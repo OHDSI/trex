@@ -25,6 +25,7 @@ use tracing::warn;
 use std::io::Write;
 
 use anyhow::{bail, Context};
+use hf_hub::api::sync::ApiBuilder;
 use llama_cpp_2::context::params::LlamaContextParams;
 use llama_cpp_2::ggml_time_us;
 use llama_cpp_2::llama_backend::LlamaBackend;
@@ -34,6 +35,7 @@ use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::{AddBos, Special};
 use llama_cpp_2::sampling::LlamaSampler;
 
+use std::fs;
 use std::num::NonZeroU32;
 use std::pin::pin;
 
@@ -239,12 +241,13 @@ fn op_prompt(
     state: &mut OpState,
     #[string] prompt: String,
     #[smi] max_tokens: u32,
+    #[serde] model: Model,
 ) -> Result<ResourceId, anyhow::Error> {
     let (sender, receiver) = mpsc::channel::<String>((max_tokens) as usize);
 
     tokio::spawn(async move {
         tokio::task::spawn_blocking(move || {
-            if let Err(e) = run_llama_model(prompt, max_tokens, sender) {
+            if let Err(e) = run_llama_model(prompt, max_tokens, model, sender) {
                 eprintln!("Error running llama model: {}", e);
             }
         });
@@ -280,9 +283,18 @@ async fn op_prompt_next(
     Ok(next_chunk)
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum Model {
+    Local { path: String },
+    HuggingFace { repo: String, model: String },
+    None,
+}
+
 fn run_llama_model(
     prompt: String,
     max_tokens: u32,
+    model: Model,
     sender: mpsc::Sender<String>,
 ) -> Result<(), anyhow::Error> {
     let backend = LlamaBackend::init()?;
@@ -307,13 +319,39 @@ fn run_llama_model(
         model_params.as_mut().append_kv_override(k.as_c_str(), *v);
     }*/
 
-    let model_path = match env::var("TREX_MODEL") {
-        Ok(val) => val.to_string(),
-        Err(_e) => "./data/plugins/node_modules/@data2evidence/chat/llm.gguf".to_string(),
+    let model_path: String = match model {
+        Model::Local { path } => path,
+        Model::HuggingFace { model, repo } => ApiBuilder::new()
+            .with_progress(true)
+            .build()
+            .with_context(|| "unable to create huggingface api")?
+            .model(repo)
+            .get(&model)
+            .with_context(|| "unable to download model")?
+            .into_os_string()
+            .into_string()
+            .expect("Not UTF-8 String"),
+        Model::None => match env::var("TREX_MODEL") {
+            Ok(val) => val,
+            Err(_e) => "./data/plugins/node_modules/@data2evidence/chat/llm.gguf".to_string(),
+        },
     };
 
-    let model = LlamaModel::load_from_file(&backend, model_path, &model_params)
-        .with_context(|| "unable to load model")?;
+    if fs::metadata(&model_path).is_err() {
+        eprintln!("Model file does not exist at path: {}", model_path);
+        return Err(anyhow::anyhow!(
+            "Model file does not exist at path: {}",
+            model_path
+        ));
+    }
+
+    let model = match LlamaModel::load_from_file(&backend, model_path, &model_params) {
+        Ok(model) => model,
+        Err(e) => {
+            eprintln!("Error loading model: {}", e);
+            return Err(anyhow::anyhow!("Unable to load model: {}", e));
+        }
+    };
 
     let ctx_params =
         LlamaContextParams::default().with_n_ctx(ctx_size.or(Some(NonZeroU32::new(2048).unwrap())));

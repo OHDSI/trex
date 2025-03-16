@@ -67,7 +67,7 @@ async function  test_dbquery4() {
         res = await conn.execute("delete from demo_cdm.person where person_id > ?", [10000]);
         console.log(res)
     } catch(e) {
-        console.error(e)
+        console.error(e) 
     }
 
     
@@ -134,7 +134,7 @@ const init_tests = {
                     "demo_cdm"
                 ]
             },
-            {
+           /* {
                 "id": "fhir_database",
                 "host": "localhost",
                 "port": 5432,
@@ -173,7 +173,7 @@ const init_tests = {
                 "vocabSchemas": [
                     "demo_cdm"
                 ]
-            }
+            }*/
         ];
         dbm.setCredentials(c);
     }
