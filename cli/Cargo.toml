@@ -18,8 +18,6 @@ deno_facade.workspace = true
 trex_core.workspace = true
 ext_event_worker = { workspace = true, optional = true, features = ["tracing"] }
 
-sb_event_worker = { workspace = true, optional = true, features = ["tracing"] }
-
 anyhow.workspace = true
 base.workspace = true
 clap.workspace = true

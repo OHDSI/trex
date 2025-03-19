@@ -40,6 +40,7 @@ import { SupabaseEventListener } from "ext:user_event_worker/event_worker.js";
 import {
   installEdgeRuntimeNamespace,
   installSupabaseNamespace,
+  installTrexNamespace,
 } from "ext:runtime/namespaces.js";
 
 import { promiseRejectMacrotaskCallback } from "ext:runtime/promises.js";
@@ -557,6 +558,7 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
 
   installPromiseHook(kind);
   installEdgeRuntimeNamespace(kind, ctx.terminationRequestToken);
+  installTrexNamespace(kind, ctx.terminationRequestToken);
   installSupabaseNamespace(kind);
 
   ObjectDefineProperty(
