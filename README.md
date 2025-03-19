@@ -30,4 +30,3 @@ Plugin metadata is stored in the `package.json` file in the trex section. Suppor
 - flow (prefect dataflows)
 
 
-
