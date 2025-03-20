@@ -4,6 +4,7 @@
     "./crates/base/test_cases",
     "./test"
   ],
+  "nodeModulesDir": "auto",
   "fmt": {
     "useTabs": false,
     "lineWidth": 100,
