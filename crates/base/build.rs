@@ -278,6 +278,7 @@ mod supabase_startup_snapshot {
       deno::deno_io::deno_io::init_ops_and_esm(Some(Default::default())),
       deno::deno_fs::deno_fs::init_ops_and_esm::<Permissions>(fs.clone()),
       ext_ai::ai::init_ops_and_esm(),
+      trex_core::trex::init_ops_and_esm(),
       ext_env::env::init_ops_and_esm(),
       ext_os::os::init_ops_and_esm(),
       ext_workers::user_workers::init_ops_and_esm(),

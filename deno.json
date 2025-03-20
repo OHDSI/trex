@@ -1,7 +1,8 @@
 {
   "workspace": [
     "./examples",
-    "./crates/base/test_cases"
+    "./crates/base/test_cases",
+    "./test"
   ],
   "fmt": {
     "useTabs": false,
@@ -11,6 +12,7 @@
     "proseWrap": "preserve"
   },
   "imports": {
+    "@meowmeow/foobar": "npm:is-odd",
     "openai": "npm:openai"
   },
   "compilerOptions": {

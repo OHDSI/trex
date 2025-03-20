@@ -577,7 +577,7 @@ fn op_execute_query(
 }
 
 deno_core::extension!(
-    sb_trex,
+    trex,
     ops = [
         op_prompt,
         op_prompt_next,
@@ -588,10 +588,11 @@ deno_core::extension!(
         op_get_dbc,
         op_set_dbc
     ],
-    esm_entry_point = "ext:sb_trex/js/trex_lib.js",
+    esm_entry_point = "ext:trex/trex_lib.js",
     esm = [
-        "js/trex_lib.js",
-        "js/pgconnection.js",
-        "js/hdbconnection.js"
+        dir "js",
+        "trex_lib.js",
+        "pgconnection.js",
+        "hdbconnection.js"
     ]
 );

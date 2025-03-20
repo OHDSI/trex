@@ -1,5 +1,6 @@
 // @ts-ignore
 import { STATUS_CODE } from 'https://deno.land/std/http/status.ts';
+import * as xwas from "npm:express";
 
 import { handleRegistryRequest } from './registry/mod.ts';
 

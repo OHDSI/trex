@@ -34,34 +34,15 @@ mod flags;
 #[cfg(not(feature = "tracing"))]
 mod logger;
 
-use anyhow::{anyhow, bail, Error};
-use base::commands::start_server;
 
 use trex_core::{start_sql_server, AuthType};
-
-use base::server::{ServerFlags, Tls, WorkerEntrypoints};
-use base::utils::path::find_up;
-use base::utils::units::percentage_value;
-use base::worker::pool::{SupervisorPolicy, WorkerPoolPolicy};
-use base::{CacheSetting, DecoratorType, InspectorOption};
 use clap::ArgMatches;
 use deno_core::url::Url;
-use env::resolve_deno_runtime_env;
-use flags::{get_cli, EszipV2ChecksumKind};
-use graph::emitter::EmitterFactory;
-use graph::import_map::load_import_map;
-use graph::{extract_from_file, generate_binary_eszip, include_glob_patterns_in_eszip};
-use log::warn;
-use std::fs::File;
-use std::io::Write;
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::ExitCode;
-use std::sync::Arc;
+
 
 fn main() -> Result<ExitCode, anyhow::Error> {
+  rustls::crypto::ring::default_provider().install_default();
   resolve_deno_runtime_env();
-
   let runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .thread_name("sb-main")
@@ -239,7 +220,6 @@ fn main() -> Result<ExitCode, anyhow::Error> {
         }
 
 
-        let import_map_path = sub_matches.get_one::<String>("import-map").cloned();
         let static_patterns =
           if let Some(val_ref) = sub_matches.get_many::<String>("static") {
             val_ref.map(|s| s.as_str()).collect::<Vec<&str>>()
