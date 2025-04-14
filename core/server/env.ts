@@ -70,7 +70,7 @@ export const env = {
     GATEWAY_IDP_SUBJECT_PROP: _env.GATEWAY__IDP_SUBJECT_PROP,
     PLUGINS_DEV_PATH: _env.PLUGINS_DEV_PATH || "./plugins",
     REP_PG: _env.REP_PG,
-    PREFECT_DOCKER_NETWORK: _env.PREFECT_DOCKER_NETWORK || "alp_data",
+    PREFECT_DOCKER_NETWORK: _env.PREFECT_DOCKER_NETWORK || `${_env.PROJECT_NAME}_data`,
     PREFECT_POOL: "docker-pool",
     SERVICE_ENV: JSON.parse(_env.SERVICE_ENV),
     CADDY__ALP__PUBLIC_FQDN: _env.CADDY__ALP__PUBLIC_FQDN || 'localhost',
