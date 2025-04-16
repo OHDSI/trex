@@ -17,6 +17,7 @@ export const ROLES = {
   TENANT_VIEWER: 'TENANT_VIEWER',
   RESEARCHER: 'RESEARCHER',
   STUDY_RESEARCHER: 'RESEARCHER',
+  STUDY_WRITE_DQD_RESEARCHER: 'STUDY_WRITE_DQD_RESEARCHER',
   VALIDATE_TOKEN_ROLE: 'VALIDATE_TOKEN',
   ADMIN_DATA_READER_ROLE: 'ADMIN_DATA_READER',
   BI_DATA_READER_ROLE: 'BI_DATA_READER',
@@ -118,6 +119,9 @@ const buildUserFromToken = (token: IAppTokenPayload, ROLE_SCOPES: any): IUser =>
     }
     if (userMgmtGroups.alp_role_tenant_viewer?.length > 0) {
       roles.push(ROLES.TENANT_VIEWER)
+    }
+    if (userMgmtGroups.alp_role_study_write_dqd_researcher?.length > 0) {
+      roles.push(ROLES.STUDY_WRITE_DQD_RESEARCHER)
     }
     if (userMgmtGroups.alp_role_study_researcher?.length > 0) {
       //roles.push(ROLES.RESEARCHER)
@@ -236,7 +240,7 @@ export async function authz(c: Context, next: any) {
   } else {
 
     const userMgmtApi = new UserMgmtAPI()
-    const { url, method } = c.req.raw
+    const { method } = c.req.raw
     const originalUrl = c.req.path
 
     const bearerToken = c.req.raw.headers.get('authorization')
@@ -251,121 +255,131 @@ export async function authz(c: Context, next: any) {
     //const { client_id, grant_type } = token
     const sub = token[env.GATEWAY_IDP_SUBJECT_PROP]
     const idpUserId = token["oid"] || sub
+    let mriUserObj: any
 
     const match = global.REQUIRED_URL_SCOPES.find(
       ({ path, httpMethods }) =>
         new RegExp(path).test(originalUrl) && (typeof httpMethods == 'undefined' || httpMethods.indexOf(method) > -1)
     )
 
-    if (match) {
-      let mriUserObj: any
-  
-      if (isClientCredToken(token)) {
-        mriUserObj = new MriUser(token, global.ROLE_SCOPES).adUserObject
-      } else {
-        try {
-          const userGroups = await userMgmtApi.getUserGroups(c.req.raw.headers.get('authorization'), idpUserId)
-          token["userMgmtGroups"] = userGroups
-          mriUserObj = new MriUser(token, global.ROLE_SCOPES).b2cUserObject
-        } catch (error) {
-          logger.error(error)
-          throw new HTTPException(500, { res: new Response('Error', {status: 500 })})
-        }
+    if(!match) {
+      // return response 404 (resource not found)
+      throw new HTTPException(404, { res: new Response('Not found', {status: 404 })})  
+    }
+
+    if (isClientCredToken(token)) {
+      mriUserObj = new MriUser(token, global.ROLE_SCOPES).adUserObject
+    } else {
+      try {
+        const userGroups = await userMgmtApi.getUserGroups(c.req.raw.headers.get('authorization'), idpUserId)
+        token["userMgmtGroups"] = userGroups
+        mriUserObj = new MriUser(token, global.ROLE_SCOPES).b2cUserObject
+      } catch (error) {
+        logger.error(error)
+        throw new HTTPException(500, { res: new Response('Error', {status: 500 })})
       }
-  
-      /*const userScopes = await getUserScopes(bearerToken, originalUrl)
-      if (scopes.some(i => userScopes.includes(i))) {
-        logger.debug(`User scopes allowed for url ${originalUrl}`)
-        return next()
-      }*/
-
-      const { scopes } = match
-      // the allowed scopes for a url should be found in the user's assigned scopes
-      if (scopes.some(i => mriUserObj.mriScopes.includes(i))) {
-        logger.info(`AUTHORIZED ACCESS: user ${mriUserObj.userId}, url ${originalUrl}`)
-        if (isDev) {
-          //logger.info(`🚀 inside au, req.headers: ${JSON.stringify(c.req.headers)}`)
-        }
-        return next()
-      } else if(scopes.some(i => mriUserObj.studyScopes.includes(i))) {
-
-        const datasetIdKey = match["datasetId"] ?? "datasetId"
-        const datasetId = await extractDatasetIdFromRequestContext(c, datasetIdKey);
-        if(datasetId) {
-          if(mriUserObj.alpRoleMap.STUDY_RESEARCHER_ROLE.indexOf(datasetId) > -1) {
-            logger.info(`AUTHORIZED STUDY ACCESS: user ${mriUserObj.userId}, url ${originalUrl}`)
-            return next()
-          } else {
-            logger.error(`datasetId check: No Access to datasetId ${datasetId}`)
-          }
-        } else {
-          logger.error(`\x1b[0m\x1b[41m>>> NO datasetId defined in scope @ ${c.req.method} ${c.req.path}<<<\x1b[0m`)
-          //logger.info(`\x1b[0m\x1b[41mTMP OVERWRITE STUDY ACCESS: user ${mriUserObj.userId}, url ${originalUrl}\x1b[0m`)
-          //return next()
-        }
+    }
 
 
-      }
+    /*const userScopes = await getUserScopes(bearerToken, originalUrl)
+    if (scopes.some(i => userScopes.includes(i))) {
+      logger.debug(`User scopes allowed for url ${originalUrl}`)
+      return next()
+    }*/
+
+    const { scopes } = match
+    // the allowed scopes for a url should be found in the user's assigned scopes
+    const assignedScopes = mriUserObj.mriScopes.concat(mriUserObj.studyScopes)
+
+    if(!hasRequiredScopes(scopes, assignedScopes)) {
       logger.info(`inside authz: Forbidden, token does not have required scope`)
       logger.debug(`inside authz: Forbidden url: ${originalUrl} scope: ${JSON.stringify(match)} user: ${JSON.stringify(mriUserObj)}`)
-      throw new HTTPException(403, { res: new Response('Forbidden', {status: 403 })})
-    } else {
-      return userMgmtApi.getUserGroups(c.req.raw.headers.get('authorization'), idpUserId).then(userGroups => {
-        logger.log(`NO SCOPE FOUND ${originalUrl}`)
-        throw new HTTPException(403, { res: new Response('Forbidden', {status: 403 })})
-      })
+      throw new HTTPException(401, { res: new Response('Forbidden', {status: 401 })})  
     }
-  }
-  }
 
-  /*
+    logger.info(`AUTHORIZED ACCESS: user ${mriUserObj.userId}, url ${originalUrl}`)
+    if (isDev) {
+      //logger.info(`🚀 inside au, req.headers: ${JSON.stringify(c.req.headers)}`)
+    }
 
-  Look for datasetId in the following order
-    1. Request query parameter
-    2. Request body
-    3. Request header
-  If datasetId is not found, return null
-  */
-  const extractDatasetIdFromRequestContext = async (
-    c,
-    datasetIdKey: string
-  ): Promise<string | null> => {
-    let datasetId: string | null = null;
-
+    if(!requireDatasetId(mriUserObj.studyScopes)) {
+      return next();
+    }
+    const datasetIdKey = match["datasetId"] ?? "datasetId"
     // Look for datasetId in query param
-    datasetId = c.req.query(datasetIdKey);
-
-    // Look for datasetId in body if not found in query parameter
-    if (!datasetId) {
-      datasetId = await _lookForDatasetIdInBody(c, datasetIdKey)
+    const datasetId = await extractDatasetIdFromRequestContext(c, datasetIdKey);
+    if(!datasetId) {
+      logger.error(`\x1b[0m\x1b[41m>>> NO datasetId defined in scope @ ${c.req.method} ${c.req.path}<<<\x1b[0m`)
+      throw new HTTPException(403, { res: new Response('Dataset id is missing in the request', {status: 403 })})
     }
 
-    // Look for datasetId in header if not found in query parameter or body
-    if (!datasetId) {
-      datasetId = c.req.header(datasetIdKey)
+    if(mriUserObj.alpRoleMap.STUDY_RESEARCHER_ROLE.indexOf(datasetId) > -1) {
+      logger.info(`AUTHORIZED STUDY ACCESS: user ${mriUserObj.userId}, url ${originalUrl}`)
+      return next()
+    } else {
+      logger.error(`datasetId check: No Access to datasetId ${datasetId}`)
+      throw new HTTPException(403, { res: new Response('Unauthorized access to dataset', {status: 403 })})
     }
+  }
+}
 
-    return datasetId;
+/*
+Look for datasetId in the following order
+  1. Request query parameter
+  2. Request body
+  3. Request header
+If datasetId is not found, return null
+*/
+const extractDatasetIdFromRequestContext = async (
+  c,
+  datasetIdKey: string
+): Promise<string | null> => {
+  let datasetId: string | null = null;
+
+  // Look for datasetId in query param
+  datasetId = c.req.query(datasetIdKey);
+
+  // Look for datasetId in body if not found in query parameter
+  if (!datasetId) {
+    datasetId = await _lookForDatasetIdInBody(c, datasetIdKey)
   }
 
-  const _lookForDatasetIdInBody = async (
-    c,
-    datasetIdKey: string
-  ): Promise<string | null> => {
-    let datasetId = null;
+  // Look for datasetId in header if not found in query parameter or body
+  if (!datasetId) {
+    datasetId = c.req.header(datasetIdKey)
+  }
 
-    // Return null if body is empty
-    if (!c.req.raw.body) {
-      return null;
-    }
+  return datasetId;
+}
 
-    const contentType = c.req.header('Content-Type')
-    if (contentType === 'application/json') {
-      // Clone req is required to not affect request body for downstream services 
-      const body = await c.req.raw.clone().json();
-      if (body) {
-        datasetId = body[datasetIdKey];
-      }
+const _lookForDatasetIdInBody = async (
+  c,
+  datasetIdKey: string
+): Promise<string | null> => {
+  let datasetId = null;
+
+  // Return null if body is empty
+  if (!c.req.raw.body) {
+    return null;
+  }
+
+  const contentType = c.req.header('Content-Type')
+  if (contentType === 'application/json') {
+    // Clone req is required to not affect request body for downstream services 
+    const body = await c.req.raw.clone().json();
+    if (body) {
+      datasetId = body[datasetIdKey];
     }
-    return datasetId;
-  };
+  }
+  return datasetId;
+};
+
+function hasRequiredScopes(reqScopes: string[], userScopes: string[]) {
+  return reqScopes.every(scope => userScopes.includes(scope))
+}
+
+function requireDatasetId(scopes: string[]): boolean {
+  const roleScopesMap: Map<string, string[]> = new Map(Object.entries(global.ROLE_SCOPES))
+  const researcherScopes = roleScopesMap.get(ROLES.STUDY_RESEARCHER)
+  return scopes.some(s => researcherScopes?.includes(s))
+}
