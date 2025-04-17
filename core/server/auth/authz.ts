@@ -302,9 +302,18 @@ export async function authz(c: Context, next: any) {
       //logger.info(`🚀 inside au, req.headers: ${JSON.stringify(c.req.headers)}`)
     }
 
-    if(!requireDatasetId(mriUserObj.studyScopes)) {
+    // check endpoint scopes
+    // if Researcher scopes exist, datasetId is required
+    if(!requireDatasetId(scopes)) {
       return next();
     }
+
+    // when the endpoint is deemed for both Admin and Researcher and the user is Admin
+    // datasetId is not mandatory
+    if(scopes.some(i => mriUserObj.mriScopes.includes(i))) {
+      return next()
+    }
+    
     const datasetIdKey = match["datasetId"] ?? "datasetId"
     // Look for datasetId in query param
     const datasetId = await extractDatasetIdFromRequestContext(c, datasetIdKey);
