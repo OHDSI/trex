@@ -10,7 +10,7 @@ path = "lib.rs"
 
 [dependencies]
 deno_core.workspace = true
-duckdb = { git = "https://github.com/p-hoffmann/duckdb-rs", rev = "6444ce2f5ee2f0b0474d9361b7b1e2b1106e244f", default-features = false, features = ["bundled"] }
+duckdb = { git = "https://github.com/p-hoffmann/duckdb-rs", rev = "851c056964a3b86f119c34a1c374d11b6f545f78", default-features = false, features = ["bundled"] }
 pgwire = { version = "0.28.0", default-features = false, features = ["server-api", "_bundled", "_duckdb"] }
 chrono = {version = "0.4.34", features = ["serde"] }
 tracing-subscriber.workspace = true
@@ -38,7 +38,7 @@ tokio-postgres = { git = "https://github.com/imor/rust-postgres", rev = "20265ef
 ] }
 tracing = { workspace = true, default-features = true }
 uuid = { workspace = true, features = ["v4"] }
-llama-cpp-2 = { git = "https://github.com/utilityai/llama-cpp-rs/", tag = "0.1.103" }
+llama-cpp-2 = { git = "https://github.com/utilityai/llama-cpp-rs/", tag = "0.1.105" }
 hf-hub = { version = "0.3.2" }
 clap = { version = "4.5.31", features = ["derive"] }
 anyhow = "1.0.97"

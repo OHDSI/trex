@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use crate::inspector_server::Inspector;
 use crate::utils::json;
 use crate::utils::path::find_up;

@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use ctor::ctor;
 use tracing_subscriber::{filter::LevelFilter, EnvFilter};
 

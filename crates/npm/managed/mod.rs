@@ -319,6 +319,7 @@ impl ManagedCliNpmResolver {
             .dependencies_result
     }
 
+    #[allow(clippy::useless_conversion)]
     pub async fn add_package_reqs_raw(&self, packages: &[PackageReq]) -> AddPkgReqsResult {
         if packages.is_empty() {
             return AddPkgReqsResult {

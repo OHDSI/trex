@@ -22,7 +22,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
     export CXX=clang++ \
     ; fi
 
-RUN apt-get update && apt-get install -y binutils llvm-dev libclang-dev clang cmake ninja-build
+RUN apt-get update && apt-get install -y binutils llvm-dev libgomp1 libclang-dev clang cmake ninja-build
 RUN rustup component add rustfmt
 #WORKDIR /usr/src/
 

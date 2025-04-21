@@ -89,6 +89,18 @@ async function  test_dbquery5() {
     
 }
 
+async function  test_dbquery6() {
+ 
+    const conn = new Trex.TrexDB("demo_database");
+    try {
+    const res = await conn.execute("select current_date", []);
+    console.log(res)
+} catch(e) {
+    console.error(e)
+}
+
+}
+
 const init_tests = {
     "install plugin": test_installPlugin,
     "init credentials": () => {
@@ -116,7 +128,7 @@ const init_tests = {
                     }
                 ],
                 "publications": [
-                    {"publication": "test_publication", "slot": "stdout_slot"}
+                    {"publication": "test_pub", "slot": "stdout_slot"}
                 ],
                 "extra": [
                     {
@@ -229,7 +241,7 @@ const tests = {
     },
     "ask": async () => {
 
-        const stream = await Trex.ask(`write a python program to get the repos from github`);
+       /* const stream = await Trex.ask(`write a python program to get the repos from github`);
         const reader = stream.getReader();
 
 
@@ -244,8 +256,10 @@ const tests = {
             res += value;
             
         } 
-        console.log("Answer:"+res)
-    }
+        console.log("Answer:"+res)*/
+    },
+    "dbquery #6": test_dbquery6,
+
 }
 
 export function test() {

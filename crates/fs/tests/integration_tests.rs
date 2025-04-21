@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use std::{collections::HashMap, path::Path, time::Duration};
 
 use anyhow::Context;

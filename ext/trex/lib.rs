@@ -519,7 +519,7 @@ fn op_execute_query(
     let _ = conn
         .execute(&format!("USE {database}"), [])
         .inspect_err(|e| warn!("{e}"));
-    let mut stmt = conn.prepare(&sql)?;
+    let tmpstmt = conn.prepare(&sql).inspect_err(|e| println!("{e}"));
 
     /*let n = stmt.parameter_count();
     let mut tparams: Vec<TrexType> = Vec::new();
@@ -562,18 +562,31 @@ fn op_execute_query(
         }
 
     }*/
+    match tmpstmt {
+        Ok(mut stmt) => {
+            let tmp = stmt
+                .query_arrow(params_from_iter(params.iter()))
+                .inspect_err(|e| println!("{e}"));
+            match tmp {
+                Ok(tmp2) => {
+                    let rows: Vec<RecordBatch> = tmp2.collect();
+                    let buffer = Vec::new();
+                    let mut writer = arrow_json::ArrayWriter::new(buffer);
+                    for row in rows {
+                        writer.write(&row).unwrap();
+                    }
+                    writer.finish().unwrap();
+                    let buffer = writer.into_inner();
+                    let s = String::from_utf8(buffer).unwrap();
 
-    let rows: Vec<RecordBatch> = stmt.query_arrow(params_from_iter(params.iter()))?.collect();
-    let buffer = Vec::new();
-    let mut writer = arrow_json::ArrayWriter::new(buffer);
-    for row in rows {
-        writer.write(&row).unwrap();
+                    //warn!(s);
+                    Ok(s)
+                }
+                _ => Ok("{\"error\": \"TREX SQL Error\"}".to_string()),
+            }
+        }
+        _ => Ok("{\"error\": \"TREX SQL Prepare Stmt Error\"}".to_string()),
     }
-    writer.finish().unwrap();
-    let buffer = writer.into_inner();
-    let s = String::from_utf8(buffer).unwrap();
-    //warn!(s);
-    Ok(s)
 }
 
 deno_core::extension!(
