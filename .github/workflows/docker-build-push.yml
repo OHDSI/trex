@@ -112,19 +112,19 @@ jobs:
       - name: npm install
         run: npm install
 
-      - name: Generate dotenv
-        run: npm run init:d2e
+      #- name: Generate dotenv
+      #  run: npm run init:d2e
 
-      - name: DC up
-        run: npm run start:d2e
+      #- name: DC up
+      #  run: npm run start:d2e
 
-      - name: stop
-        if: success() || failure()
-        run: npm run stop:d2e
+      #- name: stop
+      #  if: success() || failure()
+      #  run: npm run stop:d2e
 
-      - name: logs
-        if: success() || failure()
-        run: npm run logs:d2e
+      #- name: logs
+      #  if: success() || failure()
+      #  run: npm run logs:d2e
 
       - name: Output Summary
         run: |
