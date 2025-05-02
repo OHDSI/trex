@@ -82,20 +82,20 @@ export class DatabaseManager {
 					const key = `${c.id}_${p.publication}`
 					if(!(key in this.getPublications)) {
 						op_add_replication(p.publication, p.slot, key, c.host, c.port, c.name, adminCredentials.username, adminCredentials.password);
-						this.#add_postgres(`${key}_pg`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
+						this.#add_postgres(`${key}_trexpg`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
 						const pub = this.getPublications();
 						pub[key] = true;
 						this.#setPublications(pub);
 					}
 				}
 			} else {
-				if (c.vocabSchemas && c.vocabSchemas.length > 0) {
+				if (c.vocabSchemas && c.vocabSchemas.length > 0 && c.dialect == 'postgres') {
 					console.log(`TREX NO PUB FOUND ${c.id}`)
 					const key = `${c.id}`
 					if(!(key in this.getPublications)) {
-						this.#add_postgres(`${key}_pg`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
+						this.#add_postgres(`${key}_trexpg`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
 						const schemas = c.vocabSchemas.map(x => `'${x}'`).join(",");
-						const res = JSON.parse(op_execute_query(`${key}_pg`,`select table_schema as schema,table_name as name from information_schema.tables where table_type = 'BASE TABLE' and table_schema in (${schemas})`, []));
+						const res = JSON.parse(op_execute_query(`${key}_trexpg`,`select table_schema as schema,table_name as name from information_schema.tables where table_type = 'BASE TABLE' and table_schema in (${schemas})`, []));
 						op_copy_tables(res, key, c.host, c.port, c.name, adminCredentials.username, adminCredentials.password);
 						const pub = this.getPublications();
 						pub[key] = true;
@@ -147,7 +147,7 @@ export class UserDatabaseManager {
 
 
 	getConnection(db_id, schema, vocab_schema, translationMap) {
-		return new TrexConnection(new TrexDB(db_id), new TrexDB(`${db_id}_pg`), schema,vocab_schema,translationMap);
+		return new TrexConnection(new TrexDB(db_id), new TrexDB(`${db_id}_trexpg`), schema,vocab_schema,translationMap);
 	}
 }
 
@@ -160,9 +160,9 @@ export class TrexDB {
 		if(database in dbm.getPublications()) {
 			this.#database = database;
 		} else {
-			this.#database = dbm.getFirstPublication(database.replace("_pg", ""));
-			if(database.endsWith("_pg")){
-				this.#database = this.#database+"_pg";
+			this.#database = dbm.getFirstPublication(database.replace("_trexpg", ""));
+			if(database.endsWith("_trexpg")){
+				this.#database = this.#database+"_trexpg";
 			}
 		}
 	}
