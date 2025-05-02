@@ -68,7 +68,7 @@ export class DatabaseManager {
 		op_execute_query("memory","INSTALL postgres",[]);
 		op_execute_query("memory","LOAD postgres",[]);
 		op_execute_query("memory",
-        `ATTACH 'host=${credentials.host} port=${credentials.port} dbname=${credentials.databaseName} user=${credentials.user} password=${credentials.password}' AS ${name} (TYPE postgres)`, []
+        `ATTACH IF NOT EXISTS 'host=${credentials.host} port=${credentials.port} dbname=${credentials.databaseName} user=${credentials.user} password=${credentials.password}' AS ${name} (TYPE postgres)`, []
         );
     }
 
