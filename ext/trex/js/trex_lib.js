@@ -98,7 +98,7 @@ export class DatabaseManager {
 						this.#setPublications(pub);
 					}
 				}
-			} else if (c.vocabSchemas && c.vocabSchemas.length > 0 && c.dialect == 'postgres') {
+			} else if (c.vocab_schemas && c.vocab_schemas.length > 0 && c.dialect == 'postgres') {
 				console.log(`TREX NO PUB FOUND ${c.id}`)
 				const key = `${c.id}`
 				if(!(key in this.getPublications)) {
@@ -111,6 +111,7 @@ export class DatabaseManager {
 					this.#setPublications(pub);
 				}
 			} else if (c.dialect == 'bigquery') {
+				console.log(`TREX ADD BQ ${c.id}`)
 				const key = `${c.id}`
 				if(!(key in this.getPublications)) {
 					this.#add_bigquery(`${key}`, {project: c.host, dataset: c.name});
@@ -118,6 +119,8 @@ export class DatabaseManager {
 					pub[key] = true;
 					this.#setPublications(pub);
 				}
+			} else {
+				console.log(`TREX DB NOT SUPPORTED ${c.id}`)
 			}
 		}
 	}
