@@ -20,8 +20,8 @@ use pgwire::api::auth::md5pass::Md5PasswordAuthStartupHandler;
 use pgwire::api::auth::DefaultServerParameterProvider;
 use pgwire::api::copy::NoopCopyHandler;
 use pgwire::api::stmt::{NoopQueryParser, StoredStatement};
-use pgwire::api::{ClientInfo, Type};
-use pgwire::api::{NoopErrorHandler, PgWireServerHandlers};
+use pgwire::api::{ClientInfo, PgWireHandlerFactory, Type};
+//use pgwire::api::{NoopErrorHandler, PgWireServerHandlers};
 use pgwire::error::{PgWireError, PgWireResult};
 
 use tracing::info;
@@ -36,7 +36,7 @@ pub struct TrexDuckDBFactory {
   pub auth_type: AuthType,
 }
 
-impl PgWireServerHandlers for TrexDuckDBFactory {
+impl PgWireHandlerFactory for TrexDuckDBFactory {
   type StartupHandler = Md5PasswordAuthStartupHandler<
     TrexAuthSource,
     DefaultServerParameterProvider,
@@ -44,7 +44,7 @@ impl PgWireServerHandlers for TrexDuckDBFactory {
   type SimpleQueryHandler = TrexDuckDB;
   type ExtendedQueryHandler = TrexDuckDB;
   type CopyHandler = NoopCopyHandler;
-  type ErrorHandler = NoopErrorHandler;
+  //type ErrorHandler = NoopErrorHandler;
 
   fn simple_query_handler(&self) -> Arc<Self::SimpleQueryHandler> {
     self.handler.clone()
@@ -62,9 +62,9 @@ impl PgWireServerHandlers for TrexDuckDBFactory {
     Arc::new(NoopCopyHandler)
   }
 
-  fn error_handler(&self) -> Arc<Self::ErrorHandler> {
+  /*fn error_handler(&self) -> Arc<Self::ErrorHandler> {
     Arc::new(NoopErrorHandler)
-  }
+  }*/
 }
 
 #[async_trait]

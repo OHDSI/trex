@@ -3076,9 +3076,9 @@ dependencies = [
 
 [[package]]
 name = "derive-new"
-version = "0.7.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2cdc8d50f426189eef89dac62fabfa0abb27d5cc008f25bf4156a0203325becc"
+checksum = "d150dea618e920167e5973d70ae6ece4385b7164e0d799fe7c122dd0a5d912ad"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5377,14 +5377,13 @@ dependencies = [
 
 [[package]]
 name = "lazy-regex"
-version = "3.4.1"
+version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60c7310b93682b36b98fa7ea4de998d3463ccbebd94d935d6b48ba5b6ffa7126"
+checksum = "5d12be4595afdf58bd19e4a9f4e24187da2a66700786ff660a418e9059937a4c"
 dependencies = [
  "lazy-regex-proc_macros",
  "once_cell",
  "regex",
- "regex-lite",
 ]
 
 [[package]]
@@ -6567,9 +6566,9 @@ dependencies = [
 
 [[package]]
 name = "pgwire"
-version = "0.28.0"
+version = "0.23.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c84e671791f3a354f265e55e400be8bb4b6262c1ec04fac4289e710ccf22ab43"
+checksum = "22fb7a8b4570b74080587c5f3e187553375d18e72a38c72ca7f70a065972c65d"
 dependencies = [
  "async-trait",
  "bytes",
@@ -6577,13 +6576,12 @@ dependencies = [
  "derive-new",
  "futures",
  "hex",
- "lazy-regex",
  "md5",
  "postgres-types 0.2.9",
  "rand 0.8.5",
- "rust_decimal",
- "thiserror 2.0.8",
+ "thiserror 1.0.62",
  "tokio",
+ "tokio-rustls 0.26.1",
  "tokio-util",
 ]
 
@@ -7572,7 +7570,6 @@ dependencies = [
  "borsh",
  "bytes",
  "num-traits",
- "postgres-types 0.2.9",
  "rand 0.8.5",
  "rkyv",
  "serde",

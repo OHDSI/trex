@@ -76,7 +76,7 @@ pub async fn start_sql_server(ip: &str, port: u16, auth_type: AuthType) {
     let factory_ref = factory.clone();
 
     tokio::spawn(async move {
-      process_socket(incoming_socket.0, factory_ref).await
+      process_socket(incoming_socket.0, None, factory_ref).await
     });
   }
 }
