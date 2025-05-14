@@ -304,12 +304,12 @@ impl DuckDbExecutor {
     self.client.begin_transaction()?;
     Ok(())
   }
-    fn table_copied(&self, table_id: TableId) -> Result<(), DuckDbExecutorError> {
-        self.client.insert_into_copied_tables(table_id)?;
-        let table_schema = self.get_table_schema(table_id)?;
-        self.client.create_fts_index(&table_schema.table_name)?;
-        Ok(())
-    }
+  fn table_copied(&self, table_id: TableId) -> Result<(), DuckDbExecutorError> {
+    self.client.insert_into_copied_tables(table_id)?;
+    let table_schema = self.get_table_schema(table_id)?;
+    self.client.create_fts_index(&table_schema.table_name)?;
+    Ok(())
+  }
 
   fn commit_transaction(&self) -> Result<(), DuckDbExecutorError> {
     self.client.commit_transaction()?;

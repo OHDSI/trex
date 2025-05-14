@@ -84,13 +84,13 @@ pub async fn start_sql_server(ip: &str, port: u16, auth_type: AuthType) {
 
 #[derive(Clone)]
 pub enum ReplicateCommand {
-    CopyTable {
-        tables: Vec<TableName>,
-    },
-    Cdc {
-        publication: String,
-        slot_name: String,
-    },
+  CopyTable {
+    tables: Vec<TableName>,
+  },
+  Cdc {
+    publication: String,
+    slot_name: String,
+  },
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -104,95 +104,38 @@ async fn create_pipeline(
   db_username: &str,
   db_password: Option<String>,
 ) -> Result<BatchDataPipeline<PostgresSource, DuckDbSink>, Box<dyn Error>> {
-    let (postgres_source, action) = match command {
-        ReplicateCommand::CopyTable { tables } => {
-            let table_names: Vec<TableName> = tables;
+  let (postgres_source, action) = match command {
+    ReplicateCommand::CopyTable { tables } => {
+      let table_names: Vec<TableName> = tables;
 
-            let postgres_source = PostgresSource::new(
-                db_host,
-                db_port,
-                db_name,
-                db_username,
-                db_password,
-                None,
-                TableNamesFrom::Vec(table_names),
-            )
-            .await?;
-            (postgres_source, PipelineAction::TableCopiesOnly)
-        }
-        ReplicateCommand::Cdc {
-            publication,
-            slot_name,
-        } => {
-            let postgres_source: PostgresSource = PostgresSource::new(
-                db_host,
-                db_port,
-                db_name,
-                db_username,
-                db_password,
-                Some(slot_name),
-                TableNamesFrom::Publication(publication),
-            )
-            .await?;
-
-            (postgres_source, PipelineAction::Both)
-        }
-    };
-
-    let duckdb_sink: DuckDbSink = DuckDbSink::trexdb(duckdb, duckdb_file).await?; //DuckDbSink::file(duckdb_file).await?;//
-
-    let batch_config = BatchConfig::new(100000, Duration::from_secs(10));
-    Ok(BatchDataPipeline::new(
-        postgres_source,
-        duckdb_sink,
-        action,
-        batch_config,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn trex_replicate(
-    duckdb: &Arc<Mutex<Connection>>,
-    command: ReplicateCommand,
-    duckdb_file: &str,
-    db_host: &str,
-    db_port: u16,
-    db_name: &str,
-    db_username: &str,
-    db_password: Option<String>,
-) -> Result<(), Box<dyn Error>> {
-    let mut retries = 0;
-    let mut start = SystemTime::now();
-    if matches!(command, ReplicateCommand::CopyTable { tables: _ }) {
-        retries = 4;
+      let postgres_source = PostgresSource::new(
+        db_host,
+        db_port,
+        db_name,
+        db_username,
+        db_password,
+        None,
+        TableNamesFrom::Vec(table_names),
+      )
+      .await?;
+      (postgres_source, PipelineAction::TableCopiesOnly)
     }
-    while retries < 5 {
-        let mut pipeline = create_pipeline(
-            duckdb,
-            command.clone(),
-            duckdb_file,
-            db_host,
-            db_port,
-            db_name,
-            db_username,
-            db_password,
-            None,
-            TableNamesFrom::Vec(table_names),
-        )
-        .await?;
-        pipeline.start().await?;
-        let duration = SystemTime::now().duration_since(start)?;
-        if matches!(command, ReplicateCommand::CopyTable { tables: _ }) {
-            retries += 1;
-        } else {
-            if duration.as_secs() < 300 {
-                retries += 1;
-            } else {
-                retries = 0;
-                start = SystemTime::now();
-            }
-            println!("restarting pipeline ... (try {retries})");
-        }
+    ReplicateCommand::Cdc {
+      publication,
+      slot_name,
+    } => {
+      let postgres_source: PostgresSource = PostgresSource::new(
+        db_host,
+        db_port,
+        db_name,
+        db_username,
+        db_password,
+        Some(slot_name),
+        TableNamesFrom::Publication(publication),
+      )
+      .await?;
+
+      (postgres_source, PipelineAction::Both)
     }
   };
 
@@ -205,6 +148,52 @@ pub async fn trex_replicate(
     action,
     batch_config,
   ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn trex_replicate(
+  duckdb: &Arc<Mutex<Connection>>,
+  command: ReplicateCommand,
+  duckdb_file: &str,
+  db_host: &str,
+  db_port: u16,
+  db_name: &str,
+  db_username: &str,
+  db_password: Option<String>,
+) -> Result<(), Box<dyn Error>> {
+  let mut retries = 0;
+  let mut start = SystemTime::now();
+  if matches!(command, ReplicateCommand::CopyTable { tables: _ }) {
+    retries = 4;
+  }
+  while retries < 5 {
+    let mut pipeline = create_pipeline(
+      duckdb,
+      command.clone(),
+      duckdb_file,
+      db_host,
+      db_port,
+      db_name,
+      db_username,
+      db_password,
+      None,
+      TableNamesFrom::Vec(table_names),
+    )
+    .await?;
+    pipeline.start().await?;
+    let duration = SystemTime::now().duration_since(start)?;
+    if matches!(command, ReplicateCommand::CopyTable { tables: _ }) {
+      retries += 1;
+    } else {
+      if duration.as_secs() < 300 {
+        retries += 1;
+      } else {
+        retries = 0;
+        start = SystemTime::now();
+      }
+      println!("restarting pipeline ... (try {retries})");
+    }
+  }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,30 +236,30 @@ pub async fn trex_replicate(
 
 #[op2]
 fn op_copy_tables(
-    #[serde] tables: Vec<TableName>,
-    #[string] duckdb_file: String,
-    #[string] db_host: String,
-    db_port: u16,
-    #[string] db_name: String,
-    #[string] db_username: String,
-    #[string] db_password: String,
+  #[serde] tables: Vec<TableName>,
+  #[string] duckdb_file: String,
+  #[string] db_host: String,
+  db_port: u16,
+  #[string] db_name: String,
+  #[string] db_username: String,
+  #[string] db_password: String,
 ) {
-    warn!("TREX START TABLE COPY: {duckdb_file}");
-    let command = ReplicateCommand::CopyTable { tables };
-    tokio::spawn(async move {
-        trex_replicate(
-            &TREX_DB,
-            command,
-            duckdb_file.as_str(),
-            db_host.as_str(),
-            db_port,
-            db_name.as_str(),
-            db_username.as_str(),
-            Some(db_password),
-        )
-        .await
-        .map_err(|error| println!("ERROR: {error}"))
-    });
+  warn!("TREX START TABLE COPY: {duckdb_file}");
+  let command = ReplicateCommand::CopyTable { tables };
+  tokio::spawn(async move {
+    trex_replicate(
+      &TREX_DB,
+      command,
+      duckdb_file.as_str(),
+      db_host.as_str(),
+      db_port,
+      db_name.as_str(),
+      db_username.as_str(),
+      Some(db_password),
+    )
+    .await
+    .map_err(|error| println!("ERROR: {error}"))
+  });
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -615,12 +604,12 @@ fn op_execute_query(
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
 ) -> Result<String, AnyError> {
-    let conn = &*TREX_DB.lock().unwrap();
-    let _ = conn
-        .execute(&format!("USE {database}"), [])
-        .inspect_err(|e| warn!("{e}"));
+  let conn = &*TREX_DB.lock().unwrap();
+  let _ = conn
+    .execute(&format!("USE {database}"), [])
+    .inspect_err(|e| warn!("{e}"));
 
-    let tmpstmt = conn.prepare(&sql).inspect_err(|e| warn!("{e}"));
+  let tmpstmt = conn.prepare(&sql).inspect_err(|e| warn!("{e}"));
 
   /*let n = stmt.parameter_count();
   let mut tparams: Vec<TrexType> = Vec::new();
@@ -663,31 +652,31 @@ fn op_execute_query(
       }
 
     }*/
-    match tmpstmt {
-        Ok(mut stmt) => {
-            let tmp = stmt
-                .query_arrow(params_from_iter(params.iter()))
-                .inspect_err(|e| println!("{e}"));
-            match tmp {
-                Ok(tmp2) => {
-                    let rows: Vec<RecordBatch> = tmp2.collect();
-                    let buffer = Vec::new();
-                    let mut writer = arrow_json::ArrayWriter::new(buffer);
-                    for row in rows {
-                        writer.write(&row).unwrap();
-                    }
-                    writer.finish().unwrap();
-                    let buffer = writer.into_inner();
-                    let s = String::from_utf8(buffer).unwrap();
+  match tmpstmt {
+    Ok(mut stmt) => {
+      let tmp = stmt
+        .query_arrow(params_from_iter(params.iter()))
+        .inspect_err(|e| println!("{e}"));
+      match tmp {
+        Ok(tmp2) => {
+          let rows: Vec<RecordBatch> = tmp2.collect();
+          let buffer = Vec::new();
+          let mut writer = arrow_json::ArrayWriter::new(buffer);
+          for row in rows {
+            writer.write(&row).unwrap();
+          }
+          writer.finish().unwrap();
+          let buffer = writer.into_inner();
+          let s = String::from_utf8(buffer).unwrap();
 
-                    //warn!(s);
-                    Ok(s)
-                }
-                _ => Ok("{\"error\": \"TREX SQL Error\"}".to_string()),
-            }
+          //warn!(s);
+          Ok(s)
         }
-        _ => Ok("{\"error\": \"TREX SQL Prepare Stmt Error\"}".to_string()),
+        _ => Ok("{\"error\": \"TREX SQL Error\"}".to_string()),
+      }
     }
+    _ => Ok("{\"error\": \"TREX SQL Prepare Stmt Error\"}".to_string()),
+  }
 }
 
 deno_core::extension!(
