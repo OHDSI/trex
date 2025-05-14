@@ -89,6 +89,18 @@ async function  test_dbquery5() {
     
 }
 
+async function  test_dbquery6() {
+ 
+    const conn = new Trex.TrexDB("demo_database");
+    try {
+    const res = await conn.execute("select current_date", []);
+    console.log(res)
+} catch(e) {
+    console.error(e)
+}
+
+}
+
 const init_tests = {
     "install plugin": test_installPlugin,
     "init credentials": () => {
@@ -115,9 +127,9 @@ const init_tests = {
                         "password": "mypass"
                     }
                 ],
-                "publications": [
-                    {"publication": "test_publication", "slot": "stdout_slot"}
-                ],
+                /*"publications": [
+                    {"publication": "test_pub", "slot": "data2evidence"}
+                ],*/
                 "extra": [
                     {
                         "value": {
@@ -201,7 +213,7 @@ const tests = {
     },
     "dbquery #7 (pg conn insert)": async () => {
         try {
-            const connx = new Trex.TrexDB("demo_database_pg");
+            const connx = new Trex.TrexDB("demo_database_trexpg");
 
             let resx = await connx.execute("delete from demo_cdm.person where person_id > ?", [10000]);
             console.log(resx);
@@ -229,7 +241,7 @@ const tests = {
     },
     "ask": async () => {
 
-        const stream = await Trex.ask(`write a python program to get the repos from github`);
+       /* const stream = await Trex.ask(`write a python program to get the repos from github`);
         const reader = stream.getReader();
 
 
@@ -244,8 +256,26 @@ const tests = {
             res += value;
             
         } 
-        console.log("Answer:"+res)
-    }
+        console.log("Answer:"+res)*/
+    },
+    "dbquery #6": test_dbquery6,
+    "dbquery json": async () => {
+        const dbm = Trex.userDatabaseManager();
+        const conn = dbm.getConnection('demo_database', 'demo_cdm', "demo_cdm", {"duckdb": (n:any) => n})
+        const res1 = conn.execute("create table if not exists test (id number primary key, test json)",[], ((err:any,res:any) => {
+            console.log(err);
+            if(!err)
+            conn.execute("insert into test values (0, '{\"x\": {\"id\": \"a\"}}')",[], ((err:any,res:any) => {
+                console.log(err);
+                if(!err)
+                conn.execute("select now(), test->'$.x' from test",[], ((err:any,res:any) => {
+                    console.log(res);
+                    console.log(err);
+                      }));
+            }));
+        }));
+    },
+
 }
 
 export function test() {

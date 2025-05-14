@@ -18,3 +18,4 @@ services:
       DATABASE_CREDENTIALS: ${DATABASE_CREDENTIALS:-}
       PLUGINS_SEED: '["d2e-functions", "d2e-flows", "d2e-ui", "chat"]'
       PLUGIN_BASE_PATH: "./plugins"
+  

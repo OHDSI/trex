@@ -85,7 +85,7 @@ impl DuckDbClient {
     }
   }
 
-  fn postgres_to_duckdb_type(typ: &Type) -> &'static str {
+  /*fn postgres_to_duckdb_type(typ: &Type) -> &'static str {
     match typ {
       &Type::BOOL => "bool",
       &Type::CHAR
@@ -126,69 +126,144 @@ impl DuckDbClient {
       &Type::BYTEA_ARRAY => "bytea[]",
       _ => "string",
     }
-  }
+  }*/
 
-  fn duckdb_column_spec(column_schema: &ColumnSchema, s: &mut String) {
-    s.push('"');
-    s.push_str(&column_schema.name);
-    s.push('"');
 
-    s.push(' ');
-    let typ = Self::postgres_to_duckdb_type(&column_schema.typ);
-    s.push_str(typ);
-    //if column_schema.primary {
-    //    s.push_str(" primary key");
-    //};
-  }
 
-  fn create_columns_spec(column_schemas: &[ColumnSchema]) -> String {
-    let mut s = String::new();
-    let mut p = String::new();
-    p.push_str("PRIMARY KEY (");
-    s.push('(');
-
-    for column_schema in column_schemas {
-      Self::duckdb_column_spec(column_schema, &mut s);
-      //if i < column_schemas.len() - 1 {
-      s.push_str(", ");
-      //}
-      if column_schema.primary {
-        if !p.ends_with('(') {
-          p.push_str(", ");
+      pub fn create_fts_index(&self, table_name: &TableName) -> Result<bool, duckdb::Error> {
+        if table_name.name.to_lowercase() == "concept" {
+            info!("CREATE FTS");
+            let q0 = "install fts";
+            let c = self.conn.lock().unwrap();
+            let _install_fts = c.execute(q0, []);
+            let query = format!(
+                "PRAGMA create_fts_index({}.{}.{}, {}, {})",
+                &self.current_database, table_name.schema, table_name.name, "concept_id", "'*'"
+            );
+            info!(query);
+            info!("{}", &query);
+            let x = c.execute_batch(&query);
+            info!("RES: {:?}", x);
+            Ok(true)
+        } else {
+            Ok(false)
         }
-        p.push('"');
-        p.push_str(&column_schema.name);
-        p.push('"');
-      }
     }
-    p.push(')');
-    if p.len() > 14 {
-      s.push_str(p.as_str());
+
+    fn postgres_to_duckdb_type(typ: &Type) -> &'static str {
+        match typ {
+            &Type::BOOL => "bool",
+            &Type::CHAR | &Type::BPCHAR | &Type::VARCHAR | &Type::NAME | &Type::TEXT => "text",
+            &Type::INT2 => "int2",
+            &Type::INT4 => "int4",
+            &Type::INT8 => "int8",
+            &Type::FLOAT4 => "float",
+            &Type::FLOAT8 => "double",
+            &Type::NUMERIC => "numeric",
+            &Type::DATE => "date",
+            &Type::TIME => "time",
+            &Type::TIMESTAMP => "timestamp",
+            &Type::TIMESTAMPTZ => "timestamptz",
+            //&Type::UUID => "uuid",
+            &Type::JSON => "json",
+            &Type::OID => "int8",
+            &Type::BYTEA => "bytea",
+            /*&Type::BOOL_ARRAY => "bool[]",
+            &Type::CHAR_ARRAY
+            | &Type::BPCHAR_ARRAY
+            | &Type::VARCHAR_ARRAY
+            | &Type::NAME_ARRAY
+            | &Type::TEXT_ARRAY => "text[]",
+            &Type::INT2_ARRAY => "int2[]",
+            &Type::INT4_ARRAY => "int4[]",
+            &Type::INT8_ARRAY => "int8[]",
+            &Type::NUMERIC_ARRAY => "numeric[]",
+            &Type::DATE_ARRAY => "date[]",
+            &Type::TIME_ARRAY => "time[]",
+            &Type::TIMESTAMP_ARRAY => "timestamp[]",
+            &Type::UUID_ARRAY => "uuid[]",
+            &Type::JSON_ARRAY => "json[]",
+            &Type::OID_ARRAY => "oid[]",
+            &Type::BYTEA_ARRAY => "bytea[]",*/
+            _ => "text",
+        }
     }
-    s.push(')');
 
-    s
-  }
 
-  pub fn create_table(
-    &self,
-    table_name: &TableName,
-    column_schemas: &[ColumnSchema],
-  ) -> Result<(), duckdb::Error> {
-    let columns_spec = Self::create_columns_spec(column_schemas);
-    let query = format!(
-      "create table {}.{}.{} {}",
-      &self.current_database, table_name.schema, table_name.name, columns_spec
-    );
-    self.conn.lock().unwrap().execute(&query, [])?;
-    Ok(())
-  }
+      fn create_columns_spec(column_schemas: &[ColumnSchema]) -> String {
+        let mut s = String::new();
+        let mut p = String::new();
+        let mut names = HashSet::new();
+        p.push_str("PRIMARY KEY (");
+        s.push('(');
 
-  pub fn table_exists(
-    &self,
-    table_name: &TableName,
-  ) -> Result<bool, duckdb::Error> {
-    let query =
+        for column_schema in column_schemas {
+            let cname = column_schema.name.to_uppercase();
+            if !names.contains(&cname) {
+                names.insert(cname);
+                Self::duckdb_column_spec(column_schema, &mut s, "");
+            } else {
+                Self::duckdb_column_spec(column_schema, &mut s, "_2");
+            }
+            //if i < column_schemas.len() - 1 {
+            s.push_str(", ");
+            //}
+            if column_schema.primary {
+                if !p.ends_with('(') {
+                    p.push_str(", ");
+                }
+                p.push('"');
+                p.push_str(&column_schema.name);
+                p.push('"');
+            }
+        }
+        p.push(')');
+        if p.len() > 14 {
+            s.push_str(p.as_str());
+        }
+        s.push(')');
+
+        s
+    }
+
+ 
+    fn duckdb_column_spec(column_schema: &ColumnSchema, s: &mut String, x: &str) {
+        s.push('"');
+        s.push_str(&column_schema.name);
+        s.push_str(x);
+        let typ = Self::postgres_to_duckdb_type(&column_schema.typ);
+        s.push('"');
+
+        s.push(' ');
+        if &column_schema.name == "content" && typ == "text" {
+            s.push_str("json"); //json
+        } else {
+            s.push_str(typ);
+        }
+        //if column_schema.primary {
+        //    s.push_str(" primary key");
+        //};
+    }
+
+
+
+    pub fn create_table(
+        &self,
+        table_name: &TableName,
+        column_schemas: &[ColumnSchema],
+    ) -> Result<(), duckdb::Error> {
+        let columns_spec = Self::create_columns_spec(column_schemas);
+        let query = format!(
+            "create table {}.{}.{} {}",
+            &self.current_database, table_name.schema, table_name.name, columns_spec
+        );
+        info!("{}", &query);
+        self.conn.lock().unwrap().execute(&query, [])?;
+        Ok(())
+    }
+
+    pub fn table_exists(&self, table_name: &TableName) -> Result<bool, duckdb::Error> {
+        let query =
             "select * from information_schema.tables where table_catalog = ? and table_schema = ? and table_name = ?;";
     let c = self.conn.lock().unwrap();
     let mut stmt = c.prepare(query)?;
@@ -270,6 +345,7 @@ impl DuckDbClient {
     Ok(())
   }
 
+
   pub fn insert_rows(
     &self,
     table_name: &TableName,
@@ -280,6 +356,8 @@ impl DuckDbClient {
     let _ = c
       .execute(&format!("USE {};", &self.current_database), [])
       .inspect_err(|e| warn!("TREX: Failled to insert row (appender): {e}"));
+    info!("COPY {}", &table_name.name);
+
     let mut appender =
       c.appender_to_db(&table_name.name, &table_name.schema)?;
     for table_row in table_rows {
@@ -496,6 +574,7 @@ impl DuckDbClient {
     Ok(())
   }
 
+
   pub fn commit_transaction(&self) -> Result<(), duckdb::Error> {
     let c = self.conn.lock().unwrap();
     let mut stmt = c.prepare("commit")?;
@@ -505,47 +584,48 @@ impl DuckDbClient {
 }
 
 impl From<Cell> for Value {
-  fn from(value: Cell) -> Self {
-    match value {
-      Cell::Null => Value::Null,
-      Cell::Bool(b) => Value::Boolean(b),
-      Cell::String(s) => Value::Text(s),
-      Cell::I16(i) => Value::SmallInt(i),
-      Cell::I32(i) => Value::Int(i),
-      Cell::U32(u) => Value::UInt(u),
-      Cell::I64(i) => Value::BigInt(i),
-      Cell::F32(f) => Value::Float(f),
-      Cell::F64(f) => Value::Double(f),
-      Cell::Numeric(n) => {
-        let s = n.to_string();
-        Value::Text(s)
-      }
-      Cell::Date(d) => {
-        let s = d.format("%Y-%m-%d").to_string();
-        Value::Text(s)
-      }
-      Cell::Time(t) => {
-        let s = t.format("%H:%M:%S%.f").to_string();
-        Value::Text(s)
-      }
-      Cell::TimeStamp(t) => {
-        let s = t.format("%Y-%m-%d %H:%M:%S%.f").to_string();
-        Value::Text(s)
-      }
-      Cell::TimeStampTz(t) => {
-        let s = t.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string();
-        Value::Text(s)
-      }
-      Cell::Uuid(u) => {
-        let s = u.to_string();
-        Value::Text(s)
-      }
-      Cell::Json(j) => {
-        let s = j.to_string();
-        Value::Text(s)
-      }
-      Cell::Bytes(b) => Value::Blob(b),
-      Cell::Array(a) => a.into(),
+    fn from(value: Cell) -> Self {
+        match value {
+            Cell::Null => Value::Null,
+            Cell::Bool(b) => Value::Boolean(b),
+            Cell::String(s) => Value::Text(s),
+            Cell::I16(i) => Value::SmallInt(i),
+            Cell::I32(i) => Value::Int(i),
+            Cell::U32(u) => Value::UInt(u),
+            Cell::I64(i) => Value::BigInt(i),
+            Cell::F32(f) => Value::Float(f),
+            Cell::F64(f) => Value::Double(f),
+            Cell::Numeric(n) => {
+                let s = n.to_string();
+                Value::Text(s)
+            }
+            Cell::Date(d) => {
+                let s = d.format("%Y-%m-%d").to_string();
+                Value::Text(s)
+            }
+            Cell::Time(t) => {
+                let s = t.format("%H:%M:%S%.f").to_string();
+                Value::Text(s)
+            }
+            Cell::TimeStamp(t) => {
+                let s = t.format("%Y-%m-%d %H:%M:%S%.f").to_string();
+                Value::Text(s)
+            }
+            Cell::TimeStampTz(t) => {
+                let s = t.format("%Y-%m-%d %H:%M:%S%.f%:z").to_string();
+                Value::Text(s)
+            }
+            Cell::Uuid(u) => {
+                let s = u.to_string();
+                Value::Text(s)
+            }
+            Cell::Json(j) => {
+                let s = j.to_string();
+                Value::Text(s)
+            }
+            Cell::Bytes(b) => Value::Blob(b),
+            Cell::Array(_a) => Value::Null, //a.into(),
+        }
     }
   }
 }

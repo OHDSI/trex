@@ -218,5 +218,5 @@ for await (const dirEntry of Deno.readDir(baseDir)) {
 
 
 }
-setTimeout(() => { Trex.exit(0);}, 50000);
+setTimeout(() => { Trex.exit(0);}, 100000);
 
