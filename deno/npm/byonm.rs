@@ -49,6 +49,7 @@ impl CliNpmResolver for CliByonmNpmResolver {
     self.root_node_modules_dir()
   }
 
+  #[allow(clippy::manual_ignore_case_cmp)]
   fn ensure_read_permission<'a>(
     &self,
     permissions: &mut dyn NodePermissions,

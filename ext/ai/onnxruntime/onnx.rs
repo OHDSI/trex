@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;

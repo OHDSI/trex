@@ -286,11 +286,6 @@ impl DuckDbExecutor {
       .ok_or(DuckDbExecutorError::MissingTableId(table_id))
   }
 
-  fn table_copied(&self, table_id: TableId) -> Result<(), DuckDbExecutorError> {
-    self.client.insert_into_copied_tables(table_id)?;
-    Ok(())
-  }
-
   fn truncate_table(
     &self,
     table_id: TableId,

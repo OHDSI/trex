@@ -1,3 +1,4 @@
+#![allow(unexpected_cfgs)]
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;

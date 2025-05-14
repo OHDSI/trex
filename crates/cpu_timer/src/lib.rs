@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)]
+
 pub mod timerid;
 
 #[cfg(target_os = "linux")]

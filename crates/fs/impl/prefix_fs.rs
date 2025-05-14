@@ -114,6 +114,7 @@ where
       .unwrap_or_else(|| Ok(PathBuf::new()))
   }
 
+  #[allow(clippy::unnecessary_lazy_evaluations)]
   fn tmp_dir(&self) -> FsResult<PathBuf> {
     self
       .tmp_dir

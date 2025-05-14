@@ -175,9 +175,7 @@ pub async fn trex_replicate(
       db_port,
       db_name,
       db_username,
-      db_password,
-      None,
-      TableNamesFrom::Vec(table_names),
+      db_password.clone(),
     )
     .await?;
     pipeline.start().await?;
@@ -193,43 +191,6 @@ pub async fn trex_replicate(
       }
       println!("restarting pipeline ... (try {retries})");
     }
-  }
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn trex_replicate(
-  duckdb: &Arc<Mutex<Connection>>,
-  command: ReplicateCommand,
-  duckdb_file: &str,
-  db_host: &str,
-  db_port: u16,
-  db_name: &str,
-  db_username: &str,
-  db_password: Option<String>,
-) -> Result<(), Box<dyn Error>> {
-  let mut retries = 0;
-  let mut start = SystemTime::now();
-  while retries < 5 {
-    let mut pipeline = create_pipeline(
-      duckdb,
-      command.clone(),
-      duckdb_file,
-      db_host,
-      db_port,
-      db_name,
-      db_username,
-      db_password.clone(),
-    )
-    .await?;
-    pipeline.start().await?;
-    let duration = SystemTime::now().duration_since(start)?;
-    if duration.as_secs() < 300 {
-      retries += 1;
-    } else {
-      retries = 0;
-      start = SystemTime::now();
-    }
-    println!("restarting pipeline ... (try {retries})");
   }
   Ok(())
 }

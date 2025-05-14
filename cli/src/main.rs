@@ -34,12 +34,10 @@ mod flags;
 #[cfg(not(feature = "tracing"))]
 mod logger;
 
-use clap::ArgMatches;
-use deno_core::url::Url;
 use trex_core::{start_sql_server, AuthType};
 
 fn main() -> Result<ExitCode, anyhow::Error> {
-  rustls::crypto::ring::default_provider().install_default();
+  let _ = rustls::crypto::ring::default_provider().install_default();
   resolve_deno_runtime_env();
   let runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
