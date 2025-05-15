@@ -45,6 +45,10 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
+      - name: Setup ubuntu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libopenblas-dev
       - name: Install cargo strip
         run: cargo install cargo-strip
       - name: Prebuild Workspace (Warm-up)

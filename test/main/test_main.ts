@@ -142,7 +142,7 @@ const init_tests = {
                         "serviceScope": "Internal"
                     }
                 ],
-                "vocabSchemas": [
+                "vocab_schemas": [
                     "demo_cdm"
                 ]
             },
