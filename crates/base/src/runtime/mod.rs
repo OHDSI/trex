@@ -69,6 +69,7 @@ use deno_core::ResolutionKind;
 use deno_core::RuntimeOptions;
 use deno_facade::generate_binary_eszip;
 use deno_facade::metadata::Entrypoint;
+use deno_facade::migrate::MigrateOptions;
 use deno_facade::module_loader::standalone::create_module_loader_for_standalone_from_eszip_kind;
 use deno_facade::module_loader::RuntimeProviders;
 use deno_facade::EmitterFactory;
@@ -492,9 +493,7 @@ where
     let is_some_entry_point = maybe_entrypoint.is_some();
 
     let maybe_user_conf = conf.as_user_worker();
-    let user_context = maybe_user_conf
-      .and_then(|it| it.context.clone())
-      .unwrap_or_default();
+    let context = conf.context().cloned().unwrap_or_default();
 
     let permissions_options = maybe_user_conf
       .and_then(|it| it.permissions.clone())
@@ -609,15 +608,22 @@ where
     };
 
     let has_inspector = worker.inspector.is_some();
-    let need_source_map = user_context
+    let need_source_map = context
       .get("sourceMap")
       .and_then(serde_json::Value::as_bool)
       .unwrap_or_default();
+    let maybe_import_map_path = context
+      .get("importMapPath")
+      .and_then(|it| it.as_str())
+      .map(str::to_string);
 
     let rt_provider = create_module_loader_for_standalone_from_eszip_kind(
       eszip,
       permissions_options,
       has_inspector || need_source_map,
+      Some(MigrateOptions {
+        maybe_import_map_path,
+      }),
     )
     .await?;
 
@@ -909,16 +915,16 @@ where
       };
 
       let extra_context = {
-        let mut context =
+        let mut extra_context =
           serde_json::json!(RuntimeContext::get_extra_context());
 
         json::merge_object(
-          &mut context,
-          &serde_json::Value::Object(user_context),
+          &mut extra_context,
+          &serde_json::Value::Object(context),
         );
-        json::merge_object(&mut context, &tokens);
+        json::merge_object(&mut extra_context, &tokens);
 
-        context
+        extra_context
       };
 
       let context = js_runtime.main_context();
@@ -1369,10 +1375,12 @@ where
           if accumulated_cpu_time_ns >= threshold_ns {
             beforeunload_cpu_threshold.store(None);
 
-            if let Err(err) = MaybeDenoRuntime::DenoRuntime(&mut this)
-              .dispatch_beforeunload_event(WillTerminateReason::CPU)
-            {
-              return Poll::Ready(Err(err));
+            if !state.is_terminated() {
+              if let Err(err) = MaybeDenoRuntime::DenoRuntime(&mut this)
+                .dispatch_beforeunload_event(WillTerminateReason::CPU)
+              {
+                return Poll::Ready(Err(err));
+              }
             }
           }
         }
@@ -1393,7 +1401,7 @@ where
           if total_malloced_bytes >= threshold_bytes {
             beforeunload_mem_threshold.store(None);
 
-            if !mem_state.is_exceeded() {
+            if !state.is_terminated() && !mem_state.is_exceeded() {
               if let Err(err) = MaybeDenoRuntime::DenoRuntime(&mut this)
                 .dispatch_beforeunload_event(WillTerminateReason::Memory)
               {
@@ -2079,6 +2087,7 @@ mod test {
                   worker_pool_tx,
                   shared_metric_src: None,
                   event_worker_metric_src: None,
+                  context: None,
                 })
               }
             },
@@ -2191,6 +2200,7 @@ mod test {
               worker_pool_tx,
               shared_metric_src: None,
               event_worker_metric_src: None,
+              context: None,
             })
           },
           static_patterns: vec![],
@@ -2255,6 +2265,7 @@ mod test {
               worker_pool_tx,
               shared_metric_src: None,
               event_worker_metric_src: None,
+              context: None,
             })
           },
           static_patterns: vec![],
@@ -2334,6 +2345,7 @@ mod test {
               worker_pool_tx,
               shared_metric_src: None,
               event_worker_metric_src: None,
+              context: None,
             })
           },
           static_patterns: vec![],
