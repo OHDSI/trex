@@ -645,6 +645,7 @@ deno_core::extension!(
     esm = [
         "js/trex_lib.js",
         "js/pgconnection.js",
-        "js/hdbconnection.js"
+        "js/hdbconnection.js",
+        "js/cdw_svc.js"
     ]
 );
