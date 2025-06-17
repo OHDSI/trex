@@ -84,8 +84,10 @@ impl DuckDbClient {
             let c = self.conn.lock().unwrap();
             let _install_fts = c.execute(q0, []);
             let query = format!(
-                "PRAGMA create_fts_index({}.{}.{}, {}, {})",
-                &self.current_database, table_name.schema, table_name.name, "concept_id", "'*'"
+                "PRAGMA create_fts_index({}.{}.{}, {}, {}, ignore={}, strip_accents=1, lower=1, overwrite=1)",
+                &self.current_database, table_name.schema, table_name.name, "concept_id", 
+                "concept_id, concept_name, domain_id, vocabulary_id, concept_class_id, standard_concept, concept_code, valid_start_date, valid_end_date, invalid_reason", 
+                r#"'(\\.|[^a-z0-9!@#$%^&*()\-`.+,\\\/"])+'"#
             );
             info!(query);
             info!("{}", &query);
