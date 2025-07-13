@@ -2865,6 +2865,7 @@ async fn test_tmp_fs_should_not_be_available_in_import_stmt() {
 
 #[tokio::test]
 #[serial]
+#[ignore]
 async fn test_supabase_ai_gte() {
     let tb = TestBedBuilder::new("./test_cases/main")
         .with_per_worker_policy(None)

@@ -1,3 +1,5 @@
+import { executeQueryStream } from './trex_lib.js';
+
 const NOVALUE = "NoValue"
 
 function flattenParameter(parameters) {
@@ -156,8 +158,28 @@ export class TrexConnection  {
         callback,
         schemaName = ""
     ) {
-        throw new Error("executeStreamQuery is not yet implemented");
+        try {
+            console.log(`Stream Sql: ${sql}`);
+            console.log(
+                `Stream parameters: ${JSON.stringify(flattenParameter(parameters))}`
+            );
+            let temp = sql;
+            temp = this.#parseSql(temp, parameters);
+            console.log("Duckdb client created for streaming");
+            console.log(temp);
 
+            executeQueryStream(this.connection.database, temp, flattenParameter(parameters))
+                .then(stream => {
+                    callback(null, stream);
+                })
+                .catch(err => {
+                    console.error(err);
+                    callback(new Error(err.message), null);
+                });
+        } catch (err) {
+            console.error(err);
+            callback(new Error(err.message), null);
+        }
     }
 
     executeUpdate(

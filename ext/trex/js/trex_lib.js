@@ -17,10 +17,59 @@ const {
 	op_execute_query,
 	op_exit,
 	op_get_dbc,
-	op_set_dbc
+	op_set_dbc,
+	op_execute_query_stream,
+	op_execute_query_stream_next
 } = ops;
 
 export { op_add_replication, op_exit };
+
+export async function executeQueryStream(database, sql, params = []) {
+    const nparams = params.map(v => {
+        if(typeof(v) === 'string' || v instanceof String) {
+            try {
+                const d = Date.parse(v);    
+                if(/^\d\d\d\d-\d\d-\d\d/.test(v) && d) {
+                    return {"DateTime": d};
+                }
+            } catch (e) {}
+            return {"String": v}
+        }
+        return {"Number": v};
+    });
+    
+    const streamId = op_execute_query_stream(database, sql, nparams);
+
+    return new ReadableStream({
+        async start(controller) {
+            try {
+                while (true) {
+                    const chunk = await op_execute_query_stream_next(streamId);
+                    if (chunk === null) {
+                        controller.close();
+                        break;
+                    }
+                    
+                    // Check if the chunk is an error message
+                    try {
+                        const parsed = JSON.parse(chunk);
+                        if (parsed.error) {
+                            controller.error(new Error(parsed.error));
+                            break;
+                        }
+                    } catch (e) {
+                        // Not JSON, continue normally
+                    }
+                    
+                    controller.enqueue(chunk);
+                }
+            } catch (error) {
+                console.error("Stream error:", error);
+                controller.error(error);
+            }
+        }
+    });
+}
 
 export async function prompt(xprompt, model = null) {
     const streamId = op_prompt(xprompt, 2048, model);
@@ -231,6 +280,11 @@ export class TrexDB {
 				this.#database = this.#database+"_trexpg";
 			}
 		}
+		
+	}
+
+	get database() {
+		return this.#database;
 	}
 
 	execute(sql, params) {

@@ -1,4 +1,3 @@
-
 import { assertEquals } from "jsr:@std/assert";
 import { expect } from "jsr:@std/expect";
 
@@ -142,7 +141,7 @@ const init_tests = {
                         "serviceScope": "Internal"
                     }
                 ],
-                "vocabSchemas": [
+                "vocab_schemas": [
                     "demo_cdm"
                 ]
             },
@@ -274,6 +273,56 @@ const tests = {
                       }));
             }));
         }));
+    },
+    "dbquery stream": async () => {
+        const dbm = Trex.userDatabaseManager();
+        const conn = dbm.getConnection('demo_database', 'demo_cdm', "demo_cdm", {"duckdb": (n:any) => n})
+        
+        conn.executeStreamQuery(
+            "select person_id, gender_concept_id, year_of_birth from $$SCHEMA$$.person where person_id < ? order by person_id",
+            [{value: 10}],
+            async (err: any, stream: ReadableStream) => {
+                if (err) {
+                    console.error("Stream query error:", err);
+                    return;
+                }
+                
+                console.log("Stream query started successfully");
+                
+                try {
+                    const reader = stream.getReader();
+                    let chunkCount = 0;
+                    let totalData = "";
+                    
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) {
+                            console.log(`Stream completed. Received ${chunkCount} chunks`);
+                            break;
+                        }
+                        
+                        chunkCount++;
+                        totalData += value;
+                        console.log(`Chunk ${chunkCount}: ${value.substring(0, 100)}...`);
+                    }
+                    
+                    // Try to parse the complete data as JSON
+                    try {
+                        const jsonData = JSON.parse(totalData);
+                        console.log(`Successfully parsed JSON with ${jsonData.length} records`);
+                        if (jsonData.length > 0) {
+                            console.log("First record:", jsonData[0]);
+                        }
+                    } catch (parseErr) {
+                        console.log("Could not parse as single JSON, likely chunked data");
+                        console.log("Total data length:", totalData.length);
+                    }
+                    
+                } catch (streamErr) {
+                    console.error("Error reading stream:", streamErr);
+                }
+            }
+        );
     },
 
 }
