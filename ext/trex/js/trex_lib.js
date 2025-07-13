@@ -15,6 +15,7 @@ const {
 	op_copy_tables,
 	op_install_plugin,
 	op_execute_query,
+	op_atlas,
 	op_exit,
 	op_get_dbc,
 	op_set_dbc,
@@ -307,6 +308,18 @@ export class TrexDB {
 				//console.log(nparams);
 				console.log(`DB: ${this.#database} SQL: ${sql}`);
 				resolve(JSON.parse(op_execute_query(this.#database, sql, nparams)));
+			} catch(e) {
+				reject(e);
+			}
+		});
+	}
+	atlas_query(atlas) {
+
+		return new Promise((resolve, reject) => {
+			try {
+				//console.log(nparams);
+				console.log(`DB: ${this.#database} ATLAS: ${atlas}`);
+				resolve({sql: op_atlas(this.#database, atlas)});
 			} catch(e) {
 				reject(e);
 			}

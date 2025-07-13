@@ -70,6 +70,21 @@ export class TrexConnection  {
         return result;
     }
 
+    async atlas(
+        atlas,
+        callback
+    ) {
+        try {
+            const result = await this.connection.atlas_query(
+                atlas
+            );
+            callback(null, result);
+        } catch (err) {
+            console.error(err);
+            callback(new Error(err.message), null);
+        }
+    }
+
     async execute(
         sql,
         parameters,

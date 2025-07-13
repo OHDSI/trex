@@ -1610,6 +1610,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "circe-rust-wrapper"
+version = "0.1.0"
+source = "git+https://github.com/p-hoffmann/circe-be.git?rev=250db000f0add7cc90174d49051812f728dddba8#250db000f0add7cc90174d49051812f728dddba8"
+
+[[package]]
 name = "clang-sys"
 version = "1.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8611,6 +8616,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "chrono",
+ "circe-rust-wrapper",
  "clap",
  "deno_core",
  "duckdb",
