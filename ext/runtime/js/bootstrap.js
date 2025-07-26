@@ -674,7 +674,7 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
       "addSignalListener": "mock",
       "removeSignalListener": "mock",
 
-      "lstatSync": "allowIfRuntimeIsInInit",
+      /*"lstatSync": "allowIfRuntimeIsInInit",
       "statSync": "allowIfRuntimeIsInInit",
       "removeSync": "allowIfRuntimeIsInInit",
       "writeFileSync": "allowIfRuntimeIsInInit",
@@ -683,10 +683,19 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
       "readTextFileSync": "allowIfRuntimeIsInInit",
       "mkdirSync": "allowIfRuntimeIsInInit",
       "makeTempDirSync": "allowIfRuntimeIsInInit",
-      "readDirSync": "allowIfRuntimeIsInInit",
-
+      "readDirSync": "allowIfRuntimeIsInInit",*/
+      "lstatSync": true,
+      "statSync": true,
+      "removeSync": true,
+      "writeFileSync": true,
+      "writeTextFileSync": true,
+      "readFileSync": true,
+      "readTextFileSync": true,
+      "mkdirSync": true,
+      "makeTempDirSync": true,
+      "readDirSync": true,
       // TODO: use a non-hardcoded path
-      "execPath": () => "/bin/edge-runtime",
+      "execPath": () => "/bin/trex",
       "memoryUsage": () => ops.op_runtime_memory_usage(),
     };
 
