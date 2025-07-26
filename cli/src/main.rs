@@ -195,29 +195,33 @@ fn main() -> Result<ExitCode, anyhow::Error> {
             else {
               bail!("unable to load the key file or cert file");
             };
+            let ip_str = myip.to_string();
+            let sql_port = sql.unwrap();
             tokio::spawn(async move {
               start_sql_server(
-                myip.as_str(),
-                sql.unwrap(),
+                &ip_str,
+                sql_port,
                 AuthType::Scram {
                   password: sql_password,
                   key_slice,
                   cert_slice,
                 },
               )
-              .await
+              .await;
             });
           } else {
+            let ip_str = myip.to_string();
+            let sql_port = sql.unwrap();
             tokio::spawn(async move {
-              println!("Starting SQL Server Port: {}", sql.unwrap());
+              println!("Starting SQL Server Port: {}", sql_port);
               start_sql_server(
-                myip.as_str(),
-                sql.unwrap(),
+                &ip_str,
+                sql_port,
                 AuthType::Default {
                   password: sql_password,
                 },
               )
-              .await
+              .await;
             });
           }
         }
