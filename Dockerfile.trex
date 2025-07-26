@@ -37,7 +37,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=${TARGETPLATFORM} \
     (cargo build --profile ${PROFILE} --workspace || true) && \
     GIT_V_TAG=${GIT_V_VERSION} cargo build --profile ${PROFILE} --features "${FEATURES}" && \
     #cargo strip && \
-    mv /usr/src/trex/target/${PROFILE}/trex /root
+    mv /usr/src/trex/target/${PROFILE}/trex /root && \
+    cp /usr/src/trex/target/${PROFILE}/build/circe-rust-wrapper-*/out/libcirce-native.so /root/ || true && \
+    CIRCE_REV=$(grep -A1 'circe.*git.*circe-be' ext/trex/Cargo.toml | grep 'rev' | sed 's/.*rev = "\([^"]*\)".*/\1/' | cut -c1-7) && \
+    cp /usr/local/cargo/git/checkouts/circe-be-*/${CIRCE_REV}*/native-libs/linux-x86_64/libcirce-native.so /root/libcirce-native.so || \
+    echo "Warning: Could not find CIRCE native library for revision $CIRCE_REV"
 
 RUN objcopy --compress-debug-sections \
     --only-keep-debug \
@@ -60,8 +64,9 @@ RUN apt-get remove -y perl && apt-get autoremove -y
 
 COPY --from=builder /root/trex /usr/src/trex
 #COPY --from=builder /root/trex.debug /usr/src/trex.debug
+COPY --from=builder /root/libcirce-native.so /usr/lib/libcirce-native.so
 
-COPY --from=ort /root/onnxruntime/lib/libonnxruntime.so* /usr/lib
+COPY --from=ort /root/onnxruntime/lib/libonnxruntime.so* /usr/lib/
 
 WORKDIR /usr/src
 

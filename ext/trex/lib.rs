@@ -47,6 +47,11 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use tokio::sync::mpsc;
 
+use circe::{
+    build_expression_query, init_jvm, render_and_translate_sql, validate_cohort_expression,
+    BuildExpressionQueryOptions,
+};
+
 use crate::pipeline::{
   batching::{data_pipeline::BatchDataPipeline, BatchConfig},
   sinks::duckdb::DuckDbSink,
@@ -558,19 +563,22 @@ impl ToSql for TrexType {
   }
 }
 
-#[op2]
-#[string]
-fn op_execute_query(
-  #[string] database: String,
-  #[string] sql: String,
-  #[serde] params: Vec<TrexType>,
-) -> Result<String, AnyError> {
-  let conn = &*TREX_DB.lock().unwrap();
-  let _ = conn
-    .execute(&format!("USE {database}"), [])
-    .inspect_err(|e| warn!("{e}"));
+fn execute_query(database: String, sql: String, params: Vec<TrexType>) -> Result<String, AnyError> {
+    let conn = &*TREX_DB.lock().unwrap();
+    let _ = conn
+        .execute(&format!("USE {database}"), [])
+        .inspect_err(|e| warn!("{e}"));
 
-  let tmpstmt = conn.prepare(&sql).inspect_err(|e| warn!("{e}"));
+    // Check if the SQL looks valid before attempting to prepare it
+    if sql.trim().is_empty() || !sql.trim_start().to_lowercase().starts_with("select") {
+        warn!("Invalid SQL detected: {}", sql);
+        return Ok(format!(
+            "{{\"error\": \"Invalid SQL: {}\"}}",
+            sql.replace("\"", "\\\"")
+        ));
+    }
+
+    let tmpstmt = conn.prepare(&sql).inspect_err(|e| warn!("{e}"));
 
   /*let n = stmt.parameter_count();
   let mut tparams: Vec<TrexType> = Vec::new();
@@ -640,6 +648,195 @@ fn op_execute_query(
   }
 }
 
+#[op2]
+#[string]
+fn op_execute_query(
+    #[string] database: String,
+    #[string] sql: String,
+    #[serde] params: Vec<TrexType>,
+) -> Result<String, AnyError> {
+    execute_query(database, sql, params)
+}
+
+#[op2]
+#[string]
+fn op_atlas(#[string] _database: String, #[string] query: String) -> Result<String, AnyError> {
+    init_jvm()?;
+    warn!("CIRCE input query: {}", query);
+
+    match validate_cohort_expression(&query) {
+        Ok(validation_result) => {
+            warn!("CIRCE validation result: {}", validation_result);
+            if validation_result.contains("Error") || validation_result.contains("error") {
+                return Ok(format!(
+                    "{{\"error\": \"Cohort validation failed: {}\"}}",
+                    validation_result.replace("\"", "\\\"")
+                ));
+            }
+        }
+        Err(e) => {
+            warn!("CIRCE validation error: {}", e);
+            return Ok(format!(
+                "{{\"error\": \"Cohort validation error: {}\"}}",
+                e.to_string().replace("\"", "\\\"")
+            ));
+        }
+    }
+
+    let options = BuildExpressionQueryOptions {
+        cohort_id: Some(1),
+        cdm_schema: Some("demo_cdm".to_string()),
+        result_schema: Some("demo_cdm".to_string()),
+        vocabulary_schema: Some("demo_cdm".to_string()),
+        generate_stats: true,
+        ..Default::default()
+    };
+    warn!(
+        "CIRCE options: cdm_schema={:?}, result_schema={:?}, vocabulary_schema={:?}",
+        options.cdm_schema, options.result_schema, options.vocabulary_schema
+    );
+
+    let sql_query = build_expression_query(&query, Some(&options))?;
+    warn!("Generated SQL from CIRCE: {}", sql_query);
+
+    // Check if CIRCE returned an error message instead of SQL
+    if sql_query.contains("Error building cohort SQL") || sql_query.trim().is_empty() {
+        return Ok(format!(
+            "{{\"error\": \"CIRCE failed to generate SQL: {}\"}}",
+            sql_query.replace("\"", "\\\"")
+        ));
+    }
+
+    let translated_sql = render_and_translate_sql(&sql_query, "postgresql")?;
+    warn!("Translated SQL: {}", translated_sql);
+
+    // Check if translation also failed
+    if translated_sql.contains("Error building cohort SQL") {
+        return Ok(format!(
+            "{{\"error\": \"SQL translation failed: {}\"}}",
+            translated_sql.replace("\"", "\\\"")
+        ));
+    }
+    Ok(translated_sql)
+    //execute_query(database, translated_sql, vec![])
+}
+
+pub struct QueryStreamResource {
+    receiver: Arc<Mutex<mpsc::Receiver<String>>>,
+}
+
+impl Resource for QueryStreamResource {
+    fn name(&self) -> std::borrow::Cow<str> {
+        "QueryStreamResource".into()
+    }
+}
+
+#[op2]
+#[serde]
+fn op_execute_query_stream(
+    state: &mut OpState,
+    #[string] database: String,
+    #[string] sql: String,
+    #[serde] params: Vec<TrexType>,
+) -> Result<ResourceId, anyhow::Error> {
+    let (sender, receiver) = mpsc::channel::<String>(1000);
+
+    tokio::spawn(async move {
+        tokio::task::spawn_blocking(move || {
+            // Send error messages to the stream instead of panicking
+            let send_error = |msg: &str| {
+                let error_json = format!("{{\"error\": \"{}\"}}", msg);
+                let _ = sender.blocking_send(error_json);
+            };
+
+            let conn = &*TREX_DB.lock().unwrap();
+            if let Err(e) = conn.execute(&format!("USE {database}"), []) {
+                warn!("Database error: {e}");
+                send_error(&format!("Database connection error: {}", e));
+                return;
+            }
+
+            let tmpstmt = conn.prepare(&sql);
+            match tmpstmt {
+                Ok(mut stmt) => {
+                    let tmp = stmt.query_arrow(params_from_iter(params.iter()));
+                    match tmp {
+                        Ok(tmp2) => {
+                            let rows: Vec<RecordBatch> = tmp2.collect();
+
+                            // Stream each row batch as a separate JSON chunk
+                            for row in rows {
+                                let buffer = Vec::new();
+                                let mut writer = arrow_json::ArrayWriter::new(buffer);
+                                if let Err(e) = writer.write(&row) {
+                                    warn!("Arrow write error: {e}");
+                                    send_error(&format!("JSON serialization error: {}", e));
+                                    return;
+                                }
+                                if let Err(e) = writer.finish() {
+                                    warn!("Arrow finish error: {e}");
+                                    send_error(&format!("JSON finish error: {}", e));
+                                    return;
+                                }
+                                let buffer = writer.into_inner();
+                                match String::from_utf8(buffer) {
+                                    Ok(s) => {
+                                        if sender.blocking_send(s).is_err() {
+                                            break; // Receiver dropped
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!("UTF-8 conversion error: {e}");
+                                        send_error(&format!("UTF-8 conversion error: {}", e));
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Query execution error: {e}");
+                            send_error(&format!("Query execution error: {}", e));
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!("SQL prepare error: {e}");
+                    send_error(&format!("SQL prepare error: {}", e));
+                }
+            }
+        });
+    });
+
+    let resource = QueryStreamResource {
+        receiver: Arc::new(Mutex::new(receiver)),
+    };
+    Ok(state.resource_table.add(resource))
+}
+
+#[allow(clippy::await_holding_lock)]
+#[op2(async)]
+#[string]
+async fn op_execute_query_stream_next(
+    state: Rc<RefCell<OpState>>,
+    #[smi] rid: ResourceId,
+) -> Result<Option<String>, AnyError> {
+    let resource = state
+        .borrow()
+        .resource_table
+        .get::<QueryStreamResource>(rid)?;
+
+    let mut rx = resource.receiver.lock().unwrap();
+    let next_chunk = rx.recv().await;
+
+    if next_chunk.is_none() {
+        state
+            .borrow_mut()
+            .resource_table
+            .take::<QueryStreamResource>(rid)?;
+    }
+    Ok(next_chunk)
+}
+
 deno_core::extension!(
     trex,
     ops = [
@@ -647,17 +844,20 @@ deno_core::extension!(
         op_prompt_next,
         op_add_replication,
         op_install_plugin,
+        op_atlas,
         op_execute_query,
         op_exit,
         op_get_dbc,
         op_set_dbc,
-        op_copy_tables
+        op_copy_tables,
+        op_execute_query_stream,
+        op_execute_query_stream_next
     ],
     esm_entry_point = "ext:trex/trex_lib.js",
     esm = [
-        dir "js",
-        "trex_lib.js",
-        "pgconnection.js",
-        "hdbconnection.js"
+        "js/trex_lib.js",
+        "js/pgconnection.js",
+        "js/hdbconnection.js",
+        "js/cdw_svc.js"
     ]
 );

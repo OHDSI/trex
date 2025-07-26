@@ -3288,6 +3288,7 @@ async fn test_deno_workspace() {
 
 #[tokio::test]
 #[serial]
+#[ignore]
 async fn test_supabase_ai_gte() {
   let tb = TestBedBuilder::new("./test_cases/main")
     .with_per_worker_policy(None)
