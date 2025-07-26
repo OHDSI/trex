@@ -181,7 +181,7 @@ fn main() -> Result<ExitCode, anyhow::Error> {
           .get_one::<String>("sql-password")
           .cloned()
           .unwrap();
-        let myip = ip.clone();
+        let myip = ip;
         if sql.is_some() {
           if sql_scram {
             let Some((key_slice, cert_slice)) = sub_matches
