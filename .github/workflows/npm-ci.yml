@@ -45,17 +45,6 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-      - name: Install cargo strip
-        run: cargo install cargo-strip
-      - name: Prebuild Workspace (Warm-up)
-        run: cargo build --profile release --workspace
-        continue-on-error: true
-      - name: Build
-        run: cargo build --profile release
-      - name: Cargo strip
-        run: cargo strip
-      - name: cp
-        run: cp target/release/trex trex
       - name: Update version
         run: |
           if [[ $GITHUB_EVENT_NAME == 'workflow_dispatch' ]]; then

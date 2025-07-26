@@ -2,7 +2,13 @@
   
 const function_path2 = `${Deno.cwd()}`
 console.log(function_path2)
-const trex = `${Deno.cwd()}/${Deno.args[0]}/trex`
+
+// Check for required Docker tag environment variable
+const dockerTag = Deno.env.get("TREX_DOCKER_TAG");
+if (!dockerTag) {
+    console.error("Error: TREX_DOCKER_TAG environment variable is required");
+    Deno.exit(1);
+}
 
 async function build(fn) {
     return await Promise.all(fn.map(async f => { 
@@ -16,9 +22,18 @@ async function build(fn) {
             _args = _args.concat(["--import-map", `${function_path2}${f.imports}`])
             f.imports = f_imports;
         }
-        let cmd = new Deno.Command(trex, { args:  _args});
+        // Construct Docker command arguments
+        const dockerArgs = [
+            "run", "--rm",
+            "-v", `${Deno.cwd()}:${Deno.cwd()}`,
+            "-w", Deno.cwd(),
+            `ghcr.io/data2evidence/d2e-trex-base:${dockerTag}`,
+            "/usr/src/trex",
+            ..._args
+        ];
+        let cmd = new Deno.Command("docker", { args: dockerArgs });
         let { code, stdout, stderr } = await cmd.output();
-        console.log(trex + " " + _args.join(" "))
+        console.log("docker " + dockerArgs.join(" "))
 
         if(code != 0) {
             console.log(f);
