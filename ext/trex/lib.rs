@@ -573,13 +573,12 @@ fn execute_query(
     .execute(&format!("USE {database}"), [])
     .inspect_err(|e| warn!("{e}"));
 
-  // Check if the SQL looks valid before attempting to prepare it
   if sql.trim().is_empty()
-    || !sql.trim_start().to_lowercase().starts_with("select")
+  //|| !sql.trim_start().to_lowercase().starts_with("select")
   {
-    warn!("Invalid SQL detected: {}", sql);
+    warn!("SQL is empty: {}", sql);
     return Ok(format!(
-      "{{\"error\": \"Invalid SQL: {}\"}}",
+      "{{\"error\": \"SQL is empty: {}\"}}",
       sql.replace("\"", "\\\"")
     ));
   }
