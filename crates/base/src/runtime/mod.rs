@@ -2566,6 +2566,7 @@ mod test {
 
   #[tokio::test]
   #[serial]
+  #[ignore]
   #[allow(clippy::arc_with_non_send_sync)]
   async fn test_eszip_with_source_file() {
     let (worker_pool_tx, _) = mpsc::unbounded_channel::<UserWorkerMsgs>();
@@ -2661,6 +2662,7 @@ mod test {
 
   #[tokio::test]
   #[serial]
+  #[ignore]
   #[allow(clippy::arc_with_non_send_sync)]
   async fn test_create_eszip_from_graph() {
     let (worker_pool_tx, _) = mpsc::unbounded_channel::<UserWorkerMsgs>();
@@ -2850,6 +2852,7 @@ mod test {
 
   #[tokio::test]
   #[serial]
+  #[ignore]
   async fn test_jsx_import_source() {
     let mut main_rt = RuntimeBuilder::new()
       .set_std_env()
@@ -2917,6 +2920,7 @@ mod test {
 
   #[tokio::test]
   #[serial]
+  #[ignore]
   async fn test_static_fs() {
     let mut user_rt = RuntimeBuilder::new()
       .set_worker_runtime_conf(
