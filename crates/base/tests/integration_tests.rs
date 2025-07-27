@@ -861,7 +861,7 @@ async fn test_user_worker_json_imports() {
 
 #[tokio::test]
 #[serial]
-#[ignore] // Disabled due to rustls crypto provider initialization issue  
+#[ignore] // Disabled due to rustls crypto provider initialization issue
 async fn test_user_imports_npm() {
   integration_test!(
     "./test_cases/npm",
@@ -2148,7 +2148,7 @@ async fn test_request_idle_timeout_websocket_deno(
 
 #[tokio::test]
 #[serial]
-#[ignore] // Disabled due to rustls crypto provider initialization issue  
+#[ignore] // Disabled due to rustls crypto provider initialization issue
 async fn test_request_idle_timeout_websocket_deno_non_secure() {
   test_request_idle_timeout_websocket_deno(new_localhost_tls(false), false)
     .await;
