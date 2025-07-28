@@ -1,6 +1,6 @@
 import { core } from "ext:core/mod.js";
 import { TrexConnection } from './pgconnection.js';
-import { HanaConnection } from './hdbconnection.js';
+//import { HanaConnection } from './hdbconnection.js';
 import { resolve_cdw_config_duckdb_file_path, DUCKDB_FILE_DATABASE_CODE, DUCKDB_FILE_SCHEMA_NAME } from "./cdw_svc.js"
 
 //import * as hdb from './hdb.js';
@@ -138,7 +138,7 @@ export class DatabaseManager {
         );
 			}
 
-  add_cdw_config_duckdb_connection() {
+    add_cdw_config_duckdb_connection() {
     /*
 		Checks if there is a duckdb file in /usr/src/cdw_data/dynamically_generated, if there is a file there, use it.
 		Else fallback to using the built in duckdb file in /usr/src/cdw_data/built_in

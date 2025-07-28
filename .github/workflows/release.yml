@@ -4,11 +4,15 @@ on:
   push:
     branches:
       - main
+      - develop
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   release:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.semantic.outputs.new_release_published }}
       version: ${{ steps.semantic.outputs.new_release_version }}
@@ -55,7 +59,7 @@ jobs:
 
       - uses: cardinalby/export-env-action@v2
         with:
-          envFile: ".env"
+          envFile: '.env'
       - id: build
         uses: docker/build-push-action@v3
         with:
@@ -102,7 +106,7 @@ jobs:
 
       - uses: cardinalby/export-env-action@v2
         with:
-          envFile: ".env"
+          envFile: '.env'
       - id: build
         uses: docker/build-push-action@v3
         with:

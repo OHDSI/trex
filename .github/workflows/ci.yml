@@ -2,10 +2,19 @@ name: CI
 
 on:
   pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
   push:
     branches:
       - main
+      - develop
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 env:
   CARGO_INCREMENTAL: 0
@@ -13,33 +22,53 @@ env:
   CARGO_TERM_COLOR: always
   RUSTUP_MAX_RETRIES: 10
   ORT_DYLIB_PATH: /tmp/onnxruntime/lib/libonnxruntime.so
-  RUST_LOG: sb_event_worker=trace
+  RUST_LOG: ext_event_worker=trace
+  ESZIP_TESTDATA_REPO: supabase/edge-runtime-test-eszip
 
 jobs:
   cargo-fmt:
-    name: "cargo fmt"
+    if: github.event.pull_request.draft == false
+    name: 'fmt'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
       - run: rustup show
+      #- run: deno run --allow-write --allow-read --allow-run --allow-net ./scripts/format.js --check
       - run: rustup component add rustfmt
-      - run: ./scripts/fmt.sh
+      - run: cargo fmt --all --check
 
   cargo-clippy:
-    name: "cargo clippy"
+    if: github.event.pull_request.draft == false
+    name: 'cargo clippy'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libblas-dev liblapack-dev libopenblas-dev
       - run: rustup show
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@v2
       - run: ./scripts/clippy.sh
 
   cargo-test:
+    if: github.event.pull_request.draft == false
     name: "cargo test"
     runs-on:
       group: trex
     steps:
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libblas-dev liblapack-dev libopenblas-dev
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
       - name: Remove unwanted software
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -57,29 +86,66 @@ jobs:
 
       - uses: cardinalby/export-env-action@v2
         with:
-          envFile: ".env"
+          envFile: '.env'
 
       - name: Install ONNX Runtime Library
-        run: ./scripts/install_onnx.sh ${{ env.ONNXRUNTIME_VERSION }} linux x64 /tmp/onnxruntime
+        run: ./scripts/install_onnx.sh "${{ env.ONNXRUNTIME_VERSION }}" linux x64 /tmp/onnxruntime
 
-      - name: Install S3 credentials for testing
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+      # - name: Prepare test eszip binaries
+      #   if: |
+      #     github.actor != 'dependabot[bot]' &&
+      #     (
+      #       github.event_name != 'pull_request'
+      #       || github.event.pull_request.head.repo.full_name == github.repository
+      #     )
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: ${{ env.ESZIP_TESTDATA_REPO }}
+      #     path: ./edge-runtime-test-eszip
+      #     token: ${{ secrets.EDGE_RUNTIME_ORG_TOKEN }}
+      # - name: Decompress test eszip binaries
+      #   if: |
+      #     github.actor != 'dependabot[bot]' &&
+      #     (
+      #       github.event_name != 'pull_request'
+      #       || github.event.pull_request.head.repo.full_name == github.repository
+      #     )
+      #   run: |
+      #     mkdir -p crates/base/tests/fixture/testdata
+      #     ./scripts/esbr.cjs decompress ./edge-runtime-test-eszip/testdata
+      #     mv ./edge-runtime-test-eszip/testdata/*.out crates/base/tests/fixture/testdata
+
+      # - name: Install Supabase Storage S3 credentials for testing
+      #   if: |
+      #     github.actor != 'dependabot[bot]' &&
+      #     (
+      #       github.event_name != 'pull_request'
+      #       || github.event.pull_request.head.repo.full_name == github.repository
+      #     )
+      #   run: |
+      #     cd crates/fs/tests
+      #     echo "S3FS_TEST_SUPABASE_STORAGE=true" >> .env
+      #     echo "S3FS_TEST_APP_NAME=edge_runtime_github_ci" >> .env
+      #     echo "S3FS_TEST_BUCKET_NAME=$BUCKET_NAME" >> .env
+      #     echo "S3FS_TEST_ENDPOINT_URL=$ENDPOINT_URL" >> .env
+      #     echo "S3FS_TEST_REGION=$REGION" >> .env
+      #     echo "S3FS_TEST_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> .env
+      #     echo "S3FS_TEST_SECRET_ACCESS_KEY=$SECRET_ACCESS_KEY" >> .env
+      #   shell: bash
+      #   env:
+      #     BUCKET_NAME: ${{ secrets.SUPABASE_S3_BUCKET_NAME }}
+      #     ENDPOINT_URL: ${{ secrets.SUPABASE_S3_ENTRYPOINT }}
+      #     REGION: ${{ secrets.SUPABASE_S3_REGION }}
+      #     ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY }}
+      #     SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET }}
+
+      - name: Generate code coverage
+        id: coverage
         run: |
-          cd crates/fs/tests
-          echo "S3FS_TEST_SUPABASE_STORAGE=true" >> .env
-          echo "S3FS_TEST_APP_NAME=edge_runtime_github_ci" >> .env
-          echo "S3FS_TEST_BUCKET_NAME=$BUCKET_NAME" >> .env
-          echo "S3FS_TEST_ENDPOINT_URL=$ENDPOINT_URL" >> .env
-          echo "S3FS_TEST_REGION=$REGION" >> .env
-          echo "S3FS_TEST_ACCESS_KEY_ID=$ACCESS_KEY_ID" >> .env
-          echo "S3FS_TEST_SECRET_ACCESS_KEY=$SECRET_ACCESS_KEY" >> .env
-        shell: bash
-        env:
-          BUCKET_NAME: ${{ secrets.SUPABASE_S3_BUCKET_NAME }}
-          ENDPOINT_URL: ${{ secrets.SUPABASE_S3_ENTRYPOINT }}
-          REGION: ${{ secrets.SUPABASE_S3_REGION }}
-          ACCESS_KEY_ID: ${{ secrets.SUPABASE_S3_ACCESS_KEY }}
-          SECRET_ACCESS_KEY: ${{ secrets.SUPABASE_S3_SECRET }}
-
-      - run: ./scripts/test.sh --features base/tracing
-
+          cargo llvm-cov test --workspace --no-fail-fast --lcov -j 1 --output-path lcov.info
+      - name: Coveralls upload
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: lcov.info
+          debug: true

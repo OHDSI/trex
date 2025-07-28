@@ -22,7 +22,7 @@ RUN if [ "$TARGETPLATFORM" = "linux/arm64" ]; then \
     export CXX=clang++ \
     ; fi
 
-RUN apt-get update && apt-get install -y binutils llvm-dev libgomp1 libclang-dev clang cmake ninja-build
+RUN apt-get update && apt-get install -y binutils llvm-dev libclang-dev clang cmake ninja-build libgomp1 libopenblas-dev
 RUN rustup component add rustfmt
 #WORKDIR /usr/src/
 
@@ -59,7 +59,7 @@ RUN ./scripts/install_onnx.sh $ONNXRUNTIME_VERSION linux $TARGETPLATFORM /root/o
 
 
 FROM node:18.20.4-bookworm-slim AS trex-base
-RUN apt-get update && apt-get install -y curl libssl-dev libgomp1 && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y curl libssl-dev libgomp1 libopenblas-dev && rm -rf /var/lib/apt/lists/*
 RUN apt-get remove -y perl && apt-get autoremove -y
 
 COPY --from=builder /root/trex /usr/src/trex
@@ -71,6 +71,7 @@ COPY --from=ort /root/onnxruntime/lib/libonnxruntime.so* /usr/lib/
 WORKDIR /usr/src
 
 COPY package.json /usr/src
+COPY deno.json /usr/src
 
 RUN npm install
 
