@@ -8,6 +8,7 @@ export $(grep -v '^#' $SCRIPTPATH/../.env | xargs)
 
 # --features cli/tracing
 cargo build --features cli/tracing && \
+LD_LIBRARY_PATH="~/code/trex/target/debug/build/circe-rust-wrapper-5443f92155e3cfac/out:$LD_LIBRARY_PATH" \
 RUST_BACKTRACE=full ./target/debug/trex "$@" start \
     --main-service ./examples/main \
     --event-worker ./examples/event-manager \

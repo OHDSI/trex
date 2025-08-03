@@ -191,7 +191,7 @@ export class DatabaseManager {
 					this.#add_postgres(`${key}_trexpg`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
 					const schemas = c.vocab_schemas.map(x => `'${x}'`).join(",");
 					const res = JSON.parse(op_execute_query(`${key}_trexpg`,`select table_schema as schema,table_name as name from information_schema.tables where table_type = 'BASE TABLE' and table_schema in (${schemas})`, []));
-					op_copy_tables(res, key, c.host, c.port, c.name, adminCredentials.username, adminCredentials.password);
+					//op_copy_tables(res, key, c.host, c.port, c.name, adminCredentials.username, adminCredentials.password);
 					const pub = this.getPublications();
 					pub[key] = true;
 					this.#setPublications(pub);

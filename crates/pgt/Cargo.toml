@@ -42,3 +42,5 @@ serde_json = "1.0"
 [features]
 default = []
 json_output = ["serde_json"]
+
+[workspace]
