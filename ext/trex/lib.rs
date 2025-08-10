@@ -7,12 +7,17 @@ use std::process;
 use conversions::table::TableName;
 use deno_core::error::AnyError;
 use deno_core::op2;
+use duckdb::arrow::array::{
+  Array, BooleanArray, Float64Array, Int64Array, StringArray,
+};
+use duckdb::arrow::datatypes::DataType; // removed TimeUnit (unused)
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{
-  params_from_iter, types::ToSqlOutput, types::Value, Connection, ToSql,
+  params_from_iter, types::ToSqlOutput, types::Value, Config, Connection, ToSql,
 };
 use pgwire::tokio::process_socket;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map as JsonMap, Value as JsonValue};
 pub use sql::{
   auth::AuthType,
   duckdb::{TrexDuckDB, TrexDuckDBFactory},
@@ -51,10 +56,12 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use tokio::sync::mpsc;
 
+/*
 use circe::{
   build_expression_query, init_jvm, render_and_translate_sql,
   validate_cohort_expression, BuildExpressionQueryOptions,
 };
+*/
 
 use crate::pipeline::{
   batching::{data_pipeline::BatchDataPipeline, BatchConfig},
@@ -63,9 +70,26 @@ use crate::pipeline::{
   PipelineAction,
 };
 
-static TREX_DB: LazyLock<Arc<Mutex<Connection>>> =
-  LazyLock::new(|| Arc::new(Mutex::new(Connection::open_in_memory().unwrap())));
-
+static TREX_DB: LazyLock<Arc<Mutex<Connection>>> = LazyLock::new(|| {
+  let cfg = match Config::default().allow_unsigned_extensions() {
+    Ok(c) => c,
+    Err(e) => {
+      eprintln!("Failed to allow unsigned extensions: {e}");
+      Config::default()
+    }
+  };
+  let conn = Connection::open_in_memory_with_flags(cfg)
+    .expect("Failed to open DuckDB in-memory with config");
+  if let Ok(path) = std::env::var("DUCKDB_CIRCE_EXTENSION") {
+    let escaped = path.replace('\'', "''");
+    if let Err(e) = conn.execute(&format!("LOAD '{}'", escaped), []) {
+      eprintln!("Failed to LOAD extension from {}: {e}", path);
+    }
+  } else {
+    let _ = conn.execute("LOAD circe", []);
+  }
+  Arc::new(Mutex::new(conn))
+});
 static DB_CREDENTIALS: LazyLock<Arc<Mutex<String>>> = LazyLock::new(|| {
   Arc::new(Mutex::new(String::from(
     "{\"credentials\":[], \"publications\":{}}",
@@ -569,6 +593,58 @@ impl ToSql for TrexType {
   }
 }
 
+fn field_value_to_json(
+  array: &dyn Array,
+  row: usize,
+  dt: &DataType,
+) -> JsonValue {
+  if array.is_null(row) {
+    return JsonValue::Null;
+  }
+  match dt {
+    DataType::Utf8 => {
+      let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+      JsonValue::String(arr.value(row).to_string())
+    }
+    DataType::Int64 => {
+      let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Float64 => {
+      let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Boolean => {
+      let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Timestamp(_, _) => {
+      // DuckDB re-export timestamp logicals usually backed by Int64
+      let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    _ => JsonValue::Null,
+  }
+}
+
+fn record_batches_to_json(batches: &[RecordBatch]) -> String {
+  let mut rows: Vec<JsonValue> = Vec::new();
+  for batch in batches {
+    let schema = batch.schema();
+    let n_rows = batch.num_rows();
+    for r in 0..n_rows {
+      let mut obj = JsonMap::with_capacity(batch.num_columns());
+      for (i, field) in schema.fields().iter().enumerate() {
+        let col = batch.column(i);
+        let v = field_value_to_json(col.as_ref(), r, field.data_type());
+        obj.insert(field.name().clone(), v);
+      }
+      rows.push(JsonValue::Object(obj));
+    }
+  }
+  serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+}
+
 fn execute_query(
   database: String,
   sql: String,
@@ -578,84 +654,19 @@ fn execute_query(
   let _ = conn
     .execute(&format!("USE {database}"), [])
     .inspect_err(|e| warn!("{e}"));
-
-  if sql.trim().is_empty()
-  //|| !sql.trim_start().to_lowercase().starts_with("select")
-  {
-    warn!("SQL is empty: {}", sql);
-    return Ok(format!(
-      "{{\"error\": \"SQL is empty: {}\"}}",
-      sql.replace("\"", "\\\"")
-    ));
+  if sql.trim().is_empty() {
+    return Ok("[]".to_string());
   }
-
   let tmpstmt = conn.prepare(&sql).inspect_err(|e| warn!("{e}"));
-
-  /*let n = stmt.parameter_count();
-  let mut tparams: Vec<TrexType> = Vec::new();
-  for i in 0..n {
-      let t: ffi::duckdb_type = stmt.parameter_type(i.try_into().unwrap());
-      print!("TYPE: {t}");
-      match t {
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_BIGINT |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_HUGEINT |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_INTEGER |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_SMALLINT |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_TINYINT => {
-              tparams.push(TrexType::Integer(params.get(i).unwrap().parse::<i64>().unwrap()));
-          }
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_UBIGINT |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_UHUGEINT |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_UINTEGER |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_USMALLINT |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_UTINYINT |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_VARINT => {
-              tparams.push(TrexType::Integer(params.get(i).unwrap().parse::<i64>().unwrap()));
-          }
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_DECIMAL |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_DOUBLE |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_FLOAT => {
-              tparams.push(TrexType::Number(params.get(i).unwrap().parse::<f64>().unwrap()));
-          }
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIMESTAMP |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIMESTAMP_MS |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIMESTAMP_NS |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIMESTAMP_S |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_TIMESTAMP_TZ  => {
-              tparams.push(TrexType::DateTime(params.get(i).unwrap().parse::<i64>().unwrap()));
-          }
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_ANY |
-          ffi::DUCKDB_TYPE_DUCKDB_TYPE_VARCHAR |
-          _ => {
-              tparams.push(TrexType::String((params.get(i).unwrap()).clone()));
-          }
-      }
-
-    }*/
   match tmpstmt {
-    Ok(mut stmt) => {
-      let tmp = stmt
-        .query_arrow(params_from_iter(params.iter()))
-        .inspect_err(|e| println!("{e}"));
-      match tmp {
-        Ok(tmp2) => {
-          let rows: Vec<RecordBatch> = tmp2.collect();
-          let buffer = Vec::new();
-          let mut writer = arrow_json::ArrayWriter::new(buffer);
-          for row in rows {
-            writer.write(&row).unwrap();
-          }
-          writer.finish().unwrap();
-          let buffer = writer.into_inner();
-          let s = String::from_utf8(buffer).unwrap();
-
-          //warn!(s);
-          Ok(s)
-        }
-        _ => Ok("{\"error\": \"TREX SQL Error\"}".to_string()),
+    Ok(mut stmt) => match stmt.query_arrow(params_from_iter(params.iter())) {
+      Ok(iter) => {
+        let batches: Vec<RecordBatch> = iter.collect();
+        Ok(record_batches_to_json(&batches))
       }
-    }
-    _ => Ok("{\"error\": \"TREX SQL Prepare Stmt Error\"}".to_string()),
+      Err(_) => Ok("[]".to_string()),
+    },
+    Err(_) => Ok("[]".to_string()),
   }
 }
 
@@ -673,9 +684,9 @@ fn op_execute_query(
 #[string]
 fn op_atlas(
   #[string] _database: String,
-  #[string] query: String,
+  #[string] _query: String,
 ) -> Result<String, AnyError> {
-  init_jvm()?;
+  /*init_jvm()?;
   warn!("CIRCE input query: {}", query);
 
   match validate_cohort_expression(&query) {
@@ -737,6 +748,8 @@ fn op_atlas(
   }
   Ok(translated_sql)
   //execute_query(database, translated_sql, vec![])
+  */
+  Ok("".to_string())
 }
 
 pub struct QueryStreamResource {
@@ -758,73 +771,25 @@ fn op_execute_query_stream(
   #[serde] params: Vec<TrexType>,
 ) -> Result<ResourceId, anyhow::Error> {
   let (sender, receiver) = mpsc::channel::<String>(1000);
-
   tokio::spawn(async move {
     tokio::task::spawn_blocking(move || {
-      // Send error messages to the stream instead of panicking
-      let send_error = |msg: &str| {
-        let error_json = format!("{{\"error\": \"{}\"}}", msg);
-        let _ = sender.blocking_send(error_json);
-      };
-
       let conn = &*TREX_DB.lock().unwrap();
-      if let Err(e) = conn.execute(&format!("USE {database}"), []) {
-        warn!("Database error: {e}");
-        send_error(&format!("Database connection error: {}", e));
+      if conn.execute(&format!("USE {database}"), []).is_err() {
         return;
       }
-
-      let tmpstmt = conn.prepare(&sql);
-      match tmpstmt {
-        Ok(mut stmt) => {
-          let tmp = stmt.query_arrow(params_from_iter(params.iter()));
-          match tmp {
-            Ok(tmp2) => {
-              let rows: Vec<RecordBatch> = tmp2.collect();
-
-              // Stream each row batch as a separate JSON chunk
-              for row in rows {
-                let buffer = Vec::new();
-                let mut writer = arrow_json::ArrayWriter::new(buffer);
-                if let Err(e) = writer.write(&row) {
-                  warn!("Arrow write error: {e}");
-                  send_error(&format!("JSON serialization error: {}", e));
-                  return;
-                }
-                if let Err(e) = writer.finish() {
-                  warn!("Arrow finish error: {e}");
-                  send_error(&format!("JSON finish error: {}", e));
-                  return;
-                }
-                let buffer = writer.into_inner();
-                match String::from_utf8(buffer) {
-                  Ok(s) => {
-                    if sender.blocking_send(s).is_err() {
-                      break; // Receiver dropped
-                    }
-                  }
-                  Err(e) => {
-                    warn!("UTF-8 conversion error: {e}");
-                    send_error(&format!("UTF-8 conversion error: {}", e));
-                    return;
-                  }
-                }
-              }
-            }
-            Err(e) => {
-              warn!("Query execution error: {e}");
-              send_error(&format!("Query execution error: {}", e));
+      if let Ok(mut stmt) = conn.prepare(&sql) {
+        if let Ok(iter) = stmt.query_arrow(params_from_iter(params.iter())) {
+          for batch in iter {
+            // each item is a RecordBatch
+            let json = record_batches_to_json(std::slice::from_ref(&batch));
+            if sender.blocking_send(json).is_err() {
+              break;
             }
           }
-        }
-        Err(e) => {
-          warn!("SQL prepare error: {e}");
-          send_error(&format!("SQL prepare error: {}", e));
         }
       }
     });
   });
-
   let resource = QueryStreamResource {
     receiver: Arc::new(Mutex::new(receiver)),
   };

@@ -136,7 +136,17 @@ export class DatabaseManager {
 		op_execute_query("memory",
         `ATTACH IF NOT EXISTS 'project=${credentials.project} dataset=${credentials.dataset}' AS ${name} (TYPE bigquery, READ_ONLY)`, []
         );
-			}
+	}
+
+	#add_duckdb(
+		name
+    ) {
+		op_execute_query("memory",
+        `ATTACH IF NOT EXISTS './data/cache/${name}.db' AS ${name}`, []
+        );
+	}
+
+
 
     add_cdw_config_duckdb_connection() {
     /*
@@ -200,14 +210,16 @@ export class DatabaseManager {
 				console.log(`TREX ADD BQ ${c.id}`)
 				const key = `${c.id}`
 				if(!(key in this.getPublications)) {
-					this.#add_bigquery(`${key}`, {project: c.host, dataset: c.name});
+					this.#add_bigquery(`${key}_srcdb`, {project: c.host, dataset: c.name});
 					const pub = this.getPublications();
 					pub[key] = true;
 					this.#setPublications(pub);
 				}
 			} else {
 				console.log(`TREX DB NOT SUPPORTED ${c.id}`)
+				continue;
 			}
+			this.#add_duckdb(`${c.id}`);
 		}
 	}
 
@@ -313,13 +325,24 @@ export class TrexDB {
 			}
 		});
 	}
-	atlas_query(atlas) {
+	atlas_query(atlas, cdmSchema, cohortId) {
 
 		return new Promise((resolve, reject) => {
 			try {
-				//console.log(nparams);
-				console.log(`DB: ${this.#database} ATLAS: ${atlas}`);
-				resolve({sql: op_atlas(this.#database, atlas)});
+				const atlasStr = (typeof atlas === 'string') ? atlas : JSON.stringify(atlas);
+				const toBase64 = (s) => {
+					if (typeof Buffer !== 'undefined' && Buffer.from) {
+						return Buffer.from(s, 'utf8').toString('base64');
+					}
+					const bytes = new TextEncoder().encode(s);
+					let binary = '';
+					for (const b of bytes) binary += String.fromCharCode(b);
+					return btoa(binary);
+				};
+				const atlasB64 = toBase64(atlasStr);
+				let query = `select circe_json_to_sql(${atlasB64} , '{"cdmSchema":"${cdmSchema}","resultSchema": "${cdmSchema}","targetTable":"cohort","cohortId":"${cohortId}","generateStats":true}')`;
+				resolve({sql: op_execute_query(this.#database, query, [])});
+
 			} catch(e) {
 				reject(e);
 			}
