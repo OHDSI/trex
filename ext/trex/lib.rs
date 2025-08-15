@@ -4,13 +4,19 @@ pub mod pipeline;
 pub mod sql;
 use std::process;
 
+use base64::{engine::general_purpose, Engine as _};
 use conversions::table::TableName;
 use deno_core::error::AnyError;
 use deno_core::op2;
 use duckdb::arrow::array::{
-  Array, BooleanArray, Float64Array, Int64Array, StringArray,
+  Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+  Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+  LargeBinaryArray, LargeStringArray, StringArray, Time32SecondArray,
+  Time64MicrosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+  TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array,
+  UInt64Array, UInt8Array,
 };
-use duckdb::arrow::datatypes::DataType; // removed TimeUnit (unused)
+use duckdb::arrow::datatypes::{DataType, TimeUnit};
 use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{
   params_from_iter, types::ToSqlOutput, types::Value, Config, Connection, ToSql,
@@ -606,9 +612,55 @@ fn field_value_to_json(
       let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
       JsonValue::String(arr.value(row).to_string())
     }
+    DataType::LargeUtf8 => {
+      let arr = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
+      JsonValue::String(arr.value(row).to_string())
+    }
+    DataType::Binary => {
+      let arr = array.as_any().downcast_ref::<BinaryArray>().unwrap();
+      let bytes = arr.value(row);
+      JsonValue::String(general_purpose::STANDARD.encode(bytes))
+    }
+    DataType::LargeBinary => {
+      let arr = array.as_any().downcast_ref::<LargeBinaryArray>().unwrap();
+      let bytes = arr.value(row);
+      JsonValue::String(general_purpose::STANDARD.encode(bytes))
+    }
+    DataType::Int8 => {
+      let arr = array.as_any().downcast_ref::<Int8Array>().unwrap();
+      JsonValue::from(arr.value(row) as i64)
+    }
+    DataType::Int16 => {
+      let arr = array.as_any().downcast_ref::<Int16Array>().unwrap();
+      JsonValue::from(arr.value(row) as i64)
+    }
+    DataType::Int32 => {
+      let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+      JsonValue::from(arr.value(row) as i64)
+    }
     DataType::Int64 => {
       let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
       JsonValue::from(arr.value(row))
+    }
+    DataType::UInt8 => {
+      let arr = array.as_any().downcast_ref::<UInt8Array>().unwrap();
+      JsonValue::from(arr.value(row) as u64)
+    }
+    DataType::UInt16 => {
+      let arr = array.as_any().downcast_ref::<UInt16Array>().unwrap();
+      JsonValue::from(arr.value(row) as u64)
+    }
+    DataType::UInt32 => {
+      let arr = array.as_any().downcast_ref::<UInt32Array>().unwrap();
+      JsonValue::from(arr.value(row) as u64)
+    }
+    DataType::UInt64 => {
+      let arr = array.as_any().downcast_ref::<UInt64Array>().unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Float32 => {
+      let arr = array.as_any().downcast_ref::<Float32Array>().unwrap();
+      JsonValue::from(arr.value(row) as f64)
     }
     DataType::Float64 => {
       let arr = array.as_any().downcast_ref::<Float64Array>().unwrap();
@@ -618,10 +670,58 @@ fn field_value_to_json(
       let arr = array.as_any().downcast_ref::<BooleanArray>().unwrap();
       JsonValue::from(arr.value(row))
     }
-    DataType::Timestamp(_, _) => {
-      // DuckDB re-export timestamp logicals usually backed by Int64
-      let arr = array.as_any().downcast_ref::<Int64Array>().unwrap();
+    DataType::Date32 => {
+      let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
       JsonValue::from(arr.value(row))
+    }
+    DataType::Date64 => {
+      let arr = array.as_any().downcast_ref::<Date64Array>().unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Time32(_) => {
+      let arr = array.as_any().downcast_ref::<Time32SecondArray>().unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Time64(_) => {
+      let arr = array
+        .as_any()
+        .downcast_ref::<Time64MicrosecondArray>()
+        .unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Timestamp(TimeUnit::Second, _) => {
+      let arr = array
+        .as_any()
+        .downcast_ref::<TimestampSecondArray>()
+        .unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Timestamp(TimeUnit::Millisecond, _) => {
+      let arr = array
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Timestamp(TimeUnit::Microsecond, _) => {
+      let arr = array
+        .as_any()
+        .downcast_ref::<TimestampMicrosecondArray>()
+        .unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Timestamp(TimeUnit::Nanosecond, _) => {
+      let arr = array
+        .as_any()
+        .downcast_ref::<TimestampNanosecondArray>()
+        .unwrap();
+      JsonValue::from(arr.value(row))
+    }
+    DataType::Decimal128(_, scale) => {
+      let arr = array.as_any().downcast_ref::<Decimal128Array>().unwrap();
+      let value = arr.value(row);
+      let decimal_value = value as f64 / 10_f64.powi(*scale as i32);
+      JsonValue::from(decimal_value)
     }
     _ => JsonValue::Null,
   }
