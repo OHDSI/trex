@@ -8,6 +8,7 @@ on:
           required: false
           type: choice
           options:
+            - ohdsi/trex
             - data2evidence/trex
         GIT_BRANCH_NAME:
           default: develop
@@ -57,7 +58,7 @@ jobs:
         with:
           node-version: "18.x"
           registry-url: "https://npm.pkg.github.com"
-          scope: "@data2evidence"
+          scope: "@${{ github.repository_owner }}"
       - name: Publish
         run: |
           if [[ $SHOULD_PUBLISH == true ]]; then

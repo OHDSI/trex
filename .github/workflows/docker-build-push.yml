@@ -8,7 +8,8 @@ on:
         required: false
         type: choice
         options:
-          - data2evidence/trex
+          - ohdsi/trex
+          - data2evidence/trex 
       GIT_BRANCH_NAME:
         default: develop
         description: Enter BranchName / ReleaseTagName
@@ -95,7 +96,7 @@ jobs:
         with:
           push: ${{ steps.setup.outputs.DOCKER_BUILD_PUSH_BOOL_STR }}
           platforms: "linux/amd64"
-          tags: ghcr.io/data2evidence/${{ matrix.AZ_REGISTRY_REPOSITORY }}:${{ steps.setup.outputs.DOCKER_IMG_TAG_NAME }}
+          tags: ghcr.io/${{ github.repository_owner }}/${{ matrix.AZ_REGISTRY_REPOSITORY }}:${{ steps.setup.outputs.DOCKER_IMG_TAG_NAME }}
           context: ${{ matrix.context }}
           file: ${{ matrix.dockerfile }}
 
