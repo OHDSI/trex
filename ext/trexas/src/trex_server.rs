@@ -19,11 +19,13 @@ static SERVER_THREADS: LazyLock<ServerThreads> =
   LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 fn init_logging() {
-  if rustls::crypto::ring::default_provider().install_default().is_err() {
+  if rustls::crypto::ring::default_provider()
+    .install_default()
+    .is_err()
+  {
     return;
   }
-  if LOG_INIT.swap(true, Ordering::Relaxed) {
-  }
+  if LOG_INIT.swap(true, Ordering::Relaxed) {}
 }
 
 pub struct TrexServerManagerWrapper {
