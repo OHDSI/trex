@@ -117,11 +117,11 @@ export class DatabaseManager {
 		try {
 			//const servers = JSON.parse(op_execute_query("memory", "SELECT * FROM pgwire_server_status()", []));
 			//for (const server of servers) {
-			try {
-				op_execute_query("memory", `SELECT update_db_credentials('${btoa(JSON.stringify(credentials))}')`, []);
-			} catch (e) {
-				console.error(`Failed to update credentials for all servers`, e);
-			}
+			//try {
+			op_execute_query("memory", `SELECT update_db_credentials('${btoa(JSON.stringify(credentials))}')`, []);
+			//} catch (e) {
+			//	console.error(`Failed to update credentials for all servers`, e);
+			//}
 			//}
 		} catch (e) {
 			console.error("Failed to update database credentials:", e);
