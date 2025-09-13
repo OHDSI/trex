@@ -28,10 +28,10 @@ pub use sql::{
   auth::AuthType,
   duckdb::{TrexDuckDB, TrexDuckDBFactory},
 };
+use std::cell::RefCell;
 use std::env;
 use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::cell::RefCell;
 use std::time::SystemTime;
 use std::{error::Error, time::Duration};
 use tokio::net::TcpListener;
@@ -915,10 +915,10 @@ async fn op_req_next(
 
   // Take the receiver out of the RefCell to avoid holding a borrow across await
   let receiver = resource.receiver.borrow_mut().take();
-  
+
   if let Some(mut rx) = receiver {
     let next_message = rx.recv().await;
-    
+
     if next_message.is_none() {
       // Clean up the global channel when receiver is done
       {
@@ -934,7 +934,7 @@ async fn op_req_next(
       // Put the receiver back if we still have messages
       resource.receiver.borrow_mut().replace(rx);
     }
-    
+
     Ok(next_message)
   } else {
     // Receiver already taken/consumed
