@@ -31,6 +31,7 @@ pub use sql::{
 use std::env;
 use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
+use std::cell::RefCell;
 use std::time::SystemTime;
 use std::{error::Error, time::Duration};
 use tokio::net::TcpListener;
@@ -58,7 +59,6 @@ use std::pin::pin;
 */
 
 use deno_core::{OpState, Resource, ResourceId};
-use std::cell::RefCell;
 use std::rc::Rc;
 use tokio::sync::mpsc;
 
@@ -866,7 +866,7 @@ impl Resource for QueryStreamResource {
 }
 
 pub struct RequestResource {
-  receiver: Arc<Mutex<mpsc::Receiver<JsonValue>>>,
+  receiver: RefCell<Option<mpsc::Receiver<JsonValue>>>,
 }
 
 impl Resource for RequestResource {
@@ -894,19 +894,17 @@ fn op_req(#[serde] message: JsonValue) -> Result<serde_json::Value, AnyError> {
 fn op_req_listen(state: &mut OpState) -> Result<ResourceId, AnyError> {
   let (sender, receiver) = mpsc::channel::<JsonValue>(1000);
 
-  // Update the global channel
   {
     let mut channel_guard = REQUEST_CHANNEL.lock().unwrap();
     *channel_guard = Some(sender);
   }
 
   let resource = RequestResource {
-    receiver: Arc::new(Mutex::new(receiver)),
+    receiver: RefCell::new(Some(receiver)),
   };
   Ok(state.resource_table.add(resource))
 }
 
-#[allow(clippy::await_holding_lock)]
 #[op2(async)]
 #[serde]
 async fn op_req_next(
@@ -915,22 +913,33 @@ async fn op_req_next(
 ) -> Result<Option<JsonValue>, AnyError> {
   let resource = state.borrow().resource_table.get::<RequestResource>(rid)?;
 
-  let mut rx = resource.receiver.lock().unwrap();
-  let next_message = rx.recv().await;
+  // Take the receiver out of the RefCell to avoid holding a borrow across await
+  let receiver = resource.receiver.borrow_mut().take();
+  
+  if let Some(mut rx) = receiver {
+    let next_message = rx.recv().await;
+    
+    if next_message.is_none() {
+      // Clean up the global channel when receiver is done
+      {
+        let mut channel_guard = REQUEST_CHANNEL.lock().unwrap();
+        *channel_guard = None;
+      }
 
-  if next_message.is_none() {
-    // Clean up the global channel when receiver is done
-    {
-      let mut channel_guard = REQUEST_CHANNEL.lock().unwrap();
-      *channel_guard = None;
+      state
+        .borrow_mut()
+        .resource_table
+        .take::<RequestResource>(rid)?;
+    } else {
+      // Put the receiver back if we still have messages
+      resource.receiver.borrow_mut().replace(rx);
     }
-
-    state
-      .borrow_mut()
-      .resource_table
-      .take::<RequestResource>(rid)?;
+    
+    Ok(next_message)
+  } else {
+    // Receiver already taken/consumed
+    Ok(None)
   }
-  Ok(next_message)
 }
 
 #[op2]
@@ -951,7 +960,6 @@ fn op_execute_query_stream(
       if let Ok(mut stmt) = conn.prepare(&sql) {
         if let Ok(iter) = stmt.query_arrow(params_from_iter(params.iter())) {
           for batch in iter {
-            // each item is a RecordBatch
             let json = record_batches_to_json(std::slice::from_ref(&batch));
             if sender.blocking_send(json).is_err() {
               break;

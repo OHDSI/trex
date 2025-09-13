@@ -428,11 +428,11 @@ export function req(service, request) {
 }
 
 export function createRequestListener(onMessage) {
-	const listenerId = op_req_listen();
 	
 	return new ReadableStream({
 		async start(controller) {
 			try {
+				const listenerId = await op_req_listen();
 				while (true) {
 					const message = await op_req_next(listenerId);
 					if (message === null) {
