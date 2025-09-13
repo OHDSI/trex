@@ -573,7 +573,7 @@ export class TrexHttpClient {
 					statusText: response.statusText,
 					headers: Object.fromEntries(response.headers.entries()),
 					config: config,
-					request: config
+					request: new Request(url, options)
 				};
 			} catch (error) {
 				const textData = await response.text().catch(() => "");
@@ -584,7 +584,7 @@ export class TrexHttpClient {
 					statusText: response.statusText,
 					headers: Object.fromEntries(response.headers.entries()),
 					config: config,
-					request: config
+					request: new Request(url, options)
 				};
 			}
 		}
