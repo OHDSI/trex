@@ -11,10 +11,8 @@ const {
 	op_prompt,
 	op_prompt_next,
 	op_add_replication,
-	op_copy_tables,
 	op_install_plugin,
 	op_execute_query,
-	op_atlas,
 	op_exit,
 	op_get_dbc,
 	op_set_dbc,
@@ -499,5 +497,58 @@ export function createRequestListener(onMessage) {
 			}
 		}
 	});
+}
+
+// Axios-like HTTP client for service requests
+export class TrexHttpClient {
+	constructor(service) {
+		this.service = service;
+	}
+
+	// Main request method (like axios.request)
+	async request(config) {
+		const url = config.url || '/';
+		const options = {
+			method: config.method || 'GET',
+			headers: config.headers || {},
+			body: config.data || config.body
+		};
+
+		// Handle JSON data automatically
+		if (options.body && typeof options.body === 'object' && !(options.body instanceof FormData)) {
+			if (!options.headers['Content-Type']) {
+				options.headers['Content-Type'] = 'application/json';
+				options.body = JSON.stringify(options.body);
+			}
+		}
+
+		return await req(this.service, url, options);
+	}
+
+	// HTTP method shortcuts
+	async get(url, config = {}) {
+		return this.request({ ...config, method: 'GET', url });
+	}
+
+	async post(url, data, config = {}) {
+		return this.request({ ...config, method: 'POST', url, data });
+	}
+
+	async put(url, data, config = {}) {
+		return this.request({ ...config, method: 'PUT', url, data });
+	}
+
+	async patch(url, data, config = {}) {
+		return this.request({ ...config, method: 'PATCH', url, data });
+	}
+
+	async delete(url, config = {}) {
+		return this.request({ ...config, method: 'DELETE', url });
+	}
+}
+
+// Convenience factory function to create HTTP clients
+export function createHttpClient(service) {
+	return new TrexHttpClient(service);
 }
 
