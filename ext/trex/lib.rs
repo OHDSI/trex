@@ -28,6 +28,7 @@ pub use sql::{
   auth::AuthType,
   duckdb::{TrexDuckDB, TrexDuckDBFactory},
 };
+use std::cell::RefCell;
 use std::env;
 use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -58,7 +59,6 @@ use std::pin::pin;
 */
 
 use deno_core::{OpState, Resource, ResourceId};
-use std::cell::RefCell;
 use std::rc::Rc;
 use tokio::sync::mpsc;
 
@@ -101,6 +101,9 @@ static DB_CREDENTIALS: LazyLock<Arc<Mutex<String>>> = LazyLock::new(|| {
     "{\"credentials\":[], \"publications\":{}}",
   )))
 });
+
+static REQUEST_CHANNEL: LazyLock<Arc<Mutex<Option<mpsc::Sender<JsonValue>>>>> =
+  LazyLock::new(|| Arc::new(Mutex::new(None)));
 
 pub async fn start_sql_server(ip: &str, port: u16, auth_type: AuthType) {
   let factory = Arc::new(TrexDuckDBFactory {
@@ -862,6 +865,83 @@ impl Resource for QueryStreamResource {
   }
 }
 
+pub struct RequestResource {
+  receiver: RefCell<Option<mpsc::Receiver<JsonValue>>>,
+}
+
+impl Resource for RequestResource {
+  fn name(&self) -> std::borrow::Cow<str> {
+    "RequestResource".into()
+  }
+}
+
+#[op2]
+#[serde]
+fn op_req(#[serde] message: JsonValue) -> Result<serde_json::Value, AnyError> {
+  let channel_guard = REQUEST_CHANNEL.lock().unwrap();
+  if let Some(sender) = channel_guard.as_ref() {
+    match sender.try_send(message) {
+      Ok(()) => Ok(serde_json::Value::Bool(true)),
+      Err(_) => Ok(serde_json::Value::Bool(false)), // Channel full or receiver dropped
+    }
+  } else {
+    Ok(serde_json::Value::Bool(false)) // No active listeners
+  }
+}
+
+#[op2]
+#[serde]
+fn op_req_listen(state: &mut OpState) -> Result<ResourceId, AnyError> {
+  let (sender, receiver) = mpsc::channel::<JsonValue>(1000);
+
+  {
+    let mut channel_guard = REQUEST_CHANNEL.lock().unwrap();
+    *channel_guard = Some(sender);
+  }
+
+  let resource = RequestResource {
+    receiver: RefCell::new(Some(receiver)),
+  };
+  Ok(state.resource_table.add(resource))
+}
+
+#[op2(async)]
+#[serde]
+async fn op_req_next(
+  state: Rc<RefCell<OpState>>,
+  #[smi] rid: ResourceId,
+) -> Result<Option<JsonValue>, AnyError> {
+  let resource = state.borrow().resource_table.get::<RequestResource>(rid)?;
+
+  // Take the receiver out of the RefCell to avoid holding a borrow across await
+  let receiver = resource.receiver.borrow_mut().take();
+
+  if let Some(mut rx) = receiver {
+    let next_message = rx.recv().await;
+
+    if next_message.is_none() {
+      // Clean up the global channel when receiver is done
+      {
+        let mut channel_guard = REQUEST_CHANNEL.lock().unwrap();
+        *channel_guard = None;
+      }
+
+      state
+        .borrow_mut()
+        .resource_table
+        .take::<RequestResource>(rid)?;
+    } else {
+      // Put the receiver back if we still have messages
+      resource.receiver.borrow_mut().replace(rx);
+    }
+
+    Ok(next_message)
+  } else {
+    // Receiver already taken/consumed
+    Ok(None)
+  }
+}
+
 #[op2]
 #[serde]
 fn op_execute_query_stream(
@@ -880,7 +960,6 @@ fn op_execute_query_stream(
       if let Ok(mut stmt) = conn.prepare(&sql) {
         if let Ok(iter) = stmt.query_arrow(params_from_iter(params.iter())) {
           for batch in iter {
-            // each item is a RecordBatch
             let json = record_batches_to_json(std::slice::from_ref(&batch));
             if sender.blocking_send(json).is_err() {
               break;
@@ -934,7 +1013,10 @@ deno_core::extension!(
         op_set_dbc,
         op_copy_tables,
         op_execute_query_stream,
-        op_execute_query_stream_next
+        op_execute_query_stream_next,
+        op_req,
+        op_req_listen,
+        op_req_next
     ],
     esm_entry_point = "ext:trex/trex_lib.js",
     esm = [

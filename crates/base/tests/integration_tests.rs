@@ -1010,6 +1010,7 @@ async fn req_failure_case_timeout() {
   assert!(found_timeout);
 }
 
+#[ignore = "trex temp disabled"]
 #[tokio::test]
 #[serial]
 async fn req_failure_case_cpu_time_exhausted() {

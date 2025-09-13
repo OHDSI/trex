@@ -4,13 +4,13 @@ import { MAIN_WORKER_API, USER_WORKER_API } from "ext:ai/ai.js";
 import { SUPABASE_USER_WORKERS } from "ext:user_workers/user_workers.js";
 import { applySupabaseTag } from "ext:runtime/http.js";
 import { waitUntil } from "ext:runtime/async_hook.js";
-import { prompt, op_add_replication, PluginManager, TrexDB, DatabaseManager, UserDatabaseManager } from "ext:trex/trex_lib.js";
 import {
   builtinTracer,
   enterSpan,
   METRICS_ENABLED,
   TRACING_ENABLED,
 } from "ext:deno_telemetry/telemetry.ts";
+import { req, createRequestListener, prompt, op_add_replication, PluginManager, TrexDB, DatabaseManager, UserDatabaseManager } from "ext:trex/trex_lib.js";
 
 const ops = core.ops;
 const { ObjectDefineProperty } = primordials;
@@ -43,6 +43,8 @@ function installTrexNamespace(kind, terminationRequestTokenRid) {
 				addReplication: op_add_replication,
 				addDB: op_add_replication,
 				ask: prompt,
+				req: req,
+				createRequestListener: createRequestListener,
 				exit: (c) => ops.op_exit(c),
 				...propsTrex,
 			};
@@ -58,6 +60,7 @@ function installTrexNamespace(kind, terminationRequestTokenRid) {
 			propsTrex = {
 				waitUntil,
 				ask: prompt,
+				req: req,
 				databaseManager: () => { return new UserDatabaseManager(SUPABASE_USER_WORKERS)},
 			};
 			break;
