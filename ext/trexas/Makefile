@@ -18,7 +18,7 @@ TARGET_PATH=../../target
 export CARGO_TARGET_DIR := $(PROJ_DIR)target
 
 # Use system oniguruma library instead of building from source to avoid GCC14 incompatibility
-export RUSTONIG_SYSTEM_LIBONIG := 1
+# export RUSTONIG_SYSTEM_LIBONIG := 1
 
 # Enable tracing feature for CLI dependency
 export CARGO_FEATURES := 
