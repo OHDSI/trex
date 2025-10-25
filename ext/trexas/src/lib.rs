@@ -13,6 +13,7 @@ use libduckdb_sys as ffi;
 use std::{
   error::Error,
   ffi::CString,
+  path::Path,
   sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex, OnceLock as OnceCell,
@@ -42,6 +43,35 @@ pub fn get_shared_connection() -> Option<Arc<Mutex<Connection>>> {
 mod trex_server;
 
 use trex_server::{TrexServerConfig, TREX_MANAGER};
+
+// Helper function to normalize a path to a file:// URL
+// If the path already starts with file://, return it as-is
+// Otherwise, convert the absolute path to a file:// URL
+// If the path is a directory, append /index.ts as the default entrypoint
+fn normalize_path_to_file_url(path: &str) -> String {
+  if path.starts_with("file://") {
+    return path.to_string();
+  }
+  
+  let path_obj = Path::new(path);
+  let abs_path = if path_obj.is_absolute() {
+    path_obj.to_path_buf()
+  } else {
+    std::env::current_dir()
+      .ok()
+      .and_then(|cwd| Some(cwd.join(path_obj)))
+      .unwrap_or_else(|| path_obj.to_path_buf())
+  };
+  
+  // If it's a directory, append index.ts as the default entrypoint
+  let final_path = if abs_path.is_dir() {
+    abs_path.join("index.ts")
+  } else {
+    abs_path
+  };
+  
+  format!("file://{}", final_path.display())
+}
 
 struct TrexVersionScalar;
 
@@ -113,10 +143,19 @@ impl VScalar for StartTrexServerScalar {
       .parse()
       .unwrap_or_else(|_| "127.0.0.1:8000".parse().unwrap());
 
+    // Normalize paths to file:// URLs for proper Deno module resolution
+    let main_service_path_normalized = normalize_path_to_file_url(&main_service_path);
+    
+    let event_worker_opt = if event_worker_path.is_empty() {
+      None
+    } else {
+      Some(normalize_path_to_file_url(&event_worker_path))
+    };
+
     let config = trex_server::ServerConfig {
       addr,
-      main_service_path,
-      event_worker_path: Some(event_worker_path),
+      main_service_path: main_service_path_normalized,
+      event_worker_path: event_worker_opt,
       user_worker_policy: None,
       tls_cert_path: None,
       tls_key_path: None,
