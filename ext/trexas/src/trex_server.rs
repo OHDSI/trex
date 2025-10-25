@@ -316,6 +316,8 @@ pub struct TrexServerConfig {
   #[serde(default)]
   pub tls_key_path: Option<String>,
   #[serde(default)]
+  pub tls_port: Option<u16>,
+  #[serde(default)]
   pub static_patterns: Vec<String>,
   #[serde(default)]
   pub user_worker_policy: Option<String>,
@@ -417,6 +419,7 @@ impl TrexServerConfig {
       user_worker_policy: None, // Complex type, not supported in JSON config
       tls_cert_path: self.tls_cert_path,
       tls_key_path: self.tls_key_path,
+      tls_port: self.tls_port,
       static_patterns: self.static_patterns,
       inspector: inspector_option,
       no_module_cache: self.no_module_cache,
