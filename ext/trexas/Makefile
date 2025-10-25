@@ -9,13 +9,16 @@ EXTENSION_NAME=trexas
 USE_UNSTABLE_C_API=1
 
 # Target DuckDB version
-TARGET_DUCKDB_VERSION=v1.3.2
+TARGET_DUCKDB_VERSION=v1.4.0
 
 # Override target path for workspace build before include
 TARGET_PATH=../../target
 
 # Use cargo --target-dir to build directly in the expected location
 export CARGO_TARGET_DIR := $(PROJ_DIR)target
+
+# Use system oniguruma library instead of building from source to avoid GCC14 incompatibility
+# export RUSTONIG_SYSTEM_LIBONIG := 1
 
 # Enable tracing feature for CLI dependency
 export CARGO_FEATURES := 

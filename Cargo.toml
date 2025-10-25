@@ -20,7 +20,14 @@ members = [
   "ext/trex",
   "ext/runtime",
   "ext/workers",
-  #"ext/trexas",
+  "ext/trexas",
+]
+exclude = [
+  "ext/hana",
+  "ext/circe",
+  "ext/chdb",
+  "ext/llama",
+  "ext/pgwire",
 ]
 
 [workspace.package]
