@@ -201,7 +201,11 @@ impl ServerHandle {
 }
 
 /// Create TLS configuration from file paths
-fn create_tls_config(cert_path: &str, key_path: &str, port: u16) -> Result<Tls> {
+fn create_tls_config(
+  cert_path: &str,
+  key_path: &str,
+  port: u16,
+) -> Result<Tls> {
   let cert_data = fs::read(cert_path)
     .map_err(|e| anyhow::anyhow!("Failed to read certificate file: {}", e))?;
   let key_data = fs::read(key_path)
