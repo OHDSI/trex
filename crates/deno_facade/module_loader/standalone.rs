@@ -584,7 +584,7 @@ pub async fn create_module_loader_for_eszip(
   } else {
     std::env::temp_dir()
   }
-  .join(format!("sb-compile-{}", current_exe_name));
+  .join("sb-compile-trex");
 
   let node_modules = metadata.node_modules()?;
   let root_dir_url =
