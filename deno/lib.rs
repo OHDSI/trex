@@ -116,7 +116,9 @@ impl DenoOptions {
   }
 
   pub fn unstable_sloppy_imports(&self) -> bool {
-    self.builder.unstable_sloppy_imports
+    self
+      .builder
+      .unstable_sloppy_imports
       .unwrap_or_else(|| self.workspace().has_unstable("sloppy-imports"))
   }
 
@@ -448,7 +450,10 @@ impl DenoOptionsBuilder {
     self
   }
 
-  pub fn set_unstable_sloppy_imports(&mut self, value: Option<bool>) -> &mut Self {
+  pub fn set_unstable_sloppy_imports(
+    &mut self,
+    value: Option<bool>,
+  ) -> &mut Self {
     self.unstable_sloppy_imports = value;
     self
   }
