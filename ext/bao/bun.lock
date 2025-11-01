@@ -4,12 +4,13 @@
     "": {
       "name": "bao",
       "dependencies": {
-        "@trex/as": "^0.5.0-1761460303-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-        "@trex/chdb": "^0.5.0-1761460223-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-        "@trex/circe": "^0.0.1-1761460455-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-        "@trex/hana": "^0.5.0-1761460394-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-        "@trex/llama": "^0.5.0-1761460172-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-        "@trex/pgwire": "^0.5.0-1761460092-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
+        "@trex/as": "^0.5.0-1761961659-fb8964b5010b36c17b4462ce4da13b143dc7dcaa",
+        "@trex/chdb": "^0.5.0-1761961657-fb8964b5010b36c17b4462ce4da13b143dc7dcaa",
+        "@trex/circe": "^0.0.1-1761961655-fb8964b5010b36c17b4462ce4da13b143dc7dcaa",
+        "@trex/hana": "^0.5.0-1761998602-4cd8b8f9084286a87944460ed2ea434a12095cb1",
+        "@trex/llama": "^0.5.0-1761961659-fb8964b5010b36c17b4462ce4da13b143dc7dcaa",
+        "@trex/pgwire": "^0.5.0-1761998604-4cd8b8f9084286a87944460ed2ea434a12095cb1",
+        "@trex/tpm": "^0.5.0-1761998603-4cd8b8f9084286a87944460ed2ea434a12095cb1",
         "duckdb": "1.4.0",
         "minimist": "^1.2.8",
         "nbb": "^1.3.204",
@@ -29,17 +30,19 @@
 
     "@tootallnate/once": ["@tootallnate/once@2.0.0", "", {}, "sha512-XCuKFP5PS55gnMVu3dty8KPatLqUoy/ZYzDzAGCQ8JNFCkLXzmI7vNHCR+XpbZaMWQK/vQubr7PkYq8g470J/A=="],
 
-    "@trex/as": ["@trex/as@0.5.0-1761460303-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/as/-/as-0.5.0-1761460303-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc.tgz", {}, "sha1-CFJ8OljRxi50iOMye+4YLmHyW1I="],
+    "@trex/as": ["@trex/as@0.5.0-1761961659-fb8964b5010b36c17b4462ce4da13b143dc7dcaa", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/as/-/as-0.5.0-1761961659-fb8964b5010b36c17b4462ce4da13b143dc7dcaa.tgz", {}, "sha1-PYooW9Phr98CBrZj+U9cr7UAeb0="],
 
-    "@trex/chdb": ["@trex/chdb@0.5.0-1761460223-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/chdb/-/chdb-0.5.0-1761460223-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc.tgz", {}, "sha1-pRG4lw68rpWcEE7UbFruGzLGG84="],
+    "@trex/chdb": ["@trex/chdb@0.5.0-1761998602-4cd8b8f9084286a87944460ed2ea434a12095cb1", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/chdb/-/chdb-0.5.0-1761998602-4cd8b8f9084286a87944460ed2ea434a12095cb1.tgz", {}, "sha1-K6vS9CIa1u0QOCTQCSaC2t1XdEo="],
 
-    "@trex/circe": ["@trex/circe@0.0.1-1761460455-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/circe/-/circe-0.0.1-1761460455-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc.tgz", {}, "sha1-lHLbMJsJjDhcmr4QpKTbAg/Sqxo="],
+    "@trex/circe": ["@trex/circe@0.0.1-1761998601-4cd8b8f9084286a87944460ed2ea434a12095cb1", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/circe/-/circe-0.0.1-1761998601-4cd8b8f9084286a87944460ed2ea434a12095cb1.tgz", {}, "sha1-WHGjjRQaD9IGT/T+HVZqVwrCXf4="],
 
-    "@trex/hana": ["@trex/hana@0.5.0-1761460394-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/hana/-/hana-0.5.0-1761460394-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc.tgz", {}, "sha1-NnW+9+KEdYNOesih5IPKcnP0GSM="],
+    "@trex/hana": ["@trex/hana@0.5.0-1761998602-4cd8b8f9084286a87944460ed2ea434a12095cb1", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/hana/-/hana-0.5.0-1761998602-4cd8b8f9084286a87944460ed2ea434a12095cb1.tgz", {}, "sha1-YTABq4VwfGmMWNwpa87EBQmn+MU="],
 
-    "@trex/llama": ["@trex/llama@0.5.0-1761460172-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/llama/-/llama-0.5.0-1761460172-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc.tgz", {}, "sha1-1nYT+8A/XJaPBTJ5ghNUkVi6zys="],
+    "@trex/llama": ["@trex/llama@0.5.0-1761998599-4cd8b8f9084286a87944460ed2ea434a12095cb1", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/llama/-/llama-0.5.0-1761998599-4cd8b8f9084286a87944460ed2ea434a12095cb1.tgz", {}, "sha1-+Y1GlSBZ0Jl5rCvNSu3zUO+1ExA="],
 
-    "@trex/pgwire": ["@trex/pgwire@0.5.0-1761460092-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/pgwire/-/pgwire-0.5.0-1761460092-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc.tgz", {}, "sha1-V288qEv+/JOZPAJQ/xyU/PhM8Gg="],
+    "@trex/pgwire": ["@trex/pgwire@0.5.0-1761998604-4cd8b8f9084286a87944460ed2ea434a12095cb1", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/pgwire/-/pgwire-0.5.0-1761998604-4cd8b8f9084286a87944460ed2ea434a12095cb1.tgz", {}, "sha1-kebdS/71rAAnqGgyUGprtv5KYmQ="],
+
+    "@trex/tpm": ["@trex/tpm@0.5.0-1761998603-4cd8b8f9084286a87944460ed2ea434a12095cb1", "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry/@trex/tpm/-/tpm-0.5.0-1761998603-4cd8b8f9084286a87944460ed2ea434a12095cb1.tgz", {}, "sha1-reeFkSSUJHwR7d7Nyb8CoqUpHeM="],
 
     "abbrev": ["abbrev@3.0.1", "", {}, "sha512-AO2ac6pjRB3SJmGJo+v5/aK6Omggp6fsLrs6wN9bd35ulu4cCwaAU9+7ZhXjeqHVkaHThLuzH0nZr0YpCDhygg=="],
 
