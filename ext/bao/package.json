@@ -1,8 +1,11 @@
 {
-  "name": "bao",
-  "version": "0.1.0",
+  "name": "@trex/bao",
+  "version": "0.5.0",
   "description": "",
   "type": "module",
+  "bin": {
+    "bao": "./bin/bao"
+  },
   "scripts": {
     "start": "mkdir -p /usr/src/cert && echo \"$TLS__INTERNAL__CRT\" > /usr/src/cert/cert.pem && echo \"$TLS__INTERNAL__KEY\" > /usr/src/cert/key.pem && nbb -m bao.core -- --tls-cert /usr/src/cert/cert.pem --tls-key /usr/src/cert/key.pem --tls-port 33000 --trexas-port 33001 --pgwire-port 5432 --main-path /usr/src/core/server --event-worker-path /usr/src/core/event",
     "startdev": "mkdir -p /usr/src/cert && echo \"$TLS__INTERNAL__CRT\" > /usr/src/cert/cert.pem && echo \"$TLS__INTERNAL__KEY\" > /usr/src/cert/key.pem && nbb -m bao.core -- --tls-cert /usr/src/cert/cert.pem --tls-key /usr/src/cert/key.pem --tls-port 33000 --trexas-port 33001 --pgwire-port 5432 --main-path /usr/src/core/server --event-worker-path /usr/src/core/event --enable-inspector --inspector-host 0.0.0.0 --inspector-port 9229",
@@ -13,12 +16,13 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
-    "@trex/as": "^0.5.0-1761460303-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-    "@trex/chdb": "^0.5.0-1761460223-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-    "@trex/circe": "^0.0.1-1761460455-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-    "@trex/hana": "^0.5.0-1761460394-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-    "@trex/llama": "^0.5.0-1761460172-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
-    "@trex/pgwire": "^0.5.0-1761460092-9cd40c7d9de31bf1da6132cf07bbad8f1bd8a2bc",
+    "@trex/as": "^0.5.0-1761961659-fb8964b5010b36c17b4462ce4da13b143dc7dcaa",
+    "@trex/chdb": "^0.5.0-1761998602-4cd8b8f9084286a87944460ed2ea434a12095cb1",
+    "@trex/circe": "^0.0.1-1761998601-4cd8b8f9084286a87944460ed2ea434a12095cb1",
+    "@trex/hana": "^0.5.0-1761998602-4cd8b8f9084286a87944460ed2ea434a12095cb1",
+    "@trex/llama": "^0.5.0-1761998599-4cd8b8f9084286a87944460ed2ea434a12095cb1",
+    "@trex/pgwire": "^0.5.0-1761998604-4cd8b8f9084286a87944460ed2ea434a12095cb1",
+    "@trex/tpm": "^0.5.0-1761998603-4cd8b8f9084286a87944460ed2ea434a12095cb1",
     "duckdb": "1.4.0",
     "minimist": "^1.2.8",
     "nbb": "^1.3.204"

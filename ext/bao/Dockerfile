@@ -40,7 +40,7 @@ RUN mkdir -p /usr/src
 
 WORKDIR /usr/src
 
-COPY $BASEPATH/deno.json $BASEPATH/package.json $BASEPATH/bun.lockb* $BASEPATH/.npmrc $BASEPATH/nbb.edn ./
+COPY $BASEPATH/deno.json $BASEPATH/package.json $BASEPATH/bun.lock $BASEPATH/.npmrc $BASEPATH/nbb.edn ./
 
 RUN bun install
 

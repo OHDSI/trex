@@ -1,0 +1,2 @@
+#!/bin/sh
+exec bunx nbb -m bao.core "$@"
