@@ -90,9 +90,7 @@ static PENDING_REQUESTS: LazyLock<PendingRequestsMap> =
   LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 fn get_active_connection() -> Arc<Mutex<Connection>> {
-  connection::get_connection().unwrap_or_else(|| {
-    TREX_DB.clone()
-  })
+  connection::get_connection().unwrap_or_else(|| TREX_DB.clone())
 }
 
 pub async fn start_sql_server(ip: &str, port: u16, auth_type: AuthType) {
