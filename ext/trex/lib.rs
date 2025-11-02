@@ -31,7 +31,6 @@ pub use sql::{
 };
 use std::cell::RefCell;
 use std::env;
-use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use std::{error::Error, time::Duration};
@@ -381,7 +380,8 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
   // Environment variable: TPM_USE_NODE_MODULES=false to disable (default: true)
   let use_node_modules = env::var("TPM_USE_NODE_MODULES")
     .unwrap_or_else(|_| "true".to_string())
-    .to_lowercase() != "false";
+    .to_lowercase()
+    != "false";
 
   // Determine install directory based on structure preference
   let install_dir = if use_node_modules {
@@ -391,11 +391,7 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
   };
 
   // Try to load TPM extension (ignore if already loaded)
-  let _ = execute_query(
-    "memory".to_string(),
-    "LOAD 'tpm'".to_string(),
-    vec![]
-  );
+  let _ = execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![]);
 
   // Escape SQL special characters
   let escaped_name = name.replace("'", "''");
@@ -423,15 +419,22 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
 
           for row in rows {
             if let Some(install_result) = row.get("install_results") {
-              if let Ok(result_str) = serde_json::from_value::<String>(install_result.clone()) {
-                if let Ok(result_obj) = serde_json::from_str::<serde_json::Value>(&result_str) {
-                  let package = result_obj.get("package")
+              if let Ok(result_str) =
+                serde_json::from_value::<String>(install_result.clone())
+              {
+                if let Ok(result_obj) =
+                  serde_json::from_str::<serde_json::Value>(&result_str)
+                {
+                  let package = result_obj
+                    .get("package")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                  let version = result_obj.get("version")
+                  let version = result_obj
+                    .get("version")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                  let success = result_obj.get("success")
+                  let success = result_obj
+                    .get("success")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
 
@@ -439,7 +442,8 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
                     println!("Successfully installed: {}@{}", package, version);
                     success_count += 1;
                   } else {
-                    let error = result_obj.get("error")
+                    let error = result_obj
+                      .get("error")
                       .and_then(|v| v.as_str())
                       .unwrap_or("unknown error");
                     eprintln!("Failed to install {}: {}", package, error);
@@ -450,7 +454,10 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
             }
           }
 
-          println!("Plugin installation complete: {} succeeded, {} failed", success_count, error_count);
+          println!(
+            "Plugin installation complete: {} succeeded, {} failed",
+            success_count, error_count
+          );
         }
         Err(e) => {
           eprintln!("Warning: Failed to parse installation results: {}. Raw response: {}", e, json_str);
