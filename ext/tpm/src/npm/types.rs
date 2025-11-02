@@ -57,6 +57,8 @@ pub struct NpmVersionMetadata {
     pub dependencies: HashMap<String, String>,
     #[serde(rename = "devDependencies", default)]
     pub dev_dependencies: HashMap<String, String>,
+    #[serde(default)]
+    pub dist: Option<DistInfo>,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,7 +70,7 @@ pub struct PackageInfoResponse {
     pub dist_tags: HashMap<String, String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, Clone, Default)]
 pub struct DistInfo {
     pub tarball: String,
     pub shasum: String,

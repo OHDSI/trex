@@ -169,25 +169,27 @@ impl NpmRegistry {
             version_req.to_string()
         };
 
-        // Get version metadata with dist info
-        let version_url = format!("{}/{}/{}", self.registry_url, name, resolved_version);
-        let version_response = self.client.get(&version_url).send()?;
-
-        if !version_response.status().is_success() {
-            return Err(NpmError::Other(format!(
-                "Version {} not found for package {}",
+        // Get version metadata from the already-fetched metadata
+        // This works with both npm registry and Azure DevOps (which doesn't support /package/version endpoint)
+        let version_meta = metadata.versions.get(&resolved_version)
+            .ok_or_else(|| NpmError::Other(format!(
+                "Version {} not found in package metadata for {}",
                 resolved_version, name
-            )));
-        }
+            )))?;
 
-        let version_meta: NpmVersionMetadataExt = version_response.json()?;
+        // Extract dist info (tarball and shasum)
+        let dist = version_meta.dist.as_ref()
+            .ok_or_else(|| NpmError::Other(format!(
+                "No dist information found for {}@{}",
+                name, resolved_version
+            )))?;
 
         Ok(ResolveResponse {
             package: name.to_string(),
-            resolved_version: version_meta.version,
-            tarball_url: version_meta.dist.tarball.clone(),
-            dependencies: version_meta.dependencies,
-            shasum: Some(version_meta.dist.shasum),
+            resolved_version: version_meta.version.clone(),
+            tarball_url: dist.tarball.clone(),
+            dependencies: version_meta.dependencies.clone(),
+            shasum: Some(dist.shasum.clone()),
         })
     }
 
