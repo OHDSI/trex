@@ -31,7 +31,6 @@ pub use sql::{
 };
 use std::cell::RefCell;
 use std::env;
-use std::process::Command;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::SystemTime;
 use std::{error::Error, time::Duration};
@@ -377,56 +376,96 @@ fn run_llama_model(
 
 #[op2(fast)]
 fn op_install_plugin(#[string] name: String, #[string] dir: String) {
-  let bun_path = if std::path::Path::new("/usr/local/bin/bun").exists() {
-    Some("/usr/local/bin/bun".to_string())
-  } else if Command::new("bun").arg("--version").output().is_ok() {
-    Some("bun".to_string())
+  // Check if we should use node_modules structure (for backward compatibility with bun)
+  // Environment variable: TPM_USE_NODE_MODULES=false to disable (default: true)
+  let use_node_modules = env::var("TPM_USE_NODE_MODULES")
+    .unwrap_or_else(|_| "true".to_string())
+    .to_lowercase()
+    != "false";
+
+  // Determine install directory based on structure preference
+  let install_dir = if use_node_modules {
+    format!("{}/node_modules", dir)
   } else {
-    Command::new("which")
-      .arg("bun")
-      .output()
-      .ok()
-      .and_then(|output| {
-        if output.status.success() {
-          String::from_utf8(output.stdout)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-        } else {
-          None
-        }
-      })
-      .or_else(|| {
-        Command::new("where")
-          .arg("bun")
-          .output()
-          .ok()
-          .and_then(|output| {
-            if output.status.success() {
-              String::from_utf8(output.stdout)
-                .ok()
-                .map(|s| s.lines().next().unwrap_or("").trim().to_string())
-                .filter(|s| !s.is_empty())
-            } else {
-              None
-            }
-          })
-      })
+    dir.clone()
   };
 
-  match bun_path {
-    Some(path) => {
-      Command::new(&path)
-        .args(["install", "-f", "--no-cache", "--no-save", &name])
-        .current_dir(dir)
-        .status()
-        .expect("failed to execute process");
+  // Try to load TPM extension (ignore if already loaded)
+  let _ = execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![]);
+
+  // Escape SQL special characters
+  let escaped_name = name.replace("'", "''");
+  let escaped_dir = install_dir.replace("'", "''");
+
+  // Execute tpm_install_with_deps
+  let sql = format!(
+    "SELECT install_results FROM tpm_install_with_deps('{}', '{}')",
+    escaped_name, escaped_dir
+  );
+
+  let result = execute_query("memory".to_string(), sql, vec![]);
+
+  match result {
+    Ok(json_str) => {
+      match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+        Ok(rows) => {
+          if rows.is_empty() {
+            eprintln!("Warning: No packages installed for: {}", name);
+            return;
+          }
+
+          let mut success_count = 0;
+          let mut error_count = 0;
+
+          for row in rows {
+            if let Some(install_result) = row.get("install_results") {
+              if let Ok(result_str) =
+                serde_json::from_value::<String>(install_result.clone())
+              {
+                if let Ok(result_obj) =
+                  serde_json::from_str::<serde_json::Value>(&result_str)
+                {
+                  let package = result_obj
+                    .get("package")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                  let version = result_obj
+                    .get("version")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                  let success = result_obj
+                    .get("success")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                  if success {
+                    println!("Successfully installed: {}@{}", package, version);
+                    success_count += 1;
+                  } else {
+                    let error = result_obj
+                      .get("error")
+                      .and_then(|v| v.as_str())
+                      .unwrap_or("unknown error");
+                    eprintln!("Failed to install {}: {}", package, error);
+                    error_count += 1;
+                  }
+                }
+              }
+            }
+          }
+
+          println!(
+            "Plugin installation complete: {} succeeded, {} failed",
+            success_count, error_count
+          );
+        }
+        Err(e) => {
+          eprintln!("Warning: Failed to parse installation results: {}. Raw response: {}", e, json_str);
+        }
+      }
     }
-    None => {
-      eprintln!(
-        "Warning: bun not found in PATH, skipping plugin installation for: {}",
-        name
-      );
+    Err(e) => {
+      eprintln!("Warning: Failed to install plugin '{}': {}. Make sure TPM extension is installed.", name, e);
     }
   }
 }

@@ -231,10 +231,9 @@ impl NpmRegistry {
             }
         }
 
-        // Create installation directory
+        // Create installation directory: {install_dir}/{package}/
         let package_dir = std::path::Path::new(install_dir)
-            .join(&resolved.package)
-            .join(&resolved.resolved_version);
+            .join(&resolved.package);
 
         std::fs::create_dir_all(&package_dir).map_err(|e| {
             NpmError::Other(format!("Failed to create install directory: {}", e))
