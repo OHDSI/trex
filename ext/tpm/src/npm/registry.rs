@@ -249,6 +249,10 @@ impl NpmRegistry {
         let decoder = GzDecoder::new(cursor);
         let mut archive = tar::Archive::new(decoder);
 
+        archive.set_preserve_permissions(true);
+        archive.set_preserve_mtime(true);
+        archive.set_unpack_xattrs(false);
+
         // Extract, stripping the "package/" prefix that npm tarballs have
         for entry in archive.entries().map_err(|e| NpmError::Other(e.to_string()))? {
             let mut entry = entry.map_err(|e| NpmError::Other(e.to_string()))?;
@@ -261,16 +265,51 @@ impl NpmRegistry {
 
             let dest_path = package_dir.join(stripped_path);
 
-            // Create parent directories
+            // Create parent directories with proper error handling
             if let Some(parent) = dest_path.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
-                    NpmError::Other(format!("Failed to create directory: {}", e))
-                })?;
+                if let Err(e) = std::fs::create_dir_all(parent) {
+                    if e.kind() != std::io::ErrorKind::AlreadyExists {
+                        return Err(NpmError::Other(format!(
+                            "Failed to create directory {}: {}",
+                            parent.display(),
+                            e
+                        )));
+                    }
+                }
             }
 
-            entry.unpack(&dest_path).map_err(|e| {
-                NpmError::Other(format!("Failed to extract file: {}", e))
-            })?;
+            if let Err(e) = entry.unpack(&dest_path) {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    use std::io::{Read, Write};
+
+                    let mut content = Vec::new();
+                    entry.read_to_end(&mut content).map_err(|e| {
+                        NpmError::Other(format!("Failed to read entry content: {}", e))
+                    })?;
+
+                    let mut file = std::fs::File::create(&dest_path).map_err(|e| {
+                        NpmError::Other(format!(
+                            "Failed to create file {}: {}",
+                            dest_path.display(),
+                            e
+                        ))
+                    })?;
+
+                    file.write_all(&content).map_err(|e| {
+                        NpmError::Other(format!(
+                            "Failed to write file {}: {}",
+                            dest_path.display(),
+                            e
+                        ))
+                    })?;
+                } else {
+                    return Err(NpmError::Other(format!(
+                        "Failed to extract file {}: {}",
+                        dest_path.display(),
+                        e
+                    )));
+                }
+            }
         }
 
         Ok(InstallResponse {
