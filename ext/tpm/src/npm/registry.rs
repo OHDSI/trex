@@ -15,18 +15,17 @@ pub struct NpmRegistry {
 }
 
 impl NpmRegistry {
-    /// Create a new NpmRegistry with default npm registry
     pub fn new() -> NpmResult<Self> {
         Self::with_registry_url(None)
     }
 
-    /// Create a new NpmRegistry with custom registry URL (or None for default npm registry)
     pub fn with_registry_url(registry_url: Option<String>) -> NpmResult<Self> {
         let registry_url = registry_url.unwrap_or_else(|| "https://registry.npmjs.org".to_string());
 
         let client = Client::builder()
             .user_agent("tpm-duckdb-extension/0.1.0")
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::limited(10))
             .build()
             .map_err(|e| NpmError::Network(e.to_string()))?;
 
@@ -53,7 +52,8 @@ impl NpmRegistry {
             )));
         }
 
-        let metadata: NpmPackageMetadata = response.json()?;
+        let text = response.text()?;
+        let metadata: NpmPackageMetadata = serde_json::from_str(&text)?;
 
         let latest_version = metadata.dist_tags.get("latest").cloned();
 
@@ -83,7 +83,6 @@ impl Default for NpmRegistry {
 }
 
 impl NpmRegistry {
-    /// Verify tarball integrity using SHA-1 (as used by npm)
     fn verify_integrity(&self, data: &[u8], expected_shasum: &str) -> NpmResult<()> {
         let mut hasher = Sha1::new();
         hasher.update(data);
@@ -102,12 +101,9 @@ impl NpmRegistry {
 }
 
 impl NpmRegistry {
-    /// Resolve a package spec (name@version or name) to a specific version
     pub fn resolve_package(&self, package_spec: &str) -> NpmResult<ResolveResponse> {
-        // Parse package spec: "name@version" or just "name"
         let (name, version_req) = if let Some(pos) = package_spec.rfind('@') {
             if pos == 0 {
-                // Scoped package like @types/node
                 (package_spec, "latest")
             } else {
                 let (n, v) = package_spec.split_at(pos);
@@ -133,9 +129,9 @@ impl NpmRegistry {
             )));
         }
 
-        let metadata: NpmPackageMetadata = response.json()?;
+        let text = response.text()?;
+        let metadata: NpmPackageMetadata = serde_json::from_str(&text)?;
 
-        // Resolve version using proper semver
         let resolved_version = if version_req == "latest" || version_req.is_empty() {
             metadata
                 .dist_tags
@@ -143,11 +139,9 @@ impl NpmRegistry {
                 .ok_or_else(|| NpmError::Other("No latest tag found".to_string()))?
                 .clone()
         } else if version_req.starts_with('^') || version_req.starts_with('~') || version_req.contains('*') || version_req.contains('>') || version_req.contains('<') {
-            // Parse as semver requirement
             let req = VersionReq::parse(version_req)
                 .map_err(|e| NpmError::Other(format!("Invalid semver requirement '{}': {}", version_req, e)))?;
 
-            // Get all versions and find the best match
             let mut versions: Vec<(Version, String)> = metadata.versions
                 .keys()
                 .filter_map(|v| {
@@ -155,22 +149,17 @@ impl NpmRegistry {
                 })
                 .collect();
 
-            // Sort by version (highest first)
             versions.sort_by(|a, b| b.0.cmp(&a.0));
 
-            // Find first matching version
             versions
                 .into_iter()
                 .find(|(v, _)| req.matches(v))
                 .map(|(_, s)| s)
                 .ok_or_else(|| NpmError::Other(format!("No version matching '{}' found", version_req)))?
         } else {
-            // Exact version
             version_req.to_string()
         };
 
-        // Get version metadata from the already-fetched metadata
-        // This works with both npm registry and Azure DevOps (which doesn't support /package/version endpoint)
         let version_meta = metadata.versions.get(&resolved_version)
             .ok_or_else(|| NpmError::Other(format!(
                 "Version {} not found in package metadata for {}",
@@ -193,19 +182,15 @@ impl NpmRegistry {
         })
     }
 
-    /// Download and install a package to a specific directory
     pub fn install_package(
         &self,
         package_spec: &str,
         install_dir: &str,
     ) -> NpmResult<InstallResponse> {
-        // First resolve the package
         let resolved = self.resolve_package(package_spec)?;
 
-        // Get shasum from resolve response for integrity check
         let shasum = resolved.shasum.clone();
 
-        // Download tarball
         let tarball_response = self.client.get(&resolved.tarball_url).send()?;
 
         if !tarball_response.status().is_success() {
@@ -220,7 +205,6 @@ impl NpmRegistry {
 
         let tarball_bytes = tarball_response.bytes()?;
 
-        // Verify integrity if shasum is provided
         if let Some(ref expected_shasum) = shasum {
             if let Err(e) = self.verify_integrity(&tarball_bytes, expected_shasum) {
                 return Ok(InstallResponse {
@@ -233,7 +217,6 @@ impl NpmRegistry {
             }
         }
 
-        // Create installation directory: {install_dir}/{package}/
         let package_dir = std::path::Path::new(install_dir)
             .join(&resolved.package);
 
@@ -253,19 +236,16 @@ impl NpmRegistry {
         archive.set_preserve_mtime(true);
         archive.set_unpack_xattrs(false);
 
-        // Extract, stripping the "package/" prefix that npm tarballs have
         for entry in archive.entries().map_err(|e| NpmError::Other(e.to_string()))? {
             let mut entry = entry.map_err(|e| NpmError::Other(e.to_string()))?;
             let path = entry.path().map_err(|e| NpmError::Other(e.to_string()))?;
 
-            // Strip "package/" prefix
             let stripped_path = path
                 .strip_prefix("package")
                 .unwrap_or(&path);
 
             let dest_path = package_dir.join(stripped_path);
 
-            // Create parent directories with proper error handling
             if let Some(parent) = dest_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     if e.kind() != std::io::ErrorKind::AlreadyExists {
@@ -321,7 +301,6 @@ impl NpmRegistry {
         })
     }
 
-    /// Install a package with all its dependencies recursively
     pub fn install_package_with_deps(
         &self,
         package_spec: &str,
@@ -334,7 +313,6 @@ impl NpmRegistry {
         let mut installed: HashSet<String> = HashSet::new();
 
         while let Some((spec, depth)) = to_install.pop() {
-            // Skip if already installed
             let (name, _) = if let Some(pos) = spec.rfind('@') {
                 if pos == 0 {
                     (spec.as_str(), "latest")
@@ -350,15 +328,12 @@ impl NpmRegistry {
                 continue;
             }
 
-            // Install the package
             match self.install_package(&spec, install_dir) {
                 Ok(install_result) => {
                     if install_result.success {
                         installed.insert(name.to_string());
 
-                        // Resolve to get dependencies
                         if let Ok(resolved) = self.resolve_package(&spec) {
-                            // Add dependencies to install queue (limit depth to prevent infinite recursion)
                             if depth < 10 && !resolved.dependencies.is_empty() {
                                 for (dep_name, dep_version) in resolved.dependencies.iter() {
                                     let dep_spec = format!("{}@{}", dep_name, dep_version);
@@ -384,7 +359,6 @@ impl NpmRegistry {
         Ok(results)
     }
 
-    /// Build a dependency tree for visualization
     pub fn get_dependency_tree(
         &self,
         package_spec: &str,
@@ -395,11 +369,9 @@ impl NpmRegistry {
         let mut to_process: VecDeque<(String, usize, Option<String>)> = VecDeque::new();
         let mut processed: HashSet<String> = HashSet::new();
 
-        // Start with root package
         to_process.push_back((package_spec.to_string(), 0, None));
 
         while let Some((spec, depth, parent)) = to_process.pop_front() {
-            // Parse package name
             let (name, _) = if let Some(pos) = spec.rfind('@') {
                 if pos == 0 {
                     (spec.as_str(), "latest")
@@ -417,10 +389,8 @@ impl NpmRegistry {
             }
             processed.insert(name.to_string());
 
-            // Resolve the package
             match self.resolve_package(&spec) {
                 Ok(resolved) => {
-                    // Create tree line with proper indentation
                     let tree_line = if depth == 0 {
                         format!("{} {}", resolved.package, resolved.resolved_version)
                     } else {
@@ -437,7 +407,6 @@ impl NpmRegistry {
                         tree_line,
                     });
 
-                    // Add dependencies to queue (limit depth)
                     if depth < 5 && !resolved.dependencies.is_empty() {
                         for (dep_name, dep_version) in resolved.dependencies.iter() {
                             let dep_spec = format!("{}@{}", dep_name, dep_version);
@@ -446,7 +415,6 @@ impl NpmRegistry {
                     }
                 }
                 Err(_) => {
-                    // Skip packages that can't be resolved
                     continue;
                 }
             }
@@ -455,7 +423,6 @@ impl NpmRegistry {
         Ok(result)
     }
 
-    /// List installed packages in a directory
     pub fn list_installed_packages(install_dir: &str) -> NpmResult<Vec<ListResponse>> {
         use std::fs;
         use std::path::Path;
@@ -467,19 +434,16 @@ impl NpmRegistry {
             return Ok(results);
         }
 
-        // Iterate through package directories
         if let Ok(entries) = fs::read_dir(base_path) {
             for entry in entries.flatten() {
                 if let Ok(package_name) = entry.file_name().into_string() {
                     let package_path = entry.path();
 
-                    // Iterate through version directories
                     if let Ok(version_entries) = fs::read_dir(&package_path) {
                         for version_entry in version_entries.flatten() {
                             if let Ok(version) = version_entry.file_name().into_string() {
                                 let install_path = version_entry.path();
 
-                                // Verify it's a valid package by checking for package.json
                                 let package_json = install_path.join("package.json");
                                 if package_json.exists() {
                                     results.push(ListResponse {
@@ -495,7 +459,6 @@ impl NpmRegistry {
             }
         }
 
-        // Sort by package name then version
         results.sort_by(|a, b| a.package.cmp(&b.package).then(a.version.cmp(&b.version)));
 
         Ok(results)
