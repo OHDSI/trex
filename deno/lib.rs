@@ -120,8 +120,8 @@ impl DenoOptions {
       .builder
       .unstable_sloppy_imports
       .unwrap_or_else(|| self.workspace().has_unstable("sloppy-imports"));
-    eprintln!("DEBUG: unstable_sloppy_imports() = {}, builder value = {:?}, workspace has = {}", 
-              result, 
+    eprintln!("DEBUG: unstable_sloppy_imports() = {}, builder value = {:?}, workspace has = {}",
+              result,
               self.builder.unstable_sloppy_imports,
               self.workspace().has_unstable("sloppy-imports"));
     result
