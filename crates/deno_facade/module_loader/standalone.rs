@@ -290,35 +290,20 @@ impl ModuleLoader for EmbeddedModuleLoader {
         // Try sloppy imports resolution if enabled and this is a file:// URL
         if final_specifier.scheme() == "file" {
           if let Some(sloppy_resolver) = &self.shared.sloppy_imports_resolver {
-            eprintln!(
-              "DEBUG: Attempting sloppy imports resolution for: {}",
-              final_specifier
-            );
-
             // Map VFS path back to real source path
             if let Ok(path) = final_specifier.to_file_path() {
-              eprintln!("DEBUG: VFS path: {:?}", path);
               if let Ok(stripped) =
                 path.strip_prefix("/var/tmp/sb-compile-trex")
               {
                 let real_path = std::env::current_dir().unwrap().join(stripped);
-                eprintln!("DEBUG: Real source path: {:?}", real_path);
                 if let Ok(real_specifier) =
                   ModuleSpecifier::from_file_path(&real_path)
                 {
-                  eprintln!(
-                    "DEBUG: Trying sloppy resolution on: {}",
-                    real_specifier
-                  );
                   if let Some(resolution) = sloppy_resolver.resolve(
                     &real_specifier,
                     SloppyImportsResolutionKind::Execution,
                   ) {
                     let resolved_specifier = resolution.into_specifier();
-                    eprintln!(
-                      "DEBUG: Sloppy imports resolved to: {}",
-                      resolved_specifier
-                    );
                     // Convert back to VFS path
                     if let Ok(resolved_path) = resolved_specifier.to_file_path()
                     {
@@ -331,10 +316,6 @@ impl ModuleLoader for EmbeddedModuleLoader {
                         if let Ok(vfs_specifier) =
                           ModuleSpecifier::from_file_path(&vfs_path)
                         {
-                          eprintln!(
-                            "DEBUG: Returning VFS specifier: {}",
-                            vfs_specifier
-                          );
                           return Ok(vfs_specifier);
                         }
                       }

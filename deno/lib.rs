@@ -116,15 +116,10 @@ impl DenoOptions {
   }
 
   pub fn unstable_sloppy_imports(&self) -> bool {
-    let result = self
+    self
       .builder
       .unstable_sloppy_imports
-      .unwrap_or_else(|| self.workspace().has_unstable("sloppy-imports"));
-    eprintln!("DEBUG: unstable_sloppy_imports() = {}, builder value = {:?}, workspace has = {}",
-              result,
-              self.builder.unstable_sloppy_imports,
-              self.workspace().has_unstable("sloppy-imports"));
-    result
+      .unwrap_or_else(|| self.workspace().has_unstable("sloppy-imports"))
   }
 
   fn byonm_enabled(&self) -> bool {
