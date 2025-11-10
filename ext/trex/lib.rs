@@ -584,14 +584,14 @@ fn field_value_to_json(
       // Convert to ISO 8601 date string (YYYY-MM-DD)
       let timestamp = days as i64 * 86400; // seconds in a day
       let datetime = chrono::DateTime::from_timestamp(timestamp, 0)
-        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
       JsonValue::String(datetime.format("%Y-%m-%d").to_string())
     }
     DataType::Date64 => {
       let arr = array.as_any().downcast_ref::<Date64Array>().unwrap();
       let millis = arr.value(row);
       let datetime = chrono::DateTime::from_timestamp_millis(millis)
-        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
       JsonValue::String(datetime.format("%Y-%m-%d").to_string())
     }
     DataType::Time32(_) => {
@@ -612,7 +612,7 @@ fn field_value_to_json(
         .unwrap();
       let seconds = arr.value(row);
       let datetime = chrono::DateTime::from_timestamp(seconds, 0)
-        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
       JsonValue::String(datetime.to_rfc3339())
     }
     DataType::Timestamp(TimeUnit::Millisecond, _) => {
@@ -622,7 +622,7 @@ fn field_value_to_json(
         .unwrap();
       let millis = arr.value(row);
       let datetime = chrono::DateTime::from_timestamp_millis(millis)
-        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
       JsonValue::String(datetime.to_rfc3339())
     }
     DataType::Timestamp(TimeUnit::Microsecond, _) => {
@@ -632,7 +632,7 @@ fn field_value_to_json(
         .unwrap();
       let micros = arr.value(row);
       let datetime = chrono::DateTime::from_timestamp_micros(micros)
-        .unwrap_or_else(|| chrono::DateTime::UNIX_EPOCH);
+        .unwrap_or(chrono::DateTime::UNIX_EPOCH);
       JsonValue::String(datetime.to_rfc3339())
     }
     DataType::Timestamp(TimeUnit::Nanosecond, _) => {
