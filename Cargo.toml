@@ -31,7 +31,7 @@ repository = "https://github.com/supabase/edge-runtime"
 deno = { path = "./deno" }
 
 deno_ast = { version = "=0.44.0", features = ["transpiling"] }
-deno_core = "0.324.0"
+deno_core = "0.363.0"
 
 deno_cache_dir = "=0.14.0"
 deno_config = { version = "=0.39.3", features = ["workspace", "sync"] }
@@ -90,7 +90,7 @@ clap = { version = "4.5.16", features = ["cargo", "string", "env"] }
 ctor = "0.2.6"
 either = "1"
 enum-as-inner = "0.6.0"
-eszip = "=0.80.0"
+eszip = "=0.104.0"
 futures-util = "0.3.30"
 fxhash = "0.2"
 import_map = { version = "=0.20.1", features = ["ext"] }
@@ -221,12 +221,10 @@ winapi = "=0.3.9"
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Media", "Win32_Storage_FileSystem"] }
 
 [patch.crates-io]
-# Local path patches for Deno 2.5.6 upgrade development
-# Note: Can't use local paths for deno_core and rusty_v8 due to workspace complexity
-# Keeping git references for now, will update after fork upgrades
-deno_core = { git = "https://github.com/supabase/deno_core", branch = "324-supabase" }
-eszip = { path = "thridparty/supabase/eszip" }
-v8 = { git = "https://github.com/supabase/rusty_v8", tag = "v130.0.7" }
+# Deno 2.5.6 upgrade - using p-hoffmann forks with upgraded dependencies
+deno_core = { git = "https://github.com/p-hoffmann/deno_core", branch = "supabase-v0.363.0" }
+eszip = { git = "https://github.com/p-hoffmann/eszip", branch = "supabase-v0.104.0" }
+v8 = { git = "https://github.com/p-hoffmann/rusty_v8", branch = "supabase-v140.2.0" }
 
 deno_unsync = { path = "./vendor/deno_unsync" }
 deno_fetch = { path = "./vendor/deno_fetch" }
