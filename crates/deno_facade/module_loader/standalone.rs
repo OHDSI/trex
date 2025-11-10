@@ -589,7 +589,25 @@ impl ModuleLoader for EmbeddedModuleLoader {
     eprintln!("Looking for module in eszip: {}", original_specifier);
     let Some(module) = self.shared.eszip.get_module(original_specifier) else {
       eprintln!("Module not found in eszip: {}", original_specifier);
-      
+
+      // Additional diagnostics: compute the eszip specifier key we'd expect
+      if original_specifier.scheme() == "file" {
+        let rel_base = &self.shared.eszip.root_dir_url;
+        // show the specifier key that is used to lookup file-based entries
+        let specifier_key = EszipRelativeFileBaseUrl::new(rel_base)
+          .specifier_key(original_specifier);
+        eprintln!("Computed eszip specifier key: {}", specifier_key);
+
+        // Also show the relative path inside the workspace (if available)
+        if let Ok(orig_path) = original_specifier.to_file_path() {
+          if let Ok(root_path) = rel_base.to_file_path() {
+            if let Ok(rel_path) = orig_path.strip_prefix(root_path) {
+              eprintln!("Relative path in workspace: {}", rel_path.display());
+            }
+          }
+        }
+      }
+
       // Debug: print all available eszip specifiers to help diagnose the issue
       eprintln!("=== Available eszip specifiers ===");
       let all_specifiers = self.shared.eszip.eszip.specifiers();
