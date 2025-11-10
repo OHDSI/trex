@@ -76,11 +76,15 @@ export class TrexConnection  {
 
     async atlas(
         atlas,
+        cdmSchema,
+        cohortId,
         callback
     ) {
         try {
             const result = await this.connection.atlas_query(
-                atlas
+                atlas,
+                cdmSchema,
+                cohortId
             );
             callback(null, result);
         } catch (err) {
