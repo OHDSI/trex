@@ -175,7 +175,8 @@ impl ContextifyScript {
     microtask_queue: Option<&v8::MicrotaskQueue>,
   ) -> Option<v8::Local<'s, v8::Value>> {
     let context_scope = &mut v8::ContextScope::new(scope, context);
-    let scope = &mut v8::EscapableHandleScope::new(context_scope);
+    let scope = std::pin::pin!(v8::EscapableHandleScope::new(context_scope));
+    let scope = &mut scope.init();
     let scope = &mut v8::TryCatch::new(scope);
 
     let unbound_script = self.script.get(scope).unwrap();
@@ -455,7 +456,8 @@ pub fn create_v8_context<'a>(
   mode: ContextInitMode,
   microtask_queue: *mut v8::MicrotaskQueue,
 ) -> v8::Local<'a, v8::Context> {
-  let scope = &mut v8::EscapableHandleScope::new(scope);
+  let scope = std::pin::pin!(v8::EscapableHandleScope::new(scope));
+  let scope = &mut scope.init();
 
   let context = if mode == ContextInitMode::UseSnapshot {
     v8::Context::from_snapshot(
