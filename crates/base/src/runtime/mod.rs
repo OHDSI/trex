@@ -603,9 +603,12 @@ where
             bail!("could not find an appropriate entrypoint");
           }
           let mut metadata = Metadata::default();
-          // Store the base path for sloppy imports resolution
+          // Store the parent directory path for sloppy imports resolution
+          // The VFS paths are relative to the parent of the service directory
           if let Ok(base_path) = base_dir_url.to_file_path() {
-            metadata.base_path = Some(base_path.to_string_lossy().to_string());
+            if let Some(parent_path) = base_path.parent() {
+              metadata.base_path = Some(parent_path.to_string_lossy().to_string());
+            }
           }
           let eszip = generate_binary_eszip(
             &mut metadata,
