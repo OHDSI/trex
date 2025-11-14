@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use anyhow::anyhow;
 use base_rt::RuntimeState;
-use deno_fs::AccessCheckCb;
 use deno_fs::FsDirEntry;
 use deno_fs::FsFileType;
 use deno_fs::OpenOptions;
@@ -15,6 +14,7 @@ use deno_io::fs::File;
 use deno_io::fs::FsError;
 use deno_io::fs::FsResult;
 use deno_io::fs::FsStat;
+use deno_permissions::{CheckedPath, CheckedPathBuf};
 
 #[derive(Debug, Clone)]
 pub struct PrefixFs<FileSystem> {
@@ -141,8 +141,8 @@ where
       .unwrap_or_else(|| Err(FsError::NotSupported))
   }
 
-  fn chdir(&self, path: &Path) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+  fn chdir(&self, path: &CheckedPath) -> FsResult<()> {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.chdir(path.strip_prefix(&self.prefix).unwrap())
     } else {
       self
@@ -161,14 +161,10 @@ where
       .unwrap_or_else(|| Err(FsError::NotSupported))
   }
 
-  fn open_sync(
-    &self,
-    path: &Path,
-    options: OpenOptions,
-    access_check: Option<AccessCheckCb>,
+  fn open_sync(&self, path: &CheckedPath, options: OpenOptions,
   ) -> FsResult<Rc<dyn File>> {
     self.check_sync_api_allowed("open_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.open_sync(
         path.strip_prefix(&self.prefix).unwrap(),
         options,
@@ -178,20 +174,16 @@ where
       self
         .base_fs
         .as_ref()
-        .map(|it| it.open_sync(path, options, access_check))
+        .map(|it| it.open_sync(path, options))
         .unwrap_or_else(|| {
           Err(FsError::Io(io::Error::from(io::ErrorKind::NotFound)))
         })
     }
   }
 
-  async fn open_async<'a>(
-    &'a self,
-    path: PathBuf,
-    options: OpenOptions,
-    access_check: Option<AccessCheckCb<'a>>,
+  async fn open_async<'a>(&'a self, path: CheckedPathBuf, options: OpenOptions,
   ) -> FsResult<Rc<dyn File>> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .open_async(
@@ -201,20 +193,18 @@ where
         )
         .await
     } else if let Some(fs) = self.base_fs.as_ref() {
-      fs.open_async(path, options, access_check).await
+      fs.open_async(path, options).await
     } else {
       Err(FsError::Io(io::Error::from(io::ErrorKind::NotFound)))
     }
   }
 
-  fn mkdir_sync(
-    &self,
-    path: &Path,
+  fn mkdir_sync(&self, path: &CheckedPath,
     recursive: bool,
     mode: Option<u32>,
   ) -> FsResult<()> {
     self.check_sync_api_allowed("mkdir_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.mkdir_sync(
         path.strip_prefix(&self.prefix).unwrap(),
         recursive,
@@ -229,13 +219,11 @@ where
     }
   }
 
-  async fn mkdir_async(
-    &self,
-    path: PathBuf,
+  async fn mkdir_async(&self, path: CheckedPathBuf,
     recursive: bool,
     mode: Option<u32>,
   ) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .mkdir_async(
@@ -251,9 +239,10 @@ where
     }
   }
 
-  fn chmod_sync(&self, path: &Path, mode: u32) -> FsResult<()> {
+  #[cfg(unix)]
+  fn chmod_sync(&self, path: &CheckedPath, mode: u32) -> FsResult<()> {
     self.check_sync_api_allowed("chmod_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .chmod_sync(path.strip_prefix(&self.prefix).unwrap(), mode)
@@ -266,8 +255,25 @@ where
     }
   }
 
-  async fn chmod_async(&self, path: PathBuf, mode: u32) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+  #[cfg(not(unix))]
+  fn chmod_sync(&self, path: &CheckedPath, mode: i32) -> FsResult<()> {
+    self.check_sync_api_allowed("chmod_sync")?;
+    if (&**path).starts_with(&self.prefix) {
+      self
+        .fs
+        .chmod_sync(path.strip_prefix(&self.prefix).unwrap(), mode)
+    } else {
+      self
+        .base_fs
+        .as_ref()
+        .map(|it| it.chmod_sync(path, mode))
+        .unwrap_or_else(|| Err(FsError::NotSupported))
+    }
+  }
+
+  #[cfg(unix)]
+  async fn chmod_async(&self, path: CheckedPathBuf, mode: u32) -> FsResult<()> {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .chmod_async(path.strip_prefix(&self.prefix).unwrap().to_owned(), mode)
@@ -279,14 +285,87 @@ where
     }
   }
 
-  fn chown_sync(
-    &self,
-    path: &Path,
+  #[cfg(not(unix))]
+  async fn chmod_async(&self, path: CheckedPathBuf, mode: i32) -> FsResult<()> {
+    if (&**path).starts_with(&self.prefix) {
+      self
+        .fs
+        .chmod_async(path.strip_prefix(&self.prefix).unwrap().to_owned(), mode)
+        .await
+    } else if let Some(fs) = self.base_fs.as_ref() {
+      fs.chmod_async(path, mode).await
+    } else {
+      Err(FsError::NotSupported)
+    }
+  }
+
+
+  #[cfg(unix)]
+  fn lchmod_sync(&self, path: &CheckedPath, mode: u32) -> FsResult<()> {
+    self.check_sync_api_allowed("lchmod_sync")?;
+    if (&**path).starts_with(&self.prefix) {
+      self
+        .fs
+        .lchmod_sync(path.strip_prefix(&self.prefix).unwrap(), mode)
+    } else {
+      self
+        .base_fs
+        .as_ref()
+        .map(|it| it.lchmod_sync(path, mode))
+        .unwrap_or_else(|| Err(FsError::NotSupported))
+    }
+  }
+
+  #[cfg(not(unix))]
+  fn lchmod_sync(&self, path: &CheckedPath, mode: i32) -> FsResult<()> {
+    self.check_sync_api_allowed("lchmod_sync")?;
+    if (&**path).starts_with(&self.prefix) {
+      self
+        .fs
+        .lchmod_sync(path.strip_prefix(&self.prefix).unwrap(), mode)
+    } else {
+      self
+        .base_fs
+        .as_ref()
+        .map(|it| it.lchmod_sync(path, mode))
+        .unwrap_or_else(|| Err(FsError::NotSupported))
+    }
+  }
+
+  #[cfg(unix)]
+  async fn lchmod_async(&self, path: CheckedPathBuf, mode: u32) -> FsResult<()> {
+    if (&*path).starts_with(&self.prefix) {
+      self
+        .fs
+        .lchmod_async(path.strip_prefix(&self.prefix).unwrap().to_owned(), mode)
+        .await
+    } else if let Some(fs) = self.base_fs.as_ref() {
+      fs.lchmod_async(path, mode).await
+    } else {
+      Err(FsError::NotSupported)
+    }
+  }
+
+  #[cfg(not(unix))]
+  async fn lchmod_async(&self, path: CheckedPathBuf, mode: i32) -> FsResult<()> {
+    if (&*path).starts_with(&self.prefix) {
+      self
+        .fs
+        .lchmod_async(path.strip_prefix(&self.prefix).unwrap().to_owned(), mode)
+        .await
+    } else if let Some(fs) = self.base_fs.as_ref() {
+      fs.lchmod_async(path, mode).await
+    } else {
+      Err(FsError::NotSupported)
+    }
+  }
+
+  fn chown_sync(&self, path: &CheckedPath,
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
     self.check_sync_api_allowed("chown_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .chown_sync(path.strip_prefix(&self.prefix).unwrap(), uid, gid)
@@ -299,13 +378,11 @@ where
     }
   }
 
-  async fn chown_async(
-    &self,
-    path: PathBuf,
+  async fn chown_async(&self, path: CheckedPathBuf,
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .chown_async(
@@ -321,14 +398,12 @@ where
     }
   }
 
-  fn lchown_sync(
-    &self,
-    path: &Path,
+  fn lchown_sync(&self, path: &CheckedPath,
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
     self.check_sync_api_allowed("lchown_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .lchown_sync(path.strip_prefix(&self.prefix).unwrap(), uid, gid)
@@ -341,13 +416,11 @@ where
     }
   }
 
-  async fn lchown_async(
-    &self,
-    path: PathBuf,
+  async fn lchown_async(&self, path: CheckedPathBuf,
     uid: Option<u32>,
     gid: Option<u32>,
   ) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .lchown_async(
@@ -363,9 +436,9 @@ where
     }
   }
 
-  fn remove_sync(&self, path: &Path, recursive: bool) -> FsResult<()> {
+  fn remove_sync(&self, path: &CheckedPath, recursive: bool) -> FsResult<()> {
     self.check_sync_api_allowed("remove_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .remove_sync(path.strip_prefix(&self.prefix).unwrap(), recursive)
@@ -378,8 +451,8 @@ where
     }
   }
 
-  async fn remove_async(&self, path: PathBuf, recursive: bool) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+  async fn remove_async(&self, path: CheckedPathBuf, recursive: bool) -> FsResult<()> {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .remove_async(
@@ -421,10 +494,7 @@ where
     }
   }
 
-  async fn copy_file_async(
-    &self,
-    oldpath: PathBuf,
-    newpath: PathBuf,
+  async fn copy_file_async(&self, oldpath: CheckedPathBuf, newpath: CheckedPathBuf,
   ) -> FsResult<()> {
     let oldpath_matches = oldpath.starts_with(&self.prefix);
     let newpath_matches = newpath.starts_with(&self.prefix);
@@ -454,7 +524,7 @@ where
   fn cp_sync(&self, path: &Path, new_path: &Path) -> FsResult<()> {
     self.check_sync_api_allowed("cp_sync")?;
 
-    let path_matches = path.starts_with(&self.prefix);
+    let path_matches = (&*path).starts_with(&self.prefix);
     let new_path_matches = new_path.starts_with(&self.prefix);
     if path_matches || new_path_matches {
       self.fs.cp_sync(
@@ -479,7 +549,7 @@ where
   }
 
   async fn cp_async(&self, path: PathBuf, new_path: PathBuf) -> FsResult<()> {
-    let path_matches = path.starts_with(&self.prefix);
+    let path_matches = (&*path).starts_with(&self.prefix);
     let new_path_matches = new_path.starts_with(&self.prefix);
     if path_matches || new_path_matches {
       self
@@ -506,7 +576,7 @@ where
 
   fn stat_sync(&self, path: &Path) -> FsResult<FsStat> {
     self.check_sync_api_allowed("stat_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.stat_sync(path.strip_prefix(&self.prefix).unwrap())
     } else {
       self
@@ -518,7 +588,7 @@ where
   }
 
   async fn stat_async(&self, path: PathBuf) -> FsResult<FsStat> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .stat_async(path.strip_prefix(&self.prefix).unwrap().to_owned())
@@ -532,7 +602,7 @@ where
 
   fn lstat_sync(&self, path: &Path) -> FsResult<FsStat> {
     self.check_sync_api_allowed("lstat_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.lstat_sync(path.strip_prefix(&self.prefix).unwrap())
     } else {
       self
@@ -544,7 +614,7 @@ where
   }
 
   async fn lstat_async(&self, path: PathBuf) -> FsResult<FsStat> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .lstat_async(path.strip_prefix(&self.prefix).unwrap().to_owned())
@@ -558,7 +628,7 @@ where
 
   fn realpath_sync(&self, path: &Path) -> FsResult<PathBuf> {
     self.check_sync_api_allowed("realpath_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .realpath_sync(path.strip_prefix(&self.prefix).unwrap())
@@ -572,7 +642,7 @@ where
   }
 
   async fn realpath_async(&self, path: PathBuf) -> FsResult<PathBuf> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .realpath_async(path.strip_prefix(&self.prefix).unwrap().to_owned())
@@ -586,7 +656,7 @@ where
 
   fn read_dir_sync(&self, path: &Path) -> FsResult<Vec<FsDirEntry>> {
     self.check_sync_api_allowed("read_dir_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .read_dir_sync(path.strip_prefix(&self.prefix).unwrap())
@@ -600,7 +670,7 @@ where
   }
 
   async fn read_dir_async(&self, path: PathBuf) -> FsResult<Vec<FsDirEntry>> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .read_dir_async(path.strip_prefix(&self.prefix).unwrap().to_owned())
@@ -639,10 +709,7 @@ where
     }
   }
 
-  async fn rename_async(
-    &self,
-    oldpath: PathBuf,
-    newpath: PathBuf,
+  async fn rename_async(&self, oldpath: CheckedPathBuf, newpath: CheckedPathBuf,
   ) -> FsResult<()> {
     let oldpath_matches = oldpath.starts_with(&self.prefix);
     let newpath_matches = newpath.starts_with(&self.prefix);
@@ -696,10 +763,7 @@ where
     }
   }
 
-  async fn link_async(
-    &self,
-    oldpath: PathBuf,
-    newpath: PathBuf,
+  async fn link_async(&self, oldpath: CheckedPathBuf, newpath: CheckedPathBuf,
   ) -> FsResult<()> {
     let oldpath_matches = oldpath.starts_with(&self.prefix);
     let newpath_matches = newpath.starts_with(&self.prefix);
@@ -726,10 +790,7 @@ where
     }
   }
 
-  fn symlink_sync(
-    &self,
-    oldpath: &Path,
-    newpath: &Path,
+  fn symlink_sync(&self, oldpath: &CheckedPath, newpath: &CheckedPath,
     file_type: Option<FsFileType>,
   ) -> FsResult<()> {
     self.check_sync_api_allowed("symlink_sync")?;
@@ -759,10 +820,7 @@ where
     }
   }
 
-  async fn symlink_async(
-    &self,
-    oldpath: PathBuf,
-    newpath: PathBuf,
+  async fn symlink_async(&self, oldpath: CheckedPathBuf, newpath: CheckedPathBuf,
     file_type: Option<FsFileType>,
   ) -> FsResult<()> {
     let oldpath_matches = oldpath.starts_with(&self.prefix);
@@ -793,7 +851,7 @@ where
 
   fn read_link_sync(&self, path: &Path) -> FsResult<PathBuf> {
     self.check_sync_api_allowed("read_link_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .read_link_sync(path.strip_prefix(&self.prefix).unwrap())
@@ -807,7 +865,7 @@ where
   }
 
   async fn read_link_async(&self, path: PathBuf) -> FsResult<PathBuf> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .read_link_async(path.strip_prefix(&self.prefix).unwrap().to_owned())
@@ -819,9 +877,9 @@ where
     }
   }
 
-  fn truncate_sync(&self, path: &Path, len: u64) -> FsResult<()> {
+  fn truncate_sync(&self, path: &CheckedPath, len: u64) -> FsResult<()> {
     self.check_sync_api_allowed("truncate_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .truncate_sync(path.strip_prefix(&self.prefix).unwrap(), len)
@@ -834,8 +892,8 @@ where
     }
   }
 
-  async fn truncate_async(&self, path: PathBuf, len: u64) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+  async fn truncate_async(&self, path: CheckedPathBuf, len: u64) -> FsResult<()> {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .truncate_async(
@@ -850,16 +908,14 @@ where
     }
   }
 
-  fn utime_sync(
-    &self,
-    path: &Path,
+  fn utime_sync(&self, path: &CheckedPath,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
     self.check_sync_api_allowed("utime_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.utime_sync(
         path.strip_prefix(&self.prefix).unwrap(),
         atime_secs,
@@ -878,15 +934,13 @@ where
     }
   }
 
-  async fn utime_async(
-    &self,
-    path: PathBuf,
+  async fn utime_async(&self, path: CheckedPathBuf,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .utime_async(
@@ -905,16 +959,14 @@ where
     }
   }
 
-  fn lutime_sync(
-    &self,
-    path: &Path,
+  fn lutime_sync(&self, path: &CheckedPath,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
     self.check_sync_api_allowed("lutime_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.lutime_sync(
         path.strip_prefix(&self.prefix).unwrap(),
         atime_secs,
@@ -933,15 +985,13 @@ where
     }
   }
 
-  async fn lutime_async(
-    &self,
-    path: PathBuf,
+  async fn lutime_async(&self, path: CheckedPathBuf,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .lutime_async(
@@ -960,98 +1010,82 @@ where
     }
   }
 
-  fn write_file_sync(
-    &self,
-    path: &Path,
-    options: OpenOptions,
-    access_check: Option<AccessCheckCb>,
+  fn write_file_sync(&self, path: &CheckedPath, options: OpenOptions,
     data: &[u8],
   ) -> FsResult<()> {
     self.check_sync_api_allowed("write_file_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.write_file_sync(
         path.strip_prefix(&self.prefix).unwrap(),
         options,
-        access_check,
         data,
       )
     } else {
       self
         .base_fs
         .as_ref()
-        .map(|it| it.write_file_sync(path, options, access_check, data))
+        .map(|it| it.write_file_sync(path, options, data))
         .unwrap_or_else(|| Err(FsError::NotSupported))
     }
   }
 
-  async fn write_file_async<'a>(
-    &'a self,
-    path: PathBuf,
-    options: OpenOptions,
-    access_check: Option<AccessCheckCb<'a>>,
+  async fn write_file_async<'a>(&'a self, path: CheckedPathBuf, options: OpenOptions,
     data: Vec<u8>,
   ) -> FsResult<()> {
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .write_file_async(
           path.strip_prefix(&self.prefix).unwrap().to_owned(),
           options,
-          access_check,
           data,
         )
         .await
     } else if let Some(fs) = self.base_fs.as_ref() {
-      fs.write_file_async(path, options, access_check, data).await
+      fs.write_file_async(path, options, data).await
     } else {
       Err(FsError::NotSupported)
     }
   }
 
-  fn read_file_sync(
-    &self,
-    path: &Path,
-    access_check: Option<AccessCheckCb>,
-  ) -> FsResult<Cow<'static, [u8]>> {
+  fn read_file_sync(&self, path: &CheckedPath) -> FsResult<Cow<'static, [u8]>> {
     self.check_sync_api_allowed("read_file_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
-        .read_file_sync(path.strip_prefix(&self.prefix).unwrap(), access_check)
+        .read_file_sync(path.strip_prefix(&self.prefix).unwrap())
     } else {
       self
         .base_fs
         .as_ref()
-        .map(|it| it.read_file_sync(path, access_check))
+        .map(|it| it.read_file_sync(path))
         .unwrap_or_else(|| Err(FsError::NotSupported))
     }
   }
 
   async fn read_file_async<'a>(
     &'a self,
-    path: PathBuf,
-    access_check: Option<AccessCheckCb<'a>>,
+    path: CheckedPathBuf,
   ) -> FsResult<Cow<'static, [u8]>> {
-    if path.starts_with(&self.prefix) {
+    if (&*path).starts_with(&self.prefix) {
       self
         .fs
         .read_file_async(
           path.strip_prefix(&self.prefix).unwrap().to_owned(),
-          access_check,
         )
         .await
     } else if let Some(fs) = self.base_fs.as_ref() {
-      fs.read_file_async(path, access_check).await
+      fs.read_file_async(path).await
     } else {
       Err(FsError::NotSupported)
     }
   }
 
-  fn is_file_sync(&self, path: &Path) -> bool {
+  fn is_file_sync(&self, path: &CheckedPath) -> bool {
     if self.check_sync_api_allowed("is_file_sync").is_err() {
       return false;
     }
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .is_file_sync(path.strip_prefix(&self.prefix).unwrap())
@@ -1064,11 +1098,11 @@ where
     }
   }
 
-  fn is_dir_sync(&self, path: &Path) -> bool {
+  fn is_dir_sync(&self, path: &CheckedPath) -> bool {
     if self.check_sync_api_allowed("is_dir_sync").is_err() {
       return false;
     }
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .is_dir_sync(path.strip_prefix(&self.prefix).unwrap())
@@ -1081,11 +1115,11 @@ where
     }
   }
 
-  fn exists_sync(&self, path: &Path) -> bool {
+  fn exists_sync(&self, path: &CheckedPath) -> bool {
     if self.check_sync_api_allowed("exists_sync").is_err() {
       return false;
     }
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self
         .fs
         .exists_sync(path.strip_prefix(&self.prefix).unwrap())
@@ -1098,41 +1132,44 @@ where
     }
   }
 
-  fn read_text_file_lossy_sync(
-    &self,
-    path: &Path,
-    access_check: Option<AccessCheckCb>,
-  ) -> FsResult<Cow<'static, str>> {
+  async fn exists_async(&self, path: CheckedPathBuf) -> bool {
+    if (&*path).starts_with(&self.prefix) {
+      true
+    } else if let Some(fs) = self.base_fs.as_ref() {
+      fs.exists_async(path).await
+    } else {
+      false
+    }
+  }
+
+  fn read_text_file_lossy_sync(&self, path: &CheckedPath) -> FsResult<Cow<'static, str>> {
     self.check_sync_api_allowed("read_text_file_lossy_sync")?;
-    if path.starts_with(&self.prefix) {
+    if (&**path).starts_with(&self.prefix) {
       self.fs.read_text_file_lossy_sync(
         path.strip_prefix(&self.prefix).unwrap(),
-        access_check,
       )
     } else {
       self
         .base_fs
         .as_ref()
-        .map(|it| it.read_text_file_lossy_sync(path, access_check))
+        .map(|it| it.read_text_file_lossy_sync(path))
         .unwrap_or_else(|| Err(FsError::NotSupported))
     }
   }
 
   async fn read_text_file_lossy_async<'a>(
     &'a self,
-    path: PathBuf,
-    access_check: Option<AccessCheckCb<'a>>,
+    path: CheckedPathBuf,
   ) -> FsResult<Cow<'static, str>> {
-    if path.starts_with(&self.prefix) {
+    if (&*path).starts_with(&self.prefix) {
       self
         .fs
         .read_text_file_lossy_async(
           path.strip_prefix(&self.prefix).unwrap().to_owned(),
-          access_check,
         )
         .await
     } else if let Some(fs) = self.base_fs.as_ref() {
-      fs.read_text_file_lossy_async(path, access_check).await
+      fs.read_text_file_lossy_async(path).await
     } else {
       Err(FsError::NotSupported)
     }

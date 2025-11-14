@@ -524,30 +524,30 @@ impl deno_fs::FileSystem for TmpFs {
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  fn realpath_sync(&self, path: &Path) -> FsResult<PathBuf> {
-    RealFs.realpath_sync(&self.root.path().join(path.try_normalize()?))
+  fn realpath_sync(&self, path: &CheckedPath) -> FsResult<PathBuf> {
+    RealFs.realpath_sync(&CheckedPath::new(&self.root.path().join((&**path).try_normalize()?)))
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  async fn realpath_async(&self, path: PathBuf) -> FsResult<PathBuf> {
+  async fn realpath_async(&self, path: CheckedPathBuf) -> FsResult<PathBuf> {
     RealFs
-      .realpath_async(self.root.path().join(path.try_normalize()?))
+      .realpath_async(CheckedPathBuf::new(self.root.path().join((&*path).try_normalize()?)))
       .await
   }
 
   #[instrument(level = "trace", skip(self), err(Debug))]
-  fn read_dir_sync(&self, path: &Path) -> FsResult<Vec<FsDirEntry>> {
+  fn read_dir_sync(&self, path: &CheckedPath) -> FsResult<Vec<FsDirEntry>> {
     RealFs
-      .read_dir_sync(&self.root.path().join(path.try_normalize()?))
+      .read_dir_sync(&CheckedPath::new(&self.root.path().join((&**path).try_normalize()?)))
       .inspect(|it| {
         trace!(len = it.len());
       })
   }
 
   #[instrument(level = "trace", skip(self), err(Debug))]
-  async fn read_dir_async(&self, path: PathBuf) -> FsResult<Vec<FsDirEntry>> {
+  async fn read_dir_async(&self, path: CheckedPathBuf) -> FsResult<Vec<FsDirEntry>> {
     RealFs
-      .read_dir_async(self.root.path().join(path.try_normalize()?))
+      .read_dir_async(CheckedPathBuf::new(self.root.path().join((&*path).try_normalize()?)))
       .await
       .inspect(|it| {
         trace!(len = it.len());
@@ -555,45 +555,45 @@ impl deno_fs::FileSystem for TmpFs {
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  fn rename_sync(&self, oldpath: &Path, newpath: &Path) -> FsResult<()> {
+  fn rename_sync(&self, oldpath: &CheckedPath, newpath: &CheckedPath) -> FsResult<()> {
     RealFs.rename_sync(
-      &self.root.path().join(oldpath.try_normalize()?),
-      &self.root.path().join(newpath.try_normalize()?),
+      &CheckedPath::new(&self.root.path().join((&**oldpath).try_normalize()?)),
+      &CheckedPath::new(&self.root.path().join((&**newpath).try_normalize()?)),
     )
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
   async fn rename_async(
     &self,
-    oldpath: PathBuf,
-    newpath: PathBuf,
+    oldpath: CheckedPathBuf,
+    newpath: CheckedPathBuf,
   ) -> FsResult<()> {
     RealFs
       .rename_async(
-        self.root.path().join(oldpath.try_normalize()?),
-        self.root.path().join(newpath),
+        CheckedPathBuf::new(self.root.path().join((&*oldpath).try_normalize()?)),
+        CheckedPathBuf::new(self.root.path().join(&*newpath)),
       )
       .await
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  fn link_sync(&self, oldpath: &Path, newpath: &Path) -> FsResult<()> {
+  fn link_sync(&self, oldpath: &CheckedPath, newpath: &CheckedPath) -> FsResult<()> {
     RealFs.link_sync(
-      &self.root.path().join(oldpath.try_normalize()?),
-      &self.root.path().join(newpath.try_normalize()?),
+      &CheckedPath::new(&self.root.path().join((&**oldpath).try_normalize()?)),
+      &CheckedPath::new(&self.root.path().join((&**newpath).try_normalize()?)),
     )
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
   async fn link_async(
     &self,
-    oldpath: PathBuf,
-    newpath: PathBuf,
+    oldpath: CheckedPathBuf,
+    newpath: CheckedPathBuf,
   ) -> FsResult<()> {
     RealFs
       .link_async(
-        self.root.path().join(oldpath.try_normalize()?),
-        self.root.path().join(newpath.try_normalize()?),
+        CheckedPathBuf::new(self.root.path().join((&*oldpath).try_normalize()?)),
+        CheckedPathBuf::new(self.root.path().join((&*newpath).try_normalize()?)),
       )
       .await
   }
@@ -601,13 +601,13 @@ impl deno_fs::FileSystem for TmpFs {
   #[instrument(level = "trace", skip(self, file_type), ret, err(Debug))]
   fn symlink_sync(
     &self,
-    oldpath: &Path,
-    newpath: &Path,
+    oldpath: &CheckedPath,
+    newpath: &CheckedPath,
     file_type: Option<FsFileType>,
   ) -> FsResult<()> {
     RealFs.symlink_sync(
-      &self.root.path().join(oldpath.try_normalize()?),
-      &self.root.path().join(newpath.try_normalize()?),
+      &CheckedPath::new(&self.root.path().join((&**oldpath).try_normalize()?)),
+      &CheckedPath::new(&self.root.path().join((&**newpath).try_normalize()?)),
       file_type,
     )
   }
@@ -615,44 +615,44 @@ impl deno_fs::FileSystem for TmpFs {
   #[instrument(level = "trace", skip(self, file_type), ret, err(Debug))]
   async fn symlink_async(
     &self,
-    oldpath: PathBuf,
-    newpath: PathBuf,
+    oldpath: CheckedPathBuf,
+    newpath: CheckedPathBuf,
     file_type: Option<FsFileType>,
   ) -> FsResult<()> {
     RealFs
       .symlink_async(
-        self.root.path().join(oldpath.try_normalize()?),
-        self.root.path().join(newpath.try_normalize()?),
+        CheckedPathBuf::new(self.root.path().join((&*oldpath).try_normalize()?)),
+        CheckedPathBuf::new(self.root.path().join((&*newpath).try_normalize()?)),
         file_type,
       )
       .await
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  fn read_link_sync(&self, path: &Path) -> FsResult<PathBuf> {
-    RealFs.read_link_sync(&self.root.path().join(path.try_normalize()?))
+  fn read_link_sync(&self, path: &CheckedPath) -> FsResult<PathBuf> {
+    RealFs.read_link_sync(&CheckedPath::new(&self.root.path().join((&**path).try_normalize()?)))
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  async fn read_link_async(&self, path: PathBuf) -> FsResult<PathBuf> {
+  async fn read_link_async(&self, path: CheckedPathBuf) -> FsResult<PathBuf> {
     RealFs
-      .read_link_async(self.root.path().join(path.try_normalize()?))
+      .read_link_async(CheckedPathBuf::new(self.root.path().join((&*path).try_normalize()?)))
       .await
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  fn truncate_sync(&self, path: &Path, len: u64) -> FsResult<()> {
+  fn truncate_sync(&self, path: &CheckedPath, len: u64) -> FsResult<()> {
     let size = self.stat_sync(path)?.size;
 
     self
       .quota
       .blocking_try_add_delta((len as i64) - (size as i64))?;
 
-    RealFs.truncate_sync(&self.root.path().join(path.try_normalize()?), len)
+    RealFs.truncate_sync(&CheckedPath::new(&self.root.path().join((&**path).try_normalize()?)), len)
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  async fn truncate_async(&self, path: PathBuf, len: u64) -> FsResult<()> {
+  async fn truncate_async(&self, path: CheckedPathBuf, len: u64) -> FsResult<()> {
     let size = self.stat_async(path.clone()).await?.size;
 
     self
@@ -661,21 +661,21 @@ impl deno_fs::FileSystem for TmpFs {
       .await?;
 
     RealFs
-      .truncate_async(self.root.path().join(path.try_normalize()?), len)
+      .truncate_async(CheckedPathBuf::new(self.root.path().join((&*path).try_normalize()?)), len)
       .await
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
   fn utime_sync(
     &self,
-    path: &Path,
+    path: &CheckedPath,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
     RealFs.utime_sync(
-      &self.root.path().join(path.try_normalize()?),
+      &CheckedPath::new(&self.root.path().join((&**path).try_normalize()?)),
       atime_secs,
       atime_nanos,
       mtime_secs,
@@ -686,7 +686,7 @@ impl deno_fs::FileSystem for TmpFs {
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
   async fn utime_async(
     &self,
-    path: PathBuf,
+    path: CheckedPathBuf,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
@@ -694,7 +694,7 @@ impl deno_fs::FileSystem for TmpFs {
   ) -> FsResult<()> {
     RealFs
       .utime_async(
-        self.root.path().join(path.try_normalize()?),
+        CheckedPathBuf::new(self.root.path().join((&*path).try_normalize()?)),
         atime_secs,
         atime_nanos,
         mtime_secs,
@@ -706,14 +706,14 @@ impl deno_fs::FileSystem for TmpFs {
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
   fn lutime_sync(
     &self,
-    path: &Path,
+    path: &CheckedPath,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
     mtime_nanos: u32,
   ) -> FsResult<()> {
     RealFs.lutime_sync(
-      &self.root.path().join(path.try_normalize()?),
+      &CheckedPath::new(&self.root.path().join((&**path).try_normalize()?)),
       atime_secs,
       atime_nanos,
       mtime_secs,
@@ -724,7 +724,7 @@ impl deno_fs::FileSystem for TmpFs {
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
   async fn lutime_async(
     &self,
-    path: PathBuf,
+    path: CheckedPathBuf,
     atime_secs: i64,
     atime_nanos: u32,
     mtime_secs: i64,
@@ -732,7 +732,7 @@ impl deno_fs::FileSystem for TmpFs {
   ) -> FsResult<()> {
     RealFs
       .lutime_async(
-        self.root.path().join(path.try_normalize()?),
+        CheckedPathBuf::new(self.root.path().join((&*path).try_normalize()?)),
         atime_secs,
         atime_nanos,
         mtime_secs,
@@ -1018,7 +1018,7 @@ mod test {
   where
     P: AsRef<Path>,
   {
-    fs.open_async(path.as_ref().to_path_buf(), *OPEN_CREATE, None)
+    fs.open_async(CheckedPathBuf::new(path.as_ref().to_path_buf()), *OPEN_CREATE)
       .await
       .unwrap()
   }
@@ -1028,9 +1028,8 @@ mod test {
     let fs = get_tmp_fs();
 
     fs.write_file_async(
-      PathBuf::from("meowmeow"),
+      CheckedPathBuf::new(PathBuf::from("meowmeow")),
       *OPEN_CREATE,
-      None,
       DATA.to_vec(),
     )
     .await
@@ -1044,9 +1043,8 @@ mod test {
     let fs = get_tmp_fs();
 
     fs.write_file_async(
-      PathBuf::from("meowmeow/a/b/../.."),
+      CheckedPathBuf::new(PathBuf::from("meowmeow/a/b/../..")),
       *OPEN_CREATE,
-      None,
       DATA.to_vec(),
     )
     .await
@@ -1061,9 +1059,8 @@ mod test {
 
     assert_eq!(
       fs.write_file_async(
-        PathBuf::from("../meowmeow"),
+        CheckedPathBuf::new(PathBuf::from("../meowmeow")),
         *OPEN_CREATE,
-        None,
         DATA.to_vec(),
       )
       .await
@@ -1077,11 +1074,11 @@ mod test {
   async fn non_normalized_path_3() {
     let fs = get_tmp_fs();
 
-    fs.mkdir_async(PathBuf::from("meowmeow/a/b/../c"), true, Some(0o777))
+    fs.mkdir_async(CheckedPathBuf::new(PathBuf::from("meowmeow/a/b/../c")), true, Some(0o777))
       .await
       .unwrap();
 
-    assert!(fs.stat_async(PathBuf::from("meowmeow/a/c")).await.is_ok());
+    assert!(fs.stat_async(CheckedPathBuf::new(PathBuf::from("meowmeow/a/c"))).await.is_ok());
   }
 
   #[tokio::test]
@@ -1089,7 +1086,7 @@ mod test {
     let fs = get_tmp_fs();
 
     assert_eq!(
-      fs.mkdir_async(PathBuf::from("meowmeow/a/b"), true, Some(0o100))
+      fs.mkdir_async(CheckedPathBuf::new(PathBuf::from("meowmeow/a/b")), true, Some(0o100))
         .await
         .unwrap_err()
         .kind(),
@@ -1105,7 +1102,7 @@ mod test {
     rand::thread_rng().fill_bytes(&mut arr);
 
     assert_filesystem_quota_exceeded(
-      fs.write_file_async(PathBuf::from("meowmeow"), *OPEN_CREATE, None, arr)
+      fs.write_file_async(CheckedPathBuf::new(PathBuf::from("meowmeow")), *OPEN_CREATE, arr)
         .await
         .unwrap_err()
         .into_io_error(),
@@ -1146,7 +1143,7 @@ mod test {
 
     drop(f);
 
-    fs.remove_async(PathBuf::from("meowmeow"), false)
+    fs.remove_async(CheckedPathBuf::new(PathBuf::from("meowmeow")), false)
       .await
       .unwrap();
 
@@ -1190,7 +1187,7 @@ mod test {
     drop(f);
 
     assert_filesystem_quota_exceeded(
-      fs.cp_async(PathBuf::from("meowmeow"), PathBuf::from("meowmeow2"))
+      fs.cp_async(CheckedPathBuf::new(PathBuf::from("meowmeow")), CheckedPathBuf::new(PathBuf::from("meowmeow2")))
         .await
         .unwrap_err()
         .into_io_error(),
@@ -1204,14 +1201,14 @@ mod test {
 
     rand::thread_rng().fill_bytes(&mut arr);
 
-    fs.write_file_async(PathBuf::from("meowmeow"), *OPEN_CREATE, None, arr)
+    fs.write_file_async(CheckedPathBuf::new(PathBuf::from("meowmeow")), *OPEN_CREATE, arr)
       .await
       .unwrap();
 
     assert_eq!(fs.quota.load(Ordering::Relaxed), MIB);
 
     assert_filesystem_quota_exceeded(
-      fs.truncate_async(PathBuf::from("meowmeow"), (MIB + 1) as u64)
+      fs.truncate_async(CheckedPathBuf::new(PathBuf::from("meowmeow")), (MIB + 1) as u64)
         .await
         .unwrap_err()
         .into_io_error(),
