@@ -435,7 +435,7 @@ impl deno_fs::FileSystem for S3Fs {
     Err(FsError::NotSupported)
   }
 
-  fn chdir(&self, _path: &Path) -> FsResult<()> {
+  fn chdir(&self, _path: &CheckedPath) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -489,7 +489,7 @@ impl deno_fs::FileSystem for S3Fs {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
         rt::IO_RT.block_on(async move {
-          self.mkdir_async(CheckedPathBuf::new(path), recursive, mode).await
+          self.mkdir_async(CheckedPathBuf::unsafe_new(path), recursive, mode).await
         })
       })
       .join()
@@ -692,7 +692,7 @@ impl deno_fs::FileSystem for S3Fs {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
         rt::IO_RT
-          .block_on(async move { self.remove_async(CheckedPathBuf::new(path), recursive).await })
+          .block_on(async move { self.remove_async(CheckedPathBuf::unsafe_new(path), recursive).await })
       })
       .join()
       .unwrap()
@@ -840,7 +840,7 @@ impl deno_fs::FileSystem for S3Fs {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT.block_on(async move { self.stat_async(CheckedPathBuf::new(path)).await })
+        rt::IO_RT.block_on(async move { self.stat_async(CheckedPathBuf::unsafe_new(path)).await })
       })
       .join()
       .unwrap()
@@ -880,14 +880,14 @@ impl deno_fs::FileSystem for S3Fs {
         birthtime: None,
         ctime: None,
         dev: 0,
-        ino: 0,
+        ino: Some(0),
         mode: 0,
-        nlink: 0,
+        nlink: Some(0),
         uid: 0,
         gid: 0,
         rdev: 0,
         blksize: 0,
-        blocks: 0,
+        blocks: Some(0),
         is_block_device: false,
         is_char_device: false,
         is_fifo: false,
@@ -896,7 +896,7 @@ impl deno_fs::FileSystem for S3Fs {
     }
 
     self
-      .open_async(CheckedPathBuf::new(normalized), OpenOptions::read())
+      .open_async(CheckedPathBuf::unsafe_new(normalized), OpenOptions::read())
       .and_then(|it| it.stat_async())
       .await
   }
@@ -905,7 +905,7 @@ impl deno_fs::FileSystem for S3Fs {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT.block_on(async move { self.lstat_async(CheckedPathBuf::new(path)).await })
+        rt::IO_RT.block_on(async move { self.lstat_async(CheckedPathBuf::unsafe_new(path)).await })
       })
       .join()
       .unwrap()
@@ -917,11 +917,13 @@ impl deno_fs::FileSystem for S3Fs {
     self.stat_async(path).await
   }
 
-  fn exists_sync(&self, path: &CheckedPath) -> FsResult<bool> {
+  fn exists_sync(&self, path: &CheckedPath) -> bool {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT.block_on(async move { self.exists_async(CheckedPathBuf::new(path)).await })
+        rt::IO_RT.block_on(async move {
+          self.exists_async(CheckedPathBuf::unsafe_new(path)).await.unwrap_or(false)
+        })
       })
       .join()
       .unwrap()
@@ -944,7 +946,7 @@ impl deno_fs::FileSystem for S3Fs {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT.block_on(async move { self.read_dir_async(CheckedPathBuf::new(path)).await })
+        rt::IO_RT.block_on(async move { self.read_dir_async(CheckedPathBuf::unsafe_new(path)).await })
       })
       .join()
       .unwrap()
@@ -1984,14 +1986,14 @@ impl deno_io::fs::File for S3Object {
       birthtime: None,
       ctime: None,
       dev: 0,
-      ino: 0,
+      ino: Some(0),
       mode: 0,
-      nlink: 0,
+      nlink: Some(0),
       uid: 0,
       gid: 0,
       rdev: 0,
       blksize: 0,
-      blocks: 0,
+      blocks: Some(0),
       is_block_device: false,
       is_char_device: false,
       is_fifo: false,
@@ -2052,6 +2054,26 @@ impl deno_io::fs::File for S3Object {
   }
 
   fn try_clone_inner(self: Rc<Self>) -> FsResult<Rc<dyn File>> {
+    Err(FsError::NotSupported)
+  }
+
+  fn maybe_path(&self) -> Option<&Path> {
+    None
+  }
+
+  fn chown_sync(
+    self: Rc<Self>,
+    _uid: Option<u32>,
+    _gid: Option<u32>,
+  ) -> FsResult<()> {
+    Err(FsError::NotSupported)
+  }
+
+  async fn chown_async(
+    self: Rc<Self>,
+    _uid: Option<u32>,
+    _gid: Option<u32>,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 }
@@ -2162,7 +2184,7 @@ mod test {
     let (fs, _) = get_s3_fs([]);
 
     assert_eq!(
-      fs.open_async(CheckedPathBuf::new(PathBuf::from("meowmeow")), *OPEN_CREATE)
+      fs.open_async(CheckedPathBuf::unsafe_new(PathBuf::from("meowmeow")), *OPEN_CREATE)
         .await
         .err()
         .unwrap()

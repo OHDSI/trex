@@ -71,7 +71,7 @@ impl DenoCompileFileSystem {
     self.error_if_no_use_real_fs(true)?;
     RealFs
       .write_file_async(
-        newpath.to_path_buf(),
+        CheckedPathBuf::unsafe_new(newpath.to_path_buf()),
         OpenOptions {
           read: false,
           write: true,
@@ -79,9 +79,9 @@ impl DenoCompileFileSystem {
           truncate: true,
           append: false,
           create_new: false,
+          custom_flags: None,
           mode: None,
         },
-        None,
         old_file_bytes,
       )
       .await
@@ -529,11 +529,11 @@ impl FileSystem for DenoCompileFileSystem {
     }
   }
 
-  async fn exists_async(&self, path: CheckedPathBuf) -> bool {
+  async fn exists_async(&self, path: CheckedPathBuf) -> FsResult<bool> {
     if self.0.is_path_within(&*path) {
-      true
+      Ok(true)
     } else if !self.1 {
-      false
+      Ok(false)
     } else {
       RealFs.exists_async(path).await
     }

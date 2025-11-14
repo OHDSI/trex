@@ -150,23 +150,11 @@ impl deno_fs::FileSystem for StaticFs {
     Err(FsError::NotSupported)
   }
 
-  #[cfg(unix)]
   fn lchmod_sync(&self, _path: &CheckedPath, _mode: u32) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
-  #[cfg(not(unix))]
-  fn lchmod_sync(&self, _path: &CheckedPath, _mode: i32) -> FsResult<()> {
-    Err(FsError::NotSupported)
-  }
-
-  #[cfg(unix)]
   async fn lchmod_async(&self, _path: CheckedPathBuf, _mode: u32) -> FsResult<()> {
-    Err(FsError::NotSupported)
-  }
-
-  #[cfg(not(unix))]
-  async fn lchmod_async(&self, _path: CheckedPathBuf, _mode: i32) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -482,7 +470,7 @@ impl deno_fs::FileSystem for StaticFs {
     self.vfs.is_path_within(&**path)
   }
 
-  async fn exists_async(&self, path: CheckedPathBuf) -> bool {
-    self.vfs.is_path_within(&*path)
+  async fn exists_async(&self, path: CheckedPathBuf) -> FsResult<bool> {
+    Ok(self.vfs.is_path_within(&*path))
   }
 }

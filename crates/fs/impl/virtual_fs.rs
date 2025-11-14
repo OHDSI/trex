@@ -215,7 +215,7 @@ impl<'scope> VfsBuilder<'scope> {
     data: Vec<u8>,
   ) -> Result<(), AnyError> {
     log::debug!("Adding file '{}'", path.display());
-    let checksum = checksum::gen(&[&data]);
+    let checksum = checksum::r#gen(&[&data]);
     let offset = if let Some(offset) = self.file_offsets.get(&checksum) {
       // duplicate file, reuse an old offset
       *offset
@@ -329,13 +329,13 @@ impl<'a> VfsEntryRef<'a> {
         blksize: 0,
         size: 0,
         dev: 0,
-        ino: 0,
+        ino: Some(0),
         mode: 0,
-        nlink: 0,
+        nlink: Some(0),
         uid: 0,
         gid: 0,
         rdev: 0,
-        blocks: 0,
+        blocks: Some(0),
         is_block_device: false,
         is_char_device: false,
         is_fifo: false,
@@ -352,13 +352,13 @@ impl<'a> VfsEntryRef<'a> {
         blksize: 0,
         size: file.len,
         dev: 0,
-        ino: 0,
+        ino: Some(0),
         mode: 0,
-        nlink: 0,
+        nlink: Some(0),
         uid: 0,
         gid: 0,
         rdev: 0,
-        blocks: 0,
+        blocks: Some(0),
         is_block_device: false,
         is_char_device: false,
         is_fifo: false,
@@ -375,13 +375,13 @@ impl<'a> VfsEntryRef<'a> {
         blksize: 0,
         size: 0,
         dev: 0,
-        ino: 0,
+        ino: Some(0),
         mode: 0,
-        nlink: 0,
+        nlink: Some(0),
         uid: 0,
         gid: 0,
         rdev: 0,
-        blocks: 0,
+        blocks: Some(0),
         is_block_device: false,
         is_char_device: false,
         is_fifo: false,
@@ -824,6 +824,26 @@ impl deno_io::fs::File for FileBackedVfsFile {
   }
   fn try_clone_inner(self: Rc<Self>) -> FsResult<Rc<dyn deno_io::fs::File>> {
     Ok(self)
+  }
+
+  fn maybe_path(&self) -> Option<&Path> {
+    None
+  }
+
+  fn chown_sync(
+    self: Rc<Self>,
+    _uid: Option<u32>,
+    _gid: Option<u32>,
+  ) -> FsResult<()> {
+    Err(FsError::NotSupported)
+  }
+
+  async fn chown_async(
+    self: Rc<Self>,
+    _uid: Option<u32>,
+    _gid: Option<u32>,
+  ) -> FsResult<()> {
+    Err(FsError::NotSupported)
   }
 }
 
