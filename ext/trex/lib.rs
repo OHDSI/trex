@@ -291,10 +291,12 @@ fn op_add_replication(
 #[op2]
 #[string]
 fn op_get_dbc() -> String {
-  let mut base_creds: serde_json::Value = serde_json::from_str(
-    &(*(*DB_CREDENTIALS)).lock().unwrap().clone()
-  ).unwrap_or_else(|_| serde_json::json!({"credentials": [], "publications": {}}));
-  
+  let mut base_creds: serde_json::Value =
+    serde_json::from_str(&(*(*DB_CREDENTIALS)).lock().unwrap().clone())
+      .unwrap_or_else(
+        |_| serde_json::json!({"credentials": [], "publications": {}}),
+      );
+
   // Add hardcoded RESULT database from TREX__SQL__* env variables
   if let (Ok(host), Ok(port), Ok(user), Ok(password), Ok(dbname)) = (
     std::env::var("TREX__SQL__HOST"),
@@ -320,15 +322,21 @@ fn op_get_dbc() -> String {
       "publications": [],
       "vocab_schemas": []
     });
-    
-    if let Some(credentials) = base_creds.get_mut("credentials").and_then(|c| c.as_array_mut()) {
+
+    if let Some(credentials) = base_creds
+      .get_mut("credentials")
+      .and_then(|c| c.as_array_mut())
+    {
       // Check if RESULT already exists
-      if !credentials.iter().any(|c| c.get("id").and_then(|id| id.as_str()) == Some("RESULT")) {
+      if !credentials
+        .iter()
+        .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("RESULT"))
+      {
         credentials.push(result_db);
       }
     }
   }
-  
+
   // Add hardcoded FHIR database from PG__* env variables
   if let (Ok(host), Ok(dbname), Ok(user), Ok(password)) = (
     std::env::var("PG__HOST"),
@@ -340,7 +348,7 @@ fn op_get_dbc() -> String {
       .ok()
       .and_then(|p| p.parse::<u16>().ok())
       .unwrap_or(5432);
-      
+
     let fhir_db = serde_json::json!({
       "id": "FHIR",
       "dialect": "postgres",
@@ -358,16 +366,24 @@ fn op_get_dbc() -> String {
       "publications": [],
       "vocab_schemas": []
     });
-    
-    if let Some(credentials) = base_creds.get_mut("credentials").and_then(|c| c.as_array_mut()) {
+
+    if let Some(credentials) = base_creds
+      .get_mut("credentials")
+      .and_then(|c| c.as_array_mut())
+    {
       // Check if FHIR already exists
-      if !credentials.iter().any(|c| c.get("id").and_then(|id| id.as_str()) == Some("FHIR")) {
+      if !credentials
+        .iter()
+        .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("FHIR"))
+      {
         credentials.push(fhir_db);
       }
     }
   }
-  
-  serde_json::to_string(&base_creds).unwrap_or_else(|_| String::from("{\"credentials\":[], \"publications\":{}}"))
+
+  serde_json::to_string(&base_creds).unwrap_or_else(|_| {
+    String::from("{\"credentials\":[], \"publications\":{}}")
+  })
 }
 
 #[op2(fast)]
