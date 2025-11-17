@@ -762,7 +762,8 @@ where
           deno_fs::deno_fs::lazy_init::<PermissionsContainer>(),
           ext_ai::ai::init(),
           ext_env::env::init(),
-          ext_os::os::init(),
+          deno_os::deno_os::init(None),
+          deno_process::deno_process::init(None),
           ext_workers::user_workers::init(),
           ext_event_worker::user_event_worker::init(),
           ext_event_worker::js_interceptors::js_interceptors::init(),
@@ -785,6 +786,7 @@ where
           ops::permissions::base_runtime_permissions::init(
             permissions,
           ),
+          ext_os::os::init(),
           ext_runtime::runtime::init(),
         ];
 
@@ -866,6 +868,9 @@ where
           compiled_wasm_module_store: None,
           startup_snapshot: snapshot::snapshot(),
           module_loader: Some(module_loader),
+          extension_transpiler: Some(std::rc::Rc::new(|specifier, source| {
+            deno::transpile::maybe_transpile_source(specifier, source)
+          })),
           ..Default::default()
         };
 

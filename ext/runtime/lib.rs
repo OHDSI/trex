@@ -386,13 +386,14 @@ pub fn op_read_line_prompt(
   Ok(None)
 }
 
-#[op2(fast)]
-fn op_set_exit_code(
-  _state: &mut OpState,
-  #[smi] _code: i32,
-) -> Result<(), JsErrorBox> {
-  Ok(())
-}
+// Removed: now provided by vendor/deno_os
+// #[op2(fast)]
+// fn op_set_exit_code(
+//   _state: &mut OpState,
+//   #[smi] _code: i32,
+// ) -> Result<(), JsErrorBox> {
+//   Ok(())
+// }
 
 #[op2(fast)]
 fn op_set_raw(
@@ -477,13 +478,14 @@ pub fn op_bootstrap_unstable_args(_state: &mut OpState) -> Vec<String> {
 
 deno_core::extension!(
   runtime,
+  deps = [os],
   ops = [
     // op_is_terminal,
     op_is_runtime_init,
     op_stdin_set_raw,
     op_console_size,
     op_read_line_prompt,
-    op_set_exit_code,
+    // op_set_exit_code, // Removed: now provided by vendor/deno_os
     op_runtime_metrics,
     op_schedule_mem_check,
     op_runtime_memory_usage,
@@ -499,6 +501,7 @@ deno_core::extension!(
     "00_serve.js",
     "01_http.js",
     "40_process.js",
+    "98_global_scope_shared.js",
     "async_hook.js",
     "bootstrap.js",
     "denoOverrides.js",

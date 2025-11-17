@@ -19,6 +19,8 @@ deno_net.workspace = true
 deno_tls.workspace = true
 deno_websocket.workspace = true
 
+ext_os.workspace = true
+
 base_mem_check.workspace = true
 base_rt.workspace = true
 

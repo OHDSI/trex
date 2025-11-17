@@ -6,7 +6,8 @@ import { core, internals, primordials } from "ext:core/mod.js";
 import {
   op_fs_cwd,
   op_import_sync,
-  op_napi_open,
+  // REMOVED: NAPI not supported in Deno 2.5.6 upgrade
+  // op_napi_open,
   op_require_as_file_path,
   op_require_break_on_next_statement,
   op_require_can_parse_as_esm,
@@ -158,7 +159,6 @@ import utilTypes from "node:util/types";
 import util from "node:util";
 import v8 from "node:v8";
 import vm from "node:vm";
-import workerThreads from "node:worker_threads";
 import wasi from "node:wasi";
 import zlib from "node:zlib";
 
@@ -271,7 +271,6 @@ function setupBuiltinModules() {
     v8,
     vm,
     wasi,
-    worker_threads: workerThreads,
     zlib,
   };
   for (const [name, moduleExports] of ObjectEntries(nodeModules)) {
@@ -1120,16 +1119,18 @@ Module._extensions[".json"] = function (module, filename) {
 };
 
 // Native extension for .node
+// REMOVED: NAPI support not available in Deno 2.5.6 upgrade
 Module._extensions[".node"] = function (module, filename) {
-  if (filename.endsWith("cpufeatures.node")) {
-    throw new Error("Using cpu-features module is currently not supported");
-  }
-  module.exports = op_napi_open(
-    filename,
-    globalThis,
-    buffer.Buffer,
-    reportError,
-  );
+  throw new Error("Native .node modules are not supported in this runtime");
+  // if (filename.endsWith("cpufeatures.node")) {
+  //   throw new Error("Using cpu-features module is currently not supported");
+  // }
+  // module.exports = op_napi_open(
+  //   filename,
+  //   globalThis,
+  //   buffer.Buffer,
+  //   reportError,
+  // );
 };
 
 function createRequireFromPath(filename) {

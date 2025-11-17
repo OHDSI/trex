@@ -794,8 +794,33 @@ pub async fn create_module_loader_for_eszip(
     }
   };
   let concrete_npm_resolver = match npm_resolver.as_inner() {
-    deno::npm::InnerCliNpmResolverRef::Managed(_inner) => {
-      unimplemented!("ManagedCliNpmResolver to upstream ManagedNpmResolver conversion not yet implemented in standalone mode. Use BYONM mode instead.")
+    deno::npm::InnerCliNpmResolverRef::Managed(inner) => {
+      // Convert CLI's ManagedCliNpmResolver to upstream ManagedNpmResolver
+      // Strategy: Use the CLI resolver's snapshot to create a fresh upstream resolver
+
+      // Get the snapshot from the CLI resolver
+      let snapshot = inner.snapshot();
+
+      // Create an upstream NpmResolutionCell from the snapshot
+      use deno::deno_resolver::npm::managed::NpmResolutionCell;
+      let npm_resolution_cell = NpmResolutionCell::new(snapshot);
+      let npm_resolution = deno_maybe_sync::MaybeArc::from(std::sync::Arc::new(npm_resolution_cell));
+
+      // Get node_modules path from the CLI resolver
+      let maybe_node_modules_path = inner.maybe_node_modules_path().map(|p| p.to_path_buf());
+
+      // Create upstream ManagedNpmResolver
+      use deno::deno_resolver::npm::managed::{ManagedNpmResolver, ManagedNpmResolverCreateOptions};
+      let upstream_resolver = ManagedNpmResolver::<deno::cache::CliSys>::new(ManagedNpmResolverCreateOptions {
+        npm_cache_dir: npm_cache_dir.clone(),
+        sys: cli_sys.clone(),
+        maybe_node_modules_path,
+        npm_system_info: inner.npm_system_info().clone(),
+        npmrc: inner.npmrc().clone(),
+        npm_resolution,
+      });
+
+      deno::deno_resolver::npm::NpmResolver::Managed(new_rc(upstream_resolver))
     }
     deno::npm::InnerCliNpmResolverRef::Byonm(inner) => {
       deno::deno_resolver::npm::NpmResolver::Byonm(new_rc(inner.clone()))

@@ -19,6 +19,8 @@ members = [
   "ext/os",
   "ext/runtime",
   "ext/workers",
+  "vendor/deno_console",
+  "vendor/deno_os",
 ]
 
 [workspace.package]
@@ -33,7 +35,10 @@ deno = { path = "./deno" }
 deno_ast = { version = "=0.50.3", features = ["transpiling"] }
 deno_core = "0.363.0"
 deno_error = "=0.7.0"
-temporal_capi = { git = "https://github.com/boa-dev/temporal", tag = "v0.1.1", features = ["compiled_data"] }
+temporal_capi = { package = "ry_temporal_capi", version = "=0.0.11-ry.1", features = ["compiled_data"] }
+# Pin timezone_provider to v0.0.14 to fix temporal_rs macro invocation error
+# (v0.0.16 has breaking API changes in iana_normalizer_singleton!() macro)
+timezone_provider = "=0.0.14"
 
 deno_cache_dir = "=0.25.0"
 deno_config = { version = "=0.71.0", features = ["workspace", "sync"] }
@@ -58,7 +63,7 @@ node_resolver = { version = "0.59.0", path = "./thridparty/deno/libs/node_resolv
 deno_broadcast_channel = "0.215.0"
 deno_cache = "0.153.0"
 deno_canvas = "0.90.0"
-deno_console = "0.221.0"
+deno_console = { path = "./vendor/deno_console" }
 deno_crypto = "0.235.0"
 deno_features = "0.18.0"
 deno_fetch = "0.245.0"
@@ -66,7 +71,7 @@ deno_fs = { version = "0.131.0", features = ["sync_fs"] }
 deno_http = "0.219.0"
 deno_io = "0.131.0"
 deno_net = "0.213.0"
-deno_os = { version = "0.168.0", path = "./thridparty/deno/ext/os" }
+deno_os = { path = "./vendor/deno_os" }
 deno_signals = { version = "0.12.0", path = "./thridparty/deno/ext/signals" }
 deno_telemetry = "0.43.0"
 deno_tls = "0.208.0"
@@ -219,6 +224,7 @@ tar = "=0.4.40"
 tempfile = "3.4.0"
 thiserror = "2.0.3"
 tokio = { version = "1.36.0", features = ["full"] }
+tokio-metrics = { version = "0.3.0", features = ["rt"] }
 tokio-rustls = { version = "0.26.0", default-features = false, features = ["ring", "tls12"] }
 tokio-socks = "0.5.1"
 tokio-util = "0.7.4"
@@ -278,13 +284,11 @@ windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Media
 deno_core = { git = "https://github.com/p-hoffmann/deno_core", branch = "supabase-v0.363.0" }
 # Using local eszip with Section method visibility fixes
 eszip = { path = "./thridparty/eszip" }
-# Using local rusty_v8 with temporal_rs v0.1.1 fix
+# Using local rusty_v8 with ry_temporal_capi v0.0.11-ry.1
 v8 = { path = "./thridparty/supabase/rusty_v8" }
 
 deno_unsync = { path = "./vendor/deno_unsync" }
-deno_fetch = { path = "./vendor/deno_fetch" }
 deno_telemetry = { path = "./vendor/deno_telemetry" }
-deno_http = { path = "./vendor/deno_http" }
 # Using local deno_net with stubbed op_tls_peer_certificate
 deno_net = { path = "./vendor/deno_net" }
 # Using local deno_io to remove op_set_raw (moved to deno_tty which isn't available in edge-runtime)

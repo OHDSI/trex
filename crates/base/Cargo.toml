@@ -16,6 +16,8 @@ deno_cache.workspace = true
 deno_canvas.workspace = true
 deno_config.workspace = true
 deno_console.workspace = true
+deno_os.workspace = true
+deno_process.workspace = true
 deno_webgpu.workspace = true
 
 base_mem_check.workspace = true
@@ -101,6 +103,8 @@ deno_broadcast_channel.workspace = true
 deno_cache.workspace = true
 deno_canvas.workspace = true
 deno_console.workspace = true
+deno_os.workspace = true
+deno_process.workspace = true
 deno_webgpu.workspace = true
 
 ext_ai.workspace = true

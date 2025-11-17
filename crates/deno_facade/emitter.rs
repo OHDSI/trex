@@ -433,9 +433,33 @@ impl EmitterFactory {
       .get_or_try_init_async(async {
         let npm_resolver = self.npm_resolver().await?;
         let npm_resolver_clone = match npm_resolver.as_inner() {
-          deno::npm::InnerCliNpmResolverRef::Managed(_inner) => {
-            // TODO: ManagedCliNpmResolver needs conversion to upstream ManagedNpmResolver
-            todo!("Convert ManagedCliNpmResolver to upstream ManagedNpmResolver")
+          deno::npm::InnerCliNpmResolverRef::Managed(inner) => {
+            // Convert CLI's ManagedCliNpmResolver to upstream ManagedNpmResolver
+            // Strategy: Use the CLI resolver's snapshot to create a fresh upstream resolver
+
+            // Get the snapshot from the CLI resolver
+            let snapshot = inner.snapshot();
+
+            // Create an upstream NpmResolutionCell from the snapshot
+            use deno::deno_resolver::npm::managed::NpmResolutionCell;
+            let npm_resolution_cell = NpmResolutionCell::new(snapshot);
+            let npm_resolution = deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
+
+            // Get node_modules path from the CLI resolver
+            let maybe_node_modules_path = inner.maybe_node_modules_path().map(|p| p.to_path_buf());
+
+            // Create upstream ManagedNpmResolver
+            use deno::deno_resolver::npm::managed::{ManagedNpmResolver, ManagedNpmResolverCreateOptions};
+            let upstream_resolver = ManagedNpmResolver::<deno::cache::CliSys>::new(ManagedNpmResolverCreateOptions {
+              npm_cache_dir: self.npm_cache_dir()?.clone(),
+              sys: deno::cache::CliSys::default(),
+              maybe_node_modules_path,
+              npm_system_info: inner.npm_system_info().clone(),
+              npmrc: self.resolved_npm_rc()?.clone(),
+              npm_resolution,
+            });
+
+            deno::deno_resolver::npm::NpmResolver::Managed(new_rc(upstream_resolver))
           }
           deno::npm::InnerCliNpmResolverRef::Byonm(inner) => {
             // CliByonmNpmResolver IS the upstream ByonmNpmResolver<RealSys>
@@ -459,9 +483,33 @@ impl EmitterFactory {
         let options = self.deno_options()?;
         let npm_resolver = self.npm_resolver().await?;
         let npm_resolver_clone = match npm_resolver.as_inner() {
-          deno::npm::InnerCliNpmResolverRef::Managed(_inner) => {
-            // TODO: ManagedCliNpmResolver needs conversion to upstream ManagedNpmResolver
-            todo!("Convert ManagedCliNpmResolver to upstream ManagedNpmResolver")
+          deno::npm::InnerCliNpmResolverRef::Managed(inner) => {
+            // Convert CLI's ManagedCliNpmResolver to upstream ManagedNpmResolver
+            // Strategy: Use the CLI resolver's snapshot to create a fresh upstream resolver
+
+            // Get the snapshot from the CLI resolver
+            let snapshot = inner.snapshot();
+
+            // Create an upstream NpmResolutionCell from the snapshot
+            use deno::deno_resolver::npm::managed::NpmResolutionCell;
+            let npm_resolution_cell = NpmResolutionCell::new(snapshot);
+            let npm_resolution = deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
+
+            // Get node_modules path from the CLI resolver
+            let maybe_node_modules_path = inner.maybe_node_modules_path().map(|p| p.to_path_buf());
+
+            // Create upstream ManagedNpmResolver
+            use deno::deno_resolver::npm::managed::{ManagedNpmResolver, ManagedNpmResolverCreateOptions};
+            let upstream_resolver = ManagedNpmResolver::<deno::cache::CliSys>::new(ManagedNpmResolverCreateOptions {
+              npm_cache_dir: self.npm_cache_dir()?.clone(),
+              sys: deno::cache::CliSys::default(),
+              maybe_node_modules_path,
+              npm_system_info: inner.npm_system_info().clone(),
+              npmrc: self.resolved_npm_rc()?.clone(),
+              npm_resolution,
+            });
+
+            deno::deno_resolver::npm::NpmResolver::Managed(new_rc(upstream_resolver))
           }
           deno::npm::InnerCliNpmResolverRef::Byonm(inner) => {
             // CliByonmNpmResolver IS the upstream ByonmNpmResolver<RealSys>
@@ -534,11 +582,33 @@ impl EmitterFactory {
         async {
           let npm_resolver = self.npm_resolver().await?;
           let npm_resolver_clone = match npm_resolver.as_inner() {
-            deno::npm::InnerCliNpmResolverRef::Managed(_inner) => {
-              // TODO: ManagedCliNpmResolver needs conversion to upstream ManagedNpmResolver
-              // This requires constructing an upstream ManagedNpmResolver from our custom ManagedCliNpmResolver
-              // which has a different architecture. For now, this will panic if Managed mode is used.
-              unimplemented!("ManagedCliNpmResolver to upstream ManagedNpmResolver conversion not yet implemented. Use BYONM mode instead.")
+            deno::npm::InnerCliNpmResolverRef::Managed(inner) => {
+              // Convert CLI's ManagedCliNpmResolver to upstream ManagedNpmResolver
+              // Strategy: Use the CLI resolver's snapshot to create a fresh upstream resolver
+
+              // Get the snapshot from the CLI resolver
+              let snapshot = inner.snapshot();
+
+              // Create an upstream NpmResolutionCell from the snapshot
+              use deno::deno_resolver::npm::managed::NpmResolutionCell;
+              let npm_resolution_cell = NpmResolutionCell::new(snapshot);
+              let npm_resolution = deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
+
+              // Get node_modules path from the CLI resolver
+              let maybe_node_modules_path = inner.maybe_node_modules_path().map(|p| p.to_path_buf());
+
+              // Create upstream ManagedNpmResolver
+              use deno::deno_resolver::npm::managed::{ManagedNpmResolver, ManagedNpmResolverCreateOptions};
+              let upstream_resolver = ManagedNpmResolver::<deno::cache::CliSys>::new(ManagedNpmResolverCreateOptions {
+                npm_cache_dir: self.npm_cache_dir()?.clone(),
+                sys: deno::cache::CliSys::default(),
+                maybe_node_modules_path,
+                npm_system_info: inner.npm_system_info().clone(),
+                npmrc: self.resolved_npm_rc()?.clone(),
+                npm_resolution,
+              });
+
+              deno::deno_resolver::npm::NpmResolver::Managed(new_rc(upstream_resolver))
             }
             deno::npm::InnerCliNpmResolverRef::Byonm(inner) => {
               // CliByonmNpmResolver IS the upstream ByonmNpmResolver<RealSys>

@@ -145,6 +145,7 @@ fn create_inner(
     resolution,
     tarball_cache,
     npm_system_info,
+    npm_rc,
   ))
 }
 
@@ -273,6 +274,7 @@ pub struct ManagedCliNpmResolver {
   resolution: Arc<NpmResolution>,
   tarball_cache: Arc<CliNpmTarballCache>,
   npm_system_info: NpmSystemInfo,
+  npmrc: Arc<ResolvedNpmRc>,
   top_level_install_flag: AtomicFlag,
 }
 
@@ -296,6 +298,7 @@ impl ManagedCliNpmResolver {
     resolution: Arc<NpmResolution>,
     tarball_cache: Arc<CliNpmTarballCache>,
     npm_system_info: NpmSystemInfo,
+    npmrc: Arc<ResolvedNpmRc>,
   ) -> Self {
     Self {
       fs,
@@ -307,6 +310,7 @@ impl ManagedCliNpmResolver {
       resolution,
       tarball_cache,
       npm_system_info,
+      npmrc,
       top_level_install_flag: Default::default(),
     }
   }
@@ -605,6 +609,29 @@ impl ManagedCliNpmResolver {
   pub fn global_cache_root_url(&self) -> &Url {
     self.npm_cache.root_dir_url()
   }
+
+  // Public accessors for conversion to upstream ManagedNpmResolver
+  // These allow extracting internal components for creating an upstream resolver
+
+  pub fn npm_cache(&self) -> &Arc<CliNpmCache> {
+    &self.npm_cache
+  }
+
+  pub fn npm_system_info(&self) -> &NpmSystemInfo {
+    &self.npm_system_info
+  }
+
+  pub fn resolution(&self) -> &Arc<NpmResolution> {
+    &self.resolution
+  }
+
+  pub fn fs_resolver(&self) -> &Arc<dyn NpmPackageFsResolver> {
+    &self.fs_resolver
+  }
+
+  pub fn npmrc(&self) -> &Arc<ResolvedNpmRc> {
+    &self.npmrc
+  }
 }
 
 impl NpmPackageFolderResolver for ManagedCliNpmResolver {
@@ -689,6 +716,7 @@ impl CliNpmResolver for ManagedCliNpmResolver {
       npm_resolution,
       self.tarball_cache.clone(),
       self.npm_system_info.clone(),
+      self.npmrc.clone(),
     ))
   }
 

@@ -54,7 +54,6 @@ export const builtinModules = [
   "v8",
   "vm",
   "wasi",
-  "worker_threads",
   "zlib",
 ];
 export const _builtinLibs = builtinModules;

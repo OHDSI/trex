@@ -47,6 +47,9 @@ mod logger;
 fn main() -> Result<ExitCode, anyhow::Error> {
   resolve_deno_runtime_env();
 
+  // Initialize rustls crypto provider (required for rustls 0.23+)
+  let _ = rustls::crypto::ring::default_provider().install_default();
+
   let runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .thread_name("sb-main")
