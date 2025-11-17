@@ -76,6 +76,8 @@ export class TrexConnection  {
 
     async atlas(
         atlas,
+        cdmSchema,
+        cohortId,
         callback
     ) {
         try {
@@ -96,9 +98,7 @@ export class TrexConnection  {
 
             // Build options JSON with schema information
             // Use the schema names from the connection configuration
-            const cdmSchema = this.vocabSchemaName || this.schemaName;
             const resultSchema = this.resultSchemaName || this.schemaName;
-            const cohortId = "1"; // Default cohortId - can be parameterized if needed
 
             const options = `{"cdmSchema":"${cdmSchema}","resultSchema":"${resultSchema}","targetTable":"cohort","cohortId":"${cohortId}","generateStats":true}`;
 
@@ -119,10 +119,25 @@ export class TrexConnection  {
     }
 
     async atlas_validate(
-        cohortDefinitionBase64,
+        cohortDefinition,
         callback
     ) {
         try {
+            // Convert cohort definition to JSON string if it's an object
+            const cohortStr = (typeof cohortDefinition === 'string') ? cohortDefinition : JSON.stringify(cohortDefinition);
+
+            // Convert to base64
+            const toBase64 = (s) => {
+                if (typeof Buffer !== 'undefined' && Buffer.from) {
+                    return Buffer.from(s, 'utf8').toString('base64');
+                }
+                const bytes = new TextEncoder().encode(s);
+                let binary = '';
+                for (const b of bytes) binary += String.fromCharCode(b);
+                return btoa(binary);
+            };
+            const cohortDefinitionBase64 = toBase64(cohortStr);
+
             // Execute circe_check_cohort function to validate the cohort definition
             const sql = `SELECT circe_check_cohort('${cohortDefinitionBase64}') AS warnings`;
             const result = await this.connection.execute(sql, []);

@@ -23,6 +23,7 @@ use deno::deno_permissions::Permissions;
 use deno::deno_permissions::PermissionsOptions;
 use deno::deno_resolver::cjs::IsCjsResolutionMode;
 use deno::deno_resolver::npm::NpmReqResolverOptions;
+use deno::deno_resolver::sloppy_imports::SloppyImportsResolutionKind;
 use deno::deno_semver::npm::NpmPackageReqReference;
 use deno::deno_tls::rustls::RootCertStore;
 use deno::deno_tls::RootCertStoreProvider;
@@ -45,7 +46,9 @@ use deno::npm::CreateInNpmPkgCheckerOptions;
 use deno::resolver::CjsTracker;
 use deno::resolver::CliDenoResolverFs;
 use deno::resolver::CliNpmReqResolver;
+use deno::resolver::CliSloppyImportsResolver;
 use deno::resolver::NpmModuleLoader;
+use deno::resolver::SloppyImportsCachedFs;
 use deno::standalone::binary;
 use deno::util::text_encoding::from_utf8_lossy_cow;
 use deno::PermissionsContainer;
@@ -140,6 +143,7 @@ pub struct SharedModuleLoaderState {
   pub(crate) npm_resolver: Arc<dyn CliNpmResolver>,
   pub(crate) node_resolver: Arc<NodeResolver>,
   pub(crate) vfs: Arc<FileBackedVfs>,
+  pub(crate) sloppy_imports_resolver: Option<Arc<CliSloppyImportsResolver>>,
 }
 
 #[derive(Clone)]
@@ -277,13 +281,53 @@ impl ModuleLoader for EmbeddedModuleLoader {
           }
         }
 
-        Ok(
-          self
-            .shared
-            .node_resolver
-            .handle_if_in_node_modules(&specifier)
-            .unwrap_or(specifier),
-        )
+        let final_specifier = self
+          .shared
+          .node_resolver
+          .handle_if_in_node_modules(&specifier)
+          .unwrap_or_else(|| specifier.clone());
+
+        // Try sloppy imports resolution if enabled and this is a file:// URL
+        if final_specifier.scheme() == "file" {
+          if let Some(sloppy_resolver) = &self.shared.sloppy_imports_resolver {
+            // Map VFS path back to real source path
+            if let Ok(path) = final_specifier.to_file_path() {
+              if let Ok(stripped) =
+                path.strip_prefix("/var/tmp/sb-compile-trex")
+              {
+                let real_path = std::env::current_dir().unwrap().join(stripped);
+                if let Ok(real_specifier) =
+                  ModuleSpecifier::from_file_path(&real_path)
+                {
+                  if let Some(resolution) = sloppy_resolver.resolve(
+                    &real_specifier,
+                    SloppyImportsResolutionKind::Execution,
+                  ) {
+                    let resolved_specifier = resolution.into_specifier();
+                    // Convert back to VFS path
+                    if let Ok(resolved_path) = resolved_specifier.to_file_path()
+                    {
+                      if let Ok(rel_path) = resolved_path
+                        .strip_prefix(std::env::current_dir().unwrap())
+                      {
+                        let vfs_path =
+                          std::path::PathBuf::from("/var/tmp/sb-compile-trex")
+                            .join(rel_path);
+                        if let Ok(vfs_specifier) =
+                          ModuleSpecifier::from_file_path(&vfs_path)
+                        {
+                          return Ok(vfs_specifier);
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+
+        Ok(final_specifier)
       }
       Err(err)
         if err.is_unmapped_bare_specifier() && referrer.scheme() == "file" =>
@@ -802,6 +846,9 @@ pub async fn create_module_loader_for_eszip(
       npm_resolver: npm_resolver.clone(),
       node_resolver: node_resolver.clone(),
       vfs: vfs.clone(),
+      sloppy_imports_resolver: Some(Arc::new(CliSloppyImportsResolver::new(
+        SloppyImportsCachedFs::new(Arc::new(RealFs)),
+      ))),
     }),
   };
 
