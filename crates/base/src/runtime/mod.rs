@@ -1,3 +1,4 @@
+use either::Either::{Left, Right};
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -57,9 +58,9 @@ use deno_core::url::Url;
 use deno_core::v8;
 use deno_core::v8::GCCallbackFlags;
 use deno_core::v8::GCType;
-use deno_core::v8::HeapStatistics;
 use deno_core::v8::Isolate;
 use deno_core::v8::Locker;
+use deno_core::v8::PinCallbackScope;
 use deno_core::JsRuntime;
 use deno_core::ModuleId;
 use deno_core::ModuleLoader;
@@ -79,9 +80,6 @@ use deno_facade::module_loader::RuntimeProviders;
 use deno_facade::EmitterFactory;
 use deno_facade::EszipPayloadKind;
 use deno_facade::Metadata;
-use either::Either;
-use either::Either::Left;
-use either::Either::Right;
 use ext_event_worker::events::WorkerEventWithMetadata;
 use ext_runtime::external_memory::CustomAllocator;
 use ext_runtime::MemCheckWaker;
@@ -179,8 +177,6 @@ impl MemCheck {
     };
 
     let stats = isolate.get_heap_statistics();
-
-    // NOTE: https://stackoverflow.com/questions/41541843/nodejs-v8-getheapstatistics-method
     let malloced_bytes = if SHOULD_INCLUDE_MALLOCED_MEMORY_ON_MEMCHECK
       .get()
       .copied()
@@ -271,12 +267,13 @@ struct GlobalMainContext(v8::Global<v8::Context>);
 impl GlobalMainContext {
   fn to_local_context<'s, 'i>(
     &self,
-    scope: &v8::PinScope<'s, 'i, ()>,
+    scope: &mut v8::PinCallbackScope<'s, 'i, ()>,
   ) -> v8::Local<'s, v8::Context> {
     v8::Local::new(scope, &self.0)
   }
 }
 
+#[derive(Clone)]
 struct DispatchEventFunctions {
   dispatch_load_event_fn_global: v8::Global<v8::Function>,
   dispatch_beforeunload_event_fn_global: v8::Global<v8::Function>,
@@ -1845,18 +1842,6 @@ where
 type TerminateExecutionIfCancelledReturnType =
   ScopeGuard<CancellationToken, Box<dyn FnOnce(CancellationToken)>>;
 
-#[allow(dead_code)]
-struct Scope<'s> {
-  context: v8::Local<'s, v8::Context>,
-  scope: Either<v8::ScopeStorage<v8::CallbackScope<'s, ()>>, v8::ScopeStorage<v8::CallbackScope<'s, ()>>>,
-}
-
-impl<'s> Scope<'s> {
-  // Removed context_scope() method - scope creation now inlined where needed
-  // This follows the rusty_v8 v140.x pattern where scopes must be created inline
-  // due to pinning requirements
-}
-
 pub struct IsolateWithCancellationToken<'l>(
   &'l mut v8::Isolate,
   CancellationToken,
@@ -1894,46 +1879,6 @@ impl<'l, RuntimeContext> MaybeDenoRuntime<'l, RuntimeContext>
 where
   RuntimeContext: GetRuntimeContext,
 {
-  fn scope(&mut self) -> Scope<'_> {
-    let op_state = self.op_state();
-    let op_state_ref = op_state.borrow();
-    let context = op_state_ref
-      .try_borrow::<GlobalMainContext>()
-      .unwrap()
-      .clone();
-
-    let (context_local, scope) = match self {
-      MaybeDenoRuntime::DenoRuntime(v) => {
-        let mut scope_storage = unsafe { v8::CallbackScope::new(v.js_runtime.v8_isolate()) };
-        let mut scope_pin = unsafe { std::pin::Pin::new_unchecked(&mut scope_storage) };
-        let scope_ref = &mut scope_pin.as_mut().init();
-        let ctx = context.to_local_context(scope_ref);
-        (ctx, Either::Left(scope_storage))
-      }
-      MaybeDenoRuntime::Isolate(v) => {
-        let isolate: &mut v8::Isolate = v;
-        let mut scope_storage = unsafe { v8::CallbackScope::new(isolate) };
-        let mut scope_pin = unsafe { std::pin::Pin::new_unchecked(&mut scope_storage) };
-        let scope_ref = &mut scope_pin.as_mut().init();
-        let ctx = context.to_local_context(scope_ref);
-        (ctx, Either::Right(scope_storage))
-      }
-      MaybeDenoRuntime::IsolateWithCancellationToken(v) => {
-        let isolate: &mut v8::Isolate = &mut v.0;
-        let mut scope_storage = unsafe { v8::CallbackScope::new(isolate) };
-        let mut scope_pin = unsafe { std::pin::Pin::new_unchecked(&mut scope_storage) };
-        let scope_ref = &mut scope_pin.as_mut().init();
-        let ctx = context.to_local_context(scope_ref);
-        (ctx, Either::Right(scope_storage))
-      }
-    };
-
-    Scope {
-      context: context_local,
-      scope,
-    }
-  }
-
   #[allow(unused)]
   fn v8_isolate(&mut self) -> &mut v8::Isolate {
     match self {
@@ -1971,31 +1916,39 @@ where
     let _guard = self.terminate_execution_if_cancelled();
 
     let op_state = self.op_state();
-    let op_state_ref = op_state.borrow();
-    let dispatch_fns =
-      op_state_ref.try_borrow::<DispatchEventFunctions>().unwrap();
+    let dispatch_fns = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<DispatchEventFunctions>()
+        .unwrap()
+        .clone()
+    };
+    let global_context = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<GlobalMainContext>()
+        .unwrap()
+        .clone()
+    };
+    drop(op_state);
 
-    // Get the Scope which holds the CallbackScope storage
-    let mut scope = self.scope();
+    let isolate = self.v8_isolate();
 
-    // Pin and initialize the CallbackScope
-    let scope_storage = scope.scope.as_mut().into_inner();
-    let mut scope_pin = unsafe { std::pin::Pin::new_unchecked(scope_storage) };
-    let mut cb_scope = scope_pin.as_mut().init();
+    // First create callback scope from isolate
+    v8::callback_scope!(unsafe callback_scope, isolate);
+    // Convert global context to local
+    let local_context = v8::Local::new(callback_scope, &global_context.0);
+    // Create another callback scope from the context  
+    v8::callback_scope!(unsafe context_scope, local_context);
 
-    // Create ContextScope
-    let mut context_scope = v8::ContextScope::new(&mut cb_scope, scope.context);
+    v8::tc_scope!(let tc_scope, context_scope);
 
-    // Create TryCatch scope using macro to handle pinning correctly
-    v8::tc_scope!(let tc_scope, &mut context_scope);
-
-    let event_fn = v8::Local::new(tc_scope, &dispatch_fns.dispatch_load_event_fn_global);
-
-    drop(op_state_ref);
+    let event_fn =
+      v8::Local::new(tc_scope, &dispatch_fns.dispatch_load_event_fn_global);
 
     let undefined = v8::undefined(tc_scope);
     let fn_args = vec![];
-    let fn_ret = event_fn.call(tc_scope, undefined.into(), &fn_args);
+    let _ = event_fn.call(tc_scope, undefined.into(), &fn_args);
 
     if tc_scope.has_caught() {
       if let Some(ex) = tc_scope.exception() {
@@ -2017,35 +1970,45 @@ where
     let _guard = self.terminate_execution_if_cancelled();
 
     let op_state = self.op_state();
-    let op_state_ref = op_state.borrow();
-    let dispatch_fns =
-      op_state_ref.try_borrow::<DispatchEventFunctions>().unwrap();
+    let dispatch_fns = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<DispatchEventFunctions>()
+        .unwrap()
+        .clone()
+    };
+    let global_context = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<GlobalMainContext>()
+        .unwrap()
+        .clone()
+    };
+    drop(op_state);
 
-    // Get the Scope which holds the CallbackScope storage
-    let mut scope = self.scope();
+    let isolate = self.v8_isolate();
 
-    // Pin and initialize the CallbackScope
-    let scope_storage = scope.scope.as_mut().into_inner();
-    let mut scope_pin = unsafe { std::pin::Pin::new_unchecked(scope_storage) };
-    let mut cb_scope = scope_pin.as_mut().init();
+    // Create nested callback scopes
+    v8::callback_scope!(unsafe callback_scope, isolate);
+    let local_context = v8::Local::new(callback_scope, &global_context.0);
+    v8::callback_scope!(unsafe context_scope, local_context);
 
-    // Create ContextScope
-    let mut context_scope = v8::ContextScope::new(&mut cb_scope, scope.context);
+    v8::tc_scope!(let tc_scope, context_scope);
 
-    // Create TryCatch scope using macro to handle pinning correctly
-    v8::tc_scope!(let tc_scope, &mut context_scope);
-
-    let event_fn = v8::Local::new(tc_scope, &dispatch_fns.dispatch_beforeunload_event_fn_global);
-
-    drop(op_state_ref);
+    let event_fn = v8::Local::new(
+      tc_scope,
+      &dispatch_fns.dispatch_beforeunload_event_fn_global,
+    );
 
     let undefined = v8::undefined(tc_scope);
-    let fn_args = vec![v8::String::new_external_onebyte_static(
-      tc_scope,
-      <&'static str>::from(reason).as_bytes(),
-    )
-    .unwrap()
-    .into()];
+    let fn_args = vec![
+      v8::String::new_external_onebyte_static(
+        tc_scope,
+        <&'static str>::from(reason).as_bytes(),
+      )
+      .unwrap()
+      .into(),
+    ];
     let fn_ret = event_fn.call(tc_scope, undefined.into(), &fn_args);
 
     if tc_scope.has_caught() {
@@ -2074,31 +2037,37 @@ where
     let _guard = self.terminate_execution_if_cancelled();
 
     let op_state = self.op_state();
-    let op_state_ref = op_state.borrow();
-    let dispatch_fns =
-      op_state_ref.try_borrow::<DispatchEventFunctions>().unwrap();
+    let dispatch_fns = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<DispatchEventFunctions>()
+        .unwrap()
+        .clone()
+    };
+    let global_context = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<GlobalMainContext>()
+        .unwrap()
+        .clone()
+    };
+    drop(op_state);
 
-    // Get the Scope which holds the CallbackScope storage
-    let mut scope = self.scope();
+    let isolate = self.v8_isolate();
 
-    // Pin and initialize the CallbackScope
-    let scope_storage = scope.scope.as_mut().into_inner();
-    let mut scope_pin = unsafe { std::pin::Pin::new_unchecked(scope_storage) };
-    let mut cb_scope = scope_pin.as_mut().init();
+    // Create nested callback scopes
+    v8::callback_scope!(unsafe callback_scope, isolate);
+    let local_context = v8::Local::new(callback_scope, &global_context.0);
+    v8::callback_scope!(unsafe context_scope, local_context);
 
-    // Create ContextScope
-    let mut context_scope = v8::ContextScope::new(&mut cb_scope, scope.context);
+    v8::tc_scope!(let tc_scope, context_scope);
 
-    // Create TryCatch scope using macro to handle pinning correctly
-    v8::tc_scope!(let tc_scope, &mut context_scope);
-
-    let event_fn = v8::Local::new(tc_scope, &dispatch_fns.dispatch_unload_event_fn_global);
-
-    drop(op_state_ref);
+    let event_fn =
+      v8::Local::new(tc_scope, &dispatch_fns.dispatch_unload_event_fn_global);
 
     let undefined = v8::undefined(tc_scope);
     let fn_args = vec![];
-    let fn_ret = event_fn.call(tc_scope, undefined.into(), &fn_args);
+    let _ = event_fn.call(tc_scope, undefined.into(), &fn_args);
 
     if tc_scope.has_caught() {
       if let Some(ex) = tc_scope.exception() {
@@ -2118,31 +2087,37 @@ where
     let _guard = self.terminate_execution_if_cancelled();
 
     let op_state = self.op_state();
-    let op_state_ref = op_state.borrow();
-    let dispatch_fns =
-      op_state_ref.try_borrow::<DispatchEventFunctions>().unwrap();
+    let dispatch_fns = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<DispatchEventFunctions>()
+        .unwrap()
+        .clone()
+    };
+    let global_context = {
+      let op_state_ref = op_state.borrow();
+      op_state_ref
+        .try_borrow::<GlobalMainContext>()
+        .unwrap()
+        .clone()
+    };
+    drop(op_state);
 
-    // Get the Scope which holds the CallbackScope storage
-    let mut scope = self.scope();
+    let isolate = self.v8_isolate();
 
-    // Pin and initialize the CallbackScope
-    let scope_storage = scope.scope.as_mut().into_inner();
-    let mut scope_pin = unsafe { std::pin::Pin::new_unchecked(scope_storage) };
-    let mut cb_scope = scope_pin.as_mut().init();
+    // Create nested callback scopes
+    v8::callback_scope!(unsafe callback_scope, isolate);
+    let local_context = v8::Local::new(callback_scope, &global_context.0);
+    v8::callback_scope!(unsafe context_scope, local_context);
 
-    // Create ContextScope
-    let mut context_scope = v8::ContextScope::new(&mut cb_scope, scope.context);
+    v8::tc_scope!(let tc_scope, context_scope);
 
-    // Create TryCatch scope using macro to handle pinning correctly
-    v8::tc_scope!(let tc_scope, &mut context_scope);
-
-    let event_fn = v8::Local::new(tc_scope, &dispatch_fns.dispatch_drain_event_fn_global);
-
-    drop(op_state_ref);
+    let event_fn =
+      v8::Local::new(tc_scope, &dispatch_fns.dispatch_drain_event_fn_global);
 
     let undefined = v8::undefined(tc_scope);
     let fn_args = vec![];
-    let fn_ret = event_fn.call(tc_scope, undefined.into(), &fn_args);
+    let _ = event_fn.call(tc_scope, undefined.into(), &fn_args);
 
     if tc_scope.has_caught() {
       if let Some(ex) = tc_scope.exception() {
