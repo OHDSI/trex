@@ -182,7 +182,10 @@ impl CjsCodeAnalyzer for CliCjsCodeAnalyzer {
         }
       }
     };
-    let analysis = self.inner_cjs_analysis(specifier, &source).await.map_err(|e| JsErrorBox::generic(e.to_string()))?;
+    let analysis = self
+      .inner_cjs_analysis(specifier, &source)
+      .await
+      .map_err(|e| JsErrorBox::generic(e.to_string()))?;
     match analysis {
       CliCjsAnalysis::Esm => Ok(ExtNodeCjsAnalysis::Esm(source, None)),
       CliCjsAnalysis::Cjs { exports, reexports } => {

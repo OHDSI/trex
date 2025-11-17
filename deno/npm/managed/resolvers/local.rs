@@ -17,24 +17,24 @@ use deno_ast::ModuleSpecifier;
 use deno_cache_dir::npm::mixed_case_package_name_decode;
 use deno_core::anyhow::Context;
 use deno_core::error::AnyError;
-use deno_core::futures::stream::FuturesUnordered;
 use deno_core::futures::StreamExt;
+use deno_core::futures::stream::FuturesUnordered;
 use deno_core::url::Url;
 use deno_fs;
-use deno_permissions::CheckedPath;
-use deno_npm::resolution::NpmResolutionSnapshot;
 use deno_npm::NpmPackageCacheFolderId;
 use deno_npm::NpmPackageId;
 use deno_npm::NpmResolutionPackage;
 use deno_npm::NpmSystemInfo;
+use deno_npm::resolution::NpmResolutionSnapshot;
+use deno_permissions::CheckedPath;
 use deno_resolver::npm::normalize_pkg_name_for_node_modules_deno_folder;
-use deno_semver::package::PackageNv;
 use deno_semver::StackString;
+use deno_semver::package::PackageNv;
+use node_resolver::UrlOrPathRef;
 use node_resolver::errors::PackageFolderResolveError;
 use node_resolver::errors::PackageFolderResolveIoError;
 use node_resolver::errors::PackageNotFoundError;
 use node_resolver::errors::ReferrerNotFoundError;
-use node_resolver::UrlOrPathRef;
 use serde::Deserialize;
 use serde::Serialize;
 
@@ -43,11 +43,11 @@ use crate::cache::CACHE_PERM;
 use crate::npm::CliNpmCache;
 use crate::npm::CliNpmTarballCache;
 use crate::npm::PackageCaching;
+use crate::util::fs::LaxSingleProcessFsFlag;
 use crate::util::fs::atomic_write_file_with_retries;
 use crate::util::fs::canonicalize_path_maybe_not_exists_with_fs;
 use crate::util::fs::clone_dir_recursive;
 use crate::util::fs::symlink_dir;
-use crate::util::fs::LaxSingleProcessFsFlag;
 
 use ext_node::NodePermissions;
 
@@ -199,7 +199,10 @@ impl NpmPackageFsResolver for LocalNpmPackageResolver {
       };
 
       let sub_dir = join_package_name(node_modules_folder.as_ref(), name);
-      if self.fs.is_dir_sync(&CheckedPath::unsafe_new(Cow::Borrowed(&sub_dir))) {
+      if self
+        .fs
+        .is_dir_sync(&CheckedPath::unsafe_new(Cow::Borrowed(&sub_dir)))
+      {
         return Ok(sub_dir);
       }
 
@@ -680,7 +683,10 @@ fn get_package_folder_id_from_folder_name(
   };
   let version = deno_semver::Version::parse_from_npm(raw_version).ok()?;
   Some(NpmPackageCacheFolderId {
-    nv: PackageNv { name: StackString::from(name.as_str()), version },
+    nv: PackageNv {
+      name: StackString::from(name.as_str()),
+      version,
+    },
     copy_index,
   })
 }

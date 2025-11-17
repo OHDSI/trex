@@ -1,22 +1,22 @@
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 
 use base_mem_check::WorkerHeapStatistics;
 use base_rt::DropToken;
 use base_rt::RuntimeState;
 use base_rt::RuntimeWaker;
-use deno_core::op2;
-use deno_core::v8;
 use deno_core::JsRuntime;
 use deno_core::OpState;
 use deno_core::ResourceId;
+use deno_core::op2;
+use deno_core::v8;
 use deno_error::JsErrorBox;
 use enum_as_inner::EnumAsInner;
-use futures::task::AtomicWaker;
 use futures::FutureExt;
+use futures::task::AtomicWaker;
 use log::error;
 use serde::Serialize;
 use tokio::sync::oneshot;
@@ -463,7 +463,9 @@ fn op_cancel_drop_token(
   state: &mut OpState,
   #[smi] rid: ResourceId,
 ) -> Result<(), JsErrorBox> {
-  let token = state.resource_table.get::<DropToken>(rid)
+  let token = state
+    .resource_table
+    .get::<DropToken>(rid)
     .map_err(|e| JsErrorBox::generic(e.to_string()))?;
 
   token.0.cancel();
@@ -500,7 +502,6 @@ deno_core::extension!(
     dir "js",
     "00_serve.js",
     "01_http.js",
-    "40_process.js",
     "98_global_scope_shared.js",
     "async_hook.js",
     "bootstrap.js",

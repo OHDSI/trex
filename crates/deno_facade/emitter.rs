@@ -1,14 +1,14 @@
 use std::future::Future;
+use std::sync::Arc;
 use sys_traits::FsCanonicalize;
 use sys_traits::FsCreateDirAll;
-use std::sync::Arc;
 
 use anyhow::Context;
-use deno_maybe_sync::new_rc;
-use node_resolver;
-use deno::args::check_warn_tsconfig;
+use deno::DenoOptions;
+use deno::PermissionsContainer;
 use deno::args::CacheSetting;
 use deno::args::TsConfigType;
+use deno::args::check_warn_tsconfig;
 use deno::cache::Caches;
 use deno::cache::CliSys;
 use deno::cache::DenoDir;
@@ -19,33 +19,35 @@ use deno::cache::ModuleInfoCache;
 use deno::cache::ParsedSourceCache;
 use deno::deno_ast::EmitOptions;
 use deno::deno_ast::SourceMapOption;
-use deno::deno_cache_dir::npm::NpmCacheDir;
 use deno::deno_cache_dir::HttpCache;
-use deno::deno_resolver::workspace::PackageJsonDepResolution;
-use deno::deno_resolver::workspace::WorkspaceResolver;
+use deno::deno_cache_dir::npm::NpmCacheDir;
 use deno::deno_npm::npm_rc::ResolvedNpmRc;
 use deno::deno_permissions::Permissions;
 use deno::deno_permissions::PermissionsOptions;
+use deno::deno_resolver::DenoResolverOptions;
+use deno::deno_resolver::NodeAndNpmResolvers;
 use deno::deno_resolver::cjs::IsCjsResolutionMode;
 use deno::deno_resolver::npm::DenoInNpmPackageChecker;
 use deno::deno_resolver::npm::NpmReqResolverOptions;
-use deno::deno_resolver::DenoResolverOptions;
-use deno::deno_resolver::NodeAndNpmResolvers;
+use deno::deno_resolver::workspace::PackageJsonDepResolution;
+use deno::deno_resolver::workspace::WorkspaceResolver;
 use deno::emit::Emitter;
 use deno::file_fetcher::FileFetcher;
 use deno::graph_util::ModuleGraphBuilder;
 use deno::graph_util::ModuleGraphCreator;
 use deno::http_util::HttpClientProvider;
+use deno::node_resolver::DenoIsBuiltInNodeModuleChecker;
 use deno::node_resolver::InNpmPackageChecker;
-use deno::npm::byonm::CliByonmNpmResolverCreateOptions;
-use deno::npm::create_cli_npm_resolver;
-use deno::npm::create_in_npm_pkg_checker;
+use deno::node_resolver::PackageJsonResolverRc;
 use deno::npm::CliManagedInNpmPkgCheckerCreateOptions;
 use deno::npm::CliManagedNpmResolverCreateOptions;
 use deno::npm::CliNpmResolver;
 use deno::npm::CliNpmResolverCreateOptions;
 use deno::npm::CliNpmResolverManagedSnapshotOption;
 use deno::npm::CreateInNpmPkgCheckerOptions;
+use deno::npm::byonm::CliByonmNpmResolverCreateOptions;
+use deno::npm::create_cli_npm_resolver;
+use deno::npm::create_in_npm_pkg_checker;
 use deno::resolver::CjsTracker;
 use deno::resolver::CliDenoResolver;
 use deno::resolver::CliDenoResolverFs;
@@ -54,14 +56,12 @@ use deno::resolver::CliResolver;
 use deno::resolver::CliResolverOptions;
 use deno::resolver::CliSloppyImportsResolver;
 use deno::util::fs::canonicalize_path_maybe_not_exists;
-use deno::DenoOptions;
-use deno::PermissionsContainer;
 use deno_core::error::AnyError;
 use deno_core::futures::FutureExt;
+use deno_maybe_sync::new_rc;
 use ext_node::DenoFsNodeResolverEnv;
+use node_resolver;
 use sys_traits::impls::RealSys;
-use deno::node_resolver::DenoIsBuiltInNodeModuleChecker;
-use deno::node_resolver::PackageJsonResolverRc;
 
 // Type aliases matching the Deno ecosystem types
 type CliNodeResolver = node_resolver::NodeResolver<
@@ -125,7 +125,8 @@ pub struct EmitterFactory {
   file_fetcher: Deferred<Arc<FileFetcher>>,
   global_http_cache: Deferred<Arc<GlobalHttpCache>>,
   http_client_provider: Deferred<Arc<HttpClientProvider>>,
-  in_npm_pkg_checker: Deferred<deno::deno_resolver::npm::DenoInNpmPackageChecker>,
+  in_npm_pkg_checker:
+    Deferred<deno::deno_resolver::npm::DenoInNpmPackageChecker>,
   module_graph_builder: Deferred<Arc<ModuleGraphBuilder>>,
   module_graph_creator: Deferred<Arc<ModuleGraphCreator>>,
   module_info_cache: Deferred<Arc<ModuleInfoCache>>,
@@ -333,7 +334,8 @@ impl EmitterFactory {
 
   pub fn in_npm_pkg_checker(
     &self,
-  ) -> Result<&deno::deno_resolver::npm::DenoInNpmPackageChecker, anyhow::Error> {
+  ) -> Result<&deno::deno_resolver::npm::DenoInNpmPackageChecker, anyhow::Error>
+  {
     self.in_npm_pkg_checker.get_or_try_init(|| {
       let options = self.deno_options()?;
       let options = if options.use_byonm() {
@@ -378,7 +380,10 @@ impl EmitterFactory {
           create_cli_npm_resolver(if options.use_byonm() {
             CliNpmResolverCreateOptions::Byonm(
               CliByonmNpmResolverCreateOptions {
-                sys: deno::node_resolver::cache::NodeResolutionSys::new(deno::cache::CliSys::default(), None),
+                sys: deno::node_resolver::cache::NodeResolutionSys::new(
+                  deno::cache::CliSys::default(),
+                  None,
+                ),
                 pkg_json_resolver: self.pkg_json_resolver().clone(),
                 root_node_modules_dir: Some(
                   match options.node_modules_dir_path() {
@@ -443,35 +448,48 @@ impl EmitterFactory {
             // Create an upstream NpmResolutionCell from the snapshot
             use deno::deno_resolver::npm::managed::NpmResolutionCell;
             let npm_resolution_cell = NpmResolutionCell::new(snapshot);
-            let npm_resolution = deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
+            let npm_resolution =
+              deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
 
             // Get node_modules path from the CLI resolver
-            let maybe_node_modules_path = inner.maybe_node_modules_path().map(|p| p.to_path_buf());
+            let maybe_node_modules_path =
+              inner.maybe_node_modules_path().map(|p| p.to_path_buf());
 
             // Create upstream ManagedNpmResolver
-            use deno::deno_resolver::npm::managed::{ManagedNpmResolver, ManagedNpmResolverCreateOptions};
-            let upstream_resolver = ManagedNpmResolver::<deno::cache::CliSys>::new(ManagedNpmResolverCreateOptions {
-              npm_cache_dir: self.npm_cache_dir()?.clone(),
-              sys: deno::cache::CliSys::default(),
-              maybe_node_modules_path,
-              npm_system_info: inner.npm_system_info().clone(),
-              npmrc: self.resolved_npm_rc()?.clone(),
-              npm_resolution,
-            });
+            use deno::deno_resolver::npm::managed::{
+              ManagedNpmResolver, ManagedNpmResolverCreateOptions,
+            };
+            let upstream_resolver =
+              ManagedNpmResolver::<deno::cache::CliSys>::new(
+                ManagedNpmResolverCreateOptions {
+                  npm_cache_dir: self.npm_cache_dir()?.clone(),
+                  sys: deno::cache::CliSys::default(),
+                  maybe_node_modules_path,
+                  npm_system_info: inner.npm_system_info().clone(),
+                  npmrc: self.resolved_npm_rc()?.clone(),
+                  npm_resolution,
+                },
+              );
 
-            deno::deno_resolver::npm::NpmResolver::Managed(new_rc(upstream_resolver))
+            deno::deno_resolver::npm::NpmResolver::Managed(new_rc(
+              upstream_resolver,
+            ))
           }
           deno::npm::InnerCliNpmResolverRef::Byonm(inner) => {
             // CliByonmNpmResolver IS the upstream ByonmNpmResolver<RealSys>
             deno::deno_resolver::npm::NpmResolver::Byonm(new_rc(inner.clone()))
           }
         };
-        Ok(Arc::new(CliNpmReqResolverType::new(NpmReqResolverOptions {
-          in_npm_pkg_checker: self.in_npm_pkg_checker()?.clone(),
-          node_resolver: deno_maybe_sync::MaybeArc::from(Arc::clone(self.node_resolver().await?)),
-          npm_resolver: npm_resolver_clone,
-          sys: deno::cache::CliSys::default(),
-        })))
+        Ok(Arc::new(CliNpmReqResolverType::new(
+          NpmReqResolverOptions {
+            in_npm_pkg_checker: self.in_npm_pkg_checker()?.clone(),
+            node_resolver: deno_maybe_sync::MaybeArc::from(Arc::clone(
+              self.node_resolver().await?,
+            )),
+            npm_resolver: npm_resolver_clone,
+            sys: deno::cache::CliSys::default(),
+          },
+        )))
       })
       .await
   }
@@ -493,46 +511,60 @@ impl EmitterFactory {
             // Create an upstream NpmResolutionCell from the snapshot
             use deno::deno_resolver::npm::managed::NpmResolutionCell;
             let npm_resolution_cell = NpmResolutionCell::new(snapshot);
-            let npm_resolution = deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
+            let npm_resolution =
+              deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
 
             // Get node_modules path from the CLI resolver
-            let maybe_node_modules_path = inner.maybe_node_modules_path().map(|p| p.to_path_buf());
+            let maybe_node_modules_path =
+              inner.maybe_node_modules_path().map(|p| p.to_path_buf());
 
             // Create upstream ManagedNpmResolver
-            use deno::deno_resolver::npm::managed::{ManagedNpmResolver, ManagedNpmResolverCreateOptions};
-            let upstream_resolver = ManagedNpmResolver::<deno::cache::CliSys>::new(ManagedNpmResolverCreateOptions {
-              npm_cache_dir: self.npm_cache_dir()?.clone(),
-              sys: deno::cache::CliSys::default(),
-              maybe_node_modules_path,
-              npm_system_info: inner.npm_system_info().clone(),
-              npmrc: self.resolved_npm_rc()?.clone(),
-              npm_resolution,
-            });
+            use deno::deno_resolver::npm::managed::{
+              ManagedNpmResolver, ManagedNpmResolverCreateOptions,
+            };
+            let upstream_resolver =
+              ManagedNpmResolver::<deno::cache::CliSys>::new(
+                ManagedNpmResolverCreateOptions {
+                  npm_cache_dir: self.npm_cache_dir()?.clone(),
+                  sys: deno::cache::CliSys::default(),
+                  maybe_node_modules_path,
+                  npm_system_info: inner.npm_system_info().clone(),
+                  npmrc: self.resolved_npm_rc()?.clone(),
+                  npm_resolution,
+                },
+              );
 
-            deno::deno_resolver::npm::NpmResolver::Managed(new_rc(upstream_resolver))
+            deno::deno_resolver::npm::NpmResolver::Managed(new_rc(
+              upstream_resolver,
+            ))
           }
           deno::npm::InnerCliNpmResolverRef::Byonm(inner) => {
             // CliByonmNpmResolver IS the upstream ByonmNpmResolver<RealSys>
             deno::deno_resolver::npm::NpmResolver::Byonm(new_rc(inner.clone()))
           }
         };
-        let raw_resolver = deno::deno_resolver::RawDenoResolver::new(DenoResolverOptions {
-          in_npm_pkg_checker: self.in_npm_pkg_checker()?.clone(),
-          node_and_req_resolver: Some(NodeAndNpmResolvers {
-            node_resolver: deno_maybe_sync::MaybeArc::from(Arc::clone(self.node_resolver().await?)),
-            npm_resolver: npm_resolver_clone.clone(),
-            npm_req_resolver: deno_maybe_sync::MaybeArc::from(Arc::clone(self.npm_req_resolver().await?)),
-          }),
-          workspace_resolver: self.workspace_resolver()?.clone(),
-          bare_node_builtins: options.unstable_detect_cjs(), // or some appropriate value
-          is_byonm: options.use_byonm(),
-          maybe_vendor_dir: None,
-        });
+        let raw_resolver =
+          deno::deno_resolver::RawDenoResolver::new(DenoResolverOptions {
+            in_npm_pkg_checker: self.in_npm_pkg_checker()?.clone(),
+            node_and_req_resolver: Some(NodeAndNpmResolvers {
+              node_resolver: deno_maybe_sync::MaybeArc::from(Arc::clone(
+                self.node_resolver().await?,
+              )),
+              npm_resolver: npm_resolver_clone.clone(),
+              npm_req_resolver: deno_maybe_sync::MaybeArc::from(Arc::clone(
+                self.npm_req_resolver().await?,
+              )),
+            }),
+            workspace_resolver: self.workspace_resolver()?.clone(),
+            bare_node_builtins: options.unstable_detect_cjs(), // or some appropriate value
+            is_byonm: options.use_byonm(),
+            maybe_vendor_dir: None,
+          });
         Ok(Arc::new(deno::deno_resolver::graph::DenoResolver::new(
           deno_maybe_sync::new_rc(raw_resolver),
           deno::cache::CliSys::default(),
           Default::default(), // found_package_json_dep_flag
-          None, // on_warning callback
+          None,               // on_warning callback
         )))
       })
       .await
@@ -592,27 +624,38 @@ impl EmitterFactory {
               // Create an upstream NpmResolutionCell from the snapshot
               use deno::deno_resolver::npm::managed::NpmResolutionCell;
               let npm_resolution_cell = NpmResolutionCell::new(snapshot);
-              let npm_resolution = deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
+              let npm_resolution =
+                deno_maybe_sync::MaybeArc::from(Arc::new(npm_resolution_cell));
 
               // Get node_modules path from the CLI resolver
-              let maybe_node_modules_path = inner.maybe_node_modules_path().map(|p| p.to_path_buf());
+              let maybe_node_modules_path =
+                inner.maybe_node_modules_path().map(|p| p.to_path_buf());
 
               // Create upstream ManagedNpmResolver
-              use deno::deno_resolver::npm::managed::{ManagedNpmResolver, ManagedNpmResolverCreateOptions};
-              let upstream_resolver = ManagedNpmResolver::<deno::cache::CliSys>::new(ManagedNpmResolverCreateOptions {
-                npm_cache_dir: self.npm_cache_dir()?.clone(),
-                sys: deno::cache::CliSys::default(),
-                maybe_node_modules_path,
-                npm_system_info: inner.npm_system_info().clone(),
-                npmrc: self.resolved_npm_rc()?.clone(),
-                npm_resolution,
-              });
+              use deno::deno_resolver::npm::managed::{
+                ManagedNpmResolver, ManagedNpmResolverCreateOptions,
+              };
+              let upstream_resolver =
+                ManagedNpmResolver::<deno::cache::CliSys>::new(
+                  ManagedNpmResolverCreateOptions {
+                    npm_cache_dir: self.npm_cache_dir()?.clone(),
+                    sys: deno::cache::CliSys::default(),
+                    maybe_node_modules_path,
+                    npm_system_info: inner.npm_system_info().clone(),
+                    npmrc: self.resolved_npm_rc()?.clone(),
+                    npm_resolution,
+                  },
+                );
 
-              deno::deno_resolver::npm::NpmResolver::Managed(new_rc(upstream_resolver))
+              deno::deno_resolver::npm::NpmResolver::Managed(new_rc(
+                upstream_resolver,
+              ))
             }
             deno::npm::InnerCliNpmResolverRef::Byonm(inner) => {
               // CliByonmNpmResolver IS the upstream ByonmNpmResolver<RealSys>
-              deno::deno_resolver::npm::NpmResolver::Byonm(new_rc(inner.clone()))
+              deno::deno_resolver::npm::NpmResolver::Byonm(new_rc(
+                inner.clone(),
+              ))
             }
           };
           Ok(Arc::new(node_resolver::NodeResolver::new(
@@ -620,7 +663,10 @@ impl EmitterFactory {
             node_resolver::DenoIsBuiltInNodeModuleChecker,
             npm_resolver_clone,
             self.pkg_json_resolver().clone(),
-            node_resolver::cache::NodeResolutionSys::new(deno::cache::CliSys::default(), None),
+            node_resolver::cache::NodeResolutionSys::new(
+              deno::cache::CliSys::default(),
+              None,
+            ),
             Default::default(), // NodeResolverOptions
           )))
         }
@@ -629,10 +675,14 @@ impl EmitterFactory {
       .await
   }
 
-  pub fn pkg_json_resolver(&self) -> &Arc<node_resolver::PackageJsonResolver<CliSys>> {
+  pub fn pkg_json_resolver(
+    &self,
+  ) -> &Arc<node_resolver::PackageJsonResolver<CliSys>> {
     self.pkg_json_resolver.get_or_init(|| {
       Arc::new(node_resolver::PackageJsonResolver::new(
-        deno::cache::CliSys::default(), None))
+        deno::cache::CliSys::default(),
+        None,
+      ))
     })
   }
 

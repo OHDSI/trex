@@ -8,17 +8,17 @@ use std::rc::Rc;
 
 use bytes::Bytes;
 use bytes::BytesMut;
-use deno_error::JsErrorBox;
 use deno_core::AsyncRefCell;
 use deno_core::AsyncResult;
 use deno_core::CancelHandle;
 use deno_core::CancelTryFuture;
 use deno_core::RcRef;
 use deno_core::Resource;
+use deno_error::JsErrorBox;
 use httparse::Status;
+use hyper::Response;
 use hyper::header::HeaderName;
 use hyper::header::HeaderValue;
-use hyper::Response;
 use memmem::Searcher;
 use memmem::TwoWaySearcher;
 use once_cell::sync::OnceCell;
@@ -61,7 +61,10 @@ impl UpgradeStream {
     async {
       let read = RcRef::map(self, |this| &this.read);
       let mut read = read.borrow_mut().await;
-      Pin::new(&mut *read).read(buf).await.map_err(JsErrorBox::from_err)
+      Pin::new(&mut *read)
+        .read(buf)
+        .await
+        .map_err(JsErrorBox::from_err)
     }
     .try_or_cancel(cancel_handle)
     .await
@@ -72,7 +75,10 @@ impl UpgradeStream {
     async {
       let write = RcRef::map(self, |this| &this.write);
       let mut write = write.borrow_mut().await;
-      Pin::new(&mut *write).write(buf).await.map_err(JsErrorBox::from_err)
+      Pin::new(&mut *write)
+        .write(buf)
+        .await
+        .map_err(JsErrorBox::from_err)
     }
     .try_or_cancel(cancel_handle)
     .await
@@ -88,7 +94,10 @@ impl UpgradeStream {
 
     let total = buf1.len() + buf2.len();
     let mut bufs = [std::io::IoSlice::new(buf1), std::io::IoSlice::new(buf2)];
-    let mut nwritten = wr.write_vectored(&bufs).await.map_err(JsErrorBox::from_err)?;
+    let mut nwritten = wr
+      .write_vectored(&bufs)
+      .await
+      .map_err(JsErrorBox::from_err)?;
     if nwritten == total {
       return Ok(nwritten);
     }
@@ -96,12 +105,17 @@ impl UpgradeStream {
     // Slightly more optimized than (unstable) write_all_vectored for 2 iovecs.
     while nwritten <= buf1.len() {
       bufs[0] = std::io::IoSlice::new(&buf1[nwritten..]);
-      nwritten += wr.write_vectored(&bufs).await.map_err(JsErrorBox::from_err)?;
+      nwritten += wr
+        .write_vectored(&bufs)
+        .await
+        .map_err(JsErrorBox::from_err)?;
     }
 
     // First buffer out of the way.
     if nwritten < total && nwritten > buf1.len() {
-      wr.write_all(&buf2[nwritten - buf1.len()..]).await.map_err(JsErrorBox::from_err)?;
+      wr.write_all(&buf2[nwritten - buf1.len()..])
+        .await
+        .map_err(JsErrorBox::from_err)?;
     }
 
     Ok(total)
@@ -121,7 +135,9 @@ fn parse_response<T: Default>(
     .map_err(|e| JsErrorBox::type_error(e.to_string()))?;
   match status {
     Status::Complete((index, parsed)) => {
-      let mut resp = Response::builder().status(101).body(T::default())
+      let mut resp = Response::builder()
+        .status(101)
+        .body(T::default())
         .map_err(|e| JsErrorBox::type_error(e.to_string()))?;
       for header in parsed.iter() {
         resp.headers_mut().append(
@@ -129,8 +145,9 @@ fn parse_response<T: Default>(
             .map_err(|e| JsErrorBox::type_error(e.to_string()))?,
           HeaderValue::from_str(
             std::str::from_utf8(header.value)
-              .map_err(|e| JsErrorBox::type_error(e.to_string()))?
-          ).map_err(|e| JsErrorBox::type_error(e.to_string()))?,
+              .map_err(|e| JsErrorBox::type_error(e.to_string()))?,
+          )
+          .map_err(|e| JsErrorBox::type_error(e.to_string()))?,
         );
       }
       Ok((index, resp))
@@ -245,9 +262,9 @@ impl<T: Default> WebSocketUpgrade<T> {
           Ok(None)
         }
       }
-      Complete => {
-        Err(JsErrorBox::type_error("attempted to write to completed upgrade buffer"))
-      }
+      Complete => Err(JsErrorBox::type_error(
+        "attempted to write to completed upgrade buffer",
+      )),
     }
   }
 }

@@ -1,8 +1,8 @@
 use std::ffi::c_void;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 
 use deno_core::v8;
 use deno_core::v8::UniqueRef;

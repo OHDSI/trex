@@ -195,13 +195,21 @@ impl FileSystem for DenoCompileFileSystem {
     RealFs.lchmod_sync(path, mode)
   }
   #[cfg(unix)]
-  async fn lchmod_async(&self, path: CheckedPathBuf, mode: u32) -> FsResult<()> {
+  async fn lchmod_async(
+    &self,
+    path: CheckedPathBuf,
+    mode: u32,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&*path)?;
     RealFs.lchmod_async(path, mode).await
   }
   #[cfg(not(unix))]
-  async fn lchmod_async(&self, path: CheckedPathBuf, mode: i32) -> FsResult<()> {
+  async fn lchmod_async(
+    &self,
+    path: CheckedPathBuf,
+    mode: i32,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&*path)?;
     RealFs.lchmod_async(path, mode).await
@@ -254,13 +262,21 @@ impl FileSystem for DenoCompileFileSystem {
     self.error_if_in_vfs(&**path)?;
     RealFs.remove_sync(path, recursive)
   }
-  async fn remove_async(&self, path: CheckedPathBuf, recursive: bool) -> FsResult<()> {
+  async fn remove_async(
+    &self,
+    path: CheckedPathBuf,
+    recursive: bool,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&*path)?;
     RealFs.remove_async(path, recursive).await
   }
 
-  fn copy_file_sync(&self, oldpath: &CheckedPath, newpath: &CheckedPath) -> FsResult<()> {
+  fn copy_file_sync(
+    &self,
+    oldpath: &CheckedPath,
+    newpath: &CheckedPath,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&**newpath)?;
     if self.0.is_path_within(&**oldpath) {
@@ -305,7 +321,11 @@ impl FileSystem for DenoCompileFileSystem {
 
     RealFs.cp_sync(from, to)
   }
-  async fn cp_async(&self, from: CheckedPathBuf, to: CheckedPathBuf) -> FsResult<()> {
+  async fn cp_async(
+    &self,
+    from: CheckedPathBuf,
+    to: CheckedPathBuf,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&*to)?;
 
@@ -371,7 +391,10 @@ impl FileSystem for DenoCompileFileSystem {
       RealFs.read_dir_sync(path)
     }
   }
-  async fn read_dir_async(&self, path: CheckedPathBuf) -> FsResult<Vec<FsDirEntry>> {
+  async fn read_dir_async(
+    &self,
+    path: CheckedPathBuf,
+  ) -> FsResult<Vec<FsDirEntry>> {
     if self.0.is_path_within(&*path) {
       Ok(self.0.read_dir(&*path)?)
     } else {
@@ -380,7 +403,11 @@ impl FileSystem for DenoCompileFileSystem {
     }
   }
 
-  fn rename_sync(&self, oldpath: &CheckedPath, newpath: &CheckedPath) -> FsResult<()> {
+  fn rename_sync(
+    &self,
+    oldpath: &CheckedPath,
+    newpath: &CheckedPath,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&**oldpath)?;
     self.error_if_in_vfs(&**newpath)?;
@@ -397,7 +424,11 @@ impl FileSystem for DenoCompileFileSystem {
     RealFs.rename_async(oldpath, newpath).await
   }
 
-  fn link_sync(&self, oldpath: &CheckedPath, newpath: &CheckedPath) -> FsResult<()> {
+  fn link_sync(
+    &self,
+    oldpath: &CheckedPath,
+    newpath: &CheckedPath,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&**oldpath)?;
     self.error_if_in_vfs(&**newpath)?;
@@ -459,7 +490,11 @@ impl FileSystem for DenoCompileFileSystem {
     self.error_if_in_vfs(&**path)?;
     RealFs.truncate_sync(path, len)
   }
-  async fn truncate_async(&self, path: CheckedPathBuf, len: u64) -> FsResult<()> {
+  async fn truncate_async(
+    &self,
+    path: CheckedPathBuf,
+    len: u64,
+  ) -> FsResult<()> {
     self.error_if_no_use_real_fs(false)?;
     self.error_if_in_vfs(&*path)?;
     RealFs.truncate_async(path, len).await

@@ -143,7 +143,9 @@ pub struct ModuleInfoCacheModuleAnalyzer<'a> {
 }
 
 #[async_trait::async_trait(?Send)]
-impl<'a> deno_graph::analysis::ModuleAnalyzer for ModuleInfoCacheModuleAnalyzer<'a> {
+impl<'a> deno_graph::analysis::ModuleAnalyzer
+  for ModuleInfoCacheModuleAnalyzer<'a>
+{
   async fn analyze(
     &self,
     specifier: &ModuleSpecifier,

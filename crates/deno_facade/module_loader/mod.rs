@@ -2,12 +2,12 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use deno::deno_npm::resolution::ValidSerializedNpmResolutionSnapshot;
 use deno::PermissionsContainer;
+use deno::deno_npm::resolution::ValidSerializedNpmResolutionSnapshot;
+use deno::deno_resolver::npm::DenoInNpmPackageChecker;
 use deno_core::ModuleLoader;
 use eszip_trait::EszipStaticFiles;
 use ext_node::NodeExtInitServices;
-use deno::deno_resolver::npm::DenoInNpmPackageChecker;
 use fs::virtual_fs::FileBackedVfs;
 use url::Url;
 
@@ -19,7 +19,11 @@ pub mod util;
 pub struct RuntimeProviders {
   pub migrated: bool,
   pub module_loader: Rc<dyn ModuleLoader>,
-  pub node_services: NodeExtInitServices<DenoInNpmPackageChecker, deno::deno_resolver::npm::NpmResolver<deno::cache::CliSys>, deno::cache::CliSys>,
+  pub node_services: NodeExtInitServices<
+    DenoInNpmPackageChecker,
+    deno::deno_resolver::npm::NpmResolver<deno::cache::CliSys>,
+    deno::cache::CliSys,
+  >,
   pub npm_snapshot: Option<ValidSerializedNpmResolutionSnapshot>,
   pub permissions: PermissionsContainer,
   pub metadata: Metadata,

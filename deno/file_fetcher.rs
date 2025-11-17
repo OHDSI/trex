@@ -9,10 +9,10 @@ use crate::http_util::HttpClientProvider;
 
 use deno_ast::MediaType;
 use deno_cache_dir::HttpCache;
+use deno_core::ModuleSpecifier;
 use deno_core::error::AnyError;
 use deno_core::parking_lot::Mutex;
 use deno_core::url::Url;
-use deno_core::ModuleSpecifier;
 use deno_graph::source::LoaderChecksum;
 use deno_path_util::url_to_file_path;
 use deno_permissions::PermissionsContainer;
@@ -444,7 +444,8 @@ impl FileFetcher {
       } else {
         Err(anyhow::anyhow!(
           "Import '{}' failed: {}",
-          specifier, err_str
+          specifier,
+          err_str
         ))
       }
     }

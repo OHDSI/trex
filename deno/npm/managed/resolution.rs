@@ -8,6 +8,10 @@ use capacity_builder::StringBuilder;
 use deno_core::error::AnyError;
 use deno_lockfile::NpmPackageDependencyLockfileInfo;
 use deno_lockfile::NpmPackageLockfileInfo;
+use deno_npm::NpmPackageCacheFolderId;
+use deno_npm::NpmPackageId;
+use deno_npm::NpmResolutionPackage;
+use deno_npm::NpmSystemInfo;
 use deno_npm::registry::NpmRegistryApi;
 use deno_npm::resolution::AddPkgReqsOptions;
 use deno_npm::resolution::NpmPackagesPartitioned;
@@ -18,15 +22,11 @@ use deno_npm::resolution::PackageNotFoundFromReferrerError;
 use deno_npm::resolution::PackageNvNotFoundError;
 use deno_npm::resolution::PackageReqNotFoundError;
 use deno_npm::resolution::ValidSerializedNpmResolutionSnapshot;
-use deno_npm::NpmPackageCacheFolderId;
-use deno_npm::NpmPackageId;
-use deno_npm::NpmResolutionPackage;
-use deno_npm::NpmSystemInfo;
+use deno_semver::SmallStackString;
+use deno_semver::VersionReq;
 use deno_semver::jsr::JsrDepPackageReq;
 use deno_semver::package::PackageNv;
 use deno_semver::package::PackageReq;
-use deno_semver::SmallStackString;
-use deno_semver::VersionReq;
 
 use crate::args::CliLockfile;
 use crate::npm::CliNpmRegistryInfoProvider;
@@ -118,7 +118,11 @@ impl NpmResolution {
             "Unmet peer dependency: {} (resolved: {}) required by {}",
             d.dependency,
             d.resolved,
-            d.ancestors.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" -> ")
+            d.ancestors
+              .iter()
+              .map(|a| a.to_string())
+              .collect::<Vec<_>>()
+              .join(" -> ")
           )
         })
         .collect(),
@@ -325,7 +329,11 @@ async fn add_package_reqs_to_snapshot(
       // try again with forced reloading
       let snapshot = get_new_snapshot();
       snapshot
-        .add_pkg_reqs(registry_info_provider.as_ref(), get_add_pkg_reqs_options(package_reqs, &version_resolver), None)
+        .add_pkg_reqs(
+          registry_info_provider.as_ref(),
+          get_add_pkg_reqs_options(package_reqs, &version_resolver),
+          None,
+        )
         .await
     }
     _ => result,
@@ -390,7 +398,16 @@ fn npm_package_to_lockfile_info(
 
   NpmPackageLockfileInfo {
     serialized_id: pkg.id.as_serialized(),
-    integrity: Some(pkg.dist.as_ref().unwrap().integrity().for_lockfile().expect("integrity").to_string()),
+    integrity: Some(
+      pkg
+        .dist
+        .as_ref()
+        .unwrap()
+        .integrity()
+        .for_lockfile()
+        .expect("integrity")
+        .to_string(),
+    ),
     dependencies,
     optional_dependencies: vec![],
     optional_peers: vec![],

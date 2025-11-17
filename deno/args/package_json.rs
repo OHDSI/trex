@@ -9,9 +9,9 @@ use deno_core::url::Url;
 use deno_package_json::PackageJsonDepValue;
 use deno_package_json::PackageJsonDepValueParseError;
 use deno_package_json::PackageJsonDepWorkspaceReq;
+use deno_semver::VersionReq;
 use deno_semver::npm::NpmPackageReqReference;
 use deno_semver::package::PackageReq;
-use deno_semver::VersionReq;
 use thiserror::Error;
 
 #[derive(Debug)]

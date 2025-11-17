@@ -1031,9 +1031,7 @@ impl sys_traits::BaseFsRead for DenoFsNodeResolverEnv {
   fn base_fs_read(&self, path: &Path) -> std::io::Result<Cow<'static, [u8]>> {
     self
       .fs
-      .read_file_sync(&CheckedPath::unsafe_new(Cow::Borrowed(
-        path,
-      )))
+      .read_file_sync(&CheckedPath::unsafe_new(Cow::Borrowed(path)))
       .map(|bytes| Cow::Owned(bytes.into_owned()))
       .map_err(|err| err.into_io_error())
   }
@@ -1071,12 +1069,13 @@ impl sys_traits::BaseFsMetadata for DenoFsNodeResolverEnv {
 }
 
 impl sys_traits::BaseFsCanonicalize for DenoFsNodeResolverEnv {
-  fn base_fs_canonicalize(&self, path: &Path) -> std::io::Result<std::path::PathBuf> {
+  fn base_fs_canonicalize(
+    &self,
+    path: &Path,
+  ) -> std::io::Result<std::path::PathBuf> {
     self
       .fs
-      .realpath_sync(&CheckedPath::unsafe_new(Cow::Borrowed(
-        path,
-      )))
+      .realpath_sync(&CheckedPath::unsafe_new(Cow::Borrowed(path)))
       .map_err(|err| err.into_io_error())
   }
 }
@@ -1087,13 +1086,12 @@ impl sys_traits::BaseFsReadDir for DenoFsNodeResolverEnv {
   fn base_fs_read_dir(
     &self,
     path: &Path,
-  ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<Self::ReadDirEntry>>>>
-  {
+  ) -> std::io::Result<
+    Box<dyn Iterator<Item = std::io::Result<Self::ReadDirEntry>>>,
+  > {
     let entries = self
       .fs
-      .read_dir_sync(&CheckedPath::unsafe_new(Cow::Borrowed(
-        path,
-      )))
+      .read_dir_sync(&CheckedPath::unsafe_new(Cow::Borrowed(path)))
       .map_err(|err| err.into_io_error())?;
 
     let parent_path = path.to_path_buf();
@@ -1102,9 +1100,7 @@ impl sys_traits::BaseFsReadDir for DenoFsNodeResolverEnv {
     let iter = entries.into_iter().map(move |entry| {
       let entry_path = parent_path.join(&entry.name);
       let stat = fs
-        .stat_sync(&CheckedPath::unsafe_new(Cow::Borrowed(
-          &entry_path,
-        )))
+        .stat_sync(&CheckedPath::unsafe_new(Cow::Borrowed(&entry_path)))
         .map_err(|err| err.into_io_error())?;
 
       Ok(DenoFsDirEntry {
@@ -1129,7 +1125,10 @@ impl sys_traits::EnvCurrentDir for DenoFsNodeResolverEnv {
 }
 
 impl sys_traits::BaseEnvVar for DenoFsNodeResolverEnv {
-  fn base_env_var_os(&self, key: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+  fn base_env_var_os(
+    &self,
+    key: &std::ffi::OsStr,
+  ) -> Option<std::ffi::OsString> {
     std::env::var_os(key)
   }
 }

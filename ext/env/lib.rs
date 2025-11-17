@@ -1,7 +1,7 @@
 use deno::PermissionsContainer;
-use deno_error::JsErrorBox;
-use deno_core::op2;
 use deno_core::OpState;
+use deno_core::op2;
+use deno_error::JsErrorBox;
 use ext_node::NODE_ENV_VAR_ALLOWLIST;
 
 use std::collections::HashMap;
@@ -36,7 +36,9 @@ fn op_set_env(
 #[op2]
 #[serde]
 fn op_env(state: &mut OpState) -> Result<HashMap<String, String>, JsErrorBox> {
-  state.borrow_mut::<PermissionsContainer>().check_env_all()
+  state
+    .borrow_mut::<PermissionsContainer>()
+    .check_env_all()
     .map_err(|e| JsErrorBox::from_err(e))?;
   let env_vars = state.borrow::<EnvVars>();
   Ok(env_vars.0.clone())
@@ -51,7 +53,9 @@ fn op_get_env(
   let skip_permission_check = NODE_ENV_VAR_ALLOWLIST.contains(&key);
 
   if !skip_permission_check {
-    state.borrow_mut::<PermissionsContainer>().check_env(&key)
+    state
+      .borrow_mut::<PermissionsContainer>()
+      .check_env(&key)
       .map_err(|e| JsErrorBox::from_err(e))?;
   }
 

@@ -13,24 +13,24 @@ use deno_core::error::AnyError;
 use deno_core::unsync::sync::AtomicFlag;
 use deno_core::url::Url;
 use deno_fs::FileSystem;
+use deno_npm::NpmPackageId;
+use deno_npm::NpmResolutionPackage;
+use deno_npm::NpmSystemInfo;
 use deno_npm::npm_rc::ResolvedNpmRc;
 use deno_npm::registry::NpmPackageInfo;
 use deno_npm::registry::NpmRegistryApi;
 use deno_npm::resolution::NpmResolutionSnapshot;
 use deno_npm::resolution::PackageReqNotFoundError;
 use deno_npm::resolution::ValidSerializedNpmResolutionSnapshot;
-use deno_npm::NpmPackageId;
-use deno_npm::NpmResolutionPackage;
-use deno_npm::NpmSystemInfo;
 use deno_resolver::npm::ResolvePkgFolderFromDenoReqError;
 use deno_semver::package::PackageNv;
 use deno_semver::package::PackageReq;
 use ext_node::NodePermissions;
-use node_resolver::errors::PackageFolderResolveError;
-use node_resolver::errors::PackageFolderResolveIoError;
-use node_resolver::UrlOrPathRef;
 use node_resolver::InNpmPackageChecker;
 use node_resolver::NpmPackageFolderResolver;
+use node_resolver::UrlOrPathRef;
+use node_resolver::errors::PackageFolderResolveError;
+use node_resolver::errors::PackageFolderResolveIoError;
 use resolution::AddPkgReqsResult;
 
 use crate::args::CliLockfile;
@@ -42,8 +42,8 @@ use crate::util::progress_bar::ProgressBar;
 use crate::util::progress_bar::ProgressBarStyle;
 
 use self::resolution::NpmResolution;
-use self::resolvers::create_npm_fs_resolver;
 use self::resolvers::NpmPackageFsResolver;
+use self::resolvers::create_npm_fs_resolver;
 
 use super::CliNpmCache;
 use super::CliNpmCacheHttpClient;
@@ -219,7 +219,8 @@ async fn snapshot_from_lockfile(
     deno_npm::resolution::SnapshotFromLockfileParams {
       link_packages: &link_packages,
       lockfile: &lock,
-      default_tarball_url: &deno_npm::resolution::NpmRegistryDefaultTarballUrlProvider,
+      default_tarball_url:
+        &deno_npm::resolution::NpmRegistryDefaultTarballUrlProvider,
     },
   )?;
 
@@ -539,7 +540,9 @@ impl ManagedCliNpmResolver {
           // only warn for this one
           log::warn!("{} {}\n    at {}", "Warning", err.source, err.location)
         }
-        deno_package_json::PackageJsonDepValueParseErrorKind::JsrVersionReq(_) => {
+        deno_package_json::PackageJsonDepValueParseErrorKind::JsrVersionReq(
+          _,
+        ) => {
           return Err(Box::new(err.clone()));
         }
       }
@@ -650,7 +653,12 @@ impl NpmPackageFolderResolver for ManagedCliNpmResolver {
           referrer: referrer.display(),
           source: err,
         })?;
-    log::debug!("Resolved {} from {} to {}", name, referrer.display(), path.display());
+    log::debug!(
+      "Resolved {} from {} to {}",
+      name,
+      referrer.display(),
+      path.display()
+    );
     Ok(path)
   }
 }
@@ -666,16 +674,17 @@ impl crate::resolver::CliNpmReqResolver for ManagedCliNpmResolver {
       .map_err(|err| ResolvePkgFolderFromDenoReqError::Managed(err.into()))?;
     // Edge runtime's resolve_pkg_folder_from_pkg_id returns AnyError instead of
     // ResolvePkgFolderFromPkgIdError, so we propagate it directly without wrapping
-    self.resolve_pkg_folder_from_pkg_id(&pkg_id).map_err(|_err| {
-      // TODO: proper error conversion when aligning with upstream error types
-      // Note: This creates a PackageReqNotFoundError even though the req was found,
-      // because resolve_pkg_folder_from_pkg_id returns AnyError instead of
-      // the proper ResolvePkgFolderFromPkgIdError type.
-      ResolvePkgFolderFromDenoReqError::Managed(
-        deno_npm::resolution::PackageReqNotFoundError(req.clone())
-        .into(),
-      )
-    })
+    self
+      .resolve_pkg_folder_from_pkg_id(&pkg_id)
+      .map_err(|_err| {
+        // TODO: proper error conversion when aligning with upstream error types
+        // Note: This creates a PackageReqNotFoundError even though the req was found,
+        // because resolve_pkg_folder_from_pkg_id returns AnyError instead of
+        // the proper ResolvePkgFolderFromPkgIdError type.
+        ResolvePkgFolderFromDenoReqError::Managed(
+          deno_npm::resolution::PackageReqNotFoundError(req.clone()).into(),
+        )
+      })
   }
 }
 
@@ -686,7 +695,9 @@ impl CliNpmResolver for ManagedCliNpmResolver {
     self
   }
 
-  fn into_npm_req_resolver(self: Arc<Self>) -> Arc<dyn crate::resolver::CliNpmReqResolver> {
+  fn into_npm_req_resolver(
+    self: Arc<Self>,
+  ) -> Arc<dyn crate::resolver::CliNpmReqResolver> {
     self
   }
 

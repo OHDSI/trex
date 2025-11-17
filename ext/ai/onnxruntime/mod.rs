@@ -13,13 +13,13 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use base_rt::BlockingScopeCPUUsageMetricExt;
-use deno_core::error::AnyError;
-use deno_core::op2;
-use deno_error::JsErrorBox;
 use deno_core::JsBuffer;
 use deno_core::JsRuntime;
 use deno_core::OpState;
 use deno_core::V8CrossThreadTaskSpawner;
+use deno_core::error::AnyError;
+use deno_core::op2;
+use deno_error::JsErrorBox;
 
 use model::Model;
 use model::ModelInfo;
@@ -45,11 +45,15 @@ pub async fn op_ai_ort_init_session(
   let model = match model_bytes_or_url {
     Ok(model_url) => {
       trace!(kind = "url", url = %model_url);
-      Model::from_url(model_url).await.map_err(|e| JsErrorBox::generic(e.to_string()))?
+      Model::from_url(model_url)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?
     }
     Err(_) => {
       trace!(kind = "bytes", len = model_bytes.len());
-      Model::from_bytes(&model_bytes).await.map_err(|e| JsErrorBox::generic(e.to_string()))?
+      Model::from_bytes(&model_bytes)
+        .await
+        .map_err(|e| JsErrorBox::generic(e.to_string()))?
     }
   };
 
@@ -72,14 +76,15 @@ pub async fn op_ai_ort_run_session(
   #[string] model_id: String,
   #[serde] input_values: HashMap<String, JsTensor>,
 ) -> Result<HashMap<String, ToJsTensor>, JsErrorBox> {
-  let model = Model::from_id(&model_id)
-    .await
-    .ok_or_else(|| JsErrorBox::generic(format!("could not found session for id: {model_id:?}")))?;
+  let model = Model::from_id(&model_id).await.ok_or_else(|| {
+    JsErrorBox::generic(format!("could not found session for id: {model_id:?}"))
+  })?;
 
   let model_session = model.get_session();
   let cross_thread_spawner =
     state.borrow().borrow::<V8CrossThreadTaskSpawner>().clone();
-  let (tx, rx) = oneshot::channel::<Result<HashMap<String, ToJsTensor>, String>>();
+  let (tx, rx) =
+    oneshot::channel::<Result<HashMap<String, ToJsTensor>, String>>();
 
   cross_thread_spawner.spawn(move |state| {
     let input_values = input_values
@@ -133,6 +138,9 @@ pub async fn op_ai_ort_run_session(
   match rx.await {
     Ok(Ok(result)) => Ok(result),
     Ok(Err(e)) => Err(JsErrorBox::generic(e)),
-    Err(e) => Err(JsErrorBox::generic(format!("failed to get inference result: {}", e))),
+    Err(e) => Err(JsErrorBox::generic(format!(
+      "failed to get inference result: {}",
+      e
+    ))),
   }
 }

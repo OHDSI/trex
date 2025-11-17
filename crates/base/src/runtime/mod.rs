@@ -69,8 +69,6 @@ use deno_core::OpState;
 use deno_core::PollEventLoopOptions;
 use deno_core::ResolutionKind;
 use deno_core::RuntimeOptions;
-use deno_resolver::npm;
-use sys_traits;
 use deno_facade::cert_provider::get_root_cert_store_provider;
 use deno_facade::generate_binary_eszip;
 use deno_facade::metadata::Entrypoint;
@@ -80,6 +78,7 @@ use deno_facade::module_loader::RuntimeProviders;
 use deno_facade::EmitterFactory;
 use deno_facade::EszipPayloadKind;
 use deno_facade::Metadata;
+use deno_resolver::npm;
 use ext_event_worker::events::WorkerEventWithMetadata;
 use ext_runtime::external_memory::CustomAllocator;
 use ext_runtime::MemCheckWaker;
@@ -103,6 +102,7 @@ use permissions::get_default_permissions;
 use scopeguard::ScopeGuard;
 use serde::Serialize;
 use strum::IntoStaticStr;
+use sys_traits;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio::time::interval;
@@ -119,6 +119,23 @@ use crate::utils::json;
 use crate::utils::units::bytes_to_display;
 use crate::utils::units::mib_to_bytes;
 use crate::utils::units::percentage_value;
+
+/// Debug state for tracking V8 isolate lock ownership without calling back into V8.
+#[derive(Debug, Default)]
+struct LockDebugState {
+  depth: u32,
+  ever_locked: bool,
+}
+
+thread_local! {
+  static LOCK_DEBUG_STATES: RefCell<HashMap<usize, LockDebugState>> =
+    RefCell::new(HashMap::new());
+}
+
+#[inline]
+fn isolate_debug_key(isolate: &v8::Isolate) -> usize {
+  isolate as *const v8::Isolate as usize
+}
 use crate::worker::supervisor::CPUUsage;
 use crate::worker::supervisor::CPUUsageMetrics;
 use crate::worker::DuplexStreamEntry;
@@ -362,6 +379,7 @@ impl RunOptionsBuilder {
 
 fn cleanup_js_runtime(runtime: &mut JsRuntime) {
   let isolate = runtime.v8_isolate();
+  let isolate_key = isolate_debug_key(isolate);
 
   assert_isolate_not_locked(isolate);
   let locker = unsafe {
@@ -373,6 +391,10 @@ fn cleanup_js_runtime(runtime: &mut JsRuntime) {
   {
     let _scope = v8::HandleScope::new(runtime.v8_isolate());
   }
+
+  LOCK_DEBUG_STATES.with(|states| {
+    states.borrow_mut().remove(&isolate_key);
+  });
 }
 
 pub struct DenoRuntime<RuntimeContext = DefaultRuntimeContext> {
@@ -429,7 +451,20 @@ impl<RuntimeContext> DenoRuntime<RuntimeContext> {
 
 #[inline]
 fn assert_isolate_not_locked(isolate: &v8::Isolate) {
-  assert!(!Locker::is_locked(isolate));
+  // Only check the lock state if we've ever taken the lock on this thread.
+  // This avoids calling into V8's ThreadManager before it's initialized,
+  // which would segfault in v8::Locker::IsLocked during bootstrap.
+  let isolate_key = isolate_debug_key(isolate);
+  LOCK_DEBUG_STATES.with(|states| {
+    if let Some(state) = states.borrow().get(&isolate_key) {
+      if state.ever_locked {
+        assert_eq!(
+          state.depth, 0,
+          "isolate must not be locked when entering this scope"
+        );
+      }
+    }
+  });
 }
 
 impl<RuntimeContext> DenoRuntime<RuntimeContext>
@@ -1034,11 +1069,13 @@ where
 
             let context = locker.main_context();
             // New V8 API requires pinning scopes
-            let scope_storage = std::pin::pin!(v8::HandleScope::new(locker.v8_isolate()));
+            let scope_storage =
+              std::pin::pin!(v8::HandleScope::new(locker.v8_isolate()));
             let mut handle_scope = scope_storage.init();
             let context_local = v8::Local::new(&handle_scope, context);
             // Create ContextScope to get HandleScope<Context> instead of HandleScope<()>
-            let mut context_scope = v8::ContextScope::new(&mut handle_scope, context_local);
+            let mut context_scope =
+              v8::ContextScope::new(&mut handle_scope, context_local);
             let scope = &mut context_scope;
             let global_obj = context_local.global(scope);
             let bootstrap_str = v8::String::new_external_onebyte_static(
@@ -1774,12 +1811,26 @@ trait JsRuntimeLockerGuard {
     &'l mut self,
   ) -> scopeguard::ScopeGuard<&'l mut Self, impl FnOnce(&'l mut Self) + 'l> {
     let js_runtime = self.js_runtime();
-    let locker =
-      Locker::new(std::mem::transmute::<&mut Isolate, &mut Isolate>(
-        js_runtime.v8_isolate(),
-      ));
+    let isolate = js_runtime.v8_isolate();
 
-    scopeguard::guard(self, move |_| {
+    let isolate_key = isolate_debug_key(isolate);
+    LOCK_DEBUG_STATES.with(|states| {
+      let mut states = states.borrow_mut();
+      let state = states.entry(isolate_key).or_default();
+      state.ever_locked = true;
+      state.depth = state.depth.saturating_add(1);
+    });
+
+    let locker =
+      Locker::new(std::mem::transmute::<&mut Isolate, &mut Isolate>(isolate));
+
+    scopeguard::guard(self, move |_guard| {
+      // Update debug state on exit
+      LOCK_DEBUG_STATES.with(|states| {
+        if let Some(state) = states.borrow_mut().get_mut(&isolate_key) {
+          state.depth = state.depth.saturating_sub(1);
+        }
+      });
       drop(locker);
     })
   }
@@ -1938,7 +1989,7 @@ where
     v8::callback_scope!(unsafe callback_scope, isolate);
     // Convert global context to local
     let local_context = v8::Local::new(callback_scope, &global_context.0);
-    // Create another callback scope from the context  
+    // Create another callback scope from the context
     v8::callback_scope!(unsafe context_scope, local_context);
 
     v8::tc_scope!(let tc_scope, context_scope);
@@ -2001,14 +2052,12 @@ where
     );
 
     let undefined = v8::undefined(tc_scope);
-    let fn_args = vec![
-      v8::String::new_external_onebyte_static(
-        tc_scope,
-        <&'static str>::from(reason).as_bytes(),
-      )
-      .unwrap()
-      .into(),
-    ];
+    let fn_args = vec![v8::String::new_external_onebyte_static(
+      tc_scope,
+      <&'static str>::from(reason).as_bytes(),
+    )
+    .unwrap()
+    .into()];
     let fn_ret = event_fn.call(tc_scope, undefined.into(), &fn_args);
 
     if tc_scope.has_caught() {
@@ -2135,7 +2184,9 @@ pub fn import_meta_resolve_callback(
   specifier: String,
   referrer: String,
 ) -> Result<ModuleSpecifier, AnyError> {
-  loader.resolve(&specifier, &referrer, ResolutionKind::DynamicImport).map_err(Into::into)
+  loader
+    .resolve(&specifier, &referrer, ResolutionKind::DynamicImport)
+    .map_err(Into::into)
 }
 
 fn with_cpu_metrics_guard<'l, F, R>(

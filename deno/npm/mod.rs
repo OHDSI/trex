@@ -29,7 +29,8 @@ use deno_npm_cache::NpmCacheHttpClientBytesResponse;
 use deno_npm_cache::NpmCacheHttpClientResponse;
 
 pub type CliNpmSys = RealSys;
-pub type CliNpmTarballCache = deno_npm_cache::TarballCache<CliNpmCacheHttpClient, CliNpmSys>;
+pub type CliNpmTarballCache =
+  deno_npm_cache::TarballCache<CliNpmCacheHttpClient, CliNpmSys>;
 pub type CliNpmCache = deno_npm_cache::NpmCache<CliNpmSys>;
 pub type CliNpmRegistryInfoProvider =
   deno_npm_cache::RegistryInfoProvider<CliNpmCacheHttpClient, CliNpmSys>;
@@ -174,11 +175,15 @@ pub enum InnerCliNpmResolverRef<'a> {
   Byonm(&'a CliByonmNpmResolver),
 }
 
-pub trait CliNpmResolver: NpmPackageFolderResolver + crate::resolver::CliNpmReqResolver {
+pub trait CliNpmResolver:
+  NpmPackageFolderResolver + crate::resolver::CliNpmReqResolver
+{
   fn into_npm_pkg_folder_resolver(
     self: Arc<Self>,
   ) -> Arc<dyn NpmPackageFolderResolver>;
-  fn into_npm_req_resolver(self: Arc<Self>) -> Arc<dyn crate::resolver::CliNpmReqResolver>;
+  fn into_npm_req_resolver(
+    self: Arc<Self>,
+  ) -> Arc<dyn crate::resolver::CliNpmReqResolver>;
   fn into_maybe_byonm(self: Arc<Self>) -> Option<Arc<CliByonmNpmResolver>> {
     None
   }

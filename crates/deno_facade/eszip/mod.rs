@@ -6,9 +6,9 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use anyhow::Context;
 use anyhow::anyhow;
 use anyhow::bail;
-use anyhow::Context;
 use deno::deno_ast;
 use deno::deno_fs::FileSystem;
 use deno::deno_fs::RealFs;
@@ -17,48 +17,48 @@ use deno::deno_npm::NpmSystemInfo;
 use deno::deno_package_json;
 use deno::deno_path_util;
 use deno::deno_path_util::normalize_path;
-use deno::npm::InnerCliNpmResolverRef;
 use deno::deno_permissions::CheckedPathBuf;
+use deno::npm::InnerCliNpmResolverRef;
 use deno::standalone::binary::NodeModules;
 use deno::standalone::binary::SerializedResolverWorkspaceJsrPackage;
 use deno::standalone::binary::SerializedWorkspaceResolver;
 use deno::standalone::binary::SerializedWorkspaceResolverImportMap;
 use deno::tools::compile;
-use deno_core::error::AnyError;
-use deno_core::serde_json;
-use deno_core::url::Url;
 use deno_core::FastString;
 use deno_core::JsBuffer;
 use deno_core::ModuleSpecifier;
+use deno_core::error::AnyError;
+use deno_core::serde_json;
+use deno_core::url::Url;
 use error::EszipError;
-use eszip::v2::EszipV2Module;
-use eszip::v2::EszipV2Modules;
-use eszip::v2::EszipV2SourceSlot;
 use eszip::EszipRelativeFileBaseUrl;
 use eszip::EszipV2;
 use eszip::Module;
 use eszip::ModuleKind;
 use eszip::ParseError;
+use eszip::v2::EszipV2Module;
+use eszip::v2::EszipV2Modules;
+use eszip::v2::EszipV2SourceSlot;
 use eszip_trait::AsyncEszipDataRead;
 use eszip_trait::SUPABASE_ESZIP_VERSION;
 use eszip_trait::SUPABASE_ESZIP_VERSION_KEY;
+use fs::VfsOpts;
 use fs::virtual_fs::VfsBuilder;
 use fs::virtual_fs::VfsEntry;
-use fs::VfsOpts;
+use futures::AsyncReadExt;
+use futures::AsyncSeekExt;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::future::OptionFuture;
 use futures::io::AllowStdIo;
 use futures::io::BufReader;
-use futures::AsyncReadExt;
-use futures::AsyncSeekExt;
-use futures::FutureExt;
 use glob::glob;
 use indexmap::IndexMap;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use scopeguard::ScopeGuard;
-use tokio::fs::create_dir_all;
 use tokio::fs::File;
+use tokio::fs::create_dir_all;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
@@ -66,9 +66,9 @@ use vfs::build_npm_vfs;
 
 use crate::emitter::EmitterFactory;
 use crate::extract_modules;
+use crate::graph::CreateGraphArgs;
 use crate::graph::create_eszip_from_graph_raw;
 use crate::graph::create_graph;
-use crate::graph::CreateGraphArgs;
 use crate::metadata::Entrypoint;
 use crate::metadata::Metadata;
 
@@ -667,9 +667,7 @@ impl EszipDataSection {
       modules,
       specifier,
       |module| match module {
-        EszipV2Module::Module {
-          source_map, ..
-        } => source_map,
+        EszipV2Module::Module { source_map, .. } => source_map,
         _ => panic!("invalid module type"),
       },
       new_slot_fn,
@@ -720,7 +718,8 @@ pub async fn generate_binary_eszip(
       Some(CreateGraphArgs::File(if !path.is_absolute() {
         let initial_cwd =
           std::env::current_dir().with_context(|| "failed getting cwd")?;
-        normalize_path(std::borrow::Cow::Borrowed(&initial_cwd.join(path))).into_owned()
+        normalize_path(std::borrow::Cow::Borrowed(&initial_cwd.join(path)))
+          .into_owned()
       } else {
         path.to_path_buf()
       }))
@@ -764,7 +763,12 @@ pub async fn generate_binary_eszip(
   .unwrap();
 
   let root_dir_url = compile::resolve_root_dir_from_specifiers(
-    emitter_factory.deno_options()?.workspace().root_dir().dir_url().as_ref(),
+    emitter_factory
+      .deno_options()?
+      .workspace()
+      .root_dir()
+      .dir_url()
+      .as_ref(),
     graph.specifiers().map(|(s, _)| s).chain(
       deno_options
         .node_modules_dir_path()
@@ -892,9 +896,12 @@ pub async fn generate_binary_eszip(
             match maybe_source {
               Some(source) => source,
               None => {
-                let checked_path = CheckedPathBuf::unsafe_new(file_path.clone());
-                RealFs.read_file_sync(&checked_path.as_checked_path())?.into_owned()
-              },
+                let checked_path =
+                  CheckedPathBuf::unsafe_new(file_path.clone());
+                RealFs
+                  .read_file_sync(&checked_path.as_checked_path())?
+                  .into_owned()
+              }
             },
           )
           .with_context(|| {

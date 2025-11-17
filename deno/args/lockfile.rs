@@ -14,9 +14,9 @@ use deno_package_json::PackageJsonDepValue;
 use deno_semver::jsr::JsrDepPackageReq;
 use ext_node::PackageJson;
 
+use crate::DenoOptionsBuilder;
 use crate::cache;
 use crate::util::fs::atomic_write_file_with_retries;
-use crate::DenoOptionsBuilder;
 
 use deno_lockfile::Lockfile;
 

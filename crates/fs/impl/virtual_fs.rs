@@ -12,12 +12,12 @@ use std::sync::Arc;
 
 use deno::util::checksum;
 use deno::util::fs::canonicalize_path;
-use deno_core::anyhow::Context;
-use deno_core::error::AnyError;
-use deno_core::parking_lot::Mutex;
 use deno_core::BufMutView;
 use deno_core::BufView;
 use deno_core::ResourceHandleFd;
+use deno_core::anyhow::Context;
+use deno_core::error::AnyError;
+use deno_core::parking_lot::Mutex;
 use deno_fs::FsDirEntry;
 use deno_io;
 use deno_io::fs::FsError;

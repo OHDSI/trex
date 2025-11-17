@@ -9,32 +9,32 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use args::discover_npmrc_from_workspace;
-use args::resolve_node_modules_folder;
 use args::CliLockfile;
 use args::NpmCachingStrategy;
 use args::TsConfigForEmit;
 use args::TsConfigType;
 use args::TypeCheckMode;
+use args::discover_npmrc_from_workspace;
+use args::resolve_node_modules_folder;
 use cache::DenoDirProvider;
 use deno_config::deno_json::NodeModulesDirMode;
 // TsConfigForEmit and TsConfigType have been removed from deno_config in Deno 2.5.6
 // use deno_config::deno_json::TsConfigForEmit;
 // use deno_config::deno_json::TsConfigType;
-use deno_resolver::workspace::CreateResolverOptions;
-use deno_resolver::workspace::PackageJsonDepResolution;
-use deno_resolver::workspace::SloppyImportsOptions;
-use deno_resolver::workspace::FsCacheOptions;
 use deno_config::workspace::VendorEnablement;
 use deno_config::workspace::WorkspaceDirectory;
 use deno_config::workspace::WorkspaceDirectoryEmptyOptions;
 use deno_config::workspace::WorkspaceDiscoverOptions;
 use deno_config::workspace::WorkspaceDiscoverStart;
-use deno_resolver::workspace::WorkspaceResolver;
-use deno_core::error::AnyError;
 use deno_core::ModuleSpecifier;
+use deno_core::error::AnyError;
 use deno_npm::npm_rc::ResolvedNpmRc;
 use deno_path_util::normalize_path;
+use deno_resolver::workspace::CreateResolverOptions;
+use deno_resolver::workspace::FsCacheOptions;
+use deno_resolver::workspace::PackageJsonDepResolution;
+use deno_resolver::workspace::SloppyImportsOptions;
+use deno_resolver::workspace::WorkspaceResolver;
 use dotenvy::from_filename;
 use file_fetcher::FileFetcher;
 use import_map::load_import_map;
@@ -319,7 +319,8 @@ impl DenoOptions {
     let start_dir = if let Some(entrypoint) = entrypoint {
       match &config {
         ConfigMode::Discover => {
-          let config_path = normalize_path(Cow::Owned(initial_cwd.join(&entrypoint)));
+          let config_path =
+            normalize_path(Cow::Owned(initial_cwd.join(&entrypoint)));
           WorkspaceDirectory::discover(
             &sys_traits::impls::RealSys,
             WorkspaceDiscoverStart::Paths(&[(&*config_path).to_path_buf()]),
@@ -390,14 +391,30 @@ fn load_env_variables_from_env_file(filename: Option<&Vec<String>>) {
   for env_file_name in env_file_names.iter().rev() {
     match from_filename(env_file_name) {
       Ok(_) => (),
-      Err(error) => {
-        match error {
-          dotenvy::Error::LineParse(line, index) => log::info!("{} Parsing failed within the specified environment file: {} at index: {} of the value: {}", "Warning", env_file_name, index, line),
-          dotenvy::Error::Io(_) => log::info!("{} The `--env-file` flag was used, but the environment file specified '{}' was not found.", "Warning", env_file_name),
-          dotenvy::Error::EnvVar(_) => log::info!("{} One or more of the environment variables isn't present or not unicode within the specified environment file: {}", "Warning",env_file_name),
-          _ => log::info!("{} Unknown failure occurred with the specified environment file: {}", "Warning", env_file_name),
-        }
-      }
+      Err(error) => match error {
+        dotenvy::Error::LineParse(line, index) => log::info!(
+          "{} Parsing failed within the specified environment file: {} at index: {} of the value: {}",
+          "Warning",
+          env_file_name,
+          index,
+          line
+        ),
+        dotenvy::Error::Io(_) => log::info!(
+          "{} The `--env-file` flag was used, but the environment file specified '{}' was not found.",
+          "Warning",
+          env_file_name
+        ),
+        dotenvy::Error::EnvVar(_) => log::info!(
+          "{} One or more of the environment variables isn't present or not unicode within the specified environment file: {}",
+          "Warning",
+          env_file_name
+        ),
+        _ => log::info!(
+          "{} Unknown failure occurred with the specified environment file: {}",
+          "Warning",
+          env_file_name
+        ),
+      },
     }
   }
 }

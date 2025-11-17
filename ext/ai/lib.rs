@@ -4,17 +4,17 @@ mod consts;
 mod onnxruntime;
 mod utils;
 
-use anyhow::anyhow;
-use anyhow::bail;
 use anyhow::Context;
 use anyhow::Error;
+use anyhow::anyhow;
+use anyhow::bail;
 use base_rt::BlockingScopeCPUUsageMetricExt;
-use deno_core::error::AnyError;
-use deno_core::op2;
-use deno_error::JsErrorBox;
 use deno_core::JsRuntime;
 use deno_core::OpState;
 use deno_core::V8CrossThreadTaskSpawner;
+use deno_core::error::AnyError;
+use deno_core::op2;
+use deno_error::JsErrorBox;
 use futures::TryFutureExt;
 use ndarray::Array1;
 use ndarray::Array2;
@@ -30,15 +30,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
 use tokio::sync::OnceCell;
+use tokio::sync::mpsc;
 use tokio::task;
 
 use onnxruntime::*;
+use tracing::Instrument;
 use tracing::debug_span;
 use tracing::error;
 use tracing::trace_span;
-use tracing::Instrument;
 
 deno_core::extension!(
   ai,
@@ -311,7 +311,9 @@ pub async fn op_ai_init_model(
   #[string] name: String,
 ) -> Result<(), JsErrorBox> {
   if name == "gte-small" {
-    init_gte(state).await.map_err(|e| JsErrorBox::generic(e.to_string()))
+    init_gte(state)
+      .await
+      .map_err(|e| JsErrorBox::generic(e.to_string()))
   } else {
     Err(JsErrorBox::generic("model not supported"))
   }
@@ -327,7 +329,9 @@ pub async fn op_ai_run_model(
   normalize: bool,
 ) -> Result<Vec<f32>, JsErrorBox> {
   if name == "gte-small" {
-    run_gte(state, prompt, mean_pool, normalize).await.map_err(|e| JsErrorBox::generic(e.to_string()))
+    run_gte(state, prompt, mean_pool, normalize)
+      .await
+      .map_err(|e| JsErrorBox::generic(e.to_string()))
   } else {
     Err(JsErrorBox::generic("model not supported"))
   }
@@ -335,7 +339,8 @@ pub async fn op_ai_run_model(
 
 #[op2(async)]
 #[bigint]
-pub async fn op_ai_try_cleanup_unused_session() -> Result<usize, JsErrorBox>
-{
-  session::cleanup().await.map_err(|e| JsErrorBox::generic(e.to_string()))
+pub async fn op_ai_try_cleanup_unused_session() -> Result<usize, JsErrorBox> {
+  session::cleanup()
+    .await
+    .map_err(|e| JsErrorBox::generic(e.to_string()))
 }

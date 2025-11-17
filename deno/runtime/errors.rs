@@ -23,10 +23,10 @@ use crate::runtime::ops::permissions::PermissionError;
 // use deno_broadcast_channel::BroadcastChannelError;
 // use deno_cache::CacheError;
 // use deno_canvas::CanvasError;
+use deno_core::ModuleResolutionError;
 use deno_core::error::AnyError;
 use deno_core::serde_json;
 use deno_core::url;
-use deno_core::ModuleResolutionError;
 // use deno_cron::CronError;
 use deno_crypto::DecryptError;
 use deno_crypto::EncryptError;
@@ -1080,6 +1080,14 @@ mod node {
   // IpcJsonStreamError is now part of IpcError in Deno 2.5.6
   // use deno_process::ipc::IpcJsonStreamError;
   pub use ext_node::ops::blocklist::BlocklistError;
+  pub use ext_node::ops::crypto::DiffieHellmanError;
+  pub use ext_node::ops::crypto::EcdhEncodePubKey;
+  pub use ext_node::ops::crypto::HkdfError;
+  pub use ext_node::ops::crypto::Pbkdf2Error;
+  pub use ext_node::ops::crypto::PrivateEncryptDecryptError;
+  pub use ext_node::ops::crypto::ScryptAsyncError;
+  pub use ext_node::ops::crypto::SignEd25519Error;
+  pub use ext_node::ops::crypto::VerifyEd25519Error;
   pub use ext_node::ops::crypto::cipher::CipherContextError;
   pub use ext_node::ops::crypto::cipher::CipherError;
   pub use ext_node::ops::crypto::cipher::DecipherContextError;
@@ -1100,27 +1108,19 @@ mod node {
   pub use ext_node::ops::crypto::keys::X509PublicKeyError;
   pub use ext_node::ops::crypto::sign::KeyObjectHandlePrehashedSignAndVerifyError;
   pub use ext_node::ops::crypto::x509::X509Error;
-  pub use ext_node::ops::crypto::DiffieHellmanError;
-  pub use ext_node::ops::crypto::EcdhEncodePubKey;
-  pub use ext_node::ops::crypto::HkdfError;
-  pub use ext_node::ops::crypto::Pbkdf2Error;
-  pub use ext_node::ops::crypto::PrivateEncryptDecryptError;
-  pub use ext_node::ops::crypto::ScryptAsyncError;
-  pub use ext_node::ops::crypto::SignEd25519Error;
-  pub use ext_node::ops::crypto::VerifyEd25519Error;
   pub use ext_node::ops::fs::FsError;
   pub use ext_node::ops::http2::Http2Error;
   pub use ext_node::ops::idna::IdnaError;
   pub use ext_node::ops::ipc::IpcError;
-  use ext_node::ops::os::priority::PriorityError;
   pub use ext_node::ops::os::OsError;
+  use ext_node::ops::os::priority::PriorityError;
   pub use ext_node::ops::require::RequireError;
   use ext_node::ops::require::RequireErrorKind;
   pub use ext_node::ops::worker_threads::WorkerThreadsFilenameError;
   // BrotliError removed in Deno 2.5.6 - brotli errors are now part of ZlibError
   // pub use ext_node::ops::zlib::BrotliError;
-  pub use ext_node::ops::zlib::mode::ModeError;
   pub use ext_node::ops::zlib::ZlibError;
+  pub use ext_node::ops::zlib::mode::ModeError;
 
   pub fn get_blocklist_error(error: &BlocklistError) -> &'static str {
     match error {
@@ -1921,7 +1921,8 @@ pub fn get_error_class_name(e: &AnyError) -> Option<&'static str> {
         .map(|e| get_hyper_v014_error_class(e))
     })
     .or_else(|| {
-      e.downcast_ref::<deno_core::Canceled>().map(|_| "Interrupted")
+      e.downcast_ref::<deno_core::Canceled>()
+        .map(|_| "Interrupted")
     })
     .or_else(|| {
       e.downcast_ref::<env::VarError>()

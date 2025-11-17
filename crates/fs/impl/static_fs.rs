@@ -19,8 +19,8 @@ use deno_npm::resolution::ValidSerializedNpmResolutionSnapshot;
 use deno_permissions::{CheckedPath, CheckedPathBuf};
 use eszip_trait::EszipStaticFiles;
 
-use crate::rt::IO_RT;
 use crate::FileBackedVfs;
+use crate::rt::IO_RT;
 
 #[derive(Debug, Clone)]
 pub struct StaticFs {
@@ -141,12 +141,20 @@ impl deno_fs::FileSystem for StaticFs {
   }
 
   #[cfg(unix)]
-  async fn chmod_async(&self, _path: CheckedPathBuf, _mode: u32) -> FsResult<()> {
+  async fn chmod_async(
+    &self,
+    _path: CheckedPathBuf,
+    _mode: u32,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
   #[cfg(not(unix))]
-  async fn chmod_async(&self, _path: CheckedPathBuf, _mode: i32) -> FsResult<()> {
+  async fn chmod_async(
+    &self,
+    _path: CheckedPathBuf,
+    _mode: i32,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -154,7 +162,11 @@ impl deno_fs::FileSystem for StaticFs {
     Err(FsError::NotSupported)
   }
 
-  async fn lchmod_async(&self, _path: CheckedPathBuf, _mode: u32) -> FsResult<()> {
+  async fn lchmod_async(
+    &self,
+    _path: CheckedPathBuf,
+    _mode: u32,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -206,7 +218,11 @@ impl deno_fs::FileSystem for StaticFs {
     Err(FsError::NotSupported)
   }
 
-  fn copy_file_sync(&self, _oldpath: &CheckedPath, _newpath: &CheckedPath) -> FsResult<()> {
+  fn copy_file_sync(
+    &self,
+    _oldpath: &CheckedPath,
+    _newpath: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -218,11 +234,19 @@ impl deno_fs::FileSystem for StaticFs {
     Err(FsError::NotSupported)
   }
 
-  fn cp_sync(&self, _path: &CheckedPath, _new_path: &CheckedPath) -> FsResult<()> {
+  fn cp_sync(
+    &self,
+    _path: &CheckedPath,
+    _new_path: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
-  async fn cp_async(&self, _path: CheckedPathBuf, _new_path: CheckedPathBuf) -> FsResult<()> {
+  async fn cp_async(
+    &self,
+    _path: CheckedPathBuf,
+    _new_path: CheckedPathBuf,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -282,7 +306,10 @@ impl deno_fs::FileSystem for StaticFs {
     }
   }
 
-  async fn read_dir_async(&self, path: CheckedPathBuf) -> FsResult<Vec<FsDirEntry>> {
+  async fn read_dir_async(
+    &self,
+    path: CheckedPathBuf,
+  ) -> FsResult<Vec<FsDirEntry>> {
     if self.vfs.is_path_within(&*path) {
       Ok(self.vfs.read_dir(&*path)?)
     } else {
@@ -290,7 +317,11 @@ impl deno_fs::FileSystem for StaticFs {
     }
   }
 
-  fn rename_sync(&self, _oldpath: &CheckedPath, _newpath: &CheckedPath) -> FsResult<()> {
+  fn rename_sync(
+    &self,
+    _oldpath: &CheckedPath,
+    _newpath: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -302,7 +333,11 @@ impl deno_fs::FileSystem for StaticFs {
     Err(FsError::NotSupported)
   }
 
-  fn link_sync(&self, _oldpath: &CheckedPath, _newpath: &CheckedPath) -> FsResult<()> {
+  fn link_sync(
+    &self,
+    _oldpath: &CheckedPath,
+    _newpath: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -352,7 +387,11 @@ impl deno_fs::FileSystem for StaticFs {
     Err(FsError::NotSupported)
   }
 
-  async fn truncate_async(&self, _path: CheckedPathBuf, _len: u64) -> FsResult<()> {
+  async fn truncate_async(
+    &self,
+    _path: CheckedPathBuf,
+    _len: u64,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -400,10 +439,7 @@ impl deno_fs::FileSystem for StaticFs {
     Err(FsError::NotSupported)
   }
 
-  fn read_file_sync(
-    &self,
-    path: &CheckedPath,
-  ) -> FsResult<Cow<'static, [u8]>> {
+  fn read_file_sync(&self, path: &CheckedPath) -> FsResult<Cow<'static, [u8]>> {
     let is_npm = self.is_valid_npm_package(&**path);
     let is_byonm_path = self
       .byonm_node_modules_path

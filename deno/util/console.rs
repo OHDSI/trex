@@ -17,12 +17,10 @@ use super::progress_bar::ConsoleSize;
 
 /// Gets the console size.
 pub fn console_size() -> Option<ConsoleSize> {
-  terminal::size()
-    .ok()
-    .map(|(cols, rows)| ConsoleSize {
-      cols: cols as u32,
-      rows: rows as u32,
-    })
+  terminal::size().ok().map(|(cols, rows)| ConsoleSize {
+    cols: cols as u32,
+    rows: rows as u32,
+  })
 }
 
 pub struct RawMode {

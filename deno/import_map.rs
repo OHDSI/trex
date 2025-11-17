@@ -1,8 +1,8 @@
-use anyhow::anyhow;
 use anyhow::Error;
-use deno_resolver::workspace::SpecifiedImportMap;
+use anyhow::anyhow;
 use deno_core::serde_json;
 use deno_core::url::Url;
+use deno_resolver::workspace::SpecifiedImportMap;
 use std::fs;
 use std::path::Path;
 use urlencoding::decode;

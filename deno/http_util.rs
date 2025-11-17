@@ -16,18 +16,18 @@ use deno_core::serde_json;
 use deno_core::url::Url;
 use deno_error::JsError;
 use deno_error::JsErrorBox;
-use deno_fetch::create_http_client;
 use deno_fetch::CreateHttpClientOptions;
+use deno_fetch::create_http_client;
 use deno_tls::RootCertStoreProvider;
-use header::HeaderName;
-use header::HeaderValue;
 use header::ACCEPT;
 use header::AUTHORIZATION;
+use header::HeaderName;
+use header::HeaderValue;
 use header::IF_NONE_MATCH;
 use header::LOCATION;
-use http::header;
 use http::HeaderMap;
 use http::StatusCode;
+use http::header;
 use http_body_util::BodyExt;
 
 use std::collections::HashMap;
@@ -487,7 +487,8 @@ impl HttpClient {
     if status.is_client_error() {
       let err = if response.status() == StatusCode::NOT_FOUND {
         deno_core::anyhow::anyhow!(
-          "NotFound: Import '{}' failed, not found.", args.url
+          "NotFound: Import '{}' failed, not found.",
+          args.url
         )
       } else {
         deno_core::anyhow::anyhow!(

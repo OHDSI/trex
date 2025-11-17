@@ -5,18 +5,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
+use deno::DenoOptions;
 use deno::deno_npm::NpmSystemInfo;
 use deno::npm::CliNpmResolver;
 use deno::npm::InnerCliNpmResolverRef;
-use deno::DenoOptions;
 use deno_core::error::AnyError;
 use eszip_trait::AsyncEszipDataRead;
+use fs::VfsOpts;
 use fs::virtual_fs::FileBackedVfs;
 use fs::virtual_fs::VfsBuilder;
 use fs::virtual_fs::VfsEntry;
 use fs::virtual_fs::VfsRoot;
 use fs::virtual_fs::VirtualDirectory;
-use fs::VfsOpts;
 
 pub fn load_npm_vfs(
   eszip: Arc<dyn AsyncEszipDataRead + 'static>,
@@ -131,8 +131,9 @@ where
       }
       // traverse and add all the node_modules directories in the workspace
       let mut pending_dirs = VecDeque::new();
-      pending_dirs
-        .push_back(deno_options.workspace().root_dir().dir_path().to_path_buf());
+      pending_dirs.push_back(
+        deno_options.workspace().root_dir().dir_path().to_path_buf(),
+      );
       while let Some(pending_dir) = pending_dirs.pop_front() {
         let mut entries = std::fs::read_dir(&pending_dir)
           .with_context(|| {

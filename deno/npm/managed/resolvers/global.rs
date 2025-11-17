@@ -15,19 +15,19 @@ use deno_npm::NpmPackageCacheFolderId;
 use deno_npm::NpmPackageId;
 use deno_npm::NpmSystemInfo;
 use ext_node::NodePermissions;
+use node_resolver::UrlOrPathRef;
 use node_resolver::errors::PackageFolderResolveError;
 use node_resolver::errors::PackageNotFoundError;
 use node_resolver::errors::ReferrerNotFoundError;
-use node_resolver::UrlOrPathRef;
 
 use crate::npm::CliNpmCache;
 use crate::npm::CliNpmTarballCache;
 use crate::npm::PackageCaching;
 
 use super::super::resolution::NpmResolution;
-use super::common::cache_packages;
 use super::common::NpmPackageFsResolver;
 use super::common::RegistryReadPermissionChecker;
+use super::common::cache_packages;
 
 /// Resolves packages from the global npm cache.
 #[derive(Debug)]

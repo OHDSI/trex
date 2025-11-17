@@ -5,8 +5,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use deno_core::error::AnyError;
 use deno_core::ModuleSpecifier;
+use deno_core::error::AnyError;
 use deno_permissions::OpenAccessKind;
 use deno_resolver::npm::ByonmNpmResolver;
 use deno_resolver::npm::ByonmNpmResolverCreateOptions;
@@ -21,8 +21,7 @@ use super::InnerCliNpmResolverRef;
 
 pub type CliByonmNpmResolverCreateOptions =
   ByonmNpmResolverCreateOptions<RealSys>;
-pub type CliByonmNpmResolver =
-  ByonmNpmResolver<RealSys>;
+pub type CliByonmNpmResolver = ByonmNpmResolver<RealSys>;
 
 impl crate::resolver::CliNpmReqResolver for CliByonmNpmResolver {
   fn resolve_pkg_folder_from_deno_module_req(
@@ -30,7 +29,8 @@ impl crate::resolver::CliNpmReqResolver for CliByonmNpmResolver {
     req: &PackageReq,
     referrer: &ModuleSpecifier,
   ) -> Result<PathBuf, ResolvePkgFolderFromDenoReqError> {
-    self.resolve_pkg_folder_from_deno_module_req(req, referrer)
+    self
+      .resolve_pkg_folder_from_deno_module_req(req, referrer)
       .map_err(ResolvePkgFolderFromDenoReqError::Byonm)
   }
 }
@@ -42,7 +42,9 @@ impl CliNpmResolver for CliByonmNpmResolver {
     self
   }
 
-  fn into_npm_req_resolver(self: Arc<Self>) -> Arc<dyn crate::resolver::CliNpmReqResolver> {
+  fn into_npm_req_resolver(
+    self: Arc<Self>,
+  ) -> Arc<dyn crate::resolver::CliNpmReqResolver> {
     self
   }
 
@@ -71,7 +73,8 @@ impl CliNpmResolver for CliByonmNpmResolver {
       .components()
       .any(|c| c.as_os_str().to_ascii_lowercase() == "node_modules")
     {
-      permissions.check_open(Cow::Borrowed(path), OpenAccessKind::Read, None)
+      permissions
+        .check_open(Cow::Borrowed(path), OpenAccessKind::Read, None)
         .map(|checked| checked.into_path())
         .map_err(Into::into)
     } else {

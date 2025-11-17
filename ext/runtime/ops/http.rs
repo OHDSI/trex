@@ -4,31 +4,31 @@ use std::pin::Pin;
 use std::rc::Rc;
 use std::task::Poll;
 
-use anyhow::bail;
 use anyhow::Context;
-use deno_error::JsErrorBox;
-use deno_core::op2;
+use anyhow::bail;
 use deno_core::ByteString;
 use deno_core::OpState;
 use deno_core::RcRef;
 use deno_core::Resource;
 use deno_core::ResourceId;
+use deno_core::op2;
+use deno_error::JsErrorBox;
 use deno_http::HttpRequestReader;
 use deno_http::HttpStreamReadResource;
 use deno_websocket::ws_create_server_stream;
+use futures::FutureExt;
 use futures::future::BoxFuture;
 use futures::ready;
-use futures::FutureExt;
 use hyper_v014::upgrade::OnUpgrade;
 use hyper_v014::upgrade::Parts;
 use log::error;
 use serde::Serialize;
-use tokio::io::copy_bidirectional;
 use tokio::io::AsyncRead;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 use tokio::io::DuplexStream;
+use tokio::io::copy_bidirectional;
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -235,11 +235,13 @@ async fn op_http_upgrade_websocket2(
   let request = match &mut *rd {
     HttpRequestReader::Headers(request) => request,
     _ => {
-      return Err(http_error("cannot upgrade because request body was used"))
+      return Err(http_error("cannot upgrade because request body was used"));
     }
   };
 
-  let upgraded = hyper_v014::upgrade::on(request).await.map_err(|e| crate::RuntimeError::Http(e.to_string()))?;
+  let upgraded = hyper_v014::upgrade::on(request)
+    .await
+    .map_err(|e| crate::RuntimeError::Http(e.to_string()))?;
   let Parts { io, read_buf, .. } =
     upgraded.downcast::<DuplexStream2>().unwrap();
   let (mut rw, conn_sync) = io

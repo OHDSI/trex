@@ -248,5 +248,7 @@ fn main() {
   // When building V8 from source, temporal_shim.c provides the needed symbols
   let o = PathBuf::from(env::var_os("OUT_DIR").unwrap());
   let runtime_snapshot_path = o.join("RUNTIME_SNAPSHOT.bin");
-  supabase_startup_snapshot::create_runtime_snapshot(runtime_snapshot_path.clone());
+  supabase_startup_snapshot::create_runtime_snapshot(
+    runtime_snapshot_path.clone(),
+  );
 }

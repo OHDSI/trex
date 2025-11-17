@@ -32,10 +32,7 @@ pub struct RuntimePermissionDescriptorParser {
 
 impl RuntimePermissionDescriptorParser {
   pub fn new(fs: deno_fs::FileSystemRc) -> Self {
-    Self {
-      sys: RealSys,
-      fs,
-    }
+    Self { sys: RealSys, fs }
   }
 
   fn resolve_cwd(&self) -> Result<PathBuf, PathResolveError> {

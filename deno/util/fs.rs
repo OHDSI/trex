@@ -16,11 +16,11 @@ use deno_config::glob::FilePatterns;
 use deno_config::glob::PathOrPattern;
 use deno_config::glob::PathOrPatternSet;
 use deno_config::glob::WalkEntry;
-use deno_core::anyhow::anyhow;
+use deno_core::ModuleSpecifier;
 use deno_core::anyhow::Context;
+use deno_core::anyhow::anyhow;
 use deno_core::error::AnyError;
 use deno_core::unsync::spawn_blocking;
-use deno_core::ModuleSpecifier;
 use deno_fs::FileSystem;
 use deno_permissions::CheckedPath;
 

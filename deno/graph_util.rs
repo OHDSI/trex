@@ -1,10 +1,11 @@
 // Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
 
+use crate::DenoOptions;
+use crate::args::CliLockfile;
+use crate::args::DENO_DISABLE_PEDANTIC_NODE_WARNINGS;
+pub use crate::args::NpmCachingStrategy;
 use crate::args::config_to_deno_graph_workspace_member;
 use crate::args::jsr_url;
-use crate::args::CliLockfile;
-pub use crate::args::NpmCachingStrategy;
-use crate::args::DENO_DISABLE_PEDANTIC_NODE_WARNINGS;
 use crate::cache;
 use crate::cache::FetchCacher;
 use crate::cache::GlobalHttpCache;
@@ -18,23 +19,19 @@ use crate::resolver::CliResolver;
 use crate::resolver::CliSloppyImportsResolver;
 use crate::util::fs::canonicalize_path;
 use sys_traits::impls::RealSys;
-use crate::DenoOptions;
 
-use deno_resolver::deno_json::JsxImportSourceConfig;
 use deno_config::workspace::JsrPackageConfig;
 use deno_core::anyhow::bail;
-use deno_graph::source::LoaderChecksum;
 use deno_graph::FillFromLockfileOptions;
 use deno_graph::JsrLoadError;
 use deno_graph::ModuleLoadError;
 use deno_graph::WorkspaceFastCheckOption;
+use deno_graph::source::LoaderChecksum;
+use deno_resolver::deno_json::JsxImportSourceConfig;
 
-use deno_core::error::AnyError;
 use deno_core::ModuleSpecifier;
+use deno_core::error::AnyError;
 use deno_fs::FileSystem;
-use deno_graph::source::Loader;
-use deno_graph::source::ResolveError;
-use deno_graph::source::ResolutionKind;
 use deno_graph::GraphKind;
 use deno_graph::ModuleError;
 use deno_graph::ModuleErrorKind;
@@ -42,6 +39,9 @@ use deno_graph::ModuleGraph;
 use deno_graph::ModuleGraphError;
 use deno_graph::ResolutionError;
 use deno_graph::SpecifierError;
+use deno_graph::source::Loader;
+use deno_graph::source::ResolutionKind;
+use deno_graph::source::ResolveError;
 use deno_path_util::url_to_file_path;
 use deno_permissions::CheckedPath;
 use deno_permissions::PermissionsContainer;
@@ -97,7 +97,9 @@ pub fn graph_valid(
   } else {
     // finally surface the npm resolution result
     if let Err(err) = &graph.npm_dep_graph_result {
-      return Err(anyhow::anyhow!(format_deno_graph_error(err.as_ref().deref())));
+      return Err(anyhow::anyhow!(format_deno_graph_error(
+        err.as_ref().deref()
+      )));
     }
     Ok(())
   }
@@ -572,7 +574,9 @@ impl ModuleGraphBuilder {
         &graph_npm_resolver,
         &jsr_version_resolver,
         &graph_resolver,
-        locker.as_mut().map(|l| l as &mut dyn deno_graph::source::Locker),
+        locker
+          .as_mut()
+          .map(|l| l as &mut dyn deno_graph::source::Locker),
         options.is_dynamic,
         options.npm_caching,
       )
@@ -631,7 +635,9 @@ impl ModuleGraphBuilder {
     if roots.iter().any(|r| r.scheme() == "npm")
       && self.npm_resolver.as_byonm().is_some()
     {
-      bail!("Resolving npm specifier entrypoints this way is currently not supported with \"nodeModules\": \"manual\". In the meantime, try with --node-modules-dir=auto instead");
+      bail!(
+        "Resolving npm specifier entrypoints this way is currently not supported with \"nodeModules\": \"manual\". In the meantime, try with --node-modules-dir=auto instead"
+      );
     }
 
     // Create the DenoGraphFsAdapter with 'static lifetime
@@ -641,9 +647,10 @@ impl ModuleGraphBuilder {
     // 3. graph.build() completes before this function returns
     // 4. The Arc in self is not dropped during this function's execution
     let fs_ref: &'static dyn deno_fs::FileSystem = unsafe {
-      std::mem::transmute::<&dyn deno_fs::FileSystem, &'static dyn deno_fs::FileSystem>(
-        self.fs.as_ref()
-      )
+      std::mem::transmute::<
+        &dyn deno_fs::FileSystem,
+        &'static dyn deno_fs::FileSystem,
+      >(self.fs.as_ref())
     };
     let fs_adapter = DenoGraphFsAdapter(fs_ref);
 
@@ -823,7 +830,9 @@ pub fn enhanced_resolution_error_message(error: &ResolutionError) -> String {
     get_resolution_error_bare_node_specifier(error)
   {
     if !*DENO_DISABLE_PEDANTIC_NODE_WARNINGS {
-      Some(format!("If you want to use a built-in Node module, add a \"node:\" prefix (ex. \"node:{specifier}\")."))
+      Some(format!(
+        "If you want to use a built-in Node module, add a \"node:\" prefix (ex. \"node:{specifier}\")."
+      ))
     } else {
       None
     }
@@ -856,73 +865,61 @@ fn enhanced_integrity_error_message(err: &ModuleError) -> Option<String> {
   match &**err {
     ModuleErrorKind::Load {
       specifier,
-      err: ModuleLoadError::Jsr(JsrLoadError::ContentChecksumIntegrity(
-        checksum_err,
-      )),
+      err:
+        ModuleLoadError::Jsr(JsrLoadError::ContentChecksumIntegrity(checksum_err)),
       ..
-    } => {
-      Some(format!(
-        concat!(
-          "Integrity check failed in package. The package may have been tampered with.\n\n",
-          "  Specifier: {}\n",
-          "  Actual: {}\n",
-          "  Expected: {}\n\n",
-          "If you modified your global cache, run again with the --reload flag to restore ",
-          "its state. If you want to modify dependencies locally run again with the ",
-          "--vendor flag or specify `\"vendor\": true` in a deno.json then modify the contents ",
-          "of the vendor/ folder."
-        ),
-        specifier,
-        checksum_err.actual,
-        checksum_err.expected,
-      ))
-    }
-    ModuleErrorKind::Load {
-      err: ModuleLoadError::Jsr(
-        JsrLoadError::PackageVersionManifestChecksumIntegrity(
-          package_nv,
-          checksum_err,
-        ),
+    } => Some(format!(
+      concat!(
+        "Integrity check failed in package. The package may have been tampered with.\n\n",
+        "  Specifier: {}\n",
+        "  Actual: {}\n",
+        "  Expected: {}\n\n",
+        "If you modified your global cache, run again with the --reload flag to restore ",
+        "its state. If you want to modify dependencies locally run again with the ",
+        "--vendor flag or specify `\"vendor\": true` in a deno.json then modify the contents ",
+        "of the vendor/ folder."
       ),
-      ..
-    } => {
-      Some(format!(
-        concat!(
-          "Integrity check failed for package. The source code is invalid, as it does not match the expected hash in the lock file.\n\n",
-          "  Package: {}\n",
-          "  Actual: {}\n",
-          "  Expected: {}\n\n",
-          "This could be caused by:\n",
-          "  * the lock file may be corrupt\n",
-          "  * the source itself may be corrupt\n\n",
-          "Investigate the lockfile; delete it to regenerate the lockfile or --reload to reload the source code from the server."
+      specifier, checksum_err.actual, checksum_err.expected,
+    )),
+    ModuleErrorKind::Load {
+      err:
+        ModuleLoadError::Jsr(
+          JsrLoadError::PackageVersionManifestChecksumIntegrity(
+            package_nv,
+            checksum_err,
+          ),
         ),
-        package_nv,
-        checksum_err.actual,
-        checksum_err.expected,
-      ))
-    }
+      ..
+    } => Some(format!(
+      concat!(
+        "Integrity check failed for package. The source code is invalid, as it does not match the expected hash in the lock file.\n\n",
+        "  Package: {}\n",
+        "  Actual: {}\n",
+        "  Expected: {}\n\n",
+        "This could be caused by:\n",
+        "  * the lock file may be corrupt\n",
+        "  * the source itself may be corrupt\n\n",
+        "Investigate the lockfile; delete it to regenerate the lockfile or --reload to reload the source code from the server."
+      ),
+      package_nv, checksum_err.actual, checksum_err.expected,
+    )),
     ModuleErrorKind::Load {
       specifier,
       err: ModuleLoadError::HttpsChecksumIntegrity(checksum_err),
       ..
-    } => {
-      Some(format!(
-        concat!(
-          "Integrity check failed for remote specifier. The source code is invalid, as it does not match the expected hash in the lock file.\n\n",
-          "  Specifier: {}\n",
-          "  Actual: {}\n",
-          "  Expected: {}\n\n",
-          "This could be caused by:\n",
-          "  * the lock file may be corrupt\n",
-          "  * the source itself may be corrupt\n\n",
-          "Investigate the lockfile; delete it to regenerate the lockfile or --reload to reload the source code from the server."
-        ),
-        specifier,
-        checksum_err.actual,
-        checksum_err.expected,
-      ))
-    }
+    } => Some(format!(
+      concat!(
+        "Integrity check failed for remote specifier. The source code is invalid, as it does not match the expected hash in the lock file.\n\n",
+        "  Specifier: {}\n",
+        "  Actual: {}\n",
+        "  Expected: {}\n\n",
+        "This could be caused by:\n",
+        "  * the lock file may be corrupt\n",
+        "  * the source itself may be corrupt\n\n",
+        "Investigate the lockfile; delete it to regenerate the lockfile or --reload to reload the source code from the server."
+      ),
+      specifier, checksum_err.actual, checksum_err.expected,
+    )),
     _ => None,
   }
 }
@@ -1123,8 +1120,15 @@ impl<'a> sys_traits::BaseFsReadDir for DenoGraphFsAdapter<'a> {
   fn base_fs_read_dir(
     &self,
     path: &std::path::Path,
-  ) -> std::io::Result<Box<dyn Iterator<Item = std::io::Result<Self::ReadDirEntry>>>> {
-    let entries = self.0.read_dir_sync(&CheckedPath::unsafe_new(Cow::Borrowed(path))).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+  ) -> std::io::Result<
+    Box<dyn Iterator<Item = std::io::Result<Self::ReadDirEntry>>>,
+  > {
+    let entries = self
+      .0
+      .read_dir_sync(&CheckedPath::unsafe_new(Cow::Borrowed(path)))
+      .map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+      })?;
     let iter = entries.into_iter().map(|entry| {
       Ok(sys_traits::boxed::BoxedFsDirEntry::new(FsDirEntryAdapter {
         name: std::ffi::OsString::from(entry.name),
@@ -1270,14 +1274,20 @@ struct CliGraphResolver<'a> {
 }
 
 impl<'a> deno_graph::source::Resolver for CliGraphResolver<'a> {
-  fn default_jsx_import_source(&self, _referrer: &ModuleSpecifier) -> Option<String> {
+  fn default_jsx_import_source(
+    &self,
+    _referrer: &ModuleSpecifier,
+  ) -> Option<String> {
     self
       .jsx_import_source_config
       .as_ref()
       .and_then(|c| c.import_source.as_ref().map(|s| s.specifier.clone()))
   }
 
-  fn default_jsx_import_source_types(&self, _referrer: &ModuleSpecifier) -> Option<String> {
+  fn default_jsx_import_source_types(
+    &self,
+    _referrer: &ModuleSpecifier,
+  ) -> Option<String> {
     self
       .jsx_import_source_config
       .as_ref()

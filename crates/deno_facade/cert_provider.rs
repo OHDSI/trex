@@ -2,14 +2,14 @@ use std::sync::Arc;
 
 use anyhow::bail;
 use deno::deno_tls;
+use deno::deno_tls::RootCertStoreProvider;
 use deno::deno_tls::deno_native_certs::load_native_certs;
 use deno::deno_tls::rustls::RootCertStore;
-use deno::deno_tls::RootCertStoreProvider;
 use deno_core::error::AnyError;
 use ext_runtime::cert::ValueRootCertStoreProvider;
 
-pub fn get_root_cert_store_provider(
-) -> Result<Arc<dyn RootCertStoreProvider>, AnyError> {
+pub fn get_root_cert_store_provider()
+-> Result<Arc<dyn RootCertStoreProvider>, AnyError> {
   // Create and populate a root cert store based on environment variable.
   // Reference: https://github.com/denoland/deno/blob/v1.37.0/cli/args/mod.rs#L467
   let mut root_cert_store = RootCertStore::empty();

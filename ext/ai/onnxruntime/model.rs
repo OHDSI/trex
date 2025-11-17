@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use deno_core::serde_v8::to_v8;
 use deno_core::ToV8;
+use deno_core::serde_v8::to_v8;
 use ort::session::Session;
 use reqwest::Url;
 
+use super::session::SessionWithId;
 use super::session::get_session;
 use super::session::load_session_from_bytes;
 use super::session::load_session_from_url;
-use super::session::SessionWithId;
 
 #[derive(Debug, Clone)]
 pub struct ModelInfo {

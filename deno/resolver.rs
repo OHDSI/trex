@@ -3,48 +3,50 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::anyhow;
 use anyhow::Context;
+use anyhow::anyhow;
 use async_trait::async_trait;
 use dashmap::DashMap;
 use dashmap::DashSet;
 use deno_ast::MediaType;
-use deno_resolver::workspace::MappedResolutionError;
+use deno_core::ModuleSourceCode;
+use deno_core::ModuleSpecifier;
 use deno_core::error::AnyError;
 use deno_core::unsync::sync::AtomicFlag;
 use deno_core::url::Url;
-use deno_core::ModuleSourceCode;
-use deno_core::ModuleSpecifier;
 use deno_error::JsErrorBox;
 use deno_error::JsErrorClass;
 use deno_fs::FileSystem;
-use deno_permissions::CheckedPathBuf;
-use deno_graph::source::ResolveError;
-use node_resolver::errors::UnknownBuiltInNodeModuleError;
 use deno_graph::NpmLoadError;
 use deno_graph::NpmResolvePkgReqsResult;
+use deno_graph::source::ResolveError;
 use deno_npm::resolution::NpmResolutionError;
-use deno_resolver::workspace::sloppy_imports_resolve;
+use deno_permissions::CheckedPathBuf;
+use deno_resolver::workspace::MappedResolutionError;
 use deno_resolver::workspace::SloppyImportsResolver;
+use deno_resolver::workspace::sloppy_imports_resolve;
 use deno_semver::package::PackageReq;
-use ext_node::is_builtin_node_module;
 use ext_node::DenoFsNodeResolverEnv;
+use ext_node::is_builtin_node_module;
 use node_resolver::NodeResolutionKind;
 use node_resolver::ResolutionMode;
+use node_resolver::errors::UnknownBuiltInNodeModuleError;
 use sys_traits::impls::RealSys;
 use thiserror::Error;
 
-use crate::args::NpmCachingStrategy;
 use crate::args::DENO_DISABLE_PEDANTIC_NODE_WARNINGS;
+use crate::args::NpmCachingStrategy;
 use crate::cache::CliSys;
 use crate::node::CliNodeCodeTranslator;
 use crate::npm::CliNpmResolver;
 use crate::npm::InnerCliNpmResolverRef;
 use crate::util::text_encoding::from_utf8_lossy_cow;
 
-pub type CjsTracker = deno_resolver::cjs::CjsTracker<deno_resolver::npm::DenoInNpmPackageChecker, CliSys>;
-pub type CliSloppyImportsResolver =
-  SloppyImportsResolver<CliSys>;
+pub type CjsTracker = deno_resolver::cjs::CjsTracker<
+  deno_resolver::npm::DenoInNpmPackageChecker,
+  CliSys,
+>;
+pub type CliSloppyImportsResolver = SloppyImportsResolver<CliSys>;
 pub type CliDenoResolver = deno_resolver::graph::DenoResolver<
   deno_resolver::npm::DenoInNpmPackageChecker,
   node_resolver::DenoIsBuiltInNodeModuleChecker,
@@ -58,7 +60,10 @@ pub trait CliNpmReqResolver: std::fmt::Debug + Send + Sync {
     &self,
     req: &PackageReq,
     referrer: &ModuleSpecifier,
-  ) -> Result<std::path::PathBuf, deno_resolver::npm::ResolvePkgFolderFromDenoReqError>;
+  ) -> Result<
+    std::path::PathBuf,
+    deno_resolver::npm::ResolvePkgFolderFromDenoReqError,
+  >;
 }
 
 pub struct ModuleCodeStringSource {
@@ -272,14 +277,22 @@ impl CliResolver {
   ) -> Result<ModuleSpecifier, ResolveError> {
     self
       .deno_resolver
-      .resolve(raw_specifier, referrer, referrer_range_start, resolution_mode, resolution_kind)
+      .resolve(
+        raw_specifier,
+        referrer,
+        referrer_range_start,
+        resolution_mode,
+        resolution_kind,
+      )
       .map_err(|err| match err.into_kind() {
         deno_resolver::DenoResolveErrorKind::MappedResolution(
           mapped_resolution_error,
         ) => match mapped_resolution_error {
           MappedResolutionError::Specifier(e) => ResolveError::Specifier(e),
           // deno_graph checks specifically for an ImportMapError
-          MappedResolutionError::ImportMap(e) => ResolveError::Other(JsErrorBox::generic(e.to_string())),
+          MappedResolutionError::ImportMap(e) => {
+            ResolveError::Other(JsErrorBox::generic(e.to_string()))
+          }
           err => ResolveError::Other(JsErrorBox::generic(err.to_string())),
         },
         err => ResolveError::Other(JsErrorBox::generic(err.to_string())),
@@ -355,27 +368,38 @@ impl<'a> deno_graph::source::NpmResolver for WorkerCliNpmGraphResolver<'a> {
             .into_iter()
             .map(|r| {
               r.map_err(|err| match err {
-                NpmResolutionError::Registry(e) => {
-                  NpmLoadError::RegistryInfo(Arc::new(JsErrorBox::generic(e.to_string())) as Arc<dyn JsErrorClass>)
-                }
+                NpmResolutionError::Registry(e) => NpmLoadError::RegistryInfo(
+                  Arc::new(JsErrorBox::generic(e.to_string()))
+                    as Arc<dyn JsErrorClass>,
+                ),
                 NpmResolutionError::Resolution(e) => {
-                  NpmLoadError::PackageReqResolution(Arc::new(JsErrorBox::generic(e.to_string())) as Arc<dyn JsErrorClass>)
+                  NpmLoadError::PackageReqResolution(Arc::new(
+                    JsErrorBox::generic(e.to_string()),
+                  )
+                    as Arc<dyn JsErrorClass>)
                 }
                 NpmResolutionError::DependencyEntry(e) => {
-                  NpmLoadError::PackageReqResolution(Arc::new(JsErrorBox::generic(e.to_string())) as Arc<dyn JsErrorClass>)
+                  NpmLoadError::PackageReqResolution(Arc::new(
+                    JsErrorBox::generic(e.to_string()),
+                  )
+                    as Arc<dyn JsErrorClass>)
                 }
               })
             })
             .collect::<Vec<_>>(),
           dep_graph_result: match top_level_result {
-            Ok(()) => result.dependencies_result.map_err(|e| Arc::new(JsErrorBox::generic(e.to_string())) as Arc<dyn JsErrorClass>),
-            Err(err) => Err(Arc::new(JsErrorBox::generic(err.to_string())) as Arc<dyn JsErrorClass>),
+            Ok(()) => result.dependencies_result.map_err(|e| {
+              Arc::new(JsErrorBox::generic(e.to_string()))
+                as Arc<dyn JsErrorClass>
+            }),
+            Err(err) => Err(Arc::new(JsErrorBox::generic(err.to_string()))
+              as Arc<dyn JsErrorClass>),
           },
         }
       }
       None => {
         let err = Arc::new(JsErrorBox::generic(
-          "npm specifiers were requested; but --no-npm is specified"
+          "npm specifiers were requested; but --no-npm is specified",
         ));
         NpmResolvePkgReqsResult {
           results: package_reqs

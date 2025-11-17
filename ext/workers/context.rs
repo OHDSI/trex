@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 
-use anyhow::anyhow;
 use anyhow::Error;
+use anyhow::anyhow;
 use deno::deno_permissions::PermissionsOptions;
-use deno_core::unsync::sync::AtomicFlag;
 use deno_core::FastString;
+use deno_core::unsync::sync::AtomicFlag;
 use deno_facade::EszipPayloadKind;
 use deno_telemetry::OtelConfig;
 use enum_as_inner::EnumAsInner;
@@ -20,12 +20,12 @@ use fs::tmp_fs::TmpFsConfig;
 use hyper_v014::Body;
 use hyper_v014::Request;
 use hyper_v014::Response;
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::unbounded_channel;
-use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::unbounded_channel;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 

@@ -298,7 +298,8 @@ pub fn create_supervisor(
                         "method": msg,
                         "params": serde_json::Value::Null,
                       });
-                      let stringified_msg = serde_json::to_string(&message).unwrap();
+                      let stringified_msg =
+                        serde_json::to_string(&message).unwrap();
                       let _ = inbound_tx.unbounded_send(stringified_msg);
 
                       loop {

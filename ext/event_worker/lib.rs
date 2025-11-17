@@ -1,7 +1,7 @@
 use crate::events::RawEvent;
 use crate::events::WorkerEventWithMetadata;
-use deno_core::op2;
 use deno_core::OpState;
+use deno_core::op2;
 use deno_error::JsErrorBox;
 use std::cell::RefCell;
 use std::rc::Rc;

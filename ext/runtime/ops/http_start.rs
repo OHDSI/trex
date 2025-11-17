@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use deno_core::op2;
 use deno_core::OpState;
 use deno_core::ResourceId;
+use deno_core::op2;
 use deno_http::http_create_conn_resource;
 use tokio_util::sync::CancellationToken;
 
@@ -26,8 +26,11 @@ fn op_http_start(
     // This connection might be used somewhere else. If it's the case, we cannot proceed with the
     // process of starting a HTTP server on top of this connection, so we just return a bad
     // resource error. See also: https://github.com/denoland/deno/pull/16242
-    let resource = Rc::try_unwrap(resource_rc)
-      .map_err(|_| crate::RuntimeError::Runtime("Duplex stream is currently in use".to_string()))?;
+    let resource = Rc::try_unwrap(resource_rc).map_err(|_| {
+      crate::RuntimeError::Runtime(
+        "Duplex stream is currently in use".to_string(),
+      )
+    })?;
 
     let (id, stream) = resource.into_inner();
     let token = state

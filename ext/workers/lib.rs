@@ -9,14 +9,6 @@ use context::SendRequestResult;
 use deno::deno_http::HttpRequestReader;
 use deno::deno_http::HttpStreamReadResource;
 use deno::deno_permissions::PermissionsOptions;
-use deno_core::error::AnyError;
-use deno_error::JsErrorBox;
-use deno_core::futures::stream::Peekable;
-use deno_core::futures::FutureExt;
-use deno_core::futures::Stream;
-use deno_core::futures::StreamExt;
-use deno_core::op2;
-use deno_core::serde_json;
 use deno_core::AsyncRefCell;
 use deno_core::AsyncResult;
 use deno_core::BufView;
@@ -30,6 +22,14 @@ use deno_core::RcRef;
 use deno_core::Resource;
 use deno_core::ResourceId;
 use deno_core::WriteOutcome;
+use deno_core::error::AnyError;
+use deno_core::futures::FutureExt;
+use deno_core::futures::Stream;
+use deno_core::futures::StreamExt;
+use deno_core::futures::stream::Peekable;
+use deno_core::op2;
+use deno_core::serde_json;
+use deno_error::JsErrorBox;
 use deno_facade::EszipPayloadKind;
 use deno_telemetry::OtelConfig;
 use deno_telemetry::OtelConsoleConfig;
@@ -39,14 +39,14 @@ use ext_runtime::conn_sync::ConnWatcher;
 use fs::s3_fs::S3FsConfig;
 use fs::tmp_fs::TmpFsConfig;
 use http_utils::utils::get_upgrade_type;
-use hyper_v014::body::HttpBody;
-use hyper_v014::header::HeaderName;
-use hyper_v014::header::HeaderValue;
-use hyper_v014::header::CONTENT_LENGTH;
-use hyper_v014::upgrade::OnUpgrade;
 use hyper_v014::Body;
 use hyper_v014::Method;
 use hyper_v014::Request;
+use hyper_v014::body::HttpBody;
+use hyper_v014::header::CONTENT_LENGTH;
+use hyper_v014::header::HeaderName;
+use hyper_v014::header::HeaderValue;
+use hyper_v014::upgrade::OnUpgrade;
 use log::error;
 use once_cell::sync::Lazy;
 use serde::Deserialize;
@@ -172,7 +172,7 @@ impl JsPermissionsOptions {
       allow_write: self.allow_write,
       deny_write: self.deny_write,
       allow_import: self.allow_import,
-      deny_import: None,  // New field in Deno 2.5.6
+      deny_import: None, // New field in Deno 2.5.6
     }
   }
 }
@@ -279,12 +279,12 @@ pub async fn op_user_worker_create(
 
   match result_rx.await {
     Err(err) => Err(JsErrorBox::generic(
-      AnyError::from(err).context("failed to create worker").to_string()
+      AnyError::from(err)
+        .context("failed to create worker")
+        .to_string(),
     )),
 
-    Ok(Err(err)) => {
-      Err(JsErrorBox::generic(format!("{err:#}")))
-    }
+    Ok(Err(err)) => Err(JsErrorBox::generic(format!("{err:#}"))),
     Ok(Ok(v)) => Ok((v.key.to_string(), v.reused)),
   }
 }
@@ -345,14 +345,20 @@ impl Resource for UserWorkerRequestBodyResource {
       ))?;
 
       body.send(Ok(bytes)).or_cancel(cancel).await?.map_err(|e| {
-        JsErrorBox::type_error(format!("request body receiver not connected ({})", e))
+        JsErrorBox::type_error(format!(
+          "request body receiver not connected ({})",
+          e
+        ))
       })?;
 
       Ok(WriteOutcome::Full { nwritten })
     })
   }
 
-  fn write_error(self: Rc<Self>, error: &dyn deno_error::JsErrorClass) -> AsyncResult<()> {
+  fn write_error(
+    self: Rc<Self>,
+    error: &dyn deno_error::JsErrorClass,
+  ) -> AsyncResult<()> {
     // Convert error to string before async block to avoid lifetime issues
     let error_string = format!("{}", error);
     async move {
@@ -364,7 +370,10 @@ impl Resource for UserWorkerRequestBodyResource {
       ))?;
       // Convert to anyhow::Error
       let anyhow_error: Error = anyhow::anyhow!(error_string);
-      body.send(Err(anyhow_error)).or_cancel(cancel).await?
+      body
+        .send(Err(anyhow_error))
+        .or_cancel(cancel)
+        .await?
         .map_err(|e| JsErrorBox::generic(format!("{:#}", e)))?;
       Ok(())
     }
@@ -497,7 +506,8 @@ pub fn op_user_worker_fetch_build(
     }
   }
 
-  let req = builder.body(body)
+  let req = builder
+    .body(body)
     .map_err(|e| JsErrorBox::generic(format!("{:#}", e)))?;
   let request_rid = state.resource_table.add(UserWorkerRequestResource(req));
 
@@ -541,7 +551,7 @@ pub async fn op_user_worker_fetch_send(
         .borrow_mut()
         .resource_table
         .get::<HttpStreamReadResource>(stream_rid)
-      .map_err(|e| JsErrorBox::generic(format!("{:#}", e)))?;
+        .map_err(|e| JsErrorBox::generic(format!("{:#}", e)))?;
 
       let mut req_reader_mut =
         RcRef::map(&req_stream, |r| &r.rd).borrow_mut().await;
@@ -604,7 +614,8 @@ pub async fn op_user_worker_fetch_send(
     }
   });
 
-  let res = result_rx.await
+  let res = result_rx
+    .await
     .map_err(|e| JsErrorBox::generic(format!("{:#}", e)))?;
   let (res, req_end_tx) = match res {
     Ok((res, req_end_tx)) => (res, req_end_tx),

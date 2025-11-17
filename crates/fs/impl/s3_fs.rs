@@ -16,14 +16,15 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use anyhow::anyhow;
 use anyhow::Context;
-use aws_config::retry::RetryConfig;
+use anyhow::anyhow;
 use aws_config::AppName;
 use aws_config::BehaviorVersion;
 use aws_config::Region;
-use aws_credential_types::credential_fn::provide_credentials_fn;
+use aws_config::retry::RetryConfig;
 use aws_credential_types::Credentials;
+use aws_credential_types::credential_fn::provide_credentials_fn;
+use aws_sdk_s3::Config;
 use aws_sdk_s3::config::SharedCredentialsProvider;
 use aws_sdk_s3::config::SharedHttpClient;
 use aws_sdk_s3::error::SdkError;
@@ -36,7 +37,6 @@ use aws_sdk_s3::types::CompletedMultipartUpload;
 use aws_sdk_s3::types::CompletedPart;
 use aws_sdk_s3::types::Delete;
 use aws_sdk_s3::types::ObjectIdentifier;
-use aws_sdk_s3::Config;
 use aws_smithy_runtime::client::http::hyper_014::HyperClientBuilder;
 use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
 use deno_core::AsyncRefCell;
@@ -55,15 +55,15 @@ use deno_io::fs::FsStat;
 use deno_permissions::{CheckedPath, CheckedPathBuf};
 use either::Either;
 use enum_as_inner::EnumAsInner;
+use futures::AsyncWriteExt;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::TryFutureExt;
 use futures::future::BoxFuture;
 use futures::future::LocalBoxFuture;
 use futures::future::Shared;
 use futures::io::AllowStdIo;
 use futures::stream::FuturesUnordered;
-use futures::AsyncWriteExt;
-use futures::FutureExt;
-use futures::StreamExt;
-use futures::TryFutureExt;
 use memmap2::MmapOptions;
 use memmap2::MmapRaw;
 use once_cell::sync::OnceCell;
@@ -74,6 +74,7 @@ use tokio::io::AsyncBufRead;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 use tokio::task::JoinError;
+use tracing::Instrument;
 use tracing::debug;
 use tracing::error;
 use tracing::info_span;
@@ -81,7 +82,6 @@ use tracing::instrument;
 use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
-use tracing::Instrument;
 
 use crate::rt;
 
@@ -365,8 +365,8 @@ fn resolve_proxy_connector() -> Option<
   use hyper_proxy::ProxyConnector;
   use hyper_rustls::HttpsConnector;
   use hyper_rustls::HttpsConnectorBuilder;
-  use hyper_v014::client::HttpConnector;
   use hyper_v014::Uri;
+  use hyper_v014::client::HttpConnector;
   use once_cell::sync::Lazy;
   use url::Url;
 
@@ -489,7 +489,9 @@ impl deno_fs::FileSystem for S3Fs {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
         rt::IO_RT.block_on(async move {
-          self.mkdir_async(CheckedPathBuf::unsafe_new(path), recursive, mode).await
+          self
+            .mkdir_async(CheckedPathBuf::unsafe_new(path), recursive, mode)
+            .await
         })
       })
       .join()
@@ -622,12 +624,20 @@ impl deno_fs::FileSystem for S3Fs {
   }
 
   #[cfg(unix)]
-  async fn chmod_async(&self, _path: CheckedPathBuf, _mode: u32) -> FsResult<()> {
+  async fn chmod_async(
+    &self,
+    _path: CheckedPathBuf,
+    _mode: u32,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
   #[cfg(not(unix))]
-  async fn chmod_async(&self, _path: CheckedPathBuf, _mode: i32) -> FsResult<()> {
+  async fn chmod_async(
+    &self,
+    _path: CheckedPathBuf,
+    _mode: i32,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -642,12 +652,20 @@ impl deno_fs::FileSystem for S3Fs {
   }
 
   #[cfg(unix)]
-  async fn lchmod_async(&self, _path: CheckedPathBuf, _mode: u32) -> FsResult<()> {
+  async fn lchmod_async(
+    &self,
+    _path: CheckedPathBuf,
+    _mode: u32,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
   #[cfg(not(unix))]
-  async fn lchmod_async(&self, _path: CheckedPathBuf, _mode: i32) -> FsResult<()> {
+  async fn lchmod_async(
+    &self,
+    _path: CheckedPathBuf,
+    _mode: i32,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -691,8 +709,11 @@ impl deno_fs::FileSystem for S3Fs {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT
-          .block_on(async move { self.remove_async(CheckedPathBuf::unsafe_new(path), recursive).await })
+        rt::IO_RT.block_on(async move {
+          self
+            .remove_async(CheckedPathBuf::unsafe_new(path), recursive)
+            .await
+        })
       })
       .join()
       .unwrap()
@@ -700,7 +721,11 @@ impl deno_fs::FileSystem for S3Fs {
   }
 
   #[instrument(level = "trace", skip(self), ret, err(Debug))]
-  async fn remove_async(&self, path: CheckedPathBuf, recursive: bool) -> FsResult<()> {
+  async fn remove_async(
+    &self,
+    path: CheckedPathBuf,
+    recursive: bool,
+  ) -> FsResult<()> {
     self.flush_background_tasks().await;
 
     let had_slash = (&*path).to_string_lossy().ends_with('/');
@@ -814,7 +839,11 @@ impl deno_fs::FileSystem for S3Fs {
     Ok(())
   }
 
-  fn copy_file_sync(&self, _oldpath: &CheckedPath, _newpath: &CheckedPath) -> FsResult<()> {
+  fn copy_file_sync(
+    &self,
+    _oldpath: &CheckedPath,
+    _newpath: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -827,11 +856,19 @@ impl deno_fs::FileSystem for S3Fs {
     Err(FsError::NotSupported)
   }
 
-  fn cp_sync(&self, _path: &CheckedPath, _new_path: &CheckedPath) -> FsResult<()> {
+  fn cp_sync(
+    &self,
+    _path: &CheckedPath,
+    _new_path: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
-  async fn cp_async(&self, _path: CheckedPathBuf, _new_path: CheckedPathBuf) -> FsResult<()> {
+  async fn cp_async(
+    &self,
+    _path: CheckedPathBuf,
+    _new_path: CheckedPathBuf,
+  ) -> FsResult<()> {
     // TODO
     Err(FsError::NotSupported)
   }
@@ -840,7 +877,9 @@ impl deno_fs::FileSystem for S3Fs {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT.block_on(async move { self.stat_async(CheckedPathBuf::unsafe_new(path)).await })
+        rt::IO_RT.block_on(async move {
+          self.stat_async(CheckedPathBuf::unsafe_new(path)).await
+        })
       })
       .join()
       .unwrap()
@@ -905,7 +944,9 @@ impl deno_fs::FileSystem for S3Fs {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT.block_on(async move { self.lstat_async(CheckedPathBuf::unsafe_new(path)).await })
+        rt::IO_RT.block_on(async move {
+          self.lstat_async(CheckedPathBuf::unsafe_new(path)).await
+        })
       })
       .join()
       .unwrap()
@@ -922,7 +963,10 @@ impl deno_fs::FileSystem for S3Fs {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
         rt::IO_RT.block_on(async move {
-          self.exists_async(CheckedPathBuf::unsafe_new(path)).await.unwrap_or(false)
+          self
+            .exists_async(CheckedPathBuf::unsafe_new(path))
+            .await
+            .unwrap_or(false)
         })
       })
       .join()
@@ -946,7 +990,9 @@ impl deno_fs::FileSystem for S3Fs {
     std::thread::scope(|s| {
       let path = (&**path).to_path_buf();
       s.spawn(move || {
-        rt::IO_RT.block_on(async move { self.read_dir_async(CheckedPathBuf::unsafe_new(path)).await })
+        rt::IO_RT.block_on(async move {
+          self.read_dir_async(CheckedPathBuf::unsafe_new(path)).await
+        })
       })
       .join()
       .unwrap()
@@ -954,7 +1000,10 @@ impl deno_fs::FileSystem for S3Fs {
   }
 
   #[instrument(level = "trace", skip(self), err(Debug))]
-  async fn read_dir_async(&self, path: CheckedPathBuf) -> FsResult<Vec<FsDirEntry>> {
+  async fn read_dir_async(
+    &self,
+    path: CheckedPathBuf,
+  ) -> FsResult<Vec<FsDirEntry>> {
     self.flush_background_tasks().await;
 
     let (bucket_name, mut key) =
@@ -1035,7 +1084,11 @@ impl deno_fs::FileSystem for S3Fs {
     })
   }
 
-  fn rename_sync(&self, _oldpath: &CheckedPath, _newpath: &CheckedPath) -> FsResult<()> {
+  fn rename_sync(
+    &self,
+    _oldpath: &CheckedPath,
+    _newpath: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -1048,7 +1101,11 @@ impl deno_fs::FileSystem for S3Fs {
     Err(FsError::NotSupported)
   }
 
-  fn link_sync(&self, _oldpath: &CheckedPath, _newpath: &CheckedPath) -> FsResult<()> {
+  fn link_sync(
+    &self,
+    _oldpath: &CheckedPath,
+    _newpath: &CheckedPath,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -1090,7 +1147,11 @@ impl deno_fs::FileSystem for S3Fs {
     Err(FsError::NotSupported)
   }
 
-  async fn truncate_async(&self, _path: CheckedPathBuf, _len: u64) -> FsResult<()> {
+  async fn truncate_async(
+    &self,
+    _path: CheckedPathBuf,
+    _len: u64,
+  ) -> FsResult<()> {
     Err(FsError::NotSupported)
   }
 
@@ -2184,11 +2245,14 @@ mod test {
     let (fs, _) = get_s3_fs([]);
 
     assert_eq!(
-      fs.open_async(CheckedPathBuf::unsafe_new(PathBuf::from("meowmeow")), *OPEN_CREATE)
-        .await
-        .err()
-        .unwrap()
-        .kind(),
+      fs.open_async(
+        CheckedPathBuf::unsafe_new(PathBuf::from("meowmeow")),
+        *OPEN_CREATE
+      )
+      .await
+      .err()
+      .unwrap()
+      .kind(),
       io::ErrorKind::InvalidInput
     );
   }

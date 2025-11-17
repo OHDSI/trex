@@ -11,12 +11,12 @@
 
 use deno_ast::ParseDiagnostic;
 use deno_core::error::AnyError;
-use deno_graph::source::ResolveError;
 use deno_graph::ModuleError;
 use deno_graph::ModuleErrorKind;
 use deno_graph::ModuleGraphError;
 use deno_graph::ModuleLoadError;
 use deno_graph::ResolutionError;
+use deno_graph::source::ResolveError;
 use import_map::ImportMapError;
 
 use crate::runtime;
@@ -44,9 +44,8 @@ fn get_module_graph_error_class(err: &ModuleGraphError) -> &'static str {
       ModuleErrorKind::WasmParse { .. } => "SyntaxError",
       ModuleErrorKind::UnsupportedMediaType { .. }
       | ModuleErrorKind::UnsupportedImportAttributeType { .. } => "TypeError",
-      ModuleErrorKind::Missing { .. } | ModuleErrorKind::MissingDynamic { .. } => {
-        "NotFound"
-      }
+      ModuleErrorKind::Missing { .. }
+      | ModuleErrorKind::MissingDynamic { .. } => "NotFound",
       ModuleErrorKind::Load { err, .. } => match err {
         ModuleLoadError::Loader(_) => "Error",
         ModuleLoadError::HttpsChecksumIntegrity(_)

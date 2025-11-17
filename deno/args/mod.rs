@@ -3,8 +3,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::bail;
 use anyhow::Context;
+use anyhow::bail;
 use deno_ast::SourceMapOption;
 use deno_config::deno_json::ConfigFile;
 use deno_config::workspace::FolderConfigs;
@@ -19,10 +19,10 @@ use once_cell::sync::Lazy;
 use reqwest::Url;
 use thiserror::Error;
 
+use crate::DenoOptionsBuilder;
 use crate::cache;
 use crate::cache::DenoDirProvider;
 use crate::util::fs::canonicalize_path_maybe_not_exists;
-use crate::DenoOptionsBuilder;
 
 pub mod deno_json;
 mod flags;
@@ -39,8 +39,8 @@ pub enum TsConfigType {
   Check,
 }
 
-pub use deno_json::check_warn_tsconfig;
 pub use deno_json::TsConfigForEmit;
+pub use deno_json::check_warn_tsconfig;
 pub use flags::TypeCheckMode;
 pub use lockfile::CliLockfile;
 pub use lockfile::CliLockfileReadFromPathOptions;
@@ -365,12 +365,12 @@ pub fn ts_config_to_transpile_and_emit_options(
       _ => deno_ast::ImportsNotUsedAsValues::Remove,
     };
   let jsx = match options.jsx.as_str() {
-    "react" => Some(deno_ast::JsxRuntime::Classic(
-      deno_ast::JsxClassicOptions {
+    "react" => {
+      Some(deno_ast::JsxRuntime::Classic(deno_ast::JsxClassicOptions {
         factory: options.jsx_factory,
         fragment_factory: options.jsx_fragment_factory,
-      },
-    )),
+      }))
+    }
     "react-jsx" => Some(deno_ast::JsxRuntime::Automatic(
       deno_ast::JsxAutomaticOptions {
         development: false,
