@@ -1,1 +1,1 @@
-linux_amd64
+osx_arm64
