@@ -1006,17 +1006,9 @@ where
             .put(MemCheckWaker::from(mem_check.waker.clone()));
         }
 
-        // `JsRuntime::new` enters the isolate. Make sure we exit it on the
-        // thread where it was created before handing it off to other threads
-        // (e.g. the bootstrap blocking pool) that will re-enter via Locker.
-        //
-        // TEMPORARY FIX for V8 140.2.0 (Deno 2.5.6): Commenting out the exit()
-        // call to avoid SIGBUS crash in v8::Locker::Initialize().
-        // The isolate will be re-entered via with_locker() in the spawn_blocking thread.
-        // TODO: Investigate if this causes any threading issues or resource leaks.
-        // unsafe {
-        //   js_runtime.v8_isolate().exit();
-        // }
+        // V8 isolate stays entered on this thread.
+        // With Deno 2.5.6, we no longer use v8::Locker, so the isolate
+        // remains on its creation thread and never needs to exit/re-enter.
 
         Ok(Bootstrap {
           migrated,
@@ -1035,111 +1027,114 @@ where
       .in_current_span()
     };
 
-    let span = Span::current();
-    let handle = Handle::current();
-    let bootstrap_ret = unsafe {
-      spawn_blocking_non_send(|| -> Result<Bootstrap, Error> {
-        let mut bootstrap = handle.block_on(bootstrap_fn())?;
-        let _span = span.entered();
+    let _span = Span::current().entered();
 
-        debug!("bootstrap");
+    // Execute bootstrap directly on this thread (no spawn_blocking needed)
+    let bootstrap_ret: Result<Bootstrap, Error> = {
+      let mut bootstrap = bootstrap_fn().await?;
 
-        let has_inspector = bootstrap.has_inspector;
-        let migrated = bootstrap.migrated;
-        let context = bootstrap.context.take().unwrap_or_default();
-        let mut bootstrap = scopeguard::guard(bootstrap, |mut it| {
-          cleanup_js_runtime(&mut it.js_runtime);
-        });
+      debug!("bootstrap");
 
+      let has_inspector = bootstrap.has_inspector;
+      let migrated = bootstrap.migrated;
+      let context = bootstrap.context.take().unwrap_or_default();
+      let mut bootstrap = scopeguard::guard(bootstrap, |mut it| {
+        cleanup_js_runtime(&mut it.js_runtime);
+      });
+
+      {
+        // Prepare data that doesn't need V8 scope
+        let runtime_context =
+          serde_json::json!(RuntimeContext::get_runtime_context(
+            &conf,
+            has_inspector,
+            migrated,
+            maybe_otel_config,
+          ));
+
+        let tokens = {
+          let op_state = bootstrap.js_runtime.op_state();
+          let resource_table = &mut op_state.borrow_mut().resource_table;
+          serde_json::json!({
+            "terminationRequestToken":
+              resource_table
+                .add(DropToken(termination_request_token.clone()))
+          })
+        };
+
+        let extra_context = {
+          let mut extra_context =
+            serde_json::json!(RuntimeContext::get_extra_context());
+
+          json::merge_object(
+            &mut extra_context,
+            &serde_json::Value::Object(context),
+          );
+          json::merge_object(&mut extra_context, &tokens);
+
+          extra_context
+        };
+
+        let context_global = bootstrap.js_runtime.main_context();
+
+        // Now create V8 scope for bootstrap operations
+        deno_core::scope!(scope, &mut bootstrap.js_runtime);
+
+        // Bootstrapping stage
+        let (runtime_context, extra_context, bootstrap_fn) = {
+          let context = context_global;
+          let context_local = v8::Local::new(scope, context);
+          let global_obj = context_local.global(scope);
+          let bootstrap_str = v8::String::new_external_onebyte_static(
+            scope,
+            b"bootstrapSBEdge",
+          )
+          .unwrap();
+          let bootstrap_fn = v8::Local::<v8::Function>::try_from(
+            global_obj.get(scope, bootstrap_str.into()).unwrap(),
+          )
+          .unwrap();
+
+          let runtime_context_local =
+            deno_core::serde_v8::to_v8(scope, runtime_context)
+              .context("failed to convert to v8 value")?;
+          let runtime_context_global =
+            v8::Global::new(scope, runtime_context_local);
+          let extra_context_local =
+            deno_core::serde_v8::to_v8(scope, extra_context)
+              .context("failed to convert to v8 value")?;
+          let extra_context_global =
+            v8::Global::new(scope, extra_context_local);
+          let bootstrap_fn_global = v8::Global::new(scope, bootstrap_fn);
+
+          (
+            runtime_context_global,
+            extra_context_global,
+            bootstrap_fn_global,
+          )
+        };
+
+        // Call bootstrap function directly on this thread
+        // No need for locker.call_with_args() - we're on the same thread as the isolate
         {
-          assert_isolate_not_locked(bootstrap.js_runtime.v8_isolate());
-          let mut locker = bootstrap.js_runtime.with_locker();
+          let bootstrap_fn_local = v8::Local::new(scope, &bootstrap_fn);
+          let runtime_context_local = v8::Local::new(scope, &runtime_context);
+          let extra_context_local = v8::Local::new(scope, &extra_context);
+          let undefined = v8::undefined(scope);
 
-          // Bootstrapping stage
-          let (runtime_context, extra_context, bootstrap_fn) = {
-            let runtime_context =
-              serde_json::json!(RuntimeContext::get_runtime_context(
-                &conf,
-                has_inspector,
-                migrated,
-                maybe_otel_config,
-              ));
-
-            let tokens = {
-              let op_state = locker.op_state();
-              let resource_table = &mut op_state.borrow_mut().resource_table;
-              serde_json::json!({
-                "terminationRequestToken":
-                  resource_table
-                    .add(DropToken(termination_request_token.clone()))
-              })
-            };
-
-            let extra_context = {
-              let mut extra_context =
-                serde_json::json!(RuntimeContext::get_extra_context());
-
-              json::merge_object(
-                &mut extra_context,
-                &serde_json::Value::Object(context),
-              );
-              json::merge_object(&mut extra_context, &tokens);
-
-              extra_context
-            };
-
-            let context = locker.main_context();
-            // New V8 API requires pinning scopes
-            let scope_storage =
-              std::pin::pin!(v8::HandleScope::new(locker.v8_isolate()));
-            let mut handle_scope = scope_storage.init();
-            let context_local = v8::Local::new(&handle_scope, context);
-            // Create ContextScope to get HandleScope<Context> instead of HandleScope<()>
-            let mut context_scope =
-              v8::ContextScope::new(&mut handle_scope, context_local);
-            let scope = &mut context_scope;
-            let global_obj = context_local.global(scope);
-            let bootstrap_str = v8::String::new_external_onebyte_static(
+          bootstrap_fn_local
+            .call(
               scope,
-              b"bootstrapSBEdge",
+              undefined.into(),
+              &[runtime_context_local.into(), extra_context_local.into()],
             )
-            .unwrap();
-            let bootstrap_fn = v8::Local::<v8::Function>::try_from(
-              global_obj.get(scope, bootstrap_str.into()).unwrap(),
-            )
-            .unwrap();
-
-            let runtime_context_local =
-              deno_core::serde_v8::to_v8(scope, runtime_context)
-                .context("failed to convert to v8 value")?;
-            let runtime_context_global =
-              v8::Global::new(scope, runtime_context_local);
-            let extra_context_local =
-              deno_core::serde_v8::to_v8(scope, extra_context)
-                .context("failed to convert to v8 value")?;
-            let extra_context_global =
-              v8::Global::new(scope, extra_context_local);
-            let bootstrap_fn_global = v8::Global::new(scope, bootstrap_fn);
-
-            (
-              runtime_context_global,
-              extra_context_global,
-              bootstrap_fn_global,
-            )
-          };
-
-          locker
-            .call_with_args(&bootstrap_fn, &[runtime_context, extra_context])
-            .now_or_never()
-            .transpose()
             .context("failed to execute bootstrap script")?;
         }
+      }
 
-        // from this moment on, using `v8::Locker` is enforced.
-        Ok(ScopeGuard::into_inner(bootstrap))
-      })
-    }
-    .await;
+      // Bootstrap complete - no longer using v8::Locker
+      Ok(ScopeGuard::into_inner(bootstrap))
+    };
 
     let Bootstrap {
       waker,
@@ -1152,101 +1147,86 @@ where
       beforeunload_mem_threshold,
       ..
     } = match bootstrap_ret {
-      Ok(Ok(v)) => v,
-      Ok(Err(err)) => {
-        return Err(err.context("failed to bootstrap runtime"));
-      }
+      Ok(v) => v,
       Err(err) => {
-        return Err(err).context("failed to bootstrap runtime");
+        return Err(err.context("failed to bootstrap runtime"));
       }
     };
 
     let otel_attributes = event_metadata.otel_attributes.clone();
-    let span = Span::current();
-    let post_task_ret = unsafe {
-      spawn_blocking_non_send(|| {
-        let _span = span.entered();
+    let _span = Span::current().entered();
 
-        debug!("bootstrap post task");
+    // Execute post-bootstrap tasks directly on this thread (no spawn_blocking needed)
+    debug!("bootstrap post task");
 
-        {
-          assert_isolate_not_locked(js_runtime.v8_isolate());
-          let mut locker = js_runtime.with_locker();
+    {
+      // Access op_state directly - no Locker needed on same thread
+      // run inside a closure, so op_state_rc is released
+      let op_state_rc = js_runtime.op_state();
+      let mut op_state = op_state_rc.borrow_mut();
 
-          // run inside a closure, so op_state_rc is released
-          let op_state_rc = locker.op_state();
-          let mut op_state = op_state_rc.borrow_mut();
+      let mut env_vars = env_vars.clone();
 
-          let mut env_vars = env_vars.clone();
+      if let Some(opts) = conf.as_events_worker_mut() {
+        op_state.put::<mpsc::UnboundedReceiver<WorkerEventWithMetadata>>(
+          opts.events_msg_rx.take().unwrap(),
+        );
+      }
 
-          if let Some(opts) = conf.as_events_worker_mut() {
-            op_state.put::<mpsc::UnboundedReceiver<WorkerEventWithMetadata>>(
-              opts.events_msg_rx.take().unwrap(),
-            );
-          }
+      if conf.is_main_worker() || conf.is_user_worker() {
+        op_state.put::<HashMap<usize, CancellationToken>>(HashMap::new());
+      }
 
-          if conf.is_main_worker() || conf.is_user_worker() {
-            op_state.put::<HashMap<usize, CancellationToken>>(HashMap::new());
-          }
+      if conf.is_user_worker() {
+        let conf = conf.as_user_worker().unwrap();
+        let key = conf.key.map_or("".to_string(), |k| k.to_string());
 
-          if conf.is_user_worker() {
-            let conf = conf.as_user_worker().unwrap();
-            let key = conf.key.map_or("".to_string(), |k| k.to_string());
+        // set execution id for user workers
+        env_vars.insert("SB_EXECUTION_ID".to_string(), key.clone());
 
-            // set execution id for user workers
-            env_vars.insert("SB_EXECUTION_ID".to_string(), key.clone());
-
-            if let Some(events_msg_tx) = conf.events_msg_tx.clone() {
-              op_state.put::<mpsc::UnboundedSender<WorkerEventWithMetadata>>(
-                events_msg_tx,
-              );
-              op_state.put(event_metadata);
-            }
-          }
-
-          op_state.put(ext_env::EnvVars(env_vars));
-          op_state.put(DenoRuntimeDropToken(DropToken(drop_token.clone())));
-          op_state.put(RuntimeOtelExtraAttributes(
-            otel_attributes
-              .unwrap_or_default()
-              .into_iter()
-              .map(|(k, v)| (k.into(), v.into()))
-              .collect(),
-          ));
+        if let Some(events_msg_tx) = conf.events_msg_tx.clone() {
+          op_state.put::<mpsc::UnboundedSender<WorkerEventWithMetadata>>(
+            events_msg_tx,
+          );
+          op_state.put(event_metadata);
         }
+      }
 
-        if is_user_worker {
-          drop(base_rt::SUPERVISOR_RT.spawn({
-            let drop_token = drop_token.clone();
-            let waker = mem_check.waker.clone();
+      op_state.put(ext_env::EnvVars(env_vars));
+      op_state.put(DenoRuntimeDropToken(DropToken(drop_token.clone())));
+      op_state.put(RuntimeOtelExtraAttributes(
+        otel_attributes
+          .unwrap_or_default()
+          .into_iter()
+          .map(|(k, v)| (k.into(), v.into()))
+          .collect(),
+      ));
+    }
 
-            async move {
-              // TODO(Nyannyacha): Should we introduce exponential backoff?
-              let mut int = interval(*ALLOC_CHECK_DUR);
-              loop {
-                tokio::select! {
-                  _ = int.tick() => {
-                    waker.wake();
-                  }
+    if is_user_worker {
+      drop(base_rt::SUPERVISOR_RT.spawn({
+        let drop_token = drop_token.clone();
+        let waker = mem_check.waker.clone();
 
-                  _ = drop_token.cancelled() => {
-                    break;
-                  }
-                }
+        async move {
+          // TODO(Nyannyacha): Should we introduce exponential backoff?
+          let mut int = interval(*ALLOC_CHECK_DUR);
+          loop {
+            tokio::select! {
+              _ = int.tick() => {
+                waker.wake();
+              }
+
+              _ = drop_token.cancelled() => {
+                break;
               }
             }
-          }));
+          }
         }
-      })
+      }));
     }
-    .await;
 
-    match post_task_ret {
-      Ok(_) => {}
-      Err(err) => {
-        return Err(err).context("failed to bootstrap runtime");
-      }
-    }
+    // Post-bootstrap tasks complete - continue with runtime initialization
 
     Ok(Self {
       runtime_state,
