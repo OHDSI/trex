@@ -22,6 +22,7 @@ members = [
   "ext/workers",
   "vendor/deno_console",
   "vendor/deno_os",
+  "trexsql/trexas",
 ]
 exclude = [
   "trexsql/hana",
@@ -31,7 +32,6 @@ exclude = [
   "trexsql/pgwire",
   "trexsql/pgt",
   "trexsql/tpm",
-  "trexsql/trexas",
 ]
 
 [workspace.package]
@@ -49,6 +49,8 @@ deno_error = "=0.7.0"
 temporal_capi = { package = "ry_temporal_capi", version = "=0.0.11-ry.1", features = ["compiled_data"] }
 # Pin timezone_provider to v0.0.14 to fix temporal_rs macro invocation error
 # (v0.0.16 has breaking API changes in iana_normalizer_singleton!() macro)
+# Note: rusty_v8 fork requires =0.0.14, but temporal_rs v0.0.11 requires ^0.0.16
+# This creates a conflict - trexas cannot be built until the v8 fork is updated
 timezone_provider = "=0.0.14"
 
 deno_cache_dir = "=0.25.0"
@@ -299,6 +301,9 @@ deno_core = { git = "https://github.com/p-hoffmann/deno_core", branch = "supabas
 eszip = { git = "https://github.com/p-hoffmann/eszip", branch = "supabase-v0.104.0-edge-runtime" }
 # Using p-hoffmann rusty_v8 fork with Locker API for V8 140.2.0
 v8 = { git = "https://github.com/p-hoffmann/rusty_v8", branch = "supabase-v140.2.0" }
+# Patch timezone_provider to use v0.0.14 which has iana_normalizer_singleton!() without args
+# (temporal_rs 0.0.11 calls the macro without args, but timezone_provider 0.0.16 requires an arg)
+timezone_provider = { git = "https://github.com/boa-dev/temporal", tag = "v0.0.14" }
 
 deno_unsync = { path = "./vendor/deno_unsync" }
 deno_telemetry = { path = "./vendor/deno_telemetry" }

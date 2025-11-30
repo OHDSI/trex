@@ -1,7 +1,7 @@
 extern crate duckdb;
 extern crate duckdb_loadable_macros;
 extern crate libduckdb_sys;
-extern crate trex;
+extern crate trex_core;
 
 use duckdb::{
   core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
@@ -171,7 +171,7 @@ impl VScalar for StartTrexServerScalar {
       graceful_exit_keepalive_deadline_ms: None,
       event_worker_exit_deadline_sec: 30,
       request_wait_timeout_ms: None,
-      request_idle_timeout_ms: None,
+      request_idle_timeout: Default::default(),
       request_read_timeout_ms: None,
       request_buffer_size: None,
       beforeunload_wall_clock_pct: None,
@@ -465,7 +465,7 @@ pub unsafe fn extension_entrypoint(
   store_shared_connection(&con)?;
 
   if let Some(shared_conn) = get_shared_connection() {
-    if let Err(e) = trex::connection::init_shared_connection(shared_conn) {
+    if let Err(e) = trex_core::connection::init_shared_connection(shared_conn) {
       eprintln!(
         "Warning: Failed to initialize trex with shared connection: {}",
         e

@@ -29,7 +29,8 @@ use deno::deno_resolver::cjs::IsCjsResolutionMode;
 use deno::deno_resolver::npm::DenoInNpmPackageChecker;
 use deno::deno_resolver::npm::NpmReqResolver;
 use deno::deno_resolver::npm::NpmReqResolverOptions;
-use deno::deno_resolver::sloppy_imports::SloppyImportsResolutionKind;
+// Sloppy imports disabled in Deno 2.5.6 - API changed
+// use deno::deno_resolver::sloppy_imports::SloppyImportsResolutionKind;
 use deno::deno_resolver::workspace::MappedResolution;
 use deno::deno_resolver::workspace::WorkspaceResolver;
 use deno::deno_semver::npm::NpmPackageReqReference;
@@ -56,9 +57,10 @@ use deno::npm::create_in_npm_pkg_checker;
 use deno::resolver::CjsTracker;
 use deno::resolver::CliDenoResolverFs;
 use deno::resolver::CliNpmReqResolver;
-use deno::resolver::CliSloppyImportsResolver;
+// CliSloppyImportsResolver disabled in Deno 2.5.6 - API changed
+// use deno::resolver::CliSloppyImportsResolver;
 use deno::resolver::NpmModuleLoader;
-use deno::resolver::SloppyImportsCachedFs;
+// SloppyImportsCachedFs removed in Deno 2.5.6 - sloppy imports resolver disabled
 use deno::resolver::GenericNpmModuleLoader;
 use deno::standalone::binary;
 use deno::util::text_encoding::from_utf8_lossy_cow;
@@ -190,7 +192,9 @@ pub struct SharedModuleLoaderState {
   pub(crate) npm_resolver: Arc<dyn CliNpmResolver>,
   pub(crate) node_resolver: Arc<VfsNodeResolver>,
   pub(crate) vfs: Arc<FileBackedVfs>,
-  pub(crate) sloppy_imports_resolver: Option<Arc<CliSloppyImportsResolver>>,
+  // Sloppy imports resolver disabled - API changed in Deno 2.5.6
+  #[allow(dead_code)]
+  pub(crate) sloppy_imports_resolver: Option<()>,
 }
 
 #[derive(Clone)]
@@ -408,45 +412,8 @@ impl ModuleLoader for EmbeddedModuleLoader {
           .handle_if_in_node_modules(&specifier)
           .unwrap_or_else(|| specifier.clone());
 
-        // Try sloppy imports resolution if enabled and this is a file:// URL
-        if final_specifier.scheme() == "file" {
-          if let Some(sloppy_resolver) = &self.shared.sloppy_imports_resolver {
-            // Map VFS path back to real source path
-            if let Ok(path) = final_specifier.to_file_path() {
-              if let Ok(stripped) =
-                path.strip_prefix("/var/tmp/sb-compile-trex")
-              {
-                let real_path = std::env::current_dir().unwrap().join(stripped);
-                if let Ok(real_specifier) =
-                  ModuleSpecifier::from_file_path(&real_path)
-                {
-                  if let Some(resolution) = sloppy_resolver.resolve(
-                    &real_specifier,
-                    SloppyImportsResolutionKind::Execution,
-                  ) {
-                    let resolved_specifier = resolution.into_specifier();
-                    // Convert back to VFS path
-                    if let Ok(resolved_path) = resolved_specifier.to_file_path()
-                    {
-                      if let Ok(rel_path) = resolved_path
-                        .strip_prefix(std::env::current_dir().unwrap())
-                      {
-                        let vfs_path =
-                          std::path::PathBuf::from("/var/tmp/sb-compile-trex")
-                            .join(rel_path);
-                        if let Ok(vfs_specifier) =
-                          ModuleSpecifier::from_file_path(&vfs_path)
-                        {
-                          return Ok(vfs_specifier);
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
+        // Sloppy imports resolution disabled in Deno 2.5.6
+        // (SloppyImportsResolver::resolve() is now private)
 
         Ok(final_specifier)
       }
@@ -1150,9 +1117,9 @@ pub async fn create_module_loader_for_eszip(
       npm_resolver: npm_resolver.clone(),
       node_resolver: node_resolver.clone(),
       vfs: vfs.clone(),
-      sloppy_imports_resolver: Some(Arc::new(CliSloppyImportsResolver::new(
-        SloppyImportsCachedFs::new(Arc::new(RealFs)),
-      ))),
+      // Sloppy imports resolver disabled - API changed in Deno 2.5.6
+      // (SloppyImportsResolver::new now requires 3 args and resolve() is private)
+      sloppy_imports_resolver: None,
     }),
   };
 

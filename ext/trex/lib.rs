@@ -4,8 +4,20 @@ pub mod sql;
 use std::process;
 
 use base64::{engine::general_purpose, Engine as _};
-use deno_core::error::AnyError;
 use deno_core::op2;
+use deno_error::JsError;
+use thiserror::Error;
+
+/// Error type for trex operations that implements JsErrorClass
+#[derive(Debug, Error, JsError)]
+pub enum TrexError {
+  #[class(generic)]
+  #[error("{0}")]
+  Generic(String),
+  #[class(generic)]
+  #[error("Resource error: {0}")]
+  Resource(#[from] deno_core::error::ResourceError),
+}
 use duckdb::arrow::array::{
   Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
   Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
@@ -509,7 +521,7 @@ fn execute_query(
   database: String,
   sql: String,
   params: Vec<TrexType>,
-) -> Result<String, AnyError> {
+) -> Result<String, TrexError> {
   let conn_arc = get_active_connection();
   let conn = &*conn_arc.lock().unwrap();
   let _ = conn
@@ -537,7 +549,7 @@ fn op_execute_query(
   #[string] database: String,
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
-) -> Result<String, AnyError> {
+) -> Result<String, TrexError> {
   execute_query(database, sql, params)
 }
 
@@ -563,7 +575,7 @@ impl Resource for RequestResource {
 
 #[op2(async)]
 #[serde]
-async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, AnyError> {
+async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, TrexError> {
   let request_id = Uuid::new_v4().to_string();
 
   let (response_sender, response_receiver) = oneshot::channel::<JsonValue>();
@@ -586,7 +598,7 @@ async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, AnyError> {
       return {
         let mut pending = PENDING_REQUESTS.lock().unwrap();
         pending.remove(&request_id);
-        Err(deno_core::error::generic_error("No active listeners"))
+        Err(TrexError::Generic("No active listeners".to_string()))
       };
     }
   };
@@ -603,26 +615,26 @@ async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, AnyError> {
         Ok(Err(_)) => {
           let mut pending = PENDING_REQUESTS.lock().unwrap();
           pending.remove(&request_id);
-          Err(deno_core::error::generic_error("Request cancelled"))
+          Err(TrexError::Generic("Request cancelled".to_string()))
         }
         Err(_) => {
           let mut pending = PENDING_REQUESTS.lock().unwrap();
           pending.remove(&request_id);
-          Err(deno_core::error::generic_error("Request timeout"))
+          Err(TrexError::Generic("Request timeout".to_string()))
         }
       }
     }
     Err(_) => {
       let mut pending = PENDING_REQUESTS.lock().unwrap();
       pending.remove(&request_id);
-      Err(deno_core::error::generic_error("Failed to send request"))
+      Err(TrexError::Generic("Failed to send request".to_string()))
     }
   }
 }
 
 #[op2]
 #[serde]
-fn op_req_listen(state: &mut OpState) -> Result<ResourceId, AnyError> {
+fn op_req_listen(state: &mut OpState) -> Result<ResourceId, TrexError> {
   let (sender, receiver) = mpsc::channel::<JsonValue>(1000);
 
   {
@@ -641,7 +653,7 @@ fn op_req_listen(state: &mut OpState) -> Result<ResourceId, AnyError> {
 async fn op_req_next(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
-) -> Result<Option<JsonValue>, AnyError> {
+) -> Result<Option<JsonValue>, TrexError> {
   let resource = state.borrow().resource_table.get::<RequestResource>(rid)?;
 
   let receiver = resource.receiver.borrow_mut().take();
@@ -674,7 +686,7 @@ async fn op_req_next(
 fn op_req_respond(
   #[string] request_id: String,
   #[serde] response: JsonValue,
-) -> Result<serde_json::Value, AnyError> {
+) -> Result<serde_json::Value, TrexError> {
   let mut pending = PENDING_REQUESTS.lock().unwrap();
 
   if let Some(sender) = pending.remove(&request_id) {
@@ -694,7 +706,7 @@ fn op_execute_query_stream(
   #[string] database: String,
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
-) -> Result<ResourceId, AnyError> {
+) -> Result<ResourceId, TrexError> {
   let (sender, receiver) = mpsc::channel::<String>(1000);
   let conn_arc = get_active_connection();
   tokio::spawn(async move {
@@ -727,7 +739,7 @@ fn op_execute_query_stream(
 async fn op_execute_query_stream_next(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
-) -> Result<Option<String>, AnyError> {
+) -> Result<Option<String>, TrexError> {
   let resource = state
     .borrow()
     .resource_table

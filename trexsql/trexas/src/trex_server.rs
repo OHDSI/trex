@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use base::server::RequestIdleTimeout;
 use base::InspectorOption;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -433,7 +434,10 @@ impl TrexServerConfig {
         .graceful_exit_keepalive_deadline_ms,
       event_worker_exit_deadline_sec: self.event_worker_exit_deadline_sec,
       request_wait_timeout_ms: self.request_wait_timeout_ms,
-      request_idle_timeout_ms: self.request_idle_timeout_ms,
+      request_idle_timeout: RequestIdleTimeout::from_millis(
+        self.request_idle_timeout_ms,
+        self.request_idle_timeout_ms,
+      ),
       request_read_timeout_ms: self.request_read_timeout_ms,
       request_buffer_size: self.request_buffer_size.map(|s| s as u64),
       beforeunload_wall_clock_pct: self
