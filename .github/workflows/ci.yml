@@ -9,10 +9,12 @@ on:
       - ready_for_review
     paths: &watch
       - '.cargo/**'
+      - '.github/workflows/**'
       - 'cli/**'
       - 'crates/**'
       - 'deno/**'
       - 'ext/**'
+      - 'trexsql/**'
       - 'vendor/**'
       - '.env'
       - 'Cargo.lock'
