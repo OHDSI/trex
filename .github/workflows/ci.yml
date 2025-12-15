@@ -44,7 +44,7 @@ jobs:
   cargo-fmt:
     if: github.event.pull_request.draft == false
     name: 'fmt'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: denoland/setup-deno@v2
@@ -58,7 +58,7 @@ jobs:
   cargo-clippy:
     if: github.event.pull_request.draft == false
     name: 'cargo clippy'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install deps
@@ -82,11 +82,13 @@ jobs:
     if: github.event.pull_request.draft == false
     name: 'cargo test'
     runs-on: ubuntu-latest
+    env:
+      V8_FROM_SOURCE: 1
     steps:
       - name: Install deps
         run: |
           sudo apt-get update
-          sudo apt-get -y install libblas-dev liblapack-dev libopenblas-dev unzip wget
+          sudo apt-get -y install libblas-dev liblapack-dev libopenblas-dev libglib2.0-dev unzip wget
 
       - name: Install DuckDB library
         run: |
