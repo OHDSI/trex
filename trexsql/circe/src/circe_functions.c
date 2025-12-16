@@ -5,6 +5,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <pthread.h>
+#include <errno.h>
 
 #ifdef CIRCE_EMBEDDED_NATIVE_LIB
 #include <unistd.h>
@@ -12,6 +14,8 @@
 #include <fcntl.h>
 #include "circe_native_embedded.h"
 #endif
+
+#define CIRCE_WORKER_STACK_SIZE (16 * 1024 * 1024)
 
 DUCKDB_EXTENSION_EXTERN
 
@@ -24,6 +28,8 @@ typedef char *(*circe_sql_translate_fn)(graal_isolatethread_t *, char *sql, char
 typedef char *(*circe_sql_render_translate_fn)(graal_isolatethread_t *, char *sql_template, char *target_dialect, char *parameters_json);
 typedef char *(*circe_check_cohort_fn)(graal_isolatethread_t *, char *expr_json);
 typedef int (*graal_create_isolate_fn)(void *params, graal_isolate_t **isolate, graal_isolatethread_t **thread);
+typedef int (*graal_attach_thread_fn)(graal_isolate_t *isolate, graal_isolatethread_t **thread);
+typedef int (*graal_detach_thread_fn)(graal_isolatethread_t *thread);
 
 static void *circe_lib_handle = NULL;
 static graal_isolate_t *circe_isolate = NULL;
@@ -34,6 +40,87 @@ static circe_sql_translate_fn circe_sql_translate = NULL;
 static circe_sql_render_translate_fn circe_sql_render_translate = NULL;
 static circe_check_cohort_fn circe_check_cohort = NULL;
 static graal_create_isolate_fn graal_create_isolate_ptr = NULL;
+static graal_attach_thread_fn graal_attach_thread_ptr = NULL;
+static graal_detach_thread_fn graal_detach_thread_ptr = NULL;
+
+static pthread_once_t circe_init_once = PTHREAD_ONCE_INIT;
+static int circe_init_success = 0;
+
+typedef enum {
+    CIRCE_OP_BUILD_SQL,
+    CIRCE_OP_SQL_RENDER,
+    CIRCE_OP_SQL_TRANSLATE,
+    CIRCE_OP_SQL_RENDER_TRANSLATE,
+    CIRCE_OP_CHECK_COHORT
+} circe_op_type;
+
+typedef struct {
+    circe_op_type op;
+    char* arg1;
+    char* arg2;
+    char* arg3;
+    char* result;
+} circe_work_t;
+
+static char* circe_execute_op(graal_isolatethread_t* thread, circe_work_t* work) {
+    switch (work->op) {
+        case CIRCE_OP_BUILD_SQL:
+            return circe_convert(thread, work->arg1, work->arg2);
+        case CIRCE_OP_SQL_RENDER:
+            return circe_sql_render(thread, work->arg1, work->arg2);
+        case CIRCE_OP_SQL_TRANSLATE:
+            return circe_sql_translate(thread, work->arg1, work->arg2);
+        case CIRCE_OP_SQL_RENDER_TRANSLATE:
+            return circe_sql_render_translate(thread, work->arg1, work->arg2, work->arg3);
+        case CIRCE_OP_CHECK_COHORT:
+            return circe_check_cohort(thread, work->arg1);
+        default:
+            fprintf(stderr, "circe: unknown operation type %d\n", work->op);
+            return NULL;
+    }
+}
+
+static void* circe_worker_thread(void* arg) {
+    circe_work_t* work = (circe_work_t*)arg;
+
+    graal_isolatethread_t* thread = NULL;
+    if (graal_attach_thread_ptr(circe_isolate, &thread) != 0 || !thread) {
+        work->result = NULL;
+        return NULL;
+    }
+
+    work->result = circe_execute_op(thread, work);
+    if (graal_detach_thread_ptr(thread) != 0) {
+        fprintf(stderr, "circe: graal_detach_thread failed\n");
+    }
+    return NULL;
+}
+
+static char* circe_run_with_large_stack(circe_op_type op, char* arg1, char* arg2, char* arg3) {
+    circe_work_t work = {op, arg1, arg2, arg3, NULL};
+    pthread_t thread;
+    pthread_attr_t attr;
+
+    if (pthread_attr_init(&attr) != 0) {
+        return circe_execute_op(circe_thread, &work);
+    }
+
+    if (pthread_attr_setstacksize(&attr, CIRCE_WORKER_STACK_SIZE) != 0) {
+        pthread_attr_destroy(&attr);
+        return circe_execute_op(circe_thread, &work);
+    }
+
+    if (pthread_create(&thread, &attr, circe_worker_thread, &work) != 0) {
+        pthread_attr_destroy(&attr);
+        return circe_execute_op(circe_thread, &work);
+    }
+
+    int rc;
+    while ((rc = pthread_join(thread, NULL)) == EINTR) {
+    }
+    pthread_attr_destroy(&attr);
+    return work.result;
+}
 
 static const char base64_decode_table[256] = {
     -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1, -1,-1,-1,-1,
@@ -103,16 +190,11 @@ static void *LoadEmbeddedCirceLibrary() {
 }
 #endif
 
-static int EnsureCirceLoaded() {
-    if (circe_convert) return 1; // Already loaded
-    
+static void CirceInitOnce(void) {
 #ifdef CIRCE_EMBEDDED_NATIVE_LIB
     circe_lib_handle = LoadEmbeddedCirceLibrary();
-    if (!circe_lib_handle) {
-        // Fall back to search paths below
-    }
 #endif
-    
+
     if (!circe_lib_handle) {
         const char *candidates[] = {
             "./circe-be/native-libs/libcirce-native-lib.so",
@@ -127,35 +209,45 @@ static int EnsureCirceLoaded() {
             if (circe_lib_handle) break;
         }
     }
-    
-    if (!circe_lib_handle) {
-        return 0; // Failed to load
-    }
-    
+
+    if (!circe_lib_handle) return;
+
     void *sym_build = dlsym(circe_lib_handle, "circe_build_cohort_sql");
-    if (!sym_build) return 0;
+    if (!sym_build) return;
     void *sym_render = dlsym(circe_lib_handle, "circe_sql_render");
-    if (!sym_render) return 0;
+    if (!sym_render) return;
     void *sym_translate = dlsym(circe_lib_handle, "circe_sql_translate");
-    if (!sym_translate) return 0;
+    if (!sym_translate) return;
     void *sym_render_translate = dlsym(circe_lib_handle, "circe_sql_render_translate");
-    if (!sym_render_translate) return 0;
+    if (!sym_render_translate) return;
     void *sym_check = dlsym(circe_lib_handle, "circe_check_cohort");
-    if (!sym_check) return 0;
+    if (!sym_check) return;
     void *sym_create = dlsym(circe_lib_handle, "graal_create_isolate");
-    if (!sym_create) return 0;
+    if (!sym_create) return;
+    void *sym_attach = dlsym(circe_lib_handle, "graal_attach_thread");
+    if (!sym_attach) return;
+    void *sym_detach = dlsym(circe_lib_handle, "graal_detach_thread");
+    if (!sym_detach) return;
+
+    graal_create_isolate_ptr = (graal_create_isolate_fn)sym_create;
+    graal_attach_thread_ptr = (graal_attach_thread_fn)sym_attach;
+    graal_detach_thread_ptr = (graal_detach_thread_fn)sym_detach;
+
+    int rc = graal_create_isolate_ptr(NULL, &circe_isolate, &circe_thread);
+    if (rc != 0 || !circe_thread) return;
 
     circe_convert = (circe_convert_fn)sym_build;
     circe_sql_render = (circe_sql_render_fn)sym_render;
     circe_sql_translate = (circe_sql_translate_fn)sym_translate;
     circe_sql_render_translate = (circe_sql_render_translate_fn)sym_render_translate;
     circe_check_cohort = (circe_check_cohort_fn)sym_check;
-    graal_create_isolate_ptr = (graal_create_isolate_fn)sym_create;
-    
-    int rc = graal_create_isolate_ptr(NULL, &circe_isolate, &circe_thread);
-    if (rc != 0 || !circe_thread) return 0;
-    
-    return 1; // Success
+
+    circe_init_success = 1;
+}
+
+static int EnsureCirceLoaded() {
+    pthread_once(&circe_init_once, CirceInitOnce);
+    return circe_init_success;
 }
 
 static char* get_string_from_vector(duckdb_vector vector, idx_t row) {
@@ -317,14 +409,13 @@ static void CirceJsonToSqlFunction(duckdb_function_info info, duckdb_data_chunk 
             return;
         }
         
-        // Call Circe native function
-        char* sql_c = circe_convert(circe_thread, decoded, opts);
+        char* sql_c = circe_run_with_large_stack(CIRCE_OP_BUILD_SQL, decoded, opts, NULL);
         if (sql_c) {
             set_string_in_vector(output, row, sql_c);
         } else {
             set_error_in_vector(output, row, result_validity);
         }
-        
+
         duckdb_free(decoded);
         duckdb_free(b64_expr);
         duckdb_free(opts);
@@ -374,13 +465,13 @@ static void CirceSqlRenderFunction(duckdb_function_info info, duckdb_data_chunk 
             continue;
         }
         
-        char* rendered_c = circe_sql_render(circe_thread, template_str, params_str);
+        char* rendered_c = circe_run_with_large_stack(CIRCE_OP_SQL_RENDER, template_str, params_str, NULL);
         if (rendered_c) {
             set_string_in_vector(output, row, rendered_c);
         } else {
             set_error_in_vector(output, row, result_validity);
         }
-        
+
         duckdb_free(template_str);
         duckdb_free(params_str);
     }
@@ -429,13 +520,13 @@ static void CirceSqlTranslateFunction(duckdb_function_info info, duckdb_data_chu
             continue;
         }
         
-        char* translated_c = circe_sql_translate(circe_thread, sql_str, dialect_str);
+        char* translated_c = circe_run_with_large_stack(CIRCE_OP_SQL_TRANSLATE, sql_str, dialect_str, NULL);
         if (translated_c) {
             set_string_in_vector(output, row, translated_c);
         } else {
             set_error_in_vector(output, row, result_validity);
         }
-        
+
         duckdb_free(sql_str);
         duckdb_free(dialect_str);
     }
@@ -489,13 +580,13 @@ static void CirceSqlRenderTranslateFunction(duckdb_function_info info, duckdb_da
             continue;
         }
         
-        char* result_c = circe_sql_render_translate(circe_thread, template_str, dialect_str, params_str);
+        char* result_c = circe_run_with_large_stack(CIRCE_OP_SQL_RENDER_TRANSLATE, template_str, dialect_str, params_str);
         if (result_c) {
             set_string_in_vector(output, row, result_c);
         } else {
             set_error_in_vector(output, row, result_validity);
         }
-        
+
         duckdb_free(template_str);
         duckdb_free(dialect_str);
         duckdb_free(params_str);
@@ -556,25 +647,23 @@ static void CirceGenerateAndTranslateFunction(duckdb_function_info info, duckdb_
             return;
         }
         
-        // Call Circe native function to generate SQL
-        char* sql_c = circe_convert(circe_thread, decoded, opts);
+        char* sql_c = circe_run_with_large_stack(CIRCE_OP_BUILD_SQL, decoded, opts, NULL);
         duckdb_free(decoded);
-        
+
         if (!sql_c) {
             set_error_in_vector(output, row, result_validity);
             duckdb_free(b64_expr);
             duckdb_free(opts);
             continue;
         }
-        
-        // Translate to DuckDB dialect
-        char* translated_sql = circe_sql_translate(circe_thread, sql_c, "duckdb");
+
+        char* translated_sql = circe_run_with_large_stack(CIRCE_OP_SQL_TRANSLATE, sql_c, "duckdb", NULL);
         if (translated_sql) {
             set_string_in_vector(output, row, translated_sql);
         } else {
             set_error_in_vector(output, row, result_validity);
         }
-        
+
         duckdb_free(b64_expr);
         duckdb_free(opts);
     }
@@ -627,8 +716,7 @@ static void CirceCheckCohortFunction(duckdb_function_info info, duckdb_data_chun
             return;
         }
 
-        // Call Circe native function
-        char* warnings_json = circe_check_cohort(circe_thread, decoded);
+        char* warnings_json = circe_run_with_large_stack(CIRCE_OP_CHECK_COHORT, decoded, NULL, NULL);
         if (warnings_json) {
             set_string_in_vector(output, row, warnings_json);
         } else {
