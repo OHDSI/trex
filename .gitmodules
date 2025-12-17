@@ -1,9 +1,3 @@
-[submodule "trexsql/extension-ci-tools"]
-	path = trexsql/extension-ci-tools
+[submodule "ext/trexas/extension-ci-tools"]
+	path = ext/trexas/extension-ci-tools
 	url = https://github.com/p-hoffmann/extension-ci-tools.git
-[submodule "trexsql/circe/circe-be"]
-	path = trexsql/circe/circe-be
-	url = https://github.com/p-hoffmann/circe-be.git
-[submodule "trexsql/llama/llama.cpp"]
-	path = trexsql/llama/llama.cpp
-	url = https://github.com/ggml-org/llama.cpp.git
