@@ -284,8 +284,9 @@ export class TrexConnection  {
                 if (err) {
                     console.error(err)
                     callback(err, null);
+                } else {
+                    callback(null, result);
                 }
-                callback(null, result);
             });
         } catch (error) {
             callback(error, null);

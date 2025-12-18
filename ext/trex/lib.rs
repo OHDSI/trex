@@ -533,9 +533,9 @@ fn execute_query(
         let batches: Vec<RecordBatch> = iter.collect();
         Ok(record_batches_to_json(&batches))
       }
-      Err(_) => Ok("[]".to_string()),
+      Err(e) => Err(TrexError::Generic(format!("Query execution failed: {e}"))),
     },
-    Err(_) => Ok("[]".to_string()),
+    Err(e) => Err(TrexError::Generic(format!("Query preparation failed: {e}"))),
   }
 }
 
