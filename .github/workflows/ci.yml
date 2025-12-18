@@ -14,7 +14,6 @@ on:
       - 'crates/**'
       - 'deno/**'
       - 'ext/**'
-      - 'trexsql/**'
       - 'vendor/**'
       - '.env'
       - 'Cargo.lock'
