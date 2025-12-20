@@ -63,7 +63,7 @@ impl WorkerDriver for Managed {
         .run(
           RunOptionsBuilder::new()
             .stream_rx(network_receiver)
-            .wait_termination_request_token(false)
+            .wait_termination_request_token(true)
             .build()
             .unwrap(),
         )

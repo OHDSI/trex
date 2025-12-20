@@ -723,16 +723,26 @@ pub async fn generate_binary_eszip(
         path.to_path_buf()
       }))
     } else if path.is_dir() {
-      deno_options
-        .use_byonm()
-        .then(|| {
-          let workspace = deno_options.workspace();
-          workspace
-            .root_pkg_json()
-            .and_then(|it| it.main.as_deref())
-            .map(|it| CreateGraphArgs::File(workspace.root_dir_path().join(it)))
-        })
-        .flatten()
+      // First check for index.ts or index.js in the directory
+      let index_ts = path.join("index.ts");
+      let index_js = path.join("index.js");
+      if index_ts.is_file() {
+        Some(CreateGraphArgs::File(index_ts))
+      } else if index_js.is_file() {
+        Some(CreateGraphArgs::File(index_js))
+      } else {
+        // Fall back to package.json main field
+        deno_options
+          .use_byonm()
+          .then(|| {
+            let workspace = deno_options.workspace();
+            workspace
+              .root_pkg_json()
+              .and_then(|it| it.main.as_deref())
+              .map(|it| CreateGraphArgs::File(workspace.root_dir_path().join(it)))
+          })
+          .flatten()
+      }
     } else {
       None
     }

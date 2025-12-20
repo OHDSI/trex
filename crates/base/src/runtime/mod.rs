@@ -84,6 +84,7 @@ use ext_workers::context::WorkerContextInitOpts;
 use ext_workers::context::WorkerKind;
 use ext_workers::context::WorkerRuntimeOpts;
 use fs::deno_compile_fs::DenoCompileFileSystem;
+use fs::VfsSys;
 use fs::prefix_fs::PrefixFs;
 use fs::s3_fs::S3Fs;
 use fs::static_fs::StaticFs;
@@ -711,7 +712,7 @@ where
         let RuntimeProviders {
           migrated,
           module_loader,
-          node_services: _,
+          node_services,
           npm_snapshot,
           permissions,
           metadata,
@@ -865,8 +866,8 @@ where
           ext_node::deno_node::lazy_init::<
             PermissionsContainer,
             deno_resolver::npm::DenoInNpmPackageChecker,
-            npm::NpmResolver<sys_traits::impls::RealSys>,
-            sys_traits::impls::RealSys,
+            npm::NpmResolver<VfsSys>,
+            VfsSys,
           >(),
           deno_cache::deno_cache::lazy_init(),
           deno::runtime::ops::permissions::deno_permissions::init(),
@@ -992,12 +993,15 @@ where
           deno_http::deno_http::args(deno_http::Options::default()),
           deno_io::deno_io::args(Some(stdio.clone())),
           deno_fs::deno_fs::args::<PermissionsContainer>(Arc::new(deno_fs::RealFs)),
-          ext_node::deno_node::args::<
-            PermissionsContainer,
-            deno_resolver::npm::DenoInNpmPackageChecker,
-            npm::NpmResolver<sys_traits::impls::RealSys>,
-            sys_traits::impls::RealSys,
-          >(None, Arc::new(deno_fs::RealFs)),
+          {
+            let sys = node_services.sys.clone();
+            ext_node::deno_node::args::<
+              PermissionsContainer,
+              deno_resolver::npm::DenoInNpmPackageChecker,
+              npm::NpmResolver<VfsSys>,
+              VfsSys,
+            >(Some(node_services), Arc::new(deno_fs::RealFs), sys)
+          },
           deno_cache::deno_cache::args(Default::default()),
         ]).map_err(|e| anyhow::anyhow!("Failed to lazy init extensions: {:#}", e))?;
 
@@ -1532,7 +1536,8 @@ where
       if let Err(err) = mod_result {
         return (Err(err), get_accumulated_cpu_time_ms!());
       }
-      if self.runtime_state.is_event_loop_completed()
+      if self.conf.is_user_worker()
+        && self.runtime_state.is_event_loop_completed()
         && self.promise_metrics.have_all_promises_been_resolved()
       {
         return (Ok(()), get_accumulated_cpu_time_ms!());

@@ -529,10 +529,26 @@ impl Server {
     let non_secure_listener = TcpListener::bind(&self.addr).await?;
     let mut secure_listener = if let Some(tls) = self.tls.take() {
       let addr = SocketAddr::new(self.addr.ip(), tls.port);
-      Some((
-        TlsListener::new(tls.into_acceptor()?, TcpListener::bind(addr).await?),
-        addr,
-      ))
+      eprintln!("[TREX-EXT] Starting TLS listener on {:?}", addr);
+      match tls.into_acceptor() {
+        Ok(acceptor) => {
+          eprintln!("[TREX-EXT] TLS acceptor created successfully");
+          match TcpListener::bind(addr).await {
+            Ok(listener) => {
+              eprintln!("[TREX-EXT] TLS TCP listener bound to {:?}", addr);
+              Some((TlsListener::new(acceptor, listener), addr))
+            }
+            Err(e) => {
+              eprintln!("[TREX-EXT] Failed to bind TLS TCP listener: {}", e);
+              return Err(e.into());
+            }
+          }
+        }
+        Err(e) => {
+          eprintln!("[TREX-EXT] Failed to create TLS acceptor: {}", e);
+          return Err(e);
+        }
+      }
     } else {
       None
     };
@@ -551,6 +567,7 @@ impl Server {
     );
 
     if let Some((_, addr)) = secure_listener.as_ref() {
+      eprintln!("[TREX-EXT] TLS server ready on {:?}", addr);
       debug!("edge-runtime is listening on {:?} (secure)", addr);
     }
 
@@ -650,6 +667,7 @@ impl Server {
             unreachable!();
           }.await
         } => {
+          eprintln!("[TREX-EXT] Exit: termination token resolved");
           info!("termination token resolved");
 
           if graceful_exit_deadline_sec == 0 {
@@ -661,18 +679,21 @@ impl Server {
         }
 
         _ = &mut main_worker_cancel_fut => {
+          eprintln!("[TREX-EXT] Exit: main worker has been destroyed");
           error!("main worker has been destroyed");
           loop_state = LoopState::MainWorkerDestroyed;
           break;
         }
 
         signum = &mut terminate_signal_fut => {
+          eprintln!("[TREX-EXT] Exit: shutdown signal received: {}", signum);
           info!("shutdown signal received: {}", signum);
           ret = Some(Left(signum));
           break;
         }
 
         _ = signal::ctrl_c() => {
+          eprintln!("[TREX-EXT] Exit: interrupt signal received");
           info!("interrupt signal received");
           loop_state = LoopState::Interrupted;
           break;
@@ -684,9 +705,11 @@ impl Server {
       ret = Some(Right(std::process::ExitCode::FAILURE));
 
       let Some(err) = self.main_worker_surface.exit.error().await else {
+        eprintln!("[TREX-EXT] Main worker destroyed with no error info");
         return Ok(ret);
       };
 
+      eprintln!("[TREX-EXT] Main worker error: {:?}", err);
       error!("{err:?}");
 
       return Ok(ret);
