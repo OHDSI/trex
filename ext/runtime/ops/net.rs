@@ -215,8 +215,9 @@ pub async fn op_net_accept(
   let (stream, conn_token) = tokio::select! {
     ret = rx.recv() => ret,
     _ = accept_token.cancelled() => None,
+    _ = runtime_token.clone().cancelled_owned() => None,
   }
-  .ok_or_else(|| crate::RuntimeError::Runtime("duplex stream channel closed".into()))?;
+  .ok_or_else(|| crate::RuntimeError::Runtime("listener closed".into()))?;
 
   let resource = TokioDuplexResource::new(stream);
   let id = resource.id;

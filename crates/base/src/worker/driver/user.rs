@@ -6,7 +6,6 @@ use crate::runtime::RunOptionsBuilder;
 use crate::worker::supervisor::create_supervisor;
 use crate::worker::supervisor::CPUUsageMetrics;
 use crate::worker::utils::apply_source_maps;
-use crate::worker::utils::enrich_error_with_source;
 use crate::worker::utils::translate_vfs_paths;
 use crate::worker::DuplexStreamEntry;
 use crate::worker::WorkerCx;
@@ -112,7 +111,6 @@ impl WorkerDriver for User {
 
             // Apply source maps to translate bundled line numbers to original
             let exception = apply_source_maps(&err_string);
-            let exception = enrich_error_with_source(&exception, 5);
             let exception = translate_vfs_paths(
               &exception,
               inner.event_metadata.service_path.as_deref(),

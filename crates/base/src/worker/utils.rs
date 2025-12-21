@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::fs;
-use std::path::Path;
 
 use anyhow::anyhow;
 use anyhow::bail;
@@ -25,45 +23,9 @@ use tokio_util::sync::CancellationToken;
 static VFS_PATH_REGEX: Lazy<Regex> =
   Lazy::new(|| Regex::new(r"file:///var/tmp/sb-compile-trex/[^/]+/").unwrap());
 
-static ERROR_LOCATION_REGEX: Lazy<Regex> =
-  Lazy::new(|| Regex::new(r"file://(/[^:]+):(\d+):(\d+)").unwrap());
-
 /// Apply source map translation to error messages
 pub fn apply_source_maps(error_msg: &str) -> String {
   source_map_store::translate_error_locations(error_msg)
-}
-
-pub fn enrich_error_with_source(error_msg: &str, context_lines: usize) -> String {
-  let Some(caps) = ERROR_LOCATION_REGEX.captures(error_msg) else {
-    return error_msg.to_string();
-  };
-
-  let file_path = &caps[1];
-  let Ok(line_num) = caps[2].parse::<usize>() else {
-    return error_msg.to_string();
-  };
-
-  let path = Path::new(file_path);
-  let Ok(content) = fs::read_to_string(path) else {
-    return error_msg.to_string();
-  };
-
-  let lines: Vec<&str> = content.lines().collect();
-  if line_num == 0 || line_num > lines.len() {
-    return error_msg.to_string();
-  }
-
-  let start = line_num.saturating_sub(context_lines + 1);
-  let end = (line_num + context_lines).min(lines.len());
-
-  let mut source_ctx = String::new();
-  for (i, line) in lines[start..end].iter().enumerate() {
-    let actual_line = start + i + 1;
-    let marker = if actual_line == line_num { ">" } else { " " };
-    source_ctx.push_str(&format!("{} {:4} | {}\n", marker, actual_line, line));
-  }
-
-  format!("{}\n\nSource:\n{}", error_msg, source_ctx)
 }
 
 pub fn translate_vfs_paths(error_msg: &str, service_path: Option<&str>) -> String {

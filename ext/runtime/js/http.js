@@ -180,8 +180,17 @@ function serve(args1, args2) {
       port: options.port,
     });
 
-    for await (const conn of listener) {
-      handleHttp(conn);
+    try {
+      for await (const conn of listener) {
+        handleHttp(conn);
+      }
+    } catch (error) {
+      // Listener closed during shutdown - this is expected
+      if (error?.message?.includes("listener closed") ||
+          error?.message?.includes("invalid_argument")) {
+        return;
+      }
+      throw error;
     }
   })();
 
