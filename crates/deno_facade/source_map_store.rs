@@ -4,6 +4,7 @@ use regex::Regex;
 use sourcemap::SourceMap;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tracing::debug;
 
 static SOURCE_MAPS: Lazy<RwLock<HashMap<String, Arc<SourceMap>>>> =
   Lazy::new(|| RwLock::new(HashMap::new()));
@@ -15,9 +16,17 @@ pub fn store_source_map(specifier: &str, source_map_bytes: &[u8]) {
   let result =
     std::panic::catch_unwind(|| SourceMap::from_slice(source_map_bytes));
 
-  if let Ok(Ok(sm)) = result {
-    if let Some(mut maps) = SOURCE_MAPS.try_write() {
-      maps.insert(specifier.to_string(), Arc::new(sm));
+  match result {
+    Ok(Ok(sm)) => {
+      if let Some(mut maps) = SOURCE_MAPS.try_write() {
+        maps.insert(specifier.to_string(), Arc::new(sm));
+      }
+    }
+    Ok(Err(e)) => {
+      debug!("Failed to parse source map for {}: {}", specifier, e);
+    }
+    Err(_) => {
+      debug!("Panic while parsing source map for {}", specifier);
     }
   }
 }

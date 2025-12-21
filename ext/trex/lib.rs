@@ -508,12 +508,12 @@ fn execute_query(
       Err(e) => Err(TrexError::Generic(format!("Query execution failed: {e}"))),
     },
     Err(e) => {
-      // Extract root cause from error chain
+      // Build full error chain for better debugging
       let err: &dyn StdError = &e;
       let mut msg = format!("{err}");
       let mut source = err.source();
       while let Some(s) = source {
-        msg = format!("{s}");
+        msg = format!("{msg}: {s}");
         source = s.source();
       }
       Err(TrexError::Generic(format!("Query failed: {msg}")))
