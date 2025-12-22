@@ -1,4 +1,6 @@
 import { core, internals, primordials } from "ext:core/mod.js";
+import { nodeGlobals } from "ext:deno_node/00_globals.js";
+import "ext:deno_node/02_init.js";
 
 import "ext:deno_os/30_os.js";
 import "ext:deno_process/40_process.js";
@@ -101,7 +103,14 @@ const {
   StringPrototypeIncludes,
   StringPrototypeSplit,
   StringPrototypeTrim,
+  Symbol,
 } = primordials;
+
+// Set up Deno.internal Symbol for Node.js compatibility
+const internalSymbol = Symbol("Deno.internal");
+ObjectAssign(internals, { nodeGlobals });
+denoOverrides.internal = internalSymbol;
+denoOverrides[internalSymbol] = internals;
 
 let image;
 function ImageNonEnumerable(getter) {
@@ -708,17 +717,17 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
       "addSignalListener": "mock",
       "removeSignalListener": "mock",
 
-      "lstatSync": "allowIfRuntimeIsInInit",
-      "statSync": "allowIfRuntimeIsInInit",
-      "removeSync": "allowIfRuntimeIsInInit",
-      "writeFileSync": "allowIfRuntimeIsInInit",
-      "writeTextFileSync": "allowIfRuntimeIsInInit",
-      "readFileSync": "allowIfRuntimeIsInInit",
-      "readTextFileSync": "allowIfRuntimeIsInInit",
-      "mkdirSync": "allowIfRuntimeIsInInit",
-      "makeTempDirSync": "allowIfRuntimeIsInInit",
-      "makeTempFileSync": "allowIfRuntimeIsInInit",
-      "readDirSync": "allowIfRuntimeIsInInit",
+      "lstatSync": true,
+      "statSync": true,
+      "removeSync": true,
+      "writeFileSync": true,
+      "writeTextFileSync": true,
+      "readFileSync": true,
+      "readTextFileSync": true,
+      "mkdirSync": true,
+      "makeTempDirSync": true,
+      "makeTempFileSync": true,
+      "readDirSync": true,
 
       // TODO: use a non-hardcoded path
       "execPath": () => "/bin/trex",
@@ -802,6 +811,20 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
       argv: void 0,
       nodeDebug: Deno.env.get("NODE_DEBUG") ?? "",
     });
+
+    // Apply Node.js globals to globalThis
+    if (nodeGlobals.process) {
+      globalThis.process = nodeGlobals.process;
+    }
+    if (nodeGlobals.Buffer) {
+      globalThis.Buffer = nodeGlobals.Buffer;
+    }
+    if (nodeGlobals.setImmediate) {
+      globalThis.setImmediate = nodeGlobals.setImmediate;
+    }
+    if (nodeGlobals.clearImmediate) {
+      globalThis.clearImmediate = nodeGlobals.clearImmediate;
+    }
 
     delete globalThis.nodeBootstrap;
   }

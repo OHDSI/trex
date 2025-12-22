@@ -5,6 +5,8 @@ use crate::runtime::DenoRuntime;
 use crate::runtime::RunOptionsBuilder;
 use crate::worker::supervisor::create_supervisor;
 use crate::worker::supervisor::CPUUsageMetrics;
+use crate::worker::utils::apply_source_maps;
+use crate::worker::utils::translate_vfs_paths;
 use crate::worker::DuplexStreamEntry;
 use crate::worker::WorkerCx;
 
@@ -69,7 +71,7 @@ impl WorkerDriver for User {
     &self,
     runtime: &'l mut DenoRuntime,
   ) -> impl Future<Output = Result<WorkerEvents, Error>> + 'l {
-    let User { cx, .. } = self.clone();
+    let User { inner, cx } = self.clone();
 
     async move {
       let mut cx = cx.lock().await;
@@ -107,8 +109,14 @@ impl WorkerDriver for User {
               err_string.as_str()
             );
 
+            // Apply source maps to translate bundled line numbers to original
+            let exception = apply_source_maps(&err_string);
+            let exception = translate_vfs_paths(
+              &exception,
+              inner.event_metadata.service_path.as_deref(),
+            );
             Ok(WorkerEvents::UncaughtException(UncaughtExceptionEvent {
-              exception: err_string,
+              exception,
               cpu_time_used: cpu_usage_ms as usize,
             }))
           }

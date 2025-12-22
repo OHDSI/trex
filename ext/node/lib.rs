@@ -750,12 +750,13 @@ deno_core::extension!(deno_node,
   options = {
     maybe_init: Option<NodeExtInitServices<TInNpmPackageChecker, TNpmPackageFolderResolver, TSys>>,
     fs: deno_fs::FileSystemRc,
+    sys: TSys,
   },
   state = |state, options| {
     state.put(options.fs.clone());
+    state.put(options.sys.clone());
 
     if let Some(init) = &options.maybe_init {
-      state.put(init.sys.clone());
       state.put(init.node_require_loader.clone());
       state.put(init.node_resolver.clone());
       state.put(init.pkg_json_resolver.clone());
