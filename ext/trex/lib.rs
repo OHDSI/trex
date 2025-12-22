@@ -87,13 +87,18 @@ fn get_active_connection() -> Arc<Mutex<Connection>> {
 #[op2]
 #[string]
 fn op_get_dbc() -> String {
+  return (*(*DB_CREDENTIALS)).lock().unwrap().clone();
+}
+
+#[op2]
+#[string]
+fn op_get_dbc2() -> String {
   let mut base_creds: serde_json::Value =
     serde_json::from_str(&(*(*DB_CREDENTIALS)).lock().unwrap().clone())
       .unwrap_or_else(
         |_| serde_json::json!({"credentials": [], "publications": {}}),
       );
 
-  // Add hardcoded RESULT database from TREX__SQL__* env variables
   if let (Ok(host), Ok(port), Ok(user), Ok(password), Ok(dbname)) = (
     std::env::var("TREX__SQL__HOST"),
     std::env::var("TREX__SQL__PORT"),
@@ -125,7 +130,6 @@ fn op_get_dbc() -> String {
       .get_mut("credentials")
       .and_then(|c| c.as_array_mut())
     {
-      // Check if RESULT already exists
       if !credentials
         .iter()
         .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("RESULT"))
@@ -135,7 +139,6 @@ fn op_get_dbc() -> String {
     }
   }
 
-  // Add hardcoded FHIR database from PG__* env variables
   if let (Ok(host), Ok(dbname), Ok(user), Ok(password)) = (
     std::env::var("PG__HOST"),
     std::env::var("PG__FHIR_DB_NAME"),
@@ -171,7 +174,6 @@ fn op_get_dbc() -> String {
       .get_mut("credentials")
       .and_then(|c| c.as_array_mut())
     {
-      // Check if FHIR already exists
       if !credentials
         .iter()
         .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("FHIR"))
@@ -741,6 +743,7 @@ deno_core::extension!(
         op_install_plugin,
         op_execute_query,
         op_get_dbc,
+        op_get_dbc2,
         op_set_dbc,
         op_execute_query_stream,
         op_execute_query_stream_next,
