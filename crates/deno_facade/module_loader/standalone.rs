@@ -525,20 +525,20 @@ impl ModuleLoader for EmbeddedModuleLoader {
     }
 
     let Some(module) = self.shared.eszip.get_module(original_specifier) else {
+      #[allow(clippy::collapsible_if)]
       if original_specifier.scheme() == "file" {
         if let Ok(path) = original_specifier.to_file_path() {
           let paths_to_try: Vec<PathBuf> = {
             let mut paths = vec![path.clone()];
             let path_str = path.to_string_lossy();
-            if path_str.starts_with("/var/tmp/sb-compile-trex/") {
-              if let Some(rest) =
-                path_str.strip_prefix("/var/tmp/sb-compile-trex/")
-              {
-                if let Some(relative) = rest.split_once('/').map(|(_, r)| r) {
-                  if let Some(ref svc_path) = self.shared.service_path {
-                    paths.push(svc_path.join(relative));
-                  }
-                }
+            if let Some(rest) =
+              path_str.strip_prefix("/var/tmp/sb-compile-trex/")
+            {
+              if let (Some(relative), Some(svc_path)) = (
+                rest.split_once('/').map(|(_, r)| r),
+                &self.shared.service_path,
+              ) {
+                paths.push(svc_path.join(relative));
               }
             }
             paths
