@@ -95,6 +95,7 @@ pub fn create_bundle_sync(
 
       let mut metadata = Metadata::default();
 
+      #[allow(clippy::arc_with_non_send_sync)]
       let eszip_fut = generate_binary_eszip(
         &mut metadata,
         Arc::new(emitter_factory),

@@ -747,6 +747,7 @@ deno_core::extension!(
         op_install_plugin,
         op_execute_query,
         op_get_dbc,
+        op_get_dbc2,
         op_set_dbc,
         op_execute_query_stream,
         op_execute_query_stream_next,
