@@ -99,7 +99,6 @@ fn op_get_dbc2() -> String {
         |_| serde_json::json!({"credentials": [], "publications": {}}),
       );
 
-  // Add hardcoded RESULT database from TREX__SQL__* env variables
   if let (Ok(host), Ok(port), Ok(user), Ok(password), Ok(dbname)) = (
     std::env::var("TREX__SQL__HOST"),
     std::env::var("TREX__SQL__PORT"),
@@ -131,7 +130,6 @@ fn op_get_dbc2() -> String {
       .get_mut("credentials")
       .and_then(|c| c.as_array_mut())
     {
-      // Check if RESULT already exists
       if !credentials
         .iter()
         .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("RESULT"))
@@ -141,7 +139,6 @@ fn op_get_dbc2() -> String {
     }
   }
 
-  // Add hardcoded FHIR database from PG__* env variables
   if let (Ok(host), Ok(dbname), Ok(user), Ok(password)) = (
     std::env::var("PG__HOST"),
     std::env::var("PG__FHIR_DB_NAME"),
@@ -177,7 +174,6 @@ fn op_get_dbc2() -> String {
       .get_mut("credentials")
       .and_then(|c| c.as_array_mut())
     {
-      // Check if FHIR already exists
       if !credentials
         .iter()
         .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("FHIR"))

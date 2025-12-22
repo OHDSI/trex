@@ -385,7 +385,13 @@ impl FileSystem for DenoCompileFileSystem {
 
   fn read_dir_sync(&self, path: &CheckedPath) -> FsResult<Vec<FsDirEntry>> {
     if self.0.is_path_within(path) {
-      Ok(self.0.read_dir(path)?)
+      match self.0.read_dir(path) {
+        Ok(entries) => Ok(entries),
+        Err(_) => {
+          self.error_if_no_use_real_fs(true)?;
+          RealFs.read_dir_sync(path)
+        }
+      }
     } else {
       self.error_if_no_use_real_fs(true)?;
       RealFs.read_dir_sync(path)
@@ -396,7 +402,13 @@ impl FileSystem for DenoCompileFileSystem {
     path: CheckedPathBuf,
   ) -> FsResult<Vec<FsDirEntry>> {
     if self.0.is_path_within(&path) {
-      Ok(self.0.read_dir(&path)?)
+      match self.0.read_dir(&path) {
+        Ok(entries) => Ok(entries),
+        Err(_) => {
+          self.error_if_no_use_real_fs(true)?;
+          RealFs.read_dir_async(path).await
+        }
+      }
     } else {
       self.error_if_no_use_real_fs(true)?;
       RealFs.read_dir_async(path).await

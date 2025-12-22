@@ -705,6 +705,7 @@ where
           Some(MigrateOptions {
             maybe_import_map_path,
           }),
+          Some(base_dir_path.to_string_lossy().as_ref()),
         )
         .await?;
 

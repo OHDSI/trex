@@ -1217,28 +1217,31 @@ impl sys_traits::BaseFsReadDir for VfsSys {
     Box<dyn Iterator<Item = std::io::Result<Self::ReadDirEntry>>>,
   > {
     if self.0.is_path_within(path) {
-      let entries = self.0.read_dir(path)?;
-      let parent_path = path.to_path_buf();
-      let vfs_entries: Vec<_> = entries
-        .into_iter()
-        .map(move |entry| {
-          let file_type = if entry.is_directory {
-            sys_traits::FileType::Dir
-          } else if entry.is_symlink {
-            sys_traits::FileType::Symlink
-          } else {
-            sys_traits::FileType::File
-          };
-          Ok(BoxedFsDirEntry::new(VfsDirEntry {
-            parent_path: parent_path.clone(),
-            name: entry.name,
-            file_type,
-          }))
-        })
-        .collect();
-      Ok(Box::new(vfs_entries.into_iter()))
+      match self.0.read_dir(path) {
+        Ok(entries) => {
+          let parent_path = path.to_path_buf();
+          let vfs_entries: Vec<_> = entries
+            .into_iter()
+            .map(move |entry| {
+              let file_type = if entry.is_directory {
+                sys_traits::FileType::Dir
+              } else if entry.is_symlink {
+                sys_traits::FileType::Symlink
+              } else {
+                sys_traits::FileType::File
+              };
+              Ok(BoxedFsDirEntry::new(VfsDirEntry {
+                parent_path: parent_path.clone(),
+                name: entry.name,
+                file_type,
+              }))
+            })
+            .collect();
+          Ok(Box::new(vfs_entries.into_iter()))
+        }
+        Err(_) => sys_traits::impls::RealSys.fs_read_dir_boxed(path),
+      }
     } else {
-      // Fall back to real filesystem for paths outside VFS
       sys_traits::impls::RealSys.fs_read_dir_boxed(path)
     }
   }
