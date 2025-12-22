@@ -176,6 +176,7 @@ type VfsNpmModuleLoader = GenericNpmModuleLoader<
 
 pub struct SharedModuleLoaderState {
   pub(crate) root_path: PathBuf,
+  pub(crate) service_path: Option<PathBuf>,
   pub(crate) eszip: WorkspaceEszip,
   pub(crate) workspace_resolver: WorkspaceResolver<VfsSys>,
   pub(crate) cjs_tracker: Arc<VfsCjsTracker>,
@@ -524,6 +525,78 @@ impl ModuleLoader for EmbeddedModuleLoader {
     }
 
     let Some(module) = self.shared.eszip.get_module(original_specifier) else {
+      if original_specifier.scheme() == "file" {
+        if let Ok(path) = original_specifier.to_file_path() {
+          let paths_to_try: Vec<PathBuf> = {
+            let mut paths = vec![path.clone()];
+            let path_str = path.to_string_lossy();
+            if path_str.starts_with("/var/tmp/sb-compile-trex/") {
+              if let Some(rest) = path_str.strip_prefix("/var/tmp/sb-compile-trex/") {
+                if let Some(relative) = rest.split_once('/').map(|(_, r)| r) {
+                  if let Some(ref svc_path) = self.shared.service_path {
+                    paths.push(svc_path.join(relative));
+                  }
+                }
+              }
+            }
+            paths
+          };
+
+          let code = paths_to_try.iter().find_map(|p| std::fs::read_to_string(p).ok());
+          if let Some(code) = code {
+            let media_type = MediaType::from_specifier(original_specifier);
+            let (final_code, module_type) = match media_type {
+              MediaType::TypeScript | MediaType::Mts | MediaType::Cts | MediaType::Tsx => {
+                match deno::deno_ast::parse_module(deno::deno_ast::ParseParams {
+                  specifier: original_specifier.clone(),
+                  text: code.into(),
+                  media_type,
+                  capture_tokens: false,
+                  scope_analysis: false,
+                  maybe_syntax: None,
+                }) {
+                  Ok(parsed) => {
+                    match parsed.transpile(
+                      &deno::deno_ast::TranspileOptions {
+                        imports_not_used_as_values: deno::deno_ast::ImportsNotUsedAsValues::Remove,
+                        ..Default::default()
+                      },
+                      &deno::deno_ast::TranspileModuleOptions::default(),
+                      &deno::deno_ast::EmitOptions::default(),
+                    ) {
+                      Ok(transpiled) => {
+                        let source = transpiled.into_source();
+                        (source.text, ModuleType::JavaScript)
+                      }
+                      Err(e) => {
+                        return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::type_error(
+                          format!("Failed to transpile {}: {:?}", original_specifier, e),
+                        )));
+                      }
+                    }
+                  }
+                  Err(e) => {
+                    return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::type_error(
+                      format!("Failed to parse {}: {:?}", original_specifier, e),
+                    )));
+                  }
+                }
+              }
+              MediaType::Json => (code, ModuleType::Json),
+              _ => (code, ModuleType::JavaScript),
+            };
+
+            return deno_core::ModuleLoadResponse::Sync(Ok(
+              deno_core::ModuleSource::new(
+                module_type,
+                ModuleSourceCode::String(final_code.into()),
+                original_specifier,
+                None,
+              ),
+            ));
+          }
+        }
+      }
       return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::type_error(
         format!("Module not found: {}", original_specifier),
       )));
@@ -717,6 +790,7 @@ pub async fn create_module_loader_for_eszip(
   mut eszip: LazyLoadableEszip,
   permissions_options: PermissionsOptions,
   include_source_map: bool,
+  service_path: Option<&str>,
 ) -> Result<RuntimeProviders, AnyError> {
   let migrated = eszip.migrated();
   let current_exe_path = std::env::current_exe().unwrap();
@@ -1053,6 +1127,7 @@ pub async fn create_module_loader_for_eszip(
   let module_loader_factory = StandaloneModuleLoaderFactory {
     shared: Arc::new(SharedModuleLoaderState {
       root_path,
+      service_path: service_path.map(PathBuf::from),
       eszip: WorkspaceEszip {
         eszip,
         root_dir_url: root_dir_url.clone(),
@@ -1156,6 +1231,7 @@ pub async fn create_module_loader_for_standalone_from_eszip_kind(
   permissions_options: PermissionsOptions,
   include_source_map: bool,
   options: Option<MigrateOptions>,
+  service_path: Option<&str>,
 ) -> Result<RuntimeProviders, AnyError> {
   let eszip = migrate::try_migrate_if_needed(
     payload_to_eszip(eszip_payload_kind).await?,
@@ -1163,6 +1239,6 @@ pub async fn create_module_loader_for_standalone_from_eszip_kind(
   )
   .await?;
 
-  create_module_loader_for_eszip(eszip, permissions_options, include_source_map)
+  create_module_loader_for_eszip(eszip, permissions_options, include_source_map, service_path)
     .await
 }
