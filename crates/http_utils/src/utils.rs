@@ -1,9 +1,9 @@
-use http_v02::header;
-use http_v02::response;
 use http_v02::HeaderMap;
 use http_v02::HeaderValue;
 use http_v02::Response;
 use http_v02::StatusCode;
+use http_v02::header;
+use http_v02::response;
 use hyper_v014::body::Body;
 
 pub fn get_upgrade_type(headers: &HeaderMap) -> Option<String> {
@@ -17,10 +17,10 @@ pub fn get_upgrade_type(headers: &HeaderMap) -> Option<String> {
     })
     .unwrap_or(false);
 
-  if connection_header_exists {
-    if let Some(upgrade) = headers.get(header::UPGRADE) {
-      return upgrade.to_str().ok().map(str::to_owned);
-    }
+  if connection_header_exists
+    && let Some(upgrade) = headers.get(header::UPGRADE)
+  {
+    return upgrade.to_str().ok().map(str::to_owned);
   }
 
   None

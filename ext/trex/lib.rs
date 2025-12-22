@@ -1,14 +1,20 @@
-pub mod clients;
 pub mod connection;
-pub mod conversions;
-pub mod pipeline;
-pub mod sql;
-use std::process;
 
 use base64::{engine::general_purpose, Engine as _};
-use conversions::table::TableName;
-use deno_core::error::AnyError;
 use deno_core::op2;
+use deno_error::JsError;
+use thiserror::Error;
+
+/// Error type for trex operations that implements JsErrorClass
+#[derive(Debug, Error, JsError)]
+pub enum TrexError {
+  #[class(generic)]
+  #[error("{0}")]
+  Generic(String),
+  #[class(generic)]
+  #[error("Resource error: {0}")]
+  Resource(#[from] deno_core::error::ResourceError),
+}
 use duckdb::arrow::array::{
   Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
   Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
@@ -22,19 +28,12 @@ use duckdb::arrow::record_batch::RecordBatch;
 use duckdb::{
   params_from_iter, types::ToSqlOutput, types::Value, Config, Connection, ToSql,
 };
-use pgwire::tokio::process_socket;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue};
-pub use sql::{
-  auth::AuthType,
-  duckdb::{TrexDuckDB, TrexDuckDBFactory},
-};
 use std::cell::RefCell;
 use std::env;
+use std::error::Error as StdError;
 use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
-use std::{error::Error, time::Duration};
-use tokio::net::TcpListener;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -42,13 +41,6 @@ use deno_core::{OpState, Resource, ResourceId};
 use std::collections::HashMap;
 use std::rc::Rc;
 use tokio::sync::{mpsc, oneshot};
-
-use crate::pipeline::{
-  batching::{data_pipeline::BatchDataPipeline, BatchConfig},
-  sinks::duckdb::DuckDbSink,
-  sources::postgres::{PostgresSource, TableNamesFrom},
-  PipelineAction,
-};
 
 type PendingRequestsMap =
   Arc<Mutex<HashMap<String, oneshot::Sender<JsonValue>>>>;
@@ -90,202 +82,6 @@ static PENDING_REQUESTS: LazyLock<PendingRequestsMap> =
 
 fn get_active_connection() -> Arc<Mutex<Connection>> {
   connection::get_connection().unwrap_or_else(|| TREX_DB.clone())
-}
-
-pub async fn start_sql_server(ip: &str, port: u16, auth_type: AuthType) {
-  let conn = get_active_connection();
-  let factory = Arc::new(TrexDuckDBFactory {
-    handler: Arc::new(TrexDuckDB::new(&conn)),
-    auth_type,
-  });
-  let _server_addr = format!("{ip}:{port}");
-  let server_addr = _server_addr.as_str();
-  let listener = TcpListener::bind(server_addr).await.unwrap();
-  warn!("TREX SQL Server Listening to {}", server_addr);
-  loop {
-    let incoming_socket = listener.accept().await.unwrap();
-    let factory_ref = factory.clone();
-
-    tokio::spawn(async move {
-      process_socket(incoming_socket.0, None, factory_ref).await
-    });
-  }
-}
-
-#[derive(Clone)]
-pub enum ReplicateCommand {
-  CopyTable {
-    tables: Vec<TableName>,
-  },
-  Cdc {
-    publication: String,
-    slot_name: String,
-  },
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn create_pipeline(
-  duckdb: &Arc<Mutex<Connection>>,
-  command: ReplicateCommand,
-  duckdb_file: &str,
-  db_host: &str,
-  db_port: u16,
-  db_name: &str,
-  db_username: &str,
-  db_password: Option<String>,
-) -> Result<BatchDataPipeline<PostgresSource, DuckDbSink>, Box<dyn Error>> {
-  let (postgres_source, action) = match command {
-    ReplicateCommand::CopyTable { tables } => {
-      let table_names: Vec<TableName> = tables;
-
-      let postgres_source = PostgresSource::new(
-        db_host,
-        db_port,
-        db_name,
-        db_username,
-        db_password,
-        None,
-        TableNamesFrom::Vec(table_names),
-      )
-      .await?;
-      (postgres_source, PipelineAction::TableCopiesOnly)
-    }
-    ReplicateCommand::Cdc {
-      publication,
-      slot_name,
-    } => {
-      let postgres_source: PostgresSource = PostgresSource::new(
-        db_host,
-        db_port,
-        db_name,
-        db_username,
-        db_password,
-        Some(slot_name),
-        TableNamesFrom::Publication(publication),
-      )
-      .await?;
-
-      (postgres_source, PipelineAction::Both)
-    }
-  };
-
-  let duckdb_sink: DuckDbSink = DuckDbSink::trexdb(duckdb, duckdb_file).await?; //DuckDbSink::file(duckdb_file).await?;//
-
-  let batch_config = BatchConfig::new(100000, Duration::from_secs(10));
-  Ok(BatchDataPipeline::new(
-    postgres_source,
-    duckdb_sink,
-    action,
-    batch_config,
-  ))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn trex_replicate(
-  duckdb: &Arc<Mutex<Connection>>,
-  command: ReplicateCommand,
-  duckdb_file: &str,
-  db_host: &str,
-  db_port: u16,
-  db_name: &str,
-  db_username: &str,
-  db_password: Option<String>,
-) -> Result<(), Box<dyn Error>> {
-  let mut retries = 0;
-  let mut start = SystemTime::now();
-  if matches!(command, ReplicateCommand::CopyTable { tables: _ }) {
-    retries = 4;
-  }
-  while retries < 5 {
-    let mut pipeline = create_pipeline(
-      duckdb,
-      command.clone(),
-      duckdb_file,
-      db_host,
-      db_port,
-      db_name,
-      db_username,
-      db_password.clone(),
-    )
-    .await?;
-    pipeline.start().await?;
-    let duration = SystemTime::now().duration_since(start)?;
-    if matches!(command, ReplicateCommand::CopyTable { tables: _ }) {
-      retries += 1;
-    } else {
-      if duration.as_secs() < 300 {
-        retries += 1;
-      } else {
-        retries = 0;
-        start = SystemTime::now();
-      }
-      println!("restarting pipeline ... (try {retries})");
-    }
-  }
-  Ok(())
-}
-
-#[op2]
-fn op_copy_tables(
-  #[serde] tables: Vec<TableName>,
-  #[string] duckdb_file: String,
-  #[string] db_host: String,
-  db_port: u16,
-  #[string] db_name: String,
-  #[string] db_username: String,
-  #[string] db_password: String,
-) {
-  warn!("TREX START TABLE COPY: {duckdb_file}");
-  let command = ReplicateCommand::CopyTable { tables };
-  let conn = get_active_connection();
-  tokio::spawn(async move {
-    trex_replicate(
-      &conn,
-      command,
-      duckdb_file.as_str(),
-      db_host.as_str(),
-      db_port,
-      db_name.as_str(),
-      db_username.as_str(),
-      Some(db_password),
-    )
-    .await
-    .map_err(|error| println!("ERROR: {error}"))
-  });
-}
-
-#[allow(clippy::too_many_arguments)]
-#[op2(fast)]
-fn op_add_replication(
-  #[string] publication: String,
-  #[string] slot_name: String,
-  #[string] duckdb_file: String,
-  #[string] db_host: String,
-  db_port: u16,
-  #[string] db_name: String,
-  #[string] db_username: String,
-  #[string] db_password: String,
-) {
-  warn!("TREX START REPLICATION: {duckdb_file}");
-  let command: ReplicateCommand = ReplicateCommand::Cdc {
-    publication,
-    slot_name,
-  };
-  let conn = get_active_connection();
-  tokio::spawn(async move {
-    trex_replicate(
-      &conn,
-      command,
-      duckdb_file.as_str(),
-      db_host.as_str(),
-      db_port,
-      db_name.as_str(),
-      db_username.as_str(),
-      Some(db_password),
-    )
-    .await
-    .map_err(|error| println!("ERROR: {error}"))
-  });
 }
 
 #[op2]
@@ -401,81 +197,6 @@ fn op_set_dbc(#[string] dbc: String) {
   *(*(*DB_CREDENTIALS)).lock().unwrap() = dbc;
 }
 
-pub struct LlamaStreamResource {
-  receiver: Arc<Mutex<mpsc::Receiver<String>>>,
-}
-
-impl Resource for LlamaStreamResource {
-  fn name(&self) -> std::borrow::Cow<str> {
-    "LlamaStreamResource".into()
-  }
-}
-
-#[op2]
-#[serde]
-fn op_prompt(
-  state: &mut OpState,
-  #[string] prompt: String,
-  #[smi] max_tokens: u32,
-  #[serde] model: Model,
-) -> Result<ResourceId, AnyError> {
-  let (sender, receiver) = mpsc::channel::<String>((max_tokens) as usize);
-
-  tokio::spawn(async move {
-    tokio::task::spawn_blocking(move || {
-      if let Err(e) = run_llama_model(prompt, max_tokens, model, sender) {
-        eprintln!("Error running llama model: {}", e);
-      }
-    });
-  });
-
-  let resource = LlamaStreamResource {
-    receiver: Arc::new(Mutex::new(receiver)),
-  };
-  Ok(state.resource_table.add(resource))
-}
-
-#[allow(clippy::await_holding_lock)]
-#[op2(async)]
-#[string]
-async fn op_prompt_next(
-  state: Rc<RefCell<OpState>>,
-  #[smi] rid: ResourceId,
-) -> Result<Option<String>, AnyError> {
-  let resource = state
-    .borrow()
-    .resource_table
-    .get::<LlamaStreamResource>(rid)?;
-
-  let mut rx = resource.receiver.lock().unwrap();
-  let next_chunk = rx.recv().await;
-
-  if next_chunk.is_none() {
-    state
-      .borrow_mut()
-      .resource_table
-      .take::<LlamaStreamResource>(rid)?;
-  }
-  Ok(next_chunk)
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(untagged)]
-enum Model {
-  Local { path: String },
-  HuggingFace { repo: String, model: String },
-  None,
-}
-
-fn run_llama_model(
-  _prompt: String,
-  _max_tokens: u32,
-  _model: Model,
-  _sender: mpsc::Sender<String>,
-) -> Result<(), AnyError> {
-  Ok(())
-}
-
 #[op2(fast)]
 fn op_install_plugin(#[string] name: String, #[string] dir: String) {
   // Check if we should use node_modules structure (for backward compatibility with bun)
@@ -570,11 +291,6 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
       eprintln!("Warning: Failed to install plugin '{}': {}. Make sure TPM extension is installed.", name, e);
     }
   }
-}
-
-#[op2(fast)]
-fn op_exit(code: i32) {
-  process::exit(code);
 }
 
 #[derive(Serialize, Deserialize)]
@@ -683,8 +399,7 @@ fn field_value_to_json(
     DataType::Date32 => {
       let arr = array.as_any().downcast_ref::<Date32Array>().unwrap();
       let days = arr.value(row);
-      // Convert to ISO 8601 date string (YYYY-MM-DD)
-      let timestamp = days as i64 * 86400; // seconds in a day
+      let timestamp = days as i64 * 86400;
       let datetime = chrono::DateTime::from_timestamp(timestamp, 0)
         .unwrap_or(chrono::DateTime::UNIX_EPOCH);
       JsonValue::String(datetime.format("%Y-%m-%d").to_string())
@@ -778,7 +493,7 @@ fn execute_query(
   database: String,
   sql: String,
   params: Vec<TrexType>,
-) -> Result<String, AnyError> {
+) -> Result<String, TrexError> {
   let conn_arc = get_active_connection();
   let conn = &*conn_arc.lock().unwrap();
   let _ = conn
@@ -787,16 +502,28 @@ fn execute_query(
   if sql.trim().is_empty() {
     return Ok("[]".to_string());
   }
-  let tmpstmt = conn.prepare(&sql).inspect_err(|e| warn!("{e}"));
+  let tmpstmt = conn
+    .prepare(&sql)
+    .inspect_err(|e| warn!("prepare error: {e:?}"));
   match tmpstmt {
     Ok(mut stmt) => match stmt.query_arrow(params_from_iter(params.iter())) {
       Ok(iter) => {
         let batches: Vec<RecordBatch> = iter.collect();
         Ok(record_batches_to_json(&batches))
       }
-      Err(_) => Ok("[]".to_string()),
+      Err(e) => Err(TrexError::Generic(format!("Query execution failed: {e}"))),
     },
-    Err(_) => Ok("[]".to_string()),
+    Err(e) => {
+      // Build full error chain for better debugging
+      let err: &dyn StdError = &e;
+      let mut msg = format!("{err}");
+      let mut source = err.source();
+      while let Some(s) = source {
+        msg = format!("{msg}: {s}");
+        source = s.source();
+      }
+      Err(TrexError::Generic(format!("Query failed: {msg}")))
+    }
   }
 }
 
@@ -806,17 +533,8 @@ fn op_execute_query(
   #[string] database: String,
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
-) -> Result<String, AnyError> {
+) -> Result<String, TrexError> {
   execute_query(database, sql, params)
-}
-
-#[op2]
-#[string]
-fn op_atlas(
-  #[string] _database: String,
-  #[string] _query: String,
-) -> Result<String, AnyError> {
-  Ok("".to_string())
 }
 
 pub struct QueryStreamResource {
@@ -841,7 +559,7 @@ impl Resource for RequestResource {
 
 #[op2(async)]
 #[serde]
-async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, AnyError> {
+async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, TrexError> {
   let request_id = Uuid::new_v4().to_string();
 
   let (response_sender, response_receiver) = oneshot::channel::<JsonValue>();
@@ -864,7 +582,7 @@ async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, AnyError> {
       return {
         let mut pending = PENDING_REQUESTS.lock().unwrap();
         pending.remove(&request_id);
-        Err(deno_core::error::generic_error("No active listeners"))
+        Err(TrexError::Generic("No active listeners".to_string()))
       };
     }
   };
@@ -881,26 +599,26 @@ async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, AnyError> {
         Ok(Err(_)) => {
           let mut pending = PENDING_REQUESTS.lock().unwrap();
           pending.remove(&request_id);
-          Err(deno_core::error::generic_error("Request cancelled"))
+          Err(TrexError::Generic("Request cancelled".to_string()))
         }
         Err(_) => {
           let mut pending = PENDING_REQUESTS.lock().unwrap();
           pending.remove(&request_id);
-          Err(deno_core::error::generic_error("Request timeout"))
+          Err(TrexError::Generic("Request timeout".to_string()))
         }
       }
     }
     Err(_) => {
       let mut pending = PENDING_REQUESTS.lock().unwrap();
       pending.remove(&request_id);
-      Err(deno_core::error::generic_error("Failed to send request"))
+      Err(TrexError::Generic("Failed to send request".to_string()))
     }
   }
 }
 
 #[op2]
 #[serde]
-fn op_req_listen(state: &mut OpState) -> Result<ResourceId, AnyError> {
+fn op_req_listen(state: &mut OpState) -> Result<ResourceId, TrexError> {
   let (sender, receiver) = mpsc::channel::<JsonValue>(1000);
 
   {
@@ -919,7 +637,7 @@ fn op_req_listen(state: &mut OpState) -> Result<ResourceId, AnyError> {
 async fn op_req_next(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
-) -> Result<Option<JsonValue>, AnyError> {
+) -> Result<Option<JsonValue>, TrexError> {
   let resource = state.borrow().resource_table.get::<RequestResource>(rid)?;
 
   let receiver = resource.receiver.borrow_mut().take();
@@ -952,7 +670,7 @@ async fn op_req_next(
 fn op_req_respond(
   #[string] request_id: String,
   #[serde] response: JsonValue,
-) -> Result<serde_json::Value, AnyError> {
+) -> Result<serde_json::Value, TrexError> {
   let mut pending = PENDING_REQUESTS.lock().unwrap();
 
   if let Some(sender) = pending.remove(&request_id) {
@@ -972,7 +690,7 @@ fn op_execute_query_stream(
   #[string] database: String,
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
-) -> Result<ResourceId, AnyError> {
+) -> Result<ResourceId, TrexError> {
   let (sender, receiver) = mpsc::channel::<String>(1000);
   let conn_arc = get_active_connection();
   tokio::spawn(async move {
@@ -1005,7 +723,7 @@ fn op_execute_query_stream(
 async fn op_execute_query_stream_next(
   state: Rc<RefCell<OpState>>,
   #[smi] rid: ResourceId,
-) -> Result<Option<String>, AnyError> {
+) -> Result<Option<String>, TrexError> {
   let resource = state
     .borrow()
     .resource_table
@@ -1026,16 +744,10 @@ async fn op_execute_query_stream_next(
 deno_core::extension!(
     trex,
     ops = [
-        op_prompt,
-        op_prompt_next,
-        op_add_replication,
         op_install_plugin,
-        op_atlas,
         op_execute_query,
-        op_exit,
         op_get_dbc,
         op_set_dbc,
-        op_copy_tables,
         op_execute_query_stream,
         op_execute_query_stream_next,
         op_req,

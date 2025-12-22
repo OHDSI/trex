@@ -1,7 +1,7 @@
 extern crate duckdb;
 extern crate duckdb_loadable_macros;
 extern crate libduckdb_sys;
-extern crate trex;
+extern crate trex_core;
 
 use duckdb::{
   core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
@@ -47,10 +47,6 @@ mod trex_server;
 use bundle::{create_bundle_sync, BundleOptions};
 use trex_server::{TrexServerConfig, TREX_MANAGER};
 
-// Helper function to normalize a path to a file:// URL
-// If the path already starts with file://, return it as-is
-// Otherwise, convert the absolute path to a file:// URL
-// If the path is a directory, append /index.ts as the default entrypoint
 fn normalize_path_to_file_url(path: &str) -> String {
   if path.starts_with("file://") {
     return path.to_string();
@@ -66,7 +62,6 @@ fn normalize_path_to_file_url(path: &str) -> String {
       .unwrap_or_else(|| path_obj.to_path_buf())
   };
 
-  // If it's a directory, append index.ts as the default entrypoint
   let final_path = if abs_path.is_dir() {
     abs_path.join("index.ts")
   } else {
@@ -146,7 +141,6 @@ impl VScalar for StartTrexServerScalar {
       .parse()
       .unwrap_or_else(|_| "127.0.0.1:8000".parse().unwrap());
 
-    // Normalize paths to file:// URLs for proper Deno module resolution
     let main_service_path_normalized =
       normalize_path_to_file_url(&main_service_path);
 
@@ -173,7 +167,7 @@ impl VScalar for StartTrexServerScalar {
       graceful_exit_keepalive_deadline_ms: None,
       event_worker_exit_deadline_sec: 30,
       request_wait_timeout_ms: None,
-      request_idle_timeout_ms: None,
+      request_idle_timeout: Default::default(),
       request_read_timeout_ms: None,
       request_buffer_size: None,
       beforeunload_wall_clock_pct: None,
@@ -553,7 +547,7 @@ pub unsafe fn extension_entrypoint(
   store_shared_connection(&con)?;
 
   if let Some(shared_conn) = get_shared_connection() {
-    if let Err(e) = trex::connection::init_shared_connection(shared_conn) {
+    if let Err(e) = trex_core::connection::init_shared_connection(shared_conn) {
       eprintln!(
         "Warning: Failed to initialize trex with shared connection: {}",
         e

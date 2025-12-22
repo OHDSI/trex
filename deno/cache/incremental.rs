@@ -1,13 +1,15 @@
 // Copyright 2018-2024 the Deno authors. All rights reserved. MIT license.
 
+#![allow(clippy::collapsible_if)]
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 
 use deno_core::error::AnyError;
 use deno_core::parking_lot::Mutex;
-use deno_core::unsync::spawn;
 use deno_core::unsync::JoinHandle;
+use deno_core::unsync::spawn;
 use deno_webstorage::rusqlite::params;
 
 use super::cache_db::CacheDB;

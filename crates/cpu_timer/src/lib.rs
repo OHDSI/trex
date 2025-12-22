@@ -6,8 +6,8 @@ pub mod timerid;
 use std::sync::Arc;
 
 use anyhow::Error;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 #[cfg(target_os = "linux")]
 mod linux {
@@ -83,7 +83,7 @@ pub struct CPUTimer {}
 
 impl CPUTimer {
   #[cfg(not(target_os = "linux"))]
-  pub fn new(_: u64) -> Result<Self, Error> {
+  pub fn new() -> Result<Self, Error> {
     log::error!("CPU timer: not enabled (need Linux)");
     Ok(Self {})
   }
@@ -246,10 +246,10 @@ fn register_sigalrm() {
               match msg {
                 SignalMsg::Alarm(ref timer_id) => {
                   if let Some(cpu_timer) = registry.get(timer_id) {
-                    if let Some(tx) = (*cpu_timer.cpu_alarm_val.cpu_alarms_tx.lock().await).clone() {
-                      if tx.send(()).is_err() {
-                          debug!("failed to send cpu alarm to the provided channel");
-                      }
+                    if let Some(tx) = (*cpu_timer.cpu_alarm_val.cpu_alarms_tx.lock().await).clone()
+                        && tx.send(()).is_err()
+                    {
+                        debug!("failed to send cpu alarm to the provided channel");
                     }
                   } else {
                     // NOTE: Unix signals are being delivered asynchronously,

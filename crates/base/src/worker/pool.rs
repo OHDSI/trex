@@ -391,6 +391,7 @@ impl WorkerPool {
           let WorkerContextInitOpts {
             service_path,
             no_module_cache,
+            no_npm,
             env_vars,
             conf,
             maybe_eszip,
@@ -405,9 +406,10 @@ impl WorkerPool {
 
           if worker_pool_msgs_tx
             .send(UserWorkerMsgs::Create(
-              WorkerContextInitOpts {
+              Box::new(WorkerContextInitOpts {
                 service_path,
                 no_module_cache,
+                no_npm,
                 env_vars,
                 timing: None,
                 conf,
@@ -419,7 +421,7 @@ impl WorkerPool {
                 maybe_s3_fs_config,
                 maybe_tmp_fs_config,
                 maybe_otel_config: otel_config,
-              },
+              }),
               tx,
             ))
             .is_err()
@@ -479,6 +481,18 @@ impl WorkerPool {
 
       match builder.build().await {
         Ok(surface) => {
+          // Extract thread handles from the surface
+          let mut handles_guard = surface.thread_handles.lock().unwrap();
+          let handles_opt = handles_guard.take();
+          drop(handles_guard);
+
+          let (thread_handle, isolate_handle) =
+            if let Some(handles) = handles_opt {
+              (Some(handles.thread_handle), Some(handles.isolate_handle))
+            } else {
+              (None, None)
+            };
+
           let profile = UserWorkerProfile {
             worker_request_msg_tx: surface.msg_tx,
             early_drop_tx,
@@ -488,6 +502,8 @@ impl WorkerPool {
             status: status.clone(),
             exit: surface.exit,
             cancel,
+            thread_handle,
+            isolate_handle,
           };
 
           if worker_pool_msgs_tx
@@ -542,12 +558,15 @@ impl WorkerPool {
     let _: Result<(), Error> = match self.user_workers.get(key) {
       Some(worker) => {
         let policy = self.policy.supervisor_policy;
-        let profile = worker.clone();
+        // Clone only the fields we need to move into the async task
+        let worker_request_msg_tx = worker.worker_request_msg_tx.clone();
+        let is_retired = worker.status.is_retired.clone();
+        let demand = worker.status.demand.clone();
         let exit = worker.exit.clone();
         let cancel = worker.cancel.clone();
-        let (req_start_tx, req_end_tx) = profile.timing_tx_pair.clone();
+        let (req_start_tx, req_end_tx) = worker.timing_tx_pair.clone();
 
-        if profile.status.is_retired.is_raised() {
+        if is_retired.is_raised() {
           if res_tx
             .send(Err(anyhow!(WorkerError::WorkerAlreadyRetired)))
             .is_err()
@@ -555,7 +574,7 @@ impl WorkerPool {
             error!("main worker receiver dropped");
           }
         } else {
-          profile.status.demand.fetch_add(1, Ordering::Release);
+          demand.fetch_add(1, Ordering::Release);
 
           // Create a closure to handle the request and send the response
           let request_handler = async move {
@@ -600,7 +619,7 @@ impl WorkerPool {
             }
 
             let result = send_user_worker_request(
-              profile.worker_request_msg_tx,
+              worker_request_msg_tx,
               req,
               cancel,
               exit,
@@ -612,10 +631,7 @@ impl WorkerPool {
               Ok(req) => Ok((req, req_end_tx)),
               Err(err) => {
                 let _ = req_end_tx.send(());
-                error!(
-                  "failed to send request to user worker: {}",
-                  err.to_string()
-                );
+                error!("failed to send request to user worker: {err}");
                 Err(err)
               }
             }
@@ -658,14 +674,36 @@ impl WorkerPool {
   pub fn shutdown(&mut self, key: &Uuid) {
     self.retire(key);
 
-    let Some((notify_tx, _)) = self
-      .user_workers
-      .remove(key)
+    let removed_worker = self.user_workers.remove(key);
+
+    let Some((notify_tx, _)) = removed_worker
+      .as_ref()
       .and_then(|it| self.active_workers.get(&it.service_path))
       .map(|it| it.notify_pair.clone())
     else {
       return;
     };
+
+    // For user workers with dedicated threads, terminate the isolate and join the thread
+    if let Some(worker) = removed_worker {
+      // Terminate the V8 isolate if we have a handle
+      if let Some(ref isolate_handle) = worker.isolate_handle {
+        isolate_handle.terminate_execution();
+      }
+
+      // Cancel the worker
+      worker.cancel.cancel();
+
+      // Wait for the thread to finish (if we have a thread handle)
+      if let Some(thread_handle) = worker.thread_handle {
+        // Spawn a background task to join the thread (non-blocking)
+        std::thread::spawn(move || {
+          if let Err(e) = thread_handle.join() {
+            error!("worker thread panicked during shutdown: {:?}", e);
+          }
+        });
+      }
+    }
 
     let _ = notify_tx.send(None);
 
@@ -798,8 +836,8 @@ pub async fn create_user_worker_pool(
               None => break,
               Some(UserWorkerMsgs::Create(worker_options, tx)) => {
                 worker_pool.create_user_worker(WorkerContextInitOpts {
-                  static_patterns: [worker_options.static_patterns, static_patterns.clone()].concat(),
-                  ..worker_options
+                  static_patterns: [worker_options.static_patterns.clone(), static_patterns.clone()].concat(),
+                  ..*worker_options
                 }, tx, token.map(TerminationToken::child_token));
               }
 

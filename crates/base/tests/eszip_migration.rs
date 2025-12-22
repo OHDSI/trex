@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fs::read_dir;
 use std::path::Path;
 use std::path::PathBuf;
@@ -33,6 +34,7 @@ async fn test_eszip_migration() {
   let mut passed = 0;
   let mut failed = 0;
   let mut snapshot_created = 0;
+  let mut diff_msgs = vec![];
 
   println!("running {} eszip tests", paths.len());
   for path in paths {
@@ -54,12 +56,22 @@ async fn test_eszip_migration() {
       passed += 1;
       snapshot_created += 1;
     } else {
-      let snapshot_buf = read(snapshot_path).await.unwrap();
+      let snapshot_buf = read(&snapshot_path).await.unwrap();
       if snapshot_buf == buf {
         println!("ok");
         passed += 1;
       } else {
         println!("FAILED");
+        diff_msgs.push(format!("{}", snapshot_path.to_string_lossy()).into());
+        diff_msgs.push(Cow::Borrowed("--------------------"));
+        diff_msgs.extend(
+          render_diff(
+            &String::from_utf8_lossy(&snapshot_buf),
+            &String::from_utf8_lossy(buf),
+          )
+          .map(Cow::Owned),
+        );
+        diff_msgs.push(Cow::Borrowed("\n"));
         failed += 1;
       }
     }
@@ -68,6 +80,9 @@ async fn test_eszip_migration() {
   let msg =
       format!("eszip test result: {status}. {passed} passed ({snapshot_created} snapshot created); {failed} failed");
   if failed > 0 {
+    for line in diff_msgs {
+      eprintln!("{line}");
+    }
     panic!("{msg}");
   } else {
     eprintln!("{msg}");
@@ -108,10 +123,11 @@ where
     .init_opts(WorkerContextInitOpts {
       service_path: PathBuf::from("meow"),
       no_module_cache: false,
+      no_npm: None,
       // XXX: This seems insufficient as it may rely on the env contained in
       // Edge Functions' metadata.
       env_vars: std::env::vars().collect(),
-      conf: WorkerRuntimeOpts::UserWorker(UserWorkerRuntimeOpts {
+      conf: WorkerRuntimeOpts::UserWorker(Box::new(UserWorkerRuntimeOpts {
         service_path: Some(String::from("meow")),
         key: Some(Uuid::new_v4()),
         pool_msg_tx: Some(pool_msg_tx),
@@ -123,7 +139,7 @@ where
         .as_object()
         .cloned(),
         ..Default::default()
-      }),
+      })),
       static_patterns: vec![],
       timing: None,
       maybe_eszip: Some(eszip),
@@ -323,4 +339,15 @@ fn get_bool_from_json_value(
   key: &str,
 ) -> Option<bool> {
   value.get(key).and_then(|it| it.as_bool())
+}
+
+fn render_diff<'l>(
+  left: &'l str,
+  right: &'l str,
+) -> impl Iterator<Item = String> + 'l {
+  diff::lines(left, right).into_iter().map(|it| match it {
+    diff::Result::Left(l) => format!("-{l}"),
+    diff::Result::Both(l, _) => format!(" {l}"),
+    diff::Result::Right(r) => format!("+{r}"),
+  })
 }

@@ -8,9 +8,6 @@ const CDW_DUCKDB_FILE_SCHEMA_NAME = "validation_schema";
 const CDW_BUILT_IN_DIR = "/usr/src/cdw_data/built_in";
 
 const {
-	op_prompt,
-	op_prompt_next,
-	op_add_replication,
 	op_install_plugin,
 	op_execute_query,
 	op_exit,
@@ -24,7 +21,7 @@ const {
 	op_req_respond
 } = ops;
 
-export { op_add_replication, op_exit };
+export { op_exit };
 
 
 function map_params(params) {
@@ -80,23 +77,6 @@ export async function executeQueryStream(database, sql, params = []) {
     });
 }
 
-export async function prompt(xprompt, model = null) {
-    const streamId = op_prompt(xprompt, 2048, model);
-
-    return new ReadableStream({
-        async start(controller) {
-            while (true) {
-                const chunk = await op_prompt_next(streamId);
-                if (chunk === null) {
-                    controller.close();
-                    break;
-                }
-                controller.enqueue(chunk);
-            }
-        }
-    });
-}
-
 export class DatabaseManager {
 	static #dbm;
 
@@ -113,14 +93,7 @@ export class DatabaseManager {
 		const dbc = JSON.parse(op_get_dbc());
 		op_set_dbc(JSON.stringify({credentials: credentials, publications: dbc.publications}));
 		try {
-			//const servers = JSON.parse(op_execute_query("memory", "SELECT * FROM pgwire_server_status()", []));
-			//for (const server of servers) {
-			//try {
 			op_execute_query("memory", `SELECT update_db_credentials('${btoa(JSON.stringify(credentials))}')`, []);
-			//} catch (e) {
-			//	console.error(`Failed to update credentials for all servers`, e);
-			//}
-			//}
 		} catch (e) {
 			console.error("Failed to update database credentials:", e);
 		}
@@ -137,7 +110,6 @@ export class DatabaseManager {
 		return JSON.parse(op_execute_query("memory", sql, nparams));
 	}
 
-	 // This is temporary workaround to enable communication with Postgres since cohort tables are only populated in postgres and not in duckdb yet. Once we enable the write mode on duckdb for cohort tables, then this can be removed.
 	#add_postgres(
 		name, credentials
     ) {
@@ -170,9 +142,6 @@ export class DatabaseManager {
 
 
   add_cdw_config_duckdb_connection() {
-    /*
-		Connects to duckdb file in built in duckdb file in /usr/src/cdw_data/built_in
-		*/
     const duckdb_file_path = `${CDW_BUILT_IN_DIR}/${CDW_DUCKDB_FILE_DATABASE_CODE}_${CDW_DUCKDB_FILE_SCHEMA_NAME}`;
     op_execute_query(
       "memory",
@@ -186,30 +155,12 @@ export class DatabaseManager {
 		for(const c of this.getCredentials()) {
 			const adminCredentials = c.credentials.filter(c => c.userScope === 'Admin')[0];
 
-			/*if(c.dialect == 'postgres' && c.publications && c.publications.length > 0 ) {
-				console.log(`TREX PUB FOUND ${c.id}`)
-				for(const p of c.publications) {
-					const key = `${c.id}_${p.publication}`
-					if(!(key in this.getPublications)) {
-						op_add_replication(p.publication, p.slot, key, c.host, c.port, c.name, adminCredentials.username, adminCredentials.password);
-						this.#add_postgres(`${key}_trexpg`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
-						this.#add_postgres(`${key}__srcdb`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
-
-						const pub = this.getPublications();
-						pub[key] = true;
-						this.#setPublications(pub);
-					}
-				}
-			} else */
-			if (/*c.vocab_schemas && c.vocab_schemas.length > 0 && */c.dialect == 'postgres') {
+			if (c.dialect == 'postgres') {
 				console.log(`TREX NO PUB FOUND ${c.id}`)
 				const key = `${c.id}`
 				if(!(key in this.getPublications)) {
 					this.#add_postgres(`${key}_trexpg`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
 					this.#add_postgres(`${key}__srcdb`, {host: c.host, port: c.port, databaseName: c.name, user: adminCredentials.username, password: adminCredentials.password});
-					const schemas = c.vocab_schemas.map(x => `'${x}'`).join(",");
-					const res = JSON.parse(op_execute_query(`${key}_trexpg`,`select table_schema as schema,table_name as name from information_schema.tables where table_type = 'BASE TABLE' and table_schema in (${schemas})`, []));
-					//op_copy_tables(res, key, c.host, c.port, c.name, adminCredentials.username, adminCredentials.password);
 					const pub = this.getPublications();
 					pub[key] = true;
 					this.#setPublications(pub);
@@ -330,7 +281,6 @@ export class TrexDB {
 		return new Promise((resolve, reject) => {
 			try {
 				const nparams = map_params(params);
-				//console.log(nparams);
 				console.log(`DB: ${this.__database} SQL: ${sql}`);
 				resolve(JSON.parse(op_execute_query(this.__database, sql, nparams)));
 			} catch(e) {

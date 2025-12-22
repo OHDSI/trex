@@ -13,6 +13,7 @@ use anyhow::Context;
 use anyhow::Error;
 use base::server;
 use base::server::Builder;
+use base::server::RequestIdleTimeout;
 use base::server::ServerFlags;
 use base::server::Tls;
 use base::utils::units::percentage_value;
@@ -43,11 +44,11 @@ mod flags;
 #[cfg(not(feature = "tracing"))]
 mod logger;
 
-use trex_core::{start_sql_server, AuthType};
-
 fn main() -> Result<ExitCode, anyhow::Error> {
+  // Initialize rustls crypto provider (required for rustls 0.23+)
   let _ = rustls::crypto::ring::default_provider().install_default();
   resolve_deno_runtime_env();
+
   let runtime = tokio::runtime::Builder::new_current_thread()
     .enable_all()
     .thread_name("sb-main")
@@ -182,8 +183,12 @@ fn main() -> Result<ExitCode, anyhow::Error> {
           sub_matches.get_one::<usize>("max-parallelism").cloned();
         let maybe_request_wait_timeout =
           sub_matches.get_one::<u64>("request-wait-timeout").cloned();
-        let maybe_request_idle_timeout =
-          sub_matches.get_one::<u64>("request-idle-timeout").cloned();
+        let maybe_main_worker_request_idle_timeout = sub_matches
+          .get_one::<u64>("main-worker-request-idle-timeout")
+          .cloned();
+        let maybe_user_worker_request_idle_timeout = sub_matches
+          .get_one::<u64>("user-worker-request-idle-timeout")
+          .cloned();
         let maybe_request_read_timeout =
           sub_matches.get_one::<u64>("request-read-timeout").cloned();
 
@@ -196,58 +201,6 @@ fn main() -> Result<ExitCode, anyhow::Error> {
         let maybe_beforeunload_memory_pct = sub_matches
           .get_one::<u8>("dispatch-beforeunload-memory-ratio")
           .cloned();
-
-        let sql = sub_matches.get_one::<u16>("sql").cloned();
-        let sql_scram =
-          sub_matches.get_one::<bool>("sql-scram").cloned().unwrap();
-        let sql_password = sub_matches
-          .get_one::<String>("sql-password")
-          .cloned()
-          .unwrap();
-        let myip = ip;
-        if sql.is_some() {
-          if sql_scram {
-            let Some((key_slice, cert_slice)) = sub_matches
-              .get_one::<PathBuf>("key")
-              .and_then(|it| std::fs::read(it).ok())
-              .zip(
-                sub_matches
-                  .get_one::<PathBuf>("cert")
-                  .and_then(|it| std::fs::read(it).ok()),
-              )
-            else {
-              bail!("unable to load the key file or cert file");
-            };
-            let ip_str = myip.to_string();
-            let sql_port = sql.unwrap();
-            tokio::spawn(async move {
-              start_sql_server(
-                &ip_str,
-                sql_port,
-                AuthType::Scram {
-                  password: sql_password,
-                  key_slice,
-                  cert_slice,
-                },
-              )
-              .await;
-            });
-          } else {
-            let ip_str = myip.to_string();
-            let sql_port = sql.unwrap();
-            tokio::spawn(async move {
-              println!("Starting SQL Server Port: {}", sql_port);
-              start_sql_server(
-                &ip_str,
-                sql_port,
-                AuthType::Default {
-                  password: sql_password,
-                },
-              )
-              .await;
-            });
-          }
-        }
 
         let static_patterns =
           if let Some(val_ref) = sub_matches.get_many::<String>("static") {
@@ -303,7 +256,10 @@ fn main() -> Result<ExitCode, anyhow::Error> {
           graceful_exit_keepalive_deadline_ms,
           event_worker_exit_deadline_sec,
           request_wait_timeout_ms: maybe_request_wait_timeout,
-          request_idle_timeout_ms: maybe_request_idle_timeout,
+          request_idle_timeout: RequestIdleTimeout::from_millis(
+            maybe_main_worker_request_idle_timeout,
+            maybe_user_worker_request_idle_timeout,
+          ),
           request_read_timeout_ms: maybe_request_read_timeout,
           request_buffer_size: Some(request_buffer_size),
 
@@ -326,7 +282,7 @@ fn main() -> Result<ExitCode, anyhow::Error> {
                   "{}",
                   concat!(
                     "if `oneshot` policy is enabled, the maximum ",
-                    "parallelism is fixed to `1` as forcibly"
+                    "parallelism is fixed to `1` as forcibly ^^"
                   )
                 );
               }
@@ -439,7 +395,7 @@ fn main() -> Result<ExitCode, anyhow::Error> {
           }
           builder.set_config(Some(ConfigMode::Path(path)));
         }
-        emitter_factory.set_deno_options(builder.build()?);
+        emitter_factory.set_deno_options(builder.build().await?);
 
         let mut metadata = Metadata::default();
         let eszip_fut = generate_binary_eszip(
@@ -490,9 +446,10 @@ fn main() -> Result<ExitCode, anyhow::Error> {
             "Eszip extracted successfully inside path {}",
             output_path.to_str().unwrap()
           );
+          ExitCode::SUCCESS
+        } else {
+          ExitCode::FAILURE
         }
-
-        ExitCode::SUCCESS
       }
 
       _ => {

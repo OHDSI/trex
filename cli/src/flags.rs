@@ -103,24 +103,6 @@ fn get_start_command() -> Command {
         .value_parser(value_parser!(u16)),
     )
     .arg(
-      arg!(-s --sql <PORT>)
-        .help("SQL port to listen on")
-        .value_parser(value_parser!(u16)),
-    )
-    .arg(
-      arg!(--"sql-scram")
-        .help("Enables SQL SCRAM Auth")
-        .default_value("false")
-        .requires("key")
-        .requires("cert"),
-    )
-    .arg(
-      arg!(--"sql-password" <PASSWORD>)
-        .help("SQL password")
-        .env("TREX_SQL_PASSWORD")
-        .default_value("pencil"),
-    )
-    .arg(
       arg!(--tls[PORT])
         .env("EDGE_RUNTIME_TLS")
         .num_args(0..=1)
@@ -226,7 +208,15 @@ fn get_start_command() -> Command {
         .value_parser(value_parser!(u64)),
     )
     .arg(
-      arg!(--"request-idle-timeout" <MILLISECONDS>)
+      arg!(--"main-worker-request-idle-timeout" <MILLISECONDS>)
+        .help(concat!(
+          "Maximum time in milliseconds that can be waited from when a ",
+          "worker takes over the request (disabled by default)"
+        ))
+        .value_parser(value_parser!(u64)),
+    )
+    .arg(
+      arg!(--"user-worker-request-idle-timeout" <MILLISECONDS>)
         .help(concat!(
           "Maximum time in milliseconds that can be waited from when a ",
           "worker takes over the request (disabled by default)"
@@ -398,7 +388,7 @@ fn get_unbundle_command() -> Command {
         .default_value("./"),
     )
     .arg(
-      arg!(--"eszip" <DIR>)
+      arg!(--"eszip" <Path>)
         .help("Path of eszip to extract")
         .required(true),
     )

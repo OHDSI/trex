@@ -1,4 +1,5 @@
 use std::future::pending;
+use std::sync::atomic::AtomicI32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,11 +7,10 @@ use anyhow::anyhow;
 use base_mem_check::MemCheckState;
 use base_rt::RuntimeState;
 use cpu_timer::CPUTimer;
+use deno_core::serde_json;
 use deno_core::v8;
 use deno_core::InspectorSessionKind;
-use deno_core::InspectorSessionOptions;
 use deno_core::InspectorSessionProxy;
-use deno_core::LocalInspectorSession;
 use enum_as_inner::EnumAsInner;
 use ext_event_worker::events::ShutdownEvent;
 use ext_event_worker::events::WorkerEvents;
@@ -19,7 +19,6 @@ use ext_runtime::PromiseMetrics;
 use ext_workers::context::Timing;
 use ext_workers::context::UserWorkerMsgs;
 use ext_workers::context::UserWorkerRuntimeOpts;
-use futures_util::pin_mut;
 use futures_util::task::AtomicWaker;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::{self};
@@ -41,6 +40,12 @@ pub mod strategy_per_worker;
 pub mod v8_handler;
 
 pub use v8_handler::*;
+
+static NEXT_MSG_ID: AtomicI32 = AtomicI32::new(0);
+
+fn next_msg_id() -> i32 {
+  NEXT_MSG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 #[repr(C)]
 pub struct IsolateMemoryStats {
@@ -152,11 +157,7 @@ pub fn create_supervisor(
 
   let maybe_inspector_params = runtime.inspector().map(|_| {
     (
-      runtime
-        .js_runtime
-        .inspector()
-        .borrow_mut()
-        .get_session_sender(),
+      runtime.js_runtime.inspector().get_session_sender(),
       runtime.runtime_state.clone(),
     )
   });
@@ -181,13 +182,14 @@ pub fn create_supervisor(
 
   runtime.js_runtime.add_near_heap_limit_callback({
     let send_fn = send_memory_limit_fn;
+    let low_memory_multiplier = conf.low_memory_multiplier;
     move |current, _| {
       send_fn("v8");
 
       // give an allowance on current limit (until the isolate is
       // terminated) we do this so that oom won't end up killing the
       // edge-runtime process
-      current * (conf.low_memory_multiplier as usize)
+      current * (low_memory_multiplier as usize)
     }
   });
 
@@ -203,7 +205,7 @@ pub fn create_supervisor(
 
       let args = Arguments {
         key,
-        runtime_opts: conf.clone(),
+        runtime_opts: (*conf).clone(),
         cpu_usage_metrics_rx,
         supervisor_policy: policy,
         runtime_state,
@@ -238,7 +240,6 @@ pub fn create_supervisor(
 
       if let Some((session_tx, state)) = maybe_inspector_params {
         use deno_core::futures::channel::mpsc;
-        use deno_core::serde_json::Value;
 
         let termination_request_token = termination_request_token.clone();
 
@@ -259,39 +260,45 @@ pub fn create_supervisor(
                   return;
                 }
 
-                let (outbound_tx, outbound_rx) = mpsc::unbounded();
+                let (outbound_tx, _outbound_rx) = mpsc::unbounded();
                 let (inbound_tx, inbound_rx) = mpsc::unbounded();
 
                 if session_tx
                   .unbounded_send(InspectorSessionProxy {
                     tx: outbound_tx,
                     rx: inbound_rx,
-                    options: InspectorSessionOptions {
-                      kind: InspectorSessionKind::Blocking,
-                    },
+                    kind: InspectorSessionKind::Blocking,
                   })
                   .is_err()
                 {
                   return;
                 }
 
-                let session = Arc::new(Mutex::new(LocalInspectorSession::new(
-                  inbound_tx,
-                  outbound_rx,
-                )));
+                // In the new V8/deno_core API, LocalInspectorSession is created by JsRuntimeInspector::create_local_session
+                // and requires a SessionContainer. Since we're outside the runtime and just need to send CDP messages,
+                // we'll send directly through the inbound channel instead.
+                let inbound_tx = Arc::new(Mutex::new(inbound_tx));
 
                 let send_msg_fn = {
-                  |msg| {
+                  |msg: &str| {
                     let state = state.clone();
-                    let session = session.clone();
+                    let inbound_tx = inbound_tx.clone();
+                    let msg_id = next_msg_id();
+                    let msg = msg.to_string();
                     async move {
-                      let mut session = session.lock().await;
+                      let inbound_tx = inbound_tx.lock().await;
                       let mut int =
                         tokio::time::interval(Duration::from_millis(61));
 
-                      let fut = session.post_message(msg, None::<Value>);
-
-                      pin_mut!(fut);
+                      // Send CDP message directly through the channel
+                      let message = serde_json::json!({
+                        "id": msg_id,
+                        "method": msg,
+                        "params": serde_json::Value::Null,
+                      });
+                      let stringified_msg =
+                        serde_json::to_string(&message).unwrap();
+                      let _ = inbound_tx.unbounded_send(stringified_msg);
 
                       loop {
                         tokio::select! {
@@ -301,10 +308,7 @@ pub fn create_supervisor(
                             }
                           }
 
-                          res = &mut fut => {
-                            res.unwrap();
-                            break
-                          }
+                          else => break
                         }
                       }
                     }

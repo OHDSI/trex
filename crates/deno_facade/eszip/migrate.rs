@@ -111,8 +111,8 @@ mod v1 {
 
   use anyhow::Context;
   use deno_core::serde_json;
-  use eszip::v2::EszipV2Modules;
   use eszip::EszipV2;
+  use eszip::v2::EszipV2Modules;
   use eszip_trait::AsyncEszipDataRead;
   use eszip_trait::SUPABASE_ESZIP_VERSION_KEY;
   use futures::future::OptionFuture;
@@ -121,8 +121,8 @@ mod v1 {
   use rkyv::Deserialize;
   use rkyv::Serialize;
 
-  use crate::migrate::v0;
   use crate::LazyLoadableEszip;
+  use crate::migrate::v0;
 
   use super::MigrateOptions;
 
@@ -296,18 +296,18 @@ mod v1 {
 mod v1_1 {
   use std::sync::Arc;
 
-  use anyhow::bail;
   use anyhow::Context;
-  use eszip::v2::Checksum;
+  use anyhow::bail;
   use eszip::EszipV2;
+  use eszip::v2::Checksum;
   use eszip_trait::AsyncEszipDataRead;
   use eszip_trait::SUPABASE_ESZIP_VERSION_KEY;
   use futures::future::OptionFuture;
 
   use crate::eszip::LazyLoadableEszip;
 
-  use super::v1;
   use super::MigrateOptions;
+  use super::v1;
 
   pub async fn try_migrate_v1_v1_1(
     v1_eszip: &mut LazyLoadableEszip,
@@ -384,23 +384,23 @@ mod v1_1 {
 mod v2 {
   use std::sync::Arc;
 
-  use anyhow::anyhow;
   use anyhow::Context;
+  use anyhow::anyhow;
   use deno::standalone::binary::SerializedWorkspaceResolver;
   use deno::standalone::binary::SerializedWorkspaceResolverImportMap;
-  use deno_core::serde_json;
   use deno_core::ModuleSpecifier;
-  use eszip::v2::Checksum;
+  use deno_core::serde_json;
   use eszip::EszipV2;
-  use eszip_trait::v1;
-  use eszip_trait::v2;
+  use eszip::v2::Checksum;
   use eszip_trait::AsyncEszipDataRead;
   use eszip_trait::SUPABASE_ESZIP_VERSION_KEY;
+  use eszip_trait::v1;
+  use eszip_trait::v2;
   use futures::future::OptionFuture;
 
+  use crate::LazyLoadableEszip;
   use crate::metadata::Entrypoint;
   use crate::metadata::Metadata;
-  use crate::LazyLoadableEszip;
 
   use super::MigrateOptions;
 
@@ -471,23 +471,22 @@ mod v2 {
       let import_map_url = ModuleSpecifier::parse(import_map_path.as_str())?;
       if let Some(import_map_module) =
         v1_1_eszip.ensure_import_map(import_map_url.as_str())
+        && let Some(source) = import_map_module.source().await
       {
-        if let Some(source) = import_map_module.source().await {
-          let source = String::from_utf8_lossy(&source);
-          let import_map =
-            import_map::parse_from_json(import_map_url.clone(), &source)?;
-          let resolver = SerializedWorkspaceResolver {
-            import_map: Some(SerializedWorkspaceResolverImportMap {
-              specifier: import_map_url.to_string(),
-              json: import_map.import_map.to_json(),
-            }),
-            ..Default::default()
-          };
-          result = Some(
-            serde_json::to_vec(&resolver)
-              .with_context(|| "failed to serialize workspace resolver")?,
-          );
-        }
+        let source = String::from_utf8_lossy(&source);
+        let import_map =
+          import_map::parse_from_json(import_map_url.clone(), &source)?;
+        let resolver = SerializedWorkspaceResolver {
+          import_map: Some(SerializedWorkspaceResolverImportMap {
+            specifier: import_map_url.to_string(),
+            json: import_map.import_map.to_json(),
+          }),
+          ..Default::default()
+        };
+        result = Some(
+          serde_json::to_vec(&resolver)
+            .with_context(|| "failed to serialize workspace resolver")?,
+        );
       }
       result
     } else {
@@ -539,11 +538,11 @@ mod test {
   use eszip_trait::AsyncEszipDataRead;
   use tokio::fs;
 
+  use crate::eszip::EszipPayloadKind;
+  use crate::eszip::ExtractEszipPayload;
   use crate::eszip::extract_eszip;
   use crate::eszip::migrate::try_migrate_if_needed;
   use crate::eszip::payload_to_eszip;
-  use crate::eszip::EszipPayloadKind;
-  use crate::eszip::ExtractEszipPayload;
 
   const MIGRATE_TEST_DIR: &str = "../base/test_cases/eszip-migration";
 

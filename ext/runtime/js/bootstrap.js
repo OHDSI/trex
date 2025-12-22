@@ -1,4 +1,11 @@
 import { core, internals, primordials } from "ext:core/mod.js";
+import { nodeGlobals } from "ext:deno_node/00_globals.js";
+import "ext:deno_node/02_init.js";
+
+import "ext:deno_os/30_os.js";
+import "ext:deno_process/40_process.js";
+import "ext:runtime/98_global_scope_shared.js";
+import "ext:deno_http/00_serve.ts";
 
 import * as abortSignal from "ext:deno_web/03_abort_signal.js";
 import * as base64 from "ext:deno_web/05_base64.js";
@@ -66,7 +73,16 @@ import {
   setUserAgent,
 } from "ext:runtime/navigator.js";
 
-import process from "node:process";
+// Stub process object since ext_node is not included in the snapshot
+// This provides minimal compatibility for code that expects process global
+const process = {
+  env: {},
+  argv: [],
+  version: "",
+  versions: {},
+  platform: "",
+  arch: "",
+};
 
 let globalThis_;
 
@@ -87,7 +103,14 @@ const {
   StringPrototypeIncludes,
   StringPrototypeSplit,
   StringPrototypeTrim,
+  Symbol,
 } = primordials;
+
+// Set up Deno.internal Symbol for Node.js compatibility
+const internalSymbol = Symbol("Deno.internal");
+ObjectAssign(internals, { nodeGlobals });
+denoOverrides.internal = internalSymbol;
+denoOverrides[internalSymbol] = internals;
 
 let image;
 function ImageNonEnumerable(getter) {
@@ -662,7 +685,7 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
     return new wasmMemoryCtor(maybeOpts);
   }
 
-  delete globalThis.SharedArrayBuffer;
+  globalThis.SharedArrayBuffer = globalThis.ArrayBuffer;
   globalThis.WebAssembly.Memory = patchedWasmMemoryCtor;
 
   /// DISABLE SHARED MEMORY INSTALL MEM CHECK TIMING
@@ -694,17 +717,17 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
       "addSignalListener": "mock",
       "removeSignalListener": "mock",
 
-      "lstatSync": "allowIfRuntimeIsInInit",
-      "statSync": "allowIfRuntimeIsInInit",
-      "removeSync": "allowIfRuntimeIsInInit",
-      "writeFileSync": "allowIfRuntimeIsInInit",
-      "writeTextFileSync": "allowIfRuntimeIsInInit",
-      "readFileSync": "allowIfRuntimeIsInInit",
-      "readTextFileSync": "allowIfRuntimeIsInInit",
-      "mkdirSync": "allowIfRuntimeIsInInit",
-      "makeTempDirSync": "allowIfRuntimeIsInInit",
-      "makeTempFileSync": "allowIfRuntimeIsInInit",
-      "readDirSync": "allowIfRuntimeIsInInit",
+      "lstatSync": true,
+      "statSync": true,
+      "removeSync": true,
+      "writeFileSync": true,
+      "writeTextFileSync": true,
+      "readFileSync": true,
+      "readTextFileSync": true,
+      "mkdirSync": true,
+      "makeTempDirSync": true,
+      "makeTempFileSync": true,
+      "readDirSync": true,
 
       // TODO: use a non-hardcoded path
       "execPath": () => "/bin/trex",
@@ -788,6 +811,20 @@ globalThis.bootstrapSBEdge = (opts, ctx) => {
       argv: void 0,
       nodeDebug: Deno.env.get("NODE_DEBUG") ?? "",
     });
+
+    // Apply Node.js globals to globalThis
+    if (nodeGlobals.process) {
+      globalThis.process = nodeGlobals.process;
+    }
+    if (nodeGlobals.Buffer) {
+      globalThis.Buffer = nodeGlobals.Buffer;
+    }
+    if (nodeGlobals.setImmediate) {
+      globalThis.setImmediate = nodeGlobals.setImmediate;
+    }
+    if (nodeGlobals.clearImmediate) {
+      globalThis.clearImmediate = nodeGlobals.clearImmediate;
+    }
 
     delete globalThis.nodeBootstrap;
   }
