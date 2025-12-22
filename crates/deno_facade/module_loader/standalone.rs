@@ -531,7 +531,9 @@ impl ModuleLoader for EmbeddedModuleLoader {
             let mut paths = vec![path.clone()];
             let path_str = path.to_string_lossy();
             if path_str.starts_with("/var/tmp/sb-compile-trex/") {
-              if let Some(rest) = path_str.strip_prefix("/var/tmp/sb-compile-trex/") {
+              if let Some(rest) =
+                path_str.strip_prefix("/var/tmp/sb-compile-trex/")
+              {
                 if let Some(relative) = rest.split_once('/').map(|(_, r)| r) {
                   if let Some(ref svc_path) = self.shared.service_path {
                     paths.push(svc_path.join(relative));
@@ -542,23 +544,31 @@ impl ModuleLoader for EmbeddedModuleLoader {
             paths
           };
 
-          let code = paths_to_try.iter().find_map(|p| std::fs::read_to_string(p).ok());
+          let code = paths_to_try
+            .iter()
+            .find_map(|p| std::fs::read_to_string(p).ok());
           if let Some(code) = code {
             let media_type = MediaType::from_specifier(original_specifier);
             let (final_code, module_type) = match media_type {
-              MediaType::TypeScript | MediaType::Mts | MediaType::Cts | MediaType::Tsx => {
-                match deno::deno_ast::parse_module(deno::deno_ast::ParseParams {
-                  specifier: original_specifier.clone(),
-                  text: code.into(),
-                  media_type,
-                  capture_tokens: false,
-                  scope_analysis: false,
-                  maybe_syntax: None,
-                }) {
+              MediaType::TypeScript
+              | MediaType::Mts
+              | MediaType::Cts
+              | MediaType::Tsx => {
+                match deno::deno_ast::parse_module(
+                  deno::deno_ast::ParseParams {
+                    specifier: original_specifier.clone(),
+                    text: code.into(),
+                    media_type,
+                    capture_tokens: false,
+                    scope_analysis: false,
+                    maybe_syntax: None,
+                  },
+                ) {
                   Ok(parsed) => {
                     match parsed.transpile(
                       &deno::deno_ast::TranspileOptions {
-                        imports_not_used_as_values: deno::deno_ast::ImportsNotUsedAsValues::Remove,
+                        imports_not_used_as_values:
+                          deno::deno_ast::ImportsNotUsedAsValues::Remove,
                         ..Default::default()
                       },
                       &deno::deno_ast::TranspileModuleOptions::default(),
@@ -569,16 +579,22 @@ impl ModuleLoader for EmbeddedModuleLoader {
                         (source.text, ModuleType::JavaScript)
                       }
                       Err(e) => {
-                        return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::type_error(
-                          format!("Failed to transpile {}: {:?}", original_specifier, e),
-                        )));
+                        return deno_core::ModuleLoadResponse::Sync(Err(
+                          JsErrorBox::type_error(format!(
+                            "Failed to transpile {}: {:?}",
+                            original_specifier, e
+                          )),
+                        ));
                       }
                     }
                   }
                   Err(e) => {
-                    return deno_core::ModuleLoadResponse::Sync(Err(JsErrorBox::type_error(
-                      format!("Failed to parse {}: {:?}", original_specifier, e),
-                    )));
+                    return deno_core::ModuleLoadResponse::Sync(Err(
+                      JsErrorBox::type_error(format!(
+                        "Failed to parse {}: {:?}",
+                        original_specifier, e
+                      )),
+                    ));
                   }
                 }
               }
@@ -1239,6 +1255,11 @@ pub async fn create_module_loader_for_standalone_from_eszip_kind(
   )
   .await?;
 
-  create_module_loader_for_eszip(eszip, permissions_options, include_source_map, service_path)
-    .await
+  create_module_loader_for_eszip(
+    eszip,
+    permissions_options,
+    include_source_map,
+    service_path,
+  )
+  .await
 }
