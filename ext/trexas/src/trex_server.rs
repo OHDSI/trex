@@ -21,11 +21,7 @@ static SERVER_THREADS: LazyLock<ServerThreads> =
   LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
 fn normalize_path(path: &str) -> String {
-  let path = if path.starts_with("file://") {
-    &path[7..]
-  } else {
-    path
-  };
+  let path = path.strip_prefix("file://").unwrap_or(path);
 
   let path_obj = Path::new(path);
   let abs_path = if path_obj.is_absolute() {
@@ -398,8 +394,7 @@ impl TrexServerConfig {
       .parse()
       .map_err(|e| anyhow::anyhow!("Invalid address format: {}", e))?;
 
-    let main_service_path_normalized =
-      normalize_path(&self.main_service_path);
+    let main_service_path_normalized = normalize_path(&self.main_service_path);
 
     let event_worker_path_normalized =
       self.event_worker_path.and_then(|path| {

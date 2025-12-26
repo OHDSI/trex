@@ -48,11 +48,7 @@ use bundle::{create_bundle_sync, BundleOptions};
 use trex_server::{TrexServerConfig, TREX_MANAGER};
 
 fn normalize_path(path: &str) -> String {
-  let path = if path.starts_with("file://") {
-    &path[7..]
-  } else {
-    path
-  };
+  let path = path.strip_prefix("file://").unwrap_or(path);
 
   let path_obj = Path::new(path);
   let abs_path = if path_obj.is_absolute() {
@@ -143,8 +139,7 @@ impl VScalar for StartTrexServerScalar {
       .parse()
       .unwrap_or_else(|_| "127.0.0.1:8000".parse().unwrap());
 
-    let main_service_path_normalized =
-      normalize_path(&main_service_path);
+    let main_service_path_normalized = normalize_path(&main_service_path);
 
     let event_worker_opt = if event_worker_path.is_empty() {
       None
