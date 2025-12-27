@@ -20,8 +20,10 @@ type ServerThreads = Arc<Mutex<HashMap<String, thread::JoinHandle<()>>>>;
 static SERVER_THREADS: LazyLock<ServerThreads> =
   LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
-fn normalize_path(path: &str) -> String {
-  let path = path.strip_prefix("file://").unwrap_or(path);
+fn normalize_path_to_file_url(path: &str) -> String {
+  if path.starts_with("file://") {
+    return path.to_string();
+  }
 
   let path_obj = Path::new(path);
   let abs_path = if path_obj.is_absolute() {
@@ -33,14 +35,17 @@ fn normalize_path(path: &str) -> String {
       .unwrap_or_else(|| path_obj.to_path_buf())
   };
 
-  // If it's a directory, append index.ts as the default entrypoint
+  if path.ends_with(".eszip") {
+    return abs_path.display().to_string();
+  }
+
   let final_path = if abs_path.is_dir() {
     abs_path.join("index.ts")
   } else {
     abs_path
   };
 
-  final_path.display().to_string()
+  format!("file://{}", final_path.display())
 }
 
 fn parse_inspector_option(s: &str) -> Result<InspectorOption> {
@@ -140,27 +145,11 @@ impl TrexServerManagerWrapper {
           (&config_clone.tls_cert_path, &config_clone.tls_key_path)
         {
           let tls_port = config_clone.tls_port.unwrap_or(443);
-          eprintln!(
-            "[TREX-EXT] Configuring TLS on port {} with cert: {} key: {}",
-            tls_port, cert_path, key_path
-          );
-          match Self::create_tls_config_static(cert_path, key_path, tls_port) {
-            Ok(tls) => {
-              eprintln!(
-                "[TREX-EXT] TLS configured successfully for port {}",
-                tls_port
-              );
-              builder.tls(tls);
-            }
-            Err(e) => {
-              eprintln!("[TREX-EXT] Failed to configure TLS: {}", e);
-            }
+          if let Ok(tls) =
+            Self::create_tls_config_static(cert_path, key_path, tls_port)
+          {
+            builder.tls(tls);
           }
-        } else {
-          eprintln!(
-            "[TREX-EXT] TLS not configured: cert_path={:?}, key_path={:?}",
-            config_clone.tls_cert_path, config_clone.tls_key_path
-          );
         }
 
         if let Some(event_worker_path) = &config_clone.event_worker_path {
@@ -185,8 +174,10 @@ impl TrexServerManagerWrapper {
         flags.no_module_cache = true;
         *builder.flags_mut() = flags;
 
-        let entrypoints = config_clone.to_worker_entrypoints();
-        *builder.entrypoints_mut() = entrypoints;
+        if !config_clone.main_service_path.ends_with(".eszip") {
+          let entrypoints = config_clone.to_worker_entrypoints();
+          *builder.entrypoints_mut() = entrypoints;
+        }
 
         get_global_server_manager()
           .register_server(server_id_clone.clone(), config_clone.clone())?;
@@ -394,14 +385,15 @@ impl TrexServerConfig {
       .parse()
       .map_err(|e| anyhow::anyhow!("Invalid address format: {}", e))?;
 
-    let main_service_path_normalized = normalize_path(&self.main_service_path);
+    let main_service_path_normalized =
+      normalize_path_to_file_url(&self.main_service_path);
 
     let event_worker_path_normalized =
       self.event_worker_path.and_then(|path| {
         if path.is_empty() {
           None
         } else {
-          Some(normalize_path(&path))
+          Some(normalize_path_to_file_url(&path))
         }
       });
 
