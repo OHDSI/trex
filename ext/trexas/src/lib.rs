@@ -48,7 +48,9 @@ use bundle::{create_bundle_sync, BundleOptions};
 use trex_server::{TrexServerConfig, TREX_MANAGER};
 
 fn normalize_path(path: &str) -> String {
-  let path = path.strip_prefix("file://").unwrap_or(path);
+  if path.starts_with("file://") {
+    return path.to_string();
+  }
 
   let path_obj = Path::new(path);
   let abs_path = if path_obj.is_absolute() {
@@ -60,13 +62,17 @@ fn normalize_path(path: &str) -> String {
       .unwrap_or_else(|| path_obj.to_path_buf())
   };
 
+  if path.ends_with(".eszip") {
+    return abs_path.display().to_string();
+  }
+
   let final_path = if abs_path.is_dir() {
     abs_path.join("index.ts")
   } else {
     abs_path
   };
 
-  final_path.display().to_string()
+  format!("file://{}", final_path.display())
 }
 
 struct TrexVersionScalar;

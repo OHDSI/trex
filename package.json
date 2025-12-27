@@ -22,7 +22,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "@trex/cli": "^0.5.0"
+    "@trex/cli": "latest"
   },
   "devDependencies": {
     "@data2evidence/cli": "https://github.com/OHDSI/d2e/releases/download/latest/data2evidence-cli.tgz",
