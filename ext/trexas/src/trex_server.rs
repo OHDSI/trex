@@ -438,18 +438,16 @@ impl TrexServerConfig {
     let user_worker_policy =
       if supervisor_policy.is_some() || self.max_parallelism.is_some() {
         // For oneshot policy, force max_parallelism to 1
-        let max_parallelism = if supervisor_policy
-          .as_ref()
-          .is_some_and(|p| p.is_oneshot())
-        {
-          Some(1)
-        } else {
-          self.max_parallelism
-        };
+        let max_parallelism =
+          if supervisor_policy.as_ref().is_some_and(|p| p.is_oneshot()) {
+            Some(1)
+          } else {
+            self.max_parallelism
+          };
         Some(WorkerPoolPolicy::new(
           supervisor_policy,
           max_parallelism,
-          server_flags.clone(),
+          server_flags,
         ))
       } else {
         None
