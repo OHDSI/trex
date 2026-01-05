@@ -25,14 +25,9 @@ export CARGO_FEATURES :=
 CARGO_OVERRIDE_DUCKDB_RS_FLAG :=
 
 # V8 build configuration for shared library compatibility
-# Build V8 from source (required for custom TLS model)
 export V8_FROM_SOURCE := 1
-# Enable v8_monolithic + v8_monolithic_for_shared_library to make V8 use local-dynamic TLS model
-# This is required to avoid R_X86_64_TPOFF32 relocation errors when linking into shared libraries
-# V8's BUILD.gn sets V8_TLS_USED_IN_LIBRARY define when v8_monolithic && v8_monolithic_for_shared_library
-# V8's thread-local-storage.h then uses "local-dynamic" TLS model (compatible with -shared)
-# This keeps V8 as a static monolithic library unlike is_component_build which creates libv8.so
-export EXTRA_GN_ARGS := v8_monolithic=true v8_monolithic_for_shared_library=true 
+# global-dynamic TLS required for JNI compatibility
+export EXTRA_GN_ARGS := v8_monolithic=true v8_monolithic_for_shared_library=true extra_cflags=["-ftls-model=global-dynamic"] 
 
 all: configure debug
 
