@@ -252,23 +252,15 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
     let state = state.runtime.clone();
     let thread_safe_handle = thread_safe_handle.clone();
     let waker = waker.clone();
+    let memory_tx = std::cell::RefCell::new(Some(isolate_memory_usage_tx));
     move |should_terminate: bool| {
-      let data_ptr_mut = Box::into_raw(Box::new(V8HandleTerminationData {
-        should_terminate,
-        isolate_memory_usage_tx: Some(isolate_memory_usage_tx),
-      }));
-
       if should_terminate {
         state.terminated.raise();
+        if thread_safe_handle.terminate_execution() {
+          waker.wake();
+        }
       }
-      if thread_safe_handle.request_interrupt(
-        v8_handle_termination,
-        data_ptr_mut as *mut std::ffi::c_void,
-      ) {
-        waker.wake();
-      } else {
-        drop(unsafe { Box::from_raw(data_ptr_mut) });
-      }
+      drop(memory_tx.borrow_mut().take());
     }
   };
 
