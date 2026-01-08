@@ -606,8 +606,21 @@ where
             }
           }
           if is_some_entry_point {
-            main_module_url =
-              Some(Url::parse(&maybe_entrypoint.clone().unwrap())?);
+            let entrypoint_str = maybe_entrypoint.clone().unwrap();
+            main_module_url = Some(if entrypoint_str.starts_with("http://")
+              || entrypoint_str.starts_with("https://")
+              || entrypoint_str.starts_with("file://")
+            {
+              Url::parse(&entrypoint_str)?
+            } else {
+              let entrypoint_path = base_dir_path.join(&entrypoint_str);
+              Url::from_file_path(&entrypoint_path).map_err(|_| {
+                anyhow::anyhow!(
+                  "failed to convert entrypoint to file URL: {}",
+                  entrypoint_path.display()
+                )
+              })?
+            });
           }
 
           let mut emitter_factory = EmitterFactory::new();
