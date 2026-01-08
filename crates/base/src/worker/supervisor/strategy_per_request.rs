@@ -253,18 +253,11 @@ pub async fn supervise(
       }
 
       Some(reason) => {
-        let data_ptr_mut = Box::into_raw(Box::new(V8HandleTerminationData {
-          should_terminate: true,
-          isolate_memory_usage_tx: Some(isolate_memory_usage_tx),
-        }));
-
-        if thread_safe_handle
-          .request_interrupt(v8_handle_termination, data_ptr_mut as *mut _)
-        {
+        if thread_safe_handle.terminate_execution() {
           waker.wake();
-        } else {
-          drop(unsafe { Box::from_raw(data_ptr_mut) });
         }
+
+        drop(isolate_memory_usage_tx);
 
         return (reason, cpu_usage_accumulated_ms);
       }

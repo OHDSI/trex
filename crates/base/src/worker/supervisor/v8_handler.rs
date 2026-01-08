@@ -31,7 +31,7 @@ pub extern "C" fn v8_handle_termination(
 ) {
   let mut data = unsafe { Box::from_raw(data as *mut V8HandleTerminationData) };
 
-  if data.should_terminate && !isolate.is_execution_terminating() {
+  if data.should_terminate {
     isolate.terminate_execution();
   }
 
