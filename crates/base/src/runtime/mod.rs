@@ -3640,8 +3640,13 @@ mod test {
     // Create test files
     let index_file = worker_dir.join("index.ts");
     let utils_file = worker_dir.join("utils.ts");
-    fs::write(&index_file, "import { helper } from './utils';\nconsole.log(helper());").unwrap();
-    fs::write(&utils_file, "export function helper() { return 'test'; }").unwrap();
+    fs::write(
+      &index_file,
+      "import { helper } from './utils';\nconsole.log(helper());",
+    )
+    .unwrap();
+    fs::write(&utils_file, "export function helper() { return 'test'; }")
+      .unwrap();
 
     let (worker_pool_tx, _) = mpsc::unbounded_channel::<UserWorkerMsgs>();
 
