@@ -900,8 +900,8 @@ pub async fn create_module_loader_for_eszip(
       let eszip_specifiers = eszip.specifiers();
       let vfs = load_npm_vfs(
         Arc::new(eszip.clone()),
-        root_path.clone(), // Use root_path, not root_node_modules_path, for eszip modules
-        None,              // No virtual_dir - will create empty VFS
+        root_node_modules_path.clone(),
+        None, // No virtual_dir - will create empty VFS
         eszip_specifiers,
       )
       .context("Failed to load npm vfs.")?;
