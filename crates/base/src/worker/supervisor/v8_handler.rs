@@ -31,6 +31,11 @@ pub extern "C" fn v8_handle_termination(
 ) {
   let mut data = unsafe { Box::from_raw(data as *mut V8HandleTerminationData) };
 
+  if std::hint::black_box(isolate as *const v8::Isolate).is_null() {
+    drop(data.isolate_memory_usage_tx.take());
+    return;
+  }
+
   if data.should_terminate {
     isolate.terminate_execution();
   }
@@ -48,6 +53,10 @@ pub extern "C" fn v8_handle_beforeunload(
   data: *mut std::ffi::c_void,
 ) {
   let data = unsafe { Box::from_raw(data as *mut V8HandleBeforeunloadData) };
+
+  if std::hint::black_box(isolate as *const v8::Isolate).is_null() {
+    return;
+  }
 
   JsRuntime::op_state_from(isolate)
     .borrow()
@@ -90,6 +99,10 @@ pub extern "C" fn v8_handle_drain(
   isolate: &mut v8::Isolate,
   _data: *mut std::ffi::c_void,
 ) {
+  if std::hint::black_box(isolate as *const v8::Isolate).is_null() {
+    return;
+  }
+
   JsRuntime::op_state_from(isolate)
     .borrow()
     .borrow::<V8TaskSpawner>()
