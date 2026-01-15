@@ -2592,20 +2592,34 @@ struct GcMetricDataInner {
 
 struct GcMetricData(RefCell<GcMetricDataInner>);
 
+static DEBUG_GC: Lazy<bool> = Lazy::new(|| env::var("TREX_DEBUG_GC").is_ok());
+
 impl GcMetricData {
   extern "C" fn prologue_callback(
     isolate: v8::UnsafeRawIsolatePtr,
-    _gc_type: v8::GCType,
-    _flags: v8::GCCallbackFlags,
+    gc_type: v8::GCType,
+    flags: v8::GCCallbackFlags,
     _data: *mut c_void,
   ) {
+    if *DEBUG_GC {
+      log::debug!(
+        "telemetry GC prologue: isolate={:?} type={:?} flags={:?}",
+        isolate, gc_type, flags
+      );
+    }
+
     if isolate.is_null() {
+      if *DEBUG_GC {
+        log::warn!("telemetry GC prologue: null isolate");
+      }
       return;
     }
-    // SAFETY: We've verified the pointer is non-null
     let isolate =
       unsafe { v8::Isolate::from_raw_isolate_ptr_unchecked(isolate) };
     let Some(this) = isolate.get_slot::<Self>() else {
+      if *DEBUG_GC {
+        log::debug!("telemetry GC prologue: no GcMetricData slot");
+      }
       return;
     };
     this.0.borrow_mut().start = Instant::now();
@@ -2614,21 +2628,37 @@ impl GcMetricData {
   extern "C" fn epilogue_callback(
     isolate: v8::UnsafeRawIsolatePtr,
     gc_type: v8::GCType,
-    _flags: v8::GCCallbackFlags,
+    flags: v8::GCCallbackFlags,
     _data: *mut c_void,
   ) {
+    if *DEBUG_GC {
+      log::debug!(
+        "telemetry GC epilogue: isolate={:?} type={:?} flags={:?}",
+        isolate, gc_type, flags
+      );
+    }
+
     if isolate.is_null() {
+      if *DEBUG_GC {
+        log::warn!("telemetry GC epilogue: null isolate");
+      }
       return;
     }
-    // SAFETY: We've verified the pointer is non-null
     let isolate =
       unsafe { v8::Isolate::from_raw_isolate_ptr_unchecked(isolate) };
     let Some(this) = isolate.get_slot::<Self>() else {
+      if *DEBUG_GC {
+        log::debug!("telemetry GC epilogue: no GcMetricData slot");
+      }
       return;
     };
     let this = this.0.borrow_mut();
 
     let elapsed = this.start.elapsed();
+
+    if *DEBUG_GC {
+      log::debug!("telemetry GC epilogue: elapsed={:?}", elapsed);
+    }
 
     // https://opentelemetry.io/docs/specs/semconv/runtime/v8js-metrics/#metric-v8jsgcduration
     let gc_type = KeyValue::new(
