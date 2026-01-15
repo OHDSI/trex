@@ -42,5 +42,24 @@ test: test_debug
 test_debug: test_extension_debug
 test_release: test_extension_release
 
+# ASAN (AddressSanitizer) build for memory debugging
+# Requires: nightly Rust, clang
+# Usage: make asan
+# Run with: ASAN_OPTIONS=detect_leaks=1 ./target/debug/...
+asan:
+	@echo "Building with AddressSanitizer enabled..."
+	@echo "Note: Requires nightly Rust toolchain"
+	RUSTFLAGS="-Zsanitizer=address" \
+	CFLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+	CXXFLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+	CC=clang CXX=clang++ \
+	cargo +nightly build -Zbuild-std --target x86_64-unknown-linux-gnu
+
+# Debug GC build - enables V8 GC tracing
+# Usage: TREX_DEBUG_GC=1 ./target/debug/trex ...
+debug_gc: debug
+	@echo "Debug build complete. Run with TREX_DEBUG_GC=1 to enable GC tracing"
+	@echo "Example: TREX_DEBUG_GC=1 RUST_LOG=debug ./target/debug/trex start ..."
+
 clean: clean_build clean_rust
 clean_all: clean_configure clean

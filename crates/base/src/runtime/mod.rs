@@ -2475,14 +2475,27 @@ fn terminate_execution_if_cancelled(
 }
 
 fn set_v8_flags() {
-  let v8_flags = std::env::var("V8_FLAGS").unwrap_or("".to_string());
+  let v8_flags = std::env::var("V8_FLAGS").unwrap_or_default();
+  let debug_gc = std::env::var("TREX_DEBUG_GC").is_ok();
   let mut vec = vec![""];
 
-  if v8_flags.is_empty() {
-    return;
+  // Add GC debugging flags if TREX_DEBUG_GC is set
+  if debug_gc {
+    vec.extend([
+      "--trace-gc",
+      "--trace-gc-verbose",
+      "--trace-gc-object-stats",
+    ]);
+    tracing::info!("V8 GC debugging enabled via TREX_DEBUG_GC");
   }
 
-  vec.append(&mut v8_flags.split(' ').collect());
+  if !v8_flags.is_empty() {
+    vec.append(&mut v8_flags.split(' ').collect());
+  }
+
+  if vec.len() <= 1 {
+    return;
+  }
 
   let ignored =
     deno_core::v8_set_flags(vec.iter().map(|v| v.to_string()).collect());
@@ -2494,12 +2507,32 @@ fn set_v8_flags() {
 
 unsafe extern "C" fn mem_check_gc_prologue_callback_fn(
   isolate: v8::UnsafeRawIsolatePtr,
-  _ty: GCType,
-  _flags: GCCallbackFlags,
+  ty: GCType,
+  flags: GCCallbackFlags,
   data: *mut c_void,
 ) {
-  // Check for null isolate pointer to avoid UB
-  if isolate.is_null() || data.is_null() {
+  static DEBUG_GC: Lazy<bool> =
+    Lazy::new(|| std::env::var("TREX_DEBUG_GC").is_ok());
+
+  if *DEBUG_GC {
+    tracing::debug!(
+      isolate_ptr = ?isolate,
+      gc_type = ?ty,
+      gc_flags = ?flags,
+      "GC prologue callback invoked"
+    );
+  }
+
+  if isolate.is_null() {
+    if *DEBUG_GC {
+      tracing::warn!("GC prologue: null isolate pointer");
+    }
+    return;
+  }
+  if data.is_null() {
+    if *DEBUG_GC {
+      tracing::warn!("GC prologue: null data pointer");
+    }
     return;
   }
   // SAFETY: We've verified both pointers are non-null

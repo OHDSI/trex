@@ -21,6 +21,38 @@ type ServerThreads = Arc<Mutex<HashMap<String, thread::JoinHandle<()>>>>;
 static SERVER_THREADS: LazyLock<ServerThreads> =
   LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
 
+fn init_logging() {
+  if LOG_INIT.swap(true, Ordering::Relaxed) {
+    return;
+  }
+
+  // Initialize rustls crypto provider
+  let _ = rustls::crypto::ring::default_provider().install_default();
+
+  // Initialize logging if TREX_DEBUG_GC or RUST_LOG is set
+  let debug_gc = std::env::var("TREX_DEBUG_GC").is_ok();
+  let rust_log = std::env::var("RUST_LOG").ok();
+
+  if debug_gc || rust_log.is_some() {
+    let level = if debug_gc {
+      "debug"
+    } else {
+      rust_log.as_deref().unwrap_or("info")
+    };
+
+    // Use env_logger for simple logging to stderr
+    let _ = env_logger::Builder::from_env(
+      env_logger::Env::default().default_filter_or(level),
+    )
+    .format_timestamp_millis()
+    .try_init();
+
+    if debug_gc {
+      eprintln!("[TREX-EXT] GC debugging enabled via TREX_DEBUG_GC");
+    }
+  }
+}
+
 fn normalize_path_to_file_url(path: &str) -> String {
   if path.starts_with("file://") {
     return path.to_string();
@@ -75,16 +107,6 @@ fn parse_inspector_option(s: &str) -> Result<InspectorOption> {
       mode
     ),
   }
-}
-
-fn init_logging() {
-  if rustls::crypto::ring::default_provider()
-    .install_default()
-    .is_err()
-  {
-    return;
-  }
-  if LOG_INIT.swap(true, Ordering::Relaxed) {}
 }
 
 pub struct TrexServerManagerWrapper {
