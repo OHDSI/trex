@@ -2511,7 +2511,7 @@ unsafe extern "C" fn mem_check_gc_prologue_callback_fn(
   flags: GCCallbackFlags,
   data: *mut c_void,
 ) {
-static DEBUG_GC: Lazy<bool> = Lazy::new(|| std::env::var("TREX_DEBUG_GC").is_ok());
+  static DEBUG_GC: Lazy<bool> = Lazy::new(|| std::env::var("TREX_DEBUG_GC").is_ok());
 
   if *DEBUG_GC {
     tracing::debug!(

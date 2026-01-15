@@ -2601,7 +2601,7 @@ impl GcMetricData {
     flags: v8::GCCallbackFlags,
     _data: *mut c_void,
   ) {
-if *DEBUG_GC {
+    if *DEBUG_GC {
       log::debug!(
         "telemetry GC prologue: isolate={:?} type={:?} flags={:?}",
         isolate, gc_type, flags
@@ -2631,7 +2631,7 @@ if *DEBUG_GC {
     flags: v8::GCCallbackFlags,
     _data: *mut c_void,
   ) {
-if *DEBUG_GC {
+    if *DEBUG_GC {
       log::debug!(
         "telemetry GC epilogue: isolate={:?} type={:?} flags={:?}",
         isolate, gc_type, flags
