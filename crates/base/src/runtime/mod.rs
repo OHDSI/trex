@@ -2511,7 +2511,7 @@ unsafe extern "C" fn mem_check_gc_prologue_callback_fn(
   flags: GCCallbackFlags,
   data: *mut c_void,
 ) {
-  static DEBUG_GC: Lazy<bool> = Lazy::new(|| std::env::var("TREX_DEBUG_GC").is_ok());
+static DEBUG_GC: Lazy<bool> = Lazy::new(|| std::env::var("TREX_DEBUG_GC").is_ok());
 
   if *DEBUG_GC {
     tracing::debug!(
@@ -2534,7 +2534,6 @@ unsafe extern "C" fn mem_check_gc_prologue_callback_fn(
     }
     return;
   }
-
   // SAFETY: We've verified both pointers are non-null
   let mut isolate_ref = v8::Isolate::from_raw_isolate_ptr_unchecked(isolate);
   (*(data as *mut MemCheck)).check(&mut isolate_ref);
