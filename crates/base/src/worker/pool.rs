@@ -117,7 +117,7 @@ impl WorkerPoolPolicy {
       max_parallelism: max_parallelism
         .into()
         .unwrap_or(default.max_parallelism),
-      global_max_parallelism: None,
+      global_max_parallelism: default.global_max_parallelism,
       request_wait_timeout_ms: server_flags
         .request_wait_timeout_ms
         .unwrap_or(default.request_wait_timeout_ms),
@@ -244,6 +244,8 @@ pub struct WorkerPool {
   pub maybe_inspector: Option<Inspector>,
   /// Global semaphore limiting total workers across all service paths
   pub global_sem: Option<Arc<Semaphore>>,
+  /// Notifier for when global permits become available
+  pub global_notify: Arc<Notify>,
 
   // TODO: refactor this out of worker pool
   pub worker_event_sender:
@@ -273,6 +275,7 @@ impl WorkerPool {
       maybe_inspector: inspector,
       worker_pool_msgs_tx,
       global_sem,
+      global_notify: Arc::new(Notify::new()),
     }
   }
 
@@ -330,6 +333,7 @@ impl WorkerPool {
 
       let sem = registry.sem.clone();
       let global_sem = self.global_sem.clone();
+      let global_notify = self.global_notify.clone();
       let (_, notify_rx) = registry.notify_pair.clone();
       let wait_timeout = tokio::time::sleep(Duration::from_millis(
         self.policy.request_wait_timeout_ms,
@@ -393,6 +397,14 @@ impl WorkerPool {
                     return Create(path_permit, global_permit, tx);
                   }
                 }
+              }
+            },
+
+            () = global_notify.notified() => {
+              let (path_permit, global_permit) =
+                try_acquire_permits(&sem, &global_sem);
+              if path_permit.is_some() {
+                return Create(path_permit, global_permit, tx);
               }
             },
 
@@ -772,8 +784,13 @@ impl WorkerPool {
 
       // Release both permits to make room for new workers
       let _ = profile.permit.take();
-      let _ = profile.global_permit.take();
+      let had_global_permit = profile.global_permit.take().is_some();
       let (notify_tx, _) = registry.notify_pair.clone();
+
+      // Notify waiters that a global permit may be available
+      if had_global_permit {
+        self.global_notify.notify_waiters();
+      }
 
       for _ in 0..notify_tx.receiver_count() {
         let _ = notify_tx.send(None);
