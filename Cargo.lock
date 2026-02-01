@@ -10550,6 +10550,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "crossbeam-channel",
  "deno_core",
  "deno_error",
  "duckdb",
@@ -10581,6 +10582,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
  "trex_core",
 ]
 
