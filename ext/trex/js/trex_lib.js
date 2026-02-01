@@ -298,6 +298,30 @@ export class HanaDB extends TrexDB {
 		return this.execute(sql, params);
 	}
 
+	#buildHanaConnectionUrl(credentials, adminCredentials) {
+		const dbExtra = credentials.db_extra || {};
+		const encrypt = dbExtra.encrypt === true;
+		const scheme = encrypt ? 'hdbsqls' : 'hdbsql';
+		let url = `${scheme}://${adminCredentials.username}:${adminCredentials.password}@${credentials.host}:${credentials.port}/${credentials.name}`;
+
+		if (encrypt) {
+			const tlsParams = [];
+			if (dbExtra.validateCertificate === false) {
+				tlsParams.push('insecure_omit_server_certificate_check');
+			}
+			if (dbExtra.sslTrustStore) {
+				tlsParams.push(`tls_certificate_dir=${dbExtra.sslTrustStore}`);
+			}
+			if (dbExtra.useMozillasRootCertificates) {
+				tlsParams.push('use_mozillas_root_certificates');
+			}
+			if (tlsParams.length > 0) {
+				url += '?' + tlsParams.join('&');
+			}
+		}
+		return url;
+	}
+
 	execute(sql, params) {
 
 		return new Promise((resolve, reject) => {
@@ -307,7 +331,8 @@ export class HanaDB extends TrexDB {
 				const dbm = DatabaseManager.getDatabaseManager();
 				const c = dbm.getCredentials().filter(c => c.id === super.getdatabase())[0]
 				const adminCredentials = c.credentials.filter(c => c.userScope === 'Admin')[0];
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from hana_scan('${sql}', 'hdbsql://${adminCredentials.username}:${adminCredentials.password}@${c.host}:${c.port}/${c.name}')`, nparams)));
+				const connectionUrl = this.#buildHanaConnectionUrl(c, adminCredentials);
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from hana_scan('${sql}', '${connectionUrl}')`, nparams)));
 			} catch(e) {
 				reject(e);
 			}

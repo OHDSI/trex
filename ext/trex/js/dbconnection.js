@@ -100,10 +100,13 @@ export class TrexConnection  {
             // Use the schema names from the connection configuration
             const resultSchema = this.resultSchemaName || this.schemaName;
 
-            const options = `{"cdmSchema":"${cdmSchema}","resultSchema":"${resultSchema}","targetTable":"cohort","cohortId":"${cohortId}","generateStats":true}`;
+            // cohortId must be an integer, not a string
+            const cohortIdInt = parseInt(cohortId, 10);
+            const options = `{"cdmSchema":"${cdmSchema}","resultSchema":"${resultSchema}","targetTable":"cohort","cohortId":${cohortIdInt},"generateStats":true}`;
 
             // Use circe_sql_render_translate to get properly rendered and translated SQL for DuckDB dialect
-            const sql = `SELECT circe_sql_render_translate(circe_json_to_sql('${atlasB64}', '${options}'), 'duckdb') AS sql`;
+            // Third parameter is additional render options (empty object)
+            const sql = `SELECT circe_sql_render_translate(circe_json_to_sql('${atlasB64}', '${options}'), 'duckdb', '{}') AS sql`;
             const result = await this.connection.execute(sql, []);
 
             // Extract the generated SQL from the result and return in same format as old atlas_query
