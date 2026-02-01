@@ -1,7 +1,5 @@
-// Test that static file patterns work correctly with Deno.readTextFileSync
-// This test requires the static pattern "./test_cases/**/*.md" to be set
+// Requires static pattern "./test_cases/**/*.md"
 
-// Read the content.md file from the main test_cases directory
 const content = Deno.readTextFileSync('./test_cases/main/content.md');
 const expected = 'Some test file\n';
 

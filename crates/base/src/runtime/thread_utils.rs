@@ -279,16 +279,13 @@ mod tests {
     let worker_thread_id_clone = worker_thread_id.clone();
 
     let worker = spawn_worker_thread("test-worker".to_string(), move || {
-      // Capture the worker thread ID
       *worker_thread_id_clone.lock().unwrap() = Some(thread::current().id());
 
-      // Create a real V8 isolate to get a valid handle
       let mut js_runtime = JsRuntime::new(RuntimeOptions::default());
       let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
 
       let future = async move {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        // Keep js_runtime alive until future completes
         drop(js_runtime);
         Ok(())
       };
@@ -300,7 +297,6 @@ mod tests {
 
     let worker = worker.unwrap();
 
-    // Verify different thread
     let worker_tid = worker_thread_id
       .lock()
       .unwrap()
@@ -310,7 +306,6 @@ mod tests {
       "worker should run on different thread"
     );
 
-    // Wait for worker to complete
     let result = worker.join_handle.join();
     assert!(result.is_ok(), "worker thread panicked");
     assert!(result.unwrap().is_ok(), "worker returned error");
@@ -318,17 +313,14 @@ mod tests {
 
   #[test]
   fn test_spawn_worker_thread_isolate_handle_sent() {
-    // Use an Arc to share the original handle for comparison
     let original_handle: Arc<Mutex<Option<v8::IsolateHandle>>> =
       Arc::new(Mutex::new(None));
     let handle_clone = original_handle.clone();
 
     let worker = spawn_worker_thread("test-handle".to_string(), move || {
-      // Create a real V8 isolate
       let mut js_runtime = JsRuntime::new(RuntimeOptions::default());
       let isolate_handle = js_runtime.v8_isolate().thread_safe_handle();
 
-      // Store a clone for comparison
       *handle_clone.lock().unwrap() = Some(isolate_handle.clone());
 
       let future = async move {
@@ -343,14 +335,7 @@ mod tests {
     assert!(worker.is_ok(), "failed to spawn worker");
 
     let worker = worker.unwrap();
-
-    // Verify the handle was received (it should be functional)
-    // We can verify by checking terminate_execution returns a boolean
-    // (it returns false if already terminated or no isolate)
-    // Just having a valid handle that doesn't crash is the real test
     let _can_terminate = worker.isolate_handle.terminate_execution();
-
-    // Wait for worker to complete
     let _ = worker.join_handle.join();
   }
 

@@ -1,9 +1,7 @@
-// Test that JSX import source works correctly with Preact
-// This verifies the deno.jsonc "jsxImportSource": "https://esm.sh/preact" configuration
+// Verifies jsxImportSource config transforms JSX to Preact VNodes
 
 const hello = <div>Hello</div>;
 
-// Verify the JSX was transformed into a Preact VNode
 if (typeof hello !== 'object' || hello === null) {
   throw new Error(`Expected JSX to produce an object, got: ${typeof hello}`);
 }

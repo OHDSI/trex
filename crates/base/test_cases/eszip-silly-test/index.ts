@@ -4,7 +4,6 @@ console.log("Hello A");
 const isTenEven = isEven(10);
 console.log("Hello");
 
-// Self-validate: 10 should be even
 if (isTenEven !== true) {
   throw new Error(`Expected isEven(10) to be true, got: ${isTenEven}`);
 }

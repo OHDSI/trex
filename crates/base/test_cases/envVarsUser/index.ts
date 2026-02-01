@@ -1,7 +1,5 @@
-// Test that environment variables work correctly in user worker runtime
-// User worker without env vars passed should return null for env.get
+// User worker: env vars not passed should return undefined
 
-// Test that env.get returns null for undefined env vars
 const testValue = Deno.env.get('TREX_TEST_ENV_VAR');
 if (testValue !== undefined) {
   throw new Error(

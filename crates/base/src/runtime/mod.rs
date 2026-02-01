@@ -2807,10 +2807,6 @@ mod test {
   #[serial]
   #[allow(clippy::arc_with_non_send_sync)]
   async fn test_eszip_with_source_file() {
-    // Test that eszip bundles can be created from source files and executed
-    // The test creates a temp file that uses npm:is-even and validates the result
-
-    // Initialize rustls crypto provider (required for npm package downloads)
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let (worker_pool_tx, _) = mpsc::unbounded_channel::<UserWorkerMsgs>();
@@ -2819,7 +2815,6 @@ mod test {
       .suffix(".ts")
       .tempfile_in("./test_cases")
       .unwrap();
-    // Self-validating test code: throws if isEven(9) is not false
     temp_file
       .write_all(
         b"import isEven from \"npm:is-even\";\n\
@@ -2913,10 +2908,6 @@ mod test {
   #[serial]
   #[allow(clippy::arc_with_non_send_sync)]
   async fn test_create_eszip_from_graph() {
-    // Test that eszip bundles can be created from a module graph and executed
-    // The test case (eszip-silly-test) validates that isEven(10) returns true
-
-    // Initialize rustls crypto provider (required for npm package downloads)
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let (worker_pool_tx, _) = mpsc::unbounded_channel::<UserWorkerMsgs>();
@@ -2992,11 +2983,9 @@ mod test {
     assert!(result.is_ok(), "eszip from graph test failed: {:?}", result);
   }
 
-  // Main Runtime should have access to `EdgeRuntime`
   #[tokio::test]
   #[serial]
   async fn test_main_runtime_creation() {
-    // Test that main runtime has EdgeRuntime in global scope with userWorkers API
     let mut runtime = RuntimeBuilder::new()
       .set_path("./test_cases/mainRuntimeCreation")
       .build()
@@ -3022,11 +3011,9 @@ mod test {
     );
   }
 
-  // User Runtime can access EdgeRuntime, but only with specific APIs (waitUntil)
   #[tokio::test]
   #[serial]
   async fn test_user_runtime_creation() {
-    // Test that user runtime has EdgeRuntime with limited APIs (only waitUntil)
     let mut runtime = RuntimeBuilder::new()
       .set_path("./test_cases/userRuntimeCreation")
       .set_worker_runtime_conf(WorkerRuntimeOpts::UserWorker(Box::default()))
@@ -3056,8 +3043,6 @@ mod test {
   #[tokio::test]
   #[serial]
   async fn test_main_rt_fs() {
-    // Test that Deno.readTextFileSync works correctly by running a test case
-    // that reads a file and validates its content
     let mut main_rt = RuntimeBuilder::new()
       .set_std_env()
       .set_path("./test_cases/readFile")
@@ -3068,7 +3053,6 @@ mod test {
     let (_tx, duplex_stream_rx) =
       mpsc::unbounded_channel::<DuplexStreamEntry>();
 
-    // The test case (test_read_file_sync.ts) reads the file and throws if content doesn't match
     let (result, _) = main_rt
       .run(
         RunOptionsBuilder::new()
@@ -3079,7 +3063,6 @@ mod test {
       )
       .await;
 
-    // Test passes if no error occurred
     assert!(result.is_ok(), "readTextFileSync test failed: {:?}", result);
   }
 
@@ -3087,8 +3070,6 @@ mod test {
   #[serial]
   #[ignore = "JSX import source requires deno.jsonc configuration during module transpilation"]
   async fn test_jsx_import_source() {
-    // Test that JSX import source (jsxImportSource in deno.jsonc) works correctly
-    // The test case validates that JSX is transformed into Preact VNodes
     let mut main_rt = RuntimeBuilder::new()
       .set_std_env()
       .set_path("./test_cases/jsx-preact")
@@ -3139,8 +3120,6 @@ mod test {
   #[tokio::test]
   #[serial]
   async fn test_static_fs() {
-    // Test that static file patterns allow reading files via Deno.readTextFileSync
-    // The test case reads a .md file that matches the static pattern
     let mut user_rt = RuntimeBuilder::new()
       .set_path("./test_cases/staticFs")
       .set_worker_runtime_conf(WorkerRuntimeOpts::UserWorker(Box::default()))
@@ -3168,8 +3147,6 @@ mod test {
   #[tokio::test]
   #[serial]
   async fn test_os_ops() {
-    // Test that OS operations work correctly in UserWorker context
-    // The test case validates Deno OS APIs and verifies subprocess spawning is blocked
     let mut user_rt = RuntimeBuilder::new()
       .set_path("./test_cases/osOps")
       .set_worker_runtime_conf(WorkerRuntimeOpts::UserWorker(Box::default()))
@@ -3195,8 +3172,6 @@ mod test {
   #[tokio::test]
   #[serial]
   async fn test_os_env_vars_main() {
-    // Test that main runtime can GET env vars but not SET them
-    // Set the env var that the test case expects
     std::env::set_var("TREX_TEST_ENV_VAR", "test_value_123");
 
     let mut main_rt = RuntimeBuilder::new()
@@ -3218,7 +3193,6 @@ mod test {
       )
       .await;
 
-    // Clean up env var
     std::env::remove_var("TREX_TEST_ENV_VAR");
 
     assert!(result.is_ok(), "envVarsMain test failed: {:?}", result);
@@ -3227,8 +3201,6 @@ mod test {
   #[tokio::test]
   #[serial]
   async fn test_os_env_vars_user() {
-    // Test that user worker without env vars passed returns undefined for env.get
-    // Set the env var in the process, but don't pass it to the user worker
     std::env::set_var("TREX_TEST_ENV_VAR", "test_value_123");
 
     let mut user_rt = RuntimeBuilder::new()
@@ -3250,7 +3222,6 @@ mod test {
       )
       .await;
 
-    // Clean up env var
     std::env::remove_var("TREX_TEST_ENV_VAR");
 
     assert!(result.is_ok(), "envVarsUser test failed: {:?}", result);
