@@ -102,7 +102,20 @@ export class TrexConnection  {
 
             // cohortId must be an integer, not a string
             const cohortIdInt = parseInt(cohortId, 10);
-            const options = `{"cdmSchema":"${cdmSchema}","resultSchema":"${resultSchema}","targetTable":"cohort","cohortId":${cohortIdInt},"generateStats":true}`;
+            if (Number.isNaN(cohortIdInt)) {
+                callback(new Error("Invalid cohortId: expected an integer"), null);
+                return;
+            }
+
+            // Build options as object and stringify to ensure proper JSON escaping
+            const optionsObj = {
+                cdmSchema: cdmSchema,
+                resultSchema: resultSchema,
+                targetTable: "cohort",
+                cohortId: cohortIdInt,
+                generateStats: true
+            };
+            const options = JSON.stringify(optionsObj).replace(/'/g, "''");
 
             // Use circe_sql_render_translate to get properly rendered and translated SQL for DuckDB dialect
             // Third parameter is additional render options (empty object)

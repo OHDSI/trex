@@ -299,10 +299,17 @@ export class HanaDB extends TrexDB {
 	}
 
 	#buildHanaConnectionUrl(credentials, adminCredentials) {
-		const dbExtra = credentials.db_extra || {};
+		const dbExtra = (credentials && typeof credentials.db_extra === 'object' && credentials.db_extra !== null)
+			? credentials.db_extra
+			: {};
 		const encrypt = dbExtra.encrypt === true;
 		const scheme = encrypt ? 'hdbsqls' : 'hdbsql';
-		let url = `${scheme}://${adminCredentials.username}:${adminCredentials.password}@${credentials.host}:${credentials.port}/${credentials.name}`;
+
+		// URL encode credentials and database name to handle special characters
+		const encodedUsername = encodeURIComponent(adminCredentials.username);
+		const encodedPassword = encodeURIComponent(adminCredentials.password);
+		const encodedDbName = encodeURIComponent(credentials.name);
+		let url = `${scheme}://${encodedUsername}:${encodedPassword}@${credentials.host}:${credentials.port}/${encodedDbName}`;
 
 		if (encrypt) {
 			const tlsParams = [];
@@ -310,7 +317,7 @@ export class HanaDB extends TrexDB {
 				tlsParams.push('insecure_omit_server_certificate_check');
 			}
 			if (dbExtra.sslTrustStore) {
-				tlsParams.push(`tls_certificate_dir=${dbExtra.sslTrustStore}`);
+				tlsParams.push(`tls_certificate_dir=${encodeURIComponent(dbExtra.sslTrustStore)}`);
 			}
 			if (dbExtra.useMozillasRootCertificates) {
 				tlsParams.push('use_mozillas_root_certificates');
@@ -326,13 +333,25 @@ export class HanaDB extends TrexDB {
 
 		return new Promise((resolve, reject) => {
 			try {
-				const nparams= map_params(params);
+				const nparams = map_params(params);
 				console.log(`DB: ${super.getdatabase()} SQL: ${sql}`);
 				const dbm = DatabaseManager.getDatabaseManager();
-				const c = dbm.getCredentials().filter(c => c.id === super.getdatabase())[0]
-				const adminCredentials = c.credentials.filter(c => c.userScope === 'Admin')[0];
+				const credentialsList = dbm.getCredentials() || [];
+				const c = credentialsList.find(c => c.id === super.getdatabase());
+				if (!c || !Array.isArray(c.credentials)) {
+					reject(new Error(`No credentials found for database '${super.getdatabase()}'`));
+					return;
+				}
+				const adminCredentials = c.credentials.find(cred => cred.userScope === 'Admin');
+				if (!adminCredentials) {
+					reject(new Error(`No admin credentials found for database '${super.getdatabase()}'`));
+					return;
+				}
 				const connectionUrl = this.#buildHanaConnectionUrl(c, adminCredentials);
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from hana_scan('${sql}', '${connectionUrl}')`, nparams)));
+				// Escape single quotes in SQL and connection URL to prevent SQL injection
+				const escapedSql = String(sql).replace(/'/g, "''");
+				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from hana_scan('${escapedSql}', '${escapedConnectionUrl}')`, nparams)));
 			} catch(e) {
 				reject(e);
 			}
