@@ -256,7 +256,7 @@ impl Worker {
           let mut new_runtime = match DenoRuntime::new(self).await {
             Ok(v) => v,
             Err(err) => {
-              let err_msg = apply_source_maps(&err.to_string());
+              let err_msg = apply_source_maps(&format!("{err:#}"));
               let err_msg = translate_vfs_paths(&err_msg, boot_service_path.as_deref());
               let err = CloneableError::from(anyhow::anyhow!("{}", err_msg).context("worker boot error"));
               let _ = booter_signal.send(Err(err.clone().into()));
@@ -316,7 +316,7 @@ impl Worker {
           // Now initialize the main module with CPU tracking active
           if eager_module_init {
             if let Err(err) = new_runtime.init_main_module().await {
-              let err_msg = apply_source_maps(&err.to_string());
+              let err_msg = apply_source_maps(&format!("{err:#}"));
               let err_msg = translate_vfs_paths(&err_msg, boot_service_path.as_deref());
               let err = CloneableError::from(anyhow::anyhow!("{}", err_msg).context("worker boot error"));
               // Cancel the supervisor since we're exiting
@@ -469,7 +469,7 @@ impl Worker {
           let mut new_runtime = match DenoRuntime::new(self).await {
             Ok(v) => v,
             Err(err) => {
-              let err_msg = apply_source_maps(&err.to_string());
+              let err_msg = apply_source_maps(&format!("{err:#}"));
               let err_msg = translate_vfs_paths(&err_msg, boot_service_path.as_deref());
               let err = CloneableError::from(anyhow::anyhow!("{}", err_msg).context("worker boot error"));
               let _ = booter_signal.send(Err(err.clone().into()));
@@ -510,7 +510,7 @@ impl Worker {
           // Now initialize the main module with CPU tracking active
           if eager_module_init {
             if let Err(err) = new_runtime.init_main_module().await {
-              let err_msg = apply_source_maps(&err.to_string());
+              let err_msg = apply_source_maps(&format!("{err:#}"));
               let err_msg = translate_vfs_paths(&err_msg, boot_service_path.as_deref());
               let err = CloneableError::from(anyhow::anyhow!("{}", err_msg).context("worker boot error"));
               // Cancel the supervisor since we're exiting

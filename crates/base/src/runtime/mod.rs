@@ -1134,7 +1134,7 @@ where
 
     // Execute bootstrap directly on this thread (no spawn_blocking needed)
     let bootstrap_ret: Result<Bootstrap, Error> = {
-      let mut bootstrap = bootstrap_fn().await?;
+      let mut bootstrap = bootstrap_fn().await.context("failed to bootstrap runtime")?;
 
       debug!("bootstrap");
 
