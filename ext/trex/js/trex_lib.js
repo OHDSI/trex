@@ -519,17 +519,23 @@ export class TrexHttpClient {
 			let data;
 			try {
 				data = await response.json();
-			} catch (error) {
-				data = await response.text().catch(() => "");
+			} catch (jsonError) {
+				try {
+					data = await response.text();
+				} catch (textError) {
+					console.warn(`Failed to parse response body: JSON error: ${jsonError.message}, Text error: ${textError.message}`);
+					data = "";
+				}
 			}
 
+			const urlString = typeof url === 'string' ? url : String(url);
 			const result = {
 				data: data,
 				status: response.status,
 				statusText: response.statusText,
 				headers: Object.fromEntries(response.headers.entries()),
 				config: config,
-				request: new Request(url, options)
+				request: new Request(urlString, options)
 			};
 
 			if (!response.ok) {
