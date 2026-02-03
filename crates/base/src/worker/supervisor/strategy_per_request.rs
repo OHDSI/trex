@@ -42,6 +42,7 @@ pub async fn supervise(
     tokens: Tokens {
       termination,
       supervise,
+      runtime_drop,
     },
     flags,
     ..
@@ -53,8 +54,13 @@ pub async fn supervise(
     ..
   } = timing.unwrap_or_default();
 
-  let _guard = scopeguard::guard(is_retired, |v| {
+  let _guard = scopeguard::guard((is_retired, runtime_drop.clone()), |(v, runtime_drop)| {
     v.raise();
+
+    // Guard against calling V8 handle methods during/after runtime disposal
+    if runtime_drop.is_cancelled() {
+      return;
+    }
 
     if thread_safe_handle.request_interrupt(
       as_interrupt_callback(v8_handle_early_retire_raw),
@@ -76,6 +82,7 @@ pub async fn supervise(
   let is_wall_clock_limit_disabled = worker_timeout_ms == 0;
   let is_cpu_time_limit_disabled =
     cpu_time_soft_limit_ms == 0 && cpu_time_hard_limit_ms == 0;
+
   let mut is_worker_entered = false;
   let mut is_wall_clock_beforeunload_armed = false;
 
@@ -147,9 +154,10 @@ pub async fn supervise(
             cpu_usage_ms += diff / 1_000_000;
             cpu_usage_accumulated_ms = accumulated / 1_000_000;
 
+
             if !is_cpu_time_limit_disabled {
               if cpu_usage_ms >= cpu_time_hard_limit_ms as i64 {
-                log::error!("CPU time limit reached: isolate: {:?}", key);
+                log::error!("CPU time limit reached (on leave): isolate: {:?}", key);
                 complete_reason = Some(ShutdownReason::CPUTime);
               }
 
@@ -168,8 +176,10 @@ pub async fn supervise(
           pending::<_>().await
         }
       } => {
-        if is_worker_entered && req_start_ack {
-          log::error!("CPU time limit reached: isolate: {:?}", key);
+        // For oneshot workers, enforce CPU limits during module init too since
+        // module init is part of the single request lifecycle.
+        // For non-oneshot workers, only enforce during request handling.
+        if is_worker_entered && (oneshot || req_start_ack) {
           complete_reason = Some(ShutdownReason::CPUTime);
         }
       }
@@ -216,10 +226,14 @@ pub async fn supervise(
         if !is_wall_clock_limit_disabled && !is_wall_clock_beforeunload_armed
       => {
         let data_ptr_mut = Box::into_raw(Box::new(V8HandleBeforeunloadData {
-            reason: WillTerminateReason::WallClock
+            reason: WillTerminateReason::WallClock,
+            runtime_drop_token: runtime_drop.clone(),
         }));
 
-        if thread_safe_handle.request_interrupt(
+        // Guard against calling V8 handle methods during/after runtime disposal
+        if runtime_drop.is_cancelled() {
+          drop(unsafe { Box::from_raw(data_ptr_mut)});
+        } else if thread_safe_handle.request_interrupt(
           as_interrupt_callback(v8_handle_beforeunload_raw),
           data_ptr_mut as *mut _,
         ) {
@@ -254,7 +268,8 @@ pub async fn supervise(
       }
 
       Some(reason) => {
-        if thread_safe_handle.terminate_execution() {
+        // Guard against calling V8 handle methods during/after runtime disposal
+        if !runtime_drop.is_cancelled() && thread_safe_handle.terminate_execution() {
           waker.wake();
         }
 

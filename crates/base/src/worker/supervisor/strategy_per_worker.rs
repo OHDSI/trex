@@ -30,6 +30,7 @@ use crate::worker::supervisor::wait_cpu_alarm;
 use crate::worker::supervisor::CPUUsage;
 use crate::worker::supervisor::Tokens;
 use crate::worker::supervisor::V8HandleBeforeunloadData;
+use crate::worker::supervisor::V8HandleDrainData;
 use crate::worker::supervisor::V8HandleEarlyDropData;
 
 use super::Arguments;
@@ -136,6 +137,7 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
     tokens: Tokens {
       termination,
       supervise,
+      runtime_drop,
     },
     flags,
     ..
@@ -206,10 +208,16 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
     let is_retired = state.is_retired.clone();
     let thread_safe_handle = thread_safe_handle.clone();
     let waker = waker.clone();
+    let runtime_drop = runtime_drop.clone();
     move || {
       // we should raise a retire signal because subsequent incoming requests
       // are unlikely to get enough wall clock time or cpu time
       is_retired.raise();
+
+      // Guard against calling V8 handle methods during/after runtime disposal
+      if runtime_drop.is_cancelled() {
+        return;
+      }
 
       if thread_safe_handle.request_interrupt(
         as_interrupt_callback(v8_handle_early_retire_raw),
@@ -225,9 +233,18 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
 
   let mut dispatch_early_drop_beforeunload_fn = Some({
     let token = early_drop_token.clone();
-    || {
+    let runtime_drop = runtime_drop.clone();
+    let thread_safe_handle = thread_safe_handle.clone();
+    let waker = waker.clone();
+    move || {
       let data_ptr_mut =
         Box::into_raw(Box::new(V8HandleEarlyDropData { token }));
+
+      // Guard against calling V8 handle methods during/after runtime disposal
+      if runtime_drop.is_cancelled() {
+        unsafe { Box::from_raw(data_ptr_mut) }.token.cancel();
+        return;
+      }
 
       if thread_safe_handle.request_interrupt(
         as_interrupt_callback(v8_handle_early_drop_beforeunload_raw),
@@ -240,12 +257,29 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
     }
   });
 
-  let mut dispatch_drain_fn = Some(|| {
-    if thread_safe_handle.request_interrupt(
-      as_interrupt_callback(v8_handle_drain_raw),
-      std::ptr::null_mut(),
-    ) {
-      waker.wake();
+  let mut dispatch_drain_fn = Some({
+    let runtime_drop = runtime_drop.clone();
+    let thread_safe_handle = thread_safe_handle.clone();
+    let waker = waker.clone();
+    move || {
+      let data_ptr_mut = Box::into_raw(Box::new(V8HandleDrainData {
+        runtime_drop_token: runtime_drop.clone(),
+      }));
+
+      // Guard against calling V8 handle methods during/after runtime disposal
+      if runtime_drop.is_cancelled() {
+        drop(unsafe { Box::from_raw(data_ptr_mut) });
+        return;
+      }
+
+      if thread_safe_handle.request_interrupt(
+        as_interrupt_callback(v8_handle_drain_raw),
+        data_ptr_mut as *mut _,
+      ) {
+        waker.wake();
+      } else {
+        drop(unsafe { Box::from_raw(data_ptr_mut) });
+      }
     }
   });
 
@@ -253,11 +287,13 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
     let state = state.runtime.clone();
     let thread_safe_handle = thread_safe_handle.clone();
     let waker = waker.clone();
+    let runtime_drop = runtime_drop.clone();
     let memory_tx = std::cell::RefCell::new(Some(isolate_memory_usage_tx));
     move |should_terminate: bool| {
       if should_terminate {
         state.terminated.raise();
-        if thread_safe_handle.terminate_execution() {
+        // Guard against calling V8 handle methods during/after runtime disposal
+        if !runtime_drop.is_cancelled() && thread_safe_handle.terminate_execution() {
           waker.wake();
         }
       }
@@ -442,10 +478,14 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
         if !state.is_wall_clock_limit_disabled && !state.is_wall_clock_beforeunload_armed
       => {
         let data_ptr_mut = Box::into_raw(Box::new(V8HandleBeforeunloadData {
-          reason: WillTerminateReason::WallClock
+          reason: WillTerminateReason::WallClock,
+          runtime_drop_token: runtime_drop.clone(),
         }));
 
-        if thread_safe_handle.request_interrupt(
+        // Guard against calling V8 handle methods during/after runtime disposal
+        if runtime_drop.is_cancelled() {
+          drop(unsafe { Box::from_raw(data_ptr_mut) });
+        } else if thread_safe_handle.request_interrupt(
           as_interrupt_callback(v8_handle_beforeunload_raw),
           data_ptr_mut as *mut _,
         ) {
