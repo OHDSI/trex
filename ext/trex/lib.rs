@@ -33,6 +33,7 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 use std::cell::RefCell;
 use std::env;
 use std::error::Error as StdError;
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::{Arc, LazyLock, Mutex};
 use tracing::warn;
 use uuid::Uuid;
@@ -489,8 +490,42 @@ fn execute_query(
   sql: String,
   params: Vec<TrexType>,
 ) -> Result<String, TrexError> {
+  // Wrap the entire DuckDB operation in catch_unwind to prevent panics
+  // from external extensions (like hana_scan) from crashing the V8 runtime
+  let result = panic::catch_unwind(AssertUnwindSafe(|| {
+    execute_query_inner(database, sql, params)
+  }));
+
+  match result {
+    Ok(inner_result) => inner_result,
+    Err(panic_err) => {
+      let panic_msg = if let Some(s) = panic_err.downcast_ref::<&str>() {
+        s.to_string()
+      } else if let Some(s) = panic_err.downcast_ref::<String>() {
+        s.clone()
+      } else {
+        "Unknown panic occurred during query execution".to_string()
+      };
+      Err(TrexError::Generic(format!(
+        "Query execution panicked: {panic_msg}"
+      )))
+    }
+  }
+}
+
+fn execute_query_inner(
+  database: String,
+  sql: String,
+  params: Vec<TrexType>,
+) -> Result<String, TrexError> {
   let conn_arc = get_active_connection();
-  let conn = &*conn_arc.lock().unwrap();
+  let conn = match conn_arc.lock() {
+    Ok(guard) => guard,
+    Err(poisoned) => {
+      warn!("Lock was poisoned, recovering");
+      poisoned.into_inner()
+    }
+  };
   let _ = conn
     .execute(&format!("USE {database}"), [])
     .inspect_err(|e| warn!("{e}"));
@@ -690,19 +725,39 @@ fn op_execute_query_stream(
   let conn_arc = get_active_connection();
   tokio::spawn(async move {
     tokio::task::spawn_blocking(move || {
-      let conn = &*conn_arc.lock().unwrap();
-      if conn.execute(&format!("USE {database}"), []).is_err() {
-        return;
-      }
-      if let Ok(mut stmt) = conn.prepare(&sql) {
-        if let Ok(iter) = stmt.query_arrow(params_from_iter(params.iter())) {
-          for batch in iter {
-            let json = record_batches_to_json(std::slice::from_ref(&batch));
-            if sender.blocking_send(json).is_err() {
-              break;
+      // Wrap DuckDB operations in catch_unwind to prevent panics from crashing V8
+      let result = panic::catch_unwind(AssertUnwindSafe(|| {
+        let conn = match conn_arc.lock() {
+          Ok(guard) => guard,
+          Err(poisoned) => poisoned.into_inner(),
+        };
+        if conn.execute(&format!("USE {database}"), []).is_err() {
+          return;
+        }
+        if let Ok(mut stmt) = conn.prepare(&sql) {
+          if let Ok(iter) = stmt.query_arrow(params_from_iter(params.iter())) {
+            for batch in iter {
+              let json = record_batches_to_json(std::slice::from_ref(&batch));
+              if sender.blocking_send(json).is_err() {
+                break;
+              }
             }
           }
         }
+      }));
+      if let Err(e) = result {
+        let msg = if let Some(s) = e.downcast_ref::<&str>() {
+          s.to_string()
+        } else if let Some(s) = e.downcast_ref::<String>() {
+          s.clone()
+        } else {
+          "Unknown panic during streaming query".to_string()
+        };
+        warn!("Streaming query panicked: {msg}");
+        let _ = sender.blocking_send(format!(
+          r#"{{"error":"Query execution panicked: {}"}}"#,
+          msg.replace('"', "\\\"")
+        ));
       }
     });
   });
@@ -724,7 +779,10 @@ async fn op_execute_query_stream_next(
     .resource_table
     .get::<QueryStreamResource>(rid)?;
 
-  let mut rx = resource.receiver.lock().unwrap();
+  let mut rx = match resource.receiver.lock() {
+    Ok(guard) => guard,
+    Err(poisoned) => poisoned.into_inner(),
+  };
   let next_chunk = rx.recv().await;
 
   if next_chunk.is_none() {
