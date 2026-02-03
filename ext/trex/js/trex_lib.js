@@ -462,7 +462,10 @@ export function createRequestListener(onMessage) {
 							requestOptions.body = originalMessage.request.body;
 						}
 						
-						const request = new Request(originalMessage.request.url, requestOptions);
+						const urlString = typeof originalMessage.request.url === 'string'
+							? originalMessage.request.url
+							: String(originalMessage.request.url);
+						const request = new Request(urlString, requestOptions);
 						
 						const kTokioChannelTag = Symbol.for("kTokioChannelTag");
 						request[kTokioChannelTag] = {
@@ -513,29 +516,30 @@ export class TrexHttpClient {
 		const response = await req(this.service, url, options);
 		
 		if (response instanceof Response) {
+			let data;
 			try {
-				const data = await response.json();
-
-				return {
-					data: data,
-					status: response.status,
-					statusText: response.statusText,
-					headers: Object.fromEntries(response.headers.entries()),
-					config: config,
-					request: new Request(url, options)
-				};
+				data = await response.json();
 			} catch (error) {
-				const textData = await response.text().catch(() => "");
-				
-				return {
-					data: {},
-					status: response.status,
-					statusText: response.statusText,
-					headers: Object.fromEntries(response.headers.entries()),
-					config: config,
-					request: new Request(url, options)
-				};
+				data = await response.text().catch(() => "");
 			}
+
+			const result = {
+				data: data,
+				status: response.status,
+				statusText: response.statusText,
+				headers: Object.fromEntries(response.headers.entries()),
+				config: config,
+				request: new Request(url, options)
+			};
+
+			if (!response.ok) {
+				const error = new Error(`Request failed with status ${response.status}: ${response.statusText}`);
+				error.response = result;
+				error.status = response.status;
+				throw error;
+			}
+
+			return result;
 		}
 		return response;
 	}
