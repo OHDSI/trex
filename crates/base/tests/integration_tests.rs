@@ -6,7 +6,7 @@ use std::borrow::Cow;
 // Install the default rustls crypto provider for TLS operations
 #[ctor::ctor]
 fn init() {
-    let _ = ::rustls::crypto::ring::default_provider().install_default();
+  let _ = ::rustls::crypto::ring::default_provider().install_default();
 }
 use std::collections::HashMap;
 use std::io;
@@ -551,7 +551,9 @@ async fn test_main_worker_user_worker_mod_evaluate_exception() {
 
   let body_bytes = to_bytes(res.into_body()).await.unwrap();
 
-  assert!(body_bytes.starts_with(b"{\"msg\":\"Error: event loop error: Error: fail"));
+  assert!(
+    body_bytes.starts_with(b"{\"msg\":\"Error: event loop error: Error: fail")
+  );
 }
 
 async fn test_main_worker_post_request_with_transfer_encoding(
@@ -1001,7 +1003,7 @@ async fn req_failure_case_timeout() {
       let buf = to_bytes(res.body_mut()).await.unwrap();
       let status_500 = res.status() == StatusCode::INTERNAL_SERVER_ERROR;
       let valid_output =
-                buf == "{\"msg\":\"Error: worker did not respond in time\"}";
+        buf == "{\"msg\":\"Error: worker did not respond in time\"}";
 
       found_timeout = status_500 && valid_output;
     }

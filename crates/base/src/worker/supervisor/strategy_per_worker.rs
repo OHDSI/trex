@@ -134,11 +134,12 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
     isolate_memory_usage_tx,
     thread_safe_handle,
     waker,
-    tokens: Tokens {
-      termination,
-      supervise,
-      runtime_drop,
-    },
+    tokens:
+      Tokens {
+        termination,
+        supervise,
+        runtime_drop,
+      },
     flags,
     ..
   } = args;
@@ -293,7 +294,9 @@ pub async fn supervise(args: Arguments) -> (ShutdownReason, i64) {
       if should_terminate {
         state.terminated.raise();
         // Guard against calling V8 handle methods during/after runtime disposal
-        if !runtime_drop.is_cancelled() && thread_safe_handle.terminate_execution() {
+        if !runtime_drop.is_cancelled()
+          && thread_safe_handle.terminate_execution()
+        {
           waker.wake();
         }
       }

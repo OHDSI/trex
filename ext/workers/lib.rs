@@ -632,7 +632,10 @@ pub async fn op_user_worker_fetch_send(
       match err.downcast_ref() {
         Some(err @ WorkerError::RequestCancelledBySupervisor) => {
           // Use "WorkerRequestCancelled" error class to match the registered JS error class
-          return Err(JsErrorBox::new("WorkerRequestCancelled", err.to_string()));
+          return Err(JsErrorBox::new(
+            "WorkerRequestCancelled",
+            err.to_string(),
+          ));
         }
         Some(err @ WorkerError::WorkerAlreadyRetired) => {
           return Err(JsErrorBox::generic(err.to_string()));

@@ -485,8 +485,8 @@ impl<'a> deno_graph::source::NpmResolver for WorkerCliNpmGraphResolver<'a> {
             // For BYONM mode, packages are already in node_modules and will be
             // resolved during module loading. Try to resolve each package from
             // node_modules and construct the PackageNv from the package.json.
-            use deno_semver::package::PackageNv;
             use deno_semver::StackString;
+            use deno_semver::package::PackageNv;
 
             let results: Vec<_> = package_reqs
               .iter()

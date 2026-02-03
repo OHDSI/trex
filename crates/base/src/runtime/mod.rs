@@ -1134,7 +1134,9 @@ where
 
     // Execute bootstrap directly on this thread (no spawn_blocking needed)
     let bootstrap_ret: Result<Bootstrap, Error> = {
-      let mut bootstrap = bootstrap_fn().await.context("failed to bootstrap runtime")?;
+      let mut bootstrap = bootstrap_fn()
+        .await
+        .context("failed to bootstrap runtime")?;
 
       debug!("bootstrap");
 
@@ -1437,7 +1439,6 @@ where
       maybe_cpu_usage_metrics_tx,
     } = options;
 
-    
     {
       let op_state_rc = self.js_runtime.op_state();
       let mut op_state = op_state_rc.borrow_mut();

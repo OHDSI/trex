@@ -39,11 +39,12 @@ pub async fn supervise(
     isolate_memory_usage_tx,
     thread_safe_handle,
     waker,
-    tokens: Tokens {
-      termination,
-      supervise,
-      runtime_drop,
-    },
+    tokens:
+      Tokens {
+        termination,
+        supervise,
+        runtime_drop,
+      },
     flags,
     ..
   } = args;
@@ -54,21 +55,24 @@ pub async fn supervise(
     ..
   } = timing.unwrap_or_default();
 
-  let _guard = scopeguard::guard((is_retired, runtime_drop.clone()), |(v, runtime_drop)| {
-    v.raise();
+  let _guard = scopeguard::guard(
+    (is_retired, runtime_drop.clone()),
+    |(v, runtime_drop)| {
+      v.raise();
 
-    // Guard against calling V8 handle methods during/after runtime disposal
-    if runtime_drop.is_cancelled() {
-      return;
-    }
+      // Guard against calling V8 handle methods during/after runtime disposal
+      if runtime_drop.is_cancelled() {
+        return;
+      }
 
-    if thread_safe_handle.request_interrupt(
-      as_interrupt_callback(v8_handle_early_retire_raw),
-      std::ptr::null_mut(),
-    ) {
-      waker.wake();
-    }
-  });
+      if thread_safe_handle.request_interrupt(
+        as_interrupt_callback(v8_handle_early_retire_raw),
+        std::ptr::null_mut(),
+      ) {
+        waker.wake();
+      }
+    },
+  );
 
   let mut cpu_timer = Option::<CPUTimer>::None;
 
@@ -269,7 +273,9 @@ pub async fn supervise(
 
       Some(reason) => {
         // Guard against calling V8 handle methods during/after runtime disposal
-        if !runtime_drop.is_cancelled() && thread_safe_handle.terminate_execution() {
+        if !runtime_drop.is_cancelled()
+          && thread_safe_handle.terminate_execution()
+        {
           waker.wake();
         }
 
