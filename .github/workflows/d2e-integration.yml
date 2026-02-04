@@ -1,0 +1,262 @@
+name: D2E Integration Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      d2e_branch:
+        description: 'D2E branch to test against'
+        default: 'develop'
+        type: string
+  push:
+    branches: [develop]
+    paths:
+      - 'crates/**'
+      - 'ext/**'
+      - 'deno/**'
+      - 'vendor/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+  pull_request:
+    types: [opened, ready_for_review, reopened, synchronize]
+    paths:
+      - 'crates/**'
+      - 'ext/**'
+      - 'deno/**'
+      - 'vendor/**'
+      - 'Cargo.lock'
+      - 'Cargo.toml'
+
+env:
+  D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
+  DUCKDB_VERSION: v1.4.0
+  VERSION: develop
+
+jobs:
+  build-extension:
+    runs-on: ubuntu-24.04
+    if: github.event.pull_request.draft == false
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Increase swap to 15G
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 15G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install libblas-dev liblapack-dev libopenblas-dev libglib2.0-dev unzip wget python3
+
+      - name: Install DuckDB library
+        run: |
+          wget -q -O /tmp/libduckdb.zip https://github.com/duckdb/duckdb/releases/download/${{ env.DUCKDB_VERSION }}/libduckdb-linux-amd64.zip
+          unzip /tmp/libduckdb.zip -d /tmp/duckdb
+          sudo cp /tmp/duckdb/libduckdb.so /usr/local/lib/
+          sudo cp /tmp/duckdb/duckdb.h /usr/local/include/
+          sudo ldconfig
+
+      - name: Setup Rust
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ext/trexas
+
+      - name: Build extension
+        working-directory: ext/trexas
+        run: |
+          make configure
+          make release
+
+      - name: Sign extension
+        working-directory: ext/trexas
+        env:
+          DUCKDB_EXTENSION_SIGNING_KEY: ${{ secrets.DUCKDB_EXTENSION_SIGNING_KEY }}
+        run: |
+          ./extension-ci-tools/extension_signing/sign-if-key.sh build/release
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trexas-extension
+          path: ext/trexas/build/release/trexas.trex
+          retention-days: 1
+
+  d2e-integration:
+    needs: build-extension
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Increase swap to 15G
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 15G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - name: Download extension artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: trexas-extension
+          path: ./trexas-artifact
+
+      - name: Checkout D2E
+        uses: actions/checkout@v4
+        with:
+          repository: OHDSI/Data2Evidence
+          ref: ${{ env.D2E_BRANCH }}
+          path: d2e
+          submodules: recursive
+
+      - name: Inject local extension into D2E
+        run: |
+          # Copy our built extension to D2E's services/trex directory
+          cp ./trexas-artifact/trexas.trex ./d2e/services/trex/local-trexas.trex
+
+          # Insert COPY instruction after 'RUN npm install' in Dockerfile
+          sed -i '/^RUN npm install$/a\COPY local-trexas.trex /usr/src/node_modules/@trex/as/trexas.trex' ./d2e/services/trex/Dockerfile
+
+          # Verify modification
+          echo "=== Modified Dockerfile (relevant section) ==="
+          grep -A2 "RUN npm install" ./d2e/services/trex/Dockerfile
+
+      - name: Setup D2E
+        working-directory: d2e
+        run: npm install
+
+      - name: Patch seed config for e2e tests
+        working-directory: d2e
+        run: node ./scripts/patch-seed-for-e2e.js
+
+      - name: Initialize D2E
+        working-directory: d2e
+        run: |
+          init_choice=y ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} init
+
+      - name: Build D2E Docker images
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions build
+          docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
+
+      - name: Prune build cache
+        run: docker buildx prune -af
+
+      - name: Start D2E services
+        working-directory: d2e
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          retry_wait_seconds: 100
+          max_attempts: 2
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions start
+            docker ps --format "{{.Names}},{{.Status}}"
+
+      - name: Run setupdemo
+        working-directory: d2e
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          max_attempts: 1
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions setupdemo
+
+      - name: Run checkflow
+        working-directory: d2e
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          max_attempts: 1
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions checkflow
+
+      - name: Logs after checkflow
+        if: success() || failure()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions logs
+
+      - name: Build e2e Docker image
+        working-directory: d2e/tests/e2e
+        run: docker build -t d2e-e2e .
+
+      - name: Verify app is reachable
+        run: |
+          curl -k -s -o /dev/null -w "%{http_code}" https://localhost:443/d2e/portal || echo "App not reachable"
+          curl -k -I https://localhost:443/d2e/portal || true
+
+      - name: Run e2e tests
+        working-directory: d2e/tests/e2e
+        run: |
+          docker run --rm \
+            --network=host \
+            --ipc=host \
+            -v "$(pwd)/test-results:/work/test-results" \
+            -v "$(pwd)/ctrf:/work/ctrf" \
+            -e D2E_BASE_URL=https://localhost:443 \
+            -e CI=true \
+            -e GITHUB_ACTIONS=true \
+            d2e-e2e npm test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d2e-test-results
+          path: d2e/tests/e2e/test-results/**/*
+
+      - name: Publish Test Report
+        if: always()
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: "./d2e/tests/e2e/ctrf/*.json"
+          file-report: true
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions logs
+
+      - name: Stop D2E services
+        if: always()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions stop
+
+      - name: Prune system
+        if: always()
+        run: docker system prune -af
