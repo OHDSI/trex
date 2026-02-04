@@ -56,6 +56,9 @@ pub struct IsolateMemoryStats {
 pub struct Tokens {
   pub termination: Option<TerminationToken>,
   pub supervise: CancellationToken,
+  /// Token that is cancelled when the runtime is being dropped.
+  /// Supervisors should check this before calling thread_safe_handle methods.
+  pub runtime_drop: CancellationToken,
 }
 
 pub struct Arguments {
@@ -153,6 +156,7 @@ pub fn create_supervisor(
   let tokens = Tokens {
     termination: termination_token.clone(),
     supervise: supervise_cancel_token.clone(),
+    runtime_drop: runtime_drop_token.clone(),
   };
 
   let maybe_inspector_params = runtime.inspector().map(|_| {

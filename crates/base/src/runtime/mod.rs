@@ -435,6 +435,11 @@ pub struct DenoRuntime<RuntimeContext = DefaultRuntimeContext> {
 
 impl<RuntimeContext> Drop for DenoRuntime<RuntimeContext> {
   fn drop(&mut self) {
+    // Cancel drop_token FIRST to signal supervisors that the runtime is being dropped.
+    // Supervisors should check this token before calling thread_safe_handle methods
+    // to avoid accessing the isolate during/after disposal.
+    self.drop_token.cancel();
+
     if self.conf.is_user_worker() {
       self.js_runtime.v8_isolate().remove_gc_prologue_callback(
         mem_check_gc_prologue_callback_fn as _,
@@ -447,8 +452,6 @@ impl<RuntimeContext> Drop for DenoRuntime<RuntimeContext> {
     unsafe {
       ManuallyDrop::drop(&mut self.js_runtime);
     }
-
-    self.drop_token.cancel();
   }
 }
 
@@ -1131,7 +1134,9 @@ where
 
     // Execute bootstrap directly on this thread (no spawn_blocking needed)
     let bootstrap_ret: Result<Bootstrap, Error> = {
-      let mut bootstrap = bootstrap_fn().await?;
+      let mut bootstrap = bootstrap_fn()
+        .await
+        .context("failed to bootstrap runtime")?;
 
       debug!("bootstrap");
 
@@ -1502,19 +1507,6 @@ where
       }
     }
 
-    // Create the mod_evaluate future wrapped in ScopedFuture so it has a HandleScope when polled
-    let isolate_ptr = {
-      let isolate_ref: &mut v8::Isolate = self.js_runtime.v8_isolate();
-      isolate_ref as *mut v8::Isolate
-    };
-    let context = self.js_runtime.main_context();
-    let mod_evaluate_future = self.js_runtime.mod_evaluate(main_module_id);
-    let mut mod_fut = ScopedFuture {
-      future: mod_evaluate_future,
-      isolate: isolate_ptr,
-      context,
-    };
-
     {
       let evaluating_mod =
         scopeguard::guard(self.runtime_state.evaluating_mod.clone(), |v| {
@@ -1522,6 +1514,32 @@ where
         });
 
       evaluating_mod.raise();
+
+      // CRITICAL: Create CPU metrics guard BEFORE mod_evaluate() is called!
+      // The mod_evaluate() call synchronously evaluates the module (runs top-level
+      // code) even though it returns a future. The top-level code runs immediately
+      // when the future is created, not when it's polled. We must start CPU tracking
+      // BEFORE this happens.
+      let mut mod_eval_cpu_time_ns = 0i64;
+      let cpu_metrics_guard_for_mod_eval = get_cpu_metrics_guard_inner(
+        "mod_eval",
+        self.js_runtime.op_state(),
+        &maybe_cpu_usage_metrics_tx,
+        &mut mod_eval_cpu_time_ns,
+      );
+
+      // Create the mod_evaluate future wrapped in ScopedFuture so it has a HandleScope when polled
+      let isolate_ptr = {
+        let isolate_ref: &mut v8::Isolate = self.js_runtime.v8_isolate();
+        isolate_ref as *mut v8::Isolate
+      };
+      let context = self.js_runtime.main_context();
+      let mod_evaluate_future = self.js_runtime.mod_evaluate(main_module_id);
+      let mut mod_fut = ScopedFuture {
+        future: mod_evaluate_future,
+        isolate: isolate_ptr,
+        context,
+      };
 
       let event_loop_fut = self.run_event_loop(
         wait_termination_request_token,
@@ -1548,10 +1566,17 @@ where
               )
             )
           } else {
-            mod_fut.await.map_err(Into::into)
+            let result = mod_fut.await.map_err(Into::into);
+            result
           }
         }
       };
+
+      // Drop the CPU metrics guard after module evaluation completes
+      // to send CPUUsageMetrics::Leave
+      drop(cpu_metrics_guard_for_mod_eval);
+      // Add module evaluation CPU time to the main accumulator
+      accumulated_cpu_time_ns += mod_eval_cpu_time_ns;
 
       if let Err(err) = mod_result {
         return (Err(err), get_accumulated_cpu_time_ms!());
@@ -1566,6 +1591,7 @@ where
       {
         if !self.termination_request_token.is_cancelled() {
           if let Err(err) = with_cpu_metrics_guard(
+            "load_event",
             self.js_runtime.op_state(),
             &maybe_cpu_usage_metrics_tx,
             &mut accumulated_cpu_time_ns,
@@ -1597,6 +1623,7 @@ where
       let mut guard = self.get_v8_termination_guard();
 
       if let Err(err) = with_cpu_metrics_guard(
+        "unload_event",
         guard.js_runtime.op_state(),
         &maybe_cpu_usage_metrics_tx,
         &mut accumulated_cpu_time_ns,
@@ -1665,7 +1692,8 @@ where
       }
 
       let op_state = this.js_runtime.op_state();
-      let cpu_metrics_guard = get_cpu_metrics_guard(
+      let cpu_metrics_guard = get_cpu_metrics_guard_inner(
+        "event_loop_poll",
         op_state.clone(),
         maybe_cpu_usage_metrics_tx,
         accumulated_cpu_time_ns,
@@ -1737,7 +1765,8 @@ where
             beforeunload_cpu_threshold.store(None);
 
             if !state.is_terminated() {
-              let _cpu_metrics_guard = get_cpu_metrics_guard(
+              let _cpu_metrics_guard = get_cpu_metrics_guard_inner(
+                "beforeunload_cpu",
                 op_state.clone(),
                 maybe_cpu_usage_metrics_tx,
                 accumulated_cpu_time_ns,
@@ -1772,7 +1801,8 @@ where
             beforeunload_mem_threshold.store(None);
 
             if !state.is_terminated() && !mem_state.is_exceeded() {
-              let _cpu_metrics_guard = get_cpu_metrics_guard(
+              let _cpu_metrics_guard = get_cpu_metrics_guard_inner(
+                "beforeunload_mem",
                 op_state,
                 maybe_cpu_usage_metrics_tx,
                 accumulated_cpu_time_ns,
@@ -2318,6 +2348,7 @@ pub fn import_meta_resolve_callback(
 }
 
 fn with_cpu_metrics_guard<'l, F, R>(
+  call_site: &'static str,
   op_state: Rc<RefCell<OpState>>,
   maybe_cpu_usage_metrics_tx: &'l Option<
     mpsc::UnboundedSender<CPUUsageMetrics>,
@@ -2328,7 +2359,8 @@ fn with_cpu_metrics_guard<'l, F, R>(
 where
   F: FnOnce() -> R,
 {
-  let _cpu_metrics_guard = get_cpu_metrics_guard(
+  let _cpu_metrics_guard = get_cpu_metrics_guard_inner(
+    call_site,
     op_state,
     maybe_cpu_usage_metrics_tx,
     accumulated_cpu_time_ns,
@@ -2337,7 +2369,8 @@ where
   work_fn()
 }
 
-fn get_cpu_metrics_guard<'l>(
+fn get_cpu_metrics_guard_inner<'l>(
+  _call_site: &'static str,
   op_state: Rc<RefCell<OpState>>,
   maybe_cpu_usage_metrics_tx: &'l Option<
     mpsc::UnboundedSender<CPUUsageMetrics>,
@@ -2432,6 +2465,10 @@ fn terminate_execution_if_cancelled(
     }
     // SAFETY: We've verified the pointer is non-null
     let isolate = unsafe { &mut *isolate_ptr };
+    // Check if JsRuntime state is still valid (slot 0 is cleared during drop)
+    if isolate.get_data(0).is_null() {
+      return;
+    }
     let _ = isolate.terminate_execution();
   }
 
