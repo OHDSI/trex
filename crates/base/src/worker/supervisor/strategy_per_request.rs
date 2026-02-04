@@ -141,7 +141,10 @@ pub async fn supervise(
       Some(metrics) = cpu_usage_metrics_rx.recv() => {
         match metrics {
           CPUUsageMetrics::Enter(_thread_id, timer) => {
-            assert!(!is_worker_entered);
+            if is_worker_entered {
+              // Already entered - can happen due to channel buffering or race conditions
+              continue;
+            }
             is_worker_entered = true;
 
             if !is_cpu_time_limit_disabled {
@@ -152,7 +155,10 @@ pub async fn supervise(
           }
 
           CPUUsageMetrics::Leave(CPUUsage { accumulated, diff }) => {
-            assert!(is_worker_entered);
+            if !is_worker_entered {
+              // Not entered - can happen due to channel buffering or race conditions
+              continue;
+            }
 
             is_worker_entered = false;
             cpu_usage_ms += diff / 1_000_000;

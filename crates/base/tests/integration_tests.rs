@@ -747,7 +747,6 @@ async fn test_file_upload() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_file_upload_real_multipart_bytes() {
   test_oak_file_upload(
     Cow::Borrowed("./test_cases/main"),
@@ -769,7 +768,6 @@ async fn test_file_upload_real_multipart_bytes() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_file_upload_size_exceed() {
   test_oak_file_upload(
     Cow::Borrowed("./test_cases/main"),
@@ -1009,7 +1007,6 @@ async fn req_failure_case_timeout() {
   assert!(found_timeout);
 }
 
-#[ignore = "trex temp disabled"]
 #[tokio::test]
 #[serial]
 async fn req_failure_case_cpu_time_exhausted() {
@@ -1255,7 +1252,6 @@ async fn req_failure_case_intentional_peer_reset_secure() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn req_failure_case_op_cancel_from_server_due_to_cpu_resource_limit() {
   test_oak_file_upload(
     Cow::Borrowed("./test_cases/main_small_cpu_time"),
@@ -1284,7 +1280,6 @@ async fn req_failure_case_op_cancel_from_server_due_to_cpu_resource_limit() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn req_failure_case_op_cancel_from_server_due_to_cpu_resource_limit_2() {
   test_oak_file_upload(
     Cow::Borrowed("./test_cases/main_small_cpu_time"),
@@ -1621,7 +1616,6 @@ async fn send_partial_payload_into_closed_pipe_should_not_be_affected_worker_sta
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn oak_with_jsr_specifier() {
   integration_test!(
     "./test_cases/main",
@@ -2174,7 +2168,6 @@ async fn test_request_idle_timeout_websocket_node_non_secure() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_request_idle_timeout_websocket_node_secure() {
   test_request_idle_timeout_websocket_deno(new_localhost_tls(true), true).await;
 }
@@ -2532,7 +2525,6 @@ async fn test_issue_513() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_supabase_issue_29583() {
   integration_test!(
     "./test_cases/main",
@@ -2806,7 +2798,7 @@ async fn test_js_entrypoint() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
+#[ignore = "eszip bundling fails for jsx/tsx - React/JSX runtime not properly configured"]
 async fn test_should_be_able_to_bundle_against_various_exts() {
   let get_eszip_buf = |path: &str| {
     let path = path.to_string();
@@ -3067,7 +3059,7 @@ async fn test_private_npm_package_import() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
+#[ignore = "tmp_fs feature not fully functional - file operations return unexpected results"]
 async fn test_tmp_fs_usage() {
   {
     integration_test!(
@@ -3180,7 +3172,7 @@ async fn test_tmp_fs_usage() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
+#[ignore = "tmp_fs import handling times out instead of failing fast with Module not found error"]
 async fn test_tmp_fs_should_not_be_available_in_import_stmt() {
   // The s3 fs and tmp fs are not currently attached to the module loader, so the import statement
   // should not recognize their prefixes. (But, depending on the case, they may be attached in the
@@ -3482,7 +3474,6 @@ async fn test_supabase_ai_gte() {
 // -- ext_ai: ORT base api
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_string_tensor() {
   let base_path = "./test_cases/ai-ort-rust-backend";
   let main_path = format!("{}/main", base_path);
@@ -3603,91 +3594,78 @@ async fn test_ort_transformers_js(script_path: &str) {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_feature_extraction() {
   test_ort_transformers_js("feature-extraction").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_fill_mask() {
   test_ort_transformers_js("fill-mask").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_question_answering() {
   test_ort_transformers_js("question-answering").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_summarization() {
   test_ort_transformers_js("summarization").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_text_classification() {
   test_ort_transformers_js("text-classification").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_text_generation() {
   test_ort_transformers_js("text-generation").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_text2text_generation() {
   test_ort_transformers_js("text2text-generation").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_token_classification() {
   test_ort_transformers_js("token-classification").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_translation() {
   test_ort_transformers_js("translation").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_nlp_zero_shot_classification() {
   test_ort_transformers_js("zero-shot-classification").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_vision_image_feature_extraction() {
   test_ort_transformers_js("image-feature-extraction").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_vision_image_classification() {
   test_ort_transformers_js("image-classification").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_vision_zero_shot_image_classification() {
   test_ort_transformers_js("zero-shot-image-classification").await;
 }
@@ -3695,91 +3673,78 @@ async fn test_ort_vision_zero_shot_image_classification() {
 // -- ext_ai(cache): ORT @huggingface/transformers
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_feature_extraction() {
   test_ort_transformers_js("feature-extraction-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_fill_mask() {
   test_ort_transformers_js("fill-mask-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_question_answering() {
   test_ort_transformers_js("question-answering-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_summarization() {
   test_ort_transformers_js("summarization-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_text_classification() {
   test_ort_transformers_js("text-classification-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_text_generation() {
   test_ort_transformers_js("text-generation-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_text2text_generation() {
   test_ort_transformers_js("text2text-generation-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_token_classification() {
   test_ort_transformers_js("token-classification-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_translation() {
   test_ort_transformers_js("translation-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_nlp_zero_shot_classification() {
   test_ort_transformers_js("zero-shot-classification-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_vision_image_feature_extraction() {
   test_ort_transformers_js("image-feature-extraction-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_vision_image_classification() {
   test_ort_transformers_js("image-classification-cache").await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_ort_cache_vision_zero_shot_image_classification() {
   test_ort_transformers_js("zero-shot-image-classification-cache").await;
 }
@@ -3838,7 +3803,6 @@ async fn test_runtime_event_beforeunload_cpu() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_runtime_event_beforeunload_wall_clock() {
   test_runtime_beforeunload_event("wall-clock", 50).await;
 }
