@@ -1,5 +1,10 @@
 name: D2E Integration Tests
 
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 on:
   workflow_dispatch:
     inputs:
@@ -37,7 +42,7 @@ jobs:
     if: github.event.pull_request.draft == false
     steps:
       - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
           android: true
@@ -99,13 +104,14 @@ jobs:
           name: trexas-extension
           path: ext/trexas/build/release/trexas.trex
           retention-days: 1
+          if-no-files-found: error
 
   d2e-integration:
     needs: build-extension
     runs-on: ubuntu-24.04
     steps:
       - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
+        uses: jlumbroso/free-disk-space@v1.3.1
         with:
           tool-cache: true
           android: true
@@ -142,12 +148,16 @@ jobs:
           # Copy our built extension to D2E's services/trex directory
           cp ./trexas-artifact/trexas.trex ./d2e/services/trex/local-trexas.trex
 
-          # Insert COPY instruction after 'RUN npm install' in Dockerfile
-          sed -i '/^RUN npm install$/a\COPY local-trexas.trex /usr/src/node_modules/@trex/as/trexas.trex' ./d2e/services/trex/Dockerfile
+          # Insert COPY instruction after 'RUN npm install' in Dockerfile (flexible pattern)
+          sed -i '/RUN npm install/a\COPY local-trexas.trex /usr/src/node_modules/@trex/as/trexas.trex' ./d2e/services/trex/Dockerfile
 
-          # Verify modification
+          # Verify modification succeeded
           echo "=== Modified Dockerfile (relevant section) ==="
           grep -A2 "RUN npm install" ./d2e/services/trex/Dockerfile
+          if ! grep -q "COPY local-trexas.trex" ./d2e/services/trex/Dockerfile; then
+            echo "ERROR: Failed to inject local extension into Dockerfile"
+            exit 1
+          fi
 
       - name: Setup D2E
         working-directory: d2e
@@ -172,7 +182,6 @@ jobs:
         run: docker buildx prune -af
 
       - name: Start D2E services
-        working-directory: d2e
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
@@ -184,7 +193,6 @@ jobs:
             docker ps --format "{{.Names}},{{.Status}}"
 
       - name: Run setupdemo
-        working-directory: d2e
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
@@ -194,7 +202,6 @@ jobs:
             ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions setupdemo
 
       - name: Run checkflow
-        working-directory: d2e
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
@@ -213,13 +220,17 @@ jobs:
         working-directory: d2e/tests/e2e
         run: docker build -t d2e-e2e .
 
-      - name: Verify app is reachable
+      - name: Check app status (informational)
+        continue-on-error: true
         run: |
-          curl -k -s -o /dev/null -w "%{http_code}" https://localhost:443/d2e/portal || echo "App not reachable"
+          echo "=== Checking if app is reachable ==="
+          HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:443/d2e/portal || echo "000")
+          echo "HTTP Status: $HTTP_CODE"
           curl -k -I https://localhost:443/d2e/portal || true
 
       - name: Run e2e tests
         working-directory: d2e/tests/e2e
+        timeout-minutes: 30
         run: |
           docker run --rm \
             --network=host \
@@ -237,6 +248,7 @@ jobs:
         with:
           name: d2e-test-results
           path: d2e/tests/e2e/test-results/**/*
+          if-no-files-found: warn
 
       - name: Publish Test Report
         if: always()
