@@ -611,7 +611,6 @@ async fn test_main_worker_post_request_with_transfer_encoding_non_secure() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_main_worker_post_request_with_transfer_encoding_secure() {
   test_main_worker_post_request_with_transfer_encoding(new_localhost_tls(true))
     .await;
@@ -675,7 +674,6 @@ async fn test_null_body_with_204_status_post() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_oak_server() {
   integration_test!(
     "./test_cases/oak",
@@ -700,7 +698,6 @@ async fn test_oak_server() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_file_upload() {
   let body_chunk = concat!(
     "--TEST\r\n",
@@ -1247,14 +1244,12 @@ async fn req_failure_case_intentional_peer_reset(maybe_tls: Option<Tls>) {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn req_failure_case_intentional_peer_reset_non_secure() {
   req_failure_case_intentional_peer_reset(new_localhost_tls(false)).await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn req_failure_case_intentional_peer_reset_secure() {
   req_failure_case_intentional_peer_reset(new_localhost_tls(true)).await;
 }
@@ -1515,14 +1510,12 @@ async fn test_graceful_shutdown() {
 
 #[tokio::test]
 #[serial]
-#[ignore]
 async fn test_websocket_upgrade_deno_non_secure() {
   test_websocket_upgrade(new_localhost_tls(false), false).await;
 }
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_websocket_upgrade_deno_secure() {
   test_websocket_upgrade(new_localhost_tls(true), false).await;
 }
@@ -2191,7 +2184,6 @@ async fn test_request_idle_timeout_websocket_node_secure() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_should_not_hang_when_forced_redirection_for_specifiers() {
   let (tx, rx) = oneshot::channel::<()>();
 
@@ -2383,7 +2375,6 @@ async fn test_declarative_style_fetch_handler() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_issue_208() {
   async fn create_simple_server(
     tls: Option<Tls>,
@@ -2487,7 +2478,6 @@ async fn test_issue_208() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_issue_420() {
   integration_test!(
     "./test_cases/main",
@@ -2510,7 +2500,6 @@ async fn test_issue_420() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_issue_456() {
   let tb = TestBedBuilder::new("./test_cases/main").build().await;
   let resp = tb
@@ -2529,7 +2518,6 @@ async fn test_issue_456() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_issue_513() {
   let tb = TestBedBuilder::new("./test_cases/main").build().await;
   let resp = tb
@@ -2934,7 +2922,6 @@ async fn test_should_be_able_to_bundle_against_various_exts() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_private_npm_package_import() {
   // Required because test_cases/main_with_registry/registry/registry-handler.ts:58
   std::env::set_var("EDGE_RUNTIME_PORT", NON_SECURE_PORT.to_string());
@@ -3848,7 +3835,6 @@ async fn test_runtime_beforeunload_event(kind: &'static str, pct: u8) {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_runtime_event_beforeunload_cpu() {
   test_runtime_beforeunload_event("cpu", 50).await;
 }
@@ -3862,7 +3848,6 @@ async fn test_runtime_event_beforeunload_wall_clock() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "trex temp disabled"]
 async fn test_runtime_event_beforeunload_mem() {
   test_runtime_beforeunload_event("mem", 50).await;
 }
