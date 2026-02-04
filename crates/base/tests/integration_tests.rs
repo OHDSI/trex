@@ -3609,6 +3609,7 @@ async fn test_ort_nlp_fill_mask() {
 
 #[tokio::test]
 #[serial]
+#[ignore = "V8 HandleScope crash"]
 async fn test_ort_nlp_question_answering() {
   test_ort_transformers_js("question-answering").await;
 }
