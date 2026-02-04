@@ -514,18 +514,18 @@ export class TrexHttpClient {
 		}
 
 		const response = await req(this.service, url, options);
-		
+
 		if (response instanceof Response) {
 			let data;
+			// Read body as text first (can only read body once), then try to parse as JSON
+			const textBody = await response.text().catch((err) => {
+				console.warn("TrexHttpClient: Failed to read response body:", err);
+				return "";
+			});
 			try {
-				data = await response.json();
+				data = JSON.parse(textBody);
 			} catch (jsonError) {
-				try {
-					data = await response.text();
-				} catch (textError) {
-					console.warn(`Failed to parse response body: JSON error: ${jsonError.message}, Text error: ${textError.message}`);
-					data = "";
-				}
+				data = textBody;
 			}
 
 			const urlString = typeof url === 'string' ? url : String(url);
@@ -542,6 +542,7 @@ export class TrexHttpClient {
 				const error = new Error(`Request failed with status ${response.status}: ${response.statusText}`);
 				error.response = result;
 				error.status = response.status;
+				error.code = `ERR_HTTP_${response.status}`;
 				throw error;
 			}
 
