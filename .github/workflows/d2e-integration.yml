@@ -21,6 +21,7 @@ on:
       - 'vendor/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - '.github/workflows/d2e-integration.yml'
   pull_request:
     types: [opened, ready_for_review, reopened, synchronize]
     paths:
@@ -30,6 +31,7 @@ on:
       - 'vendor/**'
       - 'Cargo.lock'
       - 'Cargo.toml'
+      - '.github/workflows/d2e-integration.yml'
 
 env:
   D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
