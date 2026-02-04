@@ -518,7 +518,10 @@ export class TrexHttpClient {
 		if (response instanceof Response) {
 			let data;
 			// Read body as text first (can only read body once), then try to parse as JSON
-			const textBody = await response.text().catch(() => "");
+			const textBody = await response.text().catch((err) => {
+				console.warn("TrexHttpClient: Failed to read response body:", err);
+				return "";
+			});
 			try {
 				data = JSON.parse(textBody);
 			} catch (jsonError) {
