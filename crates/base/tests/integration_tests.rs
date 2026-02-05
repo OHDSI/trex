@@ -3478,6 +3478,8 @@ async fn test_supabase_ai_gte() {
 #[tokio::test]
 #[serial]
 async fn test_ort_string_tensor() {
+  ext_ai::onnxruntime::session::force_cleanup_all().await;
+
   let base_path = "./test_cases/ai-ort-rust-backend";
   let main_path = format!("{}/main", base_path);
 
@@ -3496,10 +3498,13 @@ async fn test_ort_string_tensor() {
     .unwrap();
 
   assert_eq!(resp.status().as_u16(), StatusCode::OK);
+  ext_ai::onnxruntime::session::force_cleanup_all().await;
 }
 
 // -- ext_ai: ORT @huggingface/transformers
 async fn test_ort_transformers_js(script_path: &str) {
+  // Clean up any leftover sessions from previous failed tests
+  ext_ai::onnxruntime::session::force_cleanup_all().await;
   fn visit_json(value: &mut serde_json::Value) {
     use serde_json::Number;
     use serde_json::Value::*;
