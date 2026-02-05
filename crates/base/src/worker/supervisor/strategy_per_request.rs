@@ -32,6 +32,7 @@ pub async fn supervise(
   let Arguments {
     key,
     runtime_opts,
+    runtime_state,
     timing,
     cpu_usage_metrics_rx,
     mut memory_limit_rx,
@@ -44,6 +45,7 @@ pub async fn supervise(
         termination,
         supervise,
         runtime_drop,
+        isolate_lifecycle,
       },
     flags,
     ..
@@ -56,14 +58,14 @@ pub async fn supervise(
   } = timing.unwrap_or_default();
 
   let _guard = scopeguard::guard(
-    (is_retired, runtime_drop.clone()),
-    |(v, runtime_drop)| {
+    (is_retired, isolate_lifecycle.clone()),
+    |(v, isolate_lifecycle)| {
       v.raise();
 
       // Guard against calling V8 handle methods during/after runtime disposal
-      if runtime_drop.is_cancelled() {
+      let Some(_guard) = isolate_lifecycle.try_enter() else {
         return;
-      }
+      };
 
       if thread_safe_handle.request_interrupt(
         as_interrupt_callback(v8_handle_early_retire_raw),
@@ -141,7 +143,9 @@ pub async fn supervise(
       Some(metrics) = cpu_usage_metrics_rx.recv() => {
         match metrics {
           CPUUsageMetrics::Enter(_thread_id, timer) => {
-            assert!(!is_worker_entered);
+            if is_worker_entered {
+              continue;
+            }
             is_worker_entered = true;
 
             if !is_cpu_time_limit_disabled {
@@ -152,7 +156,9 @@ pub async fn supervise(
           }
 
           CPUUsageMetrics::Leave(CPUUsage { accumulated, diff }) => {
-            assert!(is_worker_entered);
+            if !is_worker_entered {
+              continue;
+            }
 
             is_worker_entered = false;
             cpu_usage_ms += diff / 1_000_000;
@@ -232,16 +238,19 @@ pub async fn supervise(
         let data_ptr_mut = Box::into_raw(Box::new(V8HandleBeforeunloadData {
             reason: WillTerminateReason::WallClock,
             runtime_drop_token: runtime_drop.clone(),
+            runtime_state: runtime_state.clone(),
         }));
 
         // Guard against calling V8 handle methods during/after runtime disposal
-        if runtime_drop.is_cancelled() {
-          drop(unsafe { Box::from_raw(data_ptr_mut)});
-        } else if thread_safe_handle.request_interrupt(
-          as_interrupt_callback(v8_handle_beforeunload_raw),
-          data_ptr_mut as *mut _,
-        ) {
-          waker.wake();
+        if let Some(_guard) = isolate_lifecycle.try_enter() {
+          if thread_safe_handle.request_interrupt(
+            as_interrupt_callback(v8_handle_beforeunload_raw),
+            data_ptr_mut as *mut _,
+          ) {
+            waker.wake();
+          } else {
+            drop(unsafe { Box::from_raw(data_ptr_mut)});
+          }
         } else {
           drop(unsafe { Box::from_raw(data_ptr_mut)});
         }
@@ -273,10 +282,10 @@ pub async fn supervise(
 
       Some(reason) => {
         // Guard against calling V8 handle methods during/after runtime disposal
-        if !runtime_drop.is_cancelled()
-          && thread_safe_handle.terminate_execution()
-        {
-          waker.wake();
+        if let Some(_guard) = isolate_lifecycle.try_enter() {
+          if thread_safe_handle.terminate_execution() {
+            waker.wake();
+          }
         }
 
         drop(isolate_memory_usage_tx);

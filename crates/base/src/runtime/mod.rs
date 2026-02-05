@@ -188,12 +188,26 @@ fn init_v8_platform() {
   JsRuntime::init_platform(None, false);
 }
 
-#[derive(Default)]
 struct MemCheck {
+  lifecycle: Arc<base_rt::IsolateLifecycle>,
   exceeded_token: CancellationToken,
   limit: Option<usize>,
   waker: Arc<AtomicWaker>,
   state: Arc<RwLock<MemCheckState>>,
+}
+
+impl Default for MemCheck {
+  fn default() -> Self {
+    Self {
+      lifecycle: Arc::new(base_rt::IsolateLifecycle::new(
+        CancellationToken::new(),
+      )),
+      exceeded_token: CancellationToken::new(),
+      limit: None,
+      waker: Arc::new(AtomicWaker::new()),
+      state: Arc::new(RwLock::new(MemCheckState::default())),
+    }
+  }
 }
 
 impl MemCheck {
@@ -391,20 +405,12 @@ fn cleanup_js_runtime(runtime: &mut JsRuntime) {
   let isolate = runtime.v8_isolate();
   let isolate_key = isolate_debug_key(isolate);
 
-  // In V8 140.2.0 (Deno 2.5.6), the Locker API crashes in v8threads.cc:40
-  // when trying to initialize thread-local storage. Since we use a
-  // dedicated-thread-per-isolate model, we don't need locking - each isolate
-  // runs entirely on its own thread from creation to destruction.
-  //
-  // We need to exit the isolate before it can be disposed.
-  // V8 requires that no context is active when disposing.
-  unsafe {
-    isolate.exit();
-  }
-
   LOCK_DEBUG_STATES.with(|states| {
     states.borrow_mut().remove(&isolate_key);
   });
+
+  // Don't call isolate.exit() - JsRuntime::drop handles cleanup properly.
+  // Calling exit() causes HandleScope crashes during cross-thread task processing.
 }
 
 pub struct DenoRuntime<RuntimeContext = DefaultRuntimeContext> {
@@ -441,6 +447,11 @@ impl<RuntimeContext> Drop for DenoRuntime<RuntimeContext> {
     self.drop_token.cancel();
 
     if self.conf.is_user_worker() {
+      // Begin isolate lifecycle drop - waits for any active GC callbacks to complete
+      // This prevents TOCTOU race conditions where a GC callback could access the
+      // isolate during drop
+      self.mem_check.lifecycle.begin_drop();
+
       self.js_runtime.v8_isolate().remove_gc_prologue_callback(
         mem_check_gc_prologue_callback_fn as _,
         Arc::as_ptr(&self.mem_check) as *mut _,
@@ -897,7 +908,10 @@ where
         ];
 
         let mut create_params = None;
-        let mut mem_check = MemCheck::default();
+        let mut mem_check = MemCheck {
+          lifecycle: Arc::new(base_rt::IsolateLifecycle::new(drop_token.clone())),
+          ..Default::default()
+        };
 
         let beforeunload_cpu_threshold =
           ArcSwapOption::<u64>::from_pointee(None);
@@ -981,7 +995,6 @@ where
         };
 
         let mut js_runtime = JsRuntime::new(runtime_options);
-        unsafe { js_runtime.v8_isolate().enter() };
 
         // Initialize lazy-loaded extensions
         // This is required for extensions that use lazy_init() instead of init()
@@ -1313,6 +1326,9 @@ where
       op_state.put(ext_env::EnvVars(env_vars));
 
       op_state.put(DenoRuntimeDropToken(DropToken(drop_token.clone())));
+
+      // Store IsolateLifecycle for spawn_cpu_accumul_blocking_scope to use
+      op_state.put(mem_check.lifecycle.clone());
 
       op_state.put(RuntimeOtelExtraAttributes(
         otel_attributes
@@ -1819,6 +1835,38 @@ where
             }
           }
         }
+
+        // Check if wall clock beforeunload was triggered by the supervisor
+        if state.wall_clock_beforeunload_triggered.is_raised() {
+          state.wall_clock_beforeunload_triggered.lower();
+
+          if !state.is_terminated() {
+            if let Err(err) = MaybeDenoRuntime::DenoRuntime(&mut *this)
+              .dispatch_beforeunload_event(WillTerminateReason::WallClock)
+            {
+              if state.is_terminated() {
+                return Poll::Ready(Err(anyhow!("execution terminated")));
+              }
+              return Poll::Ready(Err(err));
+            }
+          }
+        }
+
+        // Check if drain was triggered by the supervisor
+        if state.drain_triggered.is_raised() {
+          state.drain_triggered.lower();
+
+          if !state.is_terminated() {
+            if let Err(err) =
+              MaybeDenoRuntime::DenoRuntime(&mut *this).dispatch_drain_event()
+            {
+              if state.is_terminated() {
+                return Poll::Ready(Err(anyhow!("execution terminated")));
+              }
+              return Poll::Ready(Err(err));
+            }
+          }
+        }
       }
 
       if need_pool_event_loop
@@ -1861,6 +1909,10 @@ where
 
   pub fn mem_check_state(&self) -> Arc<RwLock<MemCheckState>> {
     self.mem_check.state.clone()
+  }
+
+  pub fn mem_check_lifecycle(&self) -> Arc<base_rt::IsolateLifecycle> {
+    self.mem_check.lifecycle.clone()
   }
 
   pub fn add_memory_limit_callback<C>(&self, cb: C)
@@ -2465,7 +2517,6 @@ fn terminate_execution_if_cancelled(
     }
     // SAFETY: We've verified the pointer is non-null
     let isolate = unsafe { &mut *isolate_ptr };
-    // Check if JsRuntime state is still valid (slot 0 is cleared during drop)
     if isolate.get_data(0).is_null() {
       return;
     }
@@ -2572,9 +2623,21 @@ unsafe extern "C" fn mem_check_gc_prologue_callback_fn(
     }
     return;
   }
-  // SAFETY: We've verified both pointers are non-null
+
+  // SAFETY: data is non-null and points to valid MemCheck
+  let mem_check = &*(data as *const MemCheck);
+
+  // Atomically acquire access guard - prevents race with runtime drop
+  let Some(_guard) = mem_check.lifecycle.try_enter() else {
+    if *DEBUG_GC {
+      tracing::debug!("GC prologue: runtime dropping, skipping mem check");
+    }
+    return;
+  };
+
+  // SAFETY: We've verified isolate pointer is non-null and hold lifecycle guard
   let mut isolate_ref = v8::Isolate::from_raw_isolate_ptr_unchecked(isolate);
-  (*(data as *mut MemCheck)).check(&mut isolate_ref);
+  mem_check.check(&mut isolate_ref);
 }
 
 #[cfg(test)]
