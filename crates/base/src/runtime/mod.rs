@@ -392,20 +392,15 @@ fn cleanup_js_runtime(runtime: &mut JsRuntime) {
   let isolate = runtime.v8_isolate();
   let isolate_key = isolate_debug_key(isolate);
 
-  // In V8 140.2.0 (Deno 2.5.6), the Locker API crashes in v8threads.cc:40
-  // when trying to initialize thread-local storage. Since we use a
-  // dedicated-thread-per-isolate model, we don't need locking - each isolate
-  // runs entirely on its own thread from creation to destruction.
-  //
-  // We need to exit the isolate before it can be disposed.
-  // V8 requires that no context is active when disposing.
-  unsafe {
-    isolate.exit();
-  }
-
   LOCK_DEBUG_STATES.with(|states| {
     states.borrow_mut().remove(&isolate_key);
   });
+
+  // NOTE: We intentionally do NOT call isolate.exit() here.
+  // In earlier versions, we called exit() before JsRuntime::drop to work around
+  // V8 140.2.0 Locker API issues. However, this causes "Cannot create a handle
+  // without a HandleScope" crashes when deno_core tries to process pending
+  // cross-thread tasks during drop. JsRuntime's own drop handles isolate cleanup.
 }
 
 pub struct DenoRuntime<RuntimeContext = DefaultRuntimeContext> {
