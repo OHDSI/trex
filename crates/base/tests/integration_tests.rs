@@ -2590,7 +2590,6 @@ async fn test_issue_func_205() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "memory limit test causes V8 HandleScope crash during OOM cleanup"]
 async fn test_issue_func_280() {
   async fn run(func_name: &'static str, reason: ShutdownReason) {
     let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3610,7 +3609,6 @@ async fn test_ort_nlp_fill_mask() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "question-answering model causes V8 memory corruption in CI"]
 async fn test_ort_nlp_question_answering() {
   test_ort_transformers_js("question-answering").await;
 }
@@ -3693,7 +3691,6 @@ async fn test_ort_cache_nlp_fill_mask() {
 
 #[tokio::test]
 #[serial]
-#[ignore = "question-answering model causes V8 memory corruption in CI"]
 async fn test_ort_cache_nlp_question_answering() {
   test_ort_transformers_js("question-answering-cache").await;
 }

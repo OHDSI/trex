@@ -188,12 +188,24 @@ fn init_v8_platform() {
   JsRuntime::init_platform(None, false);
 }
 
-#[derive(Default)]
 struct MemCheck {
+  drop_token: CancellationToken,
   exceeded_token: CancellationToken,
   limit: Option<usize>,
   waker: Arc<AtomicWaker>,
   state: Arc<RwLock<MemCheckState>>,
+}
+
+impl Default for MemCheck {
+  fn default() -> Self {
+    Self {
+      drop_token: CancellationToken::default(),
+      exceeded_token: CancellationToken::default(),
+      limit: None,
+      waker: Arc::default(),
+      state: Arc::default(),
+    }
+  }
 }
 
 impl MemCheck {
@@ -897,7 +909,10 @@ where
         ];
 
         let mut create_params = None;
-        let mut mem_check = MemCheck::default();
+        let mut mem_check = MemCheck {
+          drop_token: drop_token.clone(),
+          ..Default::default()
+        };
 
         let beforeunload_cpu_threshold =
           ArcSwapOption::<u64>::from_pointee(None);
@@ -2466,6 +2481,9 @@ fn terminate_execution_if_cancelled(
     // SAFETY: We've verified the pointer is non-null
     let isolate = unsafe { &mut *isolate_ptr };
     // Check if JsRuntime state is still valid (slot 0 is cleared during drop)
+    // Note: This check can print "[RUSTY_V8 ERROR] get_data_internal: null isolate pointer"
+    // during shutdown, but it's a warning not a crash, and the check prevents actual crashes
+    // when trying to call methods on an invalid isolate.
     if isolate.get_data(0).is_null() {
       return;
     }
@@ -2572,9 +2590,22 @@ unsafe extern "C" fn mem_check_gc_prologue_callback_fn(
     }
     return;
   }
-  // SAFETY: We've verified both pointers are non-null
+
+  // SAFETY: data is non-null and points to valid MemCheck
+  let mem_check = &*(data as *const MemCheck);
+
+  // Check if runtime is being dropped - if so, skip isolate access
+  // to avoid accessing invalid isolate state during shutdown
+  if mem_check.drop_token.is_cancelled() {
+    if *DEBUG_GC {
+      tracing::debug!("GC prologue: runtime dropping, skipping mem check");
+    }
+    return;
+  }
+
+  // SAFETY: We've verified isolate pointer is non-null and runtime is not dropping
   let mut isolate_ref = v8::Isolate::from_raw_isolate_ptr_unchecked(isolate);
-  (*(data as *mut MemCheck)).check(&mut isolate_ref);
+  mem_check.check(&mut isolate_ref);
 }
 
 #[cfg(test)]
