@@ -66,7 +66,6 @@ export default {
         noModuleCache,
         envVars,
         s3FsConfig,
-        allowHostFsAccess: true,
         context: {
           useReadSyncFileAPI: true,
         },
