@@ -83,13 +83,12 @@ jobs:
     runs-on: ubuntu-latest
     services:
       minio:
-        image: bitnami/minio:latest
+        image: minio/minio:RELEASE.2025-09-07T16-13-09Z
         ports:
           - 9000:9000
         env:
           MINIO_ROOT_USER: minioadmin
           MINIO_ROOT_PASSWORD: minioadmin
-          MINIO_DEFAULT_BUCKETS: testbucket
         options: >-
           --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
           --health-interval 10s
@@ -158,6 +157,13 @@ jobs:
       #     mkdir -p crates/base/tests/fixture/testdata
       #     ./scripts/esbr.cjs decompress ./edge-runtime-test-eszip/testdata
       #     mv ./edge-runtime-test-eszip/testdata/*.out crates/base/tests/fixture/testdata
+
+      - name: Create MinIO test bucket
+        run: |
+          wget -q https://dl.min.io/client/mc/release/linux-amd64/mc -O /tmp/mc
+          chmod +x /tmp/mc
+          /tmp/mc alias set myminio http://localhost:9000 minioadmin minioadmin
+          /tmp/mc mb myminio/testbucket
 
       - name: Configure S3FS tests (MinIO)
         run: |
