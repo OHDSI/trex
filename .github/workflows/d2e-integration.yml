@@ -93,7 +93,7 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
-  d2e-integration:
+  build-d2e-images:
     needs: build-extension
     runs-on: ubuntu-24.04
     steps:
@@ -165,8 +165,114 @@ jobs:
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions build
           docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
+      - name: Build e2e Docker image
+        working-directory: d2e/tests/e2e
+        run: docker build -t d2e-e2e .
+
       - name: Prune build cache
         run: docker buildx prune -af
+
+      - name: Save Docker images
+        run: |
+          # Save all non-dangling images (excluding base images like ubuntu, node, etc.)
+          IMAGES=$(docker images --format '{{.Repository}}:{{.Tag}}' | grep -v '<none>' | grep -vE '^(ubuntu|node|postgres|docker|alpine|debian|caddy|redis):')
+          echo "Saving images:"
+          echo "$IMAGES"
+          docker save $IMAGES | zstd -T0 -3 -o /tmp/d2e-images.tar.zst
+
+      - name: Save D2E workspace
+        run: |
+          tar cf - \
+            -C d2e \
+            .env \
+            scripts/dist \
+            deploy/caddy-config \
+            functions \
+            docker-compose.yml \
+            docker-compose.*.yml \
+            package.json \
+            node_modules/.package-lock.json \
+            2>/dev/null | zstd -T0 -3 -o /tmp/d2e-workspace.tar.zst || true
+
+      - name: Upload Docker images artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: d2e-docker-images
+          path: /tmp/d2e-images.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload D2E workspace artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: d2e-workspace
+          path: /tmp/d2e-workspace.tar.zst
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Prune system
+        if: always()
+        run: docker system prune -af
+
+  run-e2e-tests:
+    needs: build-d2e-images
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Increase swap to 15G
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 15G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      - name: Download Docker images artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: d2e-docker-images
+          path: /tmp
+
+      - name: Download D2E workspace artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: d2e-workspace
+          path: /tmp
+
+      - name: Load Docker images
+        run: |
+          zstd -d /tmp/d2e-images.tar.zst -o /tmp/d2e-images.tar
+          docker load -i /tmp/d2e-images.tar
+          rm /tmp/d2e-images.tar /tmp/d2e-images.tar.zst
+          docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
+
+      - name: Checkout D2E
+        uses: actions/checkout@v4
+        with:
+          repository: OHDSI/Data2Evidence
+          ref: ${{ env.D2E_BRANCH }}
+          path: d2e
+          submodules: recursive
+
+      - name: Restore D2E workspace
+        run: |
+          zstd -d /tmp/d2e-workspace.tar.zst -o /tmp/d2e-workspace.tar
+          tar xf /tmp/d2e-workspace.tar -C d2e
+          rm /tmp/d2e-workspace.tar /tmp/d2e-workspace.tar.zst
+
+      - name: Setup D2E
+        working-directory: d2e
+        run: npm install
 
       - name: Start D2E services
         uses: nick-fields/retry@v3
@@ -202,10 +308,6 @@ jobs:
         working-directory: d2e
         run: |
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions logs
-
-      - name: Build e2e Docker image
-        working-directory: d2e/tests/e2e
-        run: docker build -t d2e-e2e .
 
       - name: Check app status (informational)
         continue-on-error: true
