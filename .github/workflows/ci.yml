@@ -81,20 +81,16 @@ jobs:
     if: github.event.pull_request.draft == false
     name: 'cargo test'
     runs-on: ubuntu-latest
-    services:
-      minio:
-        image: minio/minio:RELEASE.2025-09-07T16-13-09Z
-        ports:
-          - 9000:9000
-        env:
-          MINIO_ROOT_USER: minioadmin
-          MINIO_ROOT_PASSWORD: minioadmin
-        options: >-
-          --health-cmd "curl -f http://localhost:9000/minio/health/live || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
     steps:
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:RELEASE.2025-09-07T16-13-09Z server /data
+          until curl -sf http://localhost:9000/minio/health/live; do sleep 1; done
+
       - name: Install deps
         run: |
           sudo apt-get update
