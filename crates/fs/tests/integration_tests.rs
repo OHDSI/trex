@@ -595,7 +595,6 @@ async fn test_mkdir_recursive_and_remove_recursive() {
 /// sync APIs. Previously this test passed only because RealFs was used for
 /// deno_fs, which couldn't resolve /s3/ paths (returning ENOENT). Now that
 /// PrefixFs correctly routes /s3/ to S3Fs, the sync read succeeds.
-#[cfg_attr(not(dotenv), ignore)]
 #[tokio::test]
 #[serial]
 #[ignore = "sync API blocking does not work (RuntimeState::is_init always true)"]
