@@ -88,14 +88,22 @@ fn get_active_connection() -> Arc<Mutex<Connection>> {
 #[op2]
 #[string]
 fn op_get_dbc() -> String {
-  return (*(*DB_CREDENTIALS)).lock().unwrap().clone();
+  get_dbc_inner()
+}
+
+fn get_dbc_inner() -> String {
+  DB_CREDENTIALS.lock().unwrap().clone()
 }
 
 #[op2]
 #[string]
 fn op_get_dbc2() -> String {
+  get_dbc2_inner()
+}
+
+fn get_dbc2_inner() -> String {
   let mut base_creds: serde_json::Value =
-    serde_json::from_str(&(*(*DB_CREDENTIALS)).lock().unwrap().clone())
+    serde_json::from_str(&DB_CREDENTIALS.lock().unwrap().clone())
       .unwrap_or_else(
         |_| serde_json::json!({"credentials": [], "publications": {}}),
       );
@@ -191,7 +199,11 @@ fn op_get_dbc2() -> String {
 
 #[op2(fast)]
 fn op_set_dbc(#[string] dbc: String) {
-  *(*(*DB_CREDENTIALS)).lock().unwrap() = dbc;
+  set_dbc_inner(dbc);
+}
+
+fn set_dbc_inner(dbc: String) {
+  *DB_CREDENTIALS.lock().unwrap() = dbc;
 }
 
 #[op2(fast)]
@@ -595,6 +607,12 @@ impl Resource for RequestResource {
 #[op2(async)]
 #[serde]
 async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, TrexError> {
+  send_request_inner(message).await
+}
+
+async fn send_request_inner(
+  message: JsonValue,
+) -> Result<JsonValue, TrexError> {
   let request_id = Uuid::new_v4().to_string();
 
   let (response_sender, response_receiver) = oneshot::channel::<JsonValue>();
@@ -614,11 +632,9 @@ async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, TrexError> {
     if let Some(sender) = channel_guard.as_ref() {
       sender.try_send(request_with_id)
     } else {
-      return {
-        let mut pending = PENDING_REQUESTS.lock().unwrap();
-        pending.remove(&request_id);
-        Err(TrexError::Generic("No active listeners".to_string()))
-      };
+      let mut pending = PENDING_REQUESTS.lock().unwrap();
+      pending.remove(&request_id);
+      return Err(TrexError::Generic("No active listeners".to_string()));
     }
   };
 
@@ -705,6 +721,13 @@ async fn op_req_next(
 fn op_req_respond(
   #[string] request_id: String,
   #[serde] response: JsonValue,
+) -> Result<serde_json::Value, TrexError> {
+  respond_to_request_inner(request_id, response)
+}
+
+fn respond_to_request_inner(
+  request_id: String,
+  response: JsonValue,
 ) -> Result<serde_json::Value, TrexError> {
   let mut pending = PENDING_REQUESTS.lock().unwrap();
 
@@ -1054,7 +1077,8 @@ mod tests {
 
   #[test]
   fn test_field_value_timestamp_nanosecond() {
-    let arr = TimestampNanosecondArray::from(vec![1_704_067_200_000_000_000i64]);
+    let arr =
+      TimestampNanosecondArray::from(vec![1_704_067_200_000_000_000i64]);
     let result = field_value_to_json(
       &arr,
       0,
@@ -1385,155 +1409,26 @@ mod tests {
   }
 
   fn get_dbc() -> String {
-    (*(*DB_CREDENTIALS)).lock().unwrap().clone()
+    get_dbc_inner()
   }
 
   fn set_dbc(dbc: String) {
-    *(*(*DB_CREDENTIALS)).lock().unwrap() = dbc;
+    set_dbc_inner(dbc);
   }
 
   fn get_dbc2() -> String {
-    let mut base_creds: serde_json::Value =
-      serde_json::from_str(&(*(*DB_CREDENTIALS)).lock().unwrap().clone())
-        .unwrap_or_else(
-          |_| serde_json::json!({"credentials": [], "publications": {}}),
-        );
-
-    if let (Ok(host), Ok(port), Ok(user), Ok(password), Ok(dbname)) = (
-      std::env::var("TREX__SQL__HOST"),
-      std::env::var("TREX__SQL__PORT"),
-      std::env::var("TREX__SQL__USER"),
-      std::env::var("TREX__SQL__PASSWORD"),
-      std::env::var("TREX__SQL__DBNAME"),
-    ) {
-      let result_db = serde_json::json!({
-        "id": "RESULT",
-        "code": "RESULT",
-        "dialect": "postgres",
-        "authentication_mode": "Password",
-        "host": host,
-        "port": port.parse::<u16>().unwrap_or(5432),
-        "name": dbname,
-        "credentials": [{"username": user, "password": password, "userScope": "Admin", "serviceScope": "Internal"}],
-        "publications": [],
-        "vocab_schemas": []
-      });
-      if let Some(credentials) = base_creds
-        .get_mut("credentials")
-        .and_then(|c| c.as_array_mut())
-      {
-        if !credentials
-          .iter()
-          .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("RESULT"))
-        {
-          credentials.push(result_db);
-        }
-      }
-    }
-
-    if let (Ok(host), Ok(dbname), Ok(user), Ok(password)) = (
-      std::env::var("PG__HOST"),
-      std::env::var("PG__FHIR_DB_NAME"),
-      std::env::var("PG_USER"),
-      std::env::var("PG_PASSWORD"),
-    ) {
-      let port = std::env::var("PG__PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(5432);
-      let fhir_db = serde_json::json!({
-        "id": "FHIR",
-        "code": "FHIR",
-        "dialect": "postgres",
-        "authentication_mode": "Password",
-        "host": host,
-        "port": port,
-        "name": dbname,
-        "credentials": [{"username": user, "password": password, "userScope": "Admin", "serviceScope": "Internal"}],
-        "publications": [],
-        "vocab_schemas": []
-      });
-      if let Some(credentials) = base_creds
-        .get_mut("credentials")
-        .and_then(|c| c.as_array_mut())
-      {
-        if !credentials
-          .iter()
-          .any(|c| c.get("id").and_then(|id| id.as_str()) == Some("FHIR"))
-        {
-          credentials.push(fhir_db);
-        }
-      }
-    }
-
-    serde_json::to_string(&base_creds).unwrap_or_else(|_| {
-      String::from("{\"credentials\":[], \"publications\":{}}")
-    })
+    get_dbc2_inner()
   }
 
   async fn send_request(message: JsonValue) -> Result<JsonValue, TrexError> {
-    let request_id = Uuid::new_v4().to_string();
-    let (response_sender, response_receiver) = oneshot::channel::<JsonValue>();
-    {
-      let mut pending = PENDING_REQUESTS.lock().unwrap();
-      pending.insert(request_id.clone(), response_sender);
-    }
-    let request_with_id = serde_json::json!({
-      "id": request_id,
-      "message": message
-    });
-    let send_result = {
-      let channel_guard = REQUEST_CHANNEL.lock().unwrap();
-      if let Some(sender) = channel_guard.as_ref() {
-        sender.try_send(request_with_id)
-      } else {
-        let mut pending = PENDING_REQUESTS.lock().unwrap();
-        pending.remove(&request_id);
-        return Err(TrexError::Generic("No active listeners".to_string()));
-      }
-    };
-    match send_result {
-      Ok(()) => {
-        match tokio::time::timeout(
-          std::time::Duration::from_secs(30),
-          response_receiver,
-        )
-        .await
-        {
-          Ok(Ok(response)) => Ok(response),
-          Ok(Err(_)) => {
-            let mut pending = PENDING_REQUESTS.lock().unwrap();
-            pending.remove(&request_id);
-            Err(TrexError::Generic("Request cancelled".to_string()))
-          }
-          Err(_) => {
-            let mut pending = PENDING_REQUESTS.lock().unwrap();
-            pending.remove(&request_id);
-            Err(TrexError::Generic("Request timeout".to_string()))
-          }
-        }
-      }
-      Err(_) => {
-        let mut pending = PENDING_REQUESTS.lock().unwrap();
-        pending.remove(&request_id);
-        Err(TrexError::Generic("Failed to send request".to_string()))
-      }
-    }
+    send_request_inner(message).await
   }
 
   fn respond_to_request(
     request_id: String,
     response: JsonValue,
   ) -> Result<serde_json::Value, TrexError> {
-    let mut pending = PENDING_REQUESTS.lock().unwrap();
-    if let Some(sender) = pending.remove(&request_id) {
-      match sender.send(response) {
-        Ok(()) => Ok(serde_json::Value::Bool(true)),
-        Err(_) => Ok(serde_json::Value::Bool(false)),
-      }
-    } else {
-      Ok(serde_json::Value::Bool(false))
-    }
+    respond_to_request_inner(request_id, response)
   }
 
   #[test]
