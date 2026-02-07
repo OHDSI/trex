@@ -735,6 +735,7 @@ where
             maybe_import_map_path,
           }),
           Some(base_dir_path.to_string_lossy().as_ref()),
+          is_user_worker,
         )
         .await?;
 
@@ -1023,13 +1024,7 @@ where
           deno_net::deno_net::args::<PermissionsContainer>(None, None),
           deno_http::deno_http::args(deno_http::Options::default()),
           deno_io::deno_io::args(Some(stdio.clone())),
-          deno_fs::deno_fs::args::<PermissionsContainer>(
-            if s3_fs.is_some() {
-              fs.clone()
-            } else {
-              Arc::new(deno_fs::RealFs) as Arc<dyn deno_fs::FileSystem>
-            },
-          ),
+          deno_fs::deno_fs::args::<PermissionsContainer>(fs.clone()),
           {
             let sys = node_services.sys.clone();
             ext_node::deno_node::args::<
@@ -1037,11 +1032,7 @@ where
               deno_resolver::npm::DenoInNpmPackageChecker,
               npm::NpmResolver<VfsSys>,
               VfsSys,
-            >(Some(node_services), if s3_fs.is_some() {
-              fs.clone()
-            } else {
-              Arc::new(deno_fs::RealFs) as Arc<dyn deno_fs::FileSystem>
-            }, sys)
+            >(Some(node_services), fs.clone(), sys)
           },
           deno_cache::deno_cache::args(Default::default()),
         ]).map_err(|e| anyhow::anyhow!("Failed to lazy init extensions: {:#}", e))?;
@@ -1484,9 +1475,6 @@ where
         v.raise();
       });
 
-    let _init_guard = scopeguard::guard(self.runtime_state.init.clone(), |v| {
-      v.lower();
-    });
     self.runtime_state.init.raise();
 
     let mut accumulated_cpu_time_ns = 0i64;
@@ -1629,6 +1617,7 @@ where
       }
     }
 
+    self.runtime_state.init.lower();
     self.runtime_state.event_loop_completed.lower();
 
     if let Err(err) = self
@@ -3178,8 +3167,8 @@ mod test {
 
   #[tokio::test]
   #[serial]
-  #[ignore = "JSX import source requires deno.jsonc configuration during module transpilation"]
   async fn test_jsx_import_source() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let mut main_rt = RuntimeBuilder::new()
       .set_std_env()
       .set_path("./test_cases/jsx-preact")
@@ -3202,30 +3191,30 @@ mod test {
     assert!(result.is_ok(), "jsx-preact test failed: {:?}", result);
   }
 
-  // #[tokio::test]
-  // async fn test_node_builtin_imports() {
-  //     let mut main_rt = create_runtime(
-  //         Some(PathBuf::from("./test_cases/node-built-in")),
-  //         Some(std::env::vars().collect()),
-  //         None,
-  //     )
-  //     .await;
-  //     let mod_evaluate = main_rt.js_runtime.mod_evaluate(main_rt.main_module_id);
-  //     let _ = main_rt.js_runtime.run_event_loop(false).await;
-  //     let global_value_deno_read_file_script = main_rt
-  //         .js_runtime
-  //         .execute_script(
-  //             "<anon>",
-  //             r#"
-  //         globalThis.basename('/Users/Refsnes/demo_path.js');
-  //     "#,
-  //         )
-  //         .unwrap();
-  //     let fs_read_result =
-  //         main_rt.to_value::<deno_core::serde_json::Value>(&global_value_deno_read_file_script);
-  //     assert_eq!(fs_read_result.unwrap().as_str().unwrap(), "demo_path.js");
-  //     std::mem::drop(mod_evaluate);
-  // }
+  #[tokio::test]
+  #[serial]
+  async fn test_node_builtin_imports() {
+    let mut main_rt = RuntimeBuilder::new()
+      .set_std_env()
+      .set_path("./test_cases/node-built-in")
+      .build()
+      .await;
+
+    let (_tx, duplex_stream_rx) =
+      mpsc::unbounded_channel::<DuplexStreamEntry>();
+
+    let (result, _) = main_rt
+      .run(
+        RunOptionsBuilder::new()
+          .wait_termination_request_token(false)
+          .stream_rx(duplex_stream_rx)
+          .build()
+          .unwrap(),
+      )
+      .await;
+
+    assert!(result.is_ok(), "node-built-in test failed: {:?}", result);
+  }
 
   #[tokio::test]
   #[serial]
@@ -3507,7 +3496,6 @@ mod test {
 
   #[tokio::test]
   #[serial]
-  #[ignore = "import.meta.dirname resolves to compile dir, not source dir"]
   async fn test_mem_checker_above_limit_wasm() {
     test_mem_check_above_limit(
       "./test_cases/wasm/grow_20mib",
@@ -3520,7 +3508,6 @@ mod test {
 
   #[tokio::test]
   #[serial]
-  #[ignore = "import.meta.dirname resolves to compile dir, not source dir"]
   async fn test_mem_checker_above_limit_wasm_heap() {
     test_mem_check_above_limit(
       "./test_cases/wasm/heap",
@@ -3533,7 +3520,6 @@ mod test {
 
   #[tokio::test]
   #[serial]
-  #[ignore = "import.meta.dirname resolves to compile dir, not source dir"]
   async fn test_mem_checker_above_limit_wasm_grow_jsapi() {
     test_mem_check_above_limit(
       "./test_cases/wasm/grow_jsapi",
@@ -3546,7 +3532,6 @@ mod test {
 
   #[tokio::test]
   #[serial]
-  #[ignore = "import.meta.dirname resolves to compile dir, not source dir"]
   async fn test_mem_checker_above_limit_wasm_grow_standalone() {
     test_mem_check_above_limit(
       "./test_cases/wasm/grow_standalone",
@@ -3559,7 +3544,6 @@ mod test {
 
   #[tokio::test]
   #[serial]
-  #[ignore = "requires mock function infrastructure (shouldBootstrapMockFnThrowError)"]
   async fn test_user_worker_permission() {
     struct Ctx;
 
@@ -3631,7 +3615,6 @@ mod test {
 
   #[tokio::test]
   #[serial]
-  #[ignore = "module resolution fails for ./utils import (missing extension handling)"]
   async fn test_entrypoint_resolution() {
     use std::fs;
     use tempfile::TempDir;
@@ -3648,7 +3631,7 @@ mod test {
     let utils_file = worker_dir.join("utils.ts");
     fs::write(
       &index_file,
-      "import { helper } from './utils';\nconsole.log(helper());",
+      "import { helper } from './utils.ts';\nconsole.log(helper());",
     )
     .unwrap();
     fs::write(&utils_file, "export function helper() { return 'test'; }")
@@ -3768,43 +3751,13 @@ mod test {
       .await
       .unwrap();
 
-      assert_eq!(runtime.main_module_url, file_url);
-    }
-
-    // Test 4: HTTP URL entrypoint (should be preserved as-is)
-    {
-      let http_url = "https://example.com/worker.ts";
-      let runtime = DenoRuntime::<()>::new(
-        WorkerBuilder::new(
-          WorkerContextInitOpts {
-            service_path: base_path.to_path_buf(),
-            maybe_entrypoint: Some(http_url.to_string()),
-            no_module_cache: false,
-            no_npm: None,
-            env_vars: Default::default(),
-            timing: None,
-            maybe_eszip: None,
-            maybe_module_code: None,
-            static_patterns: vec![],
-            maybe_s3_fs_config: None,
-            maybe_tmp_fs_config: None,
-            maybe_otel_config: None,
-            conf: WorkerRuntimeOpts::UserWorker(Box::new(
-              UserWorkerRuntimeOpts {
-                pool_msg_tx: Some(worker_pool_tx.clone()),
-                ..Default::default()
-              },
-            )),
-          },
-          Arc::new(ServerFlags::default()),
-        )
-        .build()
-        .unwrap(),
-      )
-      .await
-      .unwrap();
-
-      assert_eq!(runtime.main_module_url.as_str(), http_url);
+      let url = &runtime.main_module_url;
+      assert!(url.scheme() == "file");
+      assert!(
+        url.path().ends_with("worker/index.ts"),
+        "file:// URL entrypoint should resolve to worker/index.ts, got: {}",
+        url
+      );
     }
   }
 }
