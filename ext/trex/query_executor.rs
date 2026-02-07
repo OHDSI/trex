@@ -3,6 +3,7 @@
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use duckdb::Connection;
 use std::panic::{self, AssertUnwindSafe};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::{self, JoinHandle};
 use tracing::warn;
 
@@ -26,9 +27,10 @@ struct Worker {
 
 /// Distributes queries across a pool of worker threads with pre-cloned connections.
 pub struct QueryExecutor {
-  sender: Sender<QueryRequest>,
+  senders: Vec<Sender<QueryRequest>>,
   #[allow(dead_code)]
   workers: Vec<Worker>,
+  next_worker: AtomicUsize,
 }
 
 impl QueryExecutor {
@@ -46,31 +48,43 @@ impl QueryExecutor {
       );
     }
 
-    let (sender, receiver): (Sender<QueryRequest>, Receiver<QueryRequest>) =
-      unbounded();
-
+    let mut senders = Vec::with_capacity(pool_size);
     let mut workers = Vec::with_capacity(pool_size);
     for (i, conn) in connections.into_iter().enumerate() {
-      let rx = receiver.clone();
+      let (sender, receiver): (Sender<QueryRequest>, Receiver<QueryRequest>) =
+        unbounded();
+      senders.push(sender);
       let handle = thread::Builder::new()
         .name(format!("trex-executor-{i}"))
-        .spawn(move || worker_loop(conn, rx))
+        .spawn(move || worker_loop(conn, receiver))
         .map_err(|e| format!("spawn worker {i}: {e}"))?;
       workers.push(Worker { _handle: handle });
     }
 
-    Ok(Self { sender, workers })
+    Ok(Self {
+      senders,
+      workers,
+      next_worker: AtomicUsize::new(0),
+    })
   }
 
-  pub fn submit(
+  /// Returns next worker index via round-robin.
+  pub fn next_worker_id(&self) -> usize {
+    self.next_worker.fetch_add(1, Ordering::Relaxed) % self.senders.len()
+  }
+
+  /// Sends request to a specific worker's channel (pinned connection).
+  pub fn submit_to(
     &self,
+    worker_id: usize,
     database: String,
     sql: String,
     params_json: String,
   ) -> std::sync::mpsc::Receiver<QueryResult> {
     let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
 
-    if let Err(e) = self.sender.send(QueryRequest {
+    let sender = &self.senders[worker_id % self.senders.len()];
+    if let Err(e) = sender.send(QueryRequest {
       database,
       sql,
       params_json,
@@ -82,6 +96,21 @@ impl QueryExecutor {
     }
 
     response_rx
+  }
+
+  /// Sends request via round-robin (unpinned).
+  pub fn submit(
+    &self,
+    database: String,
+    sql: String,
+    params_json: String,
+  ) -> std::sync::mpsc::Receiver<QueryResult> {
+    let worker_id = self.next_worker_id();
+    self.submit_to(worker_id, database, sql, params_json)
+  }
+
+  pub fn pool_size(&self) -> usize {
+    self.senders.len()
   }
 }
 

@@ -222,7 +222,7 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
     dir
   };
 
-  let _ = execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![]);
+  let _ = execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![], -1);
 
   let sql = format!(
     "SELECT install_results FROM tpm_install('{}', '{}')",
@@ -230,7 +230,7 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
     install_dir.replace('\'', "''")
   );
 
-  match execute_query("memory".to_string(), sql, vec![]) {
+  match execute_query("memory".to_string(), sql, vec![], -1) {
     Ok(json_str) => {
       match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
         Ok(rows) if rows.is_empty() => {
@@ -489,12 +489,19 @@ fn execute_query(
   database: String,
   sql: String,
   params: Vec<TrexType>,
+  worker_id: i32,
 ) -> Result<String, TrexError> {
   if let Some(executor) = connection::get_query_executor() {
     let params_json = serde_json::to_string(&params)
       .map_err(|e| TrexError::Generic(format!("param serialize: {e}")))?;
 
-    match executor.submit(database, sql, params_json).recv() {
+    let rx = if worker_id >= 0 {
+      executor.submit_to(worker_id as usize, database, sql, params_json)
+    } else {
+      executor.submit(database, sql, params_json)
+    };
+
+    match rx.recv() {
       Ok(query_executor::QueryResult::Success(json)) => Ok(json),
       Ok(query_executor::QueryResult::Error(msg)) => {
         Err(TrexError::Generic(msg))
@@ -573,7 +580,26 @@ fn op_execute_query(
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
 ) -> Result<String, TrexError> {
-  execute_query(database, sql, params)
+  execute_query(database, sql, params, -1)
+}
+
+#[op2(fast)]
+#[smi]
+fn op_acquire_worker() -> u32 {
+  connection::get_query_executor()
+    .map(|e| e.next_worker_id() as u32)
+    .unwrap_or(0)
+}
+
+#[op2]
+#[string]
+fn op_execute_query_pinned(
+  #[smi] worker_id: u32,
+  #[string] database: String,
+  #[string] sql: String,
+  #[serde] params: Vec<TrexType>,
+) -> Result<String, TrexError> {
+  execute_query(database, sql, params, worker_id as i32)
 }
 
 pub struct QueryStreamResource {
@@ -829,6 +855,8 @@ deno_core::extension!(
     ops = [
         op_install_plugin,
         op_execute_query,
+        op_acquire_worker,
+        op_execute_query_pinned,
         op_get_dbc,
         op_get_dbc2,
         op_set_dbc,
@@ -1276,7 +1304,7 @@ mod tests {
   #[serial]
   fn test_execute_query_simple_select() {
     let result =
-      execute_query("memory".into(), "SELECT 1 AS val".into(), vec![]);
+      execute_query("memory".into(), "SELECT 1 AS val".into(), vec![], -1);
     let json_str = result.unwrap();
     let parsed: Vec<JsonValue> = serde_json::from_str(&json_str).unwrap();
     assert_eq!(parsed.len(), 1);
@@ -1286,7 +1314,7 @@ mod tests {
   #[test]
   #[serial]
   fn test_execute_query_empty_sql() {
-    let result = execute_query("memory".into(), "".into(), vec![]);
+    let result = execute_query("memory".into(), "".into(), vec![], -1);
     assert_eq!(result.unwrap(), "[]");
   }
 
@@ -1298,16 +1326,19 @@ mod tests {
       "CREATE TABLE IF NOT EXISTS test_cq_tbl (id INTEGER, name VARCHAR)"
         .into(),
       vec![],
+      -1,
     );
     let _ = execute_query(
       "memory".into(),
       "INSERT INTO test_cq_tbl VALUES (1, 'Alice'), (2, 'Bob')".into(),
       vec![],
+      -1,
     );
     let result = execute_query(
       "memory".into(),
       "SELECT * FROM test_cq_tbl ORDER BY id".into(),
       vec![],
+      -1,
     )
     .unwrap();
     let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
@@ -1318,6 +1349,7 @@ mod tests {
       "memory".into(),
       "DROP TABLE IF EXISTS test_cq_tbl".into(),
       vec![],
+      -1,
     );
   }
 
@@ -1332,6 +1364,7 @@ mod tests {
         TrexType::String("hi".into()),
         TrexType::Number(1.23),
       ],
+      -1,
     )
     .unwrap();
     let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
@@ -1348,6 +1381,7 @@ mod tests {
       "memory".into(),
       "SELECT $1::TIMESTAMP AS ts".into(),
       vec![TrexType::DateTime(1704067200000)],
+      -1,
     )
     .unwrap();
     let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
@@ -1358,7 +1392,7 @@ mod tests {
   #[test]
   #[serial]
   fn test_execute_query_invalid_sql() {
-    let result = execute_query("memory".into(), "NOT VALID SQL".into(), vec![]);
+    let result = execute_query("memory".into(), "NOT VALID SQL".into(), vec![], -1);
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(!err_msg.is_empty());
@@ -1371,6 +1405,7 @@ mod tests {
       "memory".into(),
       "SELECT * FROM generate_series(1, 5) AS t(n)".into(),
       vec![],
+      -1,
     )
     .unwrap();
     let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
@@ -1387,15 +1422,17 @@ mod tests {
       )"
       .into(),
       vec![],
+      -1,
     );
     let _ = execute_query(
       "memory".into(),
       "INSERT INTO test_types VALUES (1, 'hello', 1.5, true, '2024-01-01', '2024-01-01 12:00:00')"
         .into(),
       vec![],
+      -1,
     );
     let result =
-      execute_query("memory".into(), "SELECT * FROM test_types".into(), vec![])
+      execute_query("memory".into(), "SELECT * FROM test_types".into(), vec![], -1)
         .unwrap();
     let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed.len(), 1);
@@ -1407,6 +1444,7 @@ mod tests {
       "memory".into(),
       "DROP TABLE IF EXISTS test_types".into(),
       vec![],
+      -1,
     );
   }
 
