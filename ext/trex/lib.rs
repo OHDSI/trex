@@ -222,7 +222,8 @@ fn op_install_plugin(#[string] name: String, #[string] dir: String) {
     dir
   };
 
-  let _ = execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![], -1);
+  let _ =
+    execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![], -1);
 
   let sql = format!(
     "SELECT install_results FROM tpm_install('{}', '{}')",
@@ -1392,7 +1393,8 @@ mod tests {
   #[test]
   #[serial]
   fn test_execute_query_invalid_sql() {
-    let result = execute_query("memory".into(), "NOT VALID SQL".into(), vec![], -1);
+    let result =
+      execute_query("memory".into(), "NOT VALID SQL".into(), vec![], -1);
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(!err_msg.is_empty());
@@ -1431,9 +1433,13 @@ mod tests {
       vec![],
       -1,
     );
-    let result =
-      execute_query("memory".into(), "SELECT * FROM test_types".into(), vec![], -1)
-        .unwrap();
+    let result = execute_query(
+      "memory".into(),
+      "SELECT * FROM test_types".into(),
+      vec![],
+      -1,
+    )
+    .unwrap();
     let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
     assert_eq!(parsed.len(), 1);
     assert_eq!(parsed[0]["i"], 1);
