@@ -2,6 +2,7 @@
 
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use duckdb::Connection;
+use std::panic::{self, AssertUnwindSafe};
 use std::thread::{self, JoinHandle};
 use tracing::warn;
 
@@ -86,9 +87,18 @@ impl QueryExecutor {
 
 fn worker_loop(conn: Connection, receiver: Receiver<QueryRequest>) {
   while let Ok(req) = receiver.recv() {
-    let result =
-      execute_query(&conn, &req.database, &req.sql, &req.params_json);
-    let _ = req.response_tx.send(result);
+    let result = panic::catch_unwind(AssertUnwindSafe(|| {
+      execute_query(&conn, &req.database, &req.sql, &req.params_json)
+    }));
+    let query_result = match result {
+      Ok(r) => r,
+      Err(panic_err) => {
+        let msg = crate::extract_panic_message(panic_err);
+        warn!(error = %msg, "query panicked");
+        QueryResult::Error(format!("query panicked: {msg}"))
+      }
+    };
+    let _ = req.response_tx.send(query_result);
   }
 }
 

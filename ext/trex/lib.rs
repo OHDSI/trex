@@ -511,12 +511,35 @@ fn execute_query_fallback(
   sql: String,
   params: Vec<TrexType>,
 ) -> Result<String, TrexError> {
+  let result = panic::catch_unwind(AssertUnwindSafe(|| {
+    execute_query_fallback_inner(database, sql, params)
+  }));
+  match result {
+    Ok(inner) => inner,
+    Err(panic_err) => {
+      let msg = extract_panic_message(panic_err);
+      Err(TrexError::Generic(format!("query panicked: {msg}")))
+    }
+  }
+}
+
+fn execute_query_fallback_inner(
+  database: String,
+  sql: String,
+  params: Vec<TrexType>,
+) -> Result<String, TrexError> {
   let conn_arc = get_active_connection();
-  let conn = conn_arc
-    .lock()
-    .unwrap()
+  let guard = match conn_arc.lock() {
+    Ok(g) => g,
+    Err(poisoned) => {
+      warn!("lock was poisoned, recovering");
+      poisoned.into_inner()
+    }
+  };
+  let conn = guard
     .try_clone()
     .map_err(|e| TrexError::Generic(format!("connection clone: {e}")))?;
+  drop(guard);
 
   if let Err(e) = conn.execute(&format!("USE {database}"), []) {
     warn!(database, error = %e, "failed to switch database");
@@ -724,9 +747,14 @@ fn op_execute_query_stream(
     tokio::task::spawn_blocking(move || {
       // Wrap DuckDB operations in catch_unwind to prevent panics from crashing V8
       let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        // Clone connection (brief lock) so queries run on independent connections.
-        // DuckDB handles concurrency internally via MVCC.
-        let conn = match conn_arc.lock().unwrap().try_clone() {
+        let guard = match conn_arc.lock() {
+          Ok(g) => g,
+          Err(poisoned) => {
+            warn!("lock was poisoned in streaming query, recovering");
+            poisoned.into_inner()
+          }
+        };
+        let conn = match guard.try_clone() {
           Ok(c) => c,
           Err(e) => {
             let _ = sender.blocking_send(format!(
@@ -735,6 +763,7 @@ fn op_execute_query_stream(
             return;
           }
         };
+        drop(guard);
         if conn.execute(&format!("USE {database}"), []).is_err() {
           return;
         }
