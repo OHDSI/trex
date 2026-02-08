@@ -1653,6 +1653,7 @@ where
       }
     }
 
+    self.runtime_state.init.lower();
     self.runtime_state.event_loop_completed.lower();
 
     if let Err(err) = self

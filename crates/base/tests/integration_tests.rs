@@ -3450,6 +3450,7 @@ async fn test_supabase_ai_gte() {
     .unwrap();
 
   assert_eq!(resp.status().as_u16(), StatusCode::OK);
+  tb.exit(Duration::from_secs(TESTBED_DEADLINE_SEC)).await;
   ext_ai::onnxruntime::session::force_cleanup_all().await;
 }
 
@@ -3488,6 +3489,7 @@ async fn test_ort_string_tensor() {
     .unwrap();
 
   assert_eq!(resp.status().as_u16(), StatusCode::OK);
+  tb.exit(Duration::from_secs(TESTBED_DEADLINE_SEC)).await;
   ext_ai::onnxruntime::session::force_cleanup_all().await;
 }
 
