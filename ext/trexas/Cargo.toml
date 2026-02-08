@@ -15,12 +15,11 @@ strip = true
 duckdb = { workspace = true, features = ["vtab-loadable", "vscalar"] }
 duckdb-loadable-macros = "0.1.9"
 libduckdb-sys = { version = "1.4.1", features = ["loadable-extension"] }
-trex_cli = { path = "../../cli", package = "cli" }
 deno_facade = { path = "../../crates/deno_facade" }
 deno = { path = "../../deno" }
 ext_workers = { path = "../workers" }
 trex_core.workspace = true
-base.workspace = true
+base = { workspace = true, features = ["trex"] }
 anyhow.workspace = true
 serde = { version = "1.0", features = ["derive"] }
 serde_json.workspace = true

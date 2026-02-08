@@ -40,6 +40,5 @@ thiserror.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true
 tracing.workspace = true
-trex_core.workspace = true
 
 memmem = "0.1"

@@ -246,7 +246,6 @@ mod supabase_startup_snapshot {
       deno_fs::deno_fs::init::<PermissionsContainer>(Arc::new(deno_fs::RealFs)),
       deno_webgpu::deno_webgpu::init(),
       ext_ai::ai::init(),
-      trex_core::trex::init(),
       ext_env::env::init(),
       deno_os::deno_os::init(None),
       deno_process::deno_process::init(None),

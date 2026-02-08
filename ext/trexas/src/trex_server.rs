@@ -1,5 +1,5 @@
 use anyhow::{bail, Result};
-use base::server::RequestIdleTimeout;
+use base::server::{RequestIdleTimeout, ServerFlags, WorkerEntrypoints};
 use base::worker::pool::{SupervisorPolicy, WorkerPoolPolicy};
 use base::InspectorOption;
 use serde::{Deserialize, Serialize};
@@ -10,9 +10,228 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 
-pub use trex_cli::{
-  get_global_server_manager, get_version, ServerConfig, ServerManager,
-};
+#[derive(Clone)]
+pub struct ServerConfig {
+  pub addr: SocketAddr,
+  pub main_service_path: String,
+  pub event_worker_path: Option<String>,
+  pub user_worker_policy: Option<WorkerPoolPolicy>,
+  pub tls_cert_path: Option<String>,
+  pub tls_key_path: Option<String>,
+  pub tls_port: Option<u16>,
+  pub static_patterns: Vec<String>,
+  pub inspector: Option<InspectorOption>,
+  pub no_module_cache: bool,
+  pub allow_main_inspector: bool,
+  pub tcp_nodelay: bool,
+  pub graceful_exit_deadline_sec: u64,
+  pub graceful_exit_keepalive_deadline_ms: Option<u64>,
+  pub event_worker_exit_deadline_sec: u64,
+  pub request_wait_timeout_ms: Option<u64>,
+  pub request_idle_timeout: RequestIdleTimeout,
+  pub request_read_timeout_ms: Option<u64>,
+  pub request_buffer_size: Option<u64>,
+  pub beforeunload_wall_clock_pct: Option<u8>,
+  pub beforeunload_cpu_pct: Option<u8>,
+  pub beforeunload_memory_pct: Option<u8>,
+  pub import_map_path: Option<String>,
+  pub jsx_specifier: Option<String>,
+  pub jsx_module: Option<String>,
+  pub worker_pool_max_size: Option<usize>,
+  pub worker_memory_limit_mb: Option<usize>,
+  pub decorator: bool,
+  pub restrict_host_fs: bool,
+}
+
+impl std::fmt::Debug for ServerConfig {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("ServerConfig")
+      .field("addr", &self.addr)
+      .field("main_service_path", &self.main_service_path)
+      .field("event_worker_path", &self.event_worker_path)
+      .field("user_worker_policy", &"<WorkerPoolPolicy>")
+      .field("tls_cert_path", &self.tls_cert_path)
+      .field("tls_key_path", &self.tls_key_path)
+      .field("tls_port", &self.tls_port)
+      .field("static_patterns", &self.static_patterns)
+      .field("inspector", &self.inspector)
+      .field("no_module_cache", &self.no_module_cache)
+      .field("allow_main_inspector", &self.allow_main_inspector)
+      .field("tcp_nodelay", &self.tcp_nodelay)
+      .field(
+        "graceful_exit_deadline_sec",
+        &self.graceful_exit_deadline_sec,
+      )
+      .field(
+        "graceful_exit_keepalive_deadline_ms",
+        &self.graceful_exit_keepalive_deadline_ms,
+      )
+      .field(
+        "event_worker_exit_deadline_sec",
+        &self.event_worker_exit_deadline_sec,
+      )
+      .field("request_wait_timeout_ms", &self.request_wait_timeout_ms)
+      .field("request_idle_timeout", &self.request_idle_timeout)
+      .field("request_read_timeout_ms", &self.request_read_timeout_ms)
+      .field("request_buffer_size", &self.request_buffer_size)
+      .field(
+        "beforeunload_wall_clock_pct",
+        &self.beforeunload_wall_clock_pct,
+      )
+      .field("beforeunload_cpu_pct", &self.beforeunload_cpu_pct)
+      .field("beforeunload_memory_pct", &self.beforeunload_memory_pct)
+      .field("import_map_path", &self.import_map_path)
+      .field("jsx_specifier", &self.jsx_specifier)
+      .field("jsx_module", &self.jsx_module)
+      .field("worker_pool_max_size", &self.worker_pool_max_size)
+      .field("worker_memory_limit_mb", &self.worker_memory_limit_mb)
+      .field("decorator", &self.decorator)
+      .field("restrict_host_fs", &self.restrict_host_fs)
+      .finish()
+  }
+}
+
+impl Default for ServerConfig {
+  fn default() -> Self {
+    Self {
+      addr: "127.0.0.1:8080".parse().unwrap(),
+      main_service_path: "main.ts".to_string(),
+      event_worker_path: None,
+      user_worker_policy: None,
+      tls_cert_path: None,
+      tls_key_path: None,
+      tls_port: None,
+      static_patterns: vec![],
+      inspector: None,
+      no_module_cache: false,
+      allow_main_inspector: false,
+      tcp_nodelay: false,
+      graceful_exit_deadline_sec: 30,
+      graceful_exit_keepalive_deadline_ms: None,
+      event_worker_exit_deadline_sec: 30,
+      request_wait_timeout_ms: None,
+      request_idle_timeout: RequestIdleTimeout::default(),
+      request_read_timeout_ms: None,
+      request_buffer_size: None,
+      beforeunload_wall_clock_pct: None,
+      beforeunload_cpu_pct: None,
+      beforeunload_memory_pct: None,
+      import_map_path: None,
+      jsx_specifier: None,
+      jsx_module: None,
+      worker_pool_max_size: None,
+      worker_memory_limit_mb: None,
+      decorator: false,
+      restrict_host_fs: false,
+    }
+  }
+}
+
+impl ServerConfig {
+  pub fn to_server_flags(&self) -> ServerFlags {
+    ServerFlags {
+      otel: None,
+      otel_console: None,
+      no_module_cache: self.no_module_cache,
+      allow_main_inspector: self.allow_main_inspector,
+      tcp_nodelay: self.tcp_nodelay,
+      graceful_exit_deadline_sec: self.graceful_exit_deadline_sec,
+      graceful_exit_keepalive_deadline_ms: self
+        .graceful_exit_keepalive_deadline_ms,
+      event_worker_exit_deadline_sec: self.event_worker_exit_deadline_sec,
+      request_wait_timeout_ms: self.request_wait_timeout_ms,
+      request_idle_timeout: self.request_idle_timeout,
+      request_read_timeout_ms: self.request_read_timeout_ms,
+      request_buffer_size: self.request_buffer_size,
+      beforeunload_wall_clock_pct: self.beforeunload_wall_clock_pct,
+      beforeunload_cpu_pct: self.beforeunload_cpu_pct,
+      beforeunload_memory_pct: self.beforeunload_memory_pct,
+      restrict_host_fs: self.restrict_host_fs,
+    }
+  }
+
+  pub fn to_worker_entrypoints(&self) -> WorkerEntrypoints {
+    WorkerEntrypoints {
+      main: Some(self.main_service_path.clone()),
+      events: self.event_worker_path.clone(),
+    }
+  }
+}
+
+pub struct ServerManager {
+  servers: Arc<Mutex<HashMap<String, ServerInfo>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ServerInfo {
+  config: ServerConfig,
+  status: String,
+  _started_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Default for ServerManager {
+  fn default() -> Self {
+    Self {
+      servers: Arc::new(Mutex::new(HashMap::new())),
+    }
+  }
+}
+
+impl ServerManager {
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  pub fn register_server(
+    &self,
+    id: String,
+    config: ServerConfig,
+  ) -> Result<()> {
+    let mut servers = self.servers.lock().unwrap();
+    servers.insert(
+      id,
+      ServerInfo {
+        config,
+        status: "running".to_string(),
+        _started_at: chrono::Utc::now(),
+      },
+    );
+    Ok(())
+  }
+
+  pub fn unregister_server(&self, id: &str) -> Result<()> {
+    let mut servers = self.servers.lock().unwrap();
+    servers.remove(id);
+    Ok(())
+  }
+
+  pub fn list_servers(&self) -> Result<Vec<(String, ServerConfig, String)>> {
+    let servers = self.servers.lock().unwrap();
+    let result = servers
+      .iter()
+      .map(|(id, info)| (id.clone(), info.config.clone(), info.status.clone()))
+      .collect();
+    Ok(result)
+  }
+
+  pub fn stop_all_servers(&self) -> Result<usize> {
+    let mut servers = self.servers.lock().unwrap();
+    let count = servers.len();
+    servers.clear();
+    Ok(count)
+  }
+}
+
+static GLOBAL_SERVER_MANAGER: LazyLock<ServerManager> =
+  LazyLock::new(ServerManager::new);
+
+pub fn get_global_server_manager() -> &'static ServerManager {
+  &GLOBAL_SERVER_MANAGER
+}
+
+pub fn get_version() -> String {
+  env!("CARGO_PKG_VERSION").to_string()
+}
 
 static LOG_INIT: AtomicBool = AtomicBool::new(false);
 
@@ -26,10 +245,8 @@ fn init_logging() {
     return;
   }
 
-  // Initialize rustls crypto provider
   let _ = rustls::crypto::ring::default_provider().install_default();
 
-  // Initialize logging if TREX_DEBUG_GC or RUST_LOG is set
   let debug_gc = std::env::var("TREX_DEBUG_GC").is_ok();
   let rust_log = std::env::var("RUST_LOG").ok();
 
@@ -40,7 +257,6 @@ fn init_logging() {
       rust_log.as_deref().unwrap_or("info")
     };
 
-    // Use env_logger for simple logging to stderr
     let _ = env_logger::Builder::from_env(
       env_logger::Env::default().default_filter_or(level),
     )
@@ -314,7 +530,6 @@ pub static TREX_MANAGER: LazyLock<TrexServerManagerWrapper> =
     TrexServerManagerWrapper::new()
   });
 
-/// Server handle for the extension API
 #[derive(Debug, Clone)]
 pub struct ServerHandle {
   pub config: ServerConfig,
@@ -339,13 +554,10 @@ pub struct TrexServerConfig {
   pub tls_port: Option<u16>,
   #[serde(default)]
   pub static_patterns: Vec<String>,
-  /// Worker policy: "per_worker", "per_request", or "oneshot"
   #[serde(default)]
   pub user_worker_policy: Option<String>,
-  /// Maximum number of workers per service path (1-9999)
   #[serde(default)]
   pub max_parallelism: Option<usize>,
-  /// Maximum total number of workers across all service paths (global limit)
   #[serde(default)]
   pub global_max_parallelism: Option<usize>,
   #[serde(default)]
@@ -438,7 +650,7 @@ impl TrexServerConfig {
         .unwrap_or(SupervisorPolicy::PerWorker)
     });
 
-    let server_flags = base::server::ServerFlags {
+    let server_flags = ServerFlags {
       otel: None,
       otel_console: None,
       no_module_cache: self.no_module_cache,
@@ -467,7 +679,6 @@ impl TrexServerConfig {
       || self.max_parallelism.is_some()
       || self.global_max_parallelism.is_some()
     {
-      // For oneshot policy, force max_parallelism to 1
       let max_parallelism =
         if supervisor_policy.as_ref().is_some_and(|p| p.is_oneshot()) {
           Some(1)
