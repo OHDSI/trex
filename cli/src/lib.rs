@@ -106,6 +106,7 @@ impl std::fmt::Debug for ServerConfig {
       .field("worker_pool_max_size", &self.worker_pool_max_size)
       .field("worker_memory_limit_mb", &self.worker_memory_limit_mb)
       .field("decorator", &self.decorator)
+      .field("restrict_host_fs", &self.restrict_host_fs)
       .finish()
   }
 }
