@@ -3556,6 +3556,13 @@ async fn test_ort_transformers_js(script_path: &str) {
     .header("Content-Type", "application/json")
     .header("Content-Length", content_length.to_string());
 
+  // Store status code to defer assertion until after server cleanup.
+  // If an assertion panics inside the integration_test! callback, the
+  // TerminationToken cleanup is skipped, leaving V8 isolates in a bad
+  // state that crashes subsequent tests.
+  let result_status = std::sync::Arc::new(std::sync::atomic::AtomicU16::new(0));
+  let status_capture = result_status.clone();
+
   integration_test!(
     main_path,
     NON_SECURE_PORT,
@@ -3563,13 +3570,14 @@ async fn test_ort_transformers_js(script_path: &str) {
     None,
     Some(req),
     None,
-    (|resp| async {
-      let res = resp.unwrap();
+    (|resp| async move {
+      let Ok(res) = resp else {
+        return;
+      };
       let status_code = res.status();
+      status_capture.store(status_code.as_u16(), std::sync::atomic::Ordering::SeqCst);
 
-      assert!(matches!(status_code, StatusCode::OK | StatusCode::CREATED));
-
-      if status_code == StatusCode::OK {
+      if status_code != StatusCode::CREATED {
         return;
       }
 
@@ -3593,6 +3601,13 @@ async fn test_ort_transformers_js(script_path: &str) {
   );
 
   ext_ai::onnxruntime::session::force_cleanup_all().await;
+
+  let status = result_status.load(std::sync::atomic::Ordering::SeqCst);
+  assert!(
+    status == 200 || status == 201,
+    "ORT test '{}' expected status 200 or 201, got {}",
+    script_path, status
+  );
 }
 
 #[tokio::test]
