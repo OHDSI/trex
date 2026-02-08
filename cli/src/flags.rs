@@ -339,9 +339,10 @@ fn get_start_command() -> Command {
         .value_parser(value_parser!(OtelConsoleConfig)),
     )
     .arg(
-      arg!(--"restrict-host-fs")
+      arg!(--"restrict-host-fs" <BOOL>)
         .help("Restrict host filesystem access for main/event workers (use PrefixFs instead of RealFs)")
-        .action(ArgAction::SetTrue),
+        .default_value("true")
+        .value_parser(value_parser!(bool)),
     )
 }
 

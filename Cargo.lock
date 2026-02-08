@@ -1981,7 +1981,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base",
- "chrono",
  "clap",
  "deno",
  "deno_core",
@@ -1989,13 +1988,11 @@ dependencies = [
  "env_logger 0.10.0",
  "ext_event_worker",
  "glob",
- "lazy_static",
  "log",
  "once_cell",
  "rustls 0.23.28",
  "tokio",
  "tracing-subscriber",
- "trex_core",
 ]
 
 [[package]]
@@ -4498,7 +4495,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "trex_core",
 ]
 
 [[package]]
@@ -10541,7 +10537,6 @@ dependencies = [
  "anyhow",
  "base",
  "chrono",
- "cli",
  "deno",
  "deno_facade",
  "duckdb",
