@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
 
-cargo test --features base/trex $@
+cargo test --features base/trex "$@"
