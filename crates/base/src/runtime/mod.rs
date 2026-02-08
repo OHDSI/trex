@@ -877,6 +877,7 @@ where
           deno_io::deno_io::lazy_init(),
           deno_fs::deno_fs::lazy_init::<PermissionsContainer>(),
           ext_ai::ai::init(),
+          #[cfg(feature = "trex")]
           trex_core::trex::init(),
           ext_env::env::init(),
           deno_os::deno_os::init(None),

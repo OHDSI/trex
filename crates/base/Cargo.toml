@@ -34,7 +34,7 @@ ext_node.workspace = true
 ext_os.workspace = true
 ext_runtime.workspace = true
 ext_workers.workspace = true
-trex_core.workspace = true
+trex_core = { workspace = true, optional = true }
 
 anyhow.workspace = true
 async-trait.workspace = true
@@ -117,7 +117,6 @@ ext_node.workspace = true
 ext_os.workspace = true
 ext_workers.workspace = true
 ext_runtime.workspace = true
-trex_core.workspace = true
 
 deno_facade.workspace = true
 
@@ -140,4 +139,5 @@ sys_traits.workspace = true
 
 [features]
 tracing = ["dep:tracing-subscriber"]
+trex = ["dep:trex_core"]
 termination-signal-ext = []

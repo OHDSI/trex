@@ -92,7 +92,6 @@ deno_webstorage = "0.216.0"
 base = { version = "0.1.0", path = "./crates/base" }
 base_mem_check = { version = "0.1.0", path = "./crates/base_mem_check" }
 base_rt = { version = "0.1.0", path = "./crates/base_rt" }
-cli = { version = "0.1.0", path = "./cli" }
 cpu_timer = { version = "0.1.0", path = "./crates/cpu_timer" }
 deno_facade = { version = "0.1.0", path = "./crates/deno_facade" }
 eszip_trait = { version = "0.1.0", path = "./crates/eszip_trait" }
