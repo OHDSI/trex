@@ -264,6 +264,7 @@ mod supabase_startup_snapshot {
       deno_cache::deno_cache::init(Default::default()),
       // deno::runtime::ops::permissions::deno_permissions::init(),
       ext_os::os::init(None),
+      ext_os::deno_os::init(),
       ext_runtime::runtime::init(),
     ];
     */

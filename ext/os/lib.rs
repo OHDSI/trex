@@ -149,6 +149,14 @@ fn op_signal_unbind(
   Ok(())
 }
 
+// ── Env stub ops (required by deno_node polyfills) ─────────────────────────
+
+#[op2]
+#[string]
+fn op_get_env_no_permission_check(#[string] _key: &str) -> Option<String> {
+  None
+}
+
 // ── Memory info op ──────────────────────────────────────────────────────────
 
 #[derive(Serialize, Default)]
@@ -227,4 +235,13 @@ deno_core::extension!(
   state = |state, options| {
     state.put::<ExitCode>(options.exit_code.unwrap_or_default());
   }
+);
+
+// Facade extension that satisfies `ext:deno_os/30_os.js` imports from upstream
+// deno_node polyfills (os.ts, process.ts) with stubbed/mocked implementations.
+deno_core::extension!(
+  deno_os,
+  deps = [os],
+  ops = [op_get_env_no_permission_check],
+  esm = ["30_os.js"],
 );

@@ -927,6 +927,7 @@ where
             permissions,
           ),
           ext_os::os::init(None),
+          ext_os::deno_os::init(),
           ext_runtime::runtime::init(),
         ];
 
