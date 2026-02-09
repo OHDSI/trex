@@ -397,7 +397,7 @@ pub fn op_read_line_prompt(
   Ok(None)
 }
 
-// Removed: now provided by vendor/deno_os
+// Removed: now provided by ext/os
 // #[op2(fast)]
 // fn op_set_exit_code(
 //   _state: &mut OpState,
@@ -498,7 +498,7 @@ deno_core::extension!(
     op_stdin_set_raw,
     op_console_size,
     op_read_line_prompt,
-    // op_set_exit_code, // Removed: now provided by vendor/deno_os
+    // op_set_exit_code, // Removed: now provided by ext/os
     op_runtime_metrics,
     op_schedule_mem_check,
     op_runtime_memory_usage,

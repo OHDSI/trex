@@ -1246,7 +1246,6 @@ dependencies = [
  "deno_http",
  "deno_io",
  "deno_net",
- "deno_os 0.1.0",
  "deno_process",
  "deno_resolver",
  "deno_telemetry",
@@ -3285,25 +3284,6 @@ dependencies = [
 
 [[package]]
 name = "deno_os"
-version = "0.1.0"
-dependencies = [
- "deno_core",
- "deno_error",
- "deno_path_util",
- "deno_permissions",
- "deno_signals",
- "libc",
- "netif",
- "ntapi",
- "once_cell",
- "serde",
- "thiserror 2.0.18",
- "tokio",
- "winapi",
-]
-
-[[package]]
-name = "deno_os"
 version = "0.38.0"
 source = "git+https://github.com/p-hoffmann/deno?branch=trex_fix#6815c4c17f7029f780674533f0d86d8b9bca1a0b"
 dependencies = [
@@ -3391,7 +3371,7 @@ dependencies = [
  "deno_error",
  "deno_fs",
  "deno_io",
- "deno_os 0.38.0",
+ "deno_os",
  "deno_path_util",
  "deno_permissions",
  "deno_signals",
@@ -4459,8 +4439,12 @@ name = "ext_os"
 version = "0.1.0"
 dependencies = [
  "deno_core",
+ "deno_error",
+ "deno_signals",
  "libc",
  "serde",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

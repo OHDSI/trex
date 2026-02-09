@@ -903,7 +903,6 @@ where
           #[cfg(feature = "trex")]
           trex_core::trex::init(),
           ext_env::env::init(),
-          deno_os::deno_os::init(None),
           deno_process::deno_process::init(None),
           ext_workers::user_workers::init(),
           ext_event_worker::user_event_worker::init(),
@@ -927,7 +926,7 @@ where
           ops::permissions::base_runtime_permissions::init(
             permissions,
           ),
-          ext_os::os::init(),
+          ext_os::os::init(None),
           ext_runtime::runtime::init(),
         ];
 

@@ -247,7 +247,6 @@ mod supabase_startup_snapshot {
       deno_webgpu::deno_webgpu::init(),
       ext_ai::ai::init(),
       ext_env::env::init(),
-      deno_os::deno_os::init(None),
       deno_process::deno_process::init(None),
       ext_workers::user_workers::init(),
       ext_event_worker::user_event_worker::init(),
@@ -264,7 +263,7 @@ mod supabase_startup_snapshot {
       >(None, Arc::new(deno_fs::RealFs)),
       deno_cache::deno_cache::init(Default::default()),
       // deno::runtime::ops::permissions::deno_permissions::init(),
-      ext_os::os::init(),
+      ext_os::os::init(None),
       ext_runtime::runtime::init(),
     ];
     */
