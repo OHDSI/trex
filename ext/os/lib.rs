@@ -182,6 +182,21 @@ fn op_system_memory_info() -> Option<MemInfo> {
       mem_info.free = info.freeram * mem_unit;
       mem_info.available = mem_info.free;
       mem_info.buffers = info.bufferram * mem_unit;
+
+      // Prefer /proc/meminfo MemAvailable which accounts for reclaimable
+      // page cache/buffers, falling back to freeram above.
+      if let Ok(contents) = std::fs::read_to_string("/proc/meminfo") {
+        for line in contents.lines() {
+          if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            if let Some(kb_str) = rest.trim().strip_suffix("kB") {
+              if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                mem_info.available = kb.saturating_mul(1024);
+              }
+            }
+            break;
+          }
+        }
+      }
     }
 
     Some(mem_info)
@@ -210,8 +225,6 @@ deno_core::extension!(
   esm = ["os.js", "exit.js"],
   options = { exit_code: Option<ExitCode> },
   state = |state, options| {
-    if let Some(exit_code) = options.exit_code {
-      state.put::<ExitCode>(exit_code);
-    }
+    state.put::<ExitCode>(options.exit_code.unwrap_or_default());
   }
 );
