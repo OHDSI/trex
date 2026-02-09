@@ -632,12 +632,15 @@ impl WorkerPool {
         let (req_start_tx, req_end_tx) = worker.timing_tx_pair.clone();
 
         if is_retired.is_raised() {
-          if res_tx
-            .send(Err(anyhow!(WorkerError::WorkerAlreadyRetired)))
-            .is_err()
-          {
-            error!("main worker receiver dropped");
-          }
+          tokio::task::spawn(async move {
+            let err = exit
+              .error()
+              .await
+              .unwrap_or(anyhow!(WorkerError::WorkerAlreadyRetired));
+            if res_tx.send(Err(err)).is_err() {
+              error!("main worker receiver dropped");
+            }
+          });
         } else {
           demand.fetch_add(1, Ordering::Release);
 
