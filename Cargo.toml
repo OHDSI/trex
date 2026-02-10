@@ -19,7 +19,6 @@ members = [
   "ext/trex",
   "ext/runtime",
   "ext/workers",
-  "vendor/deno_os",
   "ext/trexas",
 ]
 
@@ -74,7 +73,6 @@ deno_fs = { version = "0.131.0", features = ["sync_fs"] }
 deno_http = "0.219.0"
 deno_io = "0.131.0"
 deno_net = "0.213.0"
-deno_os = { path = "./vendor/deno_os" }
 deno_signals = "0.12.0"
 deno_telemetry = "0.43.0"
 deno_tls = "0.208.0"
@@ -317,9 +315,6 @@ deno_signals = { git = "https://github.com/p-hoffmann/deno", branch = "trex_fix"
 deno_subprocess_windows = { git = "https://github.com/p-hoffmann/deno", branch = "trex_fix" }
 deno_tls = { git = "https://github.com/p-hoffmann/deno", branch = "trex_fix" }
 node_resolver = { git = "https://github.com/p-hoffmann/deno", branch = "trex_fix" }
-
-# Kept as local vendor (too divergent)
-deno_os = { path = "./vendor/deno_os" }
 
 [profile.dind]
 inherits = "dev"

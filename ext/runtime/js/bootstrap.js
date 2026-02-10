@@ -2,7 +2,6 @@ import { core, internals, primordials } from "ext:core/mod.js";
 import { nodeGlobals } from "ext:deno_node/00_globals.js";
 import "ext:deno_node/02_init.js";
 
-import "ext:deno_os/30_os.js";
 import "ext:deno_process/40_process.js";
 import "ext:runtime/98_global_scope_shared.js";
 import "ext:deno_http/00_serve.ts";

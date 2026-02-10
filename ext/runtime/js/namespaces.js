@@ -11,6 +11,7 @@ import {
   TRACING_ENABLED,
 } from "ext:deno_telemetry/telemetry.ts";
 import { TrexHttpClient, req, createRequestListener, PluginManager, TrexDB, DatabaseManager, UserDatabaseManager } from "ext:trex/trex_lib.js";
+import { exit as osExit } from "ext:os/exit.js";
 
 const ops = core.ops;
 const { ObjectDefineProperty } = primordials;
@@ -43,7 +44,7 @@ function installTrexNamespace(kind, terminationRequestTokenRid) {
 				req: req,
 				createRequestListener: createRequestListener,
         httpClient: (service) => { return new TrexHttpClient(service) },
-				exit: (c) => ops.op_exit(c),
+				exit: (c) => osExit(c),
 				...propsTrex,
 			};
 			break;
