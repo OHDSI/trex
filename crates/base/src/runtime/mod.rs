@@ -1728,7 +1728,10 @@ where
           .js_runtime
           .v8_isolate()
           .thread_safe_handle()
-          .request_interrupt(as_interrupt_callback(dummy), std::ptr::null_mut());
+          .request_interrupt(
+            as_interrupt_callback(dummy),
+            std::ptr::null_mut(),
+          );
       }
 
       let op_state = this.js_runtime.op_state();
