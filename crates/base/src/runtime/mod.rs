@@ -144,6 +144,7 @@ fn log_locker_event(isolate_key: usize, stage: &'static str, depth: u32) {
     depth,
   );
 }
+use crate::worker::supervisor::as_interrupt_callback;
 use crate::worker::supervisor::CPUUsage;
 use crate::worker::supervisor::CPUUsageMetrics;
 use crate::worker::DuplexStreamEntry;
@@ -441,15 +442,9 @@ pub struct DenoRuntime<RuntimeContext = DefaultRuntimeContext> {
 
 impl<RuntimeContext> Drop for DenoRuntime<RuntimeContext> {
   fn drop(&mut self) {
-    // Cancel drop_token FIRST to signal supervisors that the runtime is being dropped.
-    // Supervisors should check this token before calling thread_safe_handle methods
-    // to avoid accessing the isolate during/after disposal.
     self.drop_token.cancel();
 
     if self.conf.is_user_worker() {
-      // Begin isolate lifecycle drop - waits for any active GC callbacks to complete
-      // This prevents TOCTOU race conditions where a GC callback could access the
-      // isolate during drop
       self.mem_check.lifecycle.begin_drop();
 
       self.js_runtime.v8_isolate().remove_gc_prologue_callback(
@@ -479,6 +474,7 @@ impl<F: Future> Future for ScopedFuture<F> {
     self: std::pin::Pin<&mut Self>,
     cx: &mut std::task::Context<'_>,
   ) -> Poll<Self::Output> {
+    debug_assert!(!self.isolate.is_null());
     let isolate = unsafe { &mut *self.isolate };
     let scope_storage = std::pin::pin!(v8::HandleScope::new(isolate));
     let mut scope = scope_storage.init();
@@ -1728,18 +1724,11 @@ where
 
       if woked {
         extern "C" fn dummy(_: *mut v8::Isolate, _: *mut std::ffi::c_void) {}
-        // SAFETY: *mut T and &mut T have identical ABI representation.
-        let callback = unsafe {
-          std::mem::transmute::<
-            extern "C" fn(*mut v8::Isolate, *mut std::ffi::c_void),
-            extern "C" fn(&mut v8::Isolate, *mut std::ffi::c_void),
-          >(dummy)
-        };
         this
           .js_runtime
           .v8_isolate()
           .thread_safe_handle()
-          .request_interrupt(callback, std::ptr::null_mut());
+          .request_interrupt(as_interrupt_callback(dummy), std::ptr::null_mut());
       }
 
       let op_state = this.js_runtime.op_state();
@@ -2322,7 +2311,10 @@ where
       }
     }
 
-    Ok(fn_ret.unwrap().is_false())
+    match fn_ret {
+      Some(ret_val) => Ok(ret_val.is_false()),
+      None => Ok(false),
+    }
   }
 
   /// Dispatches "unload" event to the JavaScript runtime.
