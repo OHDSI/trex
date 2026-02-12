@@ -311,24 +311,22 @@ export class HanaDB extends TrexDB {
 		const encodedDbName = encodeURIComponent(credentials.name);
 		let url = `${scheme}://${encodedUsername}:${encodedPassword}@${credentials.host}:${credentials.port}/${encodedDbName}`;
 
+		const queryParams = [`db=${encodedDbName}`];
 		if (encrypt) {
-			const tlsParams = [];
 			if (dbExtra.validateCertificate === false) {
-				tlsParams.push('insecure_omit_server_certificate_check');
+				queryParams.push('insecure_omit_server_certificate_check');
 			}
 			if (dbExtra.sslTrustStore) {
-				tlsParams.push(`tls_certificate_dir=${encodeURIComponent(dbExtra.sslTrustStore)}`);
+				queryParams.push(`tls_certificate_dir=${encodeURIComponent(dbExtra.sslTrustStore)}`);
 			}
 			if (dbExtra.tlsCertificateEnv) {
-				tlsParams.push(`tls_certificate_env=${encodeURIComponent(dbExtra.tlsCertificateEnv)}`);
+				queryParams.push(`tls_certificate_env=${encodeURIComponent(dbExtra.tlsCertificateEnv)}`);
 			}
 			if (dbExtra.useMozillasRootCertificates) {
-				tlsParams.push('use_mozillas_root_certificates');
-			}
-			if (tlsParams.length > 0) {
-				url += '?' + tlsParams.join('&');
+				queryParams.push('use_mozillas_root_certificates');
 			}
 		}
+		url += '?' + queryParams.join('&');
 		return url;
 	}
 
