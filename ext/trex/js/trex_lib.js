@@ -319,6 +319,9 @@ export class HanaDB extends TrexDB {
 			if (dbExtra.sslTrustStore) {
 				tlsParams.push(`tls_certificate_dir=${encodeURIComponent(dbExtra.sslTrustStore)}`);
 			}
+			if (dbExtra.tlsCertificateEnv) {
+				tlsParams.push(`tls_certificate_env=${encodeURIComponent(dbExtra.tlsCertificateEnv)}`);
+			}
 			if (dbExtra.useMozillasRootCertificates) {
 				tlsParams.push('use_mozillas_root_certificates');
 			}
