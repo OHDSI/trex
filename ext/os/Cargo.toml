@@ -10,6 +10,10 @@ path = "lib.rs"
 
 [dependencies]
 deno_core.workspace = true
+deno_error.workspace = true
+deno_signals.workspace = true
+thiserror.workspace = true
 
 libc.workspace = true
 serde.workspace = true
+tokio.workspace = true

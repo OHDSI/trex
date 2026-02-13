@@ -1,4 +1,5 @@
 pub mod connection;
+pub mod query_executor;
 
 use base64::{engine::general_purpose, Engine as _};
 use deno_core::op2;
@@ -48,23 +49,24 @@ type PendingRequestsMap =
 type RequestChannelType = Arc<Mutex<Option<mpsc::Sender<JsonValue>>>>;
 
 static TREX_DB: LazyLock<Arc<Mutex<Connection>>> = LazyLock::new(|| {
-  let cfg = match Config::default().allow_unsigned_extensions() {
-    Ok(c) => c,
-    Err(e) => {
-      eprintln!("Failed to allow unsigned extensions: {e}");
-      Config::default()
-    }
-  };
+  let cfg = Config::default()
+    .allow_unsigned_extensions()
+    .unwrap_or_default();
+
   let conn = Connection::open_in_memory_with_flags(cfg)
-    .expect("Failed to open DuckDB in-memory with config");
+    .expect("failed to open DuckDB in-memory");
+
   if let Ok(path) = std::env::var("DUCKDB_CIRCE_EXTENSION") {
-    let escaped = path.replace('\'', "''");
-    if let Err(e) = conn.execute(&format!("LOAD '{}'", escaped), []) {
-      eprintln!("Failed to LOAD extension from {}: {e}", path);
+    if let Err(e) =
+      conn.execute(&format!("LOAD '{}'", path.replace('\'', "''")), [])
+    {
+      warn!(path, error = %e, "failed to load circe extension");
     }
   } else {
     let _ = conn.execute("LOAD circe", []);
   }
+
+  let _ = connection::init_query_executor(&conn);
   let conn_arc = Arc::new(Mutex::new(conn));
   let _ = connection::init_owned_connection(conn_arc.clone());
   conn_arc
@@ -88,14 +90,22 @@ fn get_active_connection() -> Arc<Mutex<Connection>> {
 #[op2]
 #[string]
 fn op_get_dbc() -> String {
-  return (*(*DB_CREDENTIALS)).lock().unwrap().clone();
+  get_dbc_inner()
+}
+
+fn get_dbc_inner() -> String {
+  DB_CREDENTIALS.lock().unwrap().clone()
 }
 
 #[op2]
 #[string]
 fn op_get_dbc2() -> String {
+  get_dbc2_inner()
+}
+
+fn get_dbc2_inner() -> String {
   let mut base_creds: serde_json::Value =
-    serde_json::from_str(&(*(*DB_CREDENTIALS)).lock().unwrap().clone())
+    serde_json::from_str(&DB_CREDENTIALS.lock().unwrap().clone())
       .unwrap_or_else(
         |_| serde_json::json!({"credentials": [], "publications": {}}),
       );
@@ -191,101 +201,81 @@ fn op_get_dbc2() -> String {
 
 #[op2(fast)]
 fn op_set_dbc(#[string] dbc: String) {
-  *(*(*DB_CREDENTIALS)).lock().unwrap() = dbc;
+  set_dbc_inner(dbc);
+}
+
+fn set_dbc_inner(dbc: String) {
+  *DB_CREDENTIALS.lock().unwrap() = dbc;
 }
 
 #[op2(fast)]
 fn op_install_plugin(#[string] name: String, #[string] dir: String) {
-  // Check if we should use node_modules structure (for backward compatibility with bun)
-  // Environment variable: TPM_USE_NODE_MODULES=false to disable (default: true)
-  let use_node_modules = env::var("TPM_USE_NODE_MODULES")
-    .unwrap_or_else(|_| "true".to_string())
-    .to_lowercase()
-    != "false";
+  use tracing::{error, info};
 
-  // Determine install directory based on structure preference
+  let use_node_modules = env::var("TPM_USE_NODE_MODULES")
+    .map(|v| v.to_lowercase() != "false")
+    .unwrap_or(true);
+
   let install_dir = if use_node_modules {
-    format!("{}/node_modules", dir)
+    format!("{dir}/node_modules")
   } else {
-    dir.clone()
+    dir
   };
 
-  // Try to load TPM extension (ignore if already loaded)
-  let _ = execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![]);
-
-  // Escape SQL special characters
-  let escaped_name = name.replace("'", "''");
-  let escaped_dir = install_dir.replace("'", "''");
+  let _ =
+    execute_query("memory".to_string(), "LOAD 'tpm'".to_string(), vec![], -1);
 
   let sql = format!(
     "SELECT install_results FROM tpm_install('{}', '{}')",
-    escaped_name, escaped_dir
+    name.replace('\'', "''"),
+    install_dir.replace('\'', "''")
   );
 
-  let result = execute_query("memory".to_string(), sql, vec![]);
-
-  match result {
+  match execute_query("memory".to_string(), sql, vec![], -1) {
     Ok(json_str) => {
       match serde_json::from_str::<Vec<serde_json::Value>>(&json_str) {
+        Ok(rows) if rows.is_empty() => {
+          warn!(package = %name, "no packages installed");
+        }
         Ok(rows) => {
-          if rows.is_empty() {
-            eprintln!("Warning: No packages installed for: {}", name);
-            return;
-          }
-
-          let mut success_count = 0;
-          let mut error_count = 0;
-
+          let (mut ok, mut err) = (0usize, 0usize);
           for row in rows {
-            if let Some(install_result) = row.get("install_results") {
-              if let Ok(result_str) =
-                serde_json::from_value::<String>(install_result.clone())
+            if let Some(result) = row
+              .get("install_results")
+              .and_then(|v| serde_json::from_value::<String>(v.clone()).ok())
+              .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            {
+              let pkg = result
+                .get("package")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+              let ver = result
+                .get("version")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+              if result
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
               {
-                if let Ok(result_obj) =
-                  serde_json::from_str::<serde_json::Value>(&result_str)
-                {
-                  let package = result_obj
-                    .get("package")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                  let version = result_obj
-                    .get("version")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                  let success = result_obj
-                    .get("success")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-
-                  if success {
-                    println!("Successfully installed: {}@{}", package, version);
-                    success_count += 1;
-                  } else {
-                    let error = result_obj
-                      .get("error")
-                      .and_then(|v| v.as_str())
-                      .unwrap_or("unknown error");
-                    eprintln!("Failed to install {}: {}", package, error);
-                    error_count += 1;
-                  }
-                }
+                info!(package = pkg, version = ver, "installed");
+                ok += 1;
+              } else {
+                let e = result
+                  .get("error")
+                  .and_then(|v| v.as_str())
+                  .unwrap_or("unknown");
+                error!(package = pkg, error = e, "install failed");
+                err += 1;
               }
             }
           }
-
-          println!(
-            "Plugin installation complete: {} succeeded, {} failed",
-            success_count, error_count
-          );
+          info!(succeeded = ok, failed = err, "plugin install complete");
         }
-        Err(e) => {
-          eprintln!("Warning: Failed to parse installation results: {}. Raw response: {}", e, json_str);
-        }
+        Err(e) => warn!(error = %e, "failed to parse install results"),
       }
     }
-    Err(e) => {
-      eprintln!("Warning: Failed to install plugin '{}': {}. Make sure TPM extension is installed.", name, e);
-    }
+    Err(e) => warn!(package = %name, error = %e, "plugin install failed"),
   }
 }
 
@@ -500,64 +490,86 @@ fn execute_query(
   database: String,
   sql: String,
   params: Vec<TrexType>,
+  worker_id: i32,
 ) -> Result<String, TrexError> {
-  // Wrap the entire DuckDB operation in catch_unwind to prevent panics
-  // from external extensions (like hana_scan) from crashing the V8 runtime
-  let result = panic::catch_unwind(AssertUnwindSafe(|| {
-    execute_query_inner(database, sql, params)
-  }));
+  if let Some(executor) = connection::get_query_executor() {
+    let params_json = serde_json::to_string(&params)
+      .map_err(|e| TrexError::Generic(format!("param serialize: {e}")))?;
 
+    let rx = if worker_id >= 0 {
+      executor.submit_to(worker_id as usize, database, sql, params_json)
+    } else {
+      executor.submit(database, sql, params_json)
+    };
+
+    match rx.recv() {
+      Ok(query_executor::QueryResult::Success(json)) => Ok(json),
+      Ok(query_executor::QueryResult::Error(msg)) => {
+        Err(TrexError::Generic(msg))
+      }
+      Err(_) => Err(TrexError::Generic("executor channel closed".into())),
+    }
+  } else {
+    execute_query_fallback(database, sql, params)
+  }
+}
+
+fn execute_query_fallback(
+  database: String,
+  sql: String,
+  params: Vec<TrexType>,
+) -> Result<String, TrexError> {
+  let result = panic::catch_unwind(AssertUnwindSafe(|| {
+    execute_query_fallback_inner(database, sql, params)
+  }));
   match result {
-    Ok(inner_result) => inner_result,
+    Ok(inner) => inner,
     Err(panic_err) => {
-      let panic_msg = extract_panic_message(panic_err);
-      Err(TrexError::Generic(format!(
-        "Query execution panicked: {panic_msg}"
-      )))
+      let msg = extract_panic_message(panic_err);
+      Err(TrexError::Generic(format!("query panicked: {msg}")))
     }
   }
 }
 
-fn execute_query_inner(
+fn execute_query_fallback_inner(
   database: String,
   sql: String,
   params: Vec<TrexType>,
 ) -> Result<String, TrexError> {
   let conn_arc = get_active_connection();
-  let conn = match conn_arc.lock() {
-    Ok(guard) => guard,
+  let guard = match conn_arc.lock() {
+    Ok(g) => g,
     Err(poisoned) => {
-      warn!("Lock was poisoned, recovering");
+      warn!("lock was poisoned, recovering");
       poisoned.into_inner()
     }
   };
-  let _ = conn
-    .execute(&format!("USE {database}"), [])
-    .inspect_err(|e| warn!("{e}"));
+  let conn = guard
+    .try_clone()
+    .map_err(|e| TrexError::Generic(format!("connection clone: {e}")))?;
+  drop(guard);
+
+  if let Err(e) = conn.execute(&format!("USE {database}"), []) {
+    warn!(database, error = %e, "failed to switch database");
+  }
+
   if sql.trim().is_empty() {
     return Ok("[]".to_string());
   }
-  let tmpstmt = conn
-    .prepare(&sql)
-    .inspect_err(|e| warn!("prepare error: {e:?}"));
-  match tmpstmt {
+
+  match conn.prepare(&sql) {
     Ok(mut stmt) => match stmt.query_arrow(params_from_iter(params.iter())) {
-      Ok(iter) => {
-        let batches: Vec<RecordBatch> = iter.collect();
-        Ok(record_batches_to_json(&batches))
-      }
-      Err(e) => Err(TrexError::Generic(format!("Query execution failed: {e}"))),
+      Ok(iter) => Ok(record_batches_to_json(&iter.collect::<Vec<_>>())),
+      Err(e) => Err(TrexError::Generic(format!("query exec: {e}"))),
     },
     Err(e) => {
-      // Build full error chain for better debugging
-      let err: &dyn StdError = &e;
-      let mut msg = format!("{err}");
-      let mut source = err.source();
+      let mut msg = e.to_string();
+      let mut source = (&e as &dyn StdError).source();
       while let Some(s) = source {
         msg = format!("{msg}: {s}");
         source = s.source();
       }
-      Err(TrexError::Generic(format!("Query failed: {msg}")))
+      Err(TrexError::Generic(msg))
     }
   }
 }
@@ -569,7 +581,26 @@ fn op_execute_query(
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
 ) -> Result<String, TrexError> {
-  execute_query(database, sql, params)
+  execute_query(database, sql, params, -1)
+}
+
+#[op2(fast)]
+#[smi]
+fn op_acquire_worker() -> u32 {
+  connection::get_query_executor()
+    .map(|e| e.next_worker_id() as u32)
+    .unwrap_or(0)
+}
+
+#[op2]
+#[string]
+fn op_execute_query_pinned(
+  #[smi] worker_id: u32,
+  #[string] database: String,
+  #[string] sql: String,
+  #[serde] params: Vec<TrexType>,
+) -> Result<String, TrexError> {
+  execute_query(database, sql, params, worker_id as i32)
 }
 
 pub struct QueryStreamResource {
@@ -595,6 +626,12 @@ impl Resource for RequestResource {
 #[op2(async)]
 #[serde]
 async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, TrexError> {
+  send_request_inner(message).await
+}
+
+async fn send_request_inner(
+  message: JsonValue,
+) -> Result<JsonValue, TrexError> {
   let request_id = Uuid::new_v4().to_string();
 
   let (response_sender, response_receiver) = oneshot::channel::<JsonValue>();
@@ -614,11 +651,9 @@ async fn op_req(#[serde] message: JsonValue) -> Result<JsonValue, TrexError> {
     if let Some(sender) = channel_guard.as_ref() {
       sender.try_send(request_with_id)
     } else {
-      return {
-        let mut pending = PENDING_REQUESTS.lock().unwrap();
-        pending.remove(&request_id);
-        Err(TrexError::Generic("No active listeners".to_string()))
-      };
+      let mut pending = PENDING_REQUESTS.lock().unwrap();
+      pending.remove(&request_id);
+      return Err(TrexError::Generic("No active listeners".to_string()));
     }
   };
 
@@ -706,6 +741,13 @@ fn op_req_respond(
   #[string] request_id: String,
   #[serde] response: JsonValue,
 ) -> Result<serde_json::Value, TrexError> {
+  respond_to_request_inner(request_id, response)
+}
+
+fn respond_to_request_inner(
+  request_id: String,
+  response: JsonValue,
+) -> Result<serde_json::Value, TrexError> {
   let mut pending = PENDING_REQUESTS.lock().unwrap();
 
   if let Some(sender) = pending.remove(&request_id) {
@@ -732,13 +774,23 @@ fn op_execute_query_stream(
     tokio::task::spawn_blocking(move || {
       // Wrap DuckDB operations in catch_unwind to prevent panics from crashing V8
       let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        let conn = match conn_arc.lock() {
-          Ok(guard) => guard,
+        let guard = match conn_arc.lock() {
+          Ok(g) => g,
           Err(poisoned) => {
-            warn!("Lock was poisoned in streaming query, recovering");
+            warn!("lock was poisoned in streaming query, recovering");
             poisoned.into_inner()
           }
         };
+        let conn = match guard.try_clone() {
+          Ok(c) => c,
+          Err(e) => {
+            let _ = sender.blocking_send(format!(
+              "{{\"error\":\"connection clone: {e}\"}}"
+            ));
+            return;
+          }
+        };
+        drop(guard);
         if conn.execute(&format!("USE {database}"), []).is_err() {
           return;
         }
@@ -804,6 +856,8 @@ deno_core::extension!(
     ops = [
         op_install_plugin,
         op_execute_query,
+        op_acquire_worker,
+        op_execute_query_pinned,
         op_get_dbc,
         op_get_dbc2,
         op_set_dbc,
@@ -821,3 +875,814 @@ deno_core::extension!(
         "dbconnection.js"
     ]
 );
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use duckdb::arrow::array::{
+    BinaryArray, BooleanArray, Date32Array, Date64Array, Decimal128Array,
+    Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
+    LargeBinaryArray, LargeStringArray, StringArray, Time32SecondArray,
+    Time64MicrosecondArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray,
+    UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+  };
+  use duckdb::arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+  use duckdb::arrow::record_batch::RecordBatch;
+  use serial_test::serial;
+  use std::sync::Arc;
+
+  fn reset_credentials() {
+    *DB_CREDENTIALS.lock().unwrap() =
+      String::from("{\"credentials\":[], \"publications\":{}}");
+  }
+
+  fn cleanup_request_state() {
+    {
+      let mut ch = REQUEST_CHANNEL.lock().unwrap();
+      *ch = None;
+    }
+    {
+      let mut pending = PENDING_REQUESTS.lock().unwrap();
+      pending.clear();
+    }
+  }
+
+  #[test]
+  fn test_field_value_utf8() {
+    let arr = StringArray::from(vec![Some("hello"), Some("")]);
+    assert_eq!(
+      field_value_to_json(&arr, 0, &DataType::Utf8),
+      JsonValue::String("hello".into())
+    );
+    assert_eq!(
+      field_value_to_json(&arr, 1, &DataType::Utf8),
+      JsonValue::String("".into())
+    );
+  }
+
+  #[test]
+  fn test_field_value_large_utf8() {
+    let arr = LargeStringArray::from(vec![Some("large")]);
+    assert_eq!(
+      field_value_to_json(&arr, 0, &DataType::LargeUtf8),
+      JsonValue::String("large".into())
+    );
+  }
+
+  #[test]
+  fn test_field_value_binary() {
+    let arr = BinaryArray::from(vec![Some(&[0xDE, 0xAD][..])]);
+    let result = field_value_to_json(&arr, 0, &DataType::Binary);
+    assert_eq!(
+      result,
+      JsonValue::String(general_purpose::STANDARD.encode([0xDE, 0xAD]))
+    );
+  }
+
+  #[test]
+  fn test_field_value_large_binary() {
+    let arr = LargeBinaryArray::from(vec![Some(&[0xBE, 0xEF][..])]);
+    let result = field_value_to_json(&arr, 0, &DataType::LargeBinary);
+    assert_eq!(
+      result,
+      JsonValue::String(general_purpose::STANDARD.encode([0xBE, 0xEF]))
+    );
+  }
+
+  #[test]
+  fn test_field_value_null() {
+    let arr = StringArray::from(vec![Option::<&str>::None]);
+    assert_eq!(
+      field_value_to_json(&arr, 0, &DataType::Utf8),
+      JsonValue::Null
+    );
+  }
+
+  #[test]
+  fn test_field_value_integers() {
+    let i8_arr = Int8Array::from(vec![42i8]);
+    assert_eq!(
+      field_value_to_json(&i8_arr, 0, &DataType::Int8),
+      JsonValue::from(42i64)
+    );
+
+    let i16_arr = Int16Array::from(vec![1000i16]);
+    assert_eq!(
+      field_value_to_json(&i16_arr, 0, &DataType::Int16),
+      JsonValue::from(1000i64)
+    );
+
+    let i32_arr = Int32Array::from(vec![100_000i32]);
+    assert_eq!(
+      field_value_to_json(&i32_arr, 0, &DataType::Int32),
+      JsonValue::from(100_000i64)
+    );
+
+    let i64_arr = Int64Array::from(vec![9_000_000_000i64]);
+    assert_eq!(
+      field_value_to_json(&i64_arr, 0, &DataType::Int64),
+      JsonValue::from(9_000_000_000i64)
+    );
+  }
+
+  #[test]
+  fn test_field_value_unsigned_integers() {
+    let u8_arr = UInt8Array::from(vec![255u8]);
+    assert_eq!(
+      field_value_to_json(&u8_arr, 0, &DataType::UInt8),
+      JsonValue::from(255u64)
+    );
+
+    let u16_arr = UInt16Array::from(vec![65535u16]);
+    assert_eq!(
+      field_value_to_json(&u16_arr, 0, &DataType::UInt16),
+      JsonValue::from(65535u64)
+    );
+
+    let u32_arr = UInt32Array::from(vec![4_000_000_000u32]);
+    assert_eq!(
+      field_value_to_json(&u32_arr, 0, &DataType::UInt32),
+      JsonValue::from(4_000_000_000u64)
+    );
+
+    let u64_arr = UInt64Array::from(vec![u64::MAX]);
+    assert_eq!(
+      field_value_to_json(&u64_arr, 0, &DataType::UInt64),
+      JsonValue::from(u64::MAX)
+    );
+  }
+
+  #[test]
+  fn test_field_value_floats() {
+    let f32_arr = Float32Array::from(vec![1.23f32]);
+    let result = field_value_to_json(&f32_arr, 0, &DataType::Float32);
+    let val = result.as_f64().unwrap();
+    assert!((val - 1.23).abs() < 0.001);
+
+    let f64_arr = Float64Array::from(vec![9.876_543_21f64]);
+    assert_eq!(
+      field_value_to_json(&f64_arr, 0, &DataType::Float64),
+      JsonValue::from(9.876_543_21f64)
+    );
+  }
+
+  #[test]
+  fn test_field_value_boolean() {
+    let arr = BooleanArray::from(vec![Some(true), Some(false)]);
+    assert_eq!(
+      field_value_to_json(&arr, 0, &DataType::Boolean),
+      JsonValue::from(true)
+    );
+    assert_eq!(
+      field_value_to_json(&arr, 1, &DataType::Boolean),
+      JsonValue::from(false)
+    );
+  }
+
+  #[test]
+  fn test_field_value_date32() {
+    let arr = Date32Array::from(vec![19723]);
+    let result = field_value_to_json(&arr, 0, &DataType::Date32);
+    assert_eq!(result, JsonValue::String("2024-01-01".into()));
+  }
+
+  #[test]
+  fn test_field_value_date64() {
+    let arr = Date64Array::from(vec![1703980800000i64]);
+    let result = field_value_to_json(&arr, 0, &DataType::Date64);
+    assert_eq!(result, JsonValue::String("2023-12-31".into()));
+  }
+
+  #[test]
+  fn test_field_value_time32() {
+    let arr = Time32SecondArray::from(vec![3661]);
+    let result =
+      field_value_to_json(&arr, 0, &DataType::Time32(TimeUnit::Second));
+    assert_eq!(result, JsonValue::from(3661));
+  }
+
+  #[test]
+  fn test_field_value_time64() {
+    let arr = Time64MicrosecondArray::from(vec![1_000_000i64]);
+    let result =
+      field_value_to_json(&arr, 0, &DataType::Time64(TimeUnit::Microsecond));
+    assert_eq!(result, JsonValue::from(1_000_000i64));
+  }
+
+  #[test]
+  fn test_field_value_timestamp_second() {
+    let arr = TimestampSecondArray::from(vec![1704067200i64]);
+    let result = field_value_to_json(
+      &arr,
+      0,
+      &DataType::Timestamp(TimeUnit::Second, None),
+    );
+    let s = result.as_str().unwrap();
+    assert!(s.starts_with("2024-01-01T00:00:00"));
+  }
+
+  #[test]
+  fn test_field_value_timestamp_millisecond() {
+    let arr = TimestampMillisecondArray::from(vec![1704067200000i64]);
+    let result = field_value_to_json(
+      &arr,
+      0,
+      &DataType::Timestamp(TimeUnit::Millisecond, None),
+    );
+    let s = result.as_str().unwrap();
+    assert!(s.starts_with("2024-01-01T00:00:00"));
+  }
+
+  #[test]
+  fn test_field_value_timestamp_microsecond() {
+    let arr = TimestampMicrosecondArray::from(vec![1_704_067_200_000_000i64]);
+    let result = field_value_to_json(
+      &arr,
+      0,
+      &DataType::Timestamp(TimeUnit::Microsecond, None),
+    );
+    let s = result.as_str().unwrap();
+    assert!(s.starts_with("2024-01-01T00:00:00"));
+  }
+
+  #[test]
+  fn test_field_value_timestamp_nanosecond() {
+    let arr =
+      TimestampNanosecondArray::from(vec![1_704_067_200_000_000_000i64]);
+    let result = field_value_to_json(
+      &arr,
+      0,
+      &DataType::Timestamp(TimeUnit::Nanosecond, None),
+    );
+    let s = result.as_str().unwrap();
+    assert!(s.starts_with("2024-01-01T00:00:00"));
+  }
+
+  #[test]
+  fn test_field_value_decimal128() {
+    let arr = Decimal128Array::from(vec![12345i128])
+      .with_precision_and_scale(10, 2)
+      .unwrap();
+    let result = field_value_to_json(&arr, 0, &DataType::Decimal128(10, 2));
+    assert_eq!(result, JsonValue::from(123.45));
+  }
+
+  #[test]
+  fn test_field_value_unsupported_type() {
+    let arr = Int32Array::from(vec![1]);
+    let result = field_value_to_json(&arr, 0, &DataType::Null);
+    assert_eq!(result, JsonValue::Null);
+  }
+
+  #[test]
+  fn test_record_batches_to_json_empty() {
+    let result = record_batches_to_json(&[]);
+    assert_eq!(result, "[]");
+  }
+
+  #[test]
+  fn test_record_batches_to_json_single_row() {
+    let schema = Arc::new(Schema::new(vec![
+      Field::new("name", DataType::Utf8, false),
+      Field::new("age", DataType::Int32, false),
+    ]));
+    let batch = RecordBatch::try_new(
+      schema,
+      vec![
+        Arc::new(StringArray::from(vec!["Alice"])),
+        Arc::new(Int32Array::from(vec![30])),
+      ],
+    )
+    .unwrap();
+    let result = record_batches_to_json(&[batch]);
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0]["name"], "Alice");
+    assert_eq!(parsed[0]["age"], 30);
+  }
+
+  #[test]
+  fn test_record_batches_to_json_multiple_rows() {
+    let schema =
+      Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+    let batch = RecordBatch::try_new(
+      schema,
+      vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+    )
+    .unwrap();
+    let result = record_batches_to_json(&[batch]);
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed.len(), 3);
+    assert_eq!(parsed[0]["id"], 1);
+    assert_eq!(parsed[1]["id"], 2);
+    assert_eq!(parsed[2]["id"], 3);
+  }
+
+  #[test]
+  fn test_record_batches_to_json_multiple_batches() {
+    let schema =
+      Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+    let batch1 = RecordBatch::try_new(
+      schema.clone(),
+      vec![Arc::new(Int32Array::from(vec![10]))],
+    )
+    .unwrap();
+    let batch2 =
+      RecordBatch::try_new(schema, vec![Arc::new(Int32Array::from(vec![20]))])
+        .unwrap();
+    let result = record_batches_to_json(&[batch1, batch2]);
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0]["v"], 10);
+    assert_eq!(parsed[1]["v"], 20);
+  }
+
+  #[test]
+  fn test_record_batches_to_json_mixed_nulls() {
+    let schema = Arc::new(Schema::new(vec![
+      Field::new("a", DataType::Utf8, true),
+      Field::new("b", DataType::Int32, true),
+    ]));
+    let batch = RecordBatch::try_new(
+      schema,
+      vec![
+        Arc::new(StringArray::from(vec![Some("x"), None])),
+        Arc::new(Int32Array::from(vec![None, Some(5)])),
+      ],
+    )
+    .unwrap();
+    let result = record_batches_to_json(&[batch]);
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0]["a"], "x");
+    assert!(parsed[0]["b"].is_null());
+    assert!(parsed[1]["a"].is_null());
+    assert_eq!(parsed[1]["b"], 5);
+  }
+
+  #[test]
+  fn test_extract_panic_message_str() {
+    let payload: Box<dyn std::any::Any + Send> = Box::new("boom");
+    assert_eq!(extract_panic_message(payload), "boom");
+  }
+
+  #[test]
+  fn test_extract_panic_message_string() {
+    let payload: Box<dyn std::any::Any + Send> =
+      Box::new(String::from("kaboom"));
+    assert_eq!(extract_panic_message(payload), "kaboom");
+  }
+
+  #[test]
+  fn test_extract_panic_message_unknown() {
+    let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+    assert_eq!(extract_panic_message(payload), "Unknown panic");
+  }
+
+  #[test]
+  fn test_trex_type_integer_to_sql() {
+    let t = TrexType::Integer(42);
+    let out = t.to_sql().unwrap();
+    match out {
+      ToSqlOutput::Owned(Value::BigInt(v)) => assert_eq!(v, 42),
+      ToSqlOutput::Owned(Value::Int(v)) => assert_eq!(v, 42),
+      other => panic!("unexpected output: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_trex_type_string_to_sql() {
+    let t = TrexType::String("hello".into());
+    let out = t.to_sql().unwrap();
+    match out {
+      ToSqlOutput::Owned(Value::Text(s)) => assert_eq!(s, "hello"),
+      other => panic!("unexpected output: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_trex_type_number_to_sql() {
+    let t = TrexType::Number(1.23);
+    let out = t.to_sql().unwrap();
+    match out {
+      ToSqlOutput::Owned(Value::Double(v)) => {
+        assert!((v - 1.23).abs() < f64::EPSILON)
+      }
+      other => panic!("unexpected output: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_trex_type_datetime_to_sql() {
+    let t = TrexType::DateTime(1704067200000);
+    let out = t.to_sql().unwrap();
+    match out {
+      ToSqlOutput::Owned(Value::Timestamp(
+        duckdb::types::TimeUnit::Millisecond,
+        v,
+      )) => assert_eq!(v, 1704067200000),
+      other => panic!("unexpected output: {:?}", other),
+    }
+  }
+
+  #[test]
+  fn test_trex_type_serde_roundtrip() {
+    let values = vec![
+      TrexType::Integer(42),
+      TrexType::String("test".into()),
+      TrexType::Number(2.5),
+      TrexType::DateTime(1000),
+    ];
+    let json = serde_json::to_string(&values).unwrap();
+    let back: Vec<TrexType> = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.len(), 4);
+    let json2 = serde_json::to_string(&back).unwrap();
+    assert_eq!(json, json2);
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_simple_select() {
+    let result =
+      execute_query("memory".into(), "SELECT 1 AS val".into(), vec![], -1);
+    let json_str = result.unwrap();
+    let parsed: Vec<JsonValue> = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0]["val"], 1);
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_empty_sql() {
+    let result = execute_query("memory".into(), "".into(), vec![], -1);
+    assert_eq!(result.unwrap(), "[]");
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_create_and_select() {
+    let _ = execute_query(
+      "memory".into(),
+      "CREATE TABLE IF NOT EXISTS test_cq_tbl (id INTEGER, name VARCHAR)"
+        .into(),
+      vec![],
+      -1,
+    );
+    let _ = execute_query(
+      "memory".into(),
+      "INSERT INTO test_cq_tbl VALUES (1, 'Alice'), (2, 'Bob')".into(),
+      vec![],
+      -1,
+    );
+    let result = execute_query(
+      "memory".into(),
+      "SELECT * FROM test_cq_tbl ORDER BY id".into(),
+      vec![],
+      -1,
+    )
+    .unwrap();
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed.len(), 2);
+    assert_eq!(parsed[0]["name"], "Alice");
+    assert_eq!(parsed[1]["name"], "Bob");
+    let _ = execute_query(
+      "memory".into(),
+      "DROP TABLE IF EXISTS test_cq_tbl".into(),
+      vec![],
+      -1,
+    );
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_with_params() {
+    let result = execute_query(
+      "memory".into(),
+      "SELECT $1::INTEGER AS a, $2::VARCHAR AS b, $3::DOUBLE AS c".into(),
+      vec![
+        TrexType::Integer(42),
+        TrexType::String("hi".into()),
+        TrexType::Number(1.23),
+      ],
+      -1,
+    )
+    .unwrap();
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed[0]["a"], 42);
+    assert_eq!(parsed[0]["b"], "hi");
+    let c = parsed[0]["c"].as_f64().unwrap();
+    assert!((c - 1.23).abs() < 0.001);
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_with_datetime_param() {
+    let result = execute_query(
+      "memory".into(),
+      "SELECT $1::TIMESTAMP AS ts".into(),
+      vec![TrexType::DateTime(1704067200000)],
+      -1,
+    )
+    .unwrap();
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    let ts = parsed[0]["ts"].as_str().unwrap();
+    assert!(ts.contains("2024-01-01"));
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_invalid_sql() {
+    let result =
+      execute_query("memory".into(), "NOT VALID SQL".into(), vec![], -1);
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(!err_msg.is_empty());
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_multiple_rows() {
+    let result = execute_query(
+      "memory".into(),
+      "SELECT * FROM generate_series(1, 5) AS t(n)".into(),
+      vec![],
+      -1,
+    )
+    .unwrap();
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed.len(), 5);
+  }
+
+  #[test]
+  #[serial]
+  fn test_execute_query_various_types() {
+    let _ = execute_query(
+      "memory".into(),
+      "CREATE TABLE IF NOT EXISTS test_types (
+        i INTEGER, v VARCHAR, d DOUBLE, b BOOLEAN, dt DATE, ts TIMESTAMP
+      )"
+      .into(),
+      vec![],
+      -1,
+    );
+    let _ = execute_query(
+      "memory".into(),
+      "INSERT INTO test_types VALUES (1, 'hello', 1.5, true, '2024-01-01', '2024-01-01 12:00:00')"
+        .into(),
+      vec![],
+      -1,
+    );
+    let result = execute_query(
+      "memory".into(),
+      "SELECT * FROM test_types".into(),
+      vec![],
+      -1,
+    )
+    .unwrap();
+    let parsed: Vec<JsonValue> = serde_json::from_str(&result).unwrap();
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0]["i"], 1);
+    assert_eq!(parsed[0]["v"], "hello");
+    assert_eq!(parsed[0]["b"], true);
+    assert!(parsed[0]["dt"].as_str().unwrap().contains("2024-01-01"));
+    let _ = execute_query(
+      "memory".into(),
+      "DROP TABLE IF EXISTS test_types".into(),
+      vec![],
+      -1,
+    );
+  }
+
+  fn get_dbc() -> String {
+    get_dbc_inner()
+  }
+
+  fn set_dbc(dbc: String) {
+    set_dbc_inner(dbc);
+  }
+
+  fn get_dbc2() -> String {
+    get_dbc2_inner()
+  }
+
+  async fn send_request(message: JsonValue) -> Result<JsonValue, TrexError> {
+    send_request_inner(message).await
+  }
+
+  fn respond_to_request(
+    request_id: String,
+    response: JsonValue,
+  ) -> Result<serde_json::Value, TrexError> {
+    respond_to_request_inner(request_id, response)
+  }
+
+  #[test]
+  #[serial]
+  fn test_get_dbc_default() {
+    reset_credentials();
+    let result = get_dbc();
+    let parsed: JsonValue = serde_json::from_str(&result).unwrap();
+    assert!(parsed["credentials"].as_array().unwrap().is_empty());
+  }
+
+  #[test]
+  #[serial]
+  fn test_set_and_get_dbc() {
+    let creds = r#"{"credentials":[{"id":"TEST"}], "publications":{}}"#;
+    set_dbc(creds.into());
+    let result = get_dbc();
+    assert_eq!(result, creds);
+    reset_credentials();
+  }
+
+  #[test]
+  #[serial]
+  fn test_get_dbc2_no_env_vars() {
+    reset_credentials();
+    env::remove_var("TREX__SQL__HOST");
+    env::remove_var("TREX__SQL__PORT");
+    env::remove_var("TREX__SQL__USER");
+    env::remove_var("TREX__SQL__PASSWORD");
+    env::remove_var("TREX__SQL__DBNAME");
+    env::remove_var("PG__HOST");
+    env::remove_var("PG__FHIR_DB_NAME");
+    env::remove_var("PG_USER");
+    env::remove_var("PG_PASSWORD");
+    env::remove_var("PG__PORT");
+
+    let result = get_dbc2();
+    let parsed: JsonValue = serde_json::from_str(&result).unwrap();
+    assert!(parsed["credentials"].as_array().unwrap().is_empty());
+  }
+
+  #[test]
+  #[serial]
+  fn test_get_dbc2_with_trex_sql_env() {
+    reset_credentials();
+    env::set_var("TREX__SQL__HOST", "localhost");
+    env::set_var("TREX__SQL__PORT", "5432");
+    env::set_var("TREX__SQL__USER", "user1");
+    env::set_var("TREX__SQL__PASSWORD", "pass1");
+    env::set_var("TREX__SQL__DBNAME", "testdb");
+
+    let result = get_dbc2();
+    let parsed: JsonValue = serde_json::from_str(&result).unwrap();
+    let creds = parsed["credentials"].as_array().unwrap();
+    assert!(creds.iter().any(|c| c["id"] == "RESULT"));
+    let result_entry = creds.iter().find(|c| c["id"] == "RESULT").unwrap();
+    assert_eq!(result_entry["host"], "localhost");
+    assert_eq!(result_entry["name"], "testdb");
+
+    env::remove_var("TREX__SQL__HOST");
+    env::remove_var("TREX__SQL__PORT");
+    env::remove_var("TREX__SQL__USER");
+    env::remove_var("TREX__SQL__PASSWORD");
+    env::remove_var("TREX__SQL__DBNAME");
+    reset_credentials();
+  }
+
+  #[test]
+  #[serial]
+  fn test_get_dbc2_with_pg_env() {
+    reset_credentials();
+    env::remove_var("TREX__SQL__HOST");
+    env::remove_var("TREX__SQL__PORT");
+    env::remove_var("TREX__SQL__USER");
+    env::remove_var("TREX__SQL__PASSWORD");
+    env::remove_var("TREX__SQL__DBNAME");
+
+    env::set_var("PG__HOST", "pghost");
+    env::set_var("PG__FHIR_DB_NAME", "fhirdb");
+    env::set_var("PG_USER", "pguser");
+    env::set_var("PG_PASSWORD", "pgpass");
+
+    let result = get_dbc2();
+    let parsed: JsonValue = serde_json::from_str(&result).unwrap();
+    let creds = parsed["credentials"].as_array().unwrap();
+    assert!(creds.iter().any(|c| c["id"] == "FHIR"));
+    let fhir_entry = creds.iter().find(|c| c["id"] == "FHIR").unwrap();
+    assert_eq!(fhir_entry["host"], "pghost");
+    assert_eq!(fhir_entry["name"], "fhirdb");
+
+    env::remove_var("PG__HOST");
+    env::remove_var("PG__FHIR_DB_NAME");
+    env::remove_var("PG_USER");
+    env::remove_var("PG_PASSWORD");
+    env::remove_var("PG__PORT");
+    reset_credentials();
+  }
+
+  #[test]
+  #[serial]
+  fn test_get_dbc2_no_duplicate_entries() {
+    let creds =
+      r#"{"credentials":[{"id":"RESULT","code":"RESULT"}], "publications":{}}"#;
+    set_dbc(creds.into());
+
+    env::set_var("TREX__SQL__HOST", "localhost");
+    env::set_var("TREX__SQL__PORT", "5432");
+    env::set_var("TREX__SQL__USER", "user1");
+    env::set_var("TREX__SQL__PASSWORD", "pass1");
+    env::set_var("TREX__SQL__DBNAME", "testdb");
+
+    let result = get_dbc2();
+    let parsed: JsonValue = serde_json::from_str(&result).unwrap();
+    let creds = parsed["credentials"].as_array().unwrap();
+    let result_count = creds.iter().filter(|c| c["id"] == "RESULT").count();
+    assert_eq!(result_count, 1, "RESULT entry should not be duplicated");
+
+    env::remove_var("TREX__SQL__HOST");
+    env::remove_var("TREX__SQL__PORT");
+    env::remove_var("TREX__SQL__USER");
+    env::remove_var("TREX__SQL__PASSWORD");
+    env::remove_var("TREX__SQL__DBNAME");
+    reset_credentials();
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_request_respond_roundtrip() {
+    cleanup_request_state();
+
+    let (tx, mut rx) = mpsc::channel::<JsonValue>(100);
+    {
+      let mut ch = REQUEST_CHANNEL.lock().unwrap();
+      *ch = Some(tx);
+    }
+
+    let response_handle = tokio::spawn(async move {
+      if let Some(msg) = rx.recv().await {
+        let id = msg["id"].as_str().unwrap().to_string();
+        let response = serde_json::json!({"status": "ok"});
+        let result = respond_to_request(id, response);
+        assert!(result.is_ok());
+      }
+    });
+
+    let result = send_request(serde_json::json!({"action": "test"})).await;
+    assert!(result.is_ok());
+    let response = result.unwrap();
+    assert_eq!(response["status"], "ok");
+
+    response_handle.await.unwrap();
+    cleanup_request_state();
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_request_no_listener() {
+    cleanup_request_state();
+
+    let result = send_request(serde_json::json!({"action": "test"})).await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("No active listeners"));
+
+    cleanup_request_state();
+  }
+
+  #[test]
+  #[serial]
+  fn test_request_respond_unknown_id() {
+    cleanup_request_state();
+
+    let result =
+      respond_to_request("nonexistent-id".into(), serde_json::json!({}));
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), serde_json::Value::Bool(false));
+
+    cleanup_request_state();
+  }
+
+  #[tokio::test]
+  #[serial]
+  async fn test_request_cleanup_on_dropped_sender() {
+    cleanup_request_state();
+
+    let (tx, mut rx) = mpsc::channel::<JsonValue>(100);
+    {
+      let mut ch = REQUEST_CHANNEL.lock().unwrap();
+      *ch = Some(tx);
+    }
+
+    let handle = tokio::spawn(async move {
+      let msg = rx.recv().await;
+      assert!(msg.is_some());
+      let id = msg.unwrap()["id"].as_str().unwrap().to_string();
+      let sender = {
+        let mut pending = PENDING_REQUESTS.lock().unwrap();
+        pending.remove(&id)
+      };
+      drop(sender);
+    });
+
+    let result = send_request(serde_json::json!({"action": "test"})).await;
+    assert!(result.is_err());
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("cancelled"));
+
+    handle.await.unwrap();
+    cleanup_request_state();
+  }
+}
