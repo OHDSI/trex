@@ -9,7 +9,7 @@ EXTENSION_NAME=trexas
 USE_UNSTABLE_C_API=1
 
 # Target DuckDB version
-TARGET_DUCKDB_VERSION=v1.4.0
+TARGET_DUCKDB_VERSION=v1.4.4
 
 # Override target path for workspace build before include
 TARGET_PATH=../../target
