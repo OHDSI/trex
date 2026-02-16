@@ -560,17 +560,31 @@ pub unsafe fn extension_entrypoint(
     }
   }
 
+  con.register_scalar_function::<TrexVersionScalar>("trex_runtime_version")?;
   con.register_scalar_function::<TrexVersionScalar>("trex_version")?;
+  con
+    .register_scalar_function::<StartTrexServerScalar>("trex_runtime_start")?;
   con.register_scalar_function::<StartTrexServerScalar>("trex_start_server")?;
+  con.register_scalar_function::<StartTrexServerWithConfigScalar>(
+    "trex_runtime_start_with_config",
+  )?;
   con.register_scalar_function::<StartTrexServerWithConfigScalar>(
     "trex_start_server_with_config",
   )?;
+  con.register_scalar_function::<StopTrexServerScalar>("trex_runtime_stop")?;
   con.register_scalar_function::<StopTrexServerScalar>("trex_stop_server")?;
+  con.register_scalar_function::<StopAllTrexServersScalar>(
+    "trex_runtime_stop_all",
+  )?;
   con.register_scalar_function::<StopAllTrexServersScalar>(
     "trex_stop_all_servers",
   )?;
+  con.register_scalar_function::<TrexCreateBundleScalar>(
+    "trex_runtime_create_bundle",
+  )?;
   con
     .register_scalar_function::<TrexCreateBundleScalar>("trex_create_bundle")?;
+  con.register_table_function::<TrexServersTable>("trex_runtime_list")?;
   con.register_table_function::<TrexServersTable>("trex_list_servers")?;
 
   Ok(())
