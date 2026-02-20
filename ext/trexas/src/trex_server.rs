@@ -149,7 +149,6 @@ impl ServerConfig {
       restrict_host_fs: self.restrict_host_fs,
     }
   }
-
 }
 
 pub struct ServerManager {
