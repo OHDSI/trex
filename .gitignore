@@ -1,6 +1,7 @@
 /.*
 !.github
 !.dockerignore
+!.npmrc
 node_modules
 /target
 /cert
