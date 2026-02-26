@@ -124,7 +124,7 @@ class Node:
     def execute(self, sql):
         """Execute SQL and return fetchall() result (list of tuples)."""
         self._cmd_queue.put(sql)
-        status, data = self._result_queue.get(timeout=30)
+        status, data = self._result_queue.get(timeout=90)
         if status == "error":
             raise RuntimeError(data)
         return data
