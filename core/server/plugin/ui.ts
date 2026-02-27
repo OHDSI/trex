@@ -34,14 +34,15 @@ export function addPlugin(app: Express, value: any, dir: string, fullName: strin
       // SPA fallback: serve index.html for non-file paths
       if (r.spa) {
         const indexPath = join(fsPath, "index.html");
-        app.use(fullPrefix, (_req, res, next) => {
-          try {
-            res.sendFile(indexPath);
-          } catch {
-            next();
-          }
-        });
-        console.log(`Registered SPA fallback: ${fullPrefix}/* -> ${indexPath}`);
+        try {
+          const html = Deno.readTextFileSync(indexPath);
+          app.use(fullPrefix, (_req, res) => {
+            res.type("html").send(html);
+          });
+          console.log(`Registered SPA fallback: ${fullPrefix}/* -> ${indexPath}`);
+        } catch {
+          console.warn(`SPA fallback skipped (index.html not found): ${indexPath}`);
+        }
       }
     }
   }
