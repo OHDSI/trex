@@ -58,7 +58,7 @@ export function Sessions() {
 
   const handleRevoke = async (sessionId: string) => {
     try {
-      await authClient.admin.revokeUserSession({ sessionId });
+      await authClient.admin.revokeUserSession({ sessionToken: sessionId });
       toast.success("Session revoked");
     } catch {
       toast.error("Failed to revoke session");
