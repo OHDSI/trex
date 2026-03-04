@@ -3,6 +3,7 @@
 use crate::query_executor::{QueryExecutor, EXECUTOR_POOL_SIZE};
 use duckdb::Connection;
 use std::sync::{Arc, Mutex, OnceLock};
+use tracing::warn;
 
 static QUERY_EXECUTOR: OnceLock<Arc<QueryExecutor>> = OnceLock::new();
 static CONNECTION_PROVIDER: OnceLock<Arc<dyn ConnectionProvider>> =
@@ -31,12 +32,22 @@ impl StreamingPool {
   }
 
   pub fn acquire(&self) -> Option<Connection> {
-    self.connections.lock().ok()?.pop()
+    match self.connections.lock() {
+      Ok(mut pool) => pool.pop(),
+      Err(poisoned) => {
+        warn!("streaming pool lock poisoned on acquire, recovering");
+        poisoned.into_inner().pop()
+      }
+    }
   }
 
   pub fn release(&self, conn: Connection) {
-    if let Ok(mut pool) = self.connections.lock() {
-      pool.push(conn);
+    match self.connections.lock() {
+      Ok(mut pool) => pool.push(conn),
+      Err(poisoned) => {
+        warn!("streaming pool lock poisoned on release, recovering");
+        poisoned.into_inner().push(conn);
+      }
     }
   }
 }
@@ -163,6 +174,21 @@ mod tests {
     let row = rows.next().unwrap().unwrap();
     let val: i32 = row.get(0).unwrap();
     assert_eq!(val, 42);
+  }
+
+  #[test]
+  fn test_streaming_pool_acquire_release() {
+    let conn = Connection::open_in_memory().unwrap();
+    let pool = StreamingPool::new(&conn, 2).unwrap();
+
+    let c1 = pool.acquire();
+    let c2 = pool.acquire();
+    assert!(c1.is_some());
+    assert!(c2.is_some());
+    assert!(pool.acquire().is_none());
+
+    pool.release(c1.unwrap());
+    assert!(pool.acquire().is_some());
   }
 
   #[test]

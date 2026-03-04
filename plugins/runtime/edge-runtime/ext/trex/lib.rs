@@ -68,7 +68,9 @@ static TREX_DB: LazyLock<Arc<Mutex<Connection>>> = LazyLock::new(|| {
   }
 
   let _ = connection::init_query_executor(&conn);
-  let _ = connection::init_streaming_pool(&conn);
+  if let Err(e) = connection::init_streaming_pool(&conn) {
+    warn!(error = %e, "failed to initialize streaming pool");
+  }
   let conn_arc = Arc::new(Mutex::new(conn));
   let _ = connection::init_owned_connection(conn_arc.clone());
   conn_arc
@@ -882,7 +884,7 @@ fn op_execute_query_stream(
         }
         Err(e) => {
           let msg = extract_panic_message(e);
-          warn!("Streaming query panicked: {msg}");
+          warn!("Streaming query panicked, connection lost from pool: {msg}");
           let error_json = serde_json::json!({
             "error": format!("Query execution panicked: {}", msg)
           });
