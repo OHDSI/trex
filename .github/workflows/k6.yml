@@ -59,7 +59,9 @@ jobs:
         run: |
           K6_VERSION="v0.52.0"
           K6_ARCH="amd64"
+          K6_SHA256="8b94f8f5b4805a128f09ba9b65b6681eabe810b5b3e0b64433587523e7677cb7"
           curl -OL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-${K6_ARCH}.tar.gz" --output-dir /tmp
+          echo "${K6_SHA256}  /tmp/k6-${K6_VERSION}-linux-${K6_ARCH}.tar.gz" | sha256sum -c -
           tar -xzf "/tmp/k6-${K6_VERSION}-linux-${K6_ARCH}.tar.gz" -C /tmp
           sudo mv "/tmp/k6-${K6_VERSION}-linux-${K6_ARCH}/k6" /usr/local/bin/
           chmod +x /usr/local/bin/k6
@@ -85,7 +87,7 @@ jobs:
       - name: Wait for server
         run: |
           for i in $(seq 1 30); do
-            if curl -so /dev/null -w '%{http_code}' http://127.0.0.1:9998 2>/dev/null | grep -q '^[0-9]'; then
+            if curl -so /dev/null --fail http://127.0.0.1:9998 2>/dev/null; then
               echo "Server is ready"
               exit 0
             fi
@@ -96,7 +98,9 @@ jobs:
           exit 1
 
       - name: Run k6 specs
+        shell: bash
         run: |
+          set -o pipefail
           mkdir -p /tmp/k6-results
           K6_TARGET="http://127.0.0.1:9998"
           K6_RUN_PROFILE="performance"
