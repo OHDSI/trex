@@ -5,7 +5,7 @@ use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
-use arrow::array::{Array, RecordBatch, StringArray};
+use arrow::array::{Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use datafusion::catalog::Session;
@@ -112,35 +112,11 @@ impl DuckDBTableProvider {
 
     /// Resolve schema via `PRAGMA table_info`: name (col 1), type (col 2), notnull (col 3).
     fn resolve_schema(table_name: &str) -> DFResult<Schema> {
-        let conn_arc = crate::get_shared_connection().ok_or_else(|| {
-            datafusion::error::DataFusionError::Execution(
-                "Shared trexsql connection is not available".to_string(),
-            )
-        })?;
-
-        let conn = conn_arc.lock().map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to lock shared connection: {e}"
-            ))
-        })?;
-
         let sql = format!("PRAGMA table_info(\"{}\")", crate::catalog::escape_identifier(table_name));
-        let mut stmt = conn.prepare(&sql).map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!(
-                "Failed to query table info for '{}': {e}",
-                table_name
-            ))
-        })?;
-
-        let batches: Vec<RecordBatch> = stmt
-            .query_arrow([])
-            .map_err(|e| {
-                datafusion::error::DataFusionError::Execution(format!(
-                    "Failed to execute PRAGMA table_info for '{}': {e}",
-                    table_name
-                ))
-            })?
-            .collect();
+        let (_schema, batches) = crate::connection_pool::submit_query_blocking(&sql)
+            .map_err(|e| datafusion::error::DataFusionError::Execution(
+                format!("Failed to resolve schema for '{}': {e}", table_name)
+            ))?;
 
         let mut fields = Vec::new();
         for batch in &batches {

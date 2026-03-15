@@ -48,20 +48,7 @@ impl TrexSQLExecutor {
 
     /// Query local trexsql and return Arrow batches (no IPC — same arrow crate).
     fn query_trexsql(&self, sql: &str) -> Result<(SchemaRef, Vec<arrow::array::RecordBatch>), String> {
-        let conn_arc = crate::get_shared_connection()
-            .ok_or("Shared trexsql connection not available")?;
-        let conn = conn_arc.lock().map_err(|e| format!("Lock failed: {e}"))?;
-
-        let mut stmt = conn.prepare(sql).map_err(|e| format!("Prepare failed: {e}"))?;
-        let batches: Vec<arrow::array::RecordBatch> =
-            stmt.query_arrow([]).map_err(|e| format!("Query failed: {e}"))?.collect();
-
-        let schema = batches
-            .first()
-            .map(|b| b.schema())
-            .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
-
-        Ok((schema, batches))
+        crate::connection_pool::submit_query_blocking(sql)
     }
 }
 

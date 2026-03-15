@@ -98,33 +98,32 @@ fn execute_on_connection(
     let merged = concat_batches(schema, &batches)
         .map_err(|e| format!("Failed to concatenate record batches: {e}"))?;
 
-    let conn_arc = crate::get_shared_connection().ok_or_else(|| {
-        "Shared DuckDB connection not available (extension not initialised?)".to_string()
+    let pool = crate::connection_pool::get_pool().map_err(|e| {
+        format!("Connection pool not available (extension not initialised?): {e}")
     })?;
-    let conn = conn_arc
-        .lock()
-        .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
 
-    let _ = conn.register_table_function::<ArrowVTab>("arrow");
+    pool.with_connection(|conn| {
+        let _ = conn.register_table_function::<ArrowVTab>("arrow");
 
-    let params = arrow_recordbatch_to_query_params(merged);
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| format!("Failed to prepare final pass SQL: {e}"))?;
+        let params = arrow_recordbatch_to_query_params(merged);
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| format!("Failed to prepare final pass SQL: {e}"))?;
 
-    let result_batches: Vec<RecordBatch> = stmt
-        .query_arrow(params)
-        .map_err(|e| format!("Failed to execute final pass SQL: {e}"))?
-        .collect();
+        let result_batches: Vec<RecordBatch> = stmt
+            .query_arrow(params)
+            .map_err(|e| format!("Failed to execute final pass SQL: {e}"))?
+            .collect();
 
-    let result_schema = result_batches
-        .first()
-        .map(|b| b.schema())
-        .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
+        let result_schema = result_batches
+            .first()
+            .map(|b| b.schema())
+            .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
 
-    Ok(FinalPassResult {
-        schema: result_schema,
-        batches: result_batches,
+        Ok(FinalPassResult {
+            schema: result_schema,
+            batches: result_batches,
+        })
     })
 }
 

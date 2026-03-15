@@ -1,4 +1,4 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use arrow::array::{Array, RecordBatch};
@@ -10,14 +10,14 @@ use arrow_flight::{
     Action, ActionType, Criteria, Empty, FlightData, FlightDescriptor, FlightInfo,
     HandshakeRequest, HandshakeResponse, PollInfo, PutResult, SchemaAsIpc, SchemaResult, Ticket,
 };
-use duckdb::{params, Connection};
+use duckdb::params;
 use futures::stream::{self, BoxStream};
 use futures::{StreamExt, TryStreamExt};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 use tokio::sync::oneshot;
 
-use crate::get_shared_connection;
+use crate::connection_pool::{ConnectionPool, PoolResult};
 use crate::logging::SwarmLogger;
 use crate::server_registry::ServerRegistry;
 use crate::shuffle_descriptor::ShuffleDescriptor;
@@ -27,18 +27,18 @@ fn escape_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Arrow Flight service backed by a shared trexsql connection.
+/// Arrow Flight service backed by a connection pool.
 #[derive(Clone)]
 pub struct DuckDBFlightService {
-    connection: Arc<Mutex<Connection>>,
+    pool: Arc<ConnectionPool>,
     host: String,
     port: u16,
 }
 
 impl DuckDBFlightService {
-    pub fn new(connection: Arc<Mutex<Connection>>, host: String, port: u16) -> Self {
+    pub fn new(pool: Arc<ConnectionPool>, host: String, port: u16) -> Self {
         Self {
-            connection,
+            pool,
             host,
             port,
         }
@@ -66,26 +66,29 @@ impl DuckDBFlightService {
             })
     }
 
-    fn execute_query(
-        connection: &Arc<Mutex<Connection>>,
+    fn execute_query_pooled(
+        pool: &Arc<ConnectionPool>,
         sql: &str,
     ) -> Result<(arrow::datatypes::SchemaRef, Vec<arrow::array::RecordBatch>), Status> {
-        let conn = connection
-            .lock()
-            .map_err(|_| Status::internal("Database connection lock poisoned"))?;
+        let rx = pool.submit(sql.to_string());
+        match rx.blocking_recv() {
+            Ok(PoolResult::Rows { schema, batches }) => Ok((schema, batches)),
+            Ok(PoolResult::Executed) => Ok((
+                Arc::new(arrow::datatypes::Schema::empty()),
+                vec![],
+            )),
+            Ok(PoolResult::Error(e)) => Err(Status::internal(format!(
+                "Failed to execute '{}': {}", sql, e
+            ))),
+            Err(e) => Err(Status::internal(format!("Pool channel closed: {}", e))),
+        }
+    }
 
-        let mut stmt = conn.prepare(sql).map_err(|e| {
-            Status::internal(format!("Failed to prepare '{}': {}", sql, e))
-        })?;
-
-        let result = stmt.query_arrow(params![]).map_err(|e| {
-            Status::internal(format!("Failed to execute '{}': {}", sql, e))
-        })?;
-
-        let schema = result.get_schema();
-        let batches: Vec<_> = result.collect();
-
-        Ok((schema, batches))
+    fn execute_query(
+        pool: &Arc<ConnectionPool>,
+        sql: &str,
+    ) -> Result<(arrow::datatypes::SchemaRef, Vec<arrow::array::RecordBatch>), Status> {
+        Self::execute_query_pooled(pool, sql)
     }
 
     /// Extract a SQL query from a FlightDescriptor (CMD or PATH).
@@ -155,83 +158,81 @@ impl FlightService for DuckDBFlightService {
         _request: Request<Criteria>,
     ) -> Result<Response<Self::ListFlightsStream>, Status> {
         SwarmLogger::debug("list_flights", &format!("Listing tables on {}:{}", self.host, self.port));
-        let connection = self.connection.clone();
+        let pool = self.pool.clone();
         let host = self.host.clone();
         let port = self.port;
 
         let flights = tokio::task::spawn_blocking(move || -> Result<Vec<FlightInfo>, Status> {
-            let conn = connection
-                .lock()
-                .map_err(|_| Status::internal("Database connection lock poisoned"))?;
+            pool.with_connection(|conn| {
+                let mut stmt = conn.prepare("SHOW TABLES").map_err(|e| {
+                    format!("Failed to list tables: {}", e)
+                })?;
 
-            let mut stmt = conn.prepare("SHOW TABLES").map_err(|e| {
-                Status::internal(format!("Failed to list tables: {}", e))
-            })?;
+                let table_result = stmt.query_arrow(params![]).map_err(|e| {
+                    format!("Failed to execute SHOW TABLES: {}", e)
+                })?;
 
-            let table_result = stmt.query_arrow(params![]).map_err(|e| {
-                Status::internal(format!("Failed to execute SHOW TABLES: {}", e))
-            })?;
+                let batches: Vec<_> = table_result.collect();
 
-            let batches: Vec<_> = table_result.collect();
+                let mut flights = Vec::new();
 
-            let mut flights = Vec::new();
+                for batch in &batches {
+                    if batch.num_columns() == 0 {
+                        continue;
+                    }
 
-            for batch in &batches {
-                if batch.num_columns() == 0 {
-                    continue;
-                }
+                    let col = batch.column(0);
+                    let string_array = col
+                        .as_any()
+                        .downcast_ref::<arrow::array::StringArray>();
 
-                let col = batch.column(0);
-                let string_array = col
-                    .as_any()
-                    .downcast_ref::<arrow::array::StringArray>();
+                    if let Some(arr) = string_array {
+                        for i in 0..arr.len() {
+                            if arr.is_null(i) {
+                                continue;
+                            }
+                            let table_name = arr.value(i);
 
-                if let Some(arr) = string_array {
-                    for i in 0..arr.len() {
-                        if arr.is_null(i) {
-                            continue;
-                        }
-                        let table_name = arr.value(i);
+                            let schema_query =
+                                format!("SELECT * FROM {} LIMIT 0", escape_identifier(table_name));
 
-                        let schema_query =
-                            format!("SELECT * FROM {} LIMIT 0", escape_identifier(table_name));
-
-                        let schema = match conn.prepare(&schema_query) {
-                            Ok(mut s) => match s.query_arrow(params![]) {
-                                Ok(ret) => ret.get_schema(),
+                            let schema = match conn.prepare(&schema_query) {
+                                Ok(mut s) => match s.query_arrow(params![]) {
+                                    Ok(ret) => ret.get_schema(),
+                                    Err(_) => continue,
+                                },
                                 Err(_) => continue,
-                            },
-                            Err(_) => continue,
-                        };
+                            };
 
-                        let descriptor = FlightDescriptor::new_path(vec![table_name.to_string()]);
+                            let descriptor = FlightDescriptor::new_path(vec![table_name.to_string()]);
 
-                        let ticket = Ticket::new(
-                            serde_json::json!({"query": format!("SELECT * FROM {}", escape_identifier(table_name))})
-                                .to_string()
-                                .into_bytes(),
-                        );
+                            let ticket = Ticket::new(
+                                serde_json::json!({"query": format!("SELECT * FROM {}", escape_identifier(table_name))})
+                                    .to_string()
+                                    .into_bytes(),
+                            );
 
-                        let endpoint = arrow_flight::FlightEndpoint::new()
-                            .with_ticket(ticket)
-                            .with_location(format!("grpc://{}:{}", host, port));
+                            let endpoint = arrow_flight::FlightEndpoint::new()
+                                .with_ticket(ticket)
+                                .with_location(format!("grpc://{}:{}", host, port));
 
-                        let info = FlightInfo::new()
-                            .with_descriptor(descriptor)
-                            .try_with_schema(&schema)
-                            .map_err(|e| {
-                                Status::internal(format!("Failed to encode schema: {}", e))
-                            })?
-                            .with_endpoint(endpoint)
-                            .with_total_records(-1)
-                            .with_total_bytes(-1);
+                            let info = FlightInfo::new()
+                                .with_descriptor(descriptor)
+                                .try_with_schema(&schema)
+                                .map_err(|e| {
+                                    format!("Failed to encode schema: {}", e)
+                                })?
+                                .with_endpoint(endpoint)
+                                .with_total_records(-1)
+                                .with_total_bytes(-1);
 
-                        flights.push(info);
+                            flights.push(info);
+                        }
                     }
                 }
-            }
 
-            Ok(flights)
+                Ok(flights)
+            }).map_err(|e| Status::internal(e))
         })
         .await
         .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
@@ -249,12 +250,12 @@ impl FlightService for DuckDBFlightService {
     ) -> Result<Response<FlightInfo>, Status> {
         let descriptor = request.into_inner();
         let sql = Self::descriptor_to_query(&descriptor)?;
-        let connection = self.connection.clone();
+        let pool = self.pool.clone();
         let host = self.host.clone();
         let port = self.port;
 
         let info = tokio::task::spawn_blocking(move || -> Result<FlightInfo, Status> {
-            let (schema, batches) = Self::execute_query(&connection, &sql)?;
+            let (schema, batches) = Self::execute_query(&pool, &sql)?;
 
             let total_records: i64 = batches.iter().map(|b| b.num_rows() as i64).sum();
 
@@ -289,7 +290,7 @@ impl FlightService for DuckDBFlightService {
     ) -> Result<Response<SchemaResult>, Status> {
         let descriptor = request.into_inner();
         let sql = Self::descriptor_to_query(&descriptor)?;
-        let connection = self.connection.clone();
+        let pool = self.pool.clone();
 
         let schema_result =
             tokio::task::spawn_blocking(move || -> Result<SchemaResult, Status> {
@@ -301,7 +302,7 @@ impl FlightService for DuckDBFlightService {
                     sql.clone()
                 };
 
-                let (schema, _) = Self::execute_query(&connection, &schema_sql)?;
+                let (schema, _) = Self::execute_query(&pool, &schema_sql)?;
 
                 let ipc_options = IpcWriteOptions::default();
                 let schema_result: SchemaResult = SchemaAsIpc::new(&schema, &ipc_options)
@@ -327,10 +328,10 @@ impl FlightService for DuckDBFlightService {
         let sql = Self::parse_ticket_query(&ticket)?;
         SwarmLogger::info("do_get", &format!("Executing query on {}:{}", self.host, self.port));
         SwarmLogger::debug("do_get", &format!("SQL: {sql}"));
-        let connection = self.connection.clone();
+        let pool = self.pool.clone();
 
         let (schema, batches) =
-            tokio::task::spawn_blocking(move || Self::execute_query(&connection, &sql))
+            tokio::task::spawn_blocking(move || Self::execute_query(&pool, &sql))
                 .await
                 .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
 
@@ -383,18 +384,19 @@ impl FlightService for DuckDBFlightService {
                     })?
                     .to_string();
 
-                let connection = self.connection.clone();
+                let pool = self.pool.clone();
 
                 let result_msg = tokio::task::spawn_blocking(move || -> Result<String, Status> {
-                    let conn = connection
-                        .lock()
-                        .map_err(|_| Status::internal("Database connection lock poisoned"))?;
-
-                    conn.execute_batch(&sql).map_err(|e| {
-                        Status::internal(format!("Failed to execute statement: {}", e))
-                    })?;
-
-                    Ok(serde_json::json!({"status": "ok"}).to_string())
+                    let rx = pool.submit(sql);
+                    match rx.blocking_recv() {
+                        Ok(PoolResult::Rows { .. }) | Ok(PoolResult::Executed) => {
+                            Ok(serde_json::json!({"status": "ok"}).to_string())
+                        }
+                        Ok(PoolResult::Error(e)) => {
+                            Err(Status::internal(format!("Failed to execute statement: {}", e)))
+                        }
+                        Err(e) => Err(Status::internal(format!("Pool channel closed: {}", e))),
+                    }
                 })
                 .await
                 .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
@@ -523,33 +525,31 @@ impl FlightService for DuckDBFlightService {
         );
 
         if let Some(ref target_table) = desc.target_table {
-            let connection = self.connection.clone();
+            let pool = self.pool.clone();
             let table_name = target_table.clone();
             let batch_count = batches.len();
 
             tokio::task::spawn_blocking(move || -> Result<(), Status> {
-                let conn = connection
-                    .lock()
-                    .map_err(|_| Status::internal("Database connection lock poisoned"))?;
+                pool.with_connection(|conn| {
+                    let mut app = conn
+                        .appender(&table_name)
+                        .map_err(|e| format!("Appender for '{}': {}", table_name, e))?;
 
-                let mut app = conn
-                    .appender(&table_name)
-                    .map_err(|e| Status::internal(format!("Appender for '{}': {}", table_name, e)))?;
-
-                for batch in &batches {
-                    if batch.num_rows() == 0 {
-                        continue;
+                    for batch in &batches {
+                        if batch.num_rows() == 0 {
+                            continue;
+                        }
+                        app.append_record_batch(batch.clone()).map_err(|e| {
+                            format!("Append to '{}': {}", table_name, e)
+                        })?;
                     }
-                    app.append_record_batch(batch.clone()).map_err(|e| {
-                        Status::internal(format!("Append to '{}': {}", table_name, e))
+
+                    app.flush().map_err(|e| {
+                        format!("Flush appender '{}': {}", table_name, e)
                     })?;
-                }
 
-                app.flush().map_err(|e| {
-                    Status::internal(format!("Flush appender '{}': {}", table_name, e))
-                })?;
-
-                Ok(())
+                    Ok(())
+                }).map_err(|e| Status::internal(e))
             })
             .await
             .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
@@ -600,15 +600,15 @@ pub fn start_flight_server(
                 .build()?;
 
             rt.block_on(async move {
-                let shared_connection = get_shared_connection().unwrap_or_else(|| {
-                    Arc::new(Mutex::new(
-                        Connection::open_in_memory()
-                            .expect("Failed to create in-memory trexsql connection"),
-                    ))
-                });
+                let pool = crate::connection_pool::get_pool().map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Connection pool not available: {}", e),
+                    )) as Box<dyn std::error::Error + Send + Sync>
+                })?;
 
                 let service = DuckDBFlightService::new(
-                    shared_connection,
+                    pool,
                     server_host.clone(),
                     server_port,
                 );
@@ -694,15 +694,15 @@ pub fn start_flight_server_with_tls(
                 .build()?;
 
             rt.block_on(async move {
-                let shared_connection = get_shared_connection().unwrap_or_else(|| {
-                    Arc::new(Mutex::new(
-                        Connection::open_in_memory()
-                            .expect("Failed to create in-memory trexsql connection"),
-                    ))
-                });
+                let pool = crate::connection_pool::get_pool().map_err(|e| {
+                    Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Connection pool not available: {}", e),
+                    )) as Box<dyn std::error::Error + Send + Sync>
+                })?;
 
                 let service = DuckDBFlightService::new(
-                    shared_connection,
+                    pool,
                     server_host.clone(),
                     server_port,
                 );

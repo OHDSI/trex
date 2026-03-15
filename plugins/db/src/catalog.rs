@@ -276,14 +276,10 @@ fn compute_schema_hash_duckdb(schema: &duckdb::arrow::datatypes::SchemaRef) -> u
 
 /// Publish `catalog:{table}` gossip keys for all local tables.
 pub fn advertise_local_tables() -> Result<usize, String> {
-    let conn_arc = crate::get_shared_connection()
-        .ok_or_else(|| "Shared DuckDB connection not available".to_string())?;
+    let pool = crate::connection_pool::get_pool()
+        .map_err(|e| format!("Connection pool not available: {e}"))?;
 
-    let conn = conn_arc
-        .lock()
-        .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
-
-    let table_names: Vec<String> = {
+    let table_data = pool.with_connection(|conn| {
         let mut stmt = conn
             .prepare("SHOW TABLES")
             .map_err(|e| format!("Failed to prepare SHOW TABLES: {e}"))?;
@@ -309,10 +305,70 @@ pub fn advertise_local_tables() -> Result<usize, String> {
                 }
             }
         }
-        names
-    };
 
-    if table_names.is_empty() {
+        if names.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let mut table_info = Vec::new();
+        for table in &names {
+            let row_count: u64 = {
+                let count_sql = format!("SELECT COUNT(*) FROM \"{}\"", escape_identifier(table));
+                let mut stmt = conn
+                    .prepare(&count_sql)
+                    .map_err(|e| format!("Failed to prepare COUNT for table '{}': {e}", table))?;
+
+                let batches: Vec<DuckRecordBatch> = stmt
+                    .query_arrow([])
+                    .map_err(|e| format!("Failed to execute COUNT for table '{}': {e}", table))?
+                    .collect();
+
+                if let Some(batch) = batches.first() {
+                    if batch.num_columns() > 0 && batch.num_rows() > 0 {
+                        let col = batch.column(0);
+                        if let Some(arr) =
+                            col.as_any().downcast_ref::<duckdb::arrow::array::Int64Array>()
+                        {
+                            arr.value(0) as u64
+                        } else {
+                            let s =
+                                duckdb::arrow::util::display::array_value_to_string(col, 0)
+                                    .unwrap_or_default();
+                            s.parse::<u64>().unwrap_or(0)
+                        }
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                }
+            };
+
+            let schema_hash: u64 = {
+                let schema_sql = format!("SELECT * FROM \"{}\" LIMIT 0", escape_identifier(table));
+                let mut stmt = conn
+                    .prepare(&schema_sql)
+                    .map_err(|e| format!("Failed to prepare schema query for '{}': {e}", table))?;
+
+                let batches: Vec<DuckRecordBatch> = stmt
+                    .query_arrow([])
+                    .map_err(|e| format!("Failed to execute schema query for '{}': {e}", table))?
+                    .collect();
+
+                if let Some(batch) = batches.first() {
+                    compute_schema_hash_duckdb(&batch.schema())
+                } else {
+                    0
+                }
+            };
+
+            table_info.push((table.clone(), row_count, schema_hash));
+        }
+
+        Ok(table_info)
+    })?;
+
+    if table_data.is_empty() {
         SwarmLogger::debug("catalog", "No local tables to advertise");
         return Ok(0);
     }
@@ -320,56 +376,7 @@ pub fn advertise_local_tables() -> Result<usize, String> {
     let gossip = GossipRegistry::instance();
     let mut count = 0;
 
-    for table in &table_names {
-        let row_count: u64 = {
-            let count_sql = format!("SELECT COUNT(*) FROM \"{}\"", escape_identifier(table));
-            let mut stmt = conn
-                .prepare(&count_sql)
-                .map_err(|e| format!("Failed to prepare COUNT for table '{}': {e}", table))?;
-
-            let batches: Vec<DuckRecordBatch> = stmt
-                .query_arrow([])
-                .map_err(|e| format!("Failed to execute COUNT for table '{}': {e}", table))?
-                .collect();
-
-            if let Some(batch) = batches.first() {
-                if batch.num_columns() > 0 && batch.num_rows() > 0 {
-                    let col = batch.column(0);
-                    if let Some(arr) =
-                        col.as_any().downcast_ref::<duckdb::arrow::array::Int64Array>()
-                    {
-                        arr.value(0) as u64
-                    } else {
-                        let s =
-                            duckdb::arrow::util::display::array_value_to_string(col, 0)
-                                .unwrap_or_default();
-                        s.parse::<u64>().unwrap_or(0)
-                    }
-                } else {
-                    0
-                }
-            } else {
-                0
-            }
-        };
-
-        let schema_hash: u64 = {
-            let schema_sql = format!("SELECT * FROM \"{}\" LIMIT 0", escape_identifier(table));
-            let mut stmt = conn
-                .prepare(&schema_sql)
-                .map_err(|e| format!("Failed to prepare schema query for '{}': {e}", table))?;
-
-            let batches: Vec<DuckRecordBatch> = stmt
-                .query_arrow([])
-                .map_err(|e| format!("Failed to execute schema query for '{}': {e}", table))?
-                .collect();
-
-            if let Some(batch) = batches.first() {
-                compute_schema_hash_duckdb(&batch.schema())
-            } else {
-                0
-            }
-        };
+    for (table, row_count, schema_hash) in &table_data {
 
         let key = format!("catalog:{}", table);
         let value = format!(r#"{{"rows": {}, "schema_hash": {}}}"#, row_count, schema_hash);
@@ -603,27 +610,26 @@ pub fn resolve_table_with_fallback(table_name: &str) -> Result<Vec<CatalogEntry>
         Err(e) => return Err(e),
     }
 
-    let conn_arc = crate::get_shared_connection()
-        .ok_or_else(|| format!(
+    let pool = crate::connection_pool::get_pool()
+        .map_err(|_| format!(
             "Table '{}' not found in distributed catalog or local database",
             table_name,
         ))?;
 
-    let conn = conn_arc
-        .lock()
-        .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
-
     let check_sql = format!("SELECT COUNT(*) FROM \"{}\"", escape_identifier(table_name));
-    match conn.prepare(&check_sql) {
-        Ok(mut stmt) => {
-            let batches: Vec<DuckRecordBatch> = stmt
-                .query_arrow([])
-                .map_err(|e| format!(
-                    "Table '{}' not found in distributed catalog or local database: {e}",
-                    table_name,
-                ))?
-                .collect();
-
+    let table_name_owned = table_name.to_string();
+    match pool.with_connection(|conn| {
+        let mut stmt = conn.prepare(&check_sql).map_err(|e| format!("prepare: {e}"))?;
+        let batches: Vec<DuckRecordBatch> = stmt
+            .query_arrow([])
+            .map_err(|e| format!(
+                "Table '{}' not found in distributed catalog or local database: {e}",
+                table_name_owned,
+            ))?
+            .collect();
+        Ok(batches)
+    }) {
+        Ok(batches) => {
             let approx_rows = batches.first().and_then(|batch| {
                 if batch.num_columns() > 0 && batch.num_rows() > 0 {
                     let col = batch.column(0);

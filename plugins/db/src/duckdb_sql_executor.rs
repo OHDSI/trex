@@ -80,29 +80,8 @@ impl SQLExecutor for DuckDBSQLExecutor {
 }
 
 fn execute_on_duckdb(sql: &str) -> DFResult<Vec<RecordBatch>> {
-    let conn_arc = crate::get_shared_connection().ok_or_else(|| {
-        datafusion::error::DataFusionError::Execution(
-            "Shared DuckDB connection not available".to_string(),
-        )
-    })?;
-
-    let conn = conn_arc.lock().map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!(
-            "Failed to lock shared connection: {e}"
-        ))
-    })?;
-
-    let mut stmt = conn.prepare(sql).map_err(|e| {
-        datafusion::error::DataFusionError::Execution(format!("Failed to prepare SQL: {e}"))
-    })?;
-
-    let batches: Vec<RecordBatch> = stmt
-        .query_arrow([])
-        .map_err(|e| {
-            datafusion::error::DataFusionError::Execution(format!("Failed to execute SQL: {e}"))
-        })?
-        .collect();
-
+    let (_schema, batches) = crate::connection_pool::submit_query_blocking(sql)
+        .map_err(|e| datafusion::error::DataFusionError::Execution(e))?;
     Ok(batches)
 }
 
@@ -139,7 +118,7 @@ mod tests {
             Err(e) => {
                 let err_msg = format!("{e}");
                 assert!(
-                    err_msg.contains("not available"),
+                    err_msg.contains("not initialised"),
                     "Error should contain 'not available', got: {err_msg}"
                 );
             }
@@ -154,7 +133,7 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("not available"),
+            err_msg.contains("not initialised"),
             "Error should contain 'not available', got: {err_msg}"
         );
     }

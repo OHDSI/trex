@@ -5,10 +5,10 @@ use crate::service_functions::get_start_service_sql;
 
 /// Load extensions, start their services, and publish endpoints to gossip.
 pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
-    let conn_arc = match crate::get_shared_connection() {
-        Some(c) => c,
-        None => {
-            SwarmLogger::error("orchestrator", "Shared trexsql connection is not available");
+    let _pool = match crate::connection_pool::get_pool() {
+        Ok(p) => p,
+        Err(_) => {
+            SwarmLogger::error("orchestrator", "Connection pool is not available");
             return extensions
                 .iter()
                 .map(|ext| format!("{}: error — no shared connection", ext.name))
@@ -16,16 +16,6 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
         }
     };
 
-    let conn = match conn_arc.lock() {
-        Ok(c) => c,
-        Err(_) => {
-            SwarmLogger::error("orchestrator", "Shared connection lock poisoned");
-            return extensions
-                .iter()
-                .map(|ext| format!("{}: error — connection lock poisoned", ext.name))
-                .collect();
-        }
-    };
     let mut statuses: Vec<String> = Vec::with_capacity(extensions.len());
 
     for ext in extensions {
@@ -38,7 +28,7 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
         let load_sql = format!("LOAD '{}.trex'", ext.name);
         SwarmLogger::info("orchestrator", &format!("Loading extension: {}", ext.name));
 
-        if let Err(e) = conn.execute_batch(&load_sql) {
+        if let Err(e) = crate::connection_pool::submit_exec_blocking(&load_sql) {
             let msg = format!("{}: load failed — {}", ext.name, e);
             SwarmLogger::error("orchestrator", &msg);
             statuses.push(msg);
@@ -86,7 +76,7 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
             &format!("Starting service: {} on {}:{}", ext.name, host, port),
         );
 
-        if let Err(e) = conn.execute_batch(&start_sql) {
+        if let Err(e) = crate::connection_pool::submit_exec_blocking(&start_sql) {
             let msg = format!("{}: start failed — {}", ext.name, e);
             SwarmLogger::error("orchestrator", &msg);
             statuses.push(msg);

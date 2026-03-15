@@ -248,21 +248,7 @@ pub fn execute_distributed_query(
 
 /// Execute locally for queries without a FROM clause.
 fn execute_local_query(sql: &str) -> Result<QueryResult, String> {
-    let conn_arc = crate::get_shared_connection().ok_or_else(|| {
-        "Shared DuckDB connection not available (extension not initialised?)".to_string()
-    })?;
-    let conn = conn_arc
-        .lock()
-        .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
-
-    let mut stmt = conn
-        .prepare(sql)
-        .map_err(|e| format!("Failed to prepare local query: {e}"))?;
-
-    let batches: Vec<RecordBatch> = stmt
-        .query_arrow([])
-        .map_err(|e| format!("Failed to execute local query: {e}"))?
-        .collect();
+    let (_schema, batches) = crate::connection_pool::submit_query_blocking(sql)?;
 
     let schema = if let Some(first) = batches.first() {
         first.schema()
@@ -391,41 +377,39 @@ fn merge_with_duckdb(
     let merged_batch = concat_batches(schema, &batches)
         .map_err(|e| format!("Failed to concatenate record batches: {e}"))?;
 
-    let conn_arc = crate::get_shared_connection().ok_or_else(|| {
-        "Shared DuckDB connection not available (extension not initialised?)".to_string()
+    let pool = crate::connection_pool::get_pool().map_err(|e| {
+        format!("Connection pool not available (extension not initialised?): {e}")
     })?;
-
-    let conn = conn_arc
-        .lock()
-        .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
-
-    let _ = conn.register_table_function::<ArrowVTab>("arrow");
 
     let rewritten_sql = merge_sql.replace(
         "FROM _merged",
         "FROM (SELECT * FROM arrow(?, ?)) AS _merged",
     );
 
-    let params = arrow_recordbatch_to_query_params(merged_batch);
+    pool.with_connection(|conn| {
+        let _ = conn.register_table_function::<ArrowVTab>("arrow");
 
-    let mut stmt = conn
-        .prepare(&rewritten_sql)
-        .map_err(|e| format!("Failed to prepare merge SQL: {e}"))?;
+        let params = arrow_recordbatch_to_query_params(merged_batch);
 
-    let result_batches: Vec<RecordBatch> = stmt
-        .query_arrow(params)
-        .map_err(|e| format!("Failed to execute merge SQL: {e}"))?
-        .collect();
+        let mut stmt = conn
+            .prepare(&rewritten_sql)
+            .map_err(|e| format!("Failed to prepare merge SQL: {e}"))?;
 
-    let result_schema = if let Some(first) = result_batches.first() {
-        first.schema()
-    } else {
-        Arc::new(arrow::datatypes::Schema::empty())
-    };
+        let result_batches: Vec<RecordBatch> = stmt
+            .query_arrow(params)
+            .map_err(|e| format!("Failed to execute merge SQL: {e}"))?
+            .collect();
 
-    Ok(QueryResult {
-        schema: result_schema,
-        batches: result_batches,
+        let result_schema = if let Some(first) = result_batches.first() {
+            first.schema()
+        } else {
+            Arc::new(arrow::datatypes::Schema::empty())
+        };
+
+        Ok(QueryResult {
+            schema: result_schema,
+            batches: result_batches,
+        })
     })
 }
 

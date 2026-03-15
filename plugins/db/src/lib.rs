@@ -2,6 +2,7 @@ extern crate duckdb;
 extern crate duckdb_loadable_macros;
 extern crate libduckdb_sys;
 
+pub mod connection_pool;
 pub mod logging;
 pub mod config;
 pub mod gossip;
@@ -42,7 +43,7 @@ use duckdb_loadable_macros::duckdb_entrypoint_c_api;
 use std::{
     error::Error,
     ffi::CString,
-    sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock as OnceCell},
+    sync::{atomic::{AtomicBool, Ordering}, Mutex},
 };
 
 use gossip::GossipRegistry;
@@ -53,23 +54,6 @@ pub fn is_distributed_enabled() -> bool {
     DISTRIBUTED_ENABLED.load(Ordering::Relaxed)
 }
 
-static SHARED_CONNECTION: OnceCell<Arc<Mutex<Connection>>> = OnceCell::new();
-
-pub fn store_shared_connection(connection: &Connection) -> Result<(), Box<dyn Error>> {
-    let cloned = connection
-        .try_clone()
-        .map_err(|e| format!("Failed to clone connection: {}", e))?;
-
-    SHARED_CONNECTION
-        .set(Arc::new(Mutex::new(cloned)))
-        .map_err(|_| "Connection already stored")?;
-
-    Ok(())
-}
-
-pub fn get_shared_connection() -> Option<Arc<Mutex<Connection>>> {
-    SHARED_CONNECTION.get().cloned()
-}
 
 struct DbStartScalar;
 
@@ -1377,7 +1361,8 @@ impl VTab for DbPartitionsTable {
 
 #[duckdb_entrypoint_c_api()]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
-    store_shared_connection(&con)?;
+    connection_pool::init_pool(&con, 4)
+        .map_err(|e| -> Box<dyn Error> { e.into() })?;
 
     con.register_scalar_function::<DbStartScalar>("trex_db_start")
         .expect("Failed to register trex_db_start function");

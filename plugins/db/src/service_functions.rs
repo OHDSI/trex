@@ -336,12 +336,7 @@ impl VScalar for SwarmStartServiceScalar {
             }
         };
 
-        let conn_arc = crate::get_shared_connection().ok_or("No shared connection")?;
-        let conn = conn_arc
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
-
-        if let Err(e) = conn.execute_batch(&sql) {
+        if let Err(e) = crate::connection_pool::submit_exec_blocking(&sql) {
             let msg = format!("Failed to start {}: {}", extension, e);
             let flat = output.flat_vector();
             flat.insert(0, &msg);
@@ -512,12 +507,7 @@ impl VScalar for SwarmLoadScalar {
 
         let load_sql = format!("LOAD '{}.trex'", extension);
 
-        let conn_arc = crate::get_shared_connection().ok_or("No shared connection")?;
-        let conn = conn_arc
-            .lock()
-            .map_err(|e| format!("Lock error: {e}"))?;
-
-        let response = match conn.execute_batch(&load_sql) {
+        let response = match crate::connection_pool::submit_exec_blocking(&load_sql) {
             Ok(()) => format!("Extension '{}' loaded successfully", extension),
             Err(e) => format!("Failed to load extension '{}': {}", extension, e),
         };

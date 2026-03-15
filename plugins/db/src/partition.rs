@@ -361,46 +361,19 @@ pub fn range_partition_batches(
 }
 
 fn read_local_table(table_name: &str) -> Result<(SchemaRef, Vec<RecordBatch>), String> {
-    let conn_arc = crate::get_shared_connection()
-        .ok_or_else(|| "Shared connection not available".to_string())?;
-    let conn = conn_arc
-        .lock()
-        .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
-
     let sql = format!(
         "SELECT * FROM \"{}\"",
         table_name.replace('"', "\"\"")
     );
-
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| format!("Failed to prepare query for table '{}': {e}", table_name))?;
-
-    let result = stmt
-        .query_arrow([])
-        .map_err(|e| format!("Failed to read table '{}': {e}", table_name))?;
-
-    let schema = result.get_schema();
-    let batches: Vec<_> = result.collect();
-
-    Ok((schema, batches))
+    crate::connection_pool::submit_query_blocking(&sql)
 }
 
 fn drop_local_table(table_name: &str) -> Result<(), String> {
-    let conn_arc = crate::get_shared_connection()
-        .ok_or_else(|| "Shared connection not available".to_string())?;
-    let conn = conn_arc
-        .lock()
-        .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
-
     let sql = format!(
         "DROP TABLE IF EXISTS \"{}\"",
         table_name.replace('"', "\"\"")
     );
-    conn.execute_batch(&sql)
-        .map_err(|e| format!("Failed to drop table '{}': {e}", table_name))?;
-
-    Ok(())
+    crate::connection_pool::submit_exec_blocking(&sql)
 }
 
 fn with_runtime<F, T>(f: F) -> Result<T, String>
@@ -560,15 +533,7 @@ pub fn swarm_create_table_impl(
         &format!("Creating and partitioning table with SQL: {}", create_sql),
     );
 
-    {
-        let conn_arc = crate::get_shared_connection()
-            .ok_or_else(|| "Shared connection not available".to_string())?;
-        let conn = conn_arc
-            .lock()
-            .map_err(|e| format!("Failed to lock shared connection: {e}"))?;
-        conn.execute_batch(create_sql)
-            .map_err(|e| format!("Failed to execute CREATE TABLE: {e}"))?;
-    }
+    crate::connection_pool::submit_exec_blocking(create_sql)?;
 
     let table_name = extract_table_name(create_sql)
         .ok_or_else(|| "Could not extract table name from CREATE SQL".to_string())?;
