@@ -197,12 +197,88 @@ jobs:
         if: hashFiles(format('{0}/*.trex', matrix.PKGPATH)) != ''
         uses: actions/upload-artifact@v4
         with:
-          name: ext-${{ steps.extname.outputs.name }}
+          name: ext-${{ steps.extname.outputs.name }}-amd64
+          path: ${{ matrix.PKGPATH }}/*.trex
+          retention-days: 1
+
+  build-arm:
+    needs: [pick_runner]
+    if: (github.ref_name == 'develop' || github.ref_name == 'main' || contains('release', github.ref_name) || github.event_name == 'workflow_dispatch') || ( github.event_name == 'pull_request' && !github.event.pull_request.draft )
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - PKGPATH: ./plugins/hana
+          - PKGPATH: ./plugins/pgwire
+          - PKGPATH: ./plugins/tpm
+          - PKGPATH: ./plugins/migration
+          - PKGPATH: ./plugins/db
+            SWAP: true
+            CARGO_BUILD_JOBS: 2
+          - PKGPATH: ./plugins/etl
+          - PKGPATH: ./plugins/fhir
+          - PKGPATH: ./plugins/transform
+
+    runs-on: ubuntu-24.04-arm
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18.x"
+          registry-url: "https://npm.pkg.github.com"
+          scope: "@trex"
+
+      - name: Install dependencies
+        run: |
+          cd ${{ matrix.PKGPATH }}
+          npm install --ignore-scripts
+        env:
+          CI: true
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add swap space
+        if: matrix.SWAP == true
+        run: |
+          sudo swapoff /swapfile 2>/dev/null || true
+          sudo rm -f /swapfile
+          sudo fallocate -l 8G /mnt/swapfile
+          sudo chmod 600 /mnt/swapfile
+          sudo mkswap /mnt/swapfile
+          sudo swapon /mnt/swapfile
+
+      - name: Build
+        run: |
+          if [ -n "${{ matrix.CARGO_BUILD_JOBS }}" ]; then
+            export CARGO_BUILD_JOBS=${{ matrix.CARGO_BUILD_JOBS }}
+          fi
+          cd ${{ matrix.PKGPATH }}
+          make configure
+          make release
+          mv build/release/extension/*/*.trex . 2>/dev/null || true
+
+      - name: Extract extension name
+        id: extname
+        run: echo "name=$(basename ${{ matrix.PKGPATH }})" >> "$GITHUB_OUTPUT"
+
+      - name: Upload extension artifact
+        if: hashFiles(format('{0}/*.trex', matrix.PKGPATH)) != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: ext-${{ steps.extname.outputs.name }}-arm64
           path: ${{ matrix.PKGPATH }}/*.trex
           retention-days: 1
 
   create-release:
-    needs: [build]
+    needs: [build, build-arm]
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.tag != ''
     runs-on: ubuntu-latest
     permissions:
@@ -212,27 +288,42 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-      - name: Download all extension artifacts
+      - name: Download amd64 extension artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ext-*
-          path: release-assets/
+          pattern: ext-*-amd64
+          path: release-assets/amd64/
           merge-multiple: true
-      - name: List release assets
-        run: ls -la release-assets/
+      - name: Download arm64 extension artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ext-*-arm64
+          path: release-assets/arm64/
+          merge-multiple: true
+        continue-on-error: true
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets/final
+          for f in release-assets/amd64/*.trex; do
+            [ -f "$f" ] && cp "$f" "release-assets/final/$(basename "${f%.trex}")-linux-amd64.trex"
+          done
+          for f in release-assets/arm64/*.trex; do
+            [ -f "$f" ] && cp "$f" "release-assets/final/$(basename "${f%.trex}")-linux-arm64.trex"
+          done
+          ls -la release-assets/final/
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag }}
           name: ${{ github.event.inputs.release }}
           prerelease: ${{ github.event.inputs.prerelease }}
-          files: release-assets/*.trex
+          files: release-assets/final/*.trex
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   build-docker:
-    needs: [build]
+    needs: [build, build-arm]
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -242,21 +333,49 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-      - name: Download extension artifacts
+
+      - name: Download amd64 extension artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ext-*
-          path: extensions/
+          pattern: ext-*-amd64
+          path: extensions/amd64/
           merge-multiple: true
+
+      - name: Download arm64 extension artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ext-*-arm64
+          path: extensions/arm64/
+          merge-multiple: true
+        continue-on-error: true
+
       - name: List extensions
-        run: ls -la extensions/
-      - name: Build Docker image
-        run: docker build -t trexsql-test .
-      - name: Test extensions load
+        run: |
+          echo "=== amd64 ==="
+          ls -la extensions/amd64/ 2>/dev/null || echo "none"
+          echo "=== arm64 ==="
+          ls -la extensions/arm64/ 2>/dev/null || echo "none"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build amd64 image for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: trexsql-test
+
+      - name: Test extensions load (amd64 only)
         run: |
           OUTPUT=$(docker run --rm trexsql-test --check 2>&1) || true
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "extension(s) loaded successfully"
+
       - name: Login to GHCR
         if: github.ref_name == 'develop' || github.ref_name == 'main' || github.event_name == 'workflow_dispatch'
         uses: docker/login-action@v3
@@ -264,13 +383,17 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push to GHCR
+
+      - name: Build and push multi-arch image
         if: github.ref_name == 'develop' || github.ref_name == 'main' || github.event_name == 'workflow_dispatch'
-        run: |
-          docker tag trexsql-test ghcr.io/${{ github.repository_owner }}/trexsql:latest
-          docker tag trexsql-test ghcr.io/${{ github.repository_owner }}/trexsql:sha-${{ github.sha }}
-          docker push ghcr.io/${{ github.repository_owner }}/trexsql:latest
-          docker push ghcr.io/${{ github.repository_owner }}/trexsql:sha-${{ github.sha }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/trexsql:latest
+            ghcr.io/${{ github.repository_owner }}/trexsql:sha-${{ github.sha }}
 
   build-pg-trex:
     needs: [build]
@@ -323,7 +446,7 @@ jobs:
       - name: Download extension artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ext-*
+          pattern: ext-*-amd64
           path: extensions/
           merge-multiple: true
 
@@ -362,13 +485,13 @@ jobs:
           docker push ghcr.io/${{ github.repository_owner }}/pg-trex:sha-${{ github.sha }}
 
   success:
-    needs: [build, build-docker, build-pg-trex, create-release]
+    needs: [build, build-arm, build-docker, build-pg-trex, create-release]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check
         run: |
-          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.build-pg-trex.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" ]]; then
+          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-arm.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.build-pg-trex.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" ]]; then
             echo "::error::One or more jobs failed"
             exit 1
           fi

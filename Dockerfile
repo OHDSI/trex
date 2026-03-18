@@ -3,15 +3,16 @@ FROM debian:trixie-slim AS builder
 
 ARG TREXSQL_VERSION=v1.4.4-trex
 ARG CHDB_VERSION=v3.6.0
+ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y curl unzip wget gcc libc6-dev && rm -rf /var/lib/apt/lists/*
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Download libtrexsql from GitHub release
+# Download libtrexsql from GitHub release (arch-specific)
 RUN mkdir -p /opt/trexsql && \
     wget -O /tmp/libtrexsql.zip \
-      https://github.com/p-hoffmann/trexsql-rs/releases/download/${TREXSQL_VERSION}/libtrexsql-linux-amd64.zip && \
+      https://github.com/p-hoffmann/trexsql-rs/releases/download/${TREXSQL_VERSION}/libtrexsql-linux-${TARGETARCH}.zip && \
     unzip /tmp/libtrexsql.zip -d /opt/trexsql && \
     rm /tmp/libtrexsql.zip && \
     ln -sf /opt/trexsql/libtrexsql.so /opt/trexsql/libduckdb.so
@@ -19,13 +20,16 @@ RUN mkdir -p /opt/trexsql && \
 ENV TREXSQL_LIB_DIR=/opt/trexsql
 ENV TREXSQL_INCLUDE_DIR=/opt/trexsql
 
-# Download libchdb from GitHub release
-RUN cd /tmp && \
-    wget -O libchdb.tar.gz \
-      https://github.com/chdb-io/chdb/releases/download/${CHDB_VERSION}/linux-x86_64-libchdb.tar.gz && \
-    tar -xzf libchdb.tar.gz && \
-    mv libchdb.so /opt/ && \
-    rm -f libchdb.tar.gz chdb.h
+# Download libchdb from GitHub release (amd64 only — no ARM build available)
+RUN mkdir -p /opt/chdb && \
+    if [ "$TARGETARCH" = "amd64" ]; then \
+      cd /tmp && \
+      wget -O libchdb.tar.gz \
+        https://github.com/chdb-io/chdb/releases/download/${CHDB_VERSION}/linux-x86_64-libchdb.tar.gz && \
+      tar -xzf libchdb.tar.gz && \
+      mv libchdb.so /opt/chdb/ && \
+      rm -f libchdb.tar.gz chdb.h; \
+    fi
 
 # Cache dependency build: copy manifests first, build with dummy src, then replace
 COPY Cargo.toml Cargo.lock /usr/src/trexsql/
@@ -45,10 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl3 libgomp1 ca-certificates libvulkan1 curl && \
     rm -rf /var/lib/apt/lists/*
 
-# Copy trex binary, libtrexsql, libchdb, and libtrexsql_engine
+# Copy trex binary, libtrexsql, and libtrexsql_engine
 COPY --from=builder /usr/src/trexsql/target/release/trex /usr/bin/
 COPY --from=builder /opt/trexsql/libtrexsql.so /usr/lib/
-COPY --from=builder /opt/libchdb.so /usr/lib/
+COPY --from=builder /opt/chdb/ /usr/lib/
 COPY --from=builder /usr/src/trexsql/target/release/libtrexsql_engine.so /usr/lib/
 RUN ldconfig
 
@@ -63,21 +67,31 @@ RUN mkdir -p /usr/lib/trexsql/extensions && \
     find node_modules/@trex -name "*.trex" -exec cp {} /usr/lib/trexsql/extensions/ \; && \
     find node_modules/@trex -name "*.duckdb_extension" -exec cp {} /usr/lib/trexsql/extensions/ \;
 
-# Download official trexsql extensions for offline use
+# Download official trexsql extensions for offline use (arch-specific)
+ARG TARGETARCH
 ENV DUCKDB_VERSION=1.4.4
-RUN mkdir -p /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/linux_amd64 && \
-    cd /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/linux_amd64 && \
+RUN DUCKDB_PLATFORM="linux_${TARGETARCH}" && \
+    mkdir -p /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM} && \
+    cd /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM} && \
     for lib in avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite sqlite_scanner vss; do \
-        curl -sfO https://extensions.duckdb.org/v${DUCKDB_VERSION}/linux_amd64/${lib}.duckdb_extension.gz && \
+        curl -sfO https://extensions.duckdb.org/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/${lib}.duckdb_extension.gz && \
         gzip -d ${lib}.duckdb_extension.gz; \
     done && \
     for lib in bigquery; do \
-        curl -sfO https://community-extensions.duckdb.org/v${DUCKDB_VERSION}/linux_amd64/${lib}.duckdb_extension.gz && \
+        curl -sfO https://community-extensions.duckdb.org/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/${lib}.duckdb_extension.gz && \
         gzip -d ${lib}.duckdb_extension.gz; \
     done
 
-# Override npm extensions with CI-built ones (no-op locally since dir only has .gitkeep)
-COPY extensions/ /usr/lib/trexsql/extensions/
+# Override npm extensions with CI-built ones
+# Supports both flat layout (local builds) and arch-specific layout (CI multi-arch builds)
+COPY extensions/ /tmp/all-extensions/
+RUN if [ -d "/tmp/all-extensions/${TARGETARCH}" ]; then \
+      cp -f /tmp/all-extensions/${TARGETARCH}/*.trex /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
+      cp -f /tmp/all-extensions/${TARGETARCH}/*.duckdb_extension /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
+    else \
+      cp -f /tmp/all-extensions/*.trex /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
+      cp -f /tmp/all-extensions/*.duckdb_extension /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
+    fi && rm -rf /tmp/all-extensions
 
 # Download and extract Shinylive assets for analytics dashboards
 ARG SHINYLIVE_VERSION=0.10.7
