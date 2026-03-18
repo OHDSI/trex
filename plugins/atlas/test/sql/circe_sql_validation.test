@@ -94,7 +94,7 @@ FROM test_circe_no_stats;
 statement error
 SELECT trex_atlas_json_to_sql('invalid_base64', '{"cdmSchema":"cdm"}');
 ----
-trex_atlas_json_to_sql: base64 decode failed
+circe_json_to_sql: base64 decode failed
 
 # Test invalid options JSON - should return error message rather than throw
 query I

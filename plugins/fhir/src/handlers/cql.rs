@@ -56,7 +56,7 @@ pub async fn evaluate_cql(
 
 async fn translate_cql_to_elm(state: &AppState, cql_text: &str) -> Result<Value, AppError> {
     let escaped = cql_text.replace('\'', "''");
-    let sql = format!("SELECT cql_to_elm('{}')", escaped);
+    let sql = format!("SELECT trex_fhir_cql_translate('{}')", escaped);
     match state.executor.submit(sql).await {
         QueryResult::Select { rows, .. } => {
             let elm_str = rows
@@ -77,7 +77,7 @@ async fn translate_cql_to_elm(state: &AppState, cql_text: &str) -> Result<Value,
                 Ok(elm)
             }
         }
-        QueryResult::Error(e) if e.contains("does not exist") || e.contains("cql_to_elm") => {
+        QueryResult::Error(e) if e.contains("does not exist") || e.contains("trex_fhir_cql_translate") => {
             Err(AppError::BadRequest(
                 "CQL text translation requires the cql2elm extension to be loaded. \
                  Provide pre-compiled ELM JSON via the 'library' field instead."

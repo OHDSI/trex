@@ -8,3 +8,5 @@ node_modules
 core/docs/build/
 core/docs/.docusaurus/
 shinylive/
+plugins/atlas/cmake_build/release/
+

@@ -92,7 +92,7 @@ def _seed_patients(client, dataset_id):
 def fhir_with_cql2elm():
     """Start FHIR server with both FHIR and cql2elm extensions loaded."""
     gp, fp, pp = alloc_ports()
-    node = Node([CQL2ELM_EXT, FHIR_EXT], gp, fp, pp)
+    node = Node([FHIR_EXT, CQL2ELM_EXT], gp, fp, pp)
 
     fhir_port = _free_port()
     result = node.execute(f"SELECT trex_fhir_start('127.0.0.1', {fhir_port})")

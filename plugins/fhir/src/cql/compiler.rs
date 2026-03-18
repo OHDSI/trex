@@ -67,10 +67,16 @@ pub fn compile_library(library: &ElmLibrary, schema_name: &str) -> Result<String
         }
 
         let sql = compile_expression(&def.expression, &mut ctx)?;
+        // Wrap scalar expressions so they work as CTEs (e.g. EXISTS, CASE, COALESCE)
+        let cte_sql = if sql.trim_start().starts_with("SELECT ") || sql.trim_start().starts_with("(SELECT ") {
+            sql
+        } else {
+            format!("SELECT ({}) AS value", sql)
+        };
         let cte_name = format!("\"{}\"", def.name.replace('"', "\"\""));
         ctx.expression_ctes
             .insert(def.name.clone(), cte_name.clone());
-        ctx.ctes.push((cte_name.clone(), sql));
+        ctx.ctes.push((cte_name.clone(), cte_sql));
         result_expressions.push(cte_name);
     }
 
@@ -187,6 +193,13 @@ pub fn compile_expression(
                     };
                     Ok(format!("DATE_DIFF('month', CAST(json_extract_string({}, '$.birthDate') AS DATE), CURRENT_DATE)", raw_ref))
                 }
+                "ToDate" => Ok(format!("CAST({} AS DATE)", args.first().unwrap_or(&"NULL".to_string()))),
+                "ToDateTime" => Ok(format!("CAST({} AS TIMESTAMP)", args.first().unwrap_or(&"NULL".to_string()))),
+                "ToBoolean" => Ok(format!("CAST({} AS BOOLEAN)", args.first().unwrap_or(&"NULL".to_string()))),
+                "ToQuantity" => Ok(format!("CAST({} AS DOUBLE)", args.first().unwrap_or(&"NULL".to_string()))),
+                "ToLong" => Ok(format!("CAST({} AS BIGINT)", args.first().unwrap_or(&"NULL".to_string()))),
+                "ToTime" => Ok(format!("CAST({} AS TIME)", args.first().unwrap_or(&"NULL".to_string()))),
+                "ToConcept" => Ok(args.first().unwrap_or(&"NULL".to_string()).clone()),
                 _ => Ok(format!("{}({})", name, args.join(", "))),
             }
         }
@@ -431,9 +444,13 @@ pub fn compile_expression(
             let inner = compile_expression(operand, ctx)?;
             Ok(format!("CAST({} AS VARCHAR)", inner))
         }
-        ElmExpression::ToDateTime { operand } | ElmExpression::ToDate { operand } => {
+        ElmExpression::ToDateTime { operand } => {
             let inner = compile_expression(operand, ctx)?;
             Ok(format!("CAST({} AS TIMESTAMP)", inner))
+        }
+        ElmExpression::ToDate { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("CAST({} AS DATE)", inner))
         }
 
         ElmExpression::Exists { operand } => {
@@ -488,6 +505,12 @@ pub fn compile_expression(
                 } else {
                     Ok(format!("SELECT * FROM {}", expr_sql))
                 }
+            } else if name == "Patient" {
+                // Patient context reference — resolve to patient table
+                Ok(format!(
+                    "SELECT * FROM \"{}\".\"patient\" WHERE NOT _is_deleted",
+                    ctx.schema_name
+                ))
             } else {
                 Ok(format!("\"{}\"", name))
             }
@@ -538,19 +561,19 @@ pub fn compile_expression(
         }
         ElmExpression::Sum { source } => {
             let inner = compile_expression(source, ctx)?;
-            Ok(format!("(SELECT SUM(*) FROM ({}))", inner))
+            Ok(format!("(SELECT SUM(COLUMNS(*)::VARCHAR)::VARCHAR FROM ({}) _t)", inner))
         }
         ElmExpression::Min { source } => {
             let inner = compile_expression(source, ctx)?;
-            Ok(format!("(SELECT MIN(*) FROM ({}))", inner))
+            Ok(format!("(SELECT MIN(COLUMNS(*)::VARCHAR)::VARCHAR FROM ({}) _t)", inner))
         }
         ElmExpression::Max { source } => {
             let inner = compile_expression(source, ctx)?;
-            Ok(format!("(SELECT MAX(*) FROM ({}))", inner))
+            Ok(format!("(SELECT MAX(COLUMNS(*)::VARCHAR)::VARCHAR FROM ({}) _t)", inner))
         }
         ElmExpression::Avg { source } => {
             let inner = compile_expression(source, ctx)?;
-            Ok(format!("(SELECT AVG(*) FROM ({}))", inner))
+            Ok(format!("(SELECT AVG(COLUMNS(*)::VARCHAR)::VARCHAR FROM ({}) _t)", inner))
         }
         ElmExpression::First { source } => {
             let inner = compile_expression(source, ctx)?;
@@ -559,7 +582,7 @@ pub fn compile_expression(
         ElmExpression::Last { source } => {
             let inner = compile_expression(source, ctx)?;
             Ok(format!(
-                "(SELECT * FROM ({}) ORDER BY rowid DESC LIMIT 1)",
+                "(SELECT * FROM ({}) ORDER BY 1 DESC LIMIT 1)",
                 inner
             ))
         }
@@ -633,6 +656,219 @@ pub fn compile_expression(
                 "MAKE_TIMESTAMP({}, {}, {}, {}, {}, {})",
                 y, m, d, h, mi, s
             ))
+        }
+
+        ElmExpression::Date { year, month, day } => {
+            let y = compile_expression(year, ctx)?;
+            let m = month
+                .as_ref()
+                .map(|e| compile_expression(e, ctx))
+                .transpose()?
+                .unwrap_or_else(|| "1".to_string());
+            let d = day
+                .as_ref()
+                .map(|e| compile_expression(e, ctx))
+                .transpose()?
+                .unwrap_or_else(|| "1".to_string());
+            Ok(format!("MAKE_DATE({}, {}, {})", y, m, d))
+        }
+
+        // String functions
+        ElmExpression::Length { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("LENGTH({})", inner))
+        }
+        ElmExpression::Upper { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("UPPER({})", inner))
+        }
+        ElmExpression::Lower { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("LOWER({})", inner))
+        }
+        ElmExpression::StartsWith { operand } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            Ok(format!("STARTS_WITH({}, {})", left, right))
+        }
+        ElmExpression::EndsWith { operand } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            Ok(format!("SUFFIX({}, {})", left, right))
+        }
+        ElmExpression::Substring { string_to_sub, start_index, length } => {
+            let s = compile_expression(string_to_sub, ctx)?;
+            let start = compile_expression(start_index, ctx)?;
+            if let Some(len) = length {
+                let l = compile_expression(len, ctx)?;
+                Ok(format!("SUBSTRING({}, {}, {})", s, start, l))
+            } else {
+                Ok(format!("SUBSTRING({}, {})", s, start))
+            }
+        }
+        ElmExpression::PositionOf { pattern, string } => {
+            let pat = compile_expression(pattern, ctx)?;
+            let s = compile_expression(string, ctx)?;
+            Ok(format!("POSITION({} IN {})", pat, s))
+        }
+        ElmExpression::Combine { source, separator } => {
+            let src = compile_expression(source, ctx)?;
+            let sep = separator
+                .as_ref()
+                .map(|e| compile_expression(e, ctx))
+                .transpose()?
+                .unwrap_or_else(|| "''".to_string());
+            Ok(format!("STRING_AGG({}, {})", src, sep))
+        }
+        ElmExpression::Split { string_to_split, separator } => {
+            let s = compile_expression(string_to_split, ctx)?;
+            let sep = compile_expression(separator, ctx)?;
+            Ok(format!("STRING_SPLIT({}, {})", s, sep))
+        }
+        ElmExpression::Replace { argument, pattern, substitution } => {
+            let arg = compile_expression(argument, ctx)?;
+            let pat = compile_expression(pattern, ctx)?;
+            let sub = compile_expression(substitution, ctx)?;
+            Ok(format!("REPLACE({}, {}, {})", arg, pat, sub))
+        }
+        ElmExpression::Matches { operand } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            Ok(format!("REGEXP_MATCHES({}, {})", left, right))
+        }
+
+        // Math functions
+        ElmExpression::Abs { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("ABS({})", inner))
+        }
+        ElmExpression::Round { operand, precision } => {
+            let inner = compile_expression(operand, ctx)?;
+            if let Some(prec) = precision {
+                let p = compile_expression(prec, ctx)?;
+                Ok(format!("ROUND({}, {})", inner, p))
+            } else {
+                Ok(format!("ROUND({})", inner))
+            }
+        }
+        ElmExpression::Floor { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("FLOOR({})", inner))
+        }
+        ElmExpression::Ceiling { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("CEIL({})", inner))
+        }
+        ElmExpression::Truncate { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("TRUNC({})", inner))
+        }
+        ElmExpression::Ln { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("LN({})", inner))
+        }
+        ElmExpression::Exp { operand } => {
+            let inner = compile_expression(operand, ctx)?;
+            Ok(format!("EXP({})", inner))
+        }
+        ElmExpression::Power { operand } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            Ok(format!("POWER({}, {})", left, right))
+        }
+
+        // Temporal comparisons
+        ElmExpression::Before { operand } => {
+            binary_op(&operand[0], &operand[1], "<", ctx)
+        }
+        ElmExpression::After { operand } => {
+            binary_op(&operand[0], &operand[1], ">", ctx)
+        }
+        ElmExpression::SameOrBefore { operand } => {
+            binary_op(&operand[0], &operand[1], "<=", ctx)
+        }
+        ElmExpression::SameOrAfter { operand } => {
+            binary_op(&operand[0], &operand[1], ">=", ctx)
+        }
+        ElmExpression::DurationBetween { operand, precision } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            let prec = precision.as_deref().unwrap_or("day");
+            Ok(format!("DATE_DIFF('{}', {}, {})", prec.to_lowercase(), left, right))
+        }
+        ElmExpression::DifferenceBetween { operand, precision } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            let prec = precision.as_deref().unwrap_or("day");
+            Ok(format!("DATE_DIFF('{}', {}, {})", prec.to_lowercase(), left, right))
+        }
+        ElmExpression::CalculateAge { operand, precision } => {
+            let prec = precision.as_deref().unwrap_or("Year");
+            // Check if the operand is a Property path on Patient (common pattern from cql2elm)
+            if let ElmExpression::Property { path, source, .. } = operand.as_ref() {
+                let clean_path = path.strip_suffix(".value").unwrap_or(path);
+                if let Some(src) = source {
+                    if let ElmExpression::ExpressionRef { name, .. } = src.as_ref() {
+                        if name == "Patient" {
+                            // Resolve to direct JSON extraction from patient context
+                            let raw_ref = if let Some(ref alias) = ctx.patient_context_alias {
+                                format!("{}.\"_raw\"", alias)
+                            } else {
+                                "_raw".to_string()
+                            };
+                            return Ok(format!(
+                                "DATE_DIFF('{}', CAST(json_extract_string({}, '$.{}') AS DATE), CURRENT_DATE)",
+                                prec.to_lowercase(), raw_ref, clean_path
+                            ));
+                        }
+                    }
+                }
+            }
+            let birth = compile_expression(operand, ctx)?;
+            Ok(format!("DATE_DIFF('{}', CAST({} AS DATE), CURRENT_DATE)", prec.to_lowercase(), birth))
+        }
+        ElmExpression::CalculateAgeAt { operand, precision } => {
+            let prec = precision.as_deref().unwrap_or("Year");
+            // Check if first operand is a Property path on Patient (common pattern from cql2elm)
+            if let ElmExpression::Property { path, source, .. } = operand[0].as_ref() {
+                let clean_path = path.strip_suffix(".value").unwrap_or(path);
+                if let Some(src) = source {
+                    if let ElmExpression::ExpressionRef { name, .. } = src.as_ref() {
+                        if name == "Patient" {
+                            let raw_ref = if let Some(ref alias) = ctx.patient_context_alias {
+                                format!("{}.\"_raw\"", alias)
+                            } else {
+                                "_raw".to_string()
+                            };
+                            let as_of = compile_expression(&operand[1], ctx)?;
+                            return Ok(format!(
+                                "DATE_DIFF('{}', CAST(json_extract_string({}, '$.{}') AS DATE), {})",
+                                prec.to_lowercase(), raw_ref, clean_path, as_of
+                            ));
+                        }
+                    }
+                }
+            }
+            let birth = compile_expression(&operand[0], ctx)?;
+            let as_of = compile_expression(&operand[1], ctx)?;
+            Ok(format!("DATE_DIFF('{}', CAST({} AS DATE), {})", prec.to_lowercase(), birth, as_of))
+        }
+
+        // Set operations
+        ElmExpression::Union { operand } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            Ok(format!("({}) UNION ALL ({})", left, right))
+        }
+        ElmExpression::Intersect { operand } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            Ok(format!("({}) INTERSECT ({})", left, right))
+        }
+        ElmExpression::Except { operand } => {
+            let left = compile_expression(&operand[0], ctx)?;
+            let right = compile_expression(&operand[1], ctx)?;
+            Ok(format!("({}) EXCEPT ({})", left, right))
         }
 
         ElmExpression::Unsupported => {
@@ -793,5 +1029,226 @@ mod tests {
         let result = compile_expression(&expr, &mut ctx).unwrap();
         assert!(result.contains(">="));
         assert!(result.contains("2000-01-01"));
+    }
+
+    #[test]
+    fn test_compile_date() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::Date {
+            year: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                value: Some("2024".to_string()),
+            }),
+            month: Some(Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                value: Some("6".to_string()),
+            })),
+            day: Some(Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                value: Some("15".to_string()),
+            })),
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert_eq!(result, "MAKE_DATE(2024, 6, 15)");
+    }
+
+    #[test]
+    fn test_compile_to_date_expr() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::ToDate {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}String".to_string()),
+                value: Some("2024-01-01".to_string()),
+            }),
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert_eq!(result, "CAST('2024-01-01' AS DATE)");
+    }
+
+    #[test]
+    fn test_compile_to_datetime_expr() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::ToDateTime {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}String".to_string()),
+                value: Some("2024-01-01".to_string()),
+            }),
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert_eq!(result, "CAST('2024-01-01' AS TIMESTAMP)");
+    }
+
+    #[test]
+    fn test_compile_function_ref_to_date() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::FunctionRef {
+            name: "ToDate".to_string(),
+            library_name: Some("FHIRHelpers".to_string()),
+            operand: vec![ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}String".to_string()),
+                value: Some("2024-01-01".to_string()),
+            }],
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert_eq!(result, "CAST('2024-01-01' AS DATE)");
+    }
+
+    #[test]
+    fn test_compile_string_functions() {
+        let mut ctx = CompilationContext::new("test");
+
+        let expr = ElmExpression::Upper {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}String".to_string()),
+                value: Some("hello".to_string()),
+            }),
+        };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "UPPER('hello')");
+
+        let expr = ElmExpression::Lower {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}String".to_string()),
+                value: Some("HELLO".to_string()),
+            }),
+        };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "LOWER('HELLO')");
+
+        let expr = ElmExpression::Length {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}String".to_string()),
+                value: Some("test".to_string()),
+            }),
+        };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "LENGTH('test')");
+    }
+
+    #[test]
+    fn test_compile_math_functions() {
+        let mut ctx = CompilationContext::new("test");
+
+        let expr = ElmExpression::Abs {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                value: Some("-5".to_string()),
+            }),
+        };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "ABS(-5)");
+
+        let expr = ElmExpression::Round {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}Decimal".to_string()),
+                value: Some("3.14".to_string()),
+            }),
+            precision: Some(Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                value: Some("1".to_string()),
+            })),
+        };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "ROUND(3.14, 1)");
+
+        let expr = ElmExpression::Floor {
+            operand: Box::new(ElmExpression::Literal {
+                value_type: Some("{urn:hl7-org:elm-types:r1}Decimal".to_string()),
+                value: Some("3.7".to_string()),
+            }),
+        };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "FLOOR(3.7)");
+    }
+
+    #[test]
+    fn test_compile_temporal_ops() {
+        let mut ctx = CompilationContext::new("test");
+        let lit = |v: &str| Box::new(ElmExpression::Literal {
+            value_type: Some("{urn:hl7-org:elm-types:r1}Date".to_string()),
+            value: Some(v.to_string()),
+        });
+
+        let expr = ElmExpression::Before { operand: [lit("2020-01-01"), lit("2021-01-01")] };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "('2020-01-01' < '2021-01-01')");
+
+        let expr = ElmExpression::After { operand: [lit("2021-01-01"), lit("2020-01-01")] };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "('2021-01-01' > '2020-01-01')");
+
+        let expr = ElmExpression::DurationBetween {
+            operand: [lit("2020-01-01"), lit("2023-01-01")],
+            precision: Some("Year".to_string()),
+        };
+        assert_eq!(compile_expression(&expr, &mut ctx).unwrap(), "DATE_DIFF('year', '2020-01-01', '2023-01-01')");
+    }
+
+    #[test]
+    fn test_compile_set_operations() {
+        let mut ctx = CompilationContext::new("test");
+        let retrieve = |t: &str| Box::new(ElmExpression::Retrieve {
+            data_type: format!("{{http://hl7.org/fhir}}{}", t),
+            template_id: None,
+            code_property: None,
+            codes: None,
+            date_property: None,
+            date_range: None,
+        });
+
+        let expr = ElmExpression::Union { operand: [retrieve("Patient"), retrieve("Patient")] };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(result.contains("UNION ALL"));
+
+        let expr = ElmExpression::Intersect { operand: [retrieve("Patient"), retrieve("Patient")] };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(result.contains("INTERSECT"));
+
+        let expr = ElmExpression::Except { operand: [retrieve("Patient"), retrieve("Patient")] };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(result.contains("EXCEPT"));
+    }
+
+    #[test]
+    fn test_compile_aggregates_no_star() {
+        let mut ctx = CompilationContext::new("test");
+        let source = Box::new(ElmExpression::Retrieve {
+            data_type: "{http://hl7.org/fhir}Observation".to_string(),
+            template_id: None,
+            code_property: None,
+            codes: None,
+            date_property: None,
+            date_range: None,
+        });
+
+        let expr = ElmExpression::Sum { source: source.clone() };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(!result.contains("SUM(*)"));
+        assert!(result.contains("SUM("));
+
+        let expr = ElmExpression::Min { source: source.clone() };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(!result.contains("MIN(*)"));
+        assert!(result.contains("MIN("));
+
+        let expr = ElmExpression::Max { source: source.clone() };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(!result.contains("MAX(*)"));
+        assert!(result.contains("MAX("));
+
+        let expr = ElmExpression::Avg { source };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(!result.contains("AVG(*)"));
+        assert!(result.contains("AVG("));
+    }
+
+    #[test]
+    fn test_compile_last_no_rowid() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::Last {
+            source: Box::new(ElmExpression::Retrieve {
+                data_type: "{http://hl7.org/fhir}Patient".to_string(),
+                template_id: None,
+                code_property: None,
+                codes: None,
+                date_property: None,
+                date_range: None,
+            }),
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(!result.contains("rowid"));
+        assert!(result.contains("ORDER BY 1 DESC LIMIT 1"));
     }
 }

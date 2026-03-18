@@ -5,7 +5,8 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Configuration of extension for C API
 EXTENSION_NAME=ai
 EXTENSION_LIB_FILENAME=lib$(EXTENSION_NAME).so
-TARGET_DUCKDB_VERSION=v1.2.0
+USE_UNSTABLE_C_API=1
+TARGET_DUCKDB_VERSION=v1.4.4
 
 # Main targets
 all: configure release

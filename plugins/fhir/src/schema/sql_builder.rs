@@ -13,7 +13,7 @@ pub fn build_insert_sql(
     format!(
         "INSERT INTO {schema}.\"{table}\" (_id, _version_id, _last_updated, _is_deleted, _raw{col_suffix}) \
          SELECT $1, {version}, CURRENT_TIMESTAMP, false, $2::JSON{sel_suffix} \
-         FROM json_transform($2::JSON, '{spec}') AS t",
+         FROM (SELECT UNNEST(json_transform($2::JSON, '{spec}'))) AS t",
         schema = schema,
         table = table,
         version = version,
@@ -48,7 +48,7 @@ pub fn build_update_sql(
         "UPDATE {schema}.\"{table}\" SET \
          _version_id = {version}, _last_updated = CURRENT_TIMESTAMP, \
          _is_deleted = false, _raw = $2::JSON{set_suffix} \
-         FROM json_transform($2::JSON, '{spec}') AS t \
+         FROM (SELECT UNNEST(json_transform($2::JSON, '{spec}'))) AS t \
          WHERE _id = $1",
         schema = schema,
         table = table,
@@ -73,7 +73,7 @@ pub fn build_upsert_sql(
     format!(
         "INSERT OR REPLACE INTO {schema}.\"{table}\" (_id, _version_id, _last_updated, _is_deleted, _raw{col_suffix}) \
          SELECT $1, {version}, CURRENT_TIMESTAMP, false, $2::JSON{sel_suffix} \
-         FROM json_transform($2::JSON, '{spec}') AS t",
+         FROM (SELECT UNNEST(json_transform($2::JSON, '{spec}'))) AS t",
         schema = schema,
         table = table,
         version = version,

@@ -304,6 +304,7 @@ pub enum ElmExpression {
     },
 
     Concatenate {
+        #[serde(default)]
         operand: Vec<ElmExpression>,
     },
 
@@ -348,6 +349,7 @@ pub enum ElmExpression {
         operand: Box<ElmExpression>,
     },
     Coalesce {
+        #[serde(default)]
         operand: Vec<ElmExpression>,
     },
     #[serde(rename = "If")]
@@ -403,24 +405,31 @@ pub enum ElmExpression {
     },
 
     Count {
+        #[serde(alias = "operand")]
         source: Box<ElmExpression>,
     },
     Sum {
+        #[serde(alias = "operand")]
         source: Box<ElmExpression>,
     },
     Min {
+        #[serde(alias = "operand")]
         source: Box<ElmExpression>,
     },
     Max {
+        #[serde(alias = "operand")]
         source: Box<ElmExpression>,
     },
     Avg {
+        #[serde(alias = "operand")]
         source: Box<ElmExpression>,
     },
     First {
+        #[serde(alias = "operand")]
         source: Box<ElmExpression>,
     },
     Last {
+        #[serde(alias = "operand")]
         source: Box<ElmExpression>,
     },
     Distinct {
@@ -451,6 +460,124 @@ pub enum ElmExpression {
         hour: Option<Box<ElmExpression>>,
         minute: Option<Box<ElmExpression>>,
         second: Option<Box<ElmExpression>>,
+    },
+    Date {
+        year: Box<ElmExpression>,
+        month: Option<Box<ElmExpression>>,
+        day: Option<Box<ElmExpression>>,
+    },
+
+    // String functions
+    Length {
+        operand: Box<ElmExpression>,
+    },
+    Upper {
+        operand: Box<ElmExpression>,
+    },
+    Lower {
+        operand: Box<ElmExpression>,
+    },
+    StartsWith {
+        operand: [Box<ElmExpression>; 2],
+    },
+    EndsWith {
+        operand: [Box<ElmExpression>; 2],
+    },
+    Substring {
+        #[serde(rename = "stringToSub")]
+        string_to_sub: Box<ElmExpression>,
+        #[serde(rename = "startIndex")]
+        start_index: Box<ElmExpression>,
+        length: Option<Box<ElmExpression>>,
+    },
+    PositionOf {
+        pattern: Box<ElmExpression>,
+        string: Box<ElmExpression>,
+    },
+    Combine {
+        source: Box<ElmExpression>,
+        separator: Option<Box<ElmExpression>>,
+    },
+    Split {
+        #[serde(rename = "stringToSplit")]
+        string_to_split: Box<ElmExpression>,
+        separator: Box<ElmExpression>,
+    },
+    Replace {
+        argument: Box<ElmExpression>,
+        pattern: Box<ElmExpression>,
+        substitution: Box<ElmExpression>,
+    },
+    Matches {
+        operand: [Box<ElmExpression>; 2],
+    },
+
+    // Math functions
+    Abs {
+        operand: Box<ElmExpression>,
+    },
+    Round {
+        operand: Box<ElmExpression>,
+        precision: Option<Box<ElmExpression>>,
+    },
+    Floor {
+        operand: Box<ElmExpression>,
+    },
+    Ceiling {
+        operand: Box<ElmExpression>,
+    },
+    Truncate {
+        operand: Box<ElmExpression>,
+    },
+    Ln {
+        operand: Box<ElmExpression>,
+    },
+    Exp {
+        operand: Box<ElmExpression>,
+    },
+    Power {
+        operand: [Box<ElmExpression>; 2],
+    },
+
+    // Temporal comparisons
+    Before {
+        operand: [Box<ElmExpression>; 2],
+    },
+    After {
+        operand: [Box<ElmExpression>; 2],
+    },
+    SameOrBefore {
+        operand: [Box<ElmExpression>; 2],
+    },
+    SameOrAfter {
+        operand: [Box<ElmExpression>; 2],
+    },
+    DurationBetween {
+        operand: [Box<ElmExpression>; 2],
+        precision: Option<String>,
+    },
+    DifferenceBetween {
+        operand: [Box<ElmExpression>; 2],
+        precision: Option<String>,
+    },
+    CalculateAge {
+        operand: Box<ElmExpression>,
+        precision: Option<String>,
+    },
+    CalculateAgeAt {
+        operand: [Box<ElmExpression>; 2],
+        precision: Option<String>,
+    },
+
+    // Set operations
+    Union {
+        operand: [Box<ElmExpression>; 2],
+    },
+    Intersect {
+        operand: [Box<ElmExpression>; 2],
+    },
+    Except {
+        operand: [Box<ElmExpression>; 2],
     },
 
     #[serde(other)]
@@ -605,5 +732,93 @@ mod tests {
             }
             _ => panic!("Expected Query"),
         }
+    }
+
+    #[test]
+    fn test_parse_date() {
+        let json = r#"{
+            "type": "Date",
+            "year": {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Integer", "value": "2024"},
+            "month": {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Integer", "value": "6"},
+            "day": {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Integer", "value": "15"}
+        }"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        match expr {
+            ElmExpression::Date { year, month, day } => {
+                assert!(month.is_some());
+                assert!(day.is_some());
+                match *year {
+                    ElmExpression::Literal { ref value, .. } => {
+                        assert_eq!(value.as_deref(), Some("2024"));
+                    }
+                    _ => panic!("Expected Literal year"),
+                }
+            }
+            _ => panic!("Expected Date"),
+        }
+    }
+
+    #[test]
+    fn test_parse_string_functions() {
+        let json = r#"{"type": "Upper", "operand": {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}String", "value": "hello"}}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        assert!(matches!(expr, ElmExpression::Upper { .. }));
+
+        let json = r#"{"type": "Length", "operand": {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}String", "value": "hello"}}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        assert!(matches!(expr, ElmExpression::Length { .. }));
+
+        let json = r#"{"type": "StartsWith", "operand": [
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}String", "value": "hello"},
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}String", "value": "he"}
+        ]}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        assert!(matches!(expr, ElmExpression::StartsWith { .. }));
+    }
+
+    #[test]
+    fn test_parse_temporal_ops() {
+        let json = r#"{"type": "Before", "operand": [
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Date", "value": "2020-01-01"},
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Date", "value": "2021-01-01"}
+        ]}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        assert!(matches!(expr, ElmExpression::Before { .. }));
+
+        let json = r#"{"type": "DurationBetween", "precision": "Year", "operand": [
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Date", "value": "2020-01-01"},
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Date", "value": "2023-01-01"}
+        ]}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        match expr {
+            ElmExpression::DurationBetween { precision, .. } => {
+                assert_eq!(precision.as_deref(), Some("Year"));
+            }
+            _ => panic!("Expected DurationBetween"),
+        }
+    }
+
+    #[test]
+    fn test_parse_math_functions() {
+        let json = r#"{"type": "Abs", "operand": {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Integer", "value": "-5"}}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        assert!(matches!(expr, ElmExpression::Abs { .. }));
+
+        let json = r#"{"type": "Power", "operand": [
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Integer", "value": "2"},
+            {"type": "Literal", "valueType": "{urn:hl7-org:elm-types:r1}Integer", "value": "3"}
+        ]}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        assert!(matches!(expr, ElmExpression::Power { .. }));
+    }
+
+    #[test]
+    fn test_parse_set_operations() {
+        let json = r#"{"type": "Union", "operand": [
+            {"type": "Retrieve", "dataType": "{http://hl7.org/fhir}Patient"},
+            {"type": "Retrieve", "dataType": "{http://hl7.org/fhir}Patient"}
+        ]}"#;
+        let expr: ElmExpression = serde_json::from_str(json).unwrap();
+        assert!(matches!(expr, ElmExpression::Union { .. }));
     }
 }

@@ -6,11 +6,10 @@ PROJ_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Main extension configuration
 EXTENSION_NAME=circe
 
-# Set to 0 to use stable C API (recommended for production)
-USE_UNSTABLE_C_API=0
+USE_UNSTABLE_C_API=1
 
 # The DuckDB version to target
-TARGET_DUCKDB_VERSION=v1.2.0
+TARGET_DUCKDB_VERSION=v1.4.4
 
 # Configuration of extension (keep for circe native build)
 EXT_NAME=circe
