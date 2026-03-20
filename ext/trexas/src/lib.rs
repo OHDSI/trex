@@ -25,10 +25,13 @@ static SHARED_CONNECTION: OnceCell<Arc<Mutex<Connection>>> = OnceCell::new();
 fn store_shared_connection(
   connection: &Connection,
 ) -> Result<(), Box<dyn Error>> {
-  let pool_size: usize = std::env::var("TREX_CONNECTION_POOL_SIZE")
-    .ok()
-    .and_then(|v| v.parse().ok())
-    .unwrap_or(0);
+  let pool_size: usize = match std::env::var("TREX_CONNECTION_POOL_SIZE") {
+    Ok(v) => v.parse().unwrap_or_else(|_| {
+      warn!(value = %v, "invalid TREX_CONNECTION_POOL_SIZE, defaulting to 0");
+      0
+    }),
+    Err(_) => 0,
+  };
 
   if pool_size > 0 {
     if let Err(e) =

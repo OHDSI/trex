@@ -67,10 +67,13 @@ static TREX_DB: LazyLock<Arc<Mutex<Connection>>> = LazyLock::new(|| {
     let _ = conn.execute("LOAD circe", []);
   }
 
-  let pool_size: usize = env::var("TREX_CONNECTION_POOL_SIZE")
-    .ok()
-    .and_then(|v| v.parse().ok())
-    .unwrap_or(0);
+  let pool_size: usize = match env::var("TREX_CONNECTION_POOL_SIZE") {
+    Ok(v) => v.parse().unwrap_or_else(|_| {
+      warn!(value = %v, "invalid TREX_CONNECTION_POOL_SIZE, defaulting to 0");
+      0
+    }),
+    Err(_) => 0,
+  };
 
   if pool_size > 0 {
     let _ = connection::init_query_executor(&conn, pool_size);
@@ -862,9 +865,13 @@ fn op_execute_query_stream(
     })?
   } else {
     from_pool = false;
-    let guard = TREX_DB.lock().map_err(|e| {
-      TrexError::Generic(format!("failed to lock connection: {e}"))
-    })?;
+    let guard = match TREX_DB.lock() {
+      Ok(g) => g,
+      Err(poisoned) => {
+        warn!("streaming fallback: lock was poisoned, recovering");
+        poisoned.into_inner()
+      }
+    };
     guard.try_clone().map_err(|e| {
       TrexError::Generic(format!("failed to clone connection: {e}"))
     })?
