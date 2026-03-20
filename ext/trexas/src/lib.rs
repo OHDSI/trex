@@ -25,11 +25,22 @@ static SHARED_CONNECTION: OnceCell<Arc<Mutex<Connection>>> = OnceCell::new();
 fn store_shared_connection(
   connection: &Connection,
 ) -> Result<(), Box<dyn Error>> {
-  if let Err(e) = trex_core::connection::init_query_executor(connection) {
-    warn!(error = %e, "query executor init failed (may already exist)");
-  }
-  if let Err(e) = trex_core::connection::init_streaming_pool(connection) {
-    warn!(error = %e, "streaming pool init failed (may already exist)");
+  let pool_size: usize = std::env::var("TREX_CONNECTION_POOL_SIZE")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0);
+
+  if pool_size > 0 {
+    if let Err(e) =
+      trex_core::connection::init_query_executor(connection, pool_size)
+    {
+      warn!(error = %e, "query executor init failed (may already exist)");
+    }
+    if let Err(e) =
+      trex_core::connection::init_streaming_pool(connection, pool_size)
+    {
+      warn!(error = %e, "streaming pool init failed (may already exist)");
+    }
   }
 
   let cloned = connection

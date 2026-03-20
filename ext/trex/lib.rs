@@ -67,9 +67,16 @@ static TREX_DB: LazyLock<Arc<Mutex<Connection>>> = LazyLock::new(|| {
     let _ = conn.execute("LOAD circe", []);
   }
 
-  let _ = connection::init_query_executor(&conn);
-  if let Err(e) = connection::init_streaming_pool(&conn) {
-    warn!(error = %e, "failed to initialize streaming pool");
+  let pool_size: usize = env::var("TREX_CONNECTION_POOL_SIZE")
+    .ok()
+    .and_then(|v| v.parse().ok())
+    .unwrap_or(0);
+
+  if pool_size > 0 {
+    let _ = connection::init_query_executor(&conn, pool_size);
+    if let Err(e) = connection::init_streaming_pool(&conn, pool_size) {
+      warn!(error = %e, "failed to initialize streaming pool");
+    }
   }
   let conn_arc = Arc::new(Mutex::new(conn));
   let _ = connection::init_owned_connection(conn_arc.clone());
@@ -847,12 +854,21 @@ fn op_execute_query_stream(
 ) -> Result<ResourceId, TrexError> {
   let (sender, receiver) = mpsc::channel::<String>(1000);
 
-  let pool = connection::get_streaming_pool().ok_or_else(|| {
-    TrexError::Generic("streaming pool not initialized".into())
-  })?;
-  let conn = pool.acquire().ok_or_else(|| {
-    TrexError::Generic("no streaming connections available".into())
-  })?;
+  let from_pool;
+  let conn = if let Some(pool) = connection::get_streaming_pool() {
+    from_pool = true;
+    pool.acquire().ok_or_else(|| {
+      TrexError::Generic("no streaming connections available".into())
+    })?
+  } else {
+    from_pool = false;
+    let guard = TREX_DB.lock().map_err(|e| {
+      TrexError::Generic(format!("failed to lock connection: {e}"))
+    })?;
+    guard.try_clone().map_err(|e| {
+      TrexError::Generic(format!("failed to clone connection: {e}"))
+    })?
+  };
 
   let sender_for_panic = sender.clone();
   tokio::spawn(async move {
@@ -878,8 +894,10 @@ fn op_execute_query_stream(
       }));
       match result {
         Ok(conn) => {
-          if let Some(pool) = connection::get_streaming_pool() {
-            pool.release(conn);
+          if from_pool {
+            if let Some(pool) = connection::get_streaming_pool() {
+              pool.release(conn);
+            }
           }
         }
         Err(e) => {
