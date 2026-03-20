@@ -26,6 +26,7 @@ services:
       BETTER_AUTH_URL: http://localhost:8001/trex
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
+      PLUGINS_PATH: /usr/src/plugins
       SCHEMA_DIR: /usr/src/core/schema
       SWARM_CONFIG: >-
         {"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:7946","extensions":[{"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server","event_worker_path":"/usr/src/core/event"}},{"name":"flight","config":{"host":"0.0.0.0","port":50051}}]}}}

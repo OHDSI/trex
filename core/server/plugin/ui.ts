@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import express from "express";
 import { join } from "jsr:@std/path@^1.0";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { scopeUrlPrefix } from "./utils.ts";
@@ -24,11 +25,15 @@ export function addPlugin(app: Express, value: any, dir: string, fullName: strin
       const fullPrefix = `${PLUGINS_BASE_PATH}${scopePrefix}${urlPrefix}`;
       console.log(`Registering static route: ${fullPrefix} -> ${fsPath}`);
       REGISTERED_UI_ROUTES.push({ pluginName: fullName, urlPrefix: fullPrefix, fsPath });
+      let staticRegistered = false;
       try {
         // deno-lint-ignore no-explicit-any
         (Deno as any).core.ops.op_register_static_route(fullPrefix, fsPath);
+        staticRegistered = true;
       } catch (e) {
-        console.error(`Failed to register static route ${fullPrefix}: ${e}`);
+        console.warn(`Native static route failed for ${fullPrefix}, using express.static fallback`);
+        app.use(fullPrefix, express.static(fsPath));
+        staticRegistered = true;
       }
 
       // SPA fallback: serve index.html for non-file paths
