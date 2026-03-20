@@ -1,5 +1,5 @@
 use axum::body::Body;
-use axum::extract::MatchedPath;
+use axum::extract::{DefaultBodyLimit, MatchedPath};
 use axum::http::{header, Request, Response};
 use axum::middleware::{self, Next};
 use axum::routing::{delete, get, post, put};
@@ -76,6 +76,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/{dataset_id}/$cql", post(handlers::cql::evaluate_cql))
         .route(
+            "/{dataset_id}/$import",
+            post(handlers::import::import_ndjson),
+        )
+        .route(
             "/{dataset_id}/$export",
             get(handlers::export::system_export),
         )
@@ -87,6 +91,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/{dataset_id}/{resource_type}/$export",
             get(handlers::export::type_export),
         )
+        .layer(DefaultBodyLimit::max(100 * 1024 * 1024)) // 100 MB
         .layer(middleware::from_fn(logging_middleware))
         .layer(middleware::from_fn(fhir_content_type_middleware))
         .with_state(state)

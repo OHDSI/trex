@@ -89,6 +89,18 @@ pub fn to_schema_name(dataset_id: &str) -> String {
     escape_identifier(&dataset_id.replace('-', "_"))
 }
 
+pub fn to_qualified_schema(db_name: &str, dataset_id: &str) -> String {
+    format!(
+        "{}.{}",
+        escape_identifier(db_name),
+        escape_identifier(&dataset_id.replace('-', "_"))
+    )
+}
+
+pub fn to_qualified_meta_schema(db_name: &str) -> String {
+    format!("{}.\"_fhir_meta\"", escape_identifier(db_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,5 +151,29 @@ mod tests {
     fn test_to_schema_name() {
         assert_eq!(to_schema_name("my-dataset"), "\"my_dataset\"");
         assert_eq!(to_schema_name("plain"), "\"plain\"");
+    }
+
+    #[test]
+    fn test_to_qualified_schema() {
+        assert_eq!(
+            to_qualified_schema("memory", "my-dataset"),
+            "\"memory\".\"my_dataset\""
+        );
+        assert_eq!(
+            to_qualified_schema("mydb", "plain"),
+            "\"mydb\".\"plain\""
+        );
+    }
+
+    #[test]
+    fn test_to_qualified_meta_schema() {
+        assert_eq!(
+            to_qualified_meta_schema("memory"),
+            "\"memory\".\"_fhir_meta\""
+        );
+        assert_eq!(
+            to_qualified_meta_schema("mydb"),
+            "\"mydb\".\"_fhir_meta\""
+        );
     }
 }

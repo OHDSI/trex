@@ -28,7 +28,7 @@ pub async fn evaluate_measure(
     body: Option<Json<Value>>,
 ) -> Result<impl IntoResponse, AppError> {
     validate_dataset_id(&dataset_id)?;
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = state.qualified_schema(&dataset_id);
 
     let measure_url = params
         .measure
@@ -43,7 +43,7 @@ pub async fn evaluate_measure(
     let period_end = params.period_end.as_deref().unwrap_or("2100-12-31");
 
     let measure_sql = format!(
-        "SELECT _raw FROM \"{}\".\"measure\" WHERE json_extract_string(_raw, '$.url') = '{}' AND NOT _is_deleted ORDER BY json_extract_string(_raw, '$.version') DESC LIMIT 1",
+        "SELECT _raw FROM {}.\"measure\" WHERE json_extract_string(_raw, '$.url') = '{}' AND NOT _is_deleted ORDER BY json_extract_string(_raw, '$.version') DESC LIMIT 1",
         schema_name,
         measure_url.replace('\'', "''")
     );
@@ -60,13 +60,13 @@ pub async fn evaluate_measure_instance(
 ) -> Result<impl IntoResponse, AppError> {
     validate_dataset_id(&dataset_id)?;
     validate_fhir_id(&measure_id)?;
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = state.qualified_schema(&dataset_id);
 
     let period_start = params.period_start.as_deref().unwrap_or("1900-01-01");
     let period_end = params.period_end.as_deref().unwrap_or("2100-12-31");
 
     let measure_sql = format!(
-        "SELECT _raw FROM \"{}\".\"measure\" WHERE _id = '{}' AND NOT _is_deleted LIMIT 1",
+        "SELECT _raw FROM {}.\"measure\" WHERE _id = '{}' AND NOT _is_deleted LIMIT 1",
         schema_name,
         measure_id.replace('\'', "''")
     );
@@ -117,7 +117,7 @@ async fn evaluate_measure_impl(
         .to_string();
 
     let library_sql = format!(
-        "SELECT _raw FROM \"{}\".\"library\" WHERE json_extract_string(_raw, '$.url') = '{}' AND NOT _is_deleted ORDER BY json_extract_string(_raw, '$.version') DESC LIMIT 1",
+        "SELECT _raw FROM {}.\"library\" WHERE json_extract_string(_raw, '$.url') = '{}' AND NOT _is_deleted ORDER BY json_extract_string(_raw, '$.version') DESC LIMIT 1",
         schema_name,
         library_url.replace('\'', "''")
     );

@@ -34,7 +34,7 @@ pub async fn create_dataset(
         ));
     }
 
-    let schema_name = body.id.replace('-', "_");
+    let qualified_schema = state.qualified_schema(&body.id);
 
     let (resource_type_names, custom_definitions) = if let Some(ref sd_bundle) = body.structure_definitions {
         parse_custom_definitions(sd_bundle)?
@@ -51,14 +51,14 @@ pub async fn create_dataset(
     // Pin all DDL for this dataset to the same worker to avoid schema visibility races.
     let worker_id = state.executor.next_worker_id();
 
-    let create_schema_sql = format!("CREATE SCHEMA IF NOT EXISTS \"{}\"", schema_name);
+    let create_schema_sql = format!("CREATE SCHEMA IF NOT EXISTS {}", qualified_schema);
     if let QueryResult::Error(e) = state.executor.submit_on(worker_id, create_schema_sql).await {
         eprintln!("[fhir] Failed to create schema: {}", e);
         return Err(AppError::Internal("Failed to create schema".to_string()));
     }
 
     let history_ddl = format!(
-        "CREATE TABLE IF NOT EXISTS \"{schema}\"._history (
+        "CREATE TABLE IF NOT EXISTS {schema}._history (
             _id VARCHAR NOT NULL,
             _resource_type VARCHAR NOT NULL,
             _version_id INTEGER NOT NULL,
@@ -67,7 +67,7 @@ pub async fn create_dataset(
             _is_deleted BOOLEAN NOT NULL DEFAULT false,
             PRIMARY KEY (_id, _version_id)
         )",
-        schema = schema_name
+        schema = qualified_schema
     );
     if let QueryResult::Error(e) = state.executor.submit_on(worker_id, history_ddl).await {
         eprintln!("[fhir] Failed to create _history table: {}", e);
@@ -77,14 +77,14 @@ pub async fn create_dataset(
     }
 
     let vs_ddl = format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\"._valueset_expansion (
+        "CREATE TABLE IF NOT EXISTS {}._valueset_expansion (
             valueset_url VARCHAR NOT NULL,
             valueset_version VARCHAR,
             code VARCHAR NOT NULL,
             system VARCHAR NOT NULL,
             display VARCHAR
         )",
-        schema_name
+        qualified_schema
     );
     if let QueryResult::Error(e) = state.executor.submit_on(worker_id, vs_ddl).await {
         eprintln!("[fhir] Failed to create _valueset_expansion table: {}", e);
@@ -98,7 +98,7 @@ pub async fn create_dataset(
 
     if let Some(ref custom_defs) = custom_definitions {
         for type_name in &resource_type_names {
-            match crate::schema::generator::generate_ddl(custom_defs, type_name, &schema_name) {
+            match crate::schema::generator::generate_ddl(custom_defs, type_name, &qualified_schema) {
                 Ok(ddl) => match state.executor.submit_on(worker_id, ddl).await {
                     QueryResult::Error(e) => {
                         errors.push(format!("{}: {}", type_name, e));
@@ -114,7 +114,7 @@ pub async fn create_dataset(
         }
     } else {
         for type_name in &resource_type_names {
-            match state.registry.get_ddl(type_name, &schema_name) {
+            match state.registry.get_ddl(type_name, &qualified_schema) {
                 Ok(ddl) => match state.executor.submit_on(worker_id, ddl).await {
                     QueryResult::Error(e) => {
                         errors.push(format!("{}: {}", type_name, e));
@@ -133,7 +133,7 @@ pub async fn create_dataset(
     if created_types.is_empty() {
         let _ = state
             .executor
-            .submit_on(worker_id, format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name))
+            .submit_on(worker_id, format!("DROP SCHEMA IF EXISTS {} CASCADE", qualified_schema))
             .await;
         eprintln!("[fhir] Failed to create any resource tables: {}", errors.join("; "));
         return Err(AppError::Internal(
@@ -150,8 +150,9 @@ pub async fn create_dataset(
         .collect::<Vec<_>>()
         .join(", ");
 
+    let meta = state.meta_schema();
     let insert_sql = format!(
-        "INSERT INTO _fhir_meta._datasets (id, name, status, resource_types) VALUES ($1, $2, 'active', [{}])",
+        "INSERT INTO {meta}._datasets (id, name, status, resource_types) VALUES ($1, $2, 'active', [{}])",
         resource_types_sql
     );
 
@@ -231,12 +232,13 @@ fn parse_custom_definitions(
 pub async fn list_datasets(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
+    let meta = state.meta_schema();
     let result = state
         .executor
-        .submit(
-            "SELECT id, name, status, created_at, resource_types FROM _fhir_meta._datasets"
-                .to_string(),
-        )
+        .submit(format!(
+            "SELECT id, name, status, created_at, resource_types FROM {}._datasets",
+            meta
+        ))
         .await;
 
     match result {
@@ -269,8 +271,10 @@ pub async fn get_dataset(
 ) -> Result<impl IntoResponse, AppError> {
     validate_dataset_id(&dataset_id)?;
 
+    let meta = state.meta_schema();
     let sql = format!(
-        "SELECT id, name, status, created_at, resource_types FROM _fhir_meta._datasets WHERE id = '{}'",
+        "SELECT id, name, status, created_at, resource_types FROM {}._datasets WHERE id = '{}'",
+        meta,
         dataset_id.replace('\'', "''")
     );
 
@@ -310,8 +314,10 @@ pub async fn delete_dataset(
 ) -> Result<impl IntoResponse, AppError> {
     validate_dataset_id(&dataset_id)?;
 
+    let meta = state.meta_schema();
     let check_sql = format!(
-        "SELECT status FROM _fhir_meta._datasets WHERE id = '{}'",
+        "SELECT status FROM {}._datasets WHERE id = '{}'",
+        meta,
         dataset_id.replace('\'', "''")
     );
 
@@ -349,13 +355,14 @@ pub async fn delete_dataset(
     }
 
     let mark_sql = format!(
-        "UPDATE _fhir_meta._datasets SET status = 'deleting' WHERE id = '{}'",
+        "UPDATE {}._datasets SET status = 'deleting' WHERE id = '{}'",
+        meta,
         dataset_id.replace('\'', "''")
     );
     let _ = state.executor.submit(mark_sql).await;
 
-    let schema_name = dataset_id.replace('-', "_");
-    let drop_sql = format!("DROP SCHEMA IF EXISTS \"{}\" CASCADE", schema_name);
+    let qualified_schema = state.qualified_schema(&dataset_id);
+    let drop_sql = format!("DROP SCHEMA IF EXISTS {} CASCADE", qualified_schema);
     if let QueryResult::Error(e) = state.executor.submit(drop_sql).await {
         eprintln!("[fhir] Failed to drop schema: {}", e);
         return Err(AppError::Internal(
@@ -364,7 +371,8 @@ pub async fn delete_dataset(
     }
 
     let delete_sql = format!(
-        "DELETE FROM _fhir_meta._datasets WHERE id = '{}'",
+        "DELETE FROM {}._datasets WHERE id = '{}'",
+        meta,
         dataset_id.replace('\'', "''")
     );
     if let QueryResult::Error(e) = state.executor.submit(delete_sql).await {
@@ -373,6 +381,8 @@ pub async fn delete_dataset(
             "Failed to delete dataset record".to_string(),
         ));
     }
+
+    state.executor.sync_all().await;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -384,8 +394,10 @@ pub async fn update_dataset(
 ) -> Result<impl IntoResponse, AppError> {
     validate_dataset_id(&dataset_id)?;
 
+    let meta = state.meta_schema();
     let check_sql = format!(
-        "SELECT id FROM _fhir_meta._datasets WHERE id = '{}'",
+        "SELECT id FROM {}._datasets WHERE id = '{}'",
+        meta,
         dataset_id.replace('\'', "''")
     );
     match state.executor.submit(check_sql).await {
@@ -403,7 +415,7 @@ pub async fn update_dataset(
         .ok_or_else(|| AppError::BadRequest("Missing 'structure_definitions' field".to_string()))?;
 
     let (new_types, custom_defs) = parse_custom_definitions(sd_bundle)?;
-    let schema_name = dataset_id.replace('-', "_");
+    let qualified_schema = state.qualified_schema(&dataset_id);
 
     let mut added = Vec::new();
     let registry = custom_defs.as_ref().ok_or_else(|| {
@@ -412,7 +424,7 @@ pub async fn update_dataset(
 
     for type_name in &new_types {
         // generate_ddl uses CREATE TABLE IF NOT EXISTS, so concurrent calls are safe
-        match crate::schema::generator::generate_ddl(registry, type_name, &schema_name) {
+        match crate::schema::generator::generate_ddl(registry, type_name, &qualified_schema) {
             Ok(ddl) => {
                 match state.executor.submit(ddl).await {
                     QueryResult::Error(e) => {
@@ -442,11 +454,16 @@ pub async fn update_dataset(
             .collect::<Vec<_>>()
             .join(", ");
         let update_sql = format!(
-            "UPDATE _fhir_meta._datasets SET resource_types = list_concat(resource_types, [{}]) WHERE id = '{}'",
+            "UPDATE {}._datasets SET resource_types = list_concat(resource_types, [{}]) WHERE id = '{}'",
+            meta,
             new_types_sql,
             dataset_id.replace('\'', "''")
         );
         let _ = state.executor.submit(update_sql).await;
+    }
+
+    if !added.is_empty() {
+        state.executor.sync_all().await;
     }
 
     Ok(Json(json!({

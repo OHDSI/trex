@@ -15,7 +15,8 @@ pub async fn get_metadata(
     validate_dataset_id(&dataset_id)?;
 
     let check_sql = format!(
-        "SELECT id FROM _fhir_meta._datasets WHERE id = '{}'",
+        "SELECT id FROM {}._datasets WHERE id = '{}'",
+        state.meta_schema(),
         dataset_id.replace('\'', "''")
     );
     match state.executor.submit(check_sql).await {

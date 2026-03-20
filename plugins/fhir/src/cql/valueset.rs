@@ -28,7 +28,7 @@ pub async fn expand_valueset(
     };
 
     let delete_sql = format!(
-        "DELETE FROM \"{schema}\"._valueset_expansion WHERE valueset_url = '{url}'",
+        "DELETE FROM {schema}._valueset_expansion WHERE valueset_url = '{url}'",
         schema = schema_name,
         url = url.replace('\'', "''")
     );
@@ -59,7 +59,7 @@ fn insert_expansion_entry<'a>(
     }
 
     let sql = format!(
-        "INSERT INTO \"{schema}\"._valueset_expansion (valueset_url, valueset_version, code, system, display) \
+        "INSERT INTO {schema}._valueset_expansion (valueset_url, valueset_version, code, system, display) \
          VALUES ('{url}', '{ver}', '{code}', '{sys}', '{disp}')",
         schema = schema_name,
         url = valueset_url.replace('\'', "''"),
@@ -99,7 +99,7 @@ pub async fn code_in_valueset(
     code: &str,
 ) -> Result<bool, String> {
     let sql = format!(
-        "SELECT 1 FROM \"{schema}\"._valueset_expansion \
+        "SELECT 1 FROM {schema}._valueset_expansion \
          WHERE valueset_url = '{url}' AND system = '{sys}' AND code = '{code}' LIMIT 1",
         schema = schema_name,
         url = valueset_url.replace('\'', "''"),

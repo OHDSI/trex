@@ -9,7 +9,7 @@ use crate::error::AppError;
 use crate::fhir::validation;
 use crate::query_executor::QueryResult;
 use crate::schema::sql_builder;
-use crate::sql_safety::{to_schema_name, validate_dataset_id, validate_fhir_id, validate_resource_type};
+use crate::sql_safety::{validate_dataset_id, validate_fhir_id, validate_resource_type};
 use crate::state::AppState;
 
 pub async fn create_resource(
@@ -29,7 +29,7 @@ pub async fn create_resource(
     }
 
     let id = uuid::Uuid::new_v4().to_string();
-    let schema_name = to_schema_name(&dataset_id);
+    let schema_name = state.qualified_schema(&dataset_id);
     let table_name = resource_type.to_lowercase();
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
 
@@ -90,7 +90,7 @@ pub async fn read_resource(
     validate_resource_type(&resource_type, &state.registry)?;
     validate_fhir_id(&resource_id)?;
 
-    let schema_name = to_schema_name(&dataset_id);
+    let schema_name = state.qualified_schema(&dataset_id);
     let table_name = resource_type.to_lowercase();
 
     let sql = format!(
@@ -178,7 +178,7 @@ pub async fn update_resource(
         ));
     }
 
-    let schema_name = to_schema_name(&dataset_id);
+    let schema_name = state.qualified_schema(&dataset_id);
     let table_name = resource_type.to_lowercase();
 
     let check_sql = format!(
@@ -314,7 +314,7 @@ pub async fn delete_resource(
     validate_resource_type(&resource_type, &state.registry)?;
     validate_fhir_id(&resource_id)?;
 
-    let schema_name = to_schema_name(&dataset_id);
+    let schema_name = state.qualified_schema(&dataset_id);
     let table_name = resource_type.to_lowercase();
 
     let check_sql = format!(

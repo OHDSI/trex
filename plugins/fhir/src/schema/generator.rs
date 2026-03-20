@@ -30,7 +30,7 @@ pub fn generate_ddl(
     columns.push("    PRIMARY KEY (_id)".to_string());
 
     Ok(format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\".\"{}\"\n(\n{}\n)",
+        "CREATE TABLE IF NOT EXISTS {}.\"{}\"\n(\n{}\n)",
         schema_name,
         table_name,
         columns.join(",\n")
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn test_patient_ddl_no_bracket_x() {
         let defs = load_default_definitions().expect("load defs");
-        let ddl = generate_ddl(&defs, "Patient", "test_schema").expect("generate ddl");
+        let ddl = generate_ddl(&defs, "Patient", "\"memory\".\"test_schema\"").expect("generate ddl");
         // Check that [x] never appears in the DDL
         assert!(
             !ddl.contains("[x]"),

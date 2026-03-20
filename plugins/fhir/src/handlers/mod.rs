@@ -8,3 +8,5 @@ pub mod metadata;
 pub mod export;
 pub mod cql;
 pub mod measure;
+pub mod import;
+pub mod upsert;

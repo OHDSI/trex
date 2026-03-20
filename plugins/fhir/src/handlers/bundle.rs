@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use crate::error::AppError;
 use crate::fhir::bundle_processor;
+use crate::handlers::upsert;
 use crate::query_executor::QueryResult;
 use crate::schema::sql_builder;
 use crate::sql_safety::validate_dataset_id;
@@ -65,9 +66,13 @@ async fn process_transaction(
         ));
     }
 
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = state.qualified_schema(dataset_id);
 
-    if let QueryResult::Error(e) = state.executor.submit("BEGIN TRANSACTION".to_string()).await {
+    // Pin all transaction queries to a single worker so BEGIN/COMMIT/ROLLBACK
+    // all run on the same DuckDB connection.
+    let worker_id = state.executor.next_worker_id();
+
+    if let QueryResult::Error(e) = state.executor.submit_on(worker_id, "BEGIN TRANSACTION".to_string()).await {
         eprintln!("[fhir] Failed to begin transaction: {}", e);
         return Err(AppError::Internal(
             "Failed to begin transaction".to_string(),
@@ -77,12 +82,12 @@ async fn process_transaction(
     let mut response_entries = Vec::new();
 
     for entry in &entries {
-        match process_single_entry(&state, &schema_name, dataset_id, entry).await {
+        match process_single_entry(&state, &schema_name, dataset_id, entry, Some(worker_id)).await {
             Ok(resp_entry) => {
                 response_entries.push(resp_entry);
             }
             Err(e) => {
-                let _ = state.executor.submit("ROLLBACK".to_string()).await;
+                let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
                 return Err(AppError::BadRequest(format!(
                     "Transaction failed on {}/{}: {}",
                     entry.resource_type, entry.server_id, e
@@ -91,7 +96,7 @@ async fn process_transaction(
         }
     }
 
-    if let QueryResult::Error(e) = state.executor.submit("COMMIT".to_string()).await {
+    if let QueryResult::Error(e) = state.executor.submit_on(worker_id, "COMMIT".to_string()).await {
         eprintln!("[fhir] Failed to commit transaction: {}", e);
         return Err(AppError::Internal(
             "Failed to commit transaction".to_string(),
@@ -127,11 +132,11 @@ async fn process_batch(
         ));
     }
 
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = state.qualified_schema(dataset_id);
     let mut response_entries = Vec::new();
 
     for entry in &entries {
-        match process_single_entry(&state, &schema_name, dataset_id, entry).await {
+        match process_single_entry(&state, &schema_name, dataset_id, entry, None).await {
             Ok(resp_entry) => {
                 response_entries.push(resp_entry);
             }
@@ -168,39 +173,44 @@ async fn process_single_entry(
     schema_name: &str,
     dataset_id: &str,
     entry: &bundle_processor::ProcessedEntry,
+    worker_id: Option<usize>,
 ) -> Result<Value, String> {
     let table_name = entry.resource_type.to_lowercase();
-    let now = chrono::Utc::now()
-        .format("%Y-%m-%dT%H:%M:%SZ")
-        .to_string();
-
-    let mut resource = entry.resource.clone();
-    if let Some(obj) = resource.as_object_mut() {
-        obj.insert("id".to_string(), Value::String(entry.server_id.clone()));
-        obj.insert(
-            "meta".to_string(),
-            json!({
-                "versionId": "1",
-                "lastUpdated": now
-            }),
-        );
-    }
-
-    let raw_json = serde_json::to_string(&resource)
-        .map_err(|e| format!("JSON serialize: {}", e))?;
 
     match entry.method.as_str() {
         "POST" => {
+            let now = chrono::Utc::now()
+                .format("%Y-%m-%dT%H:%M:%SZ")
+                .to_string();
+            let mut resource = entry.resource.clone();
+            if let Some(obj) = resource.as_object_mut() {
+                obj.insert("id".to_string(), Value::String(entry.server_id.clone()));
+                obj.insert(
+                    "meta".to_string(),
+                    json!({
+                        "versionId": "1",
+                        "lastUpdated": now
+                    }),
+                );
+            }
+            let raw_json = serde_json::to_string(&resource)
+                .map_err(|e| format!("JSON serialize: {}", e))?;
+
             let transform_spec = state.registry.get_json_transform(&entry.resource_type)
                 .map_err(|e| format!("Transform spec: {}", e))?;
             let column_names = state.registry.get_column_names(&entry.resource_type)
                 .map_err(|e| format!("Column names: {}", e))?;
-            let quoted_schema = format!("\"{}\"", schema_name);
             let insert_sql = sql_builder::build_insert_sql(
-                &quoted_schema, &table_name, 1, &transform_spec, &column_names,
+                schema_name, &table_name, 1, &transform_spec, &column_names,
             );
 
-            match state.executor.submit_params(insert_sql, vec![entry.server_id.clone(), raw_json]).await {
+            let result = if let Some(wid) = worker_id {
+                state.executor.submit_params_on(wid, insert_sql, vec![entry.server_id.clone(), raw_json]).await
+            } else {
+                state.executor.submit_params(insert_sql, vec![entry.server_id.clone(), raw_json]).await
+            };
+
+            match result {
                 QueryResult::Error(e) => Err(format!("Insert failed: {}", e)),
                 _ => Ok(json!({
                     "response": {
@@ -216,21 +226,28 @@ async fn process_single_entry(
                 .map_err(|e| format!("Transform spec: {}", e))?;
             let column_names = state.registry.get_column_names(&entry.resource_type)
                 .map_err(|e| format!("Column names: {}", e))?;
-            let quoted_schema = format!("\"{}\"", schema_name);
-            let upsert_sql = sql_builder::build_upsert_sql(
-                &quoted_schema, &table_name, 1, &transform_spec, &column_names,
-            );
+            let mut resource = entry.resource.clone();
 
-            match state.executor.submit_params(upsert_sql, vec![entry.server_id.clone(), raw_json]).await {
-                QueryResult::Error(e) => Err(format!("Upsert failed: {}", e)),
-                _ => Ok(json!({
-                    "response": {
-                        "status": "200 OK",
-                        "location": format!("/{}/{}/{}", dataset_id, entry.resource_type, entry.server_id),
-                        "etag": "W/\"1\""
-                    }
-                })),
-            }
+            let result = upsert::upsert_resource(
+                state,
+                schema_name,
+                &entry.resource_type,
+                &entry.server_id,
+                &mut resource,
+                &transform_spec,
+                &column_names,
+                worker_id,
+            )
+            .await?;
+
+            let status = if result.is_new { "201 Created" } else { "200 OK" };
+            Ok(json!({
+                "response": {
+                    "status": status,
+                    "location": format!("/{}/{}/{}", dataset_id, entry.resource_type, entry.server_id),
+                    "etag": format!("W/\"{}\"", result.version)
+                }
+            }))
         }
         "DELETE" => {
             if entry.server_id.is_empty() {
@@ -238,14 +255,20 @@ async fn process_single_entry(
             }
 
             let delete_sql = format!(
-                "UPDATE \"{schema}\".\"{table}\" SET _is_deleted = true, \
+                "UPDATE {schema}.\"{table}\" SET _is_deleted = true, \
                  _version_id = _version_id + 1, _last_updated = CURRENT_TIMESTAMP \
                  WHERE _id = $1",
                 schema = schema_name,
                 table = table_name,
             );
 
-            match state.executor.submit_params(delete_sql, vec![entry.server_id.clone()]).await {
+            let result = if let Some(wid) = worker_id {
+                state.executor.submit_params_on(wid, delete_sql, vec![entry.server_id.clone()]).await
+            } else {
+                state.executor.submit_params(delete_sql, vec![entry.server_id.clone()]).await
+            };
+
+            match result {
                 QueryResult::Error(e) => Err(format!("Delete failed: {}", e)),
                 _ => Ok(json!({
                     "response": {

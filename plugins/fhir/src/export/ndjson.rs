@@ -2,6 +2,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 use crate::query_executor::{QueryExecutor, QueryResult};
+use crate::sql_safety::to_qualified_schema;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ExportStatus {
@@ -26,6 +27,7 @@ pub async fn create_export_job(
     executor: &QueryExecutor,
     dataset_id: &str,
     resource_types: Option<&[String]>,
+    meta_schema: &str,
 ) -> Result<String, String> {
     let job_id = uuid::Uuid::new_v4().to_string();
     let types_str = resource_types
@@ -33,8 +35,9 @@ pub async fn create_export_job(
         .unwrap_or_default();
 
     let sql = format!(
-        "INSERT INTO _fhir_meta._export_jobs (id, dataset_id, status, resource_types, created_at) \
+        "INSERT INTO {meta}._export_jobs (id, dataset_id, status, resource_types, created_at) \
          VALUES ('{id}', '{ds}', 'accepted', '{types}', CURRENT_TIMESTAMP)",
+        meta = meta_schema,
         id = job_id,
         ds = dataset_id.replace('\'', "''"),
         types = types_str.replace('\'', "''")
@@ -49,10 +52,12 @@ pub async fn create_export_job(
 pub async fn get_export_job(
     executor: &QueryExecutor,
     job_id: &str,
+    meta_schema: &str,
 ) -> Result<Option<Value>, String> {
     let sql = format!(
         "SELECT id, dataset_id, status, resource_types, created_at, completed_at, output_files, error_message \
-         FROM _fhir_meta._export_jobs WHERE id = '{}'",
+         FROM {}._export_jobs WHERE id = '{}'",
+        meta_schema,
         job_id.replace('\'', "''")
     );
 
@@ -81,6 +86,7 @@ pub async fn update_export_job_status(
     status: ExportStatus,
     output_files: Option<&str>,
     error_message: Option<&str>,
+    meta_schema: &str,
 ) -> Result<(), String> {
     let mut updates = vec![format!("status = '{}'", status.as_str())];
 
@@ -103,7 +109,8 @@ pub async fn update_export_job_status(
     }
 
     let sql = format!(
-        "UPDATE _fhir_meta._export_jobs SET {} WHERE id = '{}'",
+        "UPDATE {}._export_jobs SET {} WHERE id = '{}'",
+        meta_schema,
         updates.join(", "),
         job_id.replace('\'', "''")
     );
@@ -119,16 +126,18 @@ pub async fn execute_export(
     dataset_id: &str,
     job_id: &str,
     resource_types: &[String],
+    db_name: &str,
 ) -> Result<Vec<(String, usize)>, String> {
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = to_qualified_schema(db_name, dataset_id);
+    let meta_schema = crate::sql_safety::to_qualified_meta_schema(db_name);
     let mut results = Vec::new();
 
-    update_export_job_status(&executor, job_id, ExportStatus::InProgress, None, None).await?;
+    update_export_job_status(&executor, job_id, ExportStatus::InProgress, None, None, &meta_schema).await?;
 
     for rt in resource_types {
         let table_name = rt.to_lowercase();
         let sql = format!(
-            "SELECT _raw FROM \"{}\".\"{}\" WHERE NOT _is_deleted",
+            "SELECT _raw FROM {}.\"{}\" WHERE NOT _is_deleted",
             schema_name, table_name
         );
 
@@ -165,6 +174,7 @@ pub async fn execute_export(
         ExportStatus::Complete,
         Some(&output_json),
         None,
+        &meta_schema,
     )
     .await?;
 

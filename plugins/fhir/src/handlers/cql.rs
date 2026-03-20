@@ -18,7 +18,7 @@ pub async fn evaluate_cql(
 ) -> Result<impl IntoResponse, AppError> {
     validate_dataset_id(&dataset_id)?;
 
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = state.qualified_schema(&dataset_id);
 
     let elm = if let Some(library) = body.get("library") {
         library.clone()
@@ -100,7 +100,7 @@ async fn load_library_elm(
     library_url: &str,
 ) -> Result<Value, AppError> {
     let sql = format!(
-        "SELECT _raw FROM \"{}\".\"library\" WHERE json_extract_string(_raw, '$.url') = '{}' AND NOT _is_deleted ORDER BY json_extract_string(_raw, '$.version') DESC LIMIT 1",
+        "SELECT _raw FROM {}.\"library\" WHERE json_extract_string(_raw, '$.url') = '{}' AND NOT _is_deleted ORDER BY json_extract_string(_raw, '$.version') DESC LIMIT 1",
         schema_name,
         library_url.replace('\'', "''")
     );

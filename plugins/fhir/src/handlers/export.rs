@@ -24,10 +24,12 @@ pub async fn system_export(
         state.registry.resource_type_names()
     };
 
+    let meta = state.meta_schema();
     let job_id = ndjson::create_export_job(
         &state.executor,
         &dataset_id,
         Some(&resource_types),
+        &meta,
     )
     .await
     .map_err(|e| {
@@ -39,8 +41,9 @@ pub async fn system_export(
     let ds_id = dataset_id.clone();
     let jid = job_id.clone();
     let types = resource_types.clone();
+    let db_name = state.db_name.clone();
     tokio::spawn(async move {
-        if let Err(e) = ndjson::execute_export(executor, &ds_id, &jid, &types).await {
+        if let Err(e) = ndjson::execute_export(executor, &ds_id, &jid, &types, &db_name).await {
             eprintln!("[fhir] Export job {} failed: {}", jid, e);
         }
     });
@@ -63,11 +66,13 @@ pub async fn type_export(
     validate_resource_type(&resource_type, &state.registry)?;
 
     let resource_types = vec![resource_type.clone()];
+    let meta = state.meta_schema();
 
     let job_id = ndjson::create_export_job(
         &state.executor,
         &dataset_id,
         Some(&resource_types),
+        &meta,
     )
     .await
     .map_err(|e| {
@@ -79,8 +84,9 @@ pub async fn type_export(
     let ds_id = dataset_id.clone();
     let jid = job_id.clone();
     let types = resource_types.clone();
+    let db_name = state.db_name.clone();
     tokio::spawn(async move {
-        if let Err(e) = ndjson::execute_export(executor, &ds_id, &jid, &types).await {
+        if let Err(e) = ndjson::execute_export(executor, &ds_id, &jid, &types, &db_name).await {
             eprintln!("[fhir] Export job {} failed: {}", jid, e);
         }
     });
@@ -101,7 +107,8 @@ pub async fn export_status(
 ) -> Result<impl IntoResponse, AppError> {
     validate_uuid(&job_id)?;
 
-    let job = ndjson::get_export_job(&state.executor, &job_id)
+    let meta = state.meta_schema();
+    let job = ndjson::get_export_job(&state.executor, &job_id, &meta)
         .await
         .map_err(|e| {
             eprintln!("[fhir] Failed to get export job: {}", e);

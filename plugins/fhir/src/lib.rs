@@ -37,7 +37,7 @@ use std::{
 static SHARED_CONNECTION: OnceCell<Arc<Mutex<Connection>>> = OnceCell::new();
 static QUERY_EXECUTOR: OnceCell<Arc<QueryExecutor>> = OnceCell::new();
 
-const DEFAULT_POOL_SIZE: usize = 8;
+const DEFAULT_POOL_SIZE: usize = 1;
 
 fn executor_pool_size() -> usize {
     std::env::var("FHIR_POOL_SIZE")
@@ -73,14 +73,16 @@ pub fn get_query_executor() -> Option<Arc<QueryExecutor>> {
     QUERY_EXECUTOR.get().cloned()
 }
 
-pub async fn init_fhir_meta(executor: &Arc<QueryExecutor>) {
+pub async fn init_fhir_meta(executor: &Arc<QueryExecutor>, db_name: &str) {
+    let meta_schema = sql_safety::to_qualified_meta_schema(db_name);
+
     let _ = executor
-        .submit("CREATE SCHEMA IF NOT EXISTS _fhir_meta".to_string())
+        .submit(format!("CREATE SCHEMA IF NOT EXISTS {}", meta_schema))
         .await;
 
     let _ = executor
-        .submit(
-            "CREATE TABLE IF NOT EXISTS _fhir_meta._datasets (
+        .submit(format!(
+            "CREATE TABLE IF NOT EXISTS {}._datasets (
                 id VARCHAR PRIMARY KEY,
                 name VARCHAR NOT NULL,
                 created_at TIMESTAMP NOT NULL DEFAULT now(),
@@ -88,14 +90,14 @@ pub async fn init_fhir_meta(executor: &Arc<QueryExecutor>) {
                 structure_definitions JSON,
                 resource_types VARCHAR[],
                 status VARCHAR NOT NULL DEFAULT 'active'
-            )"
-            .to_string(),
-        )
+            )",
+            meta_schema
+        ))
         .await;
 
     let _ = executor
-        .submit(
-            "CREATE TABLE IF NOT EXISTS _fhir_meta._export_jobs (
+        .submit(format!(
+            "CREATE TABLE IF NOT EXISTS {}._export_jobs (
                 id VARCHAR PRIMARY KEY,
                 dataset_id VARCHAR NOT NULL,
                 resource_types VARCHAR[],
@@ -104,10 +106,12 @@ pub async fn init_fhir_meta(executor: &Arc<QueryExecutor>) {
                 completed_at TIMESTAMP,
                 output_files JSON,
                 error_message VARCHAR
-            )"
-            .to_string(),
-        )
+            )",
+            meta_schema
+        ))
         .await;
+
+    executor.sync_all().await;
 }
 
 struct FhirStartScalar;
@@ -136,7 +140,18 @@ impl VScalar for FhirStartScalar {
             .to_string();
         let port = port_slice[0] as u16;
 
-        let response = match fhir_server::start_fhir_server(host, port) {
+        let db_name = if input.num_columns() >= 3 {
+            let db_name_vector = input.flat_vector(2);
+            let db_name_slice =
+                db_name_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            duckdb::types::DuckString::new(&mut { db_name_slice[0] })
+                .as_str()
+                .to_string()
+        } else {
+            "memory".to_string()
+        };
+
+        let response = match fhir_server::start_fhir_server(host, port, db_name) {
             Ok(msg) => msg,
             Err(err) => format!("Error: {}", err),
         };
@@ -147,10 +162,20 @@ impl VScalar for FhirStartScalar {
     }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![LogicalTypeId::Varchar.into(), LogicalTypeId::Integer.into()],
-            LogicalTypeId::Varchar.into(),
-        )]
+        vec![
+            ScalarFunctionSignature::exact(
+                vec![LogicalTypeId::Varchar.into(), LogicalTypeId::Integer.into()],
+                LogicalTypeId::Varchar.into(),
+            ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeId::Varchar.into(),
+            ),
+        ]
     }
 }
 

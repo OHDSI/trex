@@ -17,10 +17,10 @@ pub async fn resource_history(
     validate_resource_type(&resource_type, &state.registry)?;
     validate_fhir_id(&resource_id)?;
 
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = state.qualified_schema(&dataset_id);
 
     let sql = format!(
-        "SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM \"{schema}\"._history \
+        "SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM {schema}._history \
          WHERE _id = '{id}' AND _resource_type = '{rtype}' \
          ORDER BY _version_id DESC",
         schema = schema_name,
@@ -29,7 +29,7 @@ pub async fn resource_history(
     );
 
     let current_sql = format!(
-        "SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM \"{schema}\".\"{table}\" WHERE _id = '{id}'",
+        "SELECT _version_id::VARCHAR, _last_updated::VARCHAR, _raw, _is_deleted::VARCHAR FROM {schema}.\"{table}\" WHERE _id = '{id}'",
         schema = schema_name,
         table = resource_type.to_lowercase(),
         id = resource_id.replace('\'', "''")
@@ -98,10 +98,10 @@ pub async fn read_resource_version(
     validate_fhir_id(&resource_id)?;
     validate_version_id(&version_id)?;
 
-    let schema_name = dataset_id.replace('-', "_");
+    let schema_name = state.qualified_schema(&dataset_id);
 
     let sql = format!(
-        "SELECT _raw FROM \"{schema}\"._history \
+        "SELECT _raw FROM {schema}._history \
          WHERE _id = '{id}' AND _resource_type = '{rtype}' AND _version_id = {version}",
         schema = schema_name,
         id = resource_id.replace('\'', "''"),
@@ -113,7 +113,7 @@ pub async fn read_resource_version(
         QueryResult::Select { rows, .. } => {
             if rows.is_empty() {
                 let current_sql = format!(
-                    "SELECT _raw FROM \"{schema}\".\"{table}\" WHERE _id = '{id}' AND _version_id = {version}",
+                    "SELECT _raw FROM {schema}.\"{table}\" WHERE _id = '{id}' AND _version_id = {version}",
                     schema = schema_name,
                     table = resource_type.to_lowercase(),
                     id = resource_id.replace('\'', "''"),

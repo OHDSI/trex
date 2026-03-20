@@ -123,6 +123,23 @@ impl QueryExecutor {
         ))
     }
 
+    pub async fn submit_params_on(&self, worker_id: usize, query: String, params: Vec<String>) -> QueryResult {
+        let sender = &self.senders[worker_id % self.senders.len()];
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+
+        if let Err(e) = sender.send(QueryRequest {
+            query,
+            params,
+            response_tx,
+        }) {
+            return QueryResult::Error(format!("executor closed: {e}"));
+        }
+
+        response_rx.await.unwrap_or(QueryResult::Error(
+            "Query execution channel closed".to_string(),
+        ))
+    }
+
     pub fn submit_with_params(
         &self,
         query: String,

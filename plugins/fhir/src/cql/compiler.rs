@@ -123,7 +123,7 @@ pub fn compile_expression(
 
             let table_name = resource_type.to_lowercase();
             let qualified = format!(
-                "\"{}\".\"{}\"",
+                "{}.\"{}\"",
                 ctx.schema_name, table_name
             );
 
@@ -508,7 +508,7 @@ pub fn compile_expression(
             } else if name == "Patient" {
                 // Patient context reference — resolve to patient table
                 Ok(format!(
-                    "SELECT * FROM \"{}\".\"patient\" WHERE NOT _is_deleted",
+                    "SELECT * FROM {}.\"patient\" WHERE NOT _is_deleted",
                     ctx.schema_name
                 ))
             } else {
@@ -540,7 +540,7 @@ pub fn compile_expression(
             let code_sql = compile_expression(code, ctx)?;
             let vs_sql = compile_expression(valueset, ctx)?;
             Ok(format!(
-                "EXISTS (SELECT 1 FROM \"{}\".\"_valueset_expansion\" WHERE valueset_url = {} AND code = {})",
+                "EXISTS (SELECT 1 FROM {}.\"_valueset_expansion\" WHERE valueset_url = {} AND code = {})",
                 ctx.schema_name, vs_sql, code_sql
             ))
         }
@@ -949,7 +949,7 @@ pub fn compile_measure_population(
     })?;
 
     Ok(format!(
-        "SELECT COUNT(*)::VARCHAR AS count FROM \"{}\".\"patient\" p WHERE NOT p._is_deleted AND ({})",
+        "SELECT COUNT(*)::VARCHAR AS count FROM {}.\"patient\" p WHERE NOT p._is_deleted AND ({})",
         schema_name, boolean_expr
     ))
 }
@@ -995,7 +995,7 @@ mod tests {
 
     #[test]
     fn test_compile_retrieve() {
-        let mut ctx = CompilationContext::new("myds");
+        let mut ctx = CompilationContext::new("\"memory\".\"myds\"");
         let expr = ElmExpression::Retrieve {
             data_type: "{http://hl7.org/fhir}Patient".to_string(),
             template_id: None,
@@ -1005,7 +1005,7 @@ mod tests {
             date_range: None,
         };
         let result = compile_expression(&expr, &mut ctx).unwrap();
-        assert!(result.contains("\"myds\".\"patient\""));
+        assert!(result.contains("\"memory\".\"myds\".\"patient\""));
         assert!(result.contains("NOT _is_deleted"));
     }
 
