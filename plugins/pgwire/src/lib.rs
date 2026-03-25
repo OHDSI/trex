@@ -22,19 +22,26 @@ use std::{
     sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, OnceLock as OnceCell},
 };
 
-static SHARED_CONNECTION: OnceCell<Arc<Mutex<Connection>>> = OnceCell::new();
+static DESCRIBE_CONNECTIONS: OnceCell<Vec<Arc<Mutex<Connection>>>> = OnceCell::new();
 static QUERY_EXECUTOR: OnceCell<Arc<QueryExecutor>> = OnceCell::new();
 
 const EXECUTOR_POOL_SIZE: usize = 4;
 
 fn store_shared_connection(connection: &Connection) -> Result<(), Box<dyn Error>> {
-    let cloned = connection
-        .try_clone()
-        .map_err(|e| format!("connection clone: {e}"))?;
+    // Create one describe connection per worker so each pgwire session gets its
+    // own connection for DESCRIBE operations, preventing USE DATABASE state from
+    // leaking between sessions that share the same worker_id.
+    let mut describe_conns = Vec::with_capacity(EXECUTOR_POOL_SIZE);
+    for i in 0..EXECUTOR_POOL_SIZE {
+        let cloned = connection
+            .try_clone()
+            .map_err(|e| format!("describe connection clone {i}: {e}"))?;
+        describe_conns.push(Arc::new(Mutex::new(cloned)));
+    }
 
-    SHARED_CONNECTION
-        .set(Arc::new(Mutex::new(cloned)))
-        .map_err(|_| "connection already stored")?;
+    DESCRIBE_CONNECTIONS
+        .set(describe_conns)
+        .map_err(|_| "describe connections already stored")?;
 
     let executor = QueryExecutor::new(connection, EXECUTOR_POOL_SIZE)?;
     QUERY_EXECUTOR
@@ -44,8 +51,12 @@ fn store_shared_connection(connection: &Connection) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-pub fn get_shared_connection() -> Option<Arc<Mutex<Connection>>> {
-    SHARED_CONNECTION.get().cloned()
+/// Returns the describe connection for the given worker_id, ensuring USE DATABASE
+/// state is isolated per worker (and thus per pgwire session).
+pub fn get_describe_connection(worker_id: usize) -> Option<Arc<Mutex<Connection>>> {
+    DESCRIBE_CONNECTIONS.get().and_then(|conns| {
+        conns.get(worker_id % conns.len()).cloned()
+    })
 }
 
 pub fn get_query_executor() -> Option<Arc<QueryExecutor>> {

@@ -19,9 +19,13 @@ import pytest
 
 from conftest import Node, FHIR_EXT, alloc_ports
 
-# Use multiple workers to verify that transactions, DDL visibility (sync_all),
-# and worker-pinning work correctly with a real connection pool.
-os.environ.setdefault("FHIR_POOL_SIZE", "4")
+# Pool sizes to test: single-threaded and multi-threaded.
+# Each parametrized value starts a separate FHIR server instance.
+POOL_SIZES = [1, 4]
+
+# DB modes: "standalone" = FHIR server owns its own DuckDB (default),
+#            "host" = FHIR server uses the host DuckDB connection.
+DB_MODES = ["standalone", "host"]
 
 
 def _free_port():
@@ -122,17 +126,45 @@ def _create_patient(client, dataset_id, family="Doe", given="John", gender="male
 # Module-scoped fixture: one FHIR server for all tests in this file
 # ---------------------------------------------------------------------------
 
-@pytest.fixture(scope="module")
-def fhir():
-    """Start the FHIR extension, launch the HTTP server, yield an FhirClient."""
+_FHIR_PARAMS = [(pool, mode) for pool in POOL_SIZES for mode in DB_MODES]
+_FHIR_IDS = [f"pool={pool}-{mode}" for pool, mode in _FHIR_PARAMS]
+
+
+@pytest.fixture(scope="module", params=_FHIR_PARAMS, ids=_FHIR_IDS)
+def fhir(request):
+    """Start the FHIR extension with a given pool size and DB mode, yield an FhirClient."""
+    import tempfile, shutil
+
+    pool_size, db_mode = request.param
+    os.environ["FHIR_POOL_SIZE"] = str(pool_size)
+    os.environ["FHIR_USE_HOST_DB"] = "true" if db_mode == "host" else "false"
+
     gp, fp, pp = alloc_ports()
     node = Node([FHIR_EXT], gp, fp, pp)
 
+    fhir_db_dir = None
     fhir_port = _free_port()
-    result = node.execute(f"SELECT trex_fhir_start('127.0.0.1', {fhir_port})")
+
+    if db_mode == "standalone":
+        # Standalone mode: FHIR server creates its own DuckDB file
+        fhir_db_dir = tempfile.mkdtemp(
+            dir=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "tmp", "fhir-test-dbs"),
+        )
+        fhir_db_path = os.path.join(fhir_db_dir, "fhir.db")
+        result = node.execute(
+            f"SELECT trex_fhir_start('127.0.0.1', {fhir_port}, 'fhir', '{fhir_db_path}')"
+        )
+    else:
+        # Host mode: FHIR server uses the host DuckDB connection (catalog = 'fhir')
+        result = node.execute(
+            f"SELECT trex_fhir_start('127.0.0.1', {fhir_port}, 'fhir')"
+        )
+
     assert len(result) == 1 and "Started" in result[0][0], f"trex_fhir_start: {result}"
 
     client = FhirClient(f"http://127.0.0.1:{fhir_port}")
+    client.pool_size = pool_size  # expose for test introspection
+    client.db_mode = db_mode
 
     # Poll /health until server is ready (definition loading can take seconds)
     deadline = time.time() + 30
@@ -146,7 +178,9 @@ def fhir():
         time.sleep(0.5)
     else:
         node.close()
-        pytest.fail("FHIR server did not become healthy within 30 s")
+        if fhir_db_dir:
+            shutil.rmtree(fhir_db_dir, ignore_errors=True)
+        pytest.fail(f"FHIR server (pool={pool_size}, {db_mode}) did not become healthy within 30 s")
 
     yield client
 
@@ -155,6 +189,8 @@ def fhir():
     except Exception:
         pass
     node.close()
+    if fhir_db_dir:
+        shutil.rmtree(fhir_db_dir, ignore_errors=True)
 
 
 # ===================================================================
@@ -479,6 +515,24 @@ def test_transaction_reference_resolution(fhir):
     assert "201" in body["entry"][0]["response"]["status"]
     assert "201" in body["entry"][1]["response"]["status"]
 
+    # Extract IDs from response location (format: "/{dataset}/Patient/{id}")
+    pat_location = body["entry"][0]["response"]["location"]
+    obs_location = body["entry"][1]["response"]["location"]
+    pat_id = pat_location.split("/")[3]  # ['', did, 'Patient', id]
+    obs_id = obs_location.split("/")[3]  # ['', did, 'Observation', id]
+
+    # Verify Patient is persisted and retrievable
+    status, patient, _ = fhir.get(f"/{did}/Patient/{pat_id}")
+    assert status == 200, f"GET Patient/{pat_id} failed ({status}): {patient}"
+    assert patient["name"][0]["family"] == "RefTest"
+
+    # Verify Observation is persisted and urn:uuid reference was resolved
+    status, obs, _ = fhir.get(f"/{did}/Observation/{obs_id}")
+    assert status == 200, f"GET Observation/{obs_id} failed ({status}): {obs}"
+    assert obs["subject"]["reference"] == f"Patient/{pat_id}", (
+        f"urn:uuid reference not resolved: got {obs['subject']['reference']}"
+    )
+
 
 def test_batch_partial_failure(fhir):
     """Good Patient + bad ZZZFake in a batch -> first succeeds, second fails."""
@@ -758,6 +812,107 @@ def test_transaction_delete_via_bundle(fhir):
     # Verify it's gone
     status, _, _ = fhir.get(f"/{did}/Patient/bp-del-001")
     assert status == 410
+
+
+def test_transaction_delete_via_bundle_history(fhir):
+    """DELETE via bundle must write history so the create+delete lifecycle is tracked."""
+    did = _create_dataset(fhir)
+    # 1. Create a Patient via PUT bundle
+    bundle = _make_bundle("transaction", [
+        {
+            "resource": {"resourceType": "Patient", "name": [{"family": "HistDel"}]},
+            "request": {"method": "PUT", "url": "Patient/hist-del-001"},
+        },
+    ])
+    status, _, _ = fhir.post(f"/{did}", bundle)
+    assert status == 200
+
+    # 2. Delete via bundle
+    del_bundle = _make_bundle("transaction", [
+        {
+            "resource": {"resourceType": "Patient"},
+            "request": {"method": "DELETE", "url": "Patient/hist-del-001"},
+        },
+    ])
+    status, body, _ = fhir.post(f"/{did}", del_bundle)
+    assert status == 200
+    assert "204" in body["entry"][0]["response"]["status"]
+
+    # 3. History must have entries for both the create and delete
+    status, hist, _ = fhir.get(f"/{did}/Patient/hist-del-001/_history")
+    assert status == 200
+    assert hist["total"] >= 2, (
+        f"Expected at least 2 history entries (create + delete), got {hist['total']}"
+    )
+    methods = [e["request"]["method"] for e in hist["entry"]]
+    assert "DELETE" in methods, f"DELETE not found in history methods: {methods}"
+
+
+def test_large_bundle_all_resources_ingested(fhir):
+    """Load curl-bundle.json (19 entries, 6 resource types) and verify every resource is persisted."""
+    bundle_path = os.path.join(os.path.dirname(__file__), "fixtures", "transaction-bundle-19.json")
+    with open(bundle_path) as f:
+        bundle = json.load(f)
+
+    did = _create_dataset(fhir)
+    status, body, _ = fhir.post(f"/{did}", bundle)
+    assert status == 200, f"transaction failed ({status}): {body}"
+    assert body["type"] == "transaction-response"
+    assert len(body["entry"]) == len(bundle["entry"])
+
+    # All entries should succeed (201 Created or 200 OK for upserts)
+    for i, entry in enumerate(body["entry"]):
+        resp_status = entry["response"]["status"]
+        assert "200" in resp_status or "201" in resp_status, (
+            f"entry {i} ({bundle['entry'][i]['resource']['resourceType']}) "
+            f"failed: {resp_status}"
+        )
+
+    # Build expected resource map: {resourceType: [id, ...]}
+    from collections import defaultdict
+    expected = defaultdict(list)
+    for e in bundle["entry"]:
+        rt = e["resource"]["resourceType"]
+        rid = e["resource"].get("id")
+        if rid:
+            expected[rt].append(rid)
+
+    # Build a lookup of posted resources for content verification
+    posted = {}
+    for e in bundle["entry"]:
+        r = e["resource"]
+        posted[(r["resourceType"], r.get("id"))] = r
+
+    # GET each resource individually to verify it was persisted with correct content
+    for resource_type, ids in expected.items():
+        for rid in ids:
+            status, res, _ = fhir.get(f"/{did}/{resource_type}/{rid}")
+            assert status == 200, (
+                f"GET {resource_type}/{rid} failed ({status}): {res}"
+            )
+            assert res["resourceType"] == resource_type
+            assert res["id"] == rid
+
+            # Verify key fields from the original posted resource are preserved
+            original = posted.get((resource_type, rid))
+            if original:
+                for key in ("status", "name", "gender", "code", "subject"):
+                    if key in original:
+                        assert res.get(key) == original[key], (
+                            f"{resource_type}/{rid} field '{key}' mismatch: "
+                            f"expected {original[key]}, got {res.get(key)}"
+                        )
+
+    # Verify search counts match for each resource type
+    for resource_type, ids in expected.items():
+        status, search_body, _ = fhir.get(f"/{did}/{resource_type}?_count=100")
+        assert status == 200, (
+            f"Search {resource_type} failed ({status}): {search_body}"
+        )
+        assert search_body["total"] >= len(ids), (
+            f"{resource_type}: expected at least {len(ids)}, "
+            f"got {search_body['total']}"
+        )
 
 
 # ===================================================================

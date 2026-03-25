@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 
 use arrow_pg::datatypes::{encode_recordbatch, into_pg_type};
 
-use crate::{get_query_executor, get_shared_connection, QueryExecutor, QueryResult};
+use crate::{get_query_executor, get_describe_connection, QueryExecutor, QueryResult};
 use crate::server_registry::{ServerHandle, ServerRegistry};
 
 const DEBUG_LOGGING: bool = false;
@@ -473,12 +473,13 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         let login_info = LoginInfo::from_client_info(_client);
         let database = login_info.database().map(|s| s.to_string());
 
-        // Use shared connection for describe operations (quick, don't need parallel execution)
-        let connection = get_shared_connection().ok_or_else(|| {
+        // Use the per-worker describe connection so USE DATABASE state is isolated
+        // per session and doesn't leak between concurrent clients.
+        let connection = get_describe_connection(self.worker_id).ok_or_else(|| {
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
                 "XX000".to_owned(),
-                "No shared connection available".to_owned(),
+                "No describe connection available".to_owned(),
             )))
         })?;
         let statement = stmt.statement.clone();
@@ -539,12 +540,13 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         let login_info = LoginInfo::from_client_info(_client);
         let database = login_info.database().map(|s| s.to_string());
 
-        // Use shared connection for describe operations (quick, don't need parallel execution)
-        let connection = get_shared_connection().ok_or_else(|| {
+        // Use the per-worker describe connection so USE DATABASE state is isolated
+        // per session and doesn't leak between concurrent clients.
+        let connection = get_describe_connection(self.worker_id).ok_or_else(|| {
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
                 "XX000".to_owned(),
-                "No shared connection available".to_owned(),
+                "No describe connection available".to_owned(),
             )))
         })?;
         let statement = portal.statement.statement.clone();

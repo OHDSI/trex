@@ -57,9 +57,28 @@ impl QueryExecutor {
                     .map_err(|e| format!("connection clone {i}: {e}"))?,
             );
         }
+        Self::from_connections(connections)
+    }
 
-        let mut senders = Vec::with_capacity(pool_size);
-        let mut workers = Vec::with_capacity(pool_size);
+    pub fn new_standalone(db_path: &str, pool_size: usize) -> Result<Self, String> {
+        if pool_size == 0 {
+            return Err("pool_size must be > 0".into());
+        }
+        let conn = Connection::open(db_path)
+            .map_err(|e| format!("open standalone db {db_path}: {e}"))?;
+        let mut connections = Vec::with_capacity(pool_size);
+        for i in 0..pool_size {
+            connections.push(
+                conn.try_clone()
+                    .map_err(|e| format!("connection clone {i}: {e}"))?,
+            );
+        }
+        Self::from_connections(connections)
+    }
+
+    fn from_connections(connections: Vec<Connection>) -> Result<Self, String> {
+        let mut senders = Vec::with_capacity(connections.len());
+        let mut workers = Vec::with_capacity(connections.len());
         for (i, conn) in connections.into_iter().enumerate() {
             let (tx, rx): (Sender<QueryRequest>, Receiver<QueryRequest>) = unbounded();
             senders.push(tx);

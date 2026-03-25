@@ -12,8 +12,10 @@ pub struct UpsertResult {
 /// Shared upsert logic: reads current version, writes history, stamps meta, upserts.
 /// Mirrors the pattern in crud.rs::update_resource.
 ///
-/// When `worker_id` is `Some`, all queries are pinned to that worker (required
-/// for transaction bundles so every statement runs on the same connection).
+/// When `worker_id` is `Some`, all queries are pinned to that worker and the caller
+/// is responsible for the surrounding transaction (required for transaction bundles).
+/// When `worker_id` is `None`, this function picks a worker and wraps the entire
+/// read-modify-write sequence in its own BEGIN/COMMIT transaction.
 pub async fn upsert_resource(
     state: &AppState,
     schema: &str,
@@ -26,6 +28,19 @@ pub async fn upsert_resource(
 ) -> Result<UpsertResult, String> {
     let table_name = resource_type.to_lowercase();
 
+    // When no worker_id is provided, pick one and manage our own transaction
+    // to prevent read-modify-write races on concurrent upserts.
+    let (wid, owns_transaction) = match worker_id {
+        Some(w) => (w, false),
+        None => (state.executor.next_worker_id(), true),
+    };
+
+    if owns_transaction {
+        if let QueryResult::Error(e) = state.executor.submit_on(wid, "BEGIN TRANSACTION".to_string()).await {
+            return Err(format!("Failed to begin transaction: {}", e));
+        }
+    }
+
     // 1. Read current version
     let check_sql = format!(
         "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = $1",
@@ -33,11 +48,7 @@ pub async fn upsert_resource(
         table = table_name,
     );
 
-    let check_result = if let Some(wid) = worker_id {
-        state.executor.submit_params_on(wid, check_sql, vec![id.to_string()]).await
-    } else {
-        state.executor.submit_params(check_sql, vec![id.to_string()]).await
-    };
+    let check_result = state.executor.submit_params_on(wid, check_sql, vec![id.to_string()]).await;
 
     let (current_version, is_new, current_raw) = match check_result {
         QueryResult::Select { rows, .. } => {
@@ -58,6 +69,9 @@ pub async fn upsert_resource(
             }
         }
         QueryResult::Error(e) => {
+            if owns_transaction {
+                let _ = state.executor.submit_on(wid, "ROLLBACK".to_string()).await;
+            }
             return Err(format!("Failed to check resource: {}", e));
         }
         _ => (0, true, String::new()),
@@ -92,10 +106,11 @@ pub async fn upsert_resource(
             version = current_version,
         );
         let params = vec![id.to_string(), resource_type.to_string(), current_raw];
-        if let Some(wid) = worker_id {
-            let _ = state.executor.submit_params_on(wid, history_sql, params).await;
-        } else {
-            let _ = state.executor.submit_params(history_sql, params).await;
+        if let QueryResult::Error(e) = state.executor.submit_params_on(wid, history_sql, params).await {
+            if owns_transaction {
+                let _ = state.executor.submit_on(wid, "ROLLBACK".to_string()).await;
+            }
+            return Err(format!("History write failed for {}/{}: {}", resource_type, id, e));
         }
     }
 
@@ -109,17 +124,21 @@ pub async fn upsert_resource(
     );
 
     let params = vec![id.to_string(), raw_json];
-    let result = if let Some(wid) = worker_id {
-        state.executor.submit_params_on(wid, upsert_sql, params).await
-    } else {
-        state.executor.submit_params(upsert_sql, params).await
-    };
-
-    match result {
-        QueryResult::Error(e) => Err(format!("Upsert failed: {}", e)),
-        _ => Ok(UpsertResult {
-            version: new_version,
-            is_new,
-        }),
+    if let QueryResult::Error(e) = state.executor.submit_params_on(wid, upsert_sql, params).await {
+        if owns_transaction {
+            let _ = state.executor.submit_on(wid, "ROLLBACK".to_string()).await;
+        }
+        return Err(format!("Upsert failed: {}", e));
     }
+
+    if owns_transaction {
+        if let QueryResult::Error(e) = state.executor.submit_on(wid, "COMMIT".to_string()).await {
+            return Err(format!("Failed to commit transaction: {}", e));
+        }
+    }
+
+    Ok(UpsertResult {
+        version: new_version,
+        is_new,
+    })
 }

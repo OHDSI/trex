@@ -254,12 +254,66 @@ async fn process_single_entry(
                 return Err("DELETE entry missing resource id".to_string());
             }
 
+            // Read current version and raw content for history
+            let check_sql = format!(
+                "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = $1 AND NOT _is_deleted",
+                schema = schema_name,
+                table = table_name,
+            );
+
+            let check_result = if let Some(wid) = worker_id {
+                state.executor.submit_params_on(wid, check_sql, vec![entry.server_id.clone()]).await
+            } else {
+                state.executor.submit_params(check_sql, vec![entry.server_id.clone()]).await
+            };
+
+            let (current_version, current_raw) = match check_result {
+                QueryResult::Select { rows, .. } => {
+                    if rows.is_empty() {
+                        return Err(format!("Resource {}/{} not found", entry.resource_type, entry.server_id));
+                    }
+                    let v = rows[0]
+                        .get(0)
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<i64>().ok())
+                        .unwrap_or(1);
+                    let raw = rows[0]
+                        .get(1)
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}")
+                        .to_string();
+                    (v, raw)
+                }
+                QueryResult::Error(e) => return Err(format!("Delete check failed: {}", e)),
+                _ => return Err(format!("Resource {}/{} not found", entry.resource_type, entry.server_id)),
+            };
+
+            let new_version = current_version + 1;
+
+            // Write history row for the current version before deleting
+            let history_sql = format!(
+                "INSERT INTO {schema}._history (_id, _resource_type, _version_id, _last_updated, _raw, _is_deleted) \
+                 VALUES ($1, $2, {version}, CURRENT_TIMESTAMP, $3, false)",
+                schema = schema_name,
+                version = current_version,
+            );
+            let history_params = vec![entry.server_id.clone(), entry.resource_type.clone(), current_raw];
+            let history_result = if let Some(wid) = worker_id {
+                state.executor.submit_params_on(wid, history_sql, history_params).await
+            } else {
+                state.executor.submit_params(history_sql, history_params).await
+            };
+            if let QueryResult::Error(e) = history_result {
+                eprintln!("[fhir] WARNING: history write failed for {}/{}: {}", entry.resource_type, entry.server_id, e);
+            }
+
             let delete_sql = format!(
                 "UPDATE {schema}.\"{table}\" SET _is_deleted = true, \
-                 _version_id = _version_id + 1, _last_updated = CURRENT_TIMESTAMP \
+                 _version_id = {version}, _last_updated = CURRENT_TIMESTAMP \
                  WHERE _id = $1",
                 schema = schema_name,
                 table = table_name,
+                version = new_version,
             );
 
             let result = if let Some(wid) = worker_id {

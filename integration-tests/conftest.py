@@ -1,6 +1,7 @@
 import duckdb
 import multiprocessing as mp
 import pytest
+import tempfile
 import time
 import os
 
@@ -73,16 +74,24 @@ def alloc_ports():
 
 def _node_worker(ext_paths, cmd_queue, result_queue):
     """Child process: create trexsql connection, load extensions, run commands."""
+    # Use the real filesystem (not tmpfs /tmp) to avoid filling RAM-backed storage.
+    _db_base = os.path.join(REPO_ROOT, "tmp", "fhir-test-dbs")
+    os.makedirs(_db_base, exist_ok=True)
+    db_dir = tempfile.mkdtemp(dir=_db_base)
+    db_file = os.path.join(db_dir, "fhir.db")
     try:
-        conn = duckdb.connect(":memory:", config={
+        conn = duckdb.connect(db_file, config={
             "allow_unsigned_extensions": "true",
             "allow_extensions_metadata_mismatch": "true",
         })
         for path in ext_paths:
             conn.execute(f"LOAD '{path}'")
-        result_queue.put(("ready", None))
+        result_queue.put(("ready", db_file))
     except Exception as e:
         result_queue.put(("init_error", str(e)))
+        # Clean up db file on init failure
+        import shutil
+        shutil.rmtree(db_dir, ignore_errors=True)
         return
 
     while True:
@@ -100,6 +109,9 @@ def _node_worker(ext_paths, cmd_queue, result_queue):
             result_queue.put(("error", str(e)))
 
     conn.close()
+    # Clean up temp database directory
+    import shutil
+    shutil.rmtree(db_dir, ignore_errors=True)
 
 
 class Node:
@@ -120,6 +132,7 @@ class Node:
         if status != "ready":
             self._process.join(timeout=5)
             raise RuntimeError(f"Node init failed: {data}")
+        self._db_file = data  # path to temp database file
 
     def execute(self, sql):
         """Execute SQL and return fetchall() result (list of tuples)."""
@@ -138,6 +151,11 @@ class Node:
         if self._process.is_alive():
             self._process.kill()
             self._process.join(timeout=2)
+        # Clean up temp database directory if the child didn't
+        if self._db_file:
+            import shutil
+            db_dir = os.path.dirname(self._db_file)
+            shutil.rmtree(db_dir, ignore_errors=True)
 
 
 def wait_for(node, sql, check, timeout=10, interval=0.5):

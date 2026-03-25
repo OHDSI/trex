@@ -39,7 +39,7 @@ static QUERY_EXECUTOR: OnceCell<Arc<QueryExecutor>> = OnceCell::new();
 
 const DEFAULT_POOL_SIZE: usize = 1;
 
-fn executor_pool_size() -> usize {
+pub(crate) fn executor_pool_size() -> usize {
     std::env::var("FHIR_POOL_SIZE")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -140,6 +140,17 @@ impl VScalar for FhirStartScalar {
             .to_string();
         let port = port_slice[0] as u16;
 
+        let db_path = if input.num_columns() >= 4 {
+            let db_path_vector = input.flat_vector(3);
+            let db_path_slice =
+                db_path_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            duckdb::types::DuckString::new(&mut { db_path_slice[0] })
+                .as_str()
+                .to_string()
+        } else {
+            "./fhir.db".to_string()
+        };
+
         let db_name = if input.num_columns() >= 3 {
             let db_name_vector = input.flat_vector(2);
             let db_name_slice =
@@ -148,10 +159,15 @@ impl VScalar for FhirStartScalar {
                 .as_str()
                 .to_string()
         } else {
-            "memory".to_string()
+            // Derive db_name from db_path filename stem (e.g. "./fhir.db" -> "fhir")
+            std::path::Path::new(&db_path)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("fhir")
+                .to_string()
         };
 
-        let response = match fhir_server::start_fhir_server(host, port, db_name) {
+        let response = match fhir_server::start_fhir_server(host, port, db_name, db_path) {
             Ok(msg) => msg,
             Err(err) => format!("Error: {}", err),
         };
@@ -171,6 +187,15 @@ impl VScalar for FhirStartScalar {
                 vec![
                     LogicalTypeId::Varchar.into(),
                     LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeId::Varchar.into(),
+            ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Integer.into(),
+                    LogicalTypeId::Varchar.into(),
                     LogicalTypeId::Varchar.into(),
                 ],
                 LogicalTypeId::Varchar.into(),

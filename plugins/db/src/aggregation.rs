@@ -192,22 +192,45 @@ pub fn decompose_query(sql: &str) -> Result<DecomposedQuery, String> {
     })
 }
 
-/// Non-aggregate: node_sql = original sans ORDER BY/LIMIT; merge adds them back.
+/// Non-aggregate: push LIMIT (and ORDER BY + LIMIT) down to nodes for efficiency.
+///
+/// - No ORDER BY, no LIMIT: node gets full query, merge is passthrough.
+/// - LIMIT without ORDER BY: push LIMIT to each node, merge applies LIMIT again.
+/// - ORDER BY + LIMIT: push ORDER BY + LIMIT to each node, merge re-sorts + limits.
+/// - OFFSET is only applied at merge (global offset across all nodes).
 fn decompose_non_aggregate(query: &Query, select: &Select) -> Result<DecomposedQuery, String> {
-    let node_select = select.clone();
-    let node_query = build_query(node_select, None, None, None);
-    let node_sql = format!("{}", sqlparser::ast::Statement::Query(Box::new(node_query)));
-
     let has_order_or_limit =
         query.order_by.is_some() || query.limit.is_some() || query.offset.is_some();
 
     if !has_order_or_limit {
+        let node_select = select.clone();
+        let node_query = build_query(node_select, None, None, None);
+        let node_sql = format!("{}", sqlparser::ast::Statement::Query(Box::new(node_query)));
         return Ok(DecomposedQuery {
-            node_sql: node_sql.clone(),
+            node_sql,
             merge_sql: format!("SELECT * FROM _merged"),
             has_aggregations: false,
         });
     }
+
+    // Push LIMIT (and ORDER BY if present) down to each node.
+    // Each node returns at most LIMIT rows; merge re-applies ORDER BY + LIMIT + OFFSET.
+    let node_limit = match (&query.limit, &query.offset) {
+        // If there's an OFFSET, each node needs LIMIT + OFFSET rows so merge can skip.
+        (Some(limit_expr), Some(offset)) => {
+            Some(Expr::BinaryOp {
+                left: Box::new(limit_expr.clone()),
+                op: BinaryOperator::Plus,
+                right: Box::new(offset.value.clone()),
+            })
+        }
+        (Some(limit_expr), None) => Some(limit_expr.clone()),
+        _ => None,
+    };
+
+    let node_select = select.clone();
+    let node_query = build_query(node_select, query.order_by.clone(), node_limit, None);
+    let node_sql = format!("{}", sqlparser::ast::Statement::Query(Box::new(node_query)));
 
     let merge_select = build_select(
         vec![SelectItem::Wildcard(
@@ -512,8 +535,10 @@ mod tests {
         let sql = "SELECT id, name FROM users ORDER BY name LIMIT 10";
         let result = decompose_query(sql).unwrap();
         assert!(!result.has_aggregations);
-        assert!(!result.node_sql.to_uppercase().contains("ORDER BY"));
-        assert!(!result.node_sql.to_uppercase().contains("LIMIT"));
+        // LIMIT and ORDER BY are pushed down to nodes
+        assert!(result.node_sql.to_uppercase().contains("ORDER BY"));
+        assert!(result.node_sql.to_uppercase().contains("LIMIT"));
+        // Merge re-applies them for correctness
         assert!(result.merge_sql.to_uppercase().contains("ORDER BY"));
         assert!(result.merge_sql.to_uppercase().contains("LIMIT"));
     }
@@ -667,10 +692,25 @@ mod tests {
         let sql = "SELECT id FROM t ORDER BY id LIMIT 10 OFFSET 5";
         let result = decompose_query(sql).unwrap();
         assert!(!result.has_aggregations);
-        assert!(!result.node_sql.to_uppercase().contains("LIMIT"));
+        // Node gets LIMIT (10 + 5) = 15, ORDER BY pushed down, no OFFSET
+        assert!(result.node_sql.to_uppercase().contains("LIMIT"));
+        assert!(result.node_sql.to_uppercase().contains("ORDER BY"));
         assert!(!result.node_sql.to_uppercase().contains("OFFSET"));
+        // Merge applies ORDER BY + LIMIT + OFFSET for final result
         assert!(result.merge_sql.to_uppercase().contains("LIMIT"));
         assert!(result.merge_sql.to_uppercase().contains("OFFSET"));
+        assert!(result.merge_sql.to_uppercase().contains("ORDER BY"));
+    }
+
+    #[test]
+    fn test_limit_without_order_by() {
+        let sql = "SELECT * FROM t LIMIT 100";
+        let result = decompose_query(sql).unwrap();
+        assert!(!result.has_aggregations);
+        // LIMIT pushed down to node
+        assert!(result.node_sql.to_uppercase().contains("LIMIT"));
+        // Merge also applies LIMIT
+        assert!(result.merge_sql.to_uppercase().contains("LIMIT"));
     }
 
     #[test]

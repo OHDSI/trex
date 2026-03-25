@@ -181,6 +181,15 @@ pub async fn update_resource(
     let schema_name = state.qualified_schema(&dataset_id);
     let table_name = resource_type.to_lowercase();
 
+    // Pin all queries to a single worker and wrap in a transaction to prevent
+    // read-modify-write races when multiple requests target the same resource.
+    let worker_id = state.executor.next_worker_id();
+
+    if let QueryResult::Error(e) = state.executor.submit_on(worker_id, "BEGIN TRANSACTION".to_string()).await {
+        eprintln!("[fhir] Failed to begin transaction: {}", e);
+        return Err(AppError::Internal("Failed to begin transaction".to_string()));
+    }
+
     let check_sql = format!(
         "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = '{id}'",
         schema = schema_name,
@@ -188,7 +197,7 @@ pub async fn update_resource(
         id = resource_id.replace('\'', "''")
     );
 
-    let (current_version, is_new, current_raw) = match state.executor.submit(check_sql).await {
+    let (current_version, is_new, current_raw) = match state.executor.submit_on(worker_id, check_sql).await {
         QueryResult::Select { rows, .. } => {
             if rows.is_empty() {
                 (0i64, true, String::new())
@@ -207,6 +216,7 @@ pub async fn update_resource(
             }
         }
         QueryResult::Error(e) => {
+            let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
             if e.contains("does not exist") || e.contains("Table") {
                 return Err(AppError::NotFound(format!(
                     "Resource type '{}' not found in dataset '{}'",
@@ -229,6 +239,7 @@ pub async fn update_resource(
                 .trim_end_matches('"');
             if let Ok(expected) = expected_version.parse::<i64>() {
                 if !is_new && expected != current_version {
+                    let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
                     return Err(AppError::Conflict(format!(
                         "Version conflict: expected {}, current {}",
                         expected, current_version
@@ -265,11 +276,15 @@ pub async fn update_resource(
             schema = schema_name,
             version = current_version,
         );
-        let _ = state.executor.submit_params(history_sql, vec![
+        if let QueryResult::Error(e) = state.executor.submit_params_on(worker_id, history_sql, vec![
             resource_id.clone(),
             resource_type.clone(),
             current_raw,
-        ]).await;
+        ]).await {
+            let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
+            eprintln!("[fhir] WARNING: history write failed for {}/{}: {}", resource_type, resource_id, e);
+            return Err(AppError::Internal("Failed to write history".to_string()));
+        }
     }
 
     let transform_spec = state.registry.get_json_transform(&resource_type)
@@ -282,11 +297,17 @@ pub async fn update_resource(
         sql_builder::build_update_sql(&schema_name, &table_name, new_version, &transform_spec, &column_names)
     };
 
-    if let QueryResult::Error(e) = state.executor.submit_params(sql, vec![resource_id.clone(), raw_json]).await {
+    if let QueryResult::Error(e) = state.executor.submit_params_on(worker_id, sql, vec![resource_id.clone(), raw_json]).await {
+        let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
         eprintln!("[fhir] Failed to update resource: {}", e);
         return Err(AppError::Internal(
             "Failed to update resource".to_string(),
         ));
+    }
+
+    if let QueryResult::Error(e) = state.executor.submit_on(worker_id, "COMMIT".to_string()).await {
+        eprintln!("[fhir] Failed to commit update transaction: {}", e);
+        return Err(AppError::Internal("Failed to commit transaction".to_string()));
     }
 
     let status = if is_new {
@@ -317,6 +338,15 @@ pub async fn delete_resource(
     let schema_name = state.qualified_schema(&dataset_id);
     let table_name = resource_type.to_lowercase();
 
+    // Pin all queries to a single worker and wrap in a transaction to prevent
+    // read-modify-write races when multiple requests target the same resource.
+    let worker_id = state.executor.next_worker_id();
+
+    if let QueryResult::Error(e) = state.executor.submit_on(worker_id, "BEGIN TRANSACTION".to_string()).await {
+        eprintln!("[fhir] Failed to begin transaction: {}", e);
+        return Err(AppError::Internal("Failed to begin transaction".to_string()));
+    }
+
     let check_sql = format!(
         "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = '{id}' AND NOT _is_deleted",
         schema = schema_name,
@@ -324,9 +354,10 @@ pub async fn delete_resource(
         id = resource_id.replace('\'', "''")
     );
 
-    let (current_version, current_raw) = match state.executor.submit(check_sql).await {
+    let (current_version, current_raw) = match state.executor.submit_on(worker_id, check_sql).await {
         QueryResult::Select { rows, .. } => {
             if rows.is_empty() {
+                let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
                 return Err(AppError::NotFound(format!(
                     "{}/{} not found",
                     resource_type, resource_id
@@ -345,6 +376,7 @@ pub async fn delete_resource(
             (v, raw)
         }
         QueryResult::Error(e) => {
+            let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
             if e.contains("does not exist") || e.contains("Table") {
                 return Err(AppError::NotFound(format!(
                     "Resource type '{}' not found in dataset '{}'",
@@ -357,6 +389,7 @@ pub async fn delete_resource(
             ));
         }
         _ => {
+            let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
             return Err(AppError::NotFound(format!(
                 "{}/{} not found",
                 resource_type, resource_id
@@ -372,11 +405,15 @@ pub async fn delete_resource(
         schema = schema_name,
         version = current_version,
     );
-    let _ = state.executor.submit_params(history_sql, vec![
+    if let QueryResult::Error(e) = state.executor.submit_params_on(worker_id, history_sql, vec![
         resource_id.clone(),
         resource_type.clone(),
         current_raw,
-    ]).await;
+    ]).await {
+        let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
+        eprintln!("[fhir] WARNING: history write failed for {}/{}: {}", resource_type, resource_id, e);
+        return Err(AppError::Internal("Failed to write history".to_string()));
+    }
 
     let delete_sql = format!(
         "UPDATE {schema}.\"{table}\" SET _is_deleted = true, _version_id = {version}, \
@@ -386,11 +423,17 @@ pub async fn delete_resource(
         version = new_version
     );
 
-    if let QueryResult::Error(e) = state.executor.submit_params(delete_sql, vec![resource_id.clone()]).await {
+    if let QueryResult::Error(e) = state.executor.submit_params_on(worker_id, delete_sql, vec![resource_id.clone()]).await {
+        let _ = state.executor.submit_on(worker_id, "ROLLBACK".to_string()).await;
         eprintln!("[fhir] Failed to delete resource: {}", e);
         return Err(AppError::Internal(
             "Failed to delete resource".to_string(),
         ));
+    }
+
+    if let QueryResult::Error(e) = state.executor.submit_on(worker_id, "COMMIT".to_string()).await {
+        eprintln!("[fhir] Failed to commit delete transaction: {}", e);
+        return Err(AppError::Internal("Failed to commit transaction".to_string()));
     }
 
     Ok(StatusCode::NO_CONTENT)
