@@ -283,6 +283,9 @@ winapi = "=0.3.9"
 windows-sys = { version = "0.59.0", features = ["Win32_Foundation", "Win32_Media", "Win32_Storage_FileSystem"] }
 
 [patch.crates-io]
+# trex_core — lives in the parent monorepo; patch so standalone CI can resolve the optional dep
+trex_core = { git = "https://github.com/OHDSI/trexsql", branch = "develop" }
+
 # DuckDB Rust bindings fork
 duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
 libduckdb-sys = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
