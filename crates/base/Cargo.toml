@@ -79,8 +79,8 @@ async-scoped = { version = "0.9", features = ["use-tokio"] }
 cooked-waker = "5"
 flume = "0.11.0"
 strum = { version = "0.25", features = ["derive"] }
-tls-listener = { version = "0.10", features = ["rustls"] }
-tokio-rustls = "0.25.0"
+tls-listener = { version = "0.11", features = ["rustls-ring"] }
+tokio-rustls = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { workspace = true, features = ["knownfolders", "mswsock", "objbase", "shlobj", "tlhelp32", "winbase", "winerror", "winsock2"] }
