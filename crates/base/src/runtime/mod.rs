@@ -737,6 +737,11 @@ where
           false
         };
 
+        let sloppy_imports = context
+          .get("unstableSloppyImports")
+          .and_then(|v| v.as_bool())
+          .unwrap_or(false);
+
         let rt_provider = create_module_loader_for_standalone_from_eszip_kind(
           eszip,
           permissions_options,
@@ -746,6 +751,7 @@ where
           }),
           Some(base_dir_path.to_string_lossy().as_ref()),
           should_block_fs || flags.restrict_host_fs,
+          sloppy_imports,
         )
         .await?;
 

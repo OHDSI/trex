@@ -102,6 +102,7 @@ pub struct WorkspaceEszipModule {
 pub struct WorkspaceEszip {
   pub eszip: LazyLoadableEszip,
   pub root_dir_url: Arc<Url>,
+  pub sloppy_imports: bool,
 }
 
 const SLOPPY_IMPORT_EXTENSIONS: &[&str] =
@@ -135,30 +136,34 @@ impl WorkspaceEszip {
         });
       }
 
-      let has_extension = SLOPPY_IMPORT_EXTENSIONS
-        .iter()
-        .any(|ext| specifier_key.ends_with(ext));
+      if self.sloppy_imports {
+        let has_extension = SLOPPY_IMPORT_EXTENSIONS
+          .iter()
+          .any(|ext| specifier_key.ends_with(ext));
 
-      if !has_extension {
-        for ext in SLOPPY_IMPORT_EXTENSIONS {
-          let key_with_ext = format!("{}{}", specifier_key, ext);
-          if let Some(module) = self.eszip.ensure_module(&key_with_ext) {
-            let specifier = self.root_dir_url.join(&module.specifier).unwrap();
-            return Some(WorkspaceEszipModule {
-              specifier,
-              inner: module,
-            });
+        if !has_extension {
+          for ext in SLOPPY_IMPORT_EXTENSIONS {
+            let key_with_ext = format!("{}{}", specifier_key, ext);
+            if let Some(module) = self.eszip.ensure_module(&key_with_ext) {
+              let specifier =
+                self.root_dir_url.join(&module.specifier).unwrap();
+              return Some(WorkspaceEszipModule {
+                specifier,
+                inner: module,
+              });
+            }
           }
-        }
 
-        for index in SLOPPY_INDEX_FILES {
-          let key_with_index = format!("{}{}", specifier_key, index);
-          if let Some(module) = self.eszip.ensure_module(&key_with_index) {
-            let specifier = self.root_dir_url.join(&module.specifier).unwrap();
-            return Some(WorkspaceEszipModule {
-              specifier,
-              inner: module,
-            });
+          for index in SLOPPY_INDEX_FILES {
+            let key_with_index = format!("{}{}", specifier_key, index);
+            if let Some(module) = self.eszip.ensure_module(&key_with_index) {
+              let specifier =
+                self.root_dir_url.join(&module.specifier).unwrap();
+              return Some(WorkspaceEszipModule {
+                specifier,
+                inner: module,
+              });
+            }
           }
         }
       }
@@ -847,6 +852,7 @@ pub async fn create_module_loader_for_eszip(
   include_source_map: bool,
   service_path: Option<&str>,
   disable_fs_fallback: bool,
+  sloppy_imports: bool,
 ) -> Result<RuntimeProviders, AnyError> {
   let migrated = eszip.migrated();
   let current_exe_path = std::env::current_exe().unwrap();
@@ -1191,6 +1197,7 @@ pub async fn create_module_loader_for_eszip(
       eszip: WorkspaceEszip {
         eszip,
         root_dir_url: root_dir_url.clone(),
+        sloppy_imports,
       },
       workspace_resolver: {
         let import_map = match serialized_workspace_resolver.import_map {
@@ -1246,7 +1253,11 @@ pub async fn create_module_loader_for_eszip(
             .collect::<Result<_, _>>()?,
           pkg_jsons,
           serialized_workspace_resolver.pkg_json_resolution,
-          deno::deno_resolver::workspace::SloppyImportsOptions::Enabled, // sloppy_imports_options
+          if sloppy_imports {
+            deno::deno_resolver::workspace::SloppyImportsOptions::Enabled
+          } else {
+            deno::deno_resolver::workspace::SloppyImportsOptions::Unspecified
+          },
           Default::default(), // fs_cache_options
           vfs_sys.clone(),    // sys
         )
@@ -1298,6 +1309,7 @@ pub async fn create_module_loader_for_standalone_from_eszip_kind(
   options: Option<MigrateOptions>,
   service_path: Option<&str>,
   disable_fs_fallback: bool,
+  sloppy_imports: bool,
 ) -> Result<RuntimeProviders, AnyError> {
   let eszip = migrate::try_migrate_if_needed(
     payload_to_eszip(eszip_payload_kind).await?,
@@ -1311,6 +1323,7 @@ pub async fn create_module_loader_for_standalone_from_eszip_kind(
     include_source_map,
     service_path,
     disable_fs_fallback,
+    sloppy_imports,
   )
   .await
 }
