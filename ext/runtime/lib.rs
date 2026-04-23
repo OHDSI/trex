@@ -196,20 +196,19 @@ impl RuntimeMetricSource {
       heap_tx: oneshot::Sender<WorkerHeapStatistics>,
     }
 
-    extern "C" fn interrupt_fn_raw(
-      isolate_ptr: *mut v8::Isolate,
+    unsafe extern "C" fn interrupt_fn_raw(
+      isolate_ptr: v8::UnsafeRawIsolatePtr,
       data: *mut std::ffi::c_void,
     ) {
       let arg = unsafe { Box::<InterruptData>::from_raw(data as *mut _) };
 
-      // Use black_box to prevent LLVM from optimizing away the null check
-      // by back-propagating the nonnull attribute from the &mut reference below.
-      let isolate_ptr = std::hint::black_box(isolate_ptr);
       if isolate_ptr.is_null() {
         return;
       }
 
-      let isolate = unsafe { &mut *isolate_ptr };
+      let mut isolate =
+        unsafe { v8::Isolate::from_raw_isolate_ptr_unchecked(isolate_ptr) };
+      let isolate = &mut isolate;
       let v8_stats = isolate.get_heap_statistics();
       let worker_stats = WorkerHeapStatistics {
         total_heap_size: v8_stats.total_heap_size(),
@@ -237,18 +236,10 @@ impl RuntimeMetricSource {
       let (tx, rx) = oneshot::channel::<WorkerHeapStatistics>();
       let data_ptr_mut = Box::into_raw(Box::new(InterruptData { heap_tx: tx }));
 
-      // SAFETY: *mut T and &mut T have identical ABI representation.
-      let callback = unsafe {
-        std::mem::transmute::<
-          extern "C" fn(*mut v8::Isolate, *mut std::ffi::c_void),
-          extern "C" fn(&mut v8::Isolate, *mut std::ffi::c_void),
-        >(interrupt_fn_raw)
-      };
-
-      if !source
-        .handle
-        .request_interrupt(callback, data_ptr_mut as *mut std::ffi::c_void)
-      {
+      if !source.handle.request_interrupt(
+        interrupt_fn_raw,
+        data_ptr_mut as *mut std::ffi::c_void,
+      ) {
         drop(unsafe { Box::from_raw(data_ptr_mut) });
         return async { None }.boxed();
       }
@@ -341,7 +332,7 @@ fn op_console_size(
   Ok(())
 }
 
-#[op2(async)]
+#[op2]
 #[serde]
 async fn op_runtime_metrics(
   state: Rc<RefCell<OpState>>,

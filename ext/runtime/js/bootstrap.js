@@ -162,7 +162,7 @@ function ImageWritable(getter) {
 }
 function loadImage() {
   if (!image) {
-    image = ops.op_lazy_load_esm("ext:deno_canvas/01_image.js");
+    image = ops.op_lazy_load_esm("ext:deno_image/01_image.js");
   }
 }
 

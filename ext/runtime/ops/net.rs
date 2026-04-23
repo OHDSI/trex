@@ -159,7 +159,7 @@ pub fn op_net_listen(
 }
 
 /// Virtual TCP accept - waits for duplex stream from main worker.
-#[op2(async)]
+#[op2]
 #[serde]
 pub async fn op_net_accept(
   state: Rc<RefCell<OpState>>,

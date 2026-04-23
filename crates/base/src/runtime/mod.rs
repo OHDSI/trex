@@ -42,12 +42,10 @@ use deno::deno_net;
 use deno::deno_telemetry;
 use deno::deno_telemetry::OtelConfig;
 use deno::deno_tls;
-use deno::deno_url;
 use deno::deno_web;
 use deno::deno_webidl;
 use deno::deno_websocket;
 use deno::DenoOptionsBuilder;
-use deno::PermissionsContainer;
 use deno_core::error::AnyError;
 use deno_core::error::JsError;
 use deno_core::serde_json;
@@ -186,7 +184,7 @@ fn init_v8_platform() {
   // NOTE(denoland/deno/20495): Due to the new PKU (Memory Protection Keys)
   // feature introduced in V8 11.6, We need to initialize the V8 platform on
   // the main thread that spawns V8 isolates.
-  JsRuntime::init_platform(None, false);
+  JsRuntime::init_platform(None);
 }
 
 struct MemCheck {
@@ -877,26 +875,24 @@ where
           Arc::new(DenoCompileFileSystem::from_rc(vfs))
         })?;
 
+        // Deno 2.7.12: deno_url, deno_console, deno_broadcast_channel are
+        // now empty deprecated shells; their ops live in deno_web. Permissions
+        // are no longer a generic parameter — they're read from op_state.
         let extensions = vec![
           deno_telemetry::deno_telemetry::init(),
           deno_webidl::deno_webidl::init(),
-          deno_console::deno_console::init(),
-          deno_url::deno_url::init(),
-          deno_web::deno_web::lazy_init::<PermissionsContainer>(),
+          deno_web::deno_web::lazy_init(),
           deno_webgpu::deno_webgpu::init(),
-          deno_canvas::deno_canvas::init(),
-          deno_fetch::deno_fetch::lazy_init::<PermissionsContainer>(),
-          deno_websocket::deno_websocket::lazy_init::<PermissionsContainer>(),
+          deno_image::deno_image::init(),
+          deno_fetch::deno_fetch::lazy_init(),
+          deno_websocket::deno_websocket::lazy_init(),
           // TODO: support providing a custom seed for crypto
           deno_crypto::deno_crypto::lazy_init(),
-          deno_broadcast_channel::deno_broadcast_channel::lazy_init::<
-            deno_broadcast_channel::InMemoryBroadcastChannel,
-          >(),
-          deno_net::deno_net::lazy_init::<PermissionsContainer>(),
+          deno_net::deno_net::lazy_init(),
           deno_tls::deno_tls::init(),
           deno_http::deno_http::lazy_init(),
           deno_io::deno_io::lazy_init(),
-          deno_fs::deno_fs::lazy_init::<PermissionsContainer>(),
+          deno_fs::deno_fs::lazy_init(),
           ext_ai::ai::init(),
           #[cfg(feature = "trex")]
           trex_core::trex::init(),
@@ -905,7 +901,7 @@ where
           ext_workers::user_workers::init(),
           ext_event_worker::user_event_worker::init(),
           ext_event_worker::js_interceptors::js_interceptors::init(),
-          ext_runtime::runtime_bootstrap::init::<PermissionsContainer>(
+          ext_runtime::runtime_bootstrap::init(
             Some(main_module_url.clone()),
           ),
           ext_runtime::runtime_net::init(),
@@ -914,7 +910,6 @@ where
           // NOTE(AndresP): Order is matters. Otherwise, it will lead to hard
           // errors such as SIGBUS depending on the platform.
           ext_node::deno_node::lazy_init::<
-            PermissionsContainer,
             deno_resolver::npm::DenoInNpmPackageChecker,
             npm::NpmResolver<VfsSys>,
             VfsSys,
@@ -1021,12 +1016,16 @@ where
         // Initialize lazy-loaded extensions
         // This is required for extensions that use lazy_init() instead of init()
         // It calls the state initializers for those extensions (e.g., AsyncId for node)
+        // Deno 2.7.12: permissions are wired through op_state, not generics.
+        // deno_web now owns the broadcast_channel ops and takes the
+        // InMemoryBroadcastChannel as its third argument.
         js_runtime.lazy_init_extensions(vec![
-          deno_web::deno_web::args::<PermissionsContainer>(
+          deno_web::deno_web::args(
             Default::default(), // blob_store
-            None, // location
+            None,               // location
+            deno_web::InMemoryBroadcastChannel::default(),
           ),
-          deno_fetch::deno_fetch::args::<PermissionsContainer>(
+          deno_fetch::deno_fetch::args(
             deno_fetch::Options {
               user_agent: "supabase-edge-runtime".to_string(),
               root_cert_store_provider: None,
@@ -1035,17 +1034,12 @@ where
               ..Default::default()
             },
           ),
-          deno_websocket::deno_websocket::args::<PermissionsContainer>(),
+          deno_websocket::deno_websocket::args(),
           deno_crypto::deno_crypto::args(None),
-          deno_broadcast_channel::deno_broadcast_channel::args::<
-            deno_broadcast_channel::InMemoryBroadcastChannel,
-          >(
-            deno_broadcast_channel::InMemoryBroadcastChannel::default(),
-          ),
-          deno_net::deno_net::args::<PermissionsContainer>(None, None),
+          deno_net::deno_net::args(None, None),
           deno_http::deno_http::args(deno_http::Options::default()),
           deno_io::deno_io::args(Some(stdio.clone())),
-          deno_fs::deno_fs::args::<PermissionsContainer>(
+          deno_fs::deno_fs::args(
             if should_block_fs || s3_fs.is_some() || flags.restrict_host_fs {
               fs.clone()
             } else {
@@ -1055,7 +1049,6 @@ where
           {
             let sys = node_services.sys.clone();
             ext_node::deno_node::args::<
-              PermissionsContainer,
               deno_resolver::npm::DenoInNpmPackageChecker,
               npm::NpmResolver<VfsSys>,
               VfsSys,
@@ -1717,7 +1710,11 @@ where
       let this = &mut *self;
 
       if woked {
-        extern "C" fn dummy(_: *mut v8::Isolate, _: *mut std::ffi::c_void) {}
+        unsafe extern "C" fn dummy(
+          _: v8::UnsafeRawIsolatePtr,
+          _: *mut std::ffi::c_void,
+        ) {
+        }
         this
           .js_runtime
           .v8_isolate()

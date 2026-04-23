@@ -218,7 +218,7 @@ fn http_error(message: &'static str) -> crate::RuntimeError {
   crate::RuntimeError::Http(message.to_string())
 }
 
-#[op2(async)]
+#[op2]
 #[smi]
 async fn op_http_upgrade_websocket2(
   state: Rc<RefCell<OpState>>,
@@ -358,7 +358,7 @@ fn op_http_upgrade_raw2(
   ))
 }
 
-#[op2(async)]
+#[op2]
 #[serde]
 async fn op_http_upgrade_raw2_fence(
   state: Rc<RefCell<OpState>>,

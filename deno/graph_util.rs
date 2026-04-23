@@ -1041,12 +1041,9 @@ fn get_import_prefix_missing_error(error: &ResolutionError) -> Option<&str> {
             maybe_specifier = Some(specifier);
           }
         }
-        ResolveError::ImportMap(_) => {
-          // Import map errors are handled elsewhere
-        }
         ResolveError::Other(_other_error) => {
-          // Note: With JsErrorBox, we can no longer downcast to SpecifierError
-          // So we skip the SpecifierError::ImportPrefixMissing check
+          // deno_graph 0.107 folded ImportMap errors into Other (JsErrorBox);
+          // downcasting to SpecifierError is no longer possible here.
         }
       }
     }
