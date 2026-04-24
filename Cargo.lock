@@ -979,6 +979,8 @@ dependencies = [
  "deno_image",
  "deno_io",
  "deno_net",
+ "deno_node_crypto",
+ "deno_node_sqlite",
  "deno_process",
  "deno_resolver",
  "deno_telemetry",

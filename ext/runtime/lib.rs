@@ -483,6 +483,15 @@ pub fn op_bootstrap_unstable_args(_state: &mut OpState) -> Vec<String> {
   vec![]
 }
 
+// Stub for process.cpuUsage(). Upstream deno defines this in runtime::ops::worker_host,
+// which trex replaces with ext_workers. The node:process polyfill links against this
+// op at module load time, so it must exist in the global op registry.
+#[op2(fast)]
+pub fn op_current_thread_cpu_usage(#[buffer] out: &mut [f64]) {
+  out[0] = 0.0;
+  out[1] = 0.0;
+}
+
 deno_core::extension!(
   runtime,
   deps = [os],
@@ -501,6 +510,7 @@ deno_core::extension!(
     op_raise_segfault,
     op_tap_promise_metrics,
     op_cancel_drop_token,
+    op_current_thread_cpu_usage,
   ],
   esm_entry_point = "ext:runtime/bootstrap.js",
   esm = [

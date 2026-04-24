@@ -16,6 +16,8 @@ deno_cache.workspace = true
 deno_image.workspace = true
 deno_config.workspace = true
 deno_console.workspace = true
+deno_node_crypto.workspace = true
+deno_node_sqlite.workspace = true
 deno_process.workspace = true
 deno_webgpu.workspace = true
 
@@ -106,6 +108,8 @@ deno_broadcast_channel.workspace = true
 deno_cache.workspace = true
 deno_image.workspace = true
 deno_console.workspace = true
+deno_node_crypto.workspace = true
+deno_node_sqlite.workspace = true
 deno_process.workspace = true
 deno_webgpu.workspace = true
 

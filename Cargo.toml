@@ -58,6 +58,7 @@ node_resolver = "0.83.0"
 # upstream exts - Deno 2.7.12 versions
 deno_broadcast_channel = "0.216.0"
 deno_node_crypto = "0.15.0"
+deno_node_sqlite = "0.15.0"
 deno_cache = "0.178.0"
 deno_image = "0.21.0"
 deno_console = "0.222.0"
@@ -307,6 +308,7 @@ deno_resolver = { path = "/home/ph/code/deno/libs/resolver" }
 deno_npm_installer = { path = "/home/ph/code/deno/libs/npm_installer" }
 deno_npmrc = { path = "/home/ph/code/deno/libs/npmrc" }
 deno_node_crypto = { path = "/home/ph/code/deno/ext/node_crypto" }
+deno_node_sqlite = { path = "/home/ph/code/deno/ext/node_sqlite" }
 deno_config = { path = "/home/ph/code/deno/libs/config" }
 deno_crypto_provider = { path = "/home/ph/code/deno/libs/crypto" }
 deno_features = { path = "/home/ph/code/deno/runtime/features" }
