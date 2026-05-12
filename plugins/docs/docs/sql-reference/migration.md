@@ -9,19 +9,9 @@ directory of `V<n>__<name>.sql` files, computes integrity checksums, and
 applies pending migrations in order — both to Trex catalogs and to
 PostgreSQL databases attached to the engine. The Trex binary uses this
 extension at startup to bring the core schema up to the latest version
-(`SCHEMA_DIR` env var → `trex_migration_run_schema`).
-
-It is **distinct** from the plugin migration runner described in
-[Plugins → Migration Plugins](../plugins/migration-plugins). The plugin
-runner is a Deno/Node loader living in `core/server/plugin/migration.ts`
-that handles per-plugin migrations against `DATABASE_URL`. This SQL
-extension is a more general migration tool callable from any context.
-
-| Use this extension when… | Use the plugin runner when… |
-|--------------------------|----------------------------|
-| You want to run migrations from SQL or a Rust binary | You're shipping a plugin with `trex.migrations` config |
-| Targets a Trex catalog or an attached database | Targets only `DATABASE_URL` |
-| Needs `refinery_schema_history` checksum integrity | Tracks versions only (no checksums) |
+(`SCHEMA_DIR` env var → `trex_migration_run_schema`). It is also the
+intended path for plugin-owned schemas: call `trex_migration_run_schema`
+against a per-plugin directory and schema.
 
 ## Concepts
 

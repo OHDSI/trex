@@ -770,72 +770,6 @@ app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res)
   }
 });
 
-// Run core schema migrations (SCHEMA_DIR) via direct PostgreSQL connection
-try {
-  const schemaDir = Deno.env.get("SCHEMA_DIR");
-  const databaseUrl = Deno.env.get("DATABASE_URL");
-  if (schemaDir && databaseUrl) {
-    const { Pool } = await import("pg");
-    const { poolSsl } = await import("./lib/db-ssl.ts");
-    const migrationPool = new Pool({ connectionString: databaseUrl, ...poolSsl(databaseUrl) });
-    try {
-      // Ensure trex schema exists
-      await migrationPool.query("CREATE SCHEMA IF NOT EXISTS trex");
-      await migrationPool.query(`CREATE TABLE IF NOT EXISTS trex._migrations (
-        version TEXT PRIMARY KEY,
-        applied_at TIMESTAMPTZ DEFAULT NOW()
-      )`);
-
-      // Read and apply migration files in order
-      const files: string[] = [];
-      for await (const entry of Deno.readDir(schemaDir)) {
-        if (entry.isFile && entry.name.endsWith(".sql")) {
-          files.push(entry.name);
-        }
-      }
-      files.sort();
-
-      let applied = 0;
-      for (const file of files) {
-        const version = file.replace(".sql", "");
-        const check = await migrationPool.query(
-          "SELECT 1 FROM trex._migrations WHERE version = $1",
-          [version],
-        );
-        if (check.rows.length > 0) continue;
-
-        const sql = await Deno.readTextFile(`${schemaDir}/${file}`);
-        try {
-          await migrationPool.query(sql);
-          applied++;
-          console.log(`Core schema: applied migration ${version}`);
-        } catch (migErr: any) {
-          // If migration fails with "already exists" errors, mark as applied
-          // This handles the case where migrations were partially applied before tracking existed
-          const code = migErr?.code;
-          if (code === "42710" || code === "42P07" || code === "42P06") {
-            // 42710 = duplicate object, 42P07 = duplicate table, 42P06 = duplicate schema
-            console.log(`Core schema: migration ${version} already applied (objects exist)`);
-          } else {
-            console.error(`Core schema: migration ${version} failed:`, migErr);
-            // Still mark as applied to avoid retrying broken migrations endlessly
-          }
-        }
-        await migrationPool.query(
-          "INSERT INTO trex._migrations (version) VALUES ($1) ON CONFLICT DO NOTHING",
-          [version],
-        );
-      }
-      console.log(applied > 0 ? `Core schema migrations applied (${applied})` : "Core schema migrations up to date");
-    } finally {
-      await migrationPool.end();
-    }
-  }
-} catch (err) {
-  console.error("Core schema migration failed:", err);
-}
-
-
 // One-shot bootstrap: encrypt any database_credential rows that still hold a
 // plaintext password. Runs after core migrations so password_encrypted exists.
 try {
@@ -871,14 +805,6 @@ try {
   }
 } catch (err) {
   console.error("[bootstrap] database_credential encryption migration failed:", err);
-}
-
-// Run plugin migrations after plugin discovery
-try {
-  const { runAllPluginMigrations } = await import("./plugin/migration.ts");
-  await runAllPluginMigrations();
-} catch (err) {
-  console.error("Plugin migration execution failed:", err);
 }
 
 // Admin bootstrap banner — warn if no admin user and no ADMIN_EMAIL is set.

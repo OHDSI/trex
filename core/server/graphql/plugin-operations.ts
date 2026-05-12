@@ -1,6 +1,5 @@
 import { makeExtendSchemaPlugin, gql } from "graphile-utils";
 import { Plugins } from "../plugin/plugin.ts";
-import { getMigrationPlugins } from "../plugin/migration.ts";
 import { getTransformPlugins, registerTransformEndpoints, upsertTransformDeployment } from "../plugin/transform.ts";
 import { scanDiskPlugins } from "../routes/plugin.ts";
 import { pool as authPool } from "../db.ts";
@@ -590,39 +589,6 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
               }
             }
 
-            const plugins = getMigrationPlugins();
-            for (const plugin of plugins) {
-              try {
-                const sql = `SELECT version, name, status, applied_on, checksum FROM trex_migration_status_schema('${escapeSql(plugin.migrationsPath)}', '${escapeSql(plugin.schema)}', '${escapeSql(plugin.database)}')`;
-                const result = await conn.execute(sql, []);
-                const rows = result?.rows || result || [];
-                const migrations = rows.map((r: any) => ({
-                  version: parseInt(r.version ?? r[0] ?? "0", 10),
-                  name: r.name || r[1] || "",
-                  status: r.status || r[2] || "",
-                  appliedOn: r.applied_on || r[3] || null,
-                  checksum: r.checksum || r[4] || null,
-                }));
-                const appliedCount = migrations.filter((m: any) => m.status === "applied").length;
-                const pendingCount = migrations.filter((m: any) => m.status === "pending").length;
-                const maxVersion = migrations
-                  .filter((m: any) => m.status === "applied")
-                  .reduce((max: number, m: any) => Math.max(max, m.version), 0);
-                summaries.push({
-                  pluginName: plugin.pluginName,
-                  schema: plugin.schema,
-                  database: plugin.database,
-                  currentVersion: maxVersion || null,
-                  totalMigrations: migrations.length,
-                  appliedCount,
-                  pendingCount,
-                  migrations,
-                });
-              } catch (err: any) {
-                console.error("Plugin migration status error:", plugin.pluginName, err);
-              }
-            }
-
             return summaries;
           } catch (err: any) {
             console.error("trexMigrations error:", err);
@@ -1061,25 +1027,9 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
             type MigrationTarget = { name: string; path: string; schema: string; database: string };
             const targets: MigrationTarget[] = [];
 
-            if (!args.pluginName || args.pluginName === "core") {
-              const schemaDir = Deno.env.get("SCHEMA_DIR");
-              if (schemaDir) {
-                targets.push({ name: "core", path: schemaDir, schema: "trex", database: "_config" });
-              }
-            }
-
-            if (!args.pluginName || args.pluginName !== "core") {
-              const plugins = getMigrationPlugins();
-              for (const plugin of plugins) {
-                if (!args.pluginName || args.pluginName === plugin.pluginName) {
-                  targets.push({
-                    name: plugin.pluginName,
-                    path: plugin.migrationsPath,
-                    schema: plugin.schema,
-                    database: plugin.database,
-                  });
-                }
-              }
+            const schemaDir = Deno.env.get("SCHEMA_DIR");
+            if (schemaDir) {
+              targets.push({ name: "core", path: schemaDir, schema: "trex", database: "_config" });
             }
 
             for (const target of targets) {

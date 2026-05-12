@@ -88,7 +88,6 @@ const sidebars: SidebarsConfig = {
         "plugins/ui-plugins",
         "plugins/function-plugins",
         "plugins/flow-plugins",
-        "plugins/migration-plugins",
         "plugins/transform-plugins",
       ],
     },

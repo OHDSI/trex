@@ -1,9 +1,106 @@
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::process;
 
 use duckdb::{Config, Connection};
+use siphasher::sip::SipHasher13;
+
+/// Seed `_config.trex.refinery_schema_history` from the legacy JS migration
+/// tracker (`_config.trex._migrations`). Earlier server builds applied
+/// `$SCHEMA_DIR` via a TypeScript loop that recorded only `version_string`;
+/// the canonical Rust `migration` extension uses (version INT, checksum).
+/// On the first run after that loop is removed, seed the canonical table
+/// with checksums computed from the on-disk files so the next call to
+/// `trex_migration_run_schema` reports every migration as already-applied
+/// instead of re-applying — `V9__random_authenticator_password.sql` in
+/// particular would otherwise rotate the authenticator password and break
+/// any open pgwire connections.
+fn import_legacy_migrations(conn: &Connection, schema_dir: &str) {
+    let legacy_versions: Vec<String> = match conn
+        .prepare("SELECT version FROM _config.trex._migrations")
+        .and_then(|mut stmt| {
+            let iter = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            iter.collect::<Result<Vec<_>, _>>()
+        }) {
+        Ok(v) if !v.is_empty() => v,
+        _ => return,
+    };
+
+    let refinery_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM _config.trex.refinery_schema_history",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    if refinery_count > 0 {
+        return;
+    }
+
+    print!("Importing legacy migration history ... ");
+
+    if let Err(e) = conn.execute(
+        "CREATE TABLE IF NOT EXISTS _config.trex.refinery_schema_history(\
+            version INT4 PRIMARY KEY,\
+            name VARCHAR(255),\
+            applied_on VARCHAR(255),\
+            checksum VARCHAR(255)\
+        )",
+        [],
+    ) {
+        println!("FAILED to create history table: {e}");
+        return;
+    }
+
+    let applied_on = chrono::Utc::now().to_rfc3339();
+    let mut imported = 0;
+    for legacy in &legacy_versions {
+        let Some(rest) = legacy.strip_prefix('V') else { continue };
+        let Some(sep) = rest.find("__") else { continue };
+        let Ok(parsed_version) = rest[..sep].parse::<i32>() else { continue };
+        let parsed_name = &rest[sep + 2..];
+
+        let (version, name) = if parsed_version == 11 && parsed_name == "realtime_role" {
+            (15, "realtime_role")
+        } else {
+            (parsed_version, parsed_name)
+        };
+
+        let file_path = format!("{schema_dir}/V{version}__{name}.sql");
+        let sql = match fs::read_to_string(&file_path) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let checksum = compute_migration_checksum(name, version, &sql);
+
+        let safe_name = name.replace('\'', "''");
+        let safe_applied = applied_on.replace('\'', "''");
+        let insert = format!(
+            "INSERT INTO _config.trex.refinery_schema_history \
+             (version, name, applied_on, checksum) \
+             VALUES ({version}, '{safe_name}', '{safe_applied}', '{checksum}')"
+        );
+        if conn.execute(&insert, []).is_ok() {
+            imported += 1;
+        }
+    }
+
+    if let Err(e) = conn.execute("DROP TABLE _config.trex._migrations", []) {
+        println!("imported {imported}, but DROP _migrations failed: {e}");
+        return;
+    }
+    println!("imported {imported} row(s)");
+}
+
+fn compute_migration_checksum(name: &str, version: i32, sql: &str) -> u64 {
+    let mut hasher = SipHasher13::new();
+    name.hash(&mut hasher);
+    version.hash(&mut hasher);
+    sql.hash(&mut hasher);
+    hasher.finish()
+}
 
 /// Redact credentials from error messages to avoid leaking them in logs
 fn redact_url(msg: &str) -> String {
@@ -254,6 +351,7 @@ fn main() {
 
     // Run core schema migrations via the migration extension
     if let Ok(schema_dir) = env::var("SCHEMA_DIR") {
+        import_legacy_migrations(&conn, &schema_dir);
         let safe_dir = schema_dir.replace('\'', "''");
         let migration_sql = format!(
             "SELECT * FROM trex_migration_run_schema('{safe_dir}', 'trex', '_config')"

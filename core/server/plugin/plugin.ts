@@ -1,7 +1,6 @@
 import type { Express } from "express";
 import { addPlugin as addFlowPlugin } from "./flow.ts";
 import { addPlugin as addFunctionPlugin } from "./function.ts";
-import { addMigrationPlugin } from "./migration.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { scanPluginDirectory } from "./utils.ts";
@@ -46,7 +45,6 @@ export class Plugins {
           case "transform": return 1;
           case "functions": return 2;
           case "flow": return 3;
-          case "migrations": return 4;
           default: return 5;
         }
       };
@@ -63,9 +61,6 @@ export class Plugins {
             break;
           case "flow":
             addFlowPlugin(value);
-            break;
-          case "migrations":
-            addMigrationPlugin(value, dir, shortName);
             break;
           case "transform":
             addTransformPlugin(app, value, dir, shortName);
