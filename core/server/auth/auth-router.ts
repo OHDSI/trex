@@ -85,20 +85,8 @@ async function createTokenResponse(user: DbUser, sessionId?: string, res?: any) 
 
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
 
-  // Mirror the access token into an `sb-access-token` cookie so same-origin
-  // iframes (notably Supabase Studio at /plugins/trex/studio) pick up auth
-  // automatically — the web shell stores the JWT in localStorage which an
-  // iframe can't read across docs. `authContext` already reads this cookie.
-  //
-  // CSRF: SameSite=Lax is the only thing blocking forged cross-site POSTs
-  // here — we have no anti-CSRF token. If anyone ever changes SameSite to
-  // None (e.g. for a cross-origin iframe scenario), CSRF protection must
-  // be added before that lands.
-  //
-  // Secure flag: `req.protocol` only reflects the externally-visible scheme
-  // when `app.set('trust proxy', ...)` is configured. To survive deployment
-  // behind a TLS-terminating proxy without that setting, honour an explicit
-  // env override (TREX_FORCE_SECURE_COOKIES=1).
+  // sb-access-token cookie lets same-origin iframes (Studio) pick up auth.
+  // CSRF: SameSite=Lax is the only protection — adding SameSite=None requires an anti-CSRF token first.
   if (res) {
     const forwardedProto = res.req?.headers?.["x-forwarded-proto"];
     const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
@@ -365,12 +353,8 @@ async function handleRefreshGrant(req: any, res: any) {
 
 // ── POST /logout ─────────────────────────────────────────────────────────────
 
-// ── POST /sync-cookie ─────────────────────────────────────────────────────
-// Trades a Bearer access token (which the trex web shell keeps in
-// localStorage) for an `sb-access-token` HttpOnly cookie on this origin.
-// Same-origin iframes (Studio) don't have access to the parent's
-// localStorage and don't run our auth-client, so they need the cookie to
-// authenticate. Idempotent; safe to call on every Studio page mount.
+// Trade a Bearer access token for an sb-access-token cookie so same-origin
+// iframes (which can't read the parent's localStorage) can authenticate.
 router.post("/sync-cookie", apiLimiter, async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -384,8 +368,6 @@ router.post("/sync-cookie", apiLimiter, async (req, res) => {
       res.status(401).json({ error: "not_authenticated" });
       return;
     }
-    // Cookie flags must mirror createTokenResponse() — see the comment
-    // there about CSRF / TREX_FORCE_SECURE_COOKIES.
     const forwardedProto = req.headers?.["x-forwarded-proto"];
     const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
     const secure =
@@ -397,8 +379,6 @@ router.post("/sync-cookie", apiLimiter, async (req, res) => {
       sameSite: "lax",
       secure,
       path: "/",
-      // Mirror the token's own remaining lifetime so the cookie expires
-      // alongside the token rather than living past it.
       maxAge: Math.max(0, (claims.exp || 0) * 1000 - Date.now()),
     });
     res.status(204).end();
@@ -409,9 +389,6 @@ router.post("/sync-cookie", apiLimiter, async (req, res) => {
 });
 
 router.post("/logout", apiLimiter, async (req, res) => {
-  // Always clear the same-origin session cookie that mirrors the access
-  // token (set in createTokenResponse), regardless of whether refresh-token
-  // revocation succeeds.
   res.clearCookie("sb-access-token", { path: "/" });
   try {
     const authHeader = req.headers.authorization;
@@ -834,10 +811,7 @@ router.get("/health", (_req, res) => {
   res.json({ version: "trex-gotrue-1.0.0", name: "GoTrue", description: "Trex GoTrue-compatible auth" });
 });
 
-// ── Admin user creation ─────────────────────────────────────────────────────
-// /admin/users is the GoTrue-compatible path that supabase-js (and Studio's
-// auth admin) POSTs to; /admin/create-user is the original trex name.
-
+// /admin/users is the GoTrue-compatible alias supabase-js POSTs to.
 router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
@@ -853,10 +827,7 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
       return;
     }
 
-    // Caller must be an admin user OR present the service_role JWT
-    // (Supabase convention — service_role bypasses RLS and admin checks).
-    // Studio's auth function plugin calls this endpoint via supabase-js
-    // initialised with the service role key, so we must honour both.
+    // service_role bypasses RLS/admin checks (Supabase convention).
     const callerRole = claims.app_metadata?.trex_role;
     const isServiceRole = claims.role === "service_role";
     if (callerRole !== "admin" && !isServiceRole) {

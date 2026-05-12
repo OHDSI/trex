@@ -3,19 +3,13 @@ import { authClient } from "@/lib/auth-client";
 import { BASE_PATH } from "@/lib/config";
 
 /** Renders an external plugin app inside an iframe that fills the content area.
- *
- * Before mounting the iframe, we POST our access token to /auth/v1/sync-cookie
- * so the server sets an `sb-access-token` cookie on this origin. The plugin
- * (running in the iframe) can't read our localStorage, but the cookie rides
- * along on its same-origin API calls — that's how it inherits trex auth.
- */
+ *  For Studio, exchanges the access token for an sb-access-token cookie first
+ *  — same-origin iframes can't read the parent's localStorage. */
 export function EmbedPage({ plugin }: { plugin: string }) {
   const [ready, setReady] = useState(false);
   const src = `/plugins/trex/${plugin}/`;
 
   useEffect(() => {
-    // Only Studio's iframe needs a cookie — docs and other UI plugins
-    // serve public static assets. Skip the round trip for them.
     if (plugin !== "studio") { setReady(true); return; }
     let cancelled = false;
     (async () => {
@@ -26,10 +20,7 @@ export function EmbedPage({ plugin }: { plugin: string }) {
             method: "POST",
             headers: { Authorization: `Bearer ${token}` },
           });
-        } catch {
-          // Cookie sync failure isn't fatal — iframe will surface its own
-          // 401 if auth is missing.
-        }
+        } catch { /* iframe will surface its own 401 if auth is missing */ }
       }
       if (!cancelled) setReady(true);
     })();

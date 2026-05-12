@@ -51,9 +51,6 @@ function HomeRedirect() {
   return <Navigate to={session ? "/profile" : "/login"} replace />;
 }
 
-// Admin-only route guard for surfaces (Studio iframe, etc.) that should
-// not be reachable by directly typing the URL as a non-admin user. Mirrors
-// the role check the AdminLayout uses for the /admin section.
 function AdminOnly({ children }: { children: React.ReactElement }) {
   const { data: session, isPending } = useSession();
   if (isPending) return null;

@@ -41,23 +41,11 @@ app.use(cors({
   credentials: true,
 }));
 
-// `TREX_DEBUG=studio` (or `=all`) turns on the verbose studio-dispatcher /
-// graphql / storage diagnostics that are otherwise silent.
 const _TREX_DEBUG = (Deno.env.get("TREX_DEBUG") || "").toLowerCase().split(",").map((s) => s.trim());
 const DEBUG_STUDIO = _TREX_DEBUG.includes("studio") || _TREX_DEBUG.includes("all");
 const DEBUG_GRAPHQL = _TREX_DEBUG.includes("graphql") || _TREX_DEBUG.includes("all");
 
-// Body buffer for studio API requests — drains the request stream into a
-// Buffer on `req.body` and marks `_body = true` so downstream body-parsers
-// (notably the `express.json()` inside the globally-mounted cliLoginRouter)
-// don't try to re-read the now-empty stream and 500 with
-// "stream is not readable". `buildWorkerRequest` then forwards the buffered
-// bytes to the sidecar.
-//
-// Per-content-type byte caps: JSON Studio API calls are small (a few KB);
-// multipart deploys can be tens of MB. Whatever runs through, refuse with
-// 413 once the appropriate cap is hit and tear the socket down so the
-// remaining payload doesn't get buffered.
+// Buffer the body so downstream cliLoginRouter's express.json() can't 500 with "stream not readable".
 const STUDIO_BODY_MAX_JSON = 5 * 1024 * 1024;
 const STUDIO_BODY_MAX_MULTIPART = 50 * 1024 * 1024;
 app.use(["/plugins/trex/studio/api", "/plugins/trex/studio/api/*"], async (req, res, next) => {
@@ -451,14 +439,8 @@ app.use(cliLoginRouter);
 app.use(apiLimiter);
 app.use(authContext);
 
-// Admin-only gate for Studio's /api/** — the forwarder talks to the
-// sidecar using its own SERVICE_KEY, so without this any unauthenticated
-// caller would get full admin data. Static HTML/JS/CSS under
-// /plugins/trex/studio/** isn't gated: it carries no data, and gating it
-// would block the iframe's initial load before the cookie is even sent.
-//
-// `authContext` upstream has already decoded the sb-access-token cookie /
-// Authorization header / apikey header and populated req.pgSettings.
+// Admin-only gate: the sidecar forwarder uses its own service key, so without
+// this any unauthenticated caller would get admin data. Static assets pass through.
 app.use("/plugins/trex/studio/api", (req, res, next) => {
   const role = (req as any).pgSettings?.["app.user_role"];
   if (role === "admin") return next();
@@ -469,19 +451,9 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
 });
 
 try {
-// ---------------------------------------------------------------------------
-// Studio URL rewriter for Next.js dynamic-segment routes.
-// Studio's static export emits files with literal bracket-segment paths
-// (e.g. /project/[ref]/index.html). The browser hits /project/default/...,
-// so we rewrite incoming URLs to map any non-bracket segment in a dynamic
-// position to its bracket-form sibling on disk. The walk is bounded by the
-// build_static tree under plugins/studio/.
-// ---------------------------------------------------------------------------
+// Studio's static export emits literal bracket-segment paths (e.g. /project/[ref]/index.html).
+// The browser hits /project/default/..., so we rewrite to the bracket-form sibling on disk.
 const STUDIO_STATIC_DIR = "/usr/src/plugins-dev/studio/build_static";
-
-// Cache rewrite results — the static export tree is immutable at runtime,
-// so once we've resolved a path we never need to re-scan it. Bounded so a
-// flood of garbage URLs can't blow up memory.
 const STUDIO_REWRITE_CACHE = new Map<string, string>();
 const STUDIO_REWRITE_CACHE_MAX = 4096;
 
@@ -490,7 +462,6 @@ function rewriteStudioUrl(originalUrl: string): string {
   if (cached !== undefined) return cached;
   const result = computeStudioRewrite(originalUrl);
   if (STUDIO_REWRITE_CACHE.size >= STUDIO_REWRITE_CACHE_MAX) {
-    // Simple LRU-ish eviction: drop the oldest insertion.
     const firstKey = STUDIO_REWRITE_CACHE.keys().next().value;
     if (firstKey !== undefined) STUDIO_REWRITE_CACHE.delete(firstKey);
   }
@@ -504,7 +475,6 @@ function computeStudioRewrite(originalUrl: string): string {
   const query = queryIdx >= 0 ? originalUrl.slice(queryIdx) : "";
 
   if (!pathOnly.startsWith("/plugins/trex/studio")) return originalUrl;
-  // Skip /api/* — dispatched separately
   if (pathOnly.startsWith("/plugins/trex/studio/api")) return originalUrl;
 
   const stripped = pathOnly.slice("/plugins/trex/studio".length);
@@ -515,7 +485,6 @@ function computeStudioRewrite(originalUrl: string): string {
   const outSegs: string[] = [];
   for (let i = 0; i < segments.length; i++) {
     const seg = segments[i];
-    // Try literal child first
     const literal = `${cur}/${seg}`;
     let stat: any;
     try { stat = Deno.statSync(literal); } catch { stat = null; }
@@ -525,13 +494,11 @@ function computeStudioRewrite(originalUrl: string): string {
       continue;
     }
     if (stat?.isFile) {
-      // Last segment may be a file (e.g. .js, .css) — keep it as-is
       outSegs.push(seg);
       cur = literal;
       continue;
     }
 
-    // No literal match — look for a bracket sibling at this level
     let bracket: string | null = null;
     let catchall: string | null = null;
     try {
@@ -540,7 +507,7 @@ function computeStudioRewrite(originalUrl: string): string {
         if (e.name.startsWith("[[...")) catchall = e.name;
         else if (e.name.startsWith("[") && e.name.endsWith("]")) bracket = e.name;
       }
-    } catch { /* directory unreadable, give up */ }
+    } catch { /* ignore */ }
 
     if (bracket) {
       outSegs.push(bracket);
@@ -548,11 +515,9 @@ function computeStudioRewrite(originalUrl: string): string {
       continue;
     }
     if (catchall) {
-      // Catch-all eats everything that follows
       outSegs.push(catchall);
       return "/plugins/trex/studio/" + outSegs.join("/") + query;
     }
-    // Nothing matched — return original (will 404 → SPA fallback)
     return originalUrl;
   }
 
@@ -560,11 +525,7 @@ function computeStudioRewrite(originalUrl: string): string {
   return rewritten;
 }
 
-// Send the Studio root straight to the project page. Studio's static
-// export emits a literal `[ref]` folder for dynamic routes; the index page's
-// internal router.replace can't resolve `/project/[ref]` against an `as` of
-// `/`, throws, and the page hangs. Skipping straight to /project/default
-// avoids that path entirely.
+// The Studio index page hangs trying to resolve `/project/[ref]` against `as=/` — skip to /project/default.
 app.get(["/plugins/trex/studio", "/plugins/trex/studio/"], (_req, res) => {
   res.redirect(302, "/plugins/trex/studio/project/default/");
 });
@@ -577,25 +538,8 @@ app.use((req, _res, next) => {
   next();
 });
 
-// ---------------------------------------------------------------------------
-// Studio dispatchers
-// ---------------------------------------------------------------------------
-// All /plugins/trex/studio/api/** requests proxy straight to the Studio Node
-// sidecar (`STUDIO_INTERNAL_URL`, set up as the @trex/studio function plugin).
-// Static UI assets under /plugins/trex/studio/** that aren't /api are served
-// by the @trex/studio UI plugin from the baked-in Next.js static export.
-//
-// History: this used to route to per-category Deno function plugins
-// (@trex/studio-api/functions/{pg-meta-a,pg-meta-b,projects,auth,…}) first
-// and only fall through to the sidecar on worker failure. The Edge Runtime
-// supervisor's hardcoded per-worker limits killed every worker on its first
-// request with `connection closed before message completed`, so 100% of
-// traffic fell through anyway — for the cost of an extra hop and a crash
-// log per request. Removed the function-plugin tier (`plugins/studio-api/`)
-// and the dispatcher fanout; the sidecar handles everything now.
-// ---------------------------------------------------------------------------
-
-// Build a Web Request for the function plugin from an Express req
+// /plugins/trex/studio/api/** proxies to the Studio Node sidecar via the
+// @trex/studio function plugin; non-/api paths are served as static assets.
 function buildWorkerRequest(req: any, rewrittenPath?: string): globalThis.Request {
   const host = req.get("host") || "localhost";
   const protocol = req.protocol || "http";
@@ -610,17 +554,12 @@ function buildWorkerRequest(req: any, rewrittenPath?: string): globalThis.Reques
   }
   let body: Blob | undefined;
   if (req.method !== "GET" && req.method !== "HEAD" && req.body && (req.body as Buffer).length > 0) {
-    // Copy the Buffer so subsequent calls (e.g. fall-through to the sidecar
-    // after a function plugin call) still see the body. Passing a Buffer
-    // directly to Blob can mark the source as transferred in some runtimes.
+    // Copy so a retried forward sees the body — passing the Buffer directly can mark it transferred.
     body = new Blob([new Uint8Array(req.body as Buffer)]);
   }
   return new globalThis.Request(requestUrl, { method: req.method, headers, body });
 }
 
-// Stream a function plugin's Web Response back through Express. Avoids
-// buffering large responses (Monaco editor chunks, multipart deploy fetches)
-// in memory.
 async function pipeWorkerResponse(workerResponse: globalThis.Response, res: any) {
   res.status(workerResponse.status);
   workerResponse.headers.forEach((value: string, key: string) => {
@@ -637,21 +576,18 @@ async function pipeWorkerResponse(workerResponse: globalThis.Response, res: any)
       if (value) res.write(value);
     }
   } finally {
-    try { reader.releaseLock(); } catch { /* already released */ }
-    try { res.end(); } catch { /* already ended (e.g. client disconnect) */ }
+    try { reader.releaseLock(); } catch { /* ignore */ }
+    try { res.end(); } catch { /* ignore */ }
   }
 }
 
-// Redact obvious secrets before logging. Logs ship to disk/stdout and could
-// be read by anyone with infra access; passwords, tokens, and admin keys
-// must not appear in plain text. Best-effort — covers the JSON-body shape.
+// Best-effort JSON-body redaction — secrets must not hit stdout.
 function redactForLog(s: string): string {
   return s
     .replace(/("(?:password|currentPassword|newPassword|access_token|refresh_token|apikey|api_key|service_role_key|anon_key|client_secret|token|otp|magiclink|secret)"\s*:\s*")[^"]*(")/gi, '$1***$2')
     .replace(/("authorization"\s*:\s*"Bearer\s+)[^"]*(")/gi, '$1***$2');
 }
 
-// Forward a request to the @trex/studio sidecar proxy plugin
 async function forwardToStudioSidecar(req: any, res: any) {
   const handler = fnmap["@trex/studio/functions"];
   if (!handler) {
@@ -665,11 +601,6 @@ async function forwardToStudioSidecar(req: any, res: any) {
   }
   const webReq = buildWorkerRequest(req, sidecarPath);
   const workerResponse = await handler(webReq);
-  // When the sidecar returns 4xx/5xx for an API call, log the request body
-  // and response body so we can see what Studio sent. Gated behind
-  // TREX_DEBUG=studio so the noise — and the secret-leak risk from logging
-  // request bodies that contain passwords or tokens — stays out of normal
-  // operation.
   if (DEBUG_STUDIO && workerResponse.status >= 400 && sidecarPath.startsWith("/studio-proxy/api/")) {
     const cloned = workerResponse.clone();
     try {
@@ -681,9 +612,7 @@ async function forwardToStudioSidecar(req: any, res: any) {
   await pipeWorkerResponse(workerResponse, res);
 }
 
-// Studio polls /platform/notifications* on every page (every ~10s) — these
-// are Supabase Cloud-only endpoints with no server route in self-hosted
-// Studio. Return empty stubs so the browser console stays quiet.
+// Cloud-only endpoints stubbed so self-hosted Studio's polling stays quiet.
 app.get("/plugins/trex/studio/api/platform/notifications", (_req, res) => {
   res.status(200).json([]);
 });
@@ -705,10 +634,6 @@ app.all(
     }
   },
 );
-
-// /plugins/trex/studio/** (non-API) is served by the @trex/studio UI plugin's
-// static route, which points at plugins/studio/build_static/ — Studio's
-// Next.js static export. No sidecar in the path.
 
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
@@ -763,10 +688,7 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
 
     let body: Blob | undefined;
     if (req.method !== "GET" && req.method !== "HEAD") {
-      // req.body may be a Buffer (from express.raw) or an already-parsed
-      // object (cliLoginRouter mounted upstream calls express.json() which
-      // runs on every request that enters the router — including this one
-      // — and short-circuits the raw parser). Handle both.
+      // req.body may already be a parsed object: cliLoginRouter's express.json() short-circuits express.raw().
       if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         body = new Blob([req.body]);
       } else if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
@@ -991,9 +913,6 @@ try {
   console.error("Role auto-creation failed:", err);
 }
 
-// GraphQL diagnostic: log request body + status when PostGraphile returns
-// 4xx so we can see which client query was rejected. Gated behind
-// TREX_DEBUG=graphql to keep production logs clean.
 if (DEBUG_GRAPHQL) {
   app.use(`${BASE_PATH}/graphql`, express.json({ limit: "1mb" }), (req, res, next) => {
     if (req.method !== "POST") return next();
@@ -1146,8 +1065,6 @@ app.put(`${BASE_PATH}/_internal/upload`, async (req, res) => {
 
 // Supabase-compatible edge function invocation: /functions/v1/:function_name
 const FUNCTIONS_DIR = Deno.env.get("FUNCTIONS_DIR") || "./functions";
-// Studio's deploy endpoint writes uploaded function files here. Shared with
-// the studio sidecar via a docker volume.
 const EDGE_FUNCTIONS_MANAGEMENT_FOLDER = Deno.env.get("EDGE_FUNCTIONS_MANAGEMENT_FOLDER");
 
 // Cached Supabase-compatible env vars (populated after ensureAuthKeys)

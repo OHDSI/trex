@@ -1,13 +1,6 @@
 // @ts-nocheck - Deno edge function
-// Studio proxy: forwards every request received by the trex dispatcher
-// (mounted at /plugins/trex/studio/**) to the Studio Next.js standalone
-// sidecar reachable at STUDIO_INTERNAL_URL inside the docker network.
-//
-// The trex dispatcher rewrites the public URL /plugins/trex/studio/... to
-// /studio-proxy/... so it matches this function plugin's declared `source`.
-// Studio is built with NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio, so it
-// only serves URLs under that prefix — we strip /studio-proxy and prepend
-// the basePath when forwarding upstream.
+// Forwards /studio-proxy/* to the Studio sidecar at STUDIO_INTERNAL_URL,
+// re-prepending the NEXT_PUBLIC_BASE_PATH that Studio is built with.
 
 const SOURCE_PREFIX = "/studio-proxy";
 const STUDIO_BASE_PATH = "/plugins/trex/studio";

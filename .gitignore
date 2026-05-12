@@ -1,4 +1,5 @@
 /.*
+CLAUDE.md
 !.github
 node_modules
 target/

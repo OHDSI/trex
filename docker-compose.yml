@@ -55,28 +55,13 @@ services:
     volumes:
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
-      # --- Required until the trex image is rebuilt with these changes ---
-      # core/server: ships the new Studio dispatcher / gate code.
       - ./core/server:/usr/src/core/server
-      # storage: the supabase-storage submodule isn't checked out in the
-      # released image; this mount provides the locally-built dist/.
       - ./plugins/storage:/usr/src/plugins-dev/storage
-      # studio: build_static/ (the Next.js export served by the UI plugin)
-      # isn't baked into the released image yet.
       - ./plugins/studio:/usr/src/plugins-dev/studio
-      # runtime-deno.json: the workspace-less Deno config required for
-      # plugins-dev/* to load on Deno ≥2.7. New Dockerfiles bake this in.
       - ./docker/runtime-deno.json:/usr/src/deno.json:ro
-      #
-      # --- Dev convenience (drop these in production) ---
-      # web: lets `npx vite build` show up live without an image rebuild.
       - ./plugins/web:/usr/src/plugins-dev/web
-      # pg-meta: dev override; the image bakes pg-meta + dist already.
       - ./plugins/pg-meta:/usr/src/plugins-dev/pg-meta
-      #
-      # --- Shared with the studio sidecar ---
-      # Studio's deploy handler writes uploaded edge-function files here;
-      # trex's invokeEdgeFunction reads from the same volume.
+      # Shared with the studio sidecar: Studio's deploy writes here, trex reads.
       - studio-edge-functions:/app/edge-functions
     depends_on:
       postgres:
@@ -98,11 +83,7 @@ services:
       SWARM_NODE: local
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: "3000"
-      # Studio integration: function plugin proxy in @trex/studio forwards
-      # /plugins/trex/studio/** to this internal URL.
       STUDIO_INTERNAL_URL: http://studio:3000
-      # Look here first when resolving /functions/v1/<slug> — populated by
-      # Studio's deploy endpoint via the shared studio-edge-functions volume.
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
 
   postgrest:
@@ -119,19 +100,7 @@ services:
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
 
-  # ---------------------------------------------------------------------------
-  # Supabase Studio sidecar — built from our fork with NEXT_PUBLIC_BASE_PATH
-  # baked in so all of Studio's URLs are prefixed with /plugins/trex/studio.
-  # The container is internal-only (no host port); requests reach it through
-  # the @trex/studio function plugin proxy mounted on trex at
-  # /plugins/trex/studio/**. Trex's admin auth gates the proxy route, so
-  # Studio inherits trex's authentication.
-  #
-  # SUPABASE_URL/STUDIO_PG_META_URL point Studio's clients at trex's wire-
-  # compatible endpoints. Anon and service-role keys come from .env (set them
-  # to the values in trex.setting auth.anonKey / auth.serviceRoleKey, or read
-  # them from the admin endpoint /trex/api/settings/auth-keys).
-  # ---------------------------------------------------------------------------
+  # Studio sidecar — internal-only; trex proxies /plugins/trex/studio/** to it.
   studio:
     build:
       context: ./plugins/studio/supabase-studio
@@ -141,22 +110,13 @@ services:
         NEXT_PUBLIC_BASE_PATH: /plugins/trex/studio
     container_name: trex-studio
     restart: unless-stopped
-    # Intentionally NOT exposing a host port: the sidecar runs Studio with
-    # its full backend (real supabase-js etc.) and would bypass trex's
-    # admin-only gate at /plugins/trex/studio/api/* if reachable directly.
-    # All traffic must go through trex (host 8001), which authenticates
-    # then forwards via the docker network to http://studio:3000.
+    # NOT exposing a host port: direct access would bypass trex's admin-only gate.
     depends_on:
       - trex
     volumes:
-      # Trex integration: at boot, read SUPABASE_ANON_KEY and
-      # SUPABASE_SERVICE_KEY from trex.setting (Postgres) so the sidecar
-      # doesn't need them in env. The wrapper entrypoint overrides the
-      # node-base one in the image; the helper is the script it invokes.
+      # Wrapper entrypoint fetches SUPABASE_ANON_KEY / SUPABASE_SERVICE_KEY from trex.setting at boot.
       - ./plugins/studio/supabase-studio/apps/studio/docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
       - ./plugins/studio/supabase-studio/apps/studio/fetch-trex-keys.cjs:/app/apps/studio/fetch-trex-keys.cjs:ro
-      # Writable folders for Studio's SQL snippets and edge-functions admin.
-      # Studio's content/* and v1/functions/* routes read/write these dirs.
       - studio-snippets:/app/snippets
       - studio-edge-functions:/app/edge-functions
     healthcheck:
@@ -173,12 +133,7 @@ services:
       POSTGRES_PORT: "5432"
       POSTGRES_DB: testdb
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypass}
-      # trex's postgres only has the default `postgres` user (plus
-      # postgrest's `authenticator` and the supabase-style anon/authenticated/
-      # service_role roles — none of which can LOGIN). Override Studio's
-      # self-hosted defaults (`supabase_admin` / `supabase_read_only_user`)
-      # so its lints, migrations, and connection-string code use the user
-      # that actually exists.
+      # Override Studio's self-hosted defaults — trex's postgres has no supabase_admin user.
       POSTGRES_USER_READ_WRITE: postgres
       POSTGRES_USER_READ_ONLY: postgres
       PG_META_CRYPTO_KEY: ${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}
