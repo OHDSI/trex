@@ -4,11 +4,14 @@
   "description": "Supabase Studio wrapped as a trex UI + function plugin (proxies to a Studio Node sidecar)",
   "files": [
     "build/",
+    "build_static/",
     "functions/",
     "deno.json"
   ],
   "scripts": {
-    "build": "test -f build/index.html"
+    "build": "[ -f build_static/index.html ] || npm run build:static",
+    "build:static": "cd supabase-studio && pnpm install --frozen-lockfile && TREX_STATIC_EXPORT=1 SKIP_ASSET_UPLOAD=1 pnpm run build:studio && rm -rf ../build_static && mkdir -p ../build_static && cp -a apps/studio/out/. ../build_static/",
+    "prepack": "npm run build"
   },
   "trex": {
     "functions": {

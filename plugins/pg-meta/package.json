@@ -5,7 +5,7 @@
   "files": ["postgres-meta/dist", "postgres-meta/functions", "postgres-meta/deno.json", "postgres-meta/package.json"],
   "scripts": {
     "build": "cd postgres-meta && npm install --ignore-scripts --no-audit --no-fund && npm run build",
-    "prepack": "npm run build"
+    "prepack": "[ -d postgres-meta/dist ] || npm run build"
   },
   "trex": {
     "functions": {

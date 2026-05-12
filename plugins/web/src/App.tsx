@@ -1,3 +1,4 @@
+import * as React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { useSession } from "@/lib/auth-client";
@@ -53,7 +54,7 @@ function HomeRedirect() {
 // Admin-only route guard for surfaces (Studio iframe, etc.) that should
 // not be reachable by directly typing the URL as a non-admin user. Mirrors
 // the role check the AdminLayout uses for the /admin section.
-function AdminOnly({ children }: { children: JSX.Element }) {
+function AdminOnly({ children }: { children: React.ReactElement }) {
   const { data: session, isPending } = useSession();
   if (isPending) return null;
   if (!session?.user || (session.user as any).role !== "admin") {

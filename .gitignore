@@ -14,6 +14,7 @@ shinylive/
 plugins/atlas/cmake_build/release/
 plugins/devx-ext/build/
 plugins/devx-ext/configure/venv/
+plugins/studio/build_static/
 /workspace/
 # Deploy
 deploy/node_modules/

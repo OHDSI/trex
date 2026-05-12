@@ -13,6 +13,9 @@ plugins/
 !plugins/storage/
 !plugins/notebook/
 !plugins/docs/
+!plugins/studio/
+!plugins/studio/build/
+!plugins/pg-meta/
 !plugins/devx-ext/build/release/devx_ext.trex
 
 # Misc

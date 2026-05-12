@@ -1,1 +1,0 @@
-(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,17077,e=>{"use strict";e.s(["default",0,"Queues uses the `pgmq` Postgres extension, which is a durable Message Queue, like [AWS SQS](https://aws.amazon.com/sqs/) and [RSMQ](https://github.com/smrchy/rsmq), with guaranteed delivery in Postgres.\n"])}]);
