@@ -15,7 +15,7 @@ MODEL_NAME = "tiny-test"
 MODEL_LOAD_CONFIG = '{"n_ctx": 512, "n_gpu_layers": 0, "num_threads": 1}'
 
 # Generous timeout for model download/load and inference on slow CI runners.
-AI_TIMEOUT = 300
+AI_TIMEOUT = 600
 
 # Known locations where the model may already exist
 _KNOWN_MODEL_PATHS = [

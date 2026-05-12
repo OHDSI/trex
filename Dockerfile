@@ -66,6 +66,19 @@ COPY plugins/docs/src/ ./src/
 COPY plugins/docs/static/ ./static/
 RUN npm install && npm run build
 
+# Stage 5b: Build postgres-meta (TypeScript -> dist/)
+FROM node:22-trixie-slim AS pg-meta-builder
+WORKDIR /build
+COPY plugins/pg-meta/postgres-meta/ ./
+RUN npm install --ignore-scripts --no-audit --no-fund && npm run build
+
+# Stage 5c: Build the Studio Next.js static export.
+FROM node:22-trixie-slim AS studio-builder
+WORKDIR /build
+RUN corepack enable
+COPY plugins/studio/ ./
+RUN npm run build:static
+
 # Stage 6: Runtime
 FROM node:22-trixie-slim
 
@@ -90,7 +103,12 @@ COPY package.json package-lock.json .npmrc ./
 # /usr/src/plugins-dev. The repo-root deno.json keeps the workspace key for
 # local dev/CI builds; only the runtime image strips it.
 RUN echo '{"nodeModulesDir":"auto"}' > deno.json
-RUN npm install
+# Sources for `file:` deps in package.json — these aren't published to the registry.
+# Removed after install; real loading goes via node_modules/@trex and plugins-dev/.
+COPY plugins/pg-meta/ /usr/src/plugins/pg-meta/
+COPY plugins/studio/ /usr/src/plugins/studio/
+COPY --from=studio-builder /build/build_static/ /usr/src/plugins/studio/build_static/
+RUN npm install && rm -rf /usr/src/plugins/pg-meta /usr/src/plugins/studio
 
 # Collect extension files from node_modules into extensions dir
 RUN mkdir -p /usr/lib/trexsql/extensions && \
@@ -149,7 +167,12 @@ COPY plugins/notebook/ ./plugins-dev/notebook/
 COPY --from=notebook-builder /build/dist/ ./plugins-dev/notebook/dist/
 COPY plugins/docs/ ./plugins-dev/docs/
 COPY --from=docs-builder /build/build/ ./plugins-dev/docs/build/
+COPY plugins/studio/ ./plugins-dev/studio/
+COPY --from=studio-builder /build/build_static/ ./plugins-dev/studio/build_static/
 COPY plugins/storage/ ./plugins-dev/storage/
+COPY plugins/pg-meta/ ./plugins-dev/pg-meta/
+COPY --from=pg-meta-builder /build/dist/ ./plugins-dev/pg-meta/postgres-meta/dist/
+COPY --from=pg-meta-builder /build/node_modules/ ./plugins-dev/pg-meta/postgres-meta/node_modules/
 
 # TLS cert is generated at container start by /usr/src/entrypoint.sh
 # (per-container, NOT for production — see comments in that script).

@@ -1,5 +1,4 @@
-// @ts-ignore
-import { STATUS_CODE } from "https://deno.land/std/http/status.ts";
+import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
 import { join } from "jsr:@std/path@^1.0";
 import express from "express";
 import { createServer, request as httpRequest } from "node:http";
@@ -41,6 +40,47 @@ app.use(cors({
   origin: trustedOrigins.length > 0 ? trustedOrigins : false,
   credentials: true,
 }));
+
+const _TREX_DEBUG = (Deno.env.get("TREX_DEBUG") || "").toLowerCase().split(",").map((s) => s.trim());
+const DEBUG_STUDIO = _TREX_DEBUG.includes("studio") || _TREX_DEBUG.includes("all");
+const DEBUG_GRAPHQL = _TREX_DEBUG.includes("graphql") || _TREX_DEBUG.includes("all");
+
+// Buffer the body so downstream cliLoginRouter's express.json() can't 500 with "stream not readable".
+const STUDIO_BODY_MAX_JSON = 5 * 1024 * 1024;
+const STUDIO_BODY_MAX_MULTIPART = 50 * 1024 * 1024;
+app.use(["/plugins/trex/studio/api", "/plugins/trex/studio/api/*"], async (req, res, next) => {
+  if (req.method === "GET" || req.method === "HEAD") return next();
+  if (Buffer.isBuffer((req as any).body) && (req as any).body.length > 0) return next();
+  const ct = String(req.headers["content-type"] ?? "").toLowerCase();
+  const isMultipart = ct.startsWith("multipart/");
+  const limit = isMultipart ? STUDIO_BODY_MAX_MULTIPART : STUDIO_BODY_MAX_JSON;
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const chunk of req as any) {
+      const c = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      total += c.length;
+      if (total > limit) {
+        try { (req as any).destroy?.(); } catch { /* ignore */ }
+        res.status(413).json({
+          error: "payload_too_large",
+          error_description: `Body exceeds ${limit} bytes`,
+        });
+        return;
+      }
+      chunks.push(c);
+    }
+  } catch (e) {
+    console.error("[studio-body-buffer] read error:", e);
+    return next();
+  }
+  (req as any).body = Buffer.concat(chunks, total);
+  (req as any)._body = true;
+  if (DEBUG_STUDIO) {
+    console.log(`[studio-body-buffer] ${req.method} ${req.originalUrl} read=${total}`);
+  }
+  next();
+});
 
 // Public settings endpoint — no auth required, only whitelisted keys
 const PUBLIC_SETTING_KEYS = ["auth.selfRegistration", "auth.anonKey"];
@@ -399,7 +439,202 @@ app.use(cliLoginRouter);
 app.use(apiLimiter);
 app.use(authContext);
 
+// Admin-only gate: the sidecar forwarder uses its own service key, so without
+// this any unauthenticated caller would get admin data. Static assets pass through.
+app.use("/plugins/trex/studio/api", (req, res, next) => {
+  const role = (req as any).pgSettings?.["app.user_role"];
+  if (role === "admin") return next();
+  res.status(role ? 403 : 401).json({
+    error: role ? "forbidden" : "not_authenticated",
+    error_description: "Studio API is admin-only",
+  });
+});
+
 try {
+// Studio's static export emits literal bracket-segment paths (e.g. /project/[ref]/index.html).
+// The browser hits /project/default/..., so we rewrite to the bracket-form sibling on disk.
+const STUDIO_STATIC_DIR = "/usr/src/plugins-dev/studio/build_static";
+const STUDIO_REWRITE_CACHE = new Map<string, string>();
+const STUDIO_REWRITE_CACHE_MAX = 4096;
+
+function rewriteStudioUrl(originalUrl: string): string {
+  const cached = STUDIO_REWRITE_CACHE.get(originalUrl);
+  if (cached !== undefined) return cached;
+  const result = computeStudioRewrite(originalUrl);
+  if (STUDIO_REWRITE_CACHE.size >= STUDIO_REWRITE_CACHE_MAX) {
+    const firstKey = STUDIO_REWRITE_CACHE.keys().next().value;
+    if (firstKey !== undefined) STUDIO_REWRITE_CACHE.delete(firstKey);
+  }
+  STUDIO_REWRITE_CACHE.set(originalUrl, result);
+  return result;
+}
+
+function computeStudioRewrite(originalUrl: string): string {
+  const queryIdx = originalUrl.indexOf("?");
+  const pathOnly = queryIdx >= 0 ? originalUrl.slice(0, queryIdx) : originalUrl;
+  const query = queryIdx >= 0 ? originalUrl.slice(queryIdx) : "";
+
+  if (!pathOnly.startsWith("/plugins/trex/studio")) return originalUrl;
+  if (pathOnly.startsWith("/plugins/trex/studio/api")) return originalUrl;
+
+  const stripped = pathOnly.slice("/plugins/trex/studio".length);
+  const segments = stripped.split("/").filter(Boolean);
+  if (segments.length === 0) return originalUrl;
+
+  let cur = STUDIO_STATIC_DIR;
+  const outSegs: string[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const seg = segments[i];
+    const literal = `${cur}/${seg}`;
+    let stat: any;
+    try { stat = Deno.statSync(literal); } catch { stat = null; }
+    if (stat?.isDirectory) {
+      outSegs.push(seg);
+      cur = literal;
+      continue;
+    }
+    if (stat?.isFile) {
+      outSegs.push(seg);
+      cur = literal;
+      continue;
+    }
+
+    let bracket: string | null = null;
+    let catchall: string | null = null;
+    try {
+      for (const e of Deno.readDirSync(cur)) {
+        if (!e.isDirectory) continue;
+        if (e.name.startsWith("[[...")) catchall = e.name;
+        else if (e.name.startsWith("[") && e.name.endsWith("]")) bracket = e.name;
+      }
+    } catch { /* ignore */ }
+
+    if (bracket) {
+      outSegs.push(bracket);
+      cur = `${cur}/${bracket}`;
+      continue;
+    }
+    if (catchall) {
+      outSegs.push(catchall);
+      return "/plugins/trex/studio/" + outSegs.join("/") + query;
+    }
+    return originalUrl;
+  }
+
+  const rewritten = "/plugins/trex/studio/" + outSegs.join("/") + (pathOnly.endsWith("/") ? "/" : "") + query;
+  return rewritten;
+}
+
+// The Studio index page hangs trying to resolve `/project/[ref]` against `as=/` — skip to /project/default.
+app.get(["/plugins/trex/studio", "/plugins/trex/studio/"], (_req, res) => {
+  res.redirect(302, "/plugins/trex/studio/project/default/");
+});
+
+app.use((req, _res, next) => {
+  if (req.url.startsWith("/plugins/trex/studio")) {
+    const next_url = rewriteStudioUrl(req.url);
+    if (next_url !== req.url) req.url = next_url;
+  }
+  next();
+});
+
+// /plugins/trex/studio/api/** proxies to the Studio Node sidecar via the
+// @trex/studio function plugin; non-/api paths are served as static assets.
+function buildWorkerRequest(req: any, rewrittenPath?: string): globalThis.Request {
+  const host = req.get("host") || "localhost";
+  const protocol = req.protocol || "http";
+  const path = rewrittenPath ?? req.originalUrl;
+  const requestUrl = `${protocol}://${host}${path}`;
+  const headers = new Headers();
+  for (const [key, val] of Object.entries(req.headers)) {
+    if (!val) continue;
+    const lower = key.toLowerCase();
+    if (lower === "accept-encoding" || lower === "content-length") continue;
+    headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
+  }
+  let body: Blob | undefined;
+  if (req.method !== "GET" && req.method !== "HEAD" && req.body && (req.body as Buffer).length > 0) {
+    // Copy so a retried forward sees the body — passing the Buffer directly can mark it transferred.
+    body = new Blob([new Uint8Array(req.body as Buffer)]);
+  }
+  return new globalThis.Request(requestUrl, { method: req.method, headers, body });
+}
+
+async function pipeWorkerResponse(workerResponse: globalThis.Response, res: any) {
+  res.status(workerResponse.status);
+  workerResponse.headers.forEach((value: string, key: string) => {
+    const lower = key.toLowerCase();
+    if (lower === "content-encoding" || lower === "content-length" || lower === "transfer-encoding") return;
+    res.setHeader(key, value);
+  });
+  if (!workerResponse.body) { res.end(); return; }
+  const reader = workerResponse.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) res.write(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+    try { res.end(); } catch { /* ignore */ }
+  }
+}
+
+// Best-effort JSON-body redaction — secrets must not hit stdout.
+function redactForLog(s: string): string {
+  return s
+    .replace(/("(?:password|currentPassword|newPassword|access_token|refresh_token|apikey|api_key|service_role_key|anon_key|client_secret|token|otp|magiclink|secret)"\s*:\s*")[^"]*(")/gi, '$1***$2')
+    .replace(/("authorization"\s*:\s*"Bearer\s+)[^"]*(")/gi, '$1***$2');
+}
+
+async function forwardToStudioSidecar(req: any, res: any) {
+  const handler = fnmap["@trex/studio/functions"];
+  if (!handler) {
+    res.status(503).json({ error: "Studio plugin not loaded" });
+    return;
+  }
+  const sidecarPath = req.originalUrl.replace("/plugins/trex/studio", "/studio-proxy");
+  const bodyLen = req.body && (req.body as Buffer).length ? (req.body as Buffer).length : 0;
+  if (DEBUG_STUDIO) {
+    console.log(`[studio-sidecar-fwd] ${req.method} ${sidecarPath} bodyLen=${bodyLen} ct=${req.headers["content-type"] ?? ""}`);
+  }
+  const webReq = buildWorkerRequest(req, sidecarPath);
+  const workerResponse = await handler(webReq);
+  if (DEBUG_STUDIO && workerResponse.status >= 400 && sidecarPath.startsWith("/studio-proxy/api/")) {
+    const cloned = workerResponse.clone();
+    try {
+      const reqBody = bodyLen > 0 ? redactForLog((req.body as Buffer).toString("utf8").slice(0, 800)) : "";
+      const resBody = redactForLog((await cloned.text()).slice(0, 800));
+      console.log(`[studio-sidecar-${workerResponse.status >= 500 ? "5xx" : "4xx"}] ${req.method} ${sidecarPath} status=${workerResponse.status}\n  reqBody=${reqBody}\n  resBody=${resBody}`);
+    } catch { /* ignore */ }
+  }
+  await pipeWorkerResponse(workerResponse, res);
+}
+
+// Cloud-only endpoints stubbed so self-hosted Studio's polling stays quiet.
+app.get("/plugins/trex/studio/api/platform/notifications", (_req, res) => {
+  res.status(200).json([]);
+});
+app.get("/plugins/trex/studio/api/platform/notifications/summary", (_req, res) => {
+  res.status(200).json({ has_new: false, has_warning: false, has_critical: false });
+});
+app.post("/plugins/trex/studio/api/platform/notifications/archive-all", (_req, res) => {
+  res.status(200).json([]);
+});
+
+app.all(
+  ["/plugins/trex/studio/api", "/plugins/trex/studio/api/*"],
+  async (req, res) => {
+    try {
+      await forwardToStudioSidecar(req, res);
+    } catch (err) {
+      console.error("[studio-api] Error:", err);
+      res.status(500).json({ error: "Internal server error", message: String(err) });
+    }
+  },
+);
+
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
   console.log("Plugin system initialized");
@@ -453,8 +688,12 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
 
     let body: Blob | undefined;
     if (req.method !== "GET" && req.method !== "HEAD") {
-      if (req.body && req.body.length > 0) {
+      // req.body may already be a parsed object: cliLoginRouter's express.json() short-circuits express.raw().
+      if (Buffer.isBuffer(req.body) && req.body.length > 0) {
         body = new Blob([req.body]);
+      } else if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
+        body = new Blob([JSON.stringify(req.body)], { type: "application/json" });
+        headers.set("content-type", "application/json");
       } else if (storagePath.startsWith("/storage-api/object/list/")) {
         // Supabase CLI sends POST to /object/list/ with empty body — inject defaults
         body = new Blob([JSON.stringify({ prefix: "", limit: 100, offset: 0 })], { type: "application/json" });
@@ -480,6 +719,7 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
     res.status(500).json({ error: "Internal server error" });
   }
 });
+
 
 // Supabase-compatible /pg/v1/* route — calls postgres-meta worker directly.
 app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res) => {
@@ -673,6 +913,26 @@ try {
   console.error("Role auto-creation failed:", err);
 }
 
+if (DEBUG_GRAPHQL) {
+  app.use(`${BASE_PATH}/graphql`, express.json({ limit: "1mb" }), (req, res, next) => {
+    if (req.method !== "POST") return next();
+    const origJson = res.json.bind(res);
+    const origSend = res.send.bind(res);
+    const log = (body: any) => {
+      if (res.statusCode >= 400) {
+        try {
+          const q = (req.body as any)?.query;
+          const r = typeof body === "string" ? body.slice(0, 400) : JSON.stringify(body).slice(0, 400);
+          console.log(`[graphql-4xx] status=${res.statusCode} query=${String(q).slice(0,200)} resp=${r}`);
+        } catch { /* ignore */ }
+      }
+    };
+    res.json = ((body: any) => { log(body); return origJson(body); }) as any;
+    res.send = ((body: any) => { log(body); return origSend(body); }) as any;
+    next();
+  });
+}
+
 const databaseUrl = Deno.env.get("DATABASE_URL");
 if (databaseUrl) {
   try {
@@ -805,6 +1065,7 @@ app.put(`${BASE_PATH}/_internal/upload`, async (req, res) => {
 
 // Supabase-compatible edge function invocation: /functions/v1/:function_name
 const FUNCTIONS_DIR = Deno.env.get("FUNCTIONS_DIR") || "./functions";
+const EDGE_FUNCTIONS_MANAGEMENT_FOLDER = Deno.env.get("EDGE_FUNCTIONS_MANAGEMENT_FOLDER");
 
 // Cached Supabase-compatible env vars (populated after ensureAuthKeys)
 let supabaseEnvVars: [string, string][] = [];
@@ -851,7 +1112,41 @@ async function invokeEdgeFunction(req: any, res: any) {
       return;
     }
   } else {
-    servicePath = join(FUNCTIONS_DIR, functionName);
+    // Reject path-traversal attempts: function names must be simple slugs
+    // (no `..`, no slashes, no URL-encoded delimiters). Even though Express
+    // route params don't match across slashes, `..` is still a valid
+    // single-segment value that would resolve a join() above the parent.
+    if (!/^[A-Za-z0-9_-]+$/.test(functionName)) {
+      res.status(400).json({ error: "Invalid function name" });
+      return;
+    }
+    // Prefer Studio's management folder (functions deployed through the
+    // dashboard land there); fall back to FUNCTIONS_DIR for legacy /
+    // CLI-deployed functions.
+    let resolved: string | undefined;
+    const tryResolve = async (base: string) => {
+      const candidate = join(base, functionName);
+      try {
+        const real = await Deno.realPath(candidate);
+        const baseReal = await Deno.realPath(base);
+        // Symlink containment: the resolved real path must live inside the
+        // resolved base — defends against a function folder being a symlink
+        // pointing somewhere sensitive.
+        if (real === baseReal || real.startsWith(baseReal + "/")) return real;
+      } catch { /* not found */ }
+      return undefined;
+    };
+    if (EDGE_FUNCTIONS_MANAGEMENT_FOLDER) {
+      resolved = await tryResolve(EDGE_FUNCTIONS_MANAGEMENT_FOLDER);
+    }
+    if (!resolved) {
+      resolved = await tryResolve(FUNCTIONS_DIR);
+    }
+    if (!resolved) {
+      res.status(404).json({ error: `Function ${functionName} not found` });
+      return;
+    }
+    servicePath = resolved;
   }
 
   try {

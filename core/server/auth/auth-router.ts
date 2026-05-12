@@ -59,7 +59,7 @@ function toGoTrueUser(u: DbUser) {
   };
 }
 
-async function createTokenResponse(user: DbUser, sessionId?: string) {
+async function createTokenResponse(user: DbUser, sessionId?: string, res?: any) {
   const sid = sessionId || crypto.randomUUID();
   const accessToken = await signAccessToken(
     {
@@ -84,6 +84,24 @@ async function createTokenResponse(user: DbUser, sessionId?: string) {
   );
 
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+
+  // sb-access-token cookie lets same-origin iframes (Studio) pick up auth.
+  // CSRF: SameSite=Lax is the only protection — adding SameSite=None requires an anti-CSRF token first.
+  if (res) {
+    const forwardedProto = res.req?.headers?.["x-forwarded-proto"];
+    const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+    const secure =
+      Deno.env.get("TREX_FORCE_SECURE_COOKIES") === "1" ||
+      res.req?.protocol === "https" ||
+      proto === "https";
+    res.cookie("sb-access-token", accessToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure,
+      path: "/",
+      maxAge: 3600 * 1000,
+    });
+  }
 
   return {
     access_token: accessToken,
@@ -211,7 +229,7 @@ router.post("/signup", authLimiter, async (req, res) => {
       return;
     }
 
-    const response = await createTokenResponse(user);
+    const response = await createTokenResponse(user, undefined, res);
 
     // Update last_sign_in_at
     await pool.query(
@@ -278,7 +296,7 @@ async function handlePasswordGrant(req: any, res: any) {
       await migratePasswordHash(user.id, newHash);
     }
 
-    const response = await createTokenResponse(user);
+    const response = await createTokenResponse(user, undefined, res);
 
     // Update last_sign_in_at
     await pool.query(
@@ -325,7 +343,7 @@ async function handleRefreshGrant(req: any, res: any) {
       return;
     }
 
-    const response = await createTokenResponse(user, sessionId);
+    const response = await createTokenResponse(user, sessionId, res);
     res.json(response);
   } catch (err) {
     console.error("[auth] refresh grant error:", err);
@@ -335,7 +353,43 @@ async function handleRefreshGrant(req: any, res: any) {
 
 // ── POST /logout ─────────────────────────────────────────────────────────────
 
+// Trade a Bearer access token for an sb-access-token cookie so same-origin
+// iframes (which can't read the parent's localStorage) can authenticate.
+router.post("/sync-cookie", apiLimiter, async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+    const token = authHeader.slice(7);
+    const claims = await verifyAccessToken(token);
+    if (!claims || claims.role === "service_role" || claims.role === "anon") {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+    const forwardedProto = req.headers?.["x-forwarded-proto"];
+    const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+    const secure =
+      Deno.env.get("TREX_FORCE_SECURE_COOKIES") === "1" ||
+      req.protocol === "https" ||
+      proto === "https";
+    res.cookie("sb-access-token", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure,
+      path: "/",
+      maxAge: Math.max(0, (claims.exp || 0) * 1000 - Date.now()),
+    });
+    res.status(204).end();
+  } catch (err) {
+    console.error("[auth] sync-cookie error:", err);
+    res.status(500).json({ error: "server_error" });
+  }
+});
+
 router.post("/logout", apiLimiter, async (req, res) => {
+  res.clearCookie("sb-access-token", { path: "/" });
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
@@ -757,9 +811,8 @@ router.get("/health", (_req, res) => {
   res.json({ version: "trex-gotrue-1.0.0", name: "GoTrue", description: "Trex GoTrue-compatible auth" });
 });
 
-// ── Custom: POST /admin/create-user (admin-only user creation) ──────────────
-
-router.post("/admin/create-user", apiLimiter, async (req, res) => {
+// /admin/users is the GoTrue-compatible alias supabase-js POSTs to.
+router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
@@ -774,9 +827,10 @@ router.post("/admin/create-user", apiLimiter, async (req, res) => {
       return;
     }
 
-    // Check if caller is admin
+    // service_role bypasses RLS/admin checks (Supabase convention).
     const callerRole = claims.app_metadata?.trex_role;
-    if (callerRole !== "admin") {
+    const isServiceRole = claims.role === "service_role";
+    if (callerRole !== "admin" && !isServiceRole) {
       res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
       return;
     }

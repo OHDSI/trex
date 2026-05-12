@@ -21,6 +21,9 @@
 	path = plugins/cli
 	url = https://github.com/p-hoffmann/cli.git
 	branch = develop
+[submodule "plugins/studio/supabase-studio"]
+	path = plugins/studio/supabase-studio
+	url = https://github.com/p-hoffmann/supabase.git
 [submodule "plugins/bao/phenotype-library"]
 	path = plugins/bao/phenotype-library
 	url = https://github.com/OHDSI/PhenotypeLibrary.git

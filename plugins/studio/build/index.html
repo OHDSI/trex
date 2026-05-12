@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Studio — trex</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0a0a0f;--surface:#12121a;--surface2:#1a1a26;--border:#2a2a3a;
+  --text:#e4e4ef;--muted:#8888a0;--accent:#3ecf8e;
+  --radius:8px;--font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+}
+body{background:var(--bg);color:var(--text);font-family:var(--font);line-height:1.6;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:2rem}
+.card{max-width:700px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:2rem}
+.card::before{content:"";display:block;height:3px;background:var(--accent);margin:-2rem -2rem 1.5rem}
+h1{font-size:1.4rem;font-weight:700;letter-spacing:-.02em;margin-bottom:.5rem}
+.muted{color:var(--muted);font-size:.9rem;margin-bottom:1rem}
+ol{margin:1rem 0 1rem 1.25rem;font-size:.9rem}
+ol li{margin-bottom:.6rem}
+code{background:var(--surface2);padding:.15rem .4rem;border-radius:4px;font-size:.8rem;color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+pre{background:var(--surface2);padding:.75rem 1rem;border-radius:6px;font-size:.78rem;overflow-x:auto;margin:.5rem 0;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--text)}
+.label{font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--accent);font-weight:600;margin:1.25rem 0 .4rem;display:block}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Supabase Studio &mdash; sidecar not running</h1>
+  <p class="muted">The <code>@trex/studio</code> plugin is registered, but no Studio sidecar is configured. Set <code>TREX_STUDIO_URL</code> on the trex container and the web shell will iframe it directly.</p>
+
+  <span class="label">Why a sidecar (not static export)</span>
+  <p class="muted">Studio has ~92 internal Next.js API routes that don't survive <code>output: 'export'</code>. The pragmatic path is to run the official <code>supabase/studio</code> image as a separate container.</p>
+
+  <span class="label">Enable</span>
+  <ol>
+    <li>Open <code>docker-compose.yml</code> and uncomment the <code>studio</code> service block.</li>
+    <li>Set <code>SUPABASE_ANON_KEY</code> and <code>SUPABASE_SERVICE_KEY</code> in your <code>.env</code> &mdash; read them from <code>trex.setting</code> via the admin endpoint <code>/trex/api/settings/auth-keys</code>.</li>
+    <li>Set <code>TREX_STUDIO_URL=http://localhost:3001</code> on the trex container so the web shell knows where to iframe.</li>
+    <li>Restart: <code>docker compose up -d</code>.</li>
+  </ol>
+
+  <span class="label">Trex endpoints Studio talks to</span>
+  <pre>SUPABASE_URL          http://trex:8001/trex
+STUDIO_PG_META_URL    http://trex:8001/trex/pg/v1
+auth                  /trex/auth/v1
+rest                  /trex/rest/v1
+storage               /trex/storage/v1
+functions             /trex/functions/v1
+graphql               /trex/graphql
+realtime              not available in trex
+vault                 not available in trex (no pgsodium)</pre>
+
+  <span class="label">Caveats</span>
+  <p class="muted">Studio has its own session and login screen &mdash; it doesn't share trex's Better Auth session. The Realtime tab and Vault tab will surface errors at runtime, since trex doesn't ship those services.</p>
+</div>
+</body>
+</html>

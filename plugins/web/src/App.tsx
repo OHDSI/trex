@@ -1,3 +1,4 @@
+import * as React from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "@/components/ui/sonner";
 import { useSession } from "@/lib/auth-client";
@@ -50,6 +51,24 @@ function HomeRedirect() {
   return <Navigate to={session ? "/profile" : "/login"} replace />;
 }
 
+function AdminOnly({ children }: { children: React.ReactElement }) {
+  const { data: session, isPending } = useSession();
+  if (isPending) return null;
+  if (!session?.user || (session.user as any).role !== "admin") {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="text-center">
+          <h2 className="text-2xl font-bold">403 Forbidden</h2>
+          <p className="text-muted-foreground mt-2">
+            You do not have permission to access this page.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return children;
+}
+
 export default function App() {
   const { config, loaded } = useFetchedWebConfig();
   if (!loaded) {
@@ -76,6 +95,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route path="/profile" element={<Profile />} />
           <Route path="/docs" element={<EmbedPage plugin="docs" />} />
+          <Route path="/studio" element={<AdminOnly><EmbedPage plugin="studio" /></AdminOnly>} />
           {config.navExtra.map((item) => (
             <Route
               key={item.path}

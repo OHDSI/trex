@@ -1,0 +1,38 @@
+{
+  "name": "@trex/studio",
+  "version": "0.1.0",
+  "description": "Supabase Studio wrapped as a trex UI + function plugin (proxies to a Studio Node sidecar)",
+  "files": [
+    "build/",
+    "build_static/",
+    "functions/",
+    "deno.json"
+  ],
+  "scripts": {
+    "build": "[ -f build_static/index.html ] || npm run build:static",
+    "build:static": "corepack enable && cd supabase-studio && (pnpm install --frozen-lockfile || pnpm install --frozen-lockfile || pnpm install --frozen-lockfile) && rm -rf apps/studio/app/api && TREX_STATIC_EXPORT=1 SKIP_ASSET_UPLOAD=1 pnpm exec turbo run build --filter=studio --env-mode=loose && rm -rf ../build_static && mkdir -p ../build_static && cp -a apps/studio/out/. ../build_static/",
+    "prepack": "npm run build"
+  },
+  "trex": {
+    "functions": {
+      "env": {
+        "_shared": {
+          "STUDIO_INTERNAL_URL": "${STUDIO_INTERNAL_URL}"
+        }
+      },
+      "api": [
+        {
+          "source": "/studio-proxy",
+          "function": "/functions",
+          "allowHostFsAccess": true
+        }
+      ]
+    },
+    "ui": {
+      "routes": [
+        { "path": "/studio", "dir": "build_static", "spa": true },
+        { "path": "/studio-fallback", "dir": "build" }
+      ]
+    }
+  }
+}

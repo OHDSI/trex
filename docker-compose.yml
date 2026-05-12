@@ -14,6 +14,8 @@ volumes:
   core-pgdata:
   claude-config:
   gh-config:
+  studio-snippets:
+  studio-edge-functions:
 
 services:
   postgres:
@@ -50,15 +52,17 @@ services:
       - 8000:8000
       - 8001:8001
       - 5433:5432
-    # volumes:
-    #   - ./core/server:/usr/src/core/server
-    #   - ./functions:/usr/src/functions
-    #   - ./plugins-dev:/usr/src/plugins-dev
-    #   - ./plugins/docs:/usr/src/plugins/@trex/docs
-    #   - ./plugins/web/dist:/usr/src/plugins/@trex/web/dist
     volumes:
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
+      - ./core/server:/usr/src/core/server
+      - ./plugins/storage:/usr/src/plugins-dev/storage
+      - ./plugins/studio:/usr/src/plugins-dev/studio
+      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
+      - ./plugins/web:/usr/src/plugins-dev/web
+      - ./plugins/pg-meta:/usr/src/plugins-dev/pg-meta
+      # Shared with the studio sidecar: Studio's deploy writes here, trex reads.
+      - studio-edge-functions:/app/edge-functions
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,6 +83,8 @@ services:
       SWARM_NODE: local
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: "3000"
+      STUDIO_INTERNAL_URL: http://studio:3000
+      EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
@@ -93,6 +99,56 @@ services:
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
+
+  # Studio sidecar — internal-only; trex proxies /plugins/trex/studio/** to it.
+  studio:
+    build:
+      context: ./plugins/studio/supabase-studio
+      dockerfile: apps/studio/Dockerfile
+      target: production
+      args:
+        NEXT_PUBLIC_BASE_PATH: /plugins/trex/studio
+    container_name: trex-studio
+    restart: unless-stopped
+    # NOT exposing a host port: direct access would bypass trex's admin-only gate.
+    depends_on:
+      - trex
+    volumes:
+      # Wrapper entrypoint fetches SUPABASE_ANON_KEY / SUPABASE_SERVICE_KEY from trex.setting at boot.
+      - ./plugins/studio/supabase-studio/apps/studio/docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
+      - ./plugins/studio/supabase-studio/apps/studio/fetch-trex-keys.cjs:/app/apps/studio/fetch-trex-keys.cjs:ro
+      - studio-snippets:/app/snippets
+      - studio-edge-functions:/app/edge-functions
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'node -e "fetch(''http://localhost:3000/plugins/trex/studio/api/platform/profile'').then(r => { if (r.status !== 200) throw new Error(r.status) })"'
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      HOSTNAME: "0.0.0.0"
+      STUDIO_PG_META_URL: http://trex:8001/trex/pg/v1
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: testdb
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypass}
+      # Override Studio's self-hosted defaults — trex's postgres has no supabase_admin user.
+      POSTGRES_USER_READ_WRITE: postgres
+      POSTGRES_USER_READ_ONLY: postgres
+      PG_META_CRYPTO_KEY: ${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}
+      PGRST_DB_SCHEMAS: public,storage
+      DEFAULT_ORGANIZATION_NAME: trex
+      DEFAULT_PROJECT_NAME: default
+      SUPABASE_URL: http://trex:8001/trex
+      SUPABASE_PUBLIC_URL: http://localhost:8001/trex
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}
+      AUTH_JWT_SECRET: ${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}
+      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+      NEXT_PUBLIC_ENABLE_LOGS: "false"
+      SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
+      EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
 
   realtime:
     image: supabase/realtime:v2.93.3
@@ -125,4 +181,3 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-

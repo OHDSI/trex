@@ -73,7 +73,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 
 WORKDIR /usr/src
 COPY package.json package-lock.json .npmrc deno.json ./
-RUN npm install
+# Plugin sources for `file:` deps (@trex/pg-meta, @trex/studio) until those
+# packages are published from develop. --ignore-scripts skips their prepack
+# (full Next.js / postgres-meta builds) — this stage only harvests *.trex
+# files from node_modules/@trex/*, so prepack output isn't needed here.
+COPY plugins/pg-meta/ /usr/src/plugins/pg-meta/
+COPY plugins/studio/ /usr/src/plugins/studio/
+RUN npm install --ignore-scripts && rm -rf /usr/src/plugins/pg-meta /usr/src/plugins/studio
 
 RUN mkdir -p /usr/lib/trexsql/extensions && \
     find node_modules/@trex -name "*.trex" -exec cp {} /usr/lib/trexsql/extensions/ \; && \
