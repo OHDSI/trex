@@ -410,6 +410,7 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: recursive
 
       - name: Download amd64 extension artifacts
         uses: actions/download-artifact@v4
