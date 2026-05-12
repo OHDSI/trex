@@ -135,9 +135,40 @@
   (ensure-open! db)
   (native/execute! (:handle db) sql))
 
+(defn open-cache-handle!
+  "Open a fresh TrexsqlDatabase pointed directly at the cache file for
+   `database-code`. The cache file becomes the default catalog of the
+   returned handle, which is what the trex native Appender API needs to
+   resolve table names — the Appender takes (schema, table) and looks up
+   in the connection's default database, not in any attached catalog.
+
+   The caller is responsible for closing the returned handle (via
+   `close!`) when the cache build is finished."
+  [^String database-code ^String cache-path]
+  (validate-identifier! database-code "database-code")
+  (let [cache-dir (java.io.File. cache-path)
+        cache-file (java.io.File. cache-dir (str database-code ".db"))
+        file-path (.getAbsolutePath cache-file)]
+    (when-not (.exists cache-dir)
+      (.mkdirs cache-dir))
+    (let [handle (native/open file-path 0)]
+      (when (nil? handle)
+        (throw (errors/resource-error
+                (str "Failed to open cache handle at " file-path)
+                :cache-file)))
+      (make-database handle {:cache-path cache-path
+                             :database-code database-code}))))
+
 (defn attach-cache-file!
-  "Attach a TrexSQL cache file using ATTACH IF NOT EXISTS.
-   Creates the cache directory if it doesn't exist.
+  "Attach a TrexSQL cache file. If the alias is already attached but the
+   underlying file no longer exists (e.g. it was deleted on disk while the
+   trex handle still held the alias), DETACH first so the new ATTACH
+   actually creates a fresh file. Without this, `ATTACH IF NOT EXISTS`
+   silently no-ops on the stale alias and downstream
+   `information_schema.tables` queries report the in-memory stale catalog,
+   making `get-completed-tables` return tables that don't exist on disk
+   and `tables-to-copy` come out empty.
+
    Returns the database alias on success.
    Throws IllegalArgumentException if database-code is invalid.
    Throws RuntimeException if the cache file is locked or on other errors."
@@ -147,9 +178,20 @@
         cache-dir (java.io.File. cache-path)
         cache-file (java.io.File. cache-dir (str database-code ".db"))
         file-path (.getAbsolutePath cache-file)
-        escaped-path (str/replace file-path "'" "''")]
+        escaped-path (str/replace file-path "'" "''")
+        already-attached?
+        (try
+          (let [results (query db "SELECT database_name FROM duckdb_databases()")]
+            (boolean (some #(= database-code (.get ^HashMap % "database_name")) results)))
+          (catch Exception _ false))
+        file-exists? (.exists cache-file)]
     (when-not (.exists cache-dir)
       (.mkdirs cache-dir))
+    ;; Stale-handle case: alias is attached but the file is gone. Detach
+    ;; before re-attaching so DuckDB reads a fresh empty file from disk.
+    (when (and already-attached? (not file-exists?))
+      (try (execute! db (format "DETACH %s" escaped-alias))
+           (catch Exception _ nil)))
     (try
       (execute! db (format "ATTACH IF NOT EXISTS '%s' AS %s"
                            escaped-path
@@ -161,47 +203,6 @@
                   (str "Cache file is locked by another process: " file-path)
                   :cache-file))
           (throw e))))))
-
-(defn attach-source-postgres!
-  "Attach a PostgreSQL database as a source using postgres_scanner extension.
-   Installs and loads the postgres extension if needed.
-   Returns the source database alias (database-code__srcdb) on success.
-   Throws IllegalArgumentException if database-code is invalid."
-  [^TrexsqlDatabase db ^String database-code credentials]
-  (ensure-open! db)
-  (validate-identifier! database-code "database-code")
-  (let [{:keys [host port database-name user password]} credentials
-        alias (str database-code "__srcdb")
-        escaped-alias (escape-identifier alias "source-alias")
-        escaped-host (str/replace (str host) "'" "''")
-        escaped-dbname (str/replace (str database-name) "'" "''")
-        escaped-user (str/replace (str user) "'" "''")
-        escaped-password (str/replace (str password) "'" "''")
-        conn-string (format "host=%s port=%d dbname=%s user=%s password=%s"
-                            escaped-host port escaped-dbname escaped-user escaped-password)]
-    (load-extension! db "postgres")
-    (execute! db (format "ATTACH IF NOT EXISTS '%s' AS %s (TYPE postgres, READ_ONLY)"
-                         conn-string escaped-alias))
-    alias))
-
-(defn attach-source-bigquery!
-  "Attach a BigQuery dataset as a source using bigquery extension.
-   Installs and loads the bigquery extension if needed.
-   Returns the source database alias (database-code__srcdb) on success.
-   Throws IllegalArgumentException if database-code is invalid."
-  [^TrexsqlDatabase db ^String database-code credentials]
-  (ensure-open! db)
-  (validate-identifier! database-code "database-code")
-  (let [{:keys [host database-name]} credentials
-        alias (str database-code "__srcdb")
-        escaped-alias (escape-identifier alias "source-alias")
-        escaped-project (str/replace (str host) "'" "''")
-        escaped-dataset (str/replace (str database-name) "'" "''")
-        conn-string (format "project=%s dataset=%s" escaped-project escaped-dataset)]
-    (load-extension! db "bigquery" :source "community")
-    (execute! db (format "ATTACH IF NOT EXISTS '%s' AS %s (TYPE bigquery, READ_ONLY)"
-                         conn-string escaped-alias))
-    alias))
 
 (defn is-attached?
   "Check if a database with the given alias is currently attached.

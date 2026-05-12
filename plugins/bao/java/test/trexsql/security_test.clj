@@ -108,9 +108,7 @@
                 {:database-code "test'; DROP TABLE"
                  :schema-name "public"
                  :source-credentials {:dialect "postgres"
-                                      :host "localhost"
-                                      :port 5432
-                                      :database-name "test"
+                                      :jdbc-url "jdbc:postgresql://localhost:5432/test"
                                       :user "user"
                                       :password "pass"}})))))
 

@@ -147,11 +147,22 @@
 ;; === Appender ===
 
 (defn appender-create
-  "Create an appender for schema.table. Returns Pointer handle."
+  "Create an appender for schema.table in the connection's default catalog.
+   Returns Pointer handle."
   [^Pointer db-handle ^String schema ^String table]
   (let [app (.trexsql_appender_create (engine) db-handle schema table)]
     (when (nil? app)
       (check-error! (str "appender_create " schema "." table)))
+    app))
+
+(defn appender-create-ext
+  "Create an appender for catalog.schema.table. Pass a non-empty `catalog`
+   to target an attached database; pass nil/empty to fall back to the
+   connection's default catalog. Returns Pointer handle."
+  [^Pointer db-handle ^String catalog ^String schema ^String table]
+  (let [app (.trexsql_appender_create_ext (engine) db-handle (or catalog "") schema table)]
+    (when (nil? app)
+      (check-error! (str "appender_create_ext " (or catalog "<default>") "." schema "." table)))
     app))
 
 (defn appender-end-row!

@@ -16,54 +16,68 @@
                 {:dialect "invalid-dialect"})))))
 
 (deftest validate-credentials-postgres-complete-test
-  (testing "complete postgres credentials passes validation"
+  (testing "complete postgres credentials (jdbc-url shape) passes validation"
     (is (nil? (datamart/validate-credentials
                {:dialect "postgres"
-                :host "localhost"
-                :port 5432
-                :database-name "test"
+                :jdbc-url "jdbc:postgresql://localhost:5432/test"
                 :user "admin"
                 :password "secret"})))))
 
-(deftest validate-credentials-postgres-missing-host-test
-  (testing "postgres with missing host fails"
+(deftest validate-credentials-postgres-missing-jdbc-url-test
+  (testing "postgres with missing jdbc-url fails"
     (is (some? (datamart/validate-credentials
                 {:dialect "postgres"
-                 :port 5432
-                 :database-name "test"
                  :user "admin"
                  :password "secret"})))))
 
-(deftest validate-credentials-postgres-missing-port-test
-  (testing "postgres with missing port fails"
+(deftest validate-credentials-postgres-missing-user-test
+  (testing "postgres with missing user fails"
     (is (some? (datamart/validate-credentials
                 {:dialect "postgres"
-                 :host "localhost"
-                 :database-name "test"
-                 :user "admin"
+                 :jdbc-url "jdbc:postgresql://localhost:5432/test"
                  :password "secret"})))))
 
 (deftest validate-credentials-postgres-missing-password-test
   (testing "postgres with missing password fails"
     (is (some? (datamart/validate-credentials
                 {:dialect "postgres"
-                 :host "localhost"
-                 :port 5432
-                 :database-name "test"
+                 :jdbc-url "jdbc:postgresql://localhost:5432/test"
                  :user "admin"})))))
 
-(deftest validate-credentials-bigquery-complete-test
-  (testing "complete bigquery credentials passes validation"
+(deftest validate-credentials-sql-server-complete-test
+  (testing "complete sql server credentials pass validation (same JDBC shape)"
+    (is (nil? (datamart/validate-credentials
+               {:dialect "sql server"
+                :jdbc-url "jdbc:sqlserver://localhost:1433;databaseName=test"
+                :user "admin"
+                :password "secret"})))))
+
+(deftest validate-credentials-all-webapi-dialects-test
+  (testing "every dialect in WebAPI's DBMSType enum is accepted via JDBC"
+    (doseq [dialect ["postgresql" "sql server" "pdw" "synapse"
+                     "redshift" "oracle" "impala" "netezza"
+                     "hive" "spark" "snowflake" "bigquery"]]
+      (is (nil? (datamart/validate-credentials
+                 {:dialect dialect
+                  :jdbc-url (str "jdbc:" dialect "://localhost/test")
+                  :user "admin"
+                  :password "secret"}))
+          (str dialect " should be a valid JDBC dialect")))))
+
+(deftest validate-credentials-bigquery-jdbc-shape-test
+  (testing "bigquery now uses the same JDBC shape as every other dialect"
     (is (nil? (datamart/validate-credentials
                {:dialect "bigquery"
-                :host "my-project"
-                :database-name "my-dataset"})))))
+                :jdbc-url "jdbc:bigquery://https://www.googleapis.com/bigquery/v2:443;ProjectId=my-project"
+                :user "svc"
+                :password "secret"})))))
 
-(deftest validate-credentials-bigquery-missing-host-test
-  (testing "bigquery with missing host fails"
+(deftest validate-credentials-bigquery-missing-jdbc-url-test
+  (testing "bigquery without jdbc-url fails like any other JDBC dialect"
     (is (some? (datamart/validate-credentials
                 {:dialect "bigquery"
-                 :database-name "my-dataset"})))))
+                 :user "svc"
+                 :password "secret"})))))
 
 ;; DatamartConfig Validation Tests
 
@@ -77,9 +91,7 @@
     (is (some? (datamart/validate-config
                 {:schema-name "cdm"
                  :source-credentials {:dialect "postgres"
-                                      :host "localhost"
-                                      :port 5432
-                                      :database-name "test"
+                                      :jdbc-url "jdbc:postgresql://localhost:5432/test"
                                       :user "admin"
                                       :password "secret"}})))))
 
@@ -89,9 +101,7 @@
                 {:database-code "my/database"
                  :schema-name "cdm"
                  :source-credentials {:dialect "postgres"
-                                      :host "localhost"
-                                      :port 5432
-                                      :database-name "test"
+                                      :jdbc-url "jdbc:postgresql://localhost:5432/test"
                                       :user "admin"
                                       :password "secret"}})))))
 
@@ -100,9 +110,7 @@
     (is (some? (datamart/validate-config
                 {:database-code "mydb"
                  :source-credentials {:dialect "postgres"
-                                      :host "localhost"
-                                      :port 5432
-                                      :database-name "test"
+                                      :jdbc-url "jdbc:postgresql://localhost:5432/test"
                                       :user "admin"
                                       :password "secret"}})))))
 
@@ -112,9 +120,7 @@
                {:database-code "mydb"
                 :schema-name "cdm"
                 :source-credentials {:dialect "postgres"
-                                     :host "localhost"
-                                     :port 5432
-                                     :database-name "test"
+                                     :jdbc-url "jdbc:postgresql://localhost:5432/test"
                                      :user "admin"
                                      :password "secret"}})))))
 
@@ -127,9 +133,7 @@
                      "schema-name" "public"
                      "source-credentials" (java.util.HashMap.
                                            {"dialect" "postgres"
-                                            "host" "localhost"
-                                            "port" 5432
-                                            "database-name" "mydb"
+                                            "jdbc-url" "jdbc:postgresql://localhost:5432/mydb"
                                             "user" "admin"
                                             "password" "secret"})})
           config (datamart/java-map->datamart-config java-map)]
@@ -139,7 +143,8 @@
       (is (= ["concept"] (:fts-tables config)))       ; default FTS tables
       (is (= "./data/cache" (:cache-path config)))    ; default cache path
       (is (= "postgres" (:dialect (:source-credentials config))))
-      (is (= "localhost" (:host (:source-credentials config)))))))
+      (is (= "jdbc:postgresql://localhost:5432/mydb"
+             (:jdbc-url (:source-credentials config)))))))
 
 (deftest java-map-to-datamart-config-with-overrides-test
   (testing "java map conversion with custom values"
@@ -151,8 +156,9 @@
                      "cache-path" "/custom/cache"
                      "source-credentials" (java.util.HashMap.
                                            {"dialect" "bigquery"
-                                            "host" "my-project"
-                                            "database-name" "my-dataset"})})
+                                            "jdbc-url" "jdbc:bigquery://https://www.googleapis.com/bigquery/v2:443;ProjectId=my-project"
+                                            "user" "svc"
+                                            "password" "secret"})})
           config (datamart/java-map->datamart-config java-map)]
       (is (= "cdm_cache" (:target-schema-name config)))
       (is (= ["concept" "drug"] (:fts-tables config)))
@@ -202,46 +208,5 @@
         (is (= "Connection lost" (.get failed-table "error")))
         (is (= "copy" (.get failed-table "phase")))))))
 
-;; Filter Function Tests
-
-(deftest apply-table-filter-nil-test
-  (testing "nil filter returns all tables"
-    (is (= ["a" "b" "c"]
-           (datamart/apply-table-filter ["a" "b" "c"] nil)))))
-
-(deftest apply-table-filter-subset-test
-  (testing "filter returns only matching tables"
-    (is (= ["b"]
-           (vec (datamart/apply-table-filter ["a" "b" "c"] {"b" ["*"]}))))))
-
-(deftest build-select-clause-nil-test
-  (testing "nil columns returns *"
-    (is (= "*" (datamart/build-select-clause nil)))))
-
-(deftest build-select-clause-star-test
-  (testing "[*] returns *"
-    (is (= "*" (datamart/build-select-clause ["*"])))))
-
-(deftest build-select-clause-columns-test
-  (testing "specific columns are quoted and joined"
-    (is (= "\"col1\", \"col2\""
-           (datamart/build-select-clause ["col1" "col2"])))))
-
-(deftest build-where-clause-nil-test
-  (testing "no filters returns nil"
-    (is (nil? (datamart/build-where-clause nil nil)))))
-
-(deftest build-where-clause-patient-filter-test
-  (testing "patient filter generates IN clause"
-    (is (= " WHERE person_id IN (1, 2, 3)"
-           (datamart/build-where-clause [1 2 3] nil)))))
-
-(deftest build-where-clause-timestamp-filter-test
-  (testing "timestamp filter generates >= clause"
-    (is (= " WHERE observation_date >= '2024-01-01'"
-           (datamart/build-where-clause nil "2024-01-01")))))
-
-(deftest build-where-clause-combined-test
-  (testing "both filters combined with AND"
-    (is (= " WHERE person_id IN (1, 2) AND observation_date >= '2024-01-01'"
-           (datamart/build-where-clause [1 2] "2024-01-01")))))
+;; Filter and SELECT/WHERE construction now live in trexsql.batch
+;; (see batch.clj's build-select-query) and are exercised through batch-test.

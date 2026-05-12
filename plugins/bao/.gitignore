@@ -9,3 +9,15 @@ java/.lein-*
 .DS_Store
 *.log
 .nbb
+
+# Built artifacts (produced by `lein uberjar` / publish)
+dist/
+
+# Native libraries (built from the Rust crate / shipped at deploy time)
+java/resources/linux-x86-64/
+java/resources/darwin-x86-64/
+java/resources/darwin-aarch64/
+
+# Downloaded extensions (embedded at build time by CI)
+java/resources/extensions/*.trex
+java/resources/extensions/*.duckdb_extension

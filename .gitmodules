@@ -24,3 +24,10 @@
 [submodule "plugins/studio/supabase-studio"]
 	path = plugins/studio/supabase-studio
 	url = https://github.com/p-hoffmann/supabase.git
+[submodule "plugins/bao/phenotype-library"]
+	path = plugins/bao/phenotype-library
+	url = https://github.com/OHDSI/PhenotypeLibrary.git
+	branch = main
+[submodule "plugins/bao/book-of-ohdsi"]
+	path = plugins/bao/book-of-ohdsi
+	url = https://github.com/OHDSI/BookOfOHDSI-2ndEdition.git

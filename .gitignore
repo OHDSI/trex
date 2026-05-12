@@ -5,8 +5,11 @@ target/
 /specs
 /extensions/*.trex
 /extensions/*.duckdb_extension
+plugins/*/*.trex
 core/docs/build/
 core/docs/.docusaurus/
+plugins/docs/build/
+plugins/docs/.docusaurus/
 shinylive/
 plugins/atlas/cmake_build/release/
 plugins/devx-ext/build/

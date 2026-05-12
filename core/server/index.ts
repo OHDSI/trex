@@ -2,6 +2,7 @@ import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
 import { join } from "jsr:@std/path@^1.0";
 import express from "express";
 import { createServer, request as httpRequest } from "node:http";
+import { connect as netConnect } from "node:net";
 import { grafserv } from "postgraphile/grafserv/express/v4";
 import cors from "cors";
 import { BASE_PATH } from "./config.ts";
@@ -377,6 +378,54 @@ app.all(`${BASE_PATH}/rest/v1/*`, (req, res) => {
     console.error("[postgrest-proxy] Error:", err.message);
     if (!res.headersSent) {
       res.status(502).json({ error: "PostgREST unavailable" });
+    }
+  });
+
+  req.pipe(proxyReq);
+});
+
+// Realtime proxy — HTTP only. Path rewrite matches Supabase Kong:
+// /realtime/v1/* -> realtime:4000/socket/*. WebSocket upgrades are handled
+// in the server.on("upgrade") block lower in this file.
+const REALTIME_HOST = Deno.env.get("REALTIME_HOST") || "realtime";
+const REALTIME_PORT = Deno.env.get("REALTIME_PORT") || "4000";
+
+app.all(`${BASE_PATH}/realtime/v1/*`, (req, res) => {
+  const targetPath = req.originalUrl.replace(`${BASE_PATH}/realtime/v1`, "/socket") || "/socket/";
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(req.headers)) {
+    if (k.toLowerCase() === "host") continue;
+    if (v === undefined) continue;
+    headers[k] = Array.isArray(v) ? v.join(", ") : v as string;
+  }
+  // Realtime resolves tenants by host — for self-host we have one tenant
+  // seeded with external_id=realtime-dev, so override the upstream Host.
+  headers["host"] = "realtime-dev";
+
+  const proxyReq = httpRequest(
+    {
+      hostname: REALTIME_HOST,
+      port: parseInt(REALTIME_PORT),
+      path: targetPath,
+      method: req.method,
+      headers,
+    },
+    (proxyRes) => {
+      res.status(proxyRes.statusCode || 500);
+      const skipHeaders = new Set(["transfer-encoding"]);
+      for (const [key, value] of Object.entries(proxyRes.headers)) {
+        if (!skipHeaders.has(key) && value !== undefined) {
+          res.setHeader(key, value);
+        }
+      }
+      proxyRes.pipe(res);
+    },
+  );
+
+  proxyReq.on("error", (err) => {
+    console.error("[realtime-proxy] HTTP error:", err.message);
+    if (!res.headersSent) {
+      res.status(502).json({ error: "Realtime unavailable" });
     }
   });
 
@@ -980,9 +1029,41 @@ if (databaseUrl) {
   console.warn("DATABASE_URL not set — PostGraphile disabled");
 }
 
-// WebSocket upgrade handler for devx dev server proxy (Vite HMR)
+// WebSocket upgrade handler — handles realtime proxy and the devx Vite HMR tunnel.
+// Reaches user code because trexas's runtime patches `internals.upgradeHttpRaw`
+// in ext/runtime/js/http.js to use op_http_upgrade_raw2 instead of upstream's
+// Deno.serve-only path.
 server.on("upgrade", (req, socket, head) => {
   const urlPath = req.url || "";
+
+  // Realtime websocket: rewrite /realtime/v1/* -> /socket/*, tunnel via raw TCP.
+  // Override Host so realtime resolves to the seeded `realtime-dev` tenant.
+  const realtimePrefix = `${BASE_PATH}/realtime/v1`;
+  if (urlPath.startsWith(realtimePrefix + "/") || urlPath === realtimePrefix) {
+    const targetPath = urlPath.replace(realtimePrefix, "/socket") || "/socket/";
+    const upstream = netConnect({ host: REALTIME_HOST, port: parseInt(REALTIME_PORT) });
+    upstream.on("connect", () => {
+      const headerLines = [`GET ${targetPath} HTTP/1.1`];
+      for (const [k, v] of Object.entries(req.headers)) {
+        if (k.toLowerCase() === "host") continue;
+        if (v === undefined) continue;
+        const value = Array.isArray(v) ? v.join(", ") : v;
+        headerLines.push(`${k}: ${value}`);
+      }
+      headerLines.push(`Host: realtime-dev`);
+      upstream.write(headerLines.join("\r\n") + "\r\n\r\n");
+      if (head && head.length > 0) upstream.write(head);
+      upstream.pipe(socket);
+      socket.pipe(upstream);
+    });
+    upstream.on("error", (err) => {
+      console.error("[realtime-proxy] WS upstream error:", err.message);
+      socket.destroy();
+    });
+    socket.on("error", () => upstream.destroy());
+    return;
+  }
+
   const proxyMatch = urlPath.match(/\/plugins\/\w+\/devx-api\/apps\/([^/]+)\/proxy(\/.*)?$/);
   if (!proxyMatch) return; // Not a devx proxy path — let other handlers (e.g. PostGraphile) handle it
 

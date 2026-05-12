@@ -40,7 +40,17 @@
                  ;; OHDSI vocabulary interfaces (provided by WebAPI at runtime)
                  [org.ohdsi/standardized-analysis-specs "1.5.0" :scope "provided"]
                  ;; SLF4J API (provided by WebAPI at runtime)
-                 [org.slf4j/slf4j-api "2.0.16" :scope "provided"]]
+                 [org.slf4j/slf4j-api "2.0.16" :scope "provided"]
+                 ;; AWS Bedrock SDK for the cohort-design agent (trexsql.agent.*)
+                 [software.amazon.awssdk/bedrockruntime "2.28.16"]
+                 ;; Force Jackson to match WebAPI's Spring Boot 3.5.6 version (2.18.2),
+                 ;; otherwise cheshire pulls in 2.10/2.11 which doesn't support Java records
+                 ;; → Spring's content negotiation fails serialising LoginService.Result → 406.
+                 [com.fasterxml.jackson.core/jackson-core "2.18.2"]
+                 [com.fasterxml.jackson.core/jackson-databind "2.18.2"]
+                 [com.fasterxml.jackson.core/jackson-annotations "2.18.2"]
+                 [com.fasterxml.jackson.dataformat/jackson-dataformat-smile "2.18.2"]
+                 [com.fasterxml.jackson.dataformat/jackson-dataformat-cbor "2.18.2"]]
 
   :source-paths ["src"]
   :test-paths ["test"]

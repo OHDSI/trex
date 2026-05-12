@@ -10,7 +10,8 @@
             [clojure.string :as str]
             [clojure.data.json :as json]
             [clojure.tools.logging :as log]
-            [reitit.ring :as ring])
+            [reitit.ring :as ring]
+            [trexsql.agent.routes :as agent-routes])
   (:import [java.util HashMap ArrayList Map]
            [java.io File]
            [java.sql DriverManager Connection PreparedStatement ResultSet]))
@@ -57,47 +58,39 @@
     (or (.getTableQualifierOrNull source (get-daimon-type "Results"))
         (get-cdm-schema source))))
 
-(defn- parse-jdbc-url
-  "Parse PostgreSQL JDBC URL to extract connection components.
-   Format: jdbc:postgresql://host:port/database?user=xxx&password=xxx"
-  [jdbc-url]
-  (when jdbc-url
+(defn- extract-url-credential
+  "Extract a single query-string credential (e.g. user, password) from a
+   JDBC URL when it isn't supplied as an explicit field on the Source.
+   Returns nil if the param isn't in the URL."
+  [jdbc-url param]
+  (when (and jdbc-url (str/includes? jdbc-url "?"))
     (try
-      (let [url-part (str/replace jdbc-url #"^jdbc:postgresql://" "")
-            [host-port-db params-str] (str/split url-part #"\?" 2)
-            [host-port db] (str/split host-port-db #"/" 2)
-            [host port-str] (str/split host-port #":" 2)
-            port (when port-str (try (Integer/parseInt port-str) (catch Exception _ 5432)))
-            params (when params-str
-                     (into {}
-                       (for [param (str/split params-str #"&")]
-                         (let [[k v] (str/split param #"=" 2)]
-                           [(keyword k) v]))))]
-        {:host host
-         :port (or port 5432)
-         :database-name db
-         :user (:user params)
-         :password (:password params)})
+      (let [[_ qs] (str/split jdbc-url #"\?" 2)
+            params (into {}
+                     (for [pair (str/split qs #"&")]
+                       (let [[k v] (str/split pair #"=" 2)]
+                         [k v])))]
+        (get params param))
       (catch Exception _ nil))))
 
-(defn- source->credentials [source]
+(defn- source->credentials
+  "Translate a WebAPI Source bean into the SourceCredentials shape consumed
+   by datamart/create-cache. Every dialect now uses the same JDBC-url-based
+   shape — there is no special-case path."
+  [source]
   (when source
     (let [dialect (.getSourceDialect source)
           conn-str (.getSourceConnection source)
           explicit-user (.getUsername source)
           explicit-pass (.getPassword source)]
-      (if (or (= "postgres" dialect) (= "postgresql" dialect))
-        (let [parsed (parse-jdbc-url conn-str)]
-          (merge parsed
-                 {:dialect dialect
-                  :connection-string conn-str
-                  :user (or explicit-user (:user parsed))
-                  :password (or explicit-pass (:password parsed))}))
-        {:dialect dialect
-         :connection-string conn-str
-         :user explicit-user
-         :password explicit-pass
-         :jdbc-url (when (datamart/jdbc-dialect? dialect) conn-str)}))))
+      ;; Some Sources don't carry username/password as explicit fields and
+      ;; embed them in the JDBC URL query string instead — fall back to
+      ;; that when needed.
+      {:dialect dialect
+       :connection-string conn-str
+       :jdbc-url conn-str
+       :user (or explicit-user (extract-url-credential conn-str "user"))
+       :password (or explicit-pass (extract-url-credential conn-str "password"))})))
 
 (defn response
   ([status body]
@@ -125,6 +118,15 @@
 
 (defn internal-error [message]
   (response 500 {:error "INTERNAL_ERROR" :message message}))
+
+(defn unprocessable
+  "422 — the request was understood but the cohort expression circe was
+   asked to render is incomplete or invalid (e.g. missing StartWindow on
+   a correlated criterion, codeset id pointing at an empty placeholder
+   set). The cohort builder uses this to surface a banner instead of
+   silently displaying 0 counts."
+  [message]
+  (response 422 {:error "INVALID_EXPRESSION" :message message}))
 
 (defn service-unavailable [message]
   (response 503 {:error "SERVICE_UNAVAILABLE" :message message}))
@@ -262,6 +264,22 @@
                   (catch Exception e
                     (internal-error (.getMessage e))))))))))))
 
+;; Status values written into _cache_jobs.cache_generation_info that mean the
+;; job is no longer running. The status endpoint surfaces these as `lastJob`
+;; so the UI doesn't keep showing "building" after a build has completed.
+(def ^:private local-terminal-statuses #{"COMPLETE" "ERROR" "CANCELED" "FAILED"})
+
+(defn- job-status->summary [job-status]
+  {:jobId (:job-execution-id job-status)
+   :status (:status job-status)
+   :startTime (str (:start-time job-status))
+   :endTime (when (:end-time job-status) (str (:end-time job-status)))
+   :progress {:totalTables (:total-tables job-status)
+              :completedTables (:completed-tables job-status)
+              :currentTable (:current-table job-status)
+              :processedRows (:processed-rows job-status)}
+   :error (:error-message job-status)})
+
 (defn- handle-get-cache-status [db source-key params]
   (let [source (find-source-by-key source-key)]
     (if-not source
@@ -272,24 +290,34 @@
           (let [cache-path (or (:cachePath params) (get-cache-path-from-config))
                 cache-file (File. (get-cache-path cache-path database-code))
                 exists? (.exists cache-file)
+                ;; Auto-attach if the cache file exists but isn't currently
+                ;; attached to the main trex handle. After a restart the
+                ;; cache is detached until first use; without auto-attach
+                ;; here the frontend sees `cacheAttached:false`, maps to
+                ;; status='error', and refuses to fire any count/inclusion
+                ;; calls.
+                _ (when (and exists?
+                             (not (try (datamart/is-attached? db database-code)
+                                       (catch Exception _ false))))
+                    (try (db/attach-cache-file! db database-code cache-path)
+                         (catch Exception e
+                           (log/warn (format "auto-attach %s failed: %s"
+                                             database-code (.getMessage e))))))
                 attached? (try (datamart/is-attached? db database-code) (catch Exception _ false))
-                job-status (try (jobs/get-job-status db database-code) (catch Exception _ nil))]
+                job-status (try (jobs/get-job-status db database-code) (catch Exception _ nil))
+                terminal? (and job-status
+                               (contains? local-terminal-statuses (:status job-status)))
+                summary (when job-status (job-status->summary job-status))]
             (ok {:sourceKey source-key
                  :cacheExists exists?
                  :cacheAttached attached?
                  :cacheFilePath (when exists? (.getAbsolutePath cache-file))
                  :cacheSizeBytes (when exists? (.length cache-file))
                  :lastModified (when exists? (.lastModified cache-file))
-                 :activeJob (when job-status
-                              {:jobId (:job-execution-id job-status)
-                               :status (:status job-status)
-                               :startTime (str (:start-time job-status))
-                               :endTime (when (:end-time job-status) (str (:end-time job-status)))
-                               :progress {:totalTables (:total-tables job-status)
-                                          :completedTables (:completed-tables job-status)
-                                          :currentTable (:current-table job-status)
-                                          :processedRows (:processed-rows job-status)}
-                               :error (:error-message job-status)})})))))))
+                 ;; activeJob = currently running. lastJob = most recent
+                 ;; finished run (kept for history / error reporting).
+                 :activeJob (when (and summary (not terminal?)) summary)
+                 :lastJob   (when (and summary terminal?) summary)})))))))
 
 (defn- handle-list-cache-jobs [db params]
   (try
@@ -598,33 +626,176 @@
               (log/info (format "Attaching cache for %s from %s" source-key cache-path))
               (db/attach-cache-file! db source-key cache-path))
             (let [qualified-cdm (str source-key "." cdm-schema)
-                  qualified-results (str source-key "." cdm-schema)
+                  ;; Circe's cohort-write templates emit the cohort target
+                  ;; table as a bare identifier (no `@resultSchema.` prefix).
+                  ;; Older versions of OHDSI Circe did prefix it, but the
+                  ;; build bundled here writes plain `INSERT INTO
+                  ;; @target_cohort_table` / `DELETE FROM @target_cohort_table`.
+                  ;; To make the bare reference resolve, both bao's CREATE
+                  ;; and the COUNT must use the same unqualified TEMP table
+                  ;; (DuckDB's `temp.main` is on the implicit search path).
+                  ;; Passing an empty result-schema gives circe nothing to
+                  ;; prefix with for any straggling `@resultSchema.` usages
+                  ;; that may exist in older templates.
                   temp-table "temp_cohort_count"
-                  qualified-target (str qualified-results "." temp-table)
                   cohort-id 999999
-                  options-map (build-circe-options qualified-cdm qualified-results cohort-id qualified-target false)
+                  options-map (build-circe-options qualified-cdm qualified-cdm cohort-id temp-table false)
                   clj-options (circe/java-map->circe-options options-map)]
               (try
-                (db/execute! db (format "DROP TABLE IF EXISTS %s" qualified-target))
-                (db/execute! db (format "CREATE TABLE %s (cohort_definition_id INT, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)" qualified-target))
-                (circe/execute-circe db expression-str clj-options)
-                (let [cohort-sql (format "SELECT COUNT(DISTINCT subject_id) as cnt FROM %s WHERE cohort_definition_id = %d"
-                                         qualified-target cohort-id)
-                      total-sql (format "SELECT COUNT(DISTINCT person_id) as cnt FROM %s.person" qualified-cdm)
-                      cohort-result (db/query db cohort-sql)
-                      total-result (db/query db total-sql)
-                      cohort-count (or (some-> cohort-result first (.get "cnt")) 0)
-                      total-count (or (some-> total-result first (.get "cnt")) 0)
-                      exec-time (- (System/currentTimeMillis) start-time)]
-                  (ok {:cohortPatientCount cohort-count
-                       :totalPatientCount total-count
-                       :executionTimeMs exec-time}))
+                (db/execute! db (format "DROP TABLE IF EXISTS %s" temp-table))
+                (db/execute! db (format "CREATE TEMP TABLE %s (cohort_definition_id INT, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)" temp-table))
+                (let [circe-result (circe/execute-circe db expression-str clj-options)]
+                  (if (:success circe-result)
+                    (let [cohort-sql (format "SELECT COUNT(DISTINCT subject_id) as cnt FROM %s WHERE cohort_definition_id = %d"
+                                             temp-table cohort-id)
+                          total-sql (format "SELECT COUNT(DISTINCT person_id) as cnt FROM %s.person" qualified-cdm)
+                          cohort-result (db/query db cohort-sql)
+                          total-result (db/query db total-sql)
+                          cohort-count (or (some-> cohort-result first (.get "cnt")) 0)
+                          total-count (or (some-> total-result first (.get "cnt")) 0)
+                          exec-time (- (System/currentTimeMillis) start-time)]
+                      (ok {:cohortPatientCount cohort-count
+                           :totalPatientCount total-count
+                           :executionTimeMs exec-time}))
+                    (do
+                      (log/warn (format "circe execute returned failure for %s: %s"
+                                        source-key (:error circe-result)))
+                      (unprocessable
+                        (or (:error circe-result)
+                            "The cohort expression is incomplete or invalid.")))))
                 (finally
                   (try
-                    (db/execute! db (format "DROP TABLE IF EXISTS %s" qualified-target))
+                    (db/execute! db (format "DROP TABLE IF EXISTS %s" temp-table))
                     (catch Exception _)))))
             (catch Exception e
               (log/error e "Failed to count patients")
+              (internal-error (.getMessage e)))))))))
+
+(defn- count-inclusion-handler
+  [{:keys [db path-params body-params trex-config]}]
+  (let [source-key (:source-key path-params)
+        source (find-source-by-key source-key)]
+    (if-not source
+      (not-found (str "Source not found: " source-key))
+      (let [{:keys [expression]} body-params
+            expression-str (if (string? expression) expression (json/write-str expression))
+            cdm-schema (get-cdm-schema source)
+            cache-path (or (:cache-path trex-config) (get-cache-path-from-config))
+            start-time (System/currentTimeMillis)]
+        (cond
+          (or (nil? expression) (and (string? expression) (str/blank? expression)))
+          (bad-request "expression is required")
+
+          (str/blank? cdm-schema)
+          (bad-request "CDM schema not configured for this source")
+
+          :else
+          (try
+            (when-not (db/is-attached? db source-key)
+              (log/info (format "Attaching cache for %s from %s" source-key cache-path))
+              (db/attach-cache-file! db source-key cache-path))
+            (let [qualified-cdm (str source-key "." cdm-schema)
+                  cohort-id 999999
+                  ;; Circe with generate-stats=true emits two distinct
+                  ;; reference styles in the same SQL bundle:
+                  ;;   - cohort target table: bare (substituted directly
+                  ;;     from `@target_cohort_table`) → must live on the
+                  ;;     implicit search path
+                  ;;   - 4 stats tables (`cohort_inclusion_result`,
+                  ;;     `cohort_inclusion_stats`, `cohort_summary_stats`,
+                  ;;     `cohort_censor_stats`): qualified with
+                  ;;     `@results_database_schema.<name>`
+                  ;; Routing result-schema to `temp.main` lets circe emit
+                  ;; `temp.main.cohort_inclusion_result`, which DuckDB
+                  ;; resolves to the same temp catalog where the bare
+                  ;; cohort target table also lives.
+                  result-schema "temp.main"
+                  cohort-tbl "temp_inc_cohort"
+                  inc-result-tbl "cohort_inclusion_result"
+                  inc-stats-tbl "cohort_inclusion_stats"
+                  summary-tbl "cohort_summary_stats"
+                  censor-tbl "cohort_censor_stats"
+                  options-map (build-circe-options qualified-cdm result-schema cohort-id cohort-tbl true)
+                  clj-options (circe/java-map->circe-options options-map)
+                  temp-tables [cohort-tbl inc-result-tbl inc-stats-tbl summary-tbl censor-tbl]]
+              (try
+                (doseq [t temp-tables]
+                  (db/execute! db (format "DROP TABLE IF EXISTS %s" t)))
+                (db/execute! db (format "CREATE TEMP TABLE %s (cohort_definition_id INT, subject_id BIGINT, cohort_start_date DATE, cohort_end_date DATE)" cohort-tbl))
+                (db/execute! db (format "CREATE TEMP TABLE %s (cohort_definition_id INT, inclusion_rule_mask BIGINT, person_count BIGINT, mode_id INT)" inc-result-tbl))
+                (db/execute! db (format "CREATE TEMP TABLE %s (cohort_definition_id INT, rule_sequence INT, person_count BIGINT, gain_count BIGINT, person_total BIGINT, mode_id INT)" inc-stats-tbl))
+                (db/execute! db (format "CREATE TEMP TABLE %s (cohort_definition_id INT, base_count BIGINT, final_count BIGINT, mode_id INT)" summary-tbl))
+                (db/execute! db (format "CREATE TEMP TABLE %s (cohort_definition_id INT, lost_count BIGINT, mode_id INT)" censor-tbl))
+
+                (let [inc-result (circe/execute-circe db expression-str clj-options)]
+                  (if (:success inc-result)
+                    nil
+                    (do
+                      (log/warn (format "circe execute returned failure for %s (inclusion): %s"
+                                        source-key (:error inc-result)))
+                      (throw (ex-info (or (:error inc-result)
+                                          "The cohort expression is incomplete or invalid.")
+                                      {:type :invalid-expression})))))
+
+                (let [;; Rule names come from the cohort definition JSON
+                      ;; (the WebAPI cohort_inclusion table that ATLAS
+                      ;; normally reads from is not populated in cache mode
+                      ;; — circe only writes the four stats tables).
+                      expr-json (try (json/read-str expression-str :key-fn keyword)
+                                     (catch Exception _ nil))
+                      rule-defs (vec (or (:InclusionRules expr-json)
+                                         (:inclusionRules expr-json) []))
+                      mask-rows (db/query db (format "SELECT inclusion_rule_mask AS mask, person_count AS n FROM %s WHERE cohort_definition_id = %d AND mode_id = 1"
+                                                     inc-result-tbl cohort-id))
+                      summary-rows (db/query db (format "SELECT base_count, final_count FROM %s WHERE cohort_definition_id = %d AND mode_id = 1"
+                                                        summary-tbl cohort-id))
+                      total-rows (db/query db (format "SELECT COUNT(DISTINCT person_id) AS cnt FROM %s.person" qualified-cdm))
+                      total-count (or (some-> total-rows first (.get "cnt")) 0)
+                      base-count (or (some-> summary-rows first (.get "base_count")) 0)
+                      final-count (or (some-> summary-rows first (.get "final_count")) 0)
+                      rule-count (count rule-defs)
+                      ->long (fn [v]
+                               (cond (nil? v) 0
+                                     (number? v) (long v)
+                                     :else (Long/parseLong (str v))))
+                      cumulative
+                      (mapv
+                        (fn [i]
+                          (reduce
+                            (fn [acc row]
+                              (let [mask (->long (.get ^java.util.Map row "mask"))
+                                    n (->long (.get ^java.util.Map row "n"))
+                                    bits-required (dec (bit-shift-left 1 (inc i)))]
+                                (if (= bits-required (bit-and mask bits-required))
+                                  (+ acc n)
+                                  acc)))
+                            0
+                            mask-rows))
+                        (range rule-count))
+                      rule-counts (vec (map-indexed
+                                         (fn [i rule-def]
+                                           {:ruleIndex i
+                                            :ruleName (or (:name rule-def)
+                                                          (str "Inclusion Rule " (inc i)))
+                                            :cumulativeCount (nth cumulative i 0)})
+                                         rule-defs))
+                      exec-time (- (System/currentTimeMillis) start-time)]
+                  (ok {:entryEventCount base-count
+                       :totalPatientCount total-count
+                       :finalCount final-count
+                       :ruleCounts rule-counts
+                       :executionTimeMs exec-time}))
+                (finally
+                  (doseq [t temp-tables]
+                    (try (db/execute! db (format "DROP TABLE IF EXISTS %s" t))
+                         (catch Exception _))))))
+            (catch clojure.lang.ExceptionInfo e
+              (if (= :invalid-expression (:type (ex-data e)))
+                (unprocessable (.getMessage e))
+                (do (log/error e "Failed to compute inclusion stats")
+                    (internal-error (.getMessage e)))))
+            (catch Exception e
+              (log/error e "Failed to compute inclusion stats")
               (internal-error (.getMessage e)))))))))
 
 (defn- pg-query
@@ -819,17 +990,21 @@
 
 (def routes
   "WebAPI routes."
-  [["/cache/jobs" {:get {:handler list-cache-jobs-handler}}]
-   ["/:source-key"
-    ["/cache" {:post {:handler create-cache-handler}
-               :delete {:handler delete-cache-handler}}]
-    ["/cache/status" {:get {:handler get-cache-status-handler}}]
-    ["/cache/count" {:post {:handler count-patients-handler}}]
-    ["/cache/table1" {:post {:handler table1-handler}}]
-    ["/cache/job" {:delete {:handler cancel-cache-job-handler}}]
-    ["/circe/execute" {:post {:handler execute-circe-handler}}]
-    ["/circe/render" {:post {:handler render-circe-handler}}]
-    ["/vocab/search" {:get {:handler search-vocab-handler}}]]])
+  (vec
+    (concat
+      [["/cache/jobs" {:get {:handler list-cache-jobs-handler}}]
+       ["/:source-key"
+        ["/cache" {:post {:handler create-cache-handler}
+                   :delete {:handler delete-cache-handler}}]
+        ["/cache/status" {:get {:handler get-cache-status-handler}}]
+        ["/cache/count" {:post {:handler count-patients-handler}}]
+        ["/cache/inclusion" {:post {:handler count-inclusion-handler}}]
+        ["/cache/table1" {:post {:handler table1-handler}}]
+        ["/cache/job" {:delete {:handler cancel-cache-job-handler}}]
+        ["/circe/execute" {:post {:handler execute-circe-handler}}]
+        ["/circe/render" {:post {:handler render-circe-handler}}]
+        ["/vocab/search" {:get {:handler search-vocab-handler}}]]]
+      agent-routes/routes)))
 
 (defn- create-proxy-handler [target-url]
   (fn [request]

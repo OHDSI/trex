@@ -1,8 +1,9 @@
 # ---------------------------------------------------------------------------
 # WARNING: the default credentials in this file are for local development
 # only. Override via a .env file (POSTGRES_PASSWORD, BETTER_AUTH_SECRET,
-# PGRST_JWT_SECRET) before exposing this stack to anything outside your
-# laptop. The trex container will, on startup, replace any known-default
+# PGRST_JWT_SECRET, REALTIME_DB_PASSWORD, REALTIME_DB_ENC_KEY,
+# REALTIME_SECRET_KEY_BASE, REALTIME_METRICS_JWT_SECRET) before exposing this stack to anything outside
+# your laptop. The trex container will, on startup, replace any known-default
 # placeholder values with random ones and print them to stdout — but those
 # random values do NOT survive a container restart unless persisted via
 # the env. Set TREX_PRODUCTION_MODE=1 to make the container refuse to start
@@ -20,6 +21,14 @@ services:
     container_name: trexsql-postgres
     ports:
       - 65433:5432
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypass}
@@ -87,3 +96,34 @@ services:
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
+
+  realtime:
+    image: supabase/realtime:v2.93.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PORT: "4000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: testdb
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${REALTIME_DB_PASSWORD:-realtime_admin_pass}
+      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
+      DB_ENC_KEY: ${REALTIME_DB_ENC_KEY:-supabaserealtime}
+      API_JWT_SECRET: ${PGRST_JWT_SECRET:-${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}}
+      METRICS_JWT_SECRET: ${PGRST_JWT_SECRET:-${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}}
+      SECRET_KEY_BASE: ${REALTIME_SECRET_KEY_BASE:-UpNVntn3cDxHJpq99YMc1T1AQgQpc8kfYTuRgBiYa15BLrx8etQoXz3gZv1/u2oq}
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "http://localhost:4000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+

@@ -10,18 +10,23 @@
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [honey.sql :as sql])
-  (:import [java.sql Connection DriverManager PreparedStatement ResultSet ResultSetMetaData SQLException]
-           [java.util Properties HashMap]
-           [com.sun.jna Pointer]
-           [java.io File]
+  (:import [java.sql Connection DriverManager PreparedStatement ResultSet]
+           [java.util HashMap]
            [com.zaxxer.hikari HikariConfig HikariDataSource]))
 
-(def default-batch-size 10000)
-(def default-fetch-size 2000)
-(def default-progress-interval 10000)
+;; Sized for OMOP CDM cache builds against a co-located postgres source:
+;; - batch-size: how many rows the DuckDB Appender holds before flushing;
+;;   larger reduces flush overhead, no real downside up to a few hundred
+;;   thousand rows for narrow CDM tables.
+;; - fetch-size: postgres JDBC cursor row count per network round-trip;
+;;   default 0 buffers the entire result set client-side. 2k was safe but
+;;   forced ~25x more round-trips than needed for the big vocab tables.
+(def default-batch-size 50000)
+(def default-fetch-size 10000)
+(def default-progress-interval 50000)
 
 (def min-batch-size 100)
-(def max-batch-size 100000)
+(def max-batch-size 200000)
 
 (def ^:private default-pool-size 5)
 (def ^:private default-connection-timeout 30000)
@@ -122,17 +127,22 @@
     (sql/format with-timestamp {:quoted true})))
 
 (defn build-create-table-ddl
-  "Generate CREATE TABLE DDL from column metadata using HoneySQL.
-   Returns SQL string."
-  [table-name columns]
-  (let [col-defs (for [{:keys [name trexsql-type nullable? precision scale]} columns]
+  "Generate CREATE TABLE DDL from column metadata.
+   `qualified-table` may be either a bare \"table\" or a \"catalog.table\"
+   reference; the function quotes each dot-separated segment individually so
+   DuckDB resolves it as a proper qualified name (and not as a single literal
+   identifier containing a dot)."
+  [qualified-table columns]
+  (let [parts (str/split qualified-table #"\.")
+        quoted-table (str/join "." (map #(format "\"%s\"" %) parts))
+        col-defs (for [{:keys [name trexsql-type nullable? precision scale]} columns]
                    (let [type-str (if (and (= trexsql-type "DECIMAL") precision (pos? precision))
                                     (format "DECIMAL(%d,%d)" precision (or scale 0))
                                     trexsql-type)
                          null-str (if nullable? "" " NOT NULL")]
                      (format "\"%s\" %s%s" name type-str null-str)))]
-    (format "CREATE TABLE IF NOT EXISTS \"%s\" (%s)"
-            table-name
+    (format "CREATE TABLE IF NOT EXISTS %s (%s)"
+            quoted-table
             (str/join ", " col-defs))))
 
 (defn retry-with-backoff
@@ -171,43 +181,92 @@
         (throw (:error result))))))
 
 (defn create-table-schema!
-  "Create table in TrexSQL cache from JDBC column metadata."
-  [trexsql-db cache-alias table-name columns]
-  (let [full-table-name (format "%s.%s" cache-alias table-name)
-        ddl (build-create-table-ddl full-table-name columns)]
-    (log/debug (format "Creating table: %s" full-table-name))
-    (db/execute! trexsql-db ddl)))
+  "Create the destination table at `<cache-alias>.<schema-name>.<table>`,
+   where `schema-name` mirrors the source's CDM schema (e.g. `cdm`). The
+   cache count + circe SQL handlers query `<cache-alias>.<cdm-schema>` for
+   patient counts and live preview, so the cache layout has to match.
+   We CREATE SCHEMA first because, by default, an attached DuckDB catalog
+   only has a `main` schema."
+  [trexsql-db cache-alias schema-name table-name columns]
+  (let [esc (fn [s] (str/replace (str s) "\"" "\"\""))
+        create-schema-sql (format "CREATE SCHEMA IF NOT EXISTS \"%s\".\"%s\""
+                                  (esc cache-alias) (esc schema-name))]
+    (try
+      (db/execute! trexsql-db create-schema-sql)
+      (catch Exception e
+        (when-not (re-find #"(?i)already exists" (.getMessage e))
+          (log/warn (format "CREATE SCHEMA \"%s\".\"%s\" failed: %s"
+                            cache-alias schema-name (.getMessage e))))))
+    (let [qualified (format "%s.%s.%s" cache-alias schema-name table-name)
+          ddl (build-create-table-ddl qualified columns)]
+      (log/info (format "Creating cache table: %s" qualified))
+      (db/execute! trexsql-db ddl)
+      (log/info (format "Created cache table: %s" qualified)))))
+
+(def ^:private insert-batch-size
+  "Rows per multi-VALUES INSERT. Larger amortizes parse/plan cost at the
+   expense of bigger SQL strings; 10000 is a good balance for OMOP CDM
+   tables (typically 10-30 columns wide). DuckDB's parser handles
+   statements up to a few hundred MB, so this stays well within bounds.
+   The native Appender path is in batch.clj's commit history; it hits a
+   trex catalog-resolution issue that needs further investigation, so
+   we're on multi-VALUES INSERT for now."
+  10000)
+
+(defn- read-row-values
+  [^ResultSet rs columns]
+  (mapv (fn [[idx col]]
+          (jdbc-types/read-typed-value rs (inc idx) (:trexsql-type col)))
+        (map-indexed vector columns)))
+
+(defn- build-insert-prefix
+  "INSERT INTO \"<cat>\".\"<schema>\".\"<table>\" (\"c1\",...) VALUES "
+  [cache-alias schema-name table-name columns]
+  (let [esc (fn [s] (str/replace (str s) "\"" "\"\""))
+        col-list (str/join ","
+                   (map (fn [c] (str "\"" (esc (:name c)) "\"")) columns))]
+    (format "INSERT INTO \"%s\".\"%s\".\"%s\" (%s) VALUES "
+            (esc cache-alias) (esc schema-name) (esc table-name) col-list)))
+
+(defn- flush-insert-batch!
+  [trexsql-db ^String insert-prefix pending-rows num-cols]
+  (when (seq pending-rows)
+    (let [row-placeholder (str "(" (str/join "," (repeat num-cols "?")) ")")
+          all-placeholders (str/join "," (repeat (count pending-rows) row-placeholder))
+          sql (str insert-prefix all-placeholders)
+          flat-params (vec (mapcat identity pending-rows))]
+      (db/execute-with-params! trexsql-db sql flat-params))))
 
 (defn copy-rows-batched!
-  "Copy rows from ResultSet to TrexSQL using native Appender API.
-   Returns total rows copied.
-   progress-fn is called with {:phase :row-progress :table :rows-processed :estimated-rows}"
-  [^Pointer db-handle schema table-name ^ResultSet rs columns config progress-fn]
-  (let [batch-size (or (:batch-size config) default-batch-size)
-        progress-interval (or (:progress-interval config) default-progress-interval)
+  "Copy rows from a JDBC ResultSet into the attached cache catalog at
+   `<cache-alias>.<schema-name>.<table-name>` via batched multi-row INSERTs."
+  [trexsql-db cache-alias schema-name table-name ^ResultSet rs columns config progress-fn]
+  (let [progress-interval (or (:progress-interval config) default-progress-interval)
         estimated-rows (:estimated-rows config)
-        appender (native/appender-create db-handle schema table-name)]
-    (try
-      (loop [total 0]
-        (if (.next rs)
-          (do
-            (doseq [[idx col] (map-indexed vector columns)]
-              (let [value (jdbc-types/read-typed-value rs (inc idx) (:trexsql-type col))]
-                (jdbc-types/append-typed-value! appender value (:trexsql-type col))))
-            (native/appender-end-row! appender)
-            (when (zero? (mod (inc total) batch-size))
-              (native/appender-flush! appender))
-            (when (and progress-fn (zero? (mod (inc total) progress-interval)))
-              (progress-fn {:phase :row-progress
-                            :table table-name
-                            :rows-processed (inc total)
-                            :estimated-rows estimated-rows}))
-            (recur (inc total)))
-          (do
-            (native/appender-flush! appender)
-            total)))
-      (finally
-        (native/appender-close! appender)))))
+        num-cols (count columns)
+        insert-prefix (build-insert-prefix cache-alias schema-name table-name columns)]
+    (loop [total 0
+           pending []]
+      (if (.next rs)
+        (let [row-values (read-row-values rs columns)
+              pending' (conj pending row-values)
+              new-total (inc total)]
+          (cond
+            (zero? (mod new-total insert-batch-size))
+            (do
+              (flush-insert-batch! trexsql-db insert-prefix pending' num-cols)
+              (when (and progress-fn (zero? (mod new-total progress-interval)))
+                (progress-fn {:phase :row-progress
+                              :table table-name
+                              :rows-processed new-total
+                              :estimated-rows estimated-rows}))
+              (recur new-total []))
+
+            :else
+            (recur new-total pending')))
+        (do
+          (flush-insert-batch! trexsql-db insert-prefix pending num-cols)
+          total)))))
 
 (declare copy-table-jdbc-impl)
 
@@ -233,17 +292,17 @@
          (throw e#)))))
 
 (defn copy-table-with-transaction
-  "Copy a table within a TrexSQL transaction.
-   Creates table and copies all rows atomically.
-   On failure, rolls back to leave cache in consistent state."
+  "Copy a table within a TrexSQL transaction on the main handle.
+   Creates the table in the attached cache catalog and copies all rows
+   atomically. On failure, rolls back to leave the cache consistent."
   [trexsql-db source-conn cache-alias table-name config progress-fn]
   (with-trexsql-transaction [trexsql-db]
     (copy-table-jdbc-impl trexsql-db source-conn cache-alias table-name config progress-fn)))
 
 (defn copy-table-jdbc-impl
-  "Copy a single table from JDBC source to TrexSQL cache.
-   Uses cursor-based streaming with configurable fetch size.
-   Returns {:success? true :rows-copied N :duration-ms M} or {:success? false :error E}"
+  "Copy a single table from a JDBC source into the attached cache catalog.
+   DDL targets `<cache-alias>.<table-name>`; the Appender targets the same
+   catalog via trexsql_appender_create_ext."
   [trexsql-db source-conn cache-alias table-name config progress-fn]
   (let [start-time (System/currentTimeMillis)
         {:keys [schema-name fetch-size column-filter patient-filter timestamp-filter]} config
@@ -265,10 +324,9 @@
             (.setObject stmt (inc idx) param))
 
           (with-open [rs (.executeQuery stmt)]
-            (let [columns (jdbc-types/get-column-info (.getMetaData rs))
-                  db-handle (db/get-raw-handle trexsql-db)]
-              (create-table-schema! trexsql-db cache-alias table-name columns)
-              (let [rows-copied (copy-rows-batched! db-handle cache-alias table-name rs columns config progress-fn)
+            (let [columns (jdbc-types/get-column-info (.getMetaData rs))]
+              (create-table-schema! trexsql-db cache-alias schema-name table-name columns)
+              (let [rows-copied (copy-rows-batched! trexsql-db cache-alias schema-name table-name rs columns config progress-fn)
                     duration-ms (- (System/currentTimeMillis) start-time)]
                 {:success? true
                  :table-name table-name
@@ -276,7 +334,8 @@
                  :duration-ms duration-ms})))))
       (catch Exception e
         (let [duration-ms (- (System/currentTimeMillis) start-time)]
-          (log/error e (format "Failed to copy table %s" table-name))
+          (log/error e (format "Failed to copy table %s: %s"
+                               table-name (.getMessage e)))
           {:success? false
            :table-name table-name
            :error (.getMessage e)
@@ -284,10 +343,7 @@
            :duration-ms duration-ms})))))
 
 (defn copy-table-jdbc
-  "Copy a single table from JDBC source to TrexSQL cache with transaction support.
-   Uses cursor-based streaming with configurable fetch size.
-   Wraps copy operation in a TrexSQL transaction for atomicity.
-   Returns {:success? true :rows-copied N :duration-ms M} or {:success? false :error E}"
+  "Copy a single table with optional transaction wrapping."
   [trexsql-db source-conn cache-alias table-name config progress-fn]
   (let [use-transactions? (get config :use-transactions true)]
     (if use-transactions?
@@ -304,7 +360,7 @@
         tables))))
 
 (defn get-completed-tables
-  "Get list of tables already copied to cache file."
+  "Get list of tables already copied to the attached cache catalog."
   [trexsql-db cache-alias]
   (try
     (let [[query-sql & params] (sql/format
@@ -388,11 +444,15 @@
                        :pool-size (or pool-size default-pool-size)
                        :pool-name (str "batch-" database-code)
                        :read-only true}
-          run-with-connection (fn [get-conn-fn]
-                                (db/attach-cache-file! trexsql-db database-code cache-path)
-                                (create-cache-jdbc-with-connection trexsql-db config progress-fn
-                                  get-conn-fn start-time database-code schema-name cache-path
-                                  table-filter webapi-ds))]
+          run-with-connection
+          (fn [get-conn-fn]
+            ;; Attach the cache file as catalog `database-code` on the main
+            ;; trex handle. The Appender then uses
+            ;; trexsql_appender_create_ext to target this catalog directly.
+            (db/attach-cache-file! trexsql-db database-code cache-path)
+            (create-cache-jdbc-with-connection trexsql-db config progress-fn
+              get-conn-fn start-time database-code schema-name cache-path
+              table-filter webapi-ds))]
       (if use-pooling
         ;; Use connection pooling
         (with-connection-pool [pool pool-config]
@@ -403,7 +463,9 @@
                                (.setAutoCommit false)))))))
 
 (defn- create-cache-jdbc-with-connection
-  "Internal implementation that uses provided connection factory."
+  "Internal implementation. The main trex handle has the cache file attached
+   as catalog `database-code`; DDL and Appender writes both target it via
+   the ext-form appender_create."
   [trexsql-db config progress-fn get-conn-fn start-time database-code schema-name
    cache-path table-filter webapi-ds]
   (with-open [source-conn (get-conn-fn)]

@@ -37,6 +37,9 @@
       (let [escaped-path (str/replace file-path "'" "''")
             attach-sql (format "ATTACH IF NOT EXISTS '%s' AS %s" escaped-path jobs-db-name)]
         (db/execute! trexsql-db attach-sql)
+        ;; cache_generation_info has JSON-typed columns, so the json
+        ;; extension must be loaded before the DDL runs. Idempotent.
+        (db/load-extension! trexsql-db "json")
         (db/execute! trexsql-db (str "
           CREATE TABLE IF NOT EXISTS " jobs-db-name ".cache_generation_info (
             database_code     VARCHAR PRIMARY KEY,

@@ -265,6 +265,69 @@ pub unsafe extern "C" fn trexsql_appender_create(
     }
 }
 
+/// Like `trexsql_appender_create` but with an explicit `catalog` (database)
+/// name. Required when the target table lives in an attached catalog rather
+/// than the connection's default. Pass NULL or empty `catalog` to fall back
+/// to the connection's default catalog.
+/// Returns NULL on error (check trexsql_last_error).
+/// Caller must free with trexsql_appender_close.
+#[no_mangle]
+pub unsafe extern "C" fn trexsql_appender_create_ext(
+    db: *mut TrexDatabase,
+    catalog: *const c_char,
+    schema: *const c_char,
+    table: *const c_char,
+) -> *mut TrexAppender {
+    error::clear_last_error();
+
+    if db.is_null() || table.is_null() {
+        error::set_last_error("NULL argument");
+        return std::ptr::null_mut();
+    }
+
+    let catalog_str = if catalog.is_null() {
+        ""
+    } else {
+        match CStr::from_ptr(catalog).to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                error::set_last_error(&format!("Invalid catalog: {e}"));
+                return std::ptr::null_mut();
+            }
+        }
+    };
+
+    let schema_str = if schema.is_null() {
+        "main"
+    } else {
+        match CStr::from_ptr(schema).to_str() {
+            Ok(s) => s,
+            Err(e) => {
+                error::set_last_error(&format!("Invalid schema: {e}"));
+                return std::ptr::null_mut();
+            }
+        }
+    };
+
+    let table_str = match CStr::from_ptr(table).to_str() {
+        Ok(s) => s,
+        Err(e) => {
+            error::set_last_error(&format!("Invalid table name: {e}"));
+            return std::ptr::null_mut();
+        }
+    };
+
+    let raw_db = (*db).raw_db();
+
+    match TrexAppender::create_ext(raw_db, catalog_str, schema_str, table_str) {
+        Ok(app) => Box::into_raw(Box::new(app)),
+        Err(e) => {
+            error::set_last_error(&e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Finalize the current row. Returns 0 on success, -1 on error.
 #[no_mangle]
 pub unsafe extern "C" fn trexsql_appender_end_row(a: *mut TrexAppender) -> i32 {

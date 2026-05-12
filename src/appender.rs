@@ -18,6 +18,29 @@ impl TrexAppender {
         schema: &str,
         table: &str,
     ) -> Result<Self, String> {
+        Self::create_ext_inner(raw_db, None, schema, table)
+    }
+
+    /// Like `create` but with an explicit catalog (database) name. Required
+    /// when the target table lives in an attached catalog rather than the
+    /// connection's default. Pass an empty/`None` catalog to use the
+    /// connection's default catalog (same behaviour as `create`).
+    pub fn create_ext(
+        raw_db: ffi::duckdb_database,
+        catalog: &str,
+        schema: &str,
+        table: &str,
+    ) -> Result<Self, String> {
+        let cat = if catalog.is_empty() { None } else { Some(catalog) };
+        Self::create_ext_inner(raw_db, cat, schema, table)
+    }
+
+    fn create_ext_inner(
+        raw_db: ffi::duckdb_database,
+        catalog: Option<&str>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Self, String> {
         unsafe {
             let mut raw_conn: ffi::duckdb_connection = ptr::null_mut();
             let rc = ffi::duckdb_connect(raw_db, &mut raw_conn);
@@ -25,12 +48,20 @@ impl TrexAppender {
                 return Err("Failed to create connection for appender".into());
             }
 
+            let c_catalog = match catalog {
+                Some(c) => Some(CString::new(c).map_err(|e| e.to_string())?),
+                None => None,
+            };
             let c_schema = CString::new(schema).map_err(|e| e.to_string())?;
             let c_table = CString::new(table).map_err(|e| e.to_string())?;
             let mut raw_app: ffi::duckdb_appender = ptr::null_mut();
 
-            let rc = ffi::duckdb_appender_create(
+            let rc = ffi::duckdb_appender_create_ext(
                 raw_conn,
+                c_catalog
+                    .as_ref()
+                    .map(|c| c.as_ptr() as *const c_char)
+                    .unwrap_or(ptr::null()),
                 c_schema.as_ptr() as *const c_char,
                 c_table.as_ptr() as *const c_char,
                 &mut raw_app,
