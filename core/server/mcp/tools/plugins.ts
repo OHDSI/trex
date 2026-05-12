@@ -1,7 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Plugins } from "../../plugin/plugin.ts";
-import { getMigrationPlugins } from "../../plugin/migration.ts";
 import { scanPluginDirectory } from "../../plugin/utils.ts";
 import { scanDiskPlugins } from "../../routes/plugin.ts";
 
@@ -158,31 +157,6 @@ export function registerPluginTools(server: McpServer) {
 
         const registeredTypes = Object.keys(foundPkg.trex || {});
 
-        let migrationStatus: any = null;
-        const migrationPlugins = getMigrationPlugins();
-        const migInfo = migrationPlugins.find((m) => m.pluginName === pluginName);
-        if (migInfo) {
-          try {
-            const sql = `SELECT * FROM trex_migration_status_schema('${escapeSql(migInfo.migrationsPath)}', '${escapeSql(migInfo.schema)}', '${escapeSql(migInfo.database)}')`;
-            const conn = new Trex.TrexDB("memory");
-            const result = await conn.execute(sql, []);
-            const rows = result?.rows || result || [];
-            migrationStatus = {
-              schema: migInfo.schema,
-              database: migInfo.database,
-              migrationsPath: migInfo.migrationsPath,
-              details: rows,
-            };
-          } catch (err: any) {
-            migrationStatus = {
-              schema: migInfo.schema,
-              database: migInfo.database,
-              migrationsPath: migInfo.migrationsPath,
-              error: err.message,
-            };
-          }
-        }
-
         const info = {
           name: pluginName,
           version: foundPkg.version,
@@ -192,7 +166,6 @@ export function registerPluginTools(server: McpServer) {
           pendingRestart,
           trexConfig: foundPkg.trex || null,
           registeredTypes,
-          migrationStatus,
         };
 
         return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };

@@ -227,6 +227,7 @@ JSON. The whole lifecycle is in [Concepts → Plugin System](../concepts/plugin-
   Deno permissions — [Plugins → Function Plugins](../plugins/function-plugins).
 - **A real UI**: ship a built React/Vue app under `dist/` and reference it
   from `trex.ui.routes` — [Plugins → UI Plugins](../plugins/ui-plugins).
-- **Schema migrations**: [Plugins → Migration Plugins](../plugins/migration-plugins).
+- **Schema migrations**: call `trex_migration_run_schema()` against your
+  plugin's `migrations/` directory — [SQL Reference → migration](../sql-reference/migration).
 - **Publish**: when stable, publish to your npm registry and install via
   `trex_plugin_install_with_deps()` — [SQL Reference → tpm](../sql-reference/tpm).

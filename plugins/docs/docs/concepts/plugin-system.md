@@ -47,9 +47,7 @@ flowchart TD
     Loaders --> Fns["function.ts<br/>register routes"]
     Loaders --> UI["ui.ts<br/>register static routes"]
     Loaders --> Flow["flow.ts<br/>register Prefect deployments"]
-    Loaders --> Mig["migration.ts<br/>queue migrations"]
     Loaders --> Tx["transform.ts<br/>recover endpoints"]
-    Mig --> RunMig["Run pending migrations"]
     Fns --> EnsureRoles["Auto-create roles in trex.role"]
     EnsureRoles --> CliLogin["Mount cliLoginRouter"]
     CliLogin --> AuthCtx["Install authContext middleware"]
@@ -57,7 +55,6 @@ flowchart TD
     UI --> Ready
     Flow --> Ready
     Tx --> Ready
-    RunMig --> Ready
 ```
 
 Each loader lives in `core/server/plugin/<type>.ts` and is responsible for one
@@ -65,18 +62,20 @@ plugin type's lifecycle. The plugin's package directory becomes the working
 directory for path resolution — `trex.functions.api[0].function = "/foo.ts"`
 means `<plugin-dir>/foo.ts`.
 
-## Five plugin types
+## Four plugin types
 
 | Type | Loader | What it adds |
 |------|--------|--------------|
 | **Function** | `plugin/function.ts` | HTTP endpoints powered by Deno EdgeRuntime workers. Each worker runs in isolation with configurable env vars, Deno permissions, and an optional ESZIP bundle. |
 | **UI** | `plugin/ui.ts` | Static frontend assets and admin-shell sidebar entries. Supports plain static-file serving, single-page-app fallback, and the single-spa micro-frontend protocol. |
-| **Migration** | `plugin/migration.ts` | Ordered SQL migrations executed against `DATABASE_URL` (Postgres). Each migration runs once, tracked in a per-plugin `_migrations` table. |
 | **Flow** | `plugin/flow.ts` | Prefect deployments registered against `PREFECT_API_URL`. The image, work pool, concurrency limits, and image-tag overrides are read from the plugin config. |
 | **Transform** | `plugin/transform.ts` | dbt-like SQL projects whose models compile, materialize, and serve as JSON / CSV / Arrow HTTP endpoints. Endpoints persist across restarts via `trex.transform_deployment`. |
 
 A single plugin can contribute multiple types — most non-trivial plugins
-combine UI + functions + migrations.
+combine UI + functions. Schema migrations for a plugin-owned schema are
+applied directly via the
+[`migration` extension](../sql-reference/migration), typically from an
+install-time SQL script that calls `trex_migration_run_schema`.
 
 ## Authorization model
 

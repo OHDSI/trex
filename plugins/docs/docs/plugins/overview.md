@@ -4,7 +4,7 @@ sidebar_position: 1
 
 # Plugin System Overview
 
-trexsql has a plugin system that extends the management application with custom API endpoints, UI pages, database migrations, and workflow definitions. Plugins are standard NPM packages with a `trex` configuration block in `package.json`.
+trexsql has a plugin system that extends the management application with custom API endpoints, UI pages, and workflow definitions. Plugins are standard NPM packages with a `trex` configuration block in `package.json`. Plugin-owned schema migrations are handled directly by the [`migration` extension](../sql-reference/migration).
 
 ## Plugin Types
 
@@ -12,7 +12,6 @@ trexsql has a plugin system that extends the management application with custom 
 |------|---------|-----|
 | **Function** | HTTP API endpoints via Deno workers | `trex.functions` |
 | **UI** | Static frontend assets and navigation items | `trex.ui` |
-| **Migration** | SQL schema migrations | `trex.migrations` |
 | **Flow** | Prefect workflow deployments | `trex.flow` |
 | **Transform** | Data transformation projects with model endpoints | `trex.transform` |
 
@@ -27,14 +26,11 @@ flowchart TD
     ReadPkg --> RegFn["Register function routes"]
     ReadPkg --> RegUI["Register UI routes"]
     ReadPkg --> RegFlow["Register Prefect flows"]
-    ReadPkg --> RegMig["Register migrations"]
     ReadPkg --> RegTx["Register transforms (recover endpoints from trex.transform_deployment)"]
-    RegMig --> RunMig["Run pending migrations against DATABASE_URL"]
     RegFn --> EnsureRoles["ensureRolesExist — upsert into trex.role"]
     EnsureRoles --> CliLogin["Mount cliLoginRouter"]
     CliLogin --> AuthCtx["authContext middleware"]
     AuthCtx --> Ready["Server ready"]
-    RunMig --> Ready
     RegUI --> Ready
     RegFlow --> Ready
     RegTx --> Ready

@@ -60,16 +60,12 @@ EOF
   "version": "0.1.0",
   "description": "Trex plugin: notes with categorisation",
   "license": "MIT",
-  "files": ["functions", "dist", "migrations", "project", "deno.json", "package.json"],
+  "files": ["functions", "dist", "migrations", "project", "deno.json", "package.json", "init.sql"],
   "scripts": {
     "build": "vite build",
     "dev": "vite"
   },
   "trex": {
-    "migrations": {
-      "schema": "notes",
-      "database": "_config"
-    },
     "functions": {
       "env": {
         "_shared": {
@@ -122,6 +118,8 @@ automatically).
 `migrations/V1__create_notes.sql`:
 
 ```sql
+CREATE SCHEMA IF NOT EXISTS notes;
+
 CREATE TABLE IF NOT EXISTS notes.note (
   id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id    UUID NOT NULL,
@@ -139,9 +137,19 @@ CREATE INDEX IF NOT EXISTS note_category_idx
   ON notes.note(category) WHERE category IS NOT NULL;
 ```
 
-The plugin migration runner ([Plugins → Migration Plugins](../plugins/migration-plugins))
-auto-creates the `notes` schema and tracks applied versions in
-`notes._migrations`.
+Run the migrations via the `migration` extension — typically from an
+`init.sql` invoked at install time:
+
+```sql
+SELECT * FROM trex_migration_run_schema(
+  '/usr/src/plugins/notes/migrations',
+  'notes',
+  '_config'
+);
+```
+
+Applied versions and integrity checksums land in
+`notes.refinery_schema_history`.
 
 ## 3. Function (5 min)
 
