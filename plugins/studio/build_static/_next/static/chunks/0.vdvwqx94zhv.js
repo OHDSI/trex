@@ -1,0 +1,1 @@
+(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,270671,e=>{"use strict";var o=e.i(478902),s=e.i(331162);e.s(["default",0,function(e){return(0,o.jsx)(s.CodeBlock,{className:"[&_code]:text-foreground",value:"codex mcp login supabase",hideLineNumbers:!0,language:"bash"})}])}]);

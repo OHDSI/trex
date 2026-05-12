@@ -1,0 +1,1 @@
+(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,259107,e=>{"use strict";e.s(["default",0,"The Supabase Data API exposes REST endpoints for your project's databases, including read replicas\nand load balancers. Configure the API base URL, custom domains, and PostgREST settings for your project.\n"])}]);

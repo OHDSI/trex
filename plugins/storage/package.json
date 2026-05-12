@@ -7,6 +7,7 @@
       "env": {
         "_shared": {
           "DATABASE_URL": "${DATABASE_URL}",
+          "DATABASE_SEARCH_PATH": "storage,public",
           "STORAGE_BACKEND": "file",
           "FILE_STORAGE_BACKEND_PATH": "/tmp/storage",
           "FILE_SIZE_LIMIT": "52428800",

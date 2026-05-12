@@ -1,0 +1,2 @@
+(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,433215,e=>{"use strict";var t=e.i(478902),o=e.i(331162);e.s(["default",0,function(e){let c=`[mcp]
+remote_mcp_client_enabled = true`;return(0,t.jsx)(o.CodeBlock,{className:"[&_code]:text-foreground",value:c,hideLineNumbers:!0,language:"toml"})}])}]);

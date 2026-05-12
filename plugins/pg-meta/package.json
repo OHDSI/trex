@@ -2,6 +2,11 @@
   "name": "@trex/pg-meta",
   "version": "0.1.0",
   "description": "Supabase postgres-meta as edge function",
+  "files": ["postgres-meta/dist", "postgres-meta/functions", "postgres-meta/deno.json", "postgres-meta/package.json"],
+  "scripts": {
+    "build": "cd postgres-meta && npm install --ignore-scripts --no-audit --no-fund && npm run build",
+    "prepack": "npm run build"
+  },
   "trex": {
     "functions": {
       "env": {

@@ -1,0 +1,1 @@
+(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,911142,a=>{"use strict";a.s(["default",0,"Airtable is an easy-to-use online platform for creating and sharing relational databases.\n\nThe Airtable Wrapper allows you to read data from your Airtable bases/tables within your Postgres database.\n"])}]);

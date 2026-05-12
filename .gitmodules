@@ -21,3 +21,6 @@
 	path = plugins/cli
 	url = https://github.com/p-hoffmann/cli.git
 	branch = develop
+[submodule "plugins/studio/supabase-studio"]
+	path = plugins/studio/supabase-studio
+	url = https://github.com/p-hoffmann/supabase.git

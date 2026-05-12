@@ -59,7 +59,7 @@ function toGoTrueUser(u: DbUser) {
   };
 }
 
-async function createTokenResponse(user: DbUser, sessionId?: string) {
+async function createTokenResponse(user: DbUser, sessionId?: string, res?: any) {
   const sid = sessionId || crypto.randomUUID();
   const accessToken = await signAccessToken(
     {
@@ -84,6 +84,36 @@ async function createTokenResponse(user: DbUser, sessionId?: string) {
   );
 
   const expiresAt = Math.floor(Date.now() / 1000) + 3600;
+
+  // Mirror the access token into an `sb-access-token` cookie so same-origin
+  // iframes (notably Supabase Studio at /plugins/trex/studio) pick up auth
+  // automatically — the web shell stores the JWT in localStorage which an
+  // iframe can't read across docs. `authContext` already reads this cookie.
+  //
+  // CSRF: SameSite=Lax is the only thing blocking forged cross-site POSTs
+  // here — we have no anti-CSRF token. If anyone ever changes SameSite to
+  // None (e.g. for a cross-origin iframe scenario), CSRF protection must
+  // be added before that lands.
+  //
+  // Secure flag: `req.protocol` only reflects the externally-visible scheme
+  // when `app.set('trust proxy', ...)` is configured. To survive deployment
+  // behind a TLS-terminating proxy without that setting, honour an explicit
+  // env override (TREX_FORCE_SECURE_COOKIES=1).
+  if (res) {
+    const forwardedProto = res.req?.headers?.["x-forwarded-proto"];
+    const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+    const secure =
+      Deno.env.get("TREX_FORCE_SECURE_COOKIES") === "1" ||
+      res.req?.protocol === "https" ||
+      proto === "https";
+    res.cookie("sb-access-token", accessToken, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure,
+      path: "/",
+      maxAge: 3600 * 1000,
+    });
+  }
 
   return {
     access_token: accessToken,
@@ -211,7 +241,7 @@ router.post("/signup", authLimiter, async (req, res) => {
       return;
     }
 
-    const response = await createTokenResponse(user);
+    const response = await createTokenResponse(user, undefined, res);
 
     // Update last_sign_in_at
     await pool.query(
@@ -278,7 +308,7 @@ async function handlePasswordGrant(req: any, res: any) {
       await migratePasswordHash(user.id, newHash);
     }
 
-    const response = await createTokenResponse(user);
+    const response = await createTokenResponse(user, undefined, res);
 
     // Update last_sign_in_at
     await pool.query(
@@ -325,7 +355,7 @@ async function handleRefreshGrant(req: any, res: any) {
       return;
     }
 
-    const response = await createTokenResponse(user, sessionId);
+    const response = await createTokenResponse(user, sessionId, res);
     res.json(response);
   } catch (err) {
     console.error("[auth] refresh grant error:", err);
@@ -335,7 +365,54 @@ async function handleRefreshGrant(req: any, res: any) {
 
 // ── POST /logout ─────────────────────────────────────────────────────────────
 
+// ── POST /sync-cookie ─────────────────────────────────────────────────────
+// Trades a Bearer access token (which the trex web shell keeps in
+// localStorage) for an `sb-access-token` HttpOnly cookie on this origin.
+// Same-origin iframes (Studio) don't have access to the parent's
+// localStorage and don't run our auth-client, so they need the cookie to
+// authenticate. Idempotent; safe to call on every Studio page mount.
+router.post("/sync-cookie", apiLimiter, async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+    const token = authHeader.slice(7);
+    const claims = await verifyAccessToken(token);
+    if (!claims || claims.role === "service_role" || claims.role === "anon") {
+      res.status(401).json({ error: "not_authenticated" });
+      return;
+    }
+    // Cookie flags must mirror createTokenResponse() — see the comment
+    // there about CSRF / TREX_FORCE_SECURE_COOKIES.
+    const forwardedProto = req.headers?.["x-forwarded-proto"];
+    const proto = Array.isArray(forwardedProto) ? forwardedProto[0] : forwardedProto;
+    const secure =
+      Deno.env.get("TREX_FORCE_SECURE_COOKIES") === "1" ||
+      req.protocol === "https" ||
+      proto === "https";
+    res.cookie("sb-access-token", token, {
+      httpOnly: true,
+      sameSite: "lax",
+      secure,
+      path: "/",
+      // Mirror the token's own remaining lifetime so the cookie expires
+      // alongside the token rather than living past it.
+      maxAge: Math.max(0, (claims.exp || 0) * 1000 - Date.now()),
+    });
+    res.status(204).end();
+  } catch (err) {
+    console.error("[auth] sync-cookie error:", err);
+    res.status(500).json({ error: "server_error" });
+  }
+});
+
 router.post("/logout", apiLimiter, async (req, res) => {
+  // Always clear the same-origin session cookie that mirrors the access
+  // token (set in createTokenResponse), regardless of whether refresh-token
+  // revocation succeeds.
+  res.clearCookie("sb-access-token", { path: "/" });
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
@@ -757,9 +834,11 @@ router.get("/health", (_req, res) => {
   res.json({ version: "trex-gotrue-1.0.0", name: "GoTrue", description: "Trex GoTrue-compatible auth" });
 });
 
-// ── Custom: POST /admin/create-user (admin-only user creation) ──────────────
+// ── Admin user creation ─────────────────────────────────────────────────────
+// /admin/users is the GoTrue-compatible path that supabase-js (and Studio's
+// auth admin) POSTs to; /admin/create-user is the original trex name.
 
-router.post("/admin/create-user", apiLimiter, async (req, res) => {
+router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith("Bearer ")) {
@@ -774,9 +853,13 @@ router.post("/admin/create-user", apiLimiter, async (req, res) => {
       return;
     }
 
-    // Check if caller is admin
+    // Caller must be an admin user OR present the service_role JWT
+    // (Supabase convention — service_role bypasses RLS and admin checks).
+    // Studio's auth function plugin calls this endpoint via supabase-js
+    // initialised with the service role key, so we must honour both.
     const callerRole = claims.app_metadata?.trex_role;
-    if (callerRole !== "admin") {
+    const isServiceRole = claims.role === "service_role";
+    if (callerRole !== "admin" && !isServiceRole) {
       res.status(403).json({ error: "forbidden", error_description: "Admin access required" });
       return;
     }

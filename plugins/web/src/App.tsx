@@ -50,6 +50,27 @@ function HomeRedirect() {
   return <Navigate to={session ? "/profile" : "/login"} replace />;
 }
 
+// Admin-only route guard for surfaces (Studio iframe, etc.) that should
+// not be reachable by directly typing the URL as a non-admin user. Mirrors
+// the role check the AdminLayout uses for the /admin section.
+function AdminOnly({ children }: { children: JSX.Element }) {
+  const { data: session, isPending } = useSession();
+  if (isPending) return null;
+  if (!session?.user || (session.user as any).role !== "admin") {
+    return (
+      <div className="flex items-center justify-center py-20">
+        <div className="text-center">
+          <h2 className="text-2xl font-bold">403 Forbidden</h2>
+          <p className="text-muted-foreground mt-2">
+            You do not have permission to access this page.
+          </p>
+        </div>
+      </div>
+    );
+  }
+  return children;
+}
+
 export default function App() {
   const { config, loaded } = useFetchedWebConfig();
   if (!loaded) {
@@ -76,6 +97,7 @@ export default function App() {
         <Route element={<Layout />}>
           <Route path="/profile" element={<Profile />} />
           <Route path="/docs" element={<EmbedPage plugin="docs" />} />
+          <Route path="/studio" element={<AdminOnly><EmbedPage plugin="studio" /></AdminOnly>} />
           {config.navExtra.map((item) => (
             <Route
               key={item.path}

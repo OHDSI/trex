@@ -27,6 +27,7 @@ export function Layout() {
   const location = useLocation();
   const isEmbed =
     location.pathname === "/docs" ||
+    location.pathname === "/studio" ||
     navExtra.some(
       (item) =>
         location.pathname === item.path ||
@@ -53,6 +54,14 @@ export function Layout() {
                }>
               Docs
             </NavLink>
+            {session.user.role === "admin" && (
+              <NavLink to="/studio"
+                 className={({ isActive }) =>
+                   `text-sm transition-colors ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
+                 }>
+                Studio
+              </NavLink>
+            )}
             {navExtra.map((item) => (
               <NavLink
                 key={item.path}

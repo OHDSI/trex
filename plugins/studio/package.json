@@ -1,0 +1,35 @@
+{
+  "name": "@trex/studio",
+  "version": "0.1.0",
+  "description": "Supabase Studio wrapped as a trex UI + function plugin (proxies to a Studio Node sidecar)",
+  "files": [
+    "build/",
+    "functions/",
+    "deno.json"
+  ],
+  "scripts": {
+    "build": "test -f build/index.html"
+  },
+  "trex": {
+    "functions": {
+      "env": {
+        "_shared": {
+          "STUDIO_INTERNAL_URL": "${STUDIO_INTERNAL_URL}"
+        }
+      },
+      "api": [
+        {
+          "source": "/studio-proxy",
+          "function": "/functions",
+          "allowHostFsAccess": true
+        }
+      ]
+    },
+    "ui": {
+      "routes": [
+        { "path": "/studio", "dir": "build_static", "spa": true },
+        { "path": "/studio-fallback", "dir": "build" }
+      ]
+    }
+  }
+}

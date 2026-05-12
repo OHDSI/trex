@@ -101,6 +101,8 @@ jobs:
           - PKGPATH: ./plugins/docs
           - PKGPATH: ./plugins/web
           - PKGPATH: ./plugins/notebook
+          - PKGPATH: ./plugins/pg-meta
+          - PKGPATH: ./plugins/studio
           - PKGPATH: ./plugins/runtime
             RUNNER: ubuntu-24.04
 
@@ -207,7 +209,7 @@ jobs:
           # artifact. Web/docs/notebook/cli/runtime/bao publish other shapes;
           # everything else is a DuckDB extension and must ship a .trex.
           case "${{ matrix.PKGPATH }}" in
-            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao)
+            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio)
               echo "skip — non-extension plugin"
               ;;
             *)

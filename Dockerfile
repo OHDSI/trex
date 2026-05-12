@@ -66,6 +66,12 @@ COPY plugins/docs/src/ ./src/
 COPY plugins/docs/static/ ./static/
 RUN npm install && npm run build
 
+# Stage 5b: Build postgres-meta (TypeScript -> dist/) for the pg-meta plugin
+FROM node:22-trixie-slim AS pg-meta-builder
+WORKDIR /build
+COPY plugins/pg-meta/postgres-meta/ ./
+RUN npm install --ignore-scripts --no-audit --no-fund && npm run build
+
 # Stage 6: Runtime
 FROM node:22-trixie-slim
 
@@ -149,7 +155,21 @@ COPY plugins/notebook/ ./plugins-dev/notebook/
 COPY --from=notebook-builder /build/dist/ ./plugins-dev/notebook/dist/
 COPY plugins/docs/ ./plugins-dev/docs/
 COPY --from=docs-builder /build/build/ ./plugins-dev/docs/build/
+# Studio plugin: ships a placeholder build/index.html. Studio itself is run as
+# a sidecar (see docker-compose.yml `studio` service); the trex web shell
+# iframes it when TREX_STUDIO_URL is set on the trex container. Static-export
+# of Studio is not viable (~92 internal API routes), so no studio-builder
+# stage — the npm-published @trex/studio just provides the placeholder route.
+COPY plugins/studio/ ./plugins-dev/studio/
 COPY plugins/storage/ ./plugins-dev/storage/
+# pg-meta plugin: brings the postgres-meta submodule into the image so Studio
+# (and other clients) can call /trex/pg/v1/*. The submodule is initialized at
+# CI checkout (`submodules: recursive`); locally, run
+# `git submodule update --init plugins/pg-meta/postgres-meta`. The compiled
+# dist/ comes from the pg-meta-builder stage above (postgres-meta is plain TS).
+COPY plugins/pg-meta/ ./plugins-dev/pg-meta/
+COPY --from=pg-meta-builder /build/dist/ ./plugins-dev/pg-meta/postgres-meta/dist/
+COPY --from=pg-meta-builder /build/node_modules/ ./plugins-dev/pg-meta/postgres-meta/node_modules/
 
 # TLS cert is generated at container start by /usr/src/entrypoint.sh
 # (per-container, NOT for production — see comments in that script).

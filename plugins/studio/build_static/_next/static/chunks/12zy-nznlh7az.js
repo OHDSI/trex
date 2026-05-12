@@ -1,0 +1,1 @@
+(globalThis.TURBOPACK||(globalThis.TURBOPACK=[])).push(["object"==typeof document?document.currentScript:void 0,266186,a=>{"use strict";a.s(["default",0,"Cal.com is a calendar and scheduling service that allows you to create and share events with others.\n\nThe Cal.com Wrapper allows you to read data from Cal.com within your Postgres database.\n"])}]);

@@ -1,5 +1,4 @@
-// @ts-ignore
-import { STATUS_CODE } from "https://deno.land/std/http/status.ts";
+import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
 import type { Express, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
 import { pluginAuthz } from "../middleware/plugin-authz.ts";
@@ -186,15 +185,15 @@ async function _callWorker(
 
   const options: any = {
     servicePath,
-    memoryLimitMb: 1000,
+    memoryLimitMb: fncfg.memoryLimitMb ?? 4096,
     workerTimeoutMs: 30 * 60 * 1000,
     noModuleCache: false,
     importMapPath: imports,
     envVars: _myenv,
     forceCreate: false,
     netAccessDisabled: false,
-    cpuTimeSoftLimitMs: 1000000,
-    cpuTimeHardLimitMs: 2000000,
+    cpuTimeSoftLimitMs: fncfg.cpuTimeSoftLimitMs ?? 60_000_000,
+    cpuTimeHardLimitMs: fncfg.cpuTimeHardLimitMs ?? 120_000_000,
     allowHostFsAccess: fncfg.allowHostFsAccess === true,
     ...(fncfg.permissions ? { permissions: fncfg.permissions } : {}),
     context: {
