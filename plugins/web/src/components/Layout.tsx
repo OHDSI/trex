@@ -43,10 +43,16 @@ export function Layout() {
 
   return (
     <div className="min-h-screen bg-background">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-[60] focus:rounded-md focus:bg-foreground focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-background focus:shadow-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+      >
+        Skip to main content
+      </a>
       <header className="sticky top-0 z-50 border-b border-border/70 bg-background/72 backdrop-blur-md backdrop-saturate-150">
         <div className="container mx-auto flex h-14 items-center justify-between px-4">
           <Link to="/" className="font-semibold text-lg tracking-tight">
-            TREX<span className="text-primary">.</span>
+            TREX<span aria-hidden="true" className="text-primary">.</span>
           </Link>
           <div className="flex items-center gap-4">
             <NavLink to="/docs"
@@ -102,7 +108,7 @@ export function Layout() {
           </div>
         </div>
       </header>
-      <main className={isEmbed ? "" : "container mx-auto px-4 py-6"}>
+      <main id="main" tabIndex={-1} className={isEmbed ? "" : "container mx-auto px-4 py-6"}>
         <Outlet />
       </main>
     </div>
