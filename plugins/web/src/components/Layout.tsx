@@ -2,6 +2,7 @@ import { useSession, authClient } from "@/lib/auth-client";
 import { Navigate, Outlet, Link, NavLink, useLocation } from "react-router-dom";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
+import { ThemeToggle } from "@/components/ThemeToggle";
 import { useWebConfig } from "@/lib/web-config";
 
 export function Layout() {
@@ -42,22 +43,28 @@ export function Layout() {
 
   return (
     <div className="min-h-screen bg-background">
-      <header className="border-b">
+      <a
+        href="#main"
+        className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-[60] focus:rounded-md focus:bg-foreground focus:px-3 focus:py-2 focus:text-sm focus:font-medium focus:text-background focus:shadow-md focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2"
+      >
+        Skip to main content
+      </a>
+      <header className="sticky top-0 z-50 border-b border-border/70 bg-background/72 backdrop-blur-md backdrop-saturate-150">
         <div className="container mx-auto flex h-14 items-center justify-between px-4">
-          <Link to="/" className="font-semibold text-lg">
-            TREX
+          <Link to="/" className="font-semibold text-lg tracking-tight">
+            TREX<span aria-hidden="true" className="text-primary">.</span>
           </Link>
           <div className="flex items-center gap-4">
             <NavLink to="/docs"
                className={({ isActive }) =>
-                 `text-sm transition-colors ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
+                 `text-sm transition-colors duration-[120ms] ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
                }>
               Docs
             </NavLink>
             {session.user.role === "admin" && (
               <NavLink to="/studio"
                  className={({ isActive }) =>
-                   `text-sm transition-colors ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
+                   `text-sm transition-colors duration-[120ms] ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
                  }>
                 Studio
               </NavLink>
@@ -67,7 +74,7 @@ export function Layout() {
                 key={item.path}
                 to={item.path}
                 className={({ isActive }) =>
-                  `text-sm transition-colors ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
+                  `text-sm transition-colors duration-[120ms] ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
                 }
               >
                 {item.label}
@@ -76,16 +83,17 @@ export function Layout() {
             {session.user.role === "admin" && (
               <NavLink to="/admin"
                 className={({ isActive }) =>
-                  `text-sm transition-colors ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
+                  `text-sm transition-colors duration-[120ms] ${isActive ? "text-foreground font-medium" : "text-muted-foreground hover:text-foreground"}`
                 }>
                 Admin
               </NavLink>
             )}
             <Link to="/profile">
-              <span className="text-sm text-muted-foreground">
+              <span className="text-sm text-muted-foreground hover:text-foreground transition-colors duration-[120ms]">
                 {session.user.name}
               </span>
             </Link>
+            <ThemeToggle />
             <Avatar className="h-8 w-8">
               <AvatarImage src={session.user.image || undefined} />
               <AvatarFallback>{initials}</AvatarFallback>
@@ -100,7 +108,7 @@ export function Layout() {
           </div>
         </div>
       </header>
-      <main className={isEmbed ? "" : "container mx-auto px-4 py-6"}>
+      <main id="main" tabIndex={-1} className={isEmbed ? "" : "container mx-auto px-4 py-6"}>
         <Outlet />
       </main>
     </div>

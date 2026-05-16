@@ -425,7 +425,7 @@ export function DatabaseDetail() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant={db.enabled ? "default" : "secondary"}>
+          <Badge variant={db.enabled ? "success" : "secondary"}>
             {db.enabled ? "Enabled" : "Disabled"}
           </Badge>
           <Badge variant="outline">{db.dialect}</Badge>
@@ -673,7 +673,7 @@ export function DatabaseDetail() {
                 </div>
                 <div className="flex items-center justify-between">
                   <span className="text-sm text-muted-foreground">Status</span>
-                  <Badge variant={db.enabled ? "default" : "secondary"}>
+                  <Badge variant={db.enabled ? "success" : "secondary"}>
                     {db.enabled ? "Enabled" : "Disabled"}
                   </Badge>
                 </div>

@@ -147,9 +147,17 @@ COPY --from=npm-deps /root/.duckdb/extensions/ /root/.duckdb/extensions/
 RUN chown -R postgres:postgres /var/lib/postgresql/.duckdb
 
 # ── Shinylive ──
+# -f fails the build on a non-2xx response (e.g. when the GH release CDN serves
+# an HTML error page instead of the tarball — that's how this RUN broke on CI:
+# curl saved the error body, then tar choked on "stdin: not in gzip format").
+# --retry handles transient release-asset CDN flakes. The post-download `file`
+# check is belt-and-suspenders for any case curl exits 0 with bad bytes.
 ARG SHINYLIVE_VERSION=0.10.7
 RUN cd /usr/src && \
-    curl -sLO https://github.com/posit-dev/shinylive/releases/download/v${SHINYLIVE_VERSION}/shinylive-${SHINYLIVE_VERSION}.tar.gz && \
+    curl -fsSL --retry 3 --retry-delay 5 --retry-connrefused \
+      -o shinylive-${SHINYLIVE_VERSION}.tar.gz \
+      "https://github.com/posit-dev/shinylive/releases/download/v${SHINYLIVE_VERSION}/shinylive-${SHINYLIVE_VERSION}.tar.gz" && \
+    gzip -t shinylive-${SHINYLIVE_VERSION}.tar.gz && \
     tar -xzf shinylive-${SHINYLIVE_VERSION}.tar.gz && \
     mv shinylive-${SHINYLIVE_VERSION} shinylive && \
     rm shinylive-${SHINYLIVE_VERSION}.tar.gz

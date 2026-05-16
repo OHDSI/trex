@@ -73,14 +73,14 @@ interface PluginRow {
   registryVersion?: string;
 }
 
-type StatusInfo = { label: string; variant: "default" | "secondary" | "destructive" | "outline" };
+type StatusInfo = { label: string; variant: "default" | "secondary" | "destructive" | "outline" | "success" | "warning" };
 
 function getStatus(row: PluginRow): StatusInfo {
   if (row.active && row.installed && !row.pendingRestart) {
-    return { label: "Active", variant: "default" };
+    return { label: "Active", variant: "success" };
   }
   if (row.active && row.installed && row.pendingRestart) {
-    return { label: "Pending Restart", variant: "secondary" };
+    return { label: "Pending Restart", variant: "warning" };
   }
   if (row.installed && !row.active) {
     return { label: "Installed", variant: "secondary" };

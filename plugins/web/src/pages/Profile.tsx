@@ -578,10 +578,10 @@ interface ApiKeyInfo {
   createdAt: string;
 }
 
-function getKeyStatus(key: ApiKeyInfo): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } {
+function getKeyStatus(key: ApiKeyInfo): { label: string; variant: "default" | "secondary" | "destructive" | "outline" | "success" } {
   if (key.revokedAt) return { label: "Revoked", variant: "destructive" };
   if (key.expiresAt && new Date(key.expiresAt) < new Date()) return { label: "Expired", variant: "secondary" };
-  return { label: "Active", variant: "default" };
+  return { label: "Active", variant: "success" };
 }
 
 function ApiKeysTab() {

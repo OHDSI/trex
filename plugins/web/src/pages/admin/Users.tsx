@@ -103,10 +103,10 @@ const SEARCH_USERS_QUERY = gql`
 
 const PAGE_SIZE = 20;
 
-function getUserStatus(user: User): { label: string; variant: "default" | "secondary" | "destructive" | "outline" } {
+function getUserStatus(user: User): { label: string; variant: "default" | "secondary" | "destructive" | "outline" | "success" } {
   if (user.deletedAt) return { label: "Deleted", variant: "destructive" };
   if (user.banned) return { label: "Banned", variant: "destructive" };
-  return { label: "Active", variant: "default" };
+  return { label: "Active", variant: "success" };
 }
 
 function formatDate(dateString: string): string {

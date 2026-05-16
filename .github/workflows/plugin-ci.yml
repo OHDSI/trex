@@ -477,6 +477,12 @@ jobs:
           docker run --rm --entrypoint sh trexsql-test:dev -c 'command -v gh' >/dev/null
           docker run --rm --entrypoint sh trexsql-test:dev -c 'command -v claude' >/dev/null
 
+      # GHCR rejects uppercase repo names. github.repository_owner preserves the
+      # org's actual casing (OHDSI), so lowercase it once via shell into $IMAGE_NS.
+      - name: Compute lowercase image namespace
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        run: echo "IMAGE_NS=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       - name: Login to GHCR
         # Push only from canonical repo on develop/main.
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
@@ -495,8 +501,8 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/trexsql:latest
-            ghcr.io/${{ github.repository_owner }}/trexsql:sha-${{ github.sha }}
+            ghcr.io/${{ env.IMAGE_NS }}/trexsql:latest
+            ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}
 
       - name: Build and push dev image
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
@@ -507,10 +513,10 @@ jobs:
           platforms: linux/amd64
           push: true
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ github.repository_owner }}/trexsql:sha-${{ github.sha }}
+            BASE_IMAGE=ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/trexsql:dev
-            ghcr.io/${{ github.repository_owner }}/trexsql:dev-sha-${{ github.sha }}
+            ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev
+            ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev-sha-${{ github.sha }}
 
   build-pg-trex:
     needs: [build]
@@ -597,10 +603,12 @@ jobs:
       - name: Push to GHCR
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         run: |
-          docker tag pg-trex-test ghcr.io/${{ github.repository_owner }}/pg-trex:latest
-          docker tag pg-trex-test ghcr.io/${{ github.repository_owner }}/pg-trex:sha-${{ github.sha }}
-          docker push ghcr.io/${{ github.repository_owner }}/pg-trex:latest
-          docker push ghcr.io/${{ github.repository_owner }}/pg-trex:sha-${{ github.sha }}
+          # GHCR rejects uppercase repo names; lowercase the owner.
+          NS="${GITHUB_REPOSITORY_OWNER,,}"
+          docker tag pg-trex-test ghcr.io/$NS/pg-trex:latest
+          docker tag pg-trex-test ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
+          docker push ghcr.io/$NS/pg-trex:latest
+          docker push ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
 
   success:
     needs: [build, build-arm, build-docker, build-pg-trex, create-release]

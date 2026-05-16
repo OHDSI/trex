@@ -17,21 +17,16 @@ import {
 import { Link } from "react-router-dom";
 import { PlayIcon, SquareIcon, RefreshCwIcon, RotateCwIcon } from "lucide-react";
 
-const TREX_NODES_QUERY = `
-  query TrexNodes {
+// One round-trip for the 4 status sources the page polls every 15 s. Previously
+// 4 separate useQuery calls fired 4 parallel HTTP requests, which over time
+// saturated trex's connection pool and wedged the deno event loop. PostGraphile
+// resolves the four root fields in parallel inside a single operation.
+const SERVICES_PAGE_STATUS_QUERY = `
+  query ServicesPageStatus {
     trexNodes { nodeId nodeName gossipAddr dataNode status }
-  }
-`;
-
-const TREX_SERVICES_QUERY = `
-  query TrexServices {
     trexServices { nodeName serviceName host port status uptimeSeconds config }
-  }
-`;
-
-const TREX_CLUSTER_STATUS_QUERY = `
-  query TrexClusterStatus {
     trexClusterStatus { totalNodes activeQueries queuedQueries memoryUtilizationPct }
+    etlPipelines { name state mode connection publication snapshot rowsReplicated lastActivity error }
   }
 `;
 
@@ -50,12 +45,6 @@ const STOP_SERVICE_MUTATION = `
 const RESTART_SERVICE_MUTATION = `
   mutation RestartService($extension: String!, $config: String!) {
     restartService(extension: $extension, config: $config) { success message error }
-  }
-`;
-
-const ETL_PIPELINES_QUERY = `
-  query EtlPipelines {
-    etlPipelines { name state mode connection publication snapshot rowsReplicated lastActivity error }
   }
 `;
 
@@ -112,9 +101,9 @@ interface EtlPipelineRow {
   error: string | null;
 }
 
-function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" {
+function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "success" {
   const s = status.toLowerCase();
-  if (s === "active" || s === "running") return "default";
+  if (s === "active" || s === "running") return "success";
   if (s === "stopped") return "secondary";
   return "destructive";
 }
@@ -136,31 +125,24 @@ export function Services() {
   const [formPort, setFormPort] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
-  const [nodesResult, reexecuteNodes] = useQuery({ query: TREX_NODES_QUERY });
-  const [servicesResult, reexecuteServices] = useQuery({ query: TREX_SERVICES_QUERY });
-  const [clusterResult, reexecuteCluster] = useQuery({ query: TREX_CLUSTER_STATUS_QUERY });
-
-  const [etlResult, reexecuteEtl] = useQuery({ query: ETL_PIPELINES_QUERY });
+  const [statusResult, reexecuteStatus] = useQuery({ query: SERVICES_PAGE_STATUS_QUERY });
 
   const [, startService] = useMutation(START_SERVICE_MUTATION);
   const [, stopService] = useMutation(STOP_SERVICE_MUTATION);
   const [, restartService] = useMutation(RESTART_SERVICE_MUTATION);
   const [, stopEtlPipeline] = useMutation(STOP_ETL_PIPELINE_MUTATION);
 
-  const nodes: NodeRow[] = nodesResult.data?.trexNodes || [];
-  const services: ServiceRow[] = servicesResult.data?.trexServices || [];
-  const clusterStatus: ClusterStatus | null = clusterResult.data?.trexClusterStatus || null;
-  const etlPipelines: EtlPipelineRow[] = etlResult.data?.etlPipelines || [];
+  const nodes: NodeRow[] = statusResult.data?.trexNodes || [];
+  const services: ServiceRow[] = statusResult.data?.trexServices || [];
+  const clusterStatus: ClusterStatus | null = statusResult.data?.trexClusterStatus || null;
+  const etlPipelines: EtlPipelineRow[] = statusResult.data?.etlPipelines || [];
 
   function refetchAll() {
-    reexecuteNodes({ requestPolicy: "network-only" });
-    reexecuteServices({ requestPolicy: "network-only" });
-    reexecuteCluster({ requestPolicy: "network-only" });
-    reexecuteEtl({ requestPolicy: "network-only" });
+    reexecuteStatus({ requestPolicy: "network-only" });
   }
 
   useEffect(() => {
-    const interval = setInterval(refetchAll, 10000);
+    const interval = setInterval(refetchAll, 15000);
     return () => clearInterval(interval);
   }, []);
 
@@ -393,7 +375,7 @@ export function Services() {
         <DataTable
           columns={nodeColumns}
           data={nodes}
-          loading={nodesResult.fetching}
+          loading={statusResult.fetching}
           emptyMessage="No cluster nodes found. The db extension may not be running."
         />
       </div>
@@ -403,7 +385,7 @@ export function Services() {
         <DataTable
           columns={serviceColumns}
           data={services}
-          loading={servicesResult.fetching}
+          loading={statusResult.fetching}
           emptyMessage="No services running."
         />
       </div>
@@ -418,7 +400,7 @@ export function Services() {
         <DataTable
           columns={etlColumns}
           data={etlPipelines}
-          loading={etlResult.fetching}
+          loading={statusResult.fetching}
           emptyMessage="No ETL pipelines running."
         />
       </div>

@@ -215,7 +215,7 @@ export function Apps() {
     {
       header: "Status",
       cell: (row) => (
-        <Badge variant={row.disabled ? "secondary" : "default"}>
+        <Badge variant={row.disabled ? "secondary" : "success"}>
           {row.disabled ? "Disabled" : "Active"}
         </Badge>
       ),

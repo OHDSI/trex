@@ -36,13 +36,28 @@ export function addPlugin(app: Express, value: any, dir: string, fullName: strin
         staticRegistered = true;
       }
 
-      // SPA fallback: serve index.html for non-file paths
+      // SPA fallback: serve index.html for non-file paths.
+      // Read on every request so npm-run-build's new asset hashes are picked up
+      // without restarting trex; and skip paths that look like asset requests
+      // (.js/.css/etc) so a stale browser HTML asking for a missing bundle gets
+      // a clean 404 instead of HTML masquerading as JS.
       if (r.spa) {
         const indexPath = join(fsPath, "index.html");
         try {
-          const html = Deno.readTextFileSync(indexPath);
-          app.use(fullPrefix, (_req, res) => {
-            res.type("html").send(html);
+          // Validate the file exists at registration time; the handler reads fresh per request.
+          Deno.statSync(indexPath);
+          app.use(fullPrefix, (req, res) => {
+            // Bail on extension-bearing paths — those are asset requests, not SPA routes.
+            if (/\.[a-zA-Z0-9]{1,8}$/.test(req.path)) {
+              res.status(404).send("Not found");
+              return;
+            }
+            try {
+              const html = Deno.readTextFileSync(indexPath);
+              res.type("html").send(html);
+            } catch {
+              res.status(404).send("Not found");
+            }
           });
           console.log(`Registered SPA fallback: ${fullPrefix}/* -> ${indexPath}`);
         } catch {

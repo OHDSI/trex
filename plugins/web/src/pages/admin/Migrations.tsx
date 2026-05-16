@@ -139,13 +139,13 @@ export function Migrations() {
     {
       header: "Applied",
       cell: (row) => (
-        <Badge variant="default">{row.appliedCount}</Badge>
+        <Badge variant="success">{row.appliedCount}</Badge>
       ),
     },
     {
       header: "Pending",
       cell: (row) => (
-        <Badge variant={row.pendingCount > 0 ? "destructive" : "secondary"}>
+        <Badge variant={row.pendingCount > 0 ? "warning" : "secondary"}>
           {row.pendingCount}
         </Badge>
       ),
@@ -154,9 +154,9 @@ export function Migrations() {
       header: "Status",
       cell: (row) =>
         row.pendingCount > 0 ? (
-          <Badge variant="outline">Pending</Badge>
+          <Badge variant="warning">Pending</Badge>
         ) : (
-          <Badge variant="default">Up to date</Badge>
+          <Badge variant="success">Up to date</Badge>
         ),
     },
   ];
@@ -176,9 +176,9 @@ export function Migrations() {
         <Badge
           variant={
             row.status === "applied"
-              ? "default"
+              ? "success"
               : row.status === "pending"
-              ? "outline"
+              ? "warning"
               : "destructive"
           }
         >

@@ -278,7 +278,7 @@ export function SsoProviders() {
     {
       header: "Status",
       cell: (row) => (
-        <Badge variant={row.enabled ? "default" : "secondary"}>
+        <Badge variant={row.enabled ? "success" : "secondary"}>
           {row.enabled ? "Enabled" : "Disabled"}
         </Badge>
       ),
