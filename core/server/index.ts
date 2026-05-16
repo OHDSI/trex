@@ -296,6 +296,18 @@ app.post(`${BASE_PATH}/api/plugins/register`, apiLimiter, express.json(), async 
   }
 });
 
+// Readiness probe: 200 only after ensureAuthKeys has populated supabaseEnvVars
+// (which itself happens after the auth.anonKey + auth.serviceRoleKey rows land
+// in trex.setting). Used by the container healthcheck so studio's depends_on
+// waits until keys are actually fetchable, not just until the HTTP server is up.
+app.get(`${BASE_PATH}/api/ready`, (_req, res) => {
+  if (supabaseEnvVars.length > 0) {
+    res.status(200).json({ ready: true });
+  } else {
+    res.status(503).json({ ready: false, reason: "auth keys not yet initialized" });
+  }
+});
+
 // Admin-only: get auth keys
 app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
   try {

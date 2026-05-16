@@ -77,7 +77,7 @@ export function Extensions() {
     {
       header: "Loaded",
       cell: (row) => (
-        <Badge variant={row.loaded ? "default" : "secondary"}>
+        <Badge variant={row.loaded ? "success" : "secondary"}>
           {row.loaded ? "Yes" : "No"}
         </Badge>
       ),

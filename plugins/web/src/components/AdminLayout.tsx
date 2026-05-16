@@ -67,7 +67,7 @@ export function AdminLayout() {
   return (
     <div className="flex gap-6">
       <aside className="w-48 shrink-0">
-        <nav className="flex flex-col gap-4">
+        <nav className="flex flex-col gap-4 rounded-lg border border-border/70 bg-background/60 backdrop-blur-sm p-2">
           {navSections.map((section) => (
             <div key={section.label} className="flex flex-col gap-1">
               <span className="px-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground/60">
@@ -78,10 +78,10 @@ export function AdminLayout() {
                   key={item.to}
                   to={item.to}
                   className={({ isActive }) =>
-                    `px-3 py-2 rounded-md text-sm font-medium transition-colors ${
+                    `relative px-3 py-2 rounded-md text-sm font-medium transition-colors duration-[120ms] ${
                       isActive
-                        ? "bg-accent text-accent-foreground"
-                        : "text-muted-foreground hover:bg-accent/50"
+                        ? "bg-sidebar-accent text-sidebar-accent-foreground font-semibold before:content-[''] before:absolute before:left-0 before:top-2 before:bottom-2 before:w-[2px] before:rounded-full before:bg-primary"
+                        : "text-muted-foreground hover:bg-sidebar-accent/50"
                     }`
                   }
                 >

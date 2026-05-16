@@ -160,11 +160,11 @@ function formatDate(dateString: string): string {
 
 function getUserStatus(user: UserDetailData): {
   label: string;
-  variant: "default" | "secondary" | "destructive" | "outline";
+  variant: "default" | "secondary" | "destructive" | "outline" | "success";
 } {
   if (user.deletedAt) return { label: "Deleted", variant: "destructive" };
   if (user.banned) return { label: "Banned", variant: "destructive" };
-  return { label: "Active", variant: "default" };
+  return { label: "Active", variant: "success" };
 }
 
 export function UserDetail() {
@@ -389,7 +389,7 @@ export function UserDetail() {
               <div className="flex justify-between">
                 <dt className="text-muted-foreground">Email Verified</dt>
                 <dd>
-                  <Badge variant={user.emailVerified ? "default" : "outline"}>
+                  <Badge variant={user.emailVerified ? "success" : "outline"}>
                     {user.emailVerified ? "Verified" : "Unverified"}
                   </Badge>
                 </dd>

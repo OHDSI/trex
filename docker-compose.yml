@@ -56,6 +56,10 @@ services:
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
       - ./core/server:/usr/src/core/server
+      # Schema migrations: mount host dir so new V*.sql files added after the
+      # image was built actually get applied. Without this, only the migrations
+      # baked into the image at build time exist in /usr/src/core/schema.
+      - ./core/schema:/usr/src/core/schema
       - ./plugins/storage:/usr/src/plugins-dev/storage
       - ./plugins/studio:/usr/src/plugins-dev/studio
       - ./docker/runtime-deno.json:/usr/src/deno.json:ro
@@ -85,6 +89,19 @@ services:
       POSTGREST_PORT: "3000"
       STUDIO_INTERNAL_URL: http://studio:3000
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
+    healthcheck:
+      # /trex/api/ready returns 503 until supabaseEnvVars is populated, which is
+      # set immediately after ensureAuthKeys() writes anon/service keys to
+      # trex.setting. The auth/v1/health probe wasn't enough — it answered 200
+      # as soon as the HTTP server listened, which could be a few ms before the
+      # keys hit the DB. studio's depends_on then raced and read empty keys.
+      test:
+        - CMD-SHELL
+        - 'node -e "fetch(''http://localhost:8001/trex/api/ready'').then(r => { if (r.status !== 200) throw new Error(r.status) })"'
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
@@ -112,7 +129,8 @@ services:
     restart: unless-stopped
     # NOT exposing a host port: direct access would bypass trex's admin-only gate.
     depends_on:
-      - trex
+      trex:
+        condition: service_healthy
     volumes:
       # Wrapper entrypoint fetches SUPABASE_ANON_KEY / SUPABASE_SERVICE_KEY from trex.setting at boot.
       - ./plugins/studio/supabase-studio/apps/studio/docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro

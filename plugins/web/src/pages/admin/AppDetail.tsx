@@ -347,7 +347,7 @@ export function AppDetail() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Badge variant={app.disabled ? "secondary" : "default"}>
+          <Badge variant={app.disabled ? "secondary" : "success"}>
             {app.disabled ? "Disabled" : "Active"}
           </Badge>
           <Badge variant={app.type === "confidential" ? "default" : "outline"}>

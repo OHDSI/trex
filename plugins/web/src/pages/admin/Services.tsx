@@ -112,9 +112,9 @@ interface EtlPipelineRow {
   error: string | null;
 }
 
-function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" {
+function statusBadgeVariant(status: string): "default" | "secondary" | "destructive" | "success" {
   const s = status.toLowerCase();
-  if (s === "active" || s === "running") return "default";
+  if (s === "active" || s === "running") return "success";
   if (s === "stopped") return "secondary";
   return "destructive";
 }

@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useTheme } from "next-themes";
 import { authClient } from "@/lib/auth-client";
 import { BASE_PATH } from "@/lib/config";
 
@@ -8,6 +9,8 @@ import { BASE_PATH } from "@/lib/config";
 export function EmbedPage({ plugin }: { plugin: string }) {
   const [ready, setReady] = useState(false);
   const src = `/plugins/trex/${plugin}/`;
+  const iframeRef = useRef<HTMLIFrameElement | null>(null);
+  const { resolvedTheme } = useTheme();
 
   useEffect(() => {
     if (plugin !== "studio") { setReady(true); return; }
@@ -27,6 +30,24 @@ export function EmbedPage({ plugin }: { plugin: string }) {
     return () => { cancelled = true; };
   }, [plugin]);
 
+  // Push the resolved theme to the iframe whenever it changes (and on first load via onLoad).
+  useEffect(() => {
+    if (!ready || !resolvedTheme) return;
+    const iframe = iframeRef.current;
+    iframe?.contentWindow?.postMessage(
+      { type: "trex:theme", theme: resolvedTheme },
+      window.location.origin,
+    );
+  }, [ready, resolvedTheme]);
+
+  const handleLoad = () => {
+    if (!resolvedTheme) return;
+    iframeRef.current?.contentWindow?.postMessage(
+      { type: "trex:theme", theme: resolvedTheme },
+      window.location.origin,
+    );
+  };
+
   if (!ready) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -37,7 +58,9 @@ export function EmbedPage({ plugin }: { plugin: string }) {
 
   return (
     <iframe
+      ref={iframeRef}
       src={src}
+      onLoad={handleLoad}
       className="w-full border-0"
       style={{ height: "calc(100vh - 3.5rem)" }}
       title={plugin}
