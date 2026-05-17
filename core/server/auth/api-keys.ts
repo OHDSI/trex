@@ -6,7 +6,7 @@ import {
 } from "./jwt.ts";
 
 /**
- * Ensure anon key, service_role key, and jwt_secret are stored in trex.setting.
+ * Ensure anon key, service_role key, and jwt_secret are stored in trexdb.setting.
  * Generates them on first run; prints to console for easy copy.
  */
 export async function ensureAuthKeys(): Promise<{
@@ -17,7 +17,7 @@ export async function ensureAuthKeys(): Promise<{
   const client = await pool.connect();
   try {
     const existing = await client.query(
-      `SELECT key, value FROM trex.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.jwtSecret')`,
+      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.jwtSecret')`,
     );
 
     const settings: Record<string, string> = {};
@@ -27,12 +27,9 @@ export async function ensureAuthKeys(): Promise<{
         typeof row.value === "string" ? row.value : JSON.parse(row.value);
     }
 
-    const jwtSecret = getJwtSecret();
-    if (!jwtSecret) {
-      throw new Error(
-        "AUTH_JWT_SECRET or BETTER_AUTH_SECRET environment variable is required",
-      );
-    }
+    // getJwtSecret throws if TREX_ROOT_KEY is unset; treat its return as
+    // always present.
+    const jwtSecret = await getJwtSecret();
 
     let anonKey = settings["auth.anonKey"];
     let serviceRoleKey = settings["auth.serviceRoleKey"];
@@ -40,7 +37,7 @@ export async function ensureAuthKeys(): Promise<{
     if (!anonKey) {
       anonKey = await generateAnonKey();
       await client.query(
-        `INSERT INTO trex.setting (key, value) VALUES ('auth.anonKey', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        `INSERT INTO trexdb.setting (key, value) VALUES ('auth.anonKey', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
         [JSON.stringify(anonKey)],
       );
     }
@@ -48,14 +45,14 @@ export async function ensureAuthKeys(): Promise<{
     if (!serviceRoleKey) {
       serviceRoleKey = await generateServiceRoleKey();
       await client.query(
-        `INSERT INTO trex.setting (key, value) VALUES ('auth.serviceRoleKey', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        `INSERT INTO trexdb.setting (key, value) VALUES ('auth.serviceRoleKey', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
         [JSON.stringify(serviceRoleKey)],
       );
     }
 
     if (!settings["auth.jwtSecret"]) {
       await client.query(
-        `INSERT INTO trex.setting (key, value) VALUES ('auth.jwtSecret', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+        `INSERT INTO trexdb.setting (key, value) VALUES ('auth.jwtSecret', $1::jsonb) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
         [JSON.stringify(jwtSecret)],
       );
     }

@@ -11,7 +11,7 @@ function getPool(): InstanceType<typeof Pool> {
     if (databaseUrl) {
       pool = new Pool({
         connectionString: databaseUrl,
-        options: "-c search_path=trex,public",
+        options: "-c search_path=trexdb,public",
         ...poolSsl(databaseUrl),
       });
     }
@@ -60,8 +60,8 @@ export async function authContext(
           const p = getPool();
           if (p) {
             const result = await p.query(
-              `SELECT r.name FROM trex.user_role ur
-               JOIN trex.role r ON ur."roleId" = r.id
+              `SELECT r.name FROM trexdb.user_role ur
+               JOIN trexdb.role r ON ur."roleId" = r.id
                WHERE ur."userId" = $1`,
               [claims.sub],
             );

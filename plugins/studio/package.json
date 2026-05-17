@@ -11,7 +11,9 @@
   "scripts": {
     "build": "[ -f build_static/index.html ] || npm run build:static",
     "build:static": "corepack enable && cd supabase-studio && (pnpm install --frozen-lockfile || pnpm install --frozen-lockfile || pnpm install --frozen-lockfile) && rm -rf apps/studio/app/api && TREX_STATIC_EXPORT=1 SKIP_ASSET_UPLOAD=1 pnpm exec turbo run build --filter=studio --env-mode=loose && rm -rf ../build_static && mkdir -p ../build_static && cp -a apps/studio/out/. ../build_static/",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "test": "vitest run --passWithNoTests",
+    "test:coverage": "vitest run --coverage --passWithNoTests"
   },
   "trex": {
     "functions": {
@@ -34,5 +36,10 @@
         { "path": "/studio-fallback", "dir": "build" }
       ]
     }
+  },
+  "devDependencies": {
+    "@vitest/coverage-v8": "^4.0.16",
+    "jsdom": "^27.4.0",
+    "vitest": "^4.0.16"
   }
 }

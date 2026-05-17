@@ -5,6 +5,7 @@ use pgt::{config::TransformationConfig, SqlTransformer};
 use std::env;
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_data_type_transformations() {
     let mut runner = IntegrationTestRunner::new();
 
@@ -63,6 +64,7 @@ async fn test_data_type_transformations() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_basic_transformations() {
     let mut runner = IntegrationTestRunner::new();
 
@@ -145,6 +147,7 @@ async fn test_basic_transformations() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_hana_now_support() {
     init_test_env();
     let hana_url = std::env::var("HANA_URL").expect("HANA_URL not found in environment");
@@ -189,6 +192,7 @@ Testing CURRENT_TIMESTAMP() with parentheses in HANA..."
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_complex_query_transformations() {
     init_test_env();
     let hana_url = env::var("HANA_URL")
@@ -335,6 +339,7 @@ async fn test_complex_query_transformations() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_end_to_end_transformation_and_execution() {
     let mut runner = IntegrationTestRunner::new();
 
@@ -410,6 +415,7 @@ async fn test_end_to_end_transformation_and_execution() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_error_handling_and_edge_cases() {
     let mut runner = IntegrationTestRunner::new();
 
@@ -468,6 +474,7 @@ async fn test_error_handling_and_edge_cases() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_serial_identity_transformation() {
     init_test_env();
     let hana_url = env::var("HANA_URL")
@@ -613,6 +620,7 @@ async fn test_serial_identity_transformation() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_bigserial_identity_transformation() {
     init_test_env();
     let hana_url = env::var("HANA_URL")
@@ -747,6 +755,7 @@ async fn test_bigserial_identity_transformation() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_now_function_directly_in_hana() {
     let mut runner = IntegrationTestRunner::new();
 

@@ -12,7 +12,7 @@
       "env": {
         "_shared": {
           "PG_META_DB_URL": "${DATABASE_URL}",
-          "CRYPTO_KEY": "${BETTER_AUTH_SECRET}"
+          "CRYPTO_KEY": "${PG_META_CRYPTO_KEY}"
         }
       },
       "api": [

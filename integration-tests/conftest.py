@@ -1,5 +1,6 @@
 import duckdb
 import multiprocessing as mp
+import pathlib
 import pytest
 import tempfile
 import time
@@ -10,6 +11,12 @@ try:
     mp.set_start_method("spawn")
 except RuntimeError:
     pass
+
+if os.environ.get("TREX_COVERAGE") == "1":
+    _profraw_dir = pathlib.Path(__file__).parent / "coverage" / "profraw"
+    _profraw_dir.mkdir(parents=True, exist_ok=True)
+    # %p = pid, %m = binary id. Generates one .profraw per subprocess.
+    os.environ["LLVM_PROFILE_FILE"] = str(_profraw_dir / "trex-%p-%m.profraw")
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 POOL_EXT_TREX = f"{REPO_ROOT}/plugins/pool/build/debug/extension/pool/pool.trex"

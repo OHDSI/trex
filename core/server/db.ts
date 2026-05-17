@@ -8,6 +8,6 @@ if (!databaseUrl) {
 
 export const pool = new Pool({
   connectionString: databaseUrl,
-  options: "-c search_path=trex,public",
+  options: "-c search_path=trexdb,public",
   ...poolSsl(databaseUrl),
 });

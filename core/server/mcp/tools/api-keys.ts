@@ -13,8 +13,8 @@ export function registerApiKeyTools(server: McpServer) {
         const result = await pool.query(
           `SELECT ak.id, ak.name, ak.key_prefix, ak."userId", u.name AS "userName", u.email AS "userEmail",
                   ak."lastUsedAt", ak."expiresAt", ak."revokedAt", ak."createdAt"
-           FROM trex.api_key ak
-           JOIN trex."user" u ON ak."userId" = u.id
+           FROM trexdb.api_key ak
+           JOIN trexdb."user" u ON ak."userId" = u.id
            ORDER BY ak."createdAt" DESC`,
         );
         return { content: [{ type: "text", text: JSON.stringify(result.rows, null, 2) }] };
@@ -35,7 +35,7 @@ export function registerApiKeyTools(server: McpServer) {
     async ({ userId, name, expiresAt }) => {
       try {
         const userResult = await pool.query(
-          `SELECT role FROM trex."user" WHERE id = $1`,
+          `SELECT role FROM trexdb."user" WHERE id = $1`,
           [userId],
         );
         if (userResult.rows.length === 0) {
@@ -86,7 +86,7 @@ export function registerApiKeyTools(server: McpServer) {
     async ({ keyId }) => {
       try {
         const result = await pool.query(
-          `UPDATE trex.api_key SET "revokedAt" = NOW() WHERE id = $1 AND "revokedAt" IS NULL RETURNING id, name, key_prefix`,
+          `UPDATE trexdb.api_key SET "revokedAt" = NOW() WHERE id = $1 AND "revokedAt" IS NULL RETURNING id, name, key_prefix`,
           [keyId],
         );
         if (result.rows.length === 0) {

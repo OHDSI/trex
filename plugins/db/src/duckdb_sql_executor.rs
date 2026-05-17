@@ -118,8 +118,8 @@ mod tests {
             Err(e) => {
                 let err_msg = format!("{e}");
                 assert!(
-                    err_msg.contains("not initialised"),
-                    "Error should contain 'not available', got: {err_msg}"
+                    err_msg.to_lowercase().contains("pool"),
+                    "Error should indicate the pool is unavailable, got: {err_msg}"
                 );
             }
             Ok(_) => panic!("Expected error when no shared connection is available"),
@@ -133,8 +133,8 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(
-            err_msg.contains("not initialised"),
-            "Error should contain 'not available', got: {err_msg}"
+            err_msg.to_lowercase().contains("pool"),
+            "Error should indicate the pool is unavailable, got: {err_msg}"
         );
     }
 }

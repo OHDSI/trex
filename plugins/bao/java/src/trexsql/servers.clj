@@ -144,7 +144,7 @@
 (defn start-servers!
   "Start both PgWire and Trexas servers.
    Validates config and password before starting.
-   Returns updated database with :servers-running? true."
+   Returns the database (server state is queried live via db/running-servers)."
   [database config]
   (when-let [err (config/validate-tls-config config)]
     (binding [*out* *err*]
@@ -157,29 +157,37 @@
       (println (str "PgWire server: " pgwire-result)))
     (let [trexas-result (start-trexas-server database config)]
       (println (str "Trexas server: " trexas-result)))
-    (assoc database :servers-running? true)))
+    database))
 
 (defn print-server-status
-  "Print server listening status."
-  [{:keys [trexas-host trexas-port pgwire-host pgwire-port
-           tls-cert tls-port enable-inspector inspector-type
-           inspector-host inspector-port event-worker-path
-           worker-policy max-parallelism]}]
-  (println)
-  (println "\u2705 Servers started successfully")
-  (println (str "Trexas listening on "
-                (if tls-cert "https://" "http://")
-                trexas-host ":" trexas-port
-                (when enable-inspector
-                  (str " (inspector: " inspector-type ":" inspector-host ":" inspector-port ")"))
-                (if event-worker-path
-                  " (with event worker)"
-                  " (without event worker)")))
-  (when (or worker-policy max-parallelism)
-    (println (str "  Worker config: "
-                  (when worker-policy (str "policy=" worker-policy))
-                  (when (and worker-policy max-parallelism) ", ")
-                  (when max-parallelism (str "max-parallelism=" max-parallelism)))))
-  (println (str "PgWire listening on " pgwire-host ":" pgwire-port))
-  (println)
-  (println "Press Ctrl+C to stop"))
+  "Print listening status by querying the running engine. Works for
+   single-instance and multi-instance configs alike (one line per running
+   trexas server). The `opts` arg is kept for callers that want to also
+   print non-server info (worker policy, inspector flags) which only the
+   caller knows about."
+  [database opts]
+  (let [servers (db/running-servers database)]
+    (println)
+    (println "\u2705 Servers started successfully")
+    (if (seq servers)
+      (doseq [{:keys [host port status]} servers]
+        (println (str "Trexas listening on http(s)://" host ":" port
+                      " (" status ")")))
+      (println "(no trexas servers reported by trex_list_servers())"))
+    (when-let [pgwire-port (:pgwire-port opts)]
+      (println (str "PgWire listening on "
+                    (or (:pgwire-host opts) "0.0.0.0") ":" pgwire-port)))
+    (when (or (:worker-policy opts) (:max-parallelism opts))
+      (println (str "  Worker config: "
+                    (when (:worker-policy opts)
+                      (str "policy=" (:worker-policy opts)))
+                    (when (and (:worker-policy opts) (:max-parallelism opts)) ", ")
+                    (when (:max-parallelism opts)
+                      (str "max-parallelism=" (:max-parallelism opts))))))
+    (when (:enable-inspector opts)
+      (println (str "  Inspector: "
+                    (:inspector-type opts) ":"
+                    (:inspector-host opts) ":"
+                    (:inspector-port opts))))
+    (println)
+    (println "Press Ctrl+C to stop")))

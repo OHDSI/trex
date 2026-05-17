@@ -10,6 +10,8 @@ import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
 import { ensureAuthKeys } from "./auth/api-keys.ts";
 import { verifyAccessToken } from "./auth/jwt.ts";
+import { initDek } from "./auth/dek.ts";
+import { getJwtSecret } from "./auth/jwt.ts";
 import { createPostGraphile } from "./postgraphile.ts";
 import { authContext } from "./middleware/auth-context.ts";
 import { Plugins } from "./plugin/plugin.ts";
@@ -88,7 +90,7 @@ const PUBLIC_SETTING_KEYS = ["auth.selfRegistration", "auth.anonKey"];
 app.get(`${BASE_PATH}/api/settings/public`, apiLimiter, async (_req, res) => {
   try {
     const result = await pool.query(
-      `SELECT key, value FROM trex.setting WHERE key = ANY($1)`,
+      `SELECT key, value FROM trexdb.setting WHERE key = ANY($1)`,
       [PUBLIC_SETTING_KEYS]
     );
     const settings: Record<string, any> = {};
@@ -189,7 +191,7 @@ app.get(`${BASE_PATH}/api/api-keys`, apiLimiter, async (req, res) => {
       return;
     }
     const result = await pool.query(
-      `SELECT id, name, key_prefix, "lastUsedAt", "expiresAt", "revokedAt", "createdAt" FROM trex.api_key WHERE "userId" = $1 ORDER BY "createdAt" DESC`,
+      `SELECT id, name, key_prefix, "lastUsedAt", "expiresAt", "revokedAt", "createdAt" FROM trexdb.api_key WHERE "userId" = $1 ORDER BY "createdAt" DESC`,
       [user.id]
     );
     res.json(result.rows);
@@ -207,7 +209,7 @@ app.delete(`${BASE_PATH}/api/api-keys/:id`, apiLimiter, async (req, res) => {
       return;
     }
     const result = await pool.query(
-      `UPDATE trex.api_key SET "revokedAt" = NOW() WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL RETURNING id`,
+      `UPDATE trexdb.api_key SET "revokedAt" = NOW() WHERE id = $1 AND "userId" = $2 AND "revokedAt" IS NULL RETURNING id`,
       [req.params.id, user.id]
     );
     if (result.rows.length === 0) {
@@ -298,7 +300,7 @@ app.post(`${BASE_PATH}/api/plugins/register`, apiLimiter, express.json(), async 
 
 // Readiness probe: 200 only after ensureAuthKeys has populated supabaseEnvVars
 // (which itself happens after the auth.anonKey + auth.serviceRoleKey rows land
-// in trex.setting). Used by the container healthcheck so studio's depends_on
+// in trexdb.setting). Used by the container healthcheck so studio's depends_on
 // waits until keys are actually fetchable, not just until the HTTP server is up.
 app.get(`${BASE_PATH}/api/ready`, (_req, res) => {
   if (supabaseEnvVars.length > 0) {
@@ -317,7 +319,7 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
       return;
     }
     const result = await pool.query(
-      `SELECT key, value FROM trex.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
+      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
     );
     const keys: Record<string, string> = {};
     for (const row of result.rows) {
@@ -782,17 +784,29 @@ app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res)
   }
 });
 
+// Initialize the wrapped DEK before anything that may encrypt/decrypt secrets.
+// First-boot: generates a fresh DEK, wraps it with the KEK derived from
+// TREX_ROOT_KEY, persists it in trexdb.kek_wrapped_dek. Subsequent boots:
+// reads + unwraps the active row.
+try {
+  await initDek(pool);
+  console.log("[boot] DEK initialized");
+} catch (err) {
+  console.error("[boot] FATAL: DEK init failed:", err);
+  Deno.exit(1);
+}
+
 // One-shot bootstrap: encrypt any database_credential rows that still hold a
 // plaintext password. Runs after core migrations so password_encrypted exists.
 try {
   const tableCheck = await pool.query(
     `SELECT column_name FROM information_schema.columns
-     WHERE table_schema = 'trex' AND table_name = 'database_credential'
+     WHERE table_schema = 'trexdb' AND table_name = 'database_credential'
        AND column_name = 'password_encrypted'`,
   );
   if (tableCheck.rows.length > 0) {
     const stale = await pool.query(
-      `SELECT id, password FROM trex.database_credential
+      `SELECT id, password FROM trexdb.database_credential
        WHERE password_encrypted IS NULL AND password IS NOT NULL`,
     );
     if (stale.rows.length > 0) {
@@ -802,7 +816,7 @@ try {
         try {
           const ct = await encryptSecret(row.password);
           await pool.query(
-            `UPDATE trex.database_credential
+            `UPDATE trexdb.database_credential
              SET password_encrypted = $1, password = NULL, "updatedAt" = NOW()
              WHERE id = $2`,
             [ct, row.id],
@@ -822,7 +836,7 @@ try {
 // Admin bootstrap banner — warn if no admin user and no ADMIN_EMAIL is set.
 try {
   const adminCount = await pool.query(
-    `SELECT COUNT(*)::INTEGER AS n FROM trex."user" WHERE role = 'admin' AND ("deletedAt" IS NULL)`,
+    `SELECT COUNT(*)::INTEGER AS n FROM trexdb."user" WHERE role = 'admin' AND ("deletedAt" IS NULL)`,
   );
   const hasAdmin = (adminCount.rows[0]?.n ?? 0) > 0;
   const adminEmail = Deno.env.get("ADMIN_EMAIL");
@@ -874,7 +888,7 @@ if (DEBUG_GRAPHQL) {
 const databaseUrl = Deno.env.get("DATABASE_URL");
 if (databaseUrl) {
   try {
-    const schemas = (Deno.env.get("PG_SCHEMA") || "trex").split(",");
+    const schemas = (Deno.env.get("PG_SCHEMA") || "trexdb").split(",");
     const pgl = createPostGraphile(databaseUrl, schemas);
     const serv = pgl.createServ(grafserv);
     await serv.addTo(app, server);
@@ -1276,6 +1290,32 @@ app.get("/", (_req, res) => {
   res.redirect("/plugins/trex/web/");
 });
 
+// HARD CUT detection: stored anon/service_role keys in trexdb.setting were
+// signed with the previous BETTER_AUTH_SECRET-derived key. If the stored
+// auth.jwtSecret doesn't match the current HKDF-derived one, the cached
+// JWTs cannot be verified — drop the three settings rows so ensureAuthKeys
+// regenerates them with the new derivation. Idempotent: a steady-state
+// restart finds matching values and is a no-op.
+try {
+  const stored = await pool.query(
+    "SELECT value FROM trexdb.setting WHERE key = 'auth.jwtSecret' LIMIT 1",
+  );
+  const storedSecret = stored.rows[0]?.value
+    ? (typeof stored.rows[0].value === "string"
+        ? stored.rows[0].value.replace(/^"|"$/g, "")
+        : stored.rows[0].value)
+    : null;
+  const currentSecret = await getJwtSecret();
+  if (storedSecret && storedSecret !== currentSecret) {
+    console.warn("[boot] stored JWT secret does not match current derivation; purging auth.{anonKey,serviceRoleKey,jwtSecret} so they re-issue under the new key");
+    await pool.query(
+      "DELETE FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.jwtSecret')",
+    );
+  }
+} catch (err) {
+  console.error("[boot] failed to reconcile stored JWT secret; continuing anyway:", err);
+}
+
 // Initialize auth keys (anon key, service_role key) + cache for edge functions
 try {
   const authKeys = await ensureAuthKeys();
@@ -1297,11 +1337,11 @@ try {
 // Load SSO providers
 try {
   const tableCheck = await pool.query(
-    `SELECT 1 FROM information_schema.tables WHERE table_schema = 'trex' AND table_name = 'sso_provider' LIMIT 1`
+    `SELECT 1 FROM information_schema.tables WHERE table_schema = 'trexdb' AND table_name = 'sso_provider' LIMIT 1`
   );
   if (tableCheck.rows.length > 0) {
     const result = await pool.query(
-      `SELECT id FROM trex.sso_provider WHERE enabled = true`
+      `SELECT id FROM trexdb.sso_provider WHERE enabled = true`
     );
     const names = result.rows.map((r: any) => r.id);
     console.log(`[auth] SSO providers: ${names.length > 0 ? names.join(", ") : "none"}`);
@@ -1314,11 +1354,11 @@ try {
 const initialKeyName = Deno.env.get("TREX_INITIAL_API_KEY_NAME");
 if (initialKeyName) {
   try {
-    const existing = await pool.query("SELECT 1 FROM trex.api_key LIMIT 1");
+    const existing = await pool.query("SELECT 1 FROM trexdb.api_key LIMIT 1");
     if (existing.rows.length === 0) {
       const { generateApiKey } = await import("./mcp/auth.ts");
       const adminResult = await pool.query(
-        `SELECT id FROM trex."user" WHERE role = 'admin' ORDER BY "createdAt" ASC LIMIT 1`
+        `SELECT id FROM trexdb."user" WHERE role = 'admin' ORDER BY "createdAt" ASC LIMIT 1`
       );
       if (adminResult.rows.length > 0) {
         const result = await generateApiKey(adminResult.rows[0].id, initialKeyName);

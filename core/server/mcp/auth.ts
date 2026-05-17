@@ -38,7 +38,7 @@ export async function generateApiKey(
   const keyPrefix = raw.slice(0, 13);
 
   const result = await pool.query(
-    `INSERT INTO trex.api_key (name, key_hash, key_prefix, "userId", "expiresAt")
+    `INSERT INTO trexdb.api_key (name, key_hash, key_prefix, "userId", "expiresAt")
      VALUES ($1, $2, $3, $4, $5)
      RETURNING id`,
     [name, keyHash, keyPrefix, userId, expiresAt || null],
@@ -62,9 +62,9 @@ export async function validateApiKey(
   const keyHash = await sha256hex(key);
 
   const result = await pool.query(
-    `UPDATE trex.api_key ak
+    `UPDATE trexdb.api_key ak
      SET "lastUsedAt" = NOW()
-     FROM trex."user" u
+     FROM trexdb."user" u
      WHERE ak.key_hash = $1
        AND ak."revokedAt" IS NULL
        AND (ak."expiresAt" IS NULL OR ak."expiresAt" > NOW())

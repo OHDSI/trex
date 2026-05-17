@@ -16,7 +16,7 @@ const omitSensitivePlugin = makeJSONPgSmartTagsPlugin({
   version: 1,
   config: {
     class: {
-      "trex.setting": { tags: { omit: true } },
+      "trexdb.setting": { tags: { omit: true } },
     },
   },
 });

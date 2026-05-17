@@ -470,7 +470,7 @@ router.get(`${BASE_PATH}/v1/projects/:ref/api-keys`, apiLimiter, async (req, res
   const { pool } = await import("../db.ts");
   try {
     const result = await pool.query(
-      `SELECT key, value FROM trex.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
+      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
     );
     const settings: Record<string, string> = {};
     for (const row of result.rows) {
@@ -692,7 +692,7 @@ router.get(`${BASE_PATH}/v1/projects/:ref/secrets`, apiLimiter, async (req, res)
   try {
     const { pool } = await import("../db.ts");
     const result = await pool.query(
-      `SELECT name, value_hash, "updatedAt" FROM trex.secret ORDER BY name`,
+      `SELECT name, value_hash, "updatedAt" FROM trexdb.secret ORDER BY name`,
     );
     const secrets = result.rows
       .filter((r: any) => !r.name.startsWith("SUPABASE_"))
@@ -731,7 +731,7 @@ router.post(`${BASE_PATH}/v1/projects/:ref/secrets`, apiLimiter, async (req, res
       const encrypted = await encryptSecret(value);
       const hash = await hashSecret(value);
       await pool.query(
-        `INSERT INTO trex.secret (name, value_encrypted, value_hash, "updatedAt")
+        `INSERT INTO trexdb.secret (name, value_encrypted, value_hash, "updatedAt")
          VALUES ($1, $2, $3, NOW())
          ON CONFLICT (name) DO UPDATE SET value_encrypted = $2, value_hash = $3, "updatedAt" = NOW()`,
         [name, encrypted, hash],
@@ -766,7 +766,7 @@ router.delete(`${BASE_PATH}/v1/projects/:ref/secrets`, apiLimiter, async (req, r
   try {
     const { pool } = await import("../db.ts");
     await pool.query(
-      `DELETE FROM trex.secret WHERE name = ANY($1)`,
+      `DELETE FROM trexdb.secret WHERE name = ANY($1)`,
       [names],
     );
 
@@ -796,7 +796,7 @@ export async function loadSecretsForEnv(): Promise<[string, string][]> {
     const { pool } = await import("../db.ts");
     const { decryptSecret } = await import("../auth/crypto.ts");
     const result = await pool.query(
-      `SELECT name, value_encrypted FROM trex.secret ORDER BY name`,
+      `SELECT name, value_encrypted FROM trexdb.secret ORDER BY name`,
     );
     const entries: [string, string][] = [];
     for (const row of result.rows) {
@@ -818,7 +818,7 @@ export async function loadSecretsForEnv(): Promise<[string, string][]> {
 // ── Config PATCH/PUT endpoints (Supabase CLI: supabase config push) ──────────
 // CLI uses PATCH for some endpoints and PUT for others, so we register both.
 
-// Helper to upsert settings into trex.setting
+// Helper to upsert settings into trexdb.setting
 async function upsertSettings(body: Record<string, any>, mappings: Record<string, string | { key: string; transform?: (v: any) => any }>) {
   const { pool } = await import("../db.ts");
   for (const [field, mapping] of Object.entries(mappings)) {
@@ -827,7 +827,7 @@ async function upsertSettings(body: Record<string, any>, mappings: Record<string
     const transform = typeof mapping === "object" ? mapping.transform : undefined;
     const value = transform ? transform(body[field]) : body[field];
     await pool.query(
-      `INSERT INTO trex.setting (key, value, "updatedAt") VALUES ($1, $2, NOW())
+      `INSERT INTO trexdb.setting (key, value, "updatedAt") VALUES ($1, $2, NOW())
        ON CONFLICT (key) DO UPDATE SET value = $2, "updatedAt" = NOW()`,
       [key, JSON.stringify(value)],
     );

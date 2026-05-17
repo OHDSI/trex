@@ -14,7 +14,7 @@ export function registerDatabaseTools(server: McpServer) {
     },
     async ({ search }) => {
       try {
-        let sql = `SELECT id, host, port, "databaseName", dialect, description, enabled, "vocabSchemas", extra, "createdAt", "updatedAt" FROM trex.database`;
+        let sql = `SELECT id, host, port, "databaseName", dialect, description, enabled, "vocabSchemas", extra, "createdAt", "updatedAt" FROM trexdb.database`;
         const params: any[] = [];
         if (search) {
           params.push(`%${search}%`);
@@ -45,7 +45,7 @@ export function registerDatabaseTools(server: McpServer) {
     async ({ id, host, port, databaseName, dialect, description, enabled }) => {
       try {
         const result = await pool.query(
-          `INSERT INTO trex.database (id, host, port, "databaseName", dialect, description, enabled)
+          `INSERT INTO trexdb.database (id, host, port, "databaseName", dialect, description, enabled)
            VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
           [id, host, port || 5432, databaseName, dialect || "postgresql", description || null, enabled !== false],
         );
@@ -86,7 +86,7 @@ export function registerDatabaseTools(server: McpServer) {
         }
 
         params.push(id);
-        const sql = `UPDATE trex.database SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
+        const sql = `UPDATE trexdb.database SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
         const result = await pool.query(sql, params);
         if (result.rows.length === 0) {
           return { content: [{ type: "text", text: "Database not found" }], isError: true };
@@ -107,7 +107,7 @@ export function registerDatabaseTools(server: McpServer) {
     async ({ id }) => {
       try {
         const result = await pool.query(
-          `DELETE FROM trex.database WHERE id = $1 RETURNING id`,
+          `DELETE FROM trexdb.database WHERE id = $1 RETURNING id`,
           [id],
         );
         if (result.rows.length === 0) {
@@ -130,7 +130,7 @@ export function registerDatabaseTools(server: McpServer) {
       const pg = (await import("pg")).default;
       try {
         const dbResult = await pool.query(
-          `SELECT host, port, "databaseName", dialect FROM trex.database WHERE id = $1`,
+          `SELECT host, port, "databaseName", dialect FROM trexdb.database WHERE id = $1`,
           [databaseId],
         );
         if (dbResult.rows.length === 0) {
@@ -139,7 +139,7 @@ export function registerDatabaseTools(server: McpServer) {
         const db = dbResult.rows[0];
 
         const credResult = await pool.query(
-          `SELECT username, password, password_encrypted FROM trex.database_credential WHERE "databaseId" = $1 LIMIT 1`,
+          `SELECT username, password, password_encrypted FROM trexdb.database_credential WHERE "databaseId" = $1 LIMIT 1`,
           [databaseId],
         );
         if (credResult.rows.length === 0) {
@@ -190,7 +190,7 @@ export function registerDatabaseTools(server: McpServer) {
       try {
         const encrypted = await encryptSecret(password);
         await pool.query(
-          `INSERT INTO trex.database_credential ("databaseId", username, password, password_encrypted, "userScope", "serviceScope")
+          `INSERT INTO trexdb.database_credential ("databaseId", username, password, password_encrypted, "userScope", "serviceScope")
            VALUES ($1, $2, NULL, $3, $4, $5)
            ON CONFLICT ("databaseId", username) DO UPDATE SET
              password = NULL,
@@ -216,7 +216,7 @@ export function registerDatabaseTools(server: McpServer) {
     async ({ credentialId }) => {
       try {
         const result = await pool.query(
-          `DELETE FROM trex.database_credential WHERE id = $1 RETURNING id`,
+          `DELETE FROM trexdb.database_credential WHERE id = $1 RETURNING id`,
           [credentialId],
         );
         if (result.rows.length === 0) {

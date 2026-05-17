@@ -63,3 +63,20 @@ debug_gc: debug
 
 clean: clean_build clean_rust
 clean_all: clean_configure clean
+
+# ---- Coverage (cargo-llvm-cov, see docs/superpowers/specs/2026-05-17-test-infrastructure-and-coverage-design.md) ----
+
+.PHONY: coverage coverage_html debug_coverage
+
+coverage:
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+	@mkdir -p build/coverage
+	cargo llvm-cov --lcov --output-path build/coverage/lcov.info
+
+coverage_html:
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+	@mkdir -p build/coverage
+	cargo llvm-cov --html --output-dir build/coverage/html
+
+debug_coverage:
+	RUSTFLAGS="-C instrument-coverage" $(MAKE) debug

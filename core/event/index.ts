@@ -37,7 +37,7 @@ async function flush() {
       values.push(entries[i].event_type, entries[i].level, entries[i].message);
     }
     await pool.query(
-      `INSERT INTO trex.event_log (event_type, level, message) VALUES ${placeholders.join(", ")}`,
+      `INSERT INTO trexdb.event_log (event_type, level, message) VALUES ${placeholders.join(", ")}`,
       values,
     );
   } catch (err) {

@@ -1423,6 +1423,12 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     con.register_scalar_function::<service_functions::SwarmRegisterServiceScalar>("trex_db_register_service")
         .expect("Failed to register trex_db_register_service function");
 
+    con.register_scalar_function::<service_functions::DbOrchestrateSwarmScalar>("db_orchestrate_swarm")
+        .expect("Failed to register db_orchestrate_swarm function");
+
+    con.register_scalar_function::<service_functions::DbOrchestrateSwarmFromEnvScalar>("db_orchestrate_swarm_from_env")
+        .expect("Failed to register db_orchestrate_swarm_from_env function");
+
     con.register_scalar_function::<service_functions::SwarmSetKeyScalar>("trex_db_set_key")
         .expect("Failed to register trex_db_set_key function");
 

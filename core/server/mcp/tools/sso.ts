@@ -10,7 +10,7 @@ export function registerSsoTools(server: McpServer) {
     async () => {
       try {
         const result = await pool.query(
-          `SELECT id, "displayName", "clientId", enabled, "createdAt", "updatedAt" FROM trex.sso_provider ORDER BY "createdAt" DESC`,
+          `SELECT id, "displayName", "clientId", enabled, "createdAt", "updatedAt" FROM trexdb.sso_provider ORDER BY "createdAt" DESC`,
         );
         return { content: [{ type: "text", text: JSON.stringify(result.rows, null, 2) }] };
       } catch (err: any) {
@@ -32,7 +32,7 @@ export function registerSsoTools(server: McpServer) {
     async ({ id, displayName, clientId, clientSecret, enabled }) => {
       try {
         await pool.query(
-          `SELECT trex.save_sso_provider($1, $2, $3, $4, $5)`,
+          `SELECT trexdb.save_sso_provider($1, $2, $3, $4, $5)`,
           [id, displayName, clientId, clientSecret, enabled ?? false],
         );
         try {
@@ -56,7 +56,7 @@ export function registerSsoTools(server: McpServer) {
     async ({ id }) => {
       try {
         const result = await pool.query(
-          `DELETE FROM trex.sso_provider WHERE id = $1 RETURNING id`,
+          `DELETE FROM trexdb.sso_provider WHERE id = $1 RETURNING id`,
           [id],
         );
         if (result.rows.length === 0) {

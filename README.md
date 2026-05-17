@@ -33,6 +33,16 @@ Once up, Trex listens on:
 
 Trex reuses and extends several open-source projects, including Supabase (Storage, Edge Runtime, CLI), DuckDB, Postgres, PostgREST, PostGraphile, and Apache Arrow / DataFusion. Forks are maintained as submodules and retain their upstream licenses.
 
+## Testing & Coverage
+
+- Run all tests: `make test`
+- Generate coverage reports (per plugin, per language): `make coverage`
+- Coverage data lands under each plugin's `build/coverage/lcov.info`; a merged HTML report is written to `build/coverage/html/index.html` if `genhtml` is installed.
+- Cross-process Rust coverage from the Python integration suite: `cd plugins/<x> && make debug_coverage`, then `cd integration-tests && TREX_COVERAGE=1 make test-<suite> && make coverage-merge`.
+- CI uploads per-flag coverage to Codecov (informational only — never blocks PRs).
+
+See `docs/superpowers/specs/2026-05-17-test-infrastructure-and-coverage-design.md` for the full design.
+
 ## License
 
 Apache-2.0.

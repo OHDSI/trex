@@ -613,7 +613,7 @@ mod tests {
 
     #[test]
     fn test_decimal256_via_array() {
-        use arrow::buffer::i256;
+        use arrow::datatypes::i256;
         let arr = Decimal256Array::from(vec![i256::from_i128(12345)])
             .with_precision_and_scale(10, 2)
             .unwrap();

@@ -79,7 +79,7 @@ async function createTokenResponse(user: DbUser, sessionId?: string, res?: any) 
   const tokenHash = await hashRefreshToken(refreshToken);
 
   await pool.query(
-    `INSERT INTO trex.refresh_token (token_hash, "userId", session_id) VALUES ($1, $2, $3)`,
+    `INSERT INTO trexdb.refresh_token (token_hash, "userId", session_id) VALUES ($1, $2, $3)`,
     [tokenHash, user.id, sid],
   );
 
@@ -118,7 +118,7 @@ async function fetchUserByEmail(email: string): Promise<DbUser | null> {
     `SELECT id, name, email, image, role, banned, "emailVerified", email_confirmed_at,
             last_sign_in_at, "mustChangePassword", user_metadata, app_metadata,
             password_hash, "createdAt", "updatedAt"
-     FROM trex."user" WHERE email = $1 AND "deletedAt" IS NULL`,
+     FROM trexdb."user" WHERE email = $1 AND "deletedAt" IS NULL`,
     [email],
   );
   return result.rows[0] || null;
@@ -129,7 +129,7 @@ async function fetchUserById(id: string): Promise<DbUser | null> {
     `SELECT id, name, email, image, role, banned, "emailVerified", email_confirmed_at,
             last_sign_in_at, "mustChangePassword", user_metadata, app_metadata,
             password_hash, "createdAt", "updatedAt"
-     FROM trex."user" WHERE id = $1 AND "deletedAt" IS NULL`,
+     FROM trexdb."user" WHERE id = $1 AND "deletedAt" IS NULL`,
     [id],
   );
   return result.rows[0] || null;
@@ -144,7 +144,7 @@ async function getPasswordHash(userId: string, userPasswordHash: string | null):
 
   // Fallback: Better Auth stores passwords in the account table
   const result = await pool.query(
-    `SELECT password FROM trex.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
+    `SELECT password FROM trexdb.account WHERE "userId" = $1 AND "providerId" = 'credential'`,
     [userId],
   );
   return result.rows[0]?.password || null;
@@ -156,7 +156,7 @@ async function getPasswordHash(userId: string, userPasswordHash: string | null):
  */
 async function migratePasswordHash(userId: string, newHash: string) {
   await pool.query(
-    `UPDATE trex."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
+    `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
     [newHash, userId],
   );
 }
@@ -179,7 +179,7 @@ router.post("/signup", authLimiter, async (req, res) => {
 
     // Check self-registration setting
     const settingResult = await pool.query(
-      `SELECT value FROM trex.setting WHERE key = 'auth.selfRegistration'`,
+      `SELECT value FROM trexdb.setting WHERE key = 'auth.selfRegistration'`,
     );
     const registrationEnabled = settingResult.rows.length > 0 && settingResult.rows[0].value === true;
     if (!registrationEnabled) {
@@ -199,14 +199,14 @@ router.post("/signup", authLimiter, async (req, res) => {
     const userName = data?.name || email.split("@")[0];
 
     // Check if this is the first user
-    const countResult = await pool.query('SELECT COUNT(*)::int AS count FROM trex."user"');
+    const countResult = await pool.query('SELECT COUNT(*)::int AS count FROM trexdb."user"');
     const isFirstUser = countResult.rows[0].count === 0;
     const adminEmail = Deno.env.get("ADMIN_EMAIL");
     const shouldBeAdmin = isFirstUser || (adminEmail && email === adminEmail);
     const userRole = shouldBeAdmin ? "admin" : "user";
 
     await pool.query(
-      `INSERT INTO trex."user" (id, name, email, "emailVerified", email_confirmed_at, role, password_hash, user_metadata)
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role, password_hash, user_metadata)
        VALUES ($1, $2, $3, true, NOW(), $4, $5, $6)`,
       [userId, userName, email, userRole, passwordHash, JSON.stringify(data || {})],
     );
@@ -217,7 +217,7 @@ router.post("/signup", authLimiter, async (req, res) => {
 
     // Also create a Better Auth compatible account record for backward compat
     await pool.query(
-      `INSERT INTO trex.account (id, "userId", "accountId", "providerId", password)
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
        VALUES ($1, $2, $2, 'credential', $3)
        ON CONFLICT ("providerId", "accountId") DO NOTHING`,
       [crypto.randomUUID(), userId, passwordHash],
@@ -233,7 +233,7 @@ router.post("/signup", authLimiter, async (req, res) => {
 
     // Update last_sign_in_at
     await pool.query(
-      `UPDATE trex."user" SET last_sign_in_at = NOW() WHERE id = $1`,
+      `UPDATE trexdb."user" SET last_sign_in_at = NOW() WHERE id = $1`,
       [userId],
     );
 
@@ -300,7 +300,7 @@ async function handlePasswordGrant(req: any, res: any) {
 
     // Update last_sign_in_at
     await pool.query(
-      `UPDATE trex."user" SET last_sign_in_at = NOW() WHERE id = $1`,
+      `UPDATE trexdb."user" SET last_sign_in_at = NOW() WHERE id = $1`,
       [user.id],
     );
 
@@ -324,7 +324,7 @@ async function handleRefreshGrant(req: any, res: any) {
 
     // Find and revoke the old refresh token
     const result = await pool.query(
-      `UPDATE trex.refresh_token SET revoked = true, "updatedAt" = NOW()
+      `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE token_hash = $1 AND revoked = false
        RETURNING "userId", session_id`,
       [tokenHash],
@@ -402,7 +402,7 @@ router.post("/logout", apiLimiter, async (req, res) => {
     if (claims?.session_id) {
       // Revoke all refresh tokens for this session
       await pool.query(
-        `UPDATE trex.refresh_token SET revoked = true, "updatedAt" = NOW()
+        `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
          WHERE session_id = $1 AND revoked = false`,
         [claims.session_id],
       );
@@ -498,7 +498,7 @@ router.put("/user", apiLimiter, async (req, res) => {
 
       // Also update account table for backward compat
       await pool.query(
-        `UPDATE trex.account SET password = $1, "updatedAt" = NOW()
+        `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
          WHERE "userId" = $2 AND "providerId" = 'credential'`,
         [newHash, claims.sub],
       );
@@ -506,7 +506,7 @@ router.put("/user", apiLimiter, async (req, res) => {
       // Revoke all outstanding refresh tokens so a stolen token doesn't survive
       // a password change.
       await pool.query(
-        `UPDATE trex.refresh_token SET revoked = true, "updatedAt" = NOW()
+        `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
          WHERE "userId" = $1 AND revoked = false`,
         [claims.sub],
       );
@@ -516,7 +516,7 @@ router.put("/user", apiLimiter, async (req, res) => {
       updates.push(`"updatedAt" = NOW()`);
       values.push(claims.sub);
       await pool.query(
-        `UPDATE trex."user" SET ${updates.join(", ")} WHERE id = $${paramIdx}`,
+        `UPDATE trexdb."user" SET ${updates.join(", ")} WHERE id = $${paramIdx}`,
         values,
       );
     }
@@ -563,7 +563,7 @@ router.post("/password-changed", apiLimiter, async (req, res) => {
     }
 
     await pool.query(
-      'UPDATE trex."user" SET "mustChangePassword" = false, "updatedAt" = NOW() WHERE id = $1',
+      'UPDATE trexdb."user" SET "mustChangePassword" = false, "updatedAt" = NOW() WHERE id = $1',
       [claims.sub],
     );
     res.json({ success: true });
@@ -621,13 +621,13 @@ router.post("/change-password", apiLimiter, async (req, res) => {
 
     const newHash = await hashPassword(newPassword);
     await pool.query(
-      `UPDATE trex."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
+      `UPDATE trexdb."user" SET password_hash = $1, "updatedAt" = NOW() WHERE id = $2`,
       [newHash, user.id],
     );
 
     // Also update account table
     await pool.query(
-      `UPDATE trex.account SET password = $1, "updatedAt" = NOW()
+      `UPDATE trexdb.account SET password = $1, "updatedAt" = NOW()
        WHERE "userId" = $2 AND "providerId" = 'credential'`,
       [newHash, user.id],
     );
@@ -635,7 +635,7 @@ router.post("/change-password", apiLimiter, async (req, res) => {
     // Revoke all outstanding refresh tokens so a stolen token doesn't survive
     // a password change.
     await pool.query(
-      `UPDATE trex.refresh_token SET revoked = true, "updatedAt" = NOW()
+      `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE "userId" = $1 AND revoked = false`,
       [user.id],
     );
@@ -668,7 +668,7 @@ router.get("/sessions", apiLimiter, async (req, res) => {
     const result = await pool.query(
       `SELECT DISTINCT ON (session_id)
          id, session_id, "createdAt", "updatedAt"
-       FROM trex.refresh_token
+       FROM trexdb.refresh_token
        WHERE "userId" = $1 AND revoked = false
        ORDER BY session_id, "createdAt" DESC`,
       [claims.sub],
@@ -716,7 +716,7 @@ router.post("/revoke-session", apiLimiter, async (req, res) => {
     }
 
     await pool.query(
-      `UPDATE trex.refresh_token SET revoked = true, "updatedAt" = NOW()
+      `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE "userId" = $1 AND session_id = $2 AND revoked = false`,
       [claims.sub, targetSessionId],
     );
@@ -747,7 +747,7 @@ router.get("/accounts", apiLimiter, async (req, res) => {
 
     const result = await pool.query(
       `SELECT id, "providerId", "accountId", "createdAt"
-       FROM trex.account WHERE "userId" = $1`,
+       FROM trexdb.account WHERE "userId" = $1`,
       [claims.sub],
     );
 
@@ -766,7 +766,7 @@ router.get("/settings", apiLimiter, async (_req, res) => {
     let providers: Record<string, boolean> = {};
     try {
       const result = await pool.query(
-        `SELECT id FROM trex.sso_provider WHERE enabled = true`,
+        `SELECT id FROM trexdb.sso_provider WHERE enabled = true`,
       );
       for (const row of result.rows) {
         providers[row.id] = true;
@@ -779,7 +779,7 @@ router.get("/settings", apiLimiter, async (_req, res) => {
     let disableSignup = true;
     try {
       const result = await pool.query(
-        `SELECT value FROM trex.setting WHERE key = 'auth.selfRegistration'`,
+        `SELECT value FROM trexdb.setting WHERE key = 'auth.selfRegistration'`,
       );
       disableSignup = !(result.rows.length > 0 && result.rows[0].value === true);
     } catch {
@@ -855,14 +855,14 @@ router.post(["/admin/create-user", "/admin/users"], apiLimiter, async (req, res)
     const userRole = data?.role || "user";
 
     await pool.query(
-      `INSERT INTO trex."user" (id, name, email, "emailVerified", email_confirmed_at, role, password_hash, user_metadata)
+      `INSERT INTO trexdb."user" (id, name, email, "emailVerified", email_confirmed_at, role, password_hash, user_metadata)
        VALUES ($1, $2, $3, true, NOW(), $4, $5, $6)`,
       [userId, userName, email, userRole, passwordHash, JSON.stringify(data || {})],
     );
 
     // Also create account record for backward compat
     await pool.query(
-      `INSERT INTO trex.account (id, "userId", "accountId", "providerId", password)
+      `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
        VALUES ($1, $2, $2, 'credential', $3)
        ON CONFLICT ("providerId", "accountId") DO NOTHING`,
       [crypto.randomUUID(), userId, passwordHash],
