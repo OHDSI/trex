@@ -21,7 +21,7 @@ fn setup() -> (Arc<Mutex<Connection>>, DuckDbDestination) {
     let conn = Connection::open_in_memory().expect("Failed to open in-memory connection");
     let conn = Arc::new(Mutex::new(conn));
     let schemas = Arc::new(Mutex::new(HashMap::new()));
-    let dest = DuckDbDestination::new(conn.clone(), "test_pipeline".to_string(), schemas);
+    let dest = DuckDbDestination::new("test_pipeline".to_string(), schemas);
     (conn, dest)
 }
 
@@ -281,7 +281,7 @@ async fn test_store_table_mapping() {
     let conn = Connection::open_in_memory().expect("Failed to open in-memory connection");
     let conn = Arc::new(Mutex::new(conn));
     let schemas = Arc::new(Mutex::new(HashMap::new()));
-    let store = DuckDbStore::new(conn.clone(), "test_pipeline".to_string(), schemas);
+    let store = DuckDbStore::new("test_pipeline".to_string(), schemas);
 
     use etl_lib::store::state::StateStore;
 

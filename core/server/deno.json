@@ -1,3 +1,7 @@
 {
-  "nodeModulesDir": "manual"
+  "nodeModulesDir": "manual",
+  "tasks": {
+    "test": "deno test --allow-all",
+    "coverage": "rm -rf coverage && deno test --allow-all --coverage=coverage && deno coverage coverage --lcov --output=coverage/lcov.info"
+  }
 }

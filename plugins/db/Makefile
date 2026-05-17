@@ -28,3 +28,23 @@ test_release: test_extension_release
 
 clean: clean_build clean_rust
 clean_all: clean_configure clean
+
+# ---- Coverage (cargo-llvm-cov, see docs/superpowers/specs/2026-05-17-test-infrastructure-and-coverage-design.md) ----
+
+.PHONY: coverage coverage_html debug_coverage
+
+coverage:
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+	@mkdir -p build/coverage
+	cargo llvm-cov --lcov --output-path build/coverage/lcov.info
+
+coverage_html:
+	@command -v cargo-llvm-cov >/dev/null 2>&1 || cargo install cargo-llvm-cov --locked
+	@mkdir -p build/coverage
+	cargo llvm-cov --html --output-dir build/coverage/html
+
+# Build the .trex extension with LLVM source-based coverage instrumentation.
+# Used by the integration suite when TREX_COVERAGE=1 so cross-process coverage
+# can be collected from the Python tests.
+debug_coverage:
+	RUSTFLAGS="-C instrument-coverage" $(MAKE) debug
