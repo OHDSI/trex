@@ -2,5 +2,9 @@
   "nodeModulesDir": "manual",
   "imports": {
     "pg": "npm:pg@^8.13.0"
+  },
+  "tasks": {
+    "test": "deno test --allow-all",
+    "coverage": "rm -rf coverage && deno test --allow-all --coverage=coverage && deno coverage coverage --lcov --output=coverage/lcov.info"
   }
 }

@@ -1,0 +1,188 @@
+name: Coverage
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    types: [opened, ready_for_review, reopened, synchronize]
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions: read-all
+
+concurrency:
+  group: coverage-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-unit-coverage:
+    name: "Rust unit coverage (${{ matrix.plugin }})"
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plugins/${{ matrix.plugin }}/target
+          key: coverage-${{ matrix.plugin }}-${{ runner.os }}-${{ hashFiles(format('plugins/{0}/Cargo.lock', matrix.plugin)) }}
+          restore-keys: coverage-${{ matrix.plugin }}-${{ runner.os }}-
+
+      - name: Install PostgreSQL 17 dev headers (pg_trex only)
+        if: matrix.plugin == 'pg_trex'
+        run: |
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
+          sudo apt-get update
+          sudo apt-get install -y postgresql-17 postgresql-server-dev-17
+
+      - name: Download libtrexsql (pg_trex only)
+        if: matrix.plugin == 'pg_trex'
+        run: |
+          wget -O /tmp/libtrexsql.zip \
+            https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
+          unzip /tmp/libtrexsql.zip -d /tmp/trexsql
+          ln -sf /tmp/trexsql/libtrexsql.so /tmp/trexsql/libduckdb.so
+
+      - name: Install cargo-pgrx (pg_trex only)
+        if: matrix.plugin == 'pg_trex'
+        run: |
+          cargo install cargo-pgrx --version 0.16.1 --locked
+          cargo pgrx init --pg17=$(which pg_config)
+
+      - name: Install chdb native lib
+        if: matrix.plugin == 'chdb'
+        run: sudo apt-get update && sudo apt-get install -y libc6-dev clang && sudo bash ./install_chdb.sh
+        working-directory: plugins/chdb
+
+      - name: Install trexas build deps
+        if: matrix.plugin == 'runtime'
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+
+      - name: Run coverage (pg_trex)
+        if: matrix.plugin == 'pg_trex'
+        run: |
+          mkdir -p build/coverage
+          LIBRARY_PATH=/tmp/trexsql cargo llvm-cov --lcov --output-path build/coverage/lcov.info
+        working-directory: plugins/pg_trex
+
+      - name: Run coverage (pgt)
+        if: matrix.plugin == 'pgt'
+        run: |
+          mkdir -p build/coverage
+          cargo llvm-cov --lcov --output-path build/coverage/lcov.info
+        working-directory: plugins/pgt
+
+      - name: Run coverage (other plugins)
+        if: matrix.plugin != 'pg_trex' && matrix.plugin != 'pgt'
+        run: make coverage
+        working-directory: plugins/${{ matrix.plugin }}
+
+      - uses: codecov/codecov-action@v4
+        with:
+          files: plugins/${{ matrix.plugin }}/build/coverage/lcov.info
+          flags: unit-${{ matrix.plugin }}
+          fail_ci_if_error: false
+
+  integration-coverage:
+    name: "Integration coverage (${{ matrix.suite }})"
+    runs-on: ubuntu-24.04
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: distributed
+            plugins: "pool db"
+            tests: "test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py"
+          - suite: pgwire
+            plugins: "pool db pgwire"
+            tests: "test_pgwire_standalone.py test_pgwire_db.py"
+          - suite: etl
+            plugins: "pool db etl"
+            tests: "test_etl_standalone.py test_etl_db.py"
+          - suite: fhir
+            plugins: "pool fhir"
+            tests: "test_fhir_standalone.py"
+          - suite: migration
+            plugins: "pool migration"
+            tests: "test_migration_standalone.py"
+          - suite: tpm
+            plugins: "pool tpm"
+            tests: "test_tpm_standalone.py"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: integration-coverage-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('plugins/*/Cargo.lock') }}
+
+      - name: Build instrumented plugins
+        run: |
+          for plugin in ${{ matrix.plugins }}; do
+            (cd plugins/$plugin && make configure && make debug_coverage)
+          done
+
+      - name: Setup integration test env
+        run: make configure
+        working-directory: integration-tests
+
+      - name: Run tests with coverage instrumentation
+        run: TREX_COVERAGE=1 venv/bin/pytest -v ${{ matrix.tests }}
+        working-directory: integration-tests
+
+      - name: Merge coverage
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        with:
+          directory: integration-tests/coverage/lcov
+          flags: integration-${{ matrix.suite }}
+          fail_ci_if_error: false
+
+  coverage-status:
+    name: "Coverage Status"
+    if: always()
+    runs-on: ubuntu-24.04
+    needs: [rust-unit-coverage, integration-coverage]
+    steps:
+      - name: Check
+        run: |
+          echo "rust-unit-coverage: ${{ needs.rust-unit-coverage.result }}"
+          echo "integration-coverage: ${{ needs.integration-coverage.result }}"
+          # Coverage is informational only — never fail the gate. The job
+          # still appears in PR checks so missing uploads are visible.
+          exit 0

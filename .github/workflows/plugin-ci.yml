@@ -229,6 +229,16 @@ jobs:
               tar -tzf "$TARBALL" | grep '\.trex$'
               ;;
           esac
+      - name: Run Rust unit tests
+        if: contains(fromJSON('["./plugins/db", "./plugins/fhir", "./plugins/hana", "./plugins/migration", "./plugins/pgt", "./plugins/pgwire", "./plugins/transform"]'), matrix.PKGPATH)
+        run: cargo test --no-fail-fast
+        working-directory: ${{ matrix.PKGPATH }}
+
+      - name: Run sqllogic tests
+        if: contains(fromJSON('["./plugins/ai", "./plugins/atlas", "./plugins/cql2elm", "./plugins/db", "./plugins/etl", "./plugins/fhir", "./plugins/hana", "./plugins/migration", "./plugins/pgwire", "./plugins/tpm", "./plugins/transform"]'), matrix.PKGPATH)
+        run: make test_debug
+        working-directory: ${{ matrix.PKGPATH }}
+
       - name: Publish
         # Publish only from the canonical OHDSI/trex repository on develop or main.
         # Forks and feature branches build + verify but do not push to the registry.
