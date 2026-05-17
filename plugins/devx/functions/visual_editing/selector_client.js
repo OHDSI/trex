@@ -222,7 +222,6 @@
     HANDLE_POSITIONS.forEach(function (cfg) {
       var h = document.createElement("div");
       h.dataset.resizeHandle = cfg.pos;
-      var size = cfg.isEdge ? "4" : "8";
       h.style.cssText =
         "position:fixed;z-index:2147483647;background:rgba(124,58,237,0.3);border-radius:1px;display:none;cursor:" + cfg.cursor + ";";
       if (cfg.isEdge) {

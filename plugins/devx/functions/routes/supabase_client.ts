@@ -5,7 +5,6 @@
  */
 
 import { decryptToken } from "../crypto.ts";
-import { getAppWorkspacePath } from "../tools/workspace.ts";
 import { join } from "https://deno.land/std@0.224.0/path/mod.ts";
 
 export interface SupabaseTarget {
@@ -118,7 +117,7 @@ async function resolveCloudTarget(
   }
   const apiKeys = await keysRes.json();
   const anonKey = apiKeys.find((k: any) => k.name === "anon")?.api_key || "";
-  const serviceKey = apiKeys.find((k: any) => k.name === "service_role")?.api_key || "";
+  const _serviceKey = apiKeys.find((k: any) => k.name === "service_role")?.api_key || "";
 
   return {
     type: "cloud",

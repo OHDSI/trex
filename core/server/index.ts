@@ -609,11 +609,12 @@ async function forwardToStudioSidecar(req: any, res: any) {
     return;
   }
   const sidecarPath = req.originalUrl.replace("/plugins/trex/studio", "/studio-proxy");
-  // Guard against type confusion: req.body may be a Buffer, parsed object, array, or undefined
-  // depending on which body-parser middleware ran. Only Buffer has a meaningful .length here.
-  const bodyBuffer: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
-  const bodyLen = bodyBuffer ? bodyBuffer.length : 0;
+  // req.body's type depends on which body-parser middleware ran (Buffer, parsed object,
+  // array, undefined). Treat it as unknown and only trust it after a Buffer check.
+  const rawBody: unknown = req.body;
+  const bodyBuffer = rawBody instanceof Uint8Array ? Buffer.from(rawBody) : null;
   if (DEBUG_STUDIO) {
+    const bodyLen = bodyBuffer ? bodyBuffer.length : 0;
     console.log(`[studio-sidecar-fwd] ${req.method} ${sidecarPath} bodyLen=${bodyLen} ct=${req.headers["content-type"] ?? ""}`);
   }
   const webReq = buildWorkerRequest(req, sidecarPath);

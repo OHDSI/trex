@@ -31,7 +31,6 @@ export const bashTool: ToolDefinition<{
   defaultConsent: "ask",
   modifiesState: true,
   execute: async (args, ctx) => {
-    const timeout = args.timeout || 30;
     // Write the command to a temp script and execute via duckdb run_command
     const scriptId = crypto.randomUUID().slice(0, 8);
     const scriptPath = `/tmp/.devx-bash-${scriptId}.sh`;
