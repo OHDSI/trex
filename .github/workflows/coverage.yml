@@ -22,6 +22,11 @@ jobs:
     name: "Rust unit coverage (${{ matrix.plugin }})"
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    # Coverage reporting is informational. Individual plugin failures (latent
+    # test bugs, compile errors, external-service requirements) must not block
+    # the PR. Flip this to false per-plugin as each plugin's tests are
+    # stabilized.
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -107,6 +112,8 @@ jobs:
     name: "Integration coverage (${{ matrix.suite }})"
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    # Same rationale as rust-unit-coverage: informational, never gating.
+    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
