@@ -1,7 +1,8 @@
 (ns trexsql.cli-test
   "Unit tests for cli.clj - CLI command handlers."
   (:require [clojure.test :refer :all]
-            [trexsql.cli :as cli]))
+            [trexsql.cli :as cli]
+            [trexsql.config :as config]))
 
 ;; Cache Create Command Tests
 
@@ -174,3 +175,13 @@
 (deftest test-print-progress-unknown
   (testing "Progress callback handles unknown phase gracefully"
     (is (nil? (cli/print-progress {:phase :unknown})))))
+
+;; New CLI flag parsing tests (config/parse-args)
+
+(deftest new-flags-parse
+  (let [parsed (config/parse-args ["--no-orchestrator"
+                                   "--extensions" "circe,pool"
+                                   "--swarm-config-path" "/tmp/x.json"])]
+    (is (:no-orchestrator (:options parsed)))
+    (is (= ["circe" "pool"] (:extensions (:options parsed))))
+    (is (= "/tmp/x.json" (:swarm-config-path (:options parsed))))))

@@ -168,7 +168,7 @@ async function recoverEndpoints(pluginName: string) {
   if (!pool) return;
 
   const result = await pool.query(
-    "SELECT dest_db, dest_schema FROM trex.transform_deployment WHERE plugin_name = $1",
+    "SELECT dest_db, dest_schema FROM trexdb.transform_deployment WHERE plugin_name = $1",
     [pluginName]
   );
   if (result.rows.length > 0) {
@@ -243,7 +243,7 @@ export async function upsertTransformDeployment(
   if (!pool) return;
 
   await pool.query(
-    `INSERT INTO trex.transform_deployment (plugin_name, dest_db, dest_schema)
+    `INSERT INTO trexdb.transform_deployment (plugin_name, dest_db, dest_schema)
      VALUES ($1, $2, $3)
      ON CONFLICT (plugin_name) DO UPDATE SET
        dest_db = EXCLUDED.dest_db,

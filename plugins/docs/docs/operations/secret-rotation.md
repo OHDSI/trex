@@ -4,109 +4,99 @@ sidebar_position: 1
 
 # Secret Rotation
 
-trexsql signs all user-facing JWTs (access tokens, anon key, service_role
-key) with an HMAC secret read from the environment. This page describes
-how to rotate that secret without invalidating in-flight sessions, and how
-to rotate the long-lived `anon` and `service_role` keys.
+## Architecture
 
-## JWT Signing-Key Rotation
+trex uses a single operator-managed root key, `TREX_ROOT_KEY` (32 random
+bytes, base64). Every per-purpose secret is derived from it via HKDF-SHA256
+with a hardcoded salt (`"trex/v1"`) and a distinct `info` label per purpose:
 
-The signing key comes from one of two environment variables:
+| Subkey label                  | Used by                                      |
+|-------------------------------|----------------------------------------------|
+| `trex.better-auth.session.v1` | Better Auth session signing                  |
+| `trex.jwt.hs256.v1`           | All HS256 JWTs (access tokens, anon, service)|
+| `trex.pgrest.jwt.v1`          | PostgREST `PGRST_JWT_SECRET` + Studio `AUTH_JWT_SECRET` |
+| `trex.pgmeta.aes.v1`          | Studio `PG_META_CRYPTO_KEY`                  |
+| `trex.realtime.api.v1`        | Realtime `API_JWT_SECRET` / `METRICS_JWT_SECRET` / `DB_ENC_KEY` / `SECRET_KEY_BASE` |
+| `trex.dek.wrap.v1`            | KEK that wraps the Data Encryption Key       |
 
-| Variable | Format | Purpose |
-|----------|--------|---------|
-| `BETTER_AUTH_SECRET` | single string | Backwards-compatible single-secret mode. Also accepted as `AUTH_JWT_SECRET`. |
-| `BETTER_AUTH_SECRETS` | comma-separated list | Rotation list. The **first** entry is the active signing key; **all** entries are accepted for verification. |
+Data at rest (`trexdb.secret`, `trexdb.database_credential.password_encrypted`)
+is encrypted with a random 32-byte DEK that is itself wrapped under the
+`trex.dek.wrap.v1` KEK and stored in `trexdb.kek_wrapped_dek`. This decouples
+JWT-key rotation from re-encryption of stored secrets.
 
-If only `BETTER_AUTH_SECRET` is set, behavior is unchanged: the same key
-signs and verifies every token.
+## Distribution
 
-### Rotation procedure
+The `trex-init` compose service (one-shot, runs before everything else):
 
-The goal is to replace `oldkey` with `newkey` without forcibly logging
-out every active session.
+1. Generates `TREX_ROOT_KEY` into `./secrets/root.env` if the file is
+   missing; otherwise reuses the existing value.
+2. Derives all per-service env vars into `./secrets/derived.env` using
+   exactly the names each downstream container expects
+   (`PGRST_JWT_SECRET`, `PG_META_CRYPTO_KEY`, `AUTH_JWT_SECRET`,
+   `API_JWT_SECRET`, `METRICS_JWT_SECRET`, `SECRET_KEY_BASE`,
+   `DB_ENC_KEY`).
 
-1. **Add the new key as active, keep the old key for verification.**
-   Set on every server instance:
+Every other container consumes those files via `env_file:` with
+`required: false` and `depends_on: trex-init` (`condition:
+service_completed_successfully`).
 
-   ```sh
-   BETTER_AUTH_SECRETS=newkey,oldkey
-   ```
+## Rotating the JWT signing key (cheap)
 
-   Restart. From this point onward:
+This is the most common rotation. It invalidates every JWT issued under
+the old key but does NOT require re-encrypting stored secrets.
 
-   - All newly issued JWTs are signed with `newkey`.
-   - JWTs signed with either `newkey` or `oldkey` continue to verify.
+1. Edit `core/server/auth/keys.ts`, change `jwtHs256: "trex.jwt.hs256.v1"`
+   to `jwtHs256: "trex.jwt.hs256.v2"`.
+2. Deploy.
+3. On the next boot, the `index.ts` boot probe detects the stored
+   `auth.jwtSecret` no longer matches the derived value and purges the
+   three rows from `trexdb.setting`. `ensureAuthKeys` then re-issues
+   `anon` and `service_role` keys signed with the new derivation.
+4. All clients using the previous anon/service_role keys must be
+   updated to the new values (visible via the admin API or in the
+   `[auth] Anon key: ...` / `[auth] Service role key: ...` log lines).
 
-2. **Wait for clients to re-auth.** Access tokens have a 1-hour expiry,
-   so within 1 hour every active client will have refreshed and obtained a
-   token signed with `newkey`. Wait at least one access-token lifetime
-   (default 1 hour) plus a safety margin appropriate for your refresh-
-   token cadence.
+## Rotating the DEK (re-encrypts `trexdb.secret`)
 
-3. **Drop the old key.** Set on every server instance:
+Out of scope for the v1 implementation. The schema supports multiple
+versioned rows in `trexdb.kek_wrapped_dek` (see `V1__initial_schema.sql`);
+the rewrap tooling is a planned follow-up.
 
-   ```sh
-   BETTER_AUTH_SECRETS=newkey
-   ```
+## Rotating the root key (re-wraps everything)
 
-   Restart. The old key is no longer in the verification set; any token
-   still signed with `oldkey` will be rejected and the client will need
-   to re-authenticate.
+Out of scope for the v1 implementation. Doing this naively today would
+invalidate the wrapped DEK and lose every encrypted secret. A safe
+rotation procedure requires a sidecar that decrypts each wrap with the
+old KEK and re-wraps it with the new KEK before the root is replaced —
+also planned as a follow-up.
 
-You may also leave `BETTER_AUTH_SECRET=newkey` set during this process
-— the merged secret list de-duplicates, so the legacy single-secret
-variable will not introduce a duplicate entry.
+Until that tooling lands, treat `TREX_ROOT_KEY` as a long-lived secret
+and rotate by:
 
-### Why a list and not just two slots?
+1. Stopping all services.
+2. Backing up `./secrets/root.env`.
+3. Backing up `trexdb.secret` and `trexdb.database_credential` plaintext
+   exports (the hard-cut consequence: anything not exported will be
+   permanently lost when the root changes).
+4. Deleting `./secrets/`, bringing the stack back up — operators must
+   then re-enter every edge-function secret and every database
+   credential by hand.
 
-The list form lets you stack multiple historical keys (for example,
-during an incident response in which you rotate twice within an hour).
-The active key is always the first entry; everything after it is purely
-for verification.
+## Deprecated environment variables
 
-## anon / service_role Key Rotation
+The following operator-set variables are no longer read. Setting them
+has no effect:
 
-The `anon` and `service_role` keys are long-lived JWTs (100-year expiry)
-persisted in `trex.setting`. They are signed with the active JWT signing
-key at the moment they were generated.
+- `BETTER_AUTH_SECRET`
+- `BETTER_AUTH_SECRETS`
+- `AUTH_JWT_SECRET`
+- `PGRST_JWT_SECRET` (now derived; the env_file value wins over any operator-set value)
+- `PG_META_CRYPTO_KEY`
+- `API_JWT_SECRET`
+- `METRICS_JWT_SECRET`
+- `REALTIME_SECRET_KEY_BASE`
+- `REALTIME_DB_ENC_KEY`
+- `TREX_PRODUCTION_MODE`
 
-To rotate either key, call the admin GraphQL mutation:
-
-```graphql
-mutation {
-  rotateAnonKey
-}
-```
-
-```graphql
-mutation {
-  rotateServiceRoleKey
-}
-```
-
-Both mutations require `app.user_role = 'admin'`. The new key is
-generated, persisted to `trex.setting`, and returned in the response.
-
-**Effect on clients.** Rotation immediately invalidates the previous
-key. Every client (browser SDKs, server-side integrations, scripts)
-that holds the old key will receive 401 responses on its next request
-and must be re-issued the new key.
-
-Rotate the `service_role` key whenever you suspect it has been leaked
-(commit history, log files, screenshots, third-party error trackers).
-Rotate the `anon` key on the same trigger, or as part of a scheduled
-hygiene policy.
-
-### Combined rotation
-
-If you are rotating the JWT signing key because it was leaked, you
-should also rotate `anon` and `service_role` immediately afterwards —
-otherwise the old long-lived keys remain valid (they are still on the
-verification list during the overlap window). Sequence:
-
-1. Rotate the JWT signing key (steps 1–3 above), or skip the overlap
-   window entirely if the leak is confirmed.
-2. Call `rotateAnonKey` and `rotateServiceRoleKey` so the long-lived
-   keys are re-signed with the current active key.
-3. Distribute the new `anon` / `service_role` keys to clients.
+The entrypoint no longer rotates "known-default placeholders" at
+startup — the trex-init container makes that mechanism unnecessary.

@@ -18,7 +18,7 @@ export function registerMigrationTools(server: McpServer) {
         const schemaDir = Deno.env.get("SCHEMA_DIR");
         if (schemaDir) {
           try {
-            const sql = `SELECT version, name, status, applied_on, checksum FROM trex_migration_status_schema('${escapeSql(schemaDir)}', 'trex', '_config')`;
+            const sql = `SELECT version, name, status, applied_on, checksum FROM trex_migration_status_schema('${escapeSql(schemaDir)}', 'trexdb', '_config')`;
             const result = await conn.execute(sql, []);
             const rows = result?.rows || result || [];
             const migrations = rows.map((r: any) => ({
@@ -32,7 +32,7 @@ export function registerMigrationTools(server: McpServer) {
             const pendingCount = migrations.filter((m: any) => m.status === "pending").length;
             summaries.push({
               pluginName: "core",
-              schema: "trex",
+              schema: "trexdb",
               database: "_config",
               appliedCount,
               pendingCount,
@@ -64,7 +64,7 @@ export function registerMigrationTools(server: McpServer) {
 
         const schemaDir = Deno.env.get("SCHEMA_DIR");
         if (schemaDir) {
-          targets.push({ name: "core", path: schemaDir, schema: "trex", database: "_config" });
+          targets.push({ name: "core", path: schemaDir, schema: "trexdb", database: "_config" });
         }
 
         for (const target of targets) {

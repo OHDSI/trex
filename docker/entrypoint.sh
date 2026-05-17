@@ -4,12 +4,10 @@
 # Responsibilities:
 #   1. Ensure a TLS keypair exists at /usr/src/server.{crt,key}.
 #      If missing, generate a per-container self-signed cert.
-#   2. Replace any known-default placeholder values for sensitive
-#      environment variables (BETTER_AUTH_SECRET, PGRST_JWT_SECRET)
-#      with strong randomly-generated secrets.
-#   3. If TREX_PRODUCTION_MODE=1, refuse to start when any default
-#      placeholder value is still in effect.
-#   4. exec the trex binary, forwarding any CLI arguments passed
+#   2. Verify TREX_ROOT_KEY is present and a sane length. It is generated
+#      by the trex-init sidecar (see scripts/derive-secrets.ts) into
+#      /shared/root.env and made available here via the compose env_file.
+#   3. exec the trex binary, forwarding any CLI arguments passed
 #      to docker run / compose command.
 #
 # Note: the self-signed certificate generated here is per-container
@@ -21,28 +19,6 @@ set -eu
 
 CRT=/usr/src/server.crt
 KEY=/usr/src/server.key
-
-# Known-default placeholder secrets. Anything matching these is treated
-# as "operator forgot to override" and replaced (or rejected in prod).
-DEFAULT_SECRET_PLACEHOLDERS="dev-secret-at-least-32-characters-long!! dev-secret changeme please-change-me"
-
-is_default_placeholder() {
-    val="${1:-}"
-    if [ -z "$val" ]; then
-        return 0
-    fi
-    for placeholder in $DEFAULT_SECRET_PLACEHOLDERS; do
-        if [ "$val" = "$placeholder" ]; then
-            return 0
-        fi
-    done
-    return 1
-}
-
-generate_secret() {
-    # 48 bytes -> 64 base64 chars, well above the 32-char minimum
-    openssl rand -base64 48 | tr -d '\n='
-}
 
 # ---------------------------------------------------------------------------
 # 1. TLS certificate
@@ -65,30 +41,22 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 2. Secrets: BETTER_AUTH_SECRET and PGRST_JWT_SECRET
+# 2. Root key presence check
 # ---------------------------------------------------------------------------
-PRODUCTION_MODE="${TREX_PRODUCTION_MODE:-0}"
+if [ -z "${TREX_ROOT_KEY:-}" ]; then
+    echo "STARTUP: FATAL: TREX_ROOT_KEY is not set." >&2
+    echo "STARTUP: The trex-init service is responsible for generating it." >&2
+    echo "STARTUP: Check that the ./secrets directory is mounted and that" >&2
+    echo "STARTUP: trex-init has run to completion (depends_on:condition: service_completed_successfully)." >&2
+    exit 1
+fi
 
-check_or_replace_secret() {
-    name="$1"
-    current_val="$(eval "printf '%s' \"\${$name:-}\"")"
-    if is_default_placeholder "$current_val"; then
-        if [ "$PRODUCTION_MODE" = "1" ]; then
-            echo "STARTUP: FATAL: TREX_PRODUCTION_MODE=1 but $name is unset or matches a known-default placeholder." >&2
-            echo "STARTUP: Refusing to start. Set $name to a strong unique value." >&2
-            exit 1
-        fi
-        new_val="$(generate_secret)"
-        export "$name=$new_val"
-        echo "==============================================================================="
-        echo "STARTUP: generated random $name=$new_val"
-        echo "STARTUP: Set this in your compose env to persist across restarts."
-        echo "==============================================================================="
-    fi
-}
-
-check_or_replace_secret BETTER_AUTH_SECRET
-check_or_replace_secret PGRST_JWT_SECRET
+# Sanity-check length: 32 bytes base64-encoded is 43-44 chars (44 with padding,
+# 43 without). Refuse anything noticeably shorter.
+if [ "${#TREX_ROOT_KEY}" -lt 40 ]; then
+    echo "STARTUP: FATAL: TREX_ROOT_KEY is too short (${#TREX_ROOT_KEY} chars; expected ~43-44)." >&2
+    exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # 3. exec trex

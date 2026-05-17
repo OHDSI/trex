@@ -189,9 +189,16 @@ RUN mkdir -p /home/node/.claude /home/node/.config/gh && \
     chown node:node /usr/src
 
 # Install entrypoint script that generates per-container TLS cert and
-# rotates known-default placeholder secrets on startup.
+# verifies TREX_ROOT_KEY is present (set by the trex-init container).
 COPY docker/entrypoint.sh /usr/src/entrypoint.sh
 RUN chmod 755 /usr/src/entrypoint.sh
+
+# Derivation CLI + trex-init entrypoint. The trex-init compose service runs
+# /usr/local/bin/trex-init on a shared volume to generate the root key and
+# all derived per-purpose subkeys before any other service starts.
+COPY scripts/ /usr/src/scripts/
+COPY docker/trex-init-entrypoint.sh /usr/local/bin/trex-init
+RUN chmod 755 /usr/local/bin/trex-init
 
 EXPOSE 8001 8000
 USER node

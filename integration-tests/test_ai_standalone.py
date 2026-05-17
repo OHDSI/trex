@@ -133,18 +133,19 @@ class TestAiWithModel:
         assert MODEL_NAME in result[0][0] or MODEL_FILENAME in result[0][0]
 
     def test_ai_generate(self, ai_node):
-        """trex_ai_generate() produces non-empty output."""
+        """trex_ai_generate() produces non-empty inference output (not an error string)."""
         result = ai_node.execute(
             f"SELECT trex_ai_generate('{MODEL_NAME}', 'Once', "
             f"'{{\"max_tokens\": 1, \"temperature\": 0.1}}')",
             timeout=AI_TIMEOUT,
         )
         assert len(result) == 1
-        assert result[0][0] is not None
-        assert len(result[0][0]) > 0
+        text = result[0][0]
+        assert text, f"empty result: {text!r}"
+        assert not text.lower().startswith("error"), f"generate returned error: {text!r}"
 
     def test_ai_chat(self, ai_node):
-        """trex_ai_chat() produces non-empty response."""
+        """trex_ai_chat() produces non-empty inference response (not an error string)."""
         result = ai_node.execute(
             f"SELECT trex_ai_chat('{MODEL_NAME}', "
             f"'[{{\"role\": \"user\", \"content\": \"Hi\"}}]', "
@@ -152,12 +153,15 @@ class TestAiWithModel:
             timeout=AI_TIMEOUT,
         )
         assert len(result) == 1
-        assert result[0][0] is not None
-        assert len(result[0][0]) > 0
+        text = result[0][0]
+        assert text, f"empty result: {text!r}"
+        assert not text.lower().startswith("error"), f"chat returned error: {text!r}"
 
     def test_ai_unload(self, ai_node):
         """trex_ai_unload_model() succeeds."""
-        ai_node.execute(
+        result = ai_node.execute(
             f"SELECT trex_ai_unload_model('{MODEL_NAME}')",
             timeout=AI_TIMEOUT,
         )
+        text = result[0][0]
+        assert text and not text.lower().startswith("error"), f"unload returned error: {text!r}"

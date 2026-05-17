@@ -1,4 +1,5 @@
 import { BASE_PATH } from "../config.ts";
+import { deriveSubkeyBase64, LABELS } from "./keys.ts";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -56,42 +57,29 @@ async function hmacVerify(
   return crypto.subtle.verify("HMAC", key, signature, encoder.encode(data));
 }
 
-/**
- * Return all JWT signing keys, in priority order.
- * The first entry is the active key (used for signing); all entries are
- * accepted for verification.
- *
- * Keys are sourced from:
- *   - BETTER_AUTH_SECRETS (comma-separated; first entry is active)
- *   - BETTER_AUTH_SECRET / AUTH_JWT_SECRET (single secret, current behavior)
- *
- * If both are set, BETTER_AUTH_SECRETS entries come first, then any
- * single-secret value not already present. This lets operators define a
- * rotation list without having to also clear the legacy single-secret env
- * var. See plugins/docs/docs/operations/secret-rotation.md.
- */
-export function getJwtSecrets(): string[] {
-  const list = (Deno.env.get("BETTER_AUTH_SECRETS") || "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-  const single =
-    Deno.env.get("AUTH_JWT_SECRET") ||
-    Deno.env.get("BETTER_AUTH_SECRET") ||
-    "";
-  if (single && !list.includes(single)) {
-    list.push(single);
-  }
-  return list;
-}
+let _jwtSecretCache: string | null = null;
 
 /**
- * Return the active signing key (first in BETTER_AUTH_SECRETS, or
- * BETTER_AUTH_SECRET if the list is unset). Empty string if neither is set.
+ * Return the JWT signing key (HMAC-SHA256). Derived once from TREX_ROOT_KEY
+ * via HKDF label "trex.jwt.hs256.v1". To rotate, change the label suffix
+ * (".v2") and re-issue tokens — old tokens become invalid by design.
  */
-export function getJwtSecret(): string {
-  const secrets = getJwtSecrets();
-  return secrets[0] || "";
+export async function getJwtSecret(): Promise<string> {
+  if (_jwtSecretCache !== null) return _jwtSecretCache;
+  _jwtSecretCache = await deriveSubkeyBase64(LABELS.jwtHs256);
+  return _jwtSecretCache;
+}
+
+/** Test-only. */
+export function _resetJwtSecretCache(): void { _jwtSecretCache = null; }
+
+/**
+ * Verification accepts only the active key. The previous rotation list
+ * (BETTER_AUTH_SECRETS) is removed; rotation now goes via versioned HKDF
+ * labels — see plugins/docs/docs/operations/secret-rotation.md.
+ */
+export async function getJwtSecrets(): Promise<string[]> {
+  return [await getJwtSecret()];
 }
 
 export interface AccessTokenClaims {
@@ -117,7 +105,7 @@ export async function signAccessToken(
   },
   sessionId: string,
 ): Promise<string> {
-  const secret = getJwtSecret();
+  const secret = await getJwtSecret();
   const now = Math.floor(Date.now() / 1000);
   const rawUrl = Deno.env.get("BETTER_AUTH_URL") || "http://localhost:8000";
   let issOrigin: string;
@@ -155,7 +143,7 @@ export async function signAccessToken(
 export async function verifyAccessToken(
   token: string,
 ): Promise<AccessTokenClaims | null> {
-  const secrets = getJwtSecrets();
+  const secrets = await getJwtSecrets();
   if (secrets.length === 0 || !token) return null;
 
   const parts = token.split(".");
@@ -204,7 +192,7 @@ export async function hashRefreshToken(token: string): Promise<string> {
 }
 
 export async function generateAnonKey(): Promise<string> {
-  const secret = getJwtSecret();
+  const secret = await getJwtSecret();
   const now = Math.floor(Date.now() / 1000);
   const payload = {
     role: "anon",
@@ -220,7 +208,7 @@ export async function generateAnonKey(): Promise<string> {
 }
 
 export async function generateServiceRoleKey(): Promise<string> {
-  const secret = getJwtSecret();
+  const secret = await getJwtSecret();
   const now = Math.floor(Date.now() / 1000);
   const payload = {
     role: "service_role",
@@ -240,7 +228,7 @@ export async function generateServiceRoleKey(): Promise<string> {
 
 /**
  * Generate a new anon key signed with the active signing key, persist it
- * to trex.setting under 'auth.anonKey', and return the new value.
+ * to trexdb.setting under 'auth.anonKey', and return the new value.
  *
  * All clients holding the previous anon key will be rejected on next use.
  * See plugins/docs/docs/operations/secret-rotation.md.
@@ -249,7 +237,7 @@ export async function rotateAnonKey(): Promise<string> {
   const { pool } = await import("../db.ts");
   const newKey = await generateAnonKey();
   await pool.query(
-    `INSERT INTO trex.setting (key, value) VALUES ('auth.anonKey', $1::jsonb)
+    `INSERT INTO trexdb.setting (key, value) VALUES ('auth.anonKey', $1::jsonb)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
     [JSON.stringify(newKey)],
   );
@@ -258,7 +246,7 @@ export async function rotateAnonKey(): Promise<string> {
 
 /**
  * Generate a new service_role key signed with the active signing key,
- * persist it to trex.setting under 'auth.serviceRoleKey', and return the
+ * persist it to trexdb.setting under 'auth.serviceRoleKey', and return the
  * new value.
  *
  * All clients holding the previous service_role key will be rejected on
@@ -268,7 +256,7 @@ export async function rotateServiceRoleKey(): Promise<string> {
   const { pool } = await import("../db.ts");
   const newKey = await generateServiceRoleKey();
   await pool.query(
-    `INSERT INTO trex.setting (key, value) VALUES ('auth.serviceRoleKey', $1::jsonb)
+    `INSERT INTO trexdb.setting (key, value) VALUES ('auth.serviceRoleKey', $1::jsonb)
      ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
     [JSON.stringify(newKey)],
   );

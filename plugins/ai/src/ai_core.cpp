@@ -146,6 +146,13 @@ std::unique_ptr<ContextPoolEntry> ContextPool::CreateNewContext() {
     ctx_params.n_threads = config_.n_threads;
     ctx_params.embeddings = config_.embeddings;
     ctx_params.offload_kqv = config_.n_gpu_layers > 0;
+    // Force-disable flash attention on CPU-only loads unless explicitly opted in.
+    // Auto can enable CPU FA, which hangs in llama_decode for some model shapes.
+    int fa = config_.flash_attn;
+    if (fa == -1 && config_.n_gpu_layers == 0) {
+        fa = LLAMA_FLASH_ATTN_TYPE_DISABLED;
+    }
+    ctx_params.flash_attn_type = static_cast<enum llama_flash_attn_type>(fa);
     // For embedding models, honor a configured pooling type. UNSPECIFIED (-1)
     // lets llama.cpp pick the architecture default (e.g. CLS for BERT/MiniLM,
     // MEAN for nomic-embed), which is required for BERT-family models to

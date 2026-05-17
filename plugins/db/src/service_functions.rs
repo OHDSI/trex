@@ -696,3 +696,162 @@ impl VScalar for SwarmRegisterServiceScalar {
         )]
     }
 }
+
+/// Pure helper: parse SWARM_CONFIG JSON, look up the named node, run the
+/// orchestrator for its extension list, return the joined status as a single
+/// string. Factored out so it's unit-testable without a duckdb connection.
+pub fn orchestrate_swarm_impl(swarm_json: &str, node_id: &str) -> String {
+    let cfg = match crate::config::ClusterConfig::from_json(swarm_json) {
+        Ok(c) => c,
+        Err(e) => return format!("invalid SWARM_CONFIG: {e}"),
+    };
+    let node = match cfg.nodes.get(node_id) {
+        Some(n) => n,
+        None => return format!("node '{}' not found in SWARM_CONFIG", node_id),
+    };
+    let statuses = crate::orchestrator::orchestrate_extensions(&node.extensions);
+    statuses.join("\n")
+}
+
+/// Convenience: read SWARM_CONFIG and SWARM_NODE from the environment and run
+/// orchestrate_swarm_impl. Returns an error string if SWARM_CONFIG is unset.
+pub fn orchestrate_swarm_from_env() -> String {
+    let swarm_json = match std::env::var("SWARM_CONFIG") {
+        Ok(v) => v,
+        Err(_) => return "SWARM_CONFIG environment variable is not set".to_string(),
+    };
+    let node_id =
+        std::env::var("SWARM_NODE").unwrap_or_else(|_| "local".to_string());
+    orchestrate_swarm_impl(&swarm_json, &node_id)
+}
+
+pub struct DbOrchestrateSwarmFromEnvScalar;
+
+impl VScalar for DbOrchestrateSwarmFromEnvScalar {
+    type State = ();
+
+    unsafe fn invoke(
+        _state: &Self::State,
+        _input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let result = orchestrate_swarm_from_env();
+        let flat = output.flat_vector();
+        flat.insert(0, &result);
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        // Zero-arg scalar
+        vec![ScalarFunctionSignature::exact(
+            vec![],
+            LogicalTypeId::Varchar.into(),
+        )]
+    }
+}
+
+pub struct DbOrchestrateSwarmScalar;
+
+impl VScalar for DbOrchestrateSwarmScalar {
+    type State = ();
+
+    unsafe fn invoke(
+        _state: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if input.len() == 0 {
+            return Err("No input provided".into());
+        }
+        let json_vector = input.flat_vector(0);
+        let node_vector = input.flat_vector(1);
+
+        let json_slice =
+            json_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+        let node_slice =
+            node_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+
+        let swarm_json = duckdb::types::DuckString::new(&mut { json_slice[0] })
+            .as_str()
+            .to_string();
+        let node_id = duckdb::types::DuckString::new(&mut { node_slice[0] })
+            .as_str()
+            .to_string();
+
+        let result = orchestrate_swarm_impl(&swarm_json, &node_id);
+
+        let flat = output.flat_vector();
+        flat.insert(0, &result);
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        vec![ScalarFunctionSignature::exact(
+            vec![
+                LogicalTypeId::Varchar.into(),
+                LogicalTypeId::Varchar.into(),
+            ],
+            LogicalTypeId::Varchar.into(),
+        )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn db_orchestrate_swarm_rejects_invalid_json() {
+        let result = orchestrate_swarm_impl("not json", "local");
+        assert!(result.to_lowercase().contains("failed to parse"), "got: {result}");
+    }
+
+    #[test]
+    fn db_orchestrate_swarm_rejects_unknown_node() {
+        let json = r#"{"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[]}}}"#;
+        let result = orchestrate_swarm_impl(json, "missing");
+        assert!(result.contains("not found"), "got: {result}");
+        assert!(result.contains("missing"), "got: {result}");
+    }
+
+    #[test]
+    fn db_orchestrate_swarm_with_empty_extension_list_returns_empty_status() {
+        let json = r#"{"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[]}}}"#;
+        let result = orchestrate_swarm_impl(json, "local");
+        // Empty extensions vector -> orchestrator returns empty Vec<String> -> joined to ""
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn orchestrate_swarm_from_env_reads_swarm_config_and_node_from_env() {
+        // SAFETY: Tests in this module that mutate process env must be invoked with
+        // `cargo test -- --test-threads=1` to avoid races. In practice the parallel
+        // run also passes because the env var lifetimes don't overlap by ordering,
+        // but the only correct invocation is single-threaded.
+        unsafe {
+            std::env::set_var("SWARM_CONFIG", r#"{"cluster_id":"x","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[]}}}"#);
+            std::env::set_var("SWARM_NODE", "local");
+        }
+        let result = orchestrate_swarm_from_env();
+        assert_eq!(result, "");
+        // SAFETY: Tests in this module that mutate process env must be invoked with
+        // `cargo test -- --test-threads=1` to avoid races. In practice the parallel
+        // run also passes because the env var lifetimes don't overlap by ordering,
+        // but the only correct invocation is single-threaded.
+        unsafe {
+            std::env::remove_var("SWARM_CONFIG");
+            std::env::remove_var("SWARM_NODE");
+        }
+    }
+
+    #[test]
+    fn orchestrate_swarm_from_env_errors_when_unset() {
+        // SAFETY: Tests in this module that mutate process env must be invoked with
+        // `cargo test -- --test-threads=1` to avoid races. In practice the parallel
+        // run also passes because the env var lifetimes don't overlap by ordering,
+        // but the only correct invocation is single-threaded.
+        unsafe { std::env::remove_var("SWARM_CONFIG"); }
+        let result = orchestrate_swarm_from_env();
+        assert!(result.to_lowercase().contains("swarm_config"), "got: {result}");
+    }
+}

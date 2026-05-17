@@ -57,7 +57,7 @@ export function registerEtlTools(server: McpServer) {
 
       try {
         const dbResult = await pool.query(
-          `SELECT host, port, "databaseName" FROM trex.database WHERE id = $1`,
+          `SELECT host, port, "databaseName" FROM trexdb.database WHERE id = $1`,
           [databaseId],
         );
         if (dbResult.rows.length === 0) {
@@ -66,7 +66,7 @@ export function registerEtlTools(server: McpServer) {
         const db = dbResult.rows[0];
 
         const credResult = await pool.query(
-          `SELECT username, password, password_encrypted FROM trex.database_credential WHERE "databaseId" = $1 LIMIT 1`,
+          `SELECT username, password, password_encrypted FROM trexdb.database_credential WHERE "databaseId" = $1 LIMIT 1`,
           [databaseId],
         );
         if (credResult.rows.length === 0) {
