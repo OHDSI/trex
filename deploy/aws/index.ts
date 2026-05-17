@@ -32,7 +32,7 @@ export function deployAws(config: DeployConfig) {
   const protocol = certArn ? "https" : "http";
   const endpointUrl = pulumi.interpolate`${protocol}://${networking.alb.dnsName}`;
 
-  const ecs = createEcs({
+  const _ecs = createEcs({
     env,
     sizing,
     ghcrImage: config.ghcrImage,

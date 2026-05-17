@@ -4,7 +4,7 @@
  * Subagents run with their own system prompt, tool set, and context.
  */
 
-import type { ToolDefinition, AgentContext } from "./types.ts";
+import type { ToolDefinition } from "./types.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;

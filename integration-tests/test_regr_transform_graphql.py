@@ -61,7 +61,6 @@ test mutation in that case.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import time
 import urllib.error

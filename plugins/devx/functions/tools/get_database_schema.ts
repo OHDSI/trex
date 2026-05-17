@@ -1,5 +1,5 @@
 // @ts-nocheck - Deno edge function
-import type { ToolDefinition, AgentContext } from "./types.ts";
+import type { ToolDefinition } from "./types.ts";
 
 export const getDatabaseSchemaTool: ToolDefinition = {
   name: "DatabaseSchema",

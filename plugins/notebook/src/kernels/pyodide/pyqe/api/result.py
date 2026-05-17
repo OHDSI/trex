@@ -1,12 +1,10 @@
 import logging
-from typing import Type
 import pandas as pd
 import os
 from pyqe.api.base import _AuthApi
 from pyqe.setup import setup_simple_console_log
 from pyqe.shared import decorator
 from pyqe.shared.b64encode_query import _EncodeQueryStringMixin
-import base64
 logger = logging.getLogger(__name__)
 setup_simple_console_log()
 import json
@@ -45,7 +43,7 @@ class Result(_EncodeQueryStringMixin, _AuthApi):
         """
         raw_response =  await self.get_patientCount_api(cohort, cohortId=cohortid)
         patient_count = 0
-        if raw_response != None:
+        if raw_response is not None:
             patient_count = json.loads(raw_response)['rowCount']
             
         logger.debug(
@@ -65,20 +63,6 @@ class Result(_EncodeQueryStringMixin, _AuthApi):
         print(type(self._encode_query_string(cohort)))
         response = await self._get('/analytics-svc/api/services/patient', params)
         return await response.json()
-    #### DEAL WITH STREAMS LATER ##########################
-    # def download_stream(self, cohort: dict):
-    #     """Download stream from MRI which fit the cohort request provided
-
-    #     Args:
-    #         cohort: request generated using :py:class:`Query <pyqe.api.query.Query>`
-    #     """
-
-    #     params = {
-    #         'mriquery': self._encode_query_string(cohort)
-    #     }
-
-    #     return self._get_stream('/analytics-svc/api/services/datastream/patient', params)
-    ####################
 
     async def download_dataframe(self, cohort: dict, filename: str = "__temp.csv", cohortid: int = 0, limit: int or bool = False, offset: int = 0):
         """Download dataframe from MRI which fit the cohort request provided
@@ -114,22 +98,21 @@ class Result(_EncodeQueryStringMixin, _AuthApi):
                 response = pd.read_parquet(filename)
 
                 return response
-            else:
-                text = await self.download_raw(cohort, "CSV", cohortId=cohortid)
+            text = await self.download_raw(cohort, "CSV", cohortId=cohortid)
 
-                if not text:
-                    return pd.DataFrame(columns=[])
+            if not text:
+                return pd.DataFrame(columns=[])
 
-                with open(filename, "a") as file:  # Use file to refer to the file object
-                    file.write(text)
+            with open(filename, "a") as file:  # Use file to refer to the file object
+                file.write(text)
 
-                del text
+            del text
 
-                tfr = pd.read_csv(filename, chunksize=1000, iterator=True, engine='python')
+            tfr = pd.read_csv(filename, chunksize=1000, iterator=True, engine='python')
 
-                response = pd.concat(tfr, ignore_index=True)
+            response = pd.concat(tfr, ignore_index=True)
 
-                return response
+            return response
         except BaseException as error:
             raise error
         finally:

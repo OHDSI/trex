@@ -7,7 +7,6 @@ Verifies that:
 - trex_db_start_service('etl', config) generates correct SQL
 """
 
-import pytest
 from conftest import wait_for
 
 

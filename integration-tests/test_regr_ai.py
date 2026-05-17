@@ -45,7 +45,7 @@ BERT_MODEL_CONTAINER = "/tmp/trexsql_test_bert.gguf"
 
 
 def _docker_exec(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", "exec", CONTAINER, *args], capture_output=True, text=True)
+    return subprocess.run(["docker", "exec", CONTAINER, *args], capture_output=True, text=True, check=False)
 
 
 def _docker_cp_to_container(src: str, dst: str) -> None:

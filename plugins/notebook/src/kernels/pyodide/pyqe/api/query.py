@@ -1,9 +1,6 @@
 import logging
-import json
-# import requests
-import pyodide.http
 import os
-from typing import Optional, List, Dict
+from typing import List, Dict
 from pyqe.api.base import _AuthApi
 from pyqe.api.study import Study
 from pyqe.api.pa_config import PAConfig
@@ -63,7 +60,7 @@ class Query(_AuthApi):
         else:
             selected_study = None
 
-        if selected_study == None:
+        if selected_study is None:
             print("\n Study not found or assigned to your account \n")
         else:
             self._study_name = selected_study['studyDetail']['name']
@@ -76,7 +73,7 @@ class Query(_AuthApi):
 
         Args:
             config_id: study config Id`"""
-        if self._study_config_id == None:
+        if self._study_config_id is None:
             self._study_config = await PAConfig()._get_my_config(self._selectedStudyId)
 
         if len(self._study_config) == 0:
@@ -92,7 +89,7 @@ class Query(_AuthApi):
     async def get_study_list(self):
         """Print the list of assigned studies to the user in the format Study Name - Study Id"""
 
-        loop = asyncio.get_event_loop()
+        asyncio.get_event_loop()
 
         assigned_studies = []
         assigned_studies = await Study().get_user_study_list()
@@ -120,7 +117,7 @@ class Query(_AuthApi):
 
     def show_selected_study(self):
         """Print current selected study to console"""
-        if self._selectedStudyId != None:
+        if self._selectedStudyId is not None:
             print(
                 f"Currently selected Study Name & ID: { self._study_name }, { self._selectedStudyId }")
         else:
@@ -193,7 +190,7 @@ class Query(_AuthApi):
 
     def show_current_study_config(self):
         """Print current selected study config to console"""
-        if self._study_config_assigned_name != None:
+        if self._study_config_assigned_name is not None:
             print(
                 f"Currently selected Study Config Name & ID: {self._study_config_assigned_name}, {self._selectedStudyId}")
         else:
@@ -208,7 +205,7 @@ class Query(_AuthApi):
         Interactions.generate_interaction_type_class(frontend_config)
 
     async def _configure_columns(self, selected_entity_names: List[str] = []):
-        if self._study_config_id == None or self._study_config_assigned_name == None or self._study_config_version == None:
+        if self._study_config_id is None or self._study_config_assigned_name is None or self._study_config_version is None:
             await self.set_study_config()
         if self._study_config_id is None or self._selectedStudyId is None:
             raise ValueError("Study config ID and selected study ID must be set before configuring columns.")
@@ -289,7 +286,7 @@ class Query(_AuthApi):
         for card in self._filters:
             cards.append(card._req_obj())
 
-        if self._study_config_id == None or self._study_config_assigned_name == None or self._study_config_version == None:
+        if self._study_config_id is None or self._study_config_assigned_name is None or self._study_config_version is None:
             await self.set_study_config()
 
         columns = None
@@ -330,7 +327,7 @@ class Query(_AuthApi):
         for card in self._filters:
             cards.append(card._req_obj())
 
-        if self._study_config_id == None or self._study_config_assigned_name == None or self._study_config_version == None:
+        if self._study_config_id is None or self._study_config_assigned_name is None or self._study_config_version is None:
            await self.set_study_config()
 
         if selected_entity_name is None:
@@ -354,8 +351,6 @@ class Query(_AuthApi):
             else:
                 selected_entity_name = self.__added_entity_types[0].__name__
 
-        # print(f'Selected dataframe entity: {selected_entity_name}\n')
-
         columns = None
         self._column_config_paths = None
         self._selected_entity_column_config_paths = None
@@ -365,7 +360,6 @@ class Query(_AuthApi):
             filter(lambda x: x in self._selected_entity_column_config_paths, column_config_paths))
 
         columns = self._generate_cohort_columns(columns_in_selected_entity)
-        # columns = self._generate_cohort_columns(column_config_paths)
 
         if columns is None or len(columns) == 0:
             columns = self._generate_cohort_columns(self._selected_entity_column_config_paths)

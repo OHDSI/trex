@@ -3,8 +3,7 @@ import datetime
 import enum
 from pyqe.setup import setup_simple_console_log
 from pyqe.shared import decorator
-from pyqe.types.enum_types import ComparisonOperator, Format
-from typing import List
+from pyqe.types.enum_types import Format
 
 logger = logging.getLogger(__name__)
 setup_simple_console_log()
@@ -57,15 +56,15 @@ class DatePeriod():
             raise ValueError(f'date {date} is invalid')
         try:
             datetime.datetime.strptime(date, DATE_FORMAT)
-        except ValueError:
+        except ValueError as err:
             raise ValueError(
-                f'date {date} is invalid: it should be a valid date which follows YYYY-MM-DD format')
+                f'date {date} is invalid: it should be a valid date which follows YYYY-MM-DD format') from err
         if number_of_days is None or number_of_days <= 0:
-            raise ValueError(f'number_of_days should be positive')
-        elif date_period_type is None or not isinstance(date_period_type, DatePeriod.Type):
-            raise ValueError(f'date_period_type should be either BEFORE or AFTER')
-        elif is_inclusive is None or not isinstance(is_inclusive, bool):
-            raise ValueError(f'is_inclusive should be a boolean value')
+            raise ValueError('number_of_days should be positive')
+        if date_period_type is None or not isinstance(date_period_type, DatePeriod.Type):
+            raise ValueError('date_period_type should be either BEFORE or AFTER')
+        if is_inclusive is None or not isinstance(is_inclusive, bool):
+            raise ValueError('is_inclusive should be a boolean value')
         return True
 
     def _compute_date(self, date: str, number_of_days: int):

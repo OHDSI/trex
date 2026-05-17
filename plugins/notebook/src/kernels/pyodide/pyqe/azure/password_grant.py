@@ -1,11 +1,4 @@
-import sys
-import json
-import logging
-import os
 import getpass
-# import requests
-import pyodide.http
-from typing import Optional
 from pyqe.azure.msal_credentials import _MsalCredentials
 
 

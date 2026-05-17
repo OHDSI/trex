@@ -141,7 +141,6 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 400, headers: corsHeaders },
         );
       }
-      var settings = legacyResult.rows[0];
     } else {
       const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
       if (!providerRow.api_key && !noKeyProviders.has(providerRow.provider)) {

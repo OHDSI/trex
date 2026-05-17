@@ -4,7 +4,6 @@ Verifies that the atlas extension can load and execute OHDSI Circe functions:
 SQL rendering, translation, cohort JSON-to-SQL, and combined operations.
 """
 
-import pytest
 
 
 # Minimal OHDSI cohort expression (base64-encoded JSON)

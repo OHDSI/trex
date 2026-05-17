@@ -1,6 +1,4 @@
-import json
 import logging
-import os
 from pyqe.api.base import _AuthApi
 from pyqe.setup import setup_simple_console_log
 from pyqe.shared import decorator
@@ -24,6 +22,7 @@ class PAConfig(_AuthApi):
         response = await self._get('/analytics-svc/pa/services/analytics.xsjs', params)
         if response.ok:
             return await response.json()
+        return None
 
     
     async def _get_study_config_list(self, study):
@@ -34,6 +33,7 @@ class PAConfig(_AuthApi):
         response = await self._get('/analytics-svc/pa/services/analytics.xsjs', params)
         if response.ok:
             return await response.json()
+        return None
 
 
     async def _get_frontend_config(self, config_id, selectedStudyId, lang = 'eng'):
@@ -46,3 +46,4 @@ class PAConfig(_AuthApi):
         response = await self._get('/analytics-svc/pa/services/analytics.xsjs', params)
         if response.ok:
             return await response.json()
+        return None

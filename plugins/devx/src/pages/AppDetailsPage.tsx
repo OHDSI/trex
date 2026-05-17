@@ -67,7 +67,7 @@ export default function AppDetailsPage() {
       setApp(updated);
       setNameValue(updated.name);
       toast.success("App renamed");
-    } catch (err: unknown) {
+    } catch {
       toast.error("Failed to rename app");
       setNameValue(app.name);
     }

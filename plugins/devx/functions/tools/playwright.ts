@@ -7,7 +7,7 @@
  * and is executed via `node <path> <json-command>`.
  */
 
-import type { ToolDefinition, AgentContext } from "./types.ts";
+import type { ToolDefinition } from "./types.ts";
 import { duckdb, escapeSql } from "../duckdb.ts";
 
 // Known locations for the helper script (checked in order)

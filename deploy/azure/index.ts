@@ -1,4 +1,4 @@
-import * as pulumi from "@pulumi/pulumi";
+
 import { DeployConfig, getSizing } from "../shared/config";
 import { exportOutputs, StackOutputs } from "../shared/outputs";
 import { createNetworking } from "./networking";
