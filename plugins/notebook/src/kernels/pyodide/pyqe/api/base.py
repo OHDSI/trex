@@ -3,16 +3,11 @@ import json
 import logging
 import requests
 import jwt
-import getpass
 from urllib.parse import urljoin
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from dotenv import load_dotenv
-from six.moves import input
-from typing import Optional, Any, List
+from typing import Optional
 from pyqe.setup import setup_simple_console_log
-from pyqe.shared import decorator, settings
-from pyqe.azure.password_grant import _PasswordCredential
-from pyqe.azure.refresh_token import _RefreshToken
+from pyqe.shared import decorator
 from pyodide.http import pyfetch, FetchResponse
 
 logger = logging.getLogger(__name__)
@@ -168,8 +163,7 @@ class _AuthApi(_StarboardApi):
     def _create_authorization_header(self):
         if self._pyqe_token_type == 'ACCESS':
             return {'Authorization': f'Bearer {self.access_token}'}
-        else:
-            return {'Authorization': f'Bearer {self.id_token}'}
+        return {'Authorization': f'Bearer {self.id_token}'}
 
     async def _get(self, path: str, params=None, **kwargs):
         try:
@@ -223,7 +217,7 @@ class _AuthApi(_StarboardApi):
             logger.error(f'Anonymous access is not allowed ({method} {url})')
             self._reauthentication()
             return
-        elif response.status_code == 403:
+        if response.status_code == 403:
             raise PermissionError(f'Access is not permitted ({method} {url})')
 
         response.raise_for_status()

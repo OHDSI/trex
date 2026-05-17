@@ -34,7 +34,6 @@ Assumes trexsql-trex-1 is already running and reachable on port 5433.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import time
 import uuid

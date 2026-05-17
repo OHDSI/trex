@@ -535,7 +535,7 @@ def test_cross_node_join_performance(node_factory):
     local_count = local_result[0][0]
 
     # Report results (informational only).
-    print(f"\n--- Cross-Node Join Performance Benchmark ---")
+    print("\n--- Cross-Node Join Performance Benchmark ---")
     print(f"Distributed join: {dist_count} rows in {t_distributed:.3f}s")
     print(f"Local join:       {local_count} rows in {t_local:.3f}s")
     print(f"Overhead:         {t_distributed - t_local:.3f}s")

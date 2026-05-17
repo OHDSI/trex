@@ -4,7 +4,6 @@ Verifies that the plugin extension can load and execute npm package manager
 functions: info, resolve, tree, install, and list.
 """
 
-import pytest
 
 
 def test_tpm_hello(node_factory):

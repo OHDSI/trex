@@ -609,7 +609,10 @@ async function forwardToStudioSidecar(req: any, res: any) {
     return;
   }
   const sidecarPath = req.originalUrl.replace("/plugins/trex/studio", "/studio-proxy");
-  const bodyLen = req.body && (req.body as Buffer).length ? (req.body as Buffer).length : 0;
+  // Guard against type confusion: req.body may be a Buffer, parsed object, array, or undefined
+  // depending on which body-parser middleware ran. Only Buffer has a meaningful .length here.
+  const bodyBuffer: Buffer | null = Buffer.isBuffer(req.body) ? req.body : null;
+  const bodyLen = bodyBuffer ? bodyBuffer.length : 0;
   if (DEBUG_STUDIO) {
     console.log(`[studio-sidecar-fwd] ${req.method} ${sidecarPath} bodyLen=${bodyLen} ct=${req.headers["content-type"] ?? ""}`);
   }
@@ -618,7 +621,7 @@ async function forwardToStudioSidecar(req: any, res: any) {
   if (DEBUG_STUDIO && workerResponse.status >= 400 && sidecarPath.startsWith("/studio-proxy/api/")) {
     const cloned = workerResponse.clone();
     try {
-      const reqBody = bodyLen > 0 ? redactForLog((req.body as Buffer).toString("utf8").slice(0, 800)) : "";
+      const reqBody = bodyBuffer ? redactForLog(bodyBuffer.toString("utf8").slice(0, 800)) : "";
       const resBody = redactForLog((await cloned.text()).slice(0, 800));
       console.log(`[studio-sidecar-${workerResponse.status >= 500 ? "5xx" : "4xx"}] ${req.method} ${sidecarPath} status=${workerResponse.status}\n  reqBody=${reqBody}\n  resBody=${resBody}`);
     } catch { /* ignore */ }

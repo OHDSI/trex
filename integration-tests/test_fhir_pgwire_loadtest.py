@@ -11,7 +11,6 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import pytest
 
 from test_fhir_pgwire import env, FhirClient, _free_port, _pg_connect  # noqa: F401
 

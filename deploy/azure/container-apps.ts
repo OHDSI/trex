@@ -2,8 +2,6 @@ import * as azure from "@pulumi/azure-native";
 import * as pulumi from "@pulumi/pulumi";
 import { Sizing } from "../shared/config";
 import {
-  TREX_PORT,
-  POSTGREST_PORT,
   POSTGREST_IMAGE,
   TREX_HEALTH_CHECK,
   buildTrexEnvVars,

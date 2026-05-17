@@ -39,9 +39,7 @@ Assumes trexsql-trex-1 and trexsql-postgres are already running.
 
 from __future__ import annotations
 
-import os
 import subprocess
-import time
 import uuid
 
 import pytest

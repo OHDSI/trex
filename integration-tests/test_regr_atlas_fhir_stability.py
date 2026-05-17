@@ -17,7 +17,6 @@ to guard against regressions.
 """
 import base64
 
-import pytest
 
 
 # Tutorial cohort JSON (clinical-analytics tutorial, plugins/docs/docs/tutorials).

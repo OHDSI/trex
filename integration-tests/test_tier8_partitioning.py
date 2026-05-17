@@ -156,7 +156,7 @@ def test_hash_partition_across_two_nodes(node_factory):
 
     # Verify the local table was dropped on node_a
     try:
-        local_count = node_a.execute("SELECT COUNT(*) FROM orders")
+        node_a.execute("SELECT COUNT(*) FROM orders")
         # If it succeeds, the table still exists locally (might be because
         # node_a was assigned a partition)
     except RuntimeError:

@@ -7,11 +7,24 @@ DENO_PACKAGES := core/server core/event
 
 .PHONY: test test-rust test-integration test-frontend test-deno \
         coverage coverage-rust coverage-integration coverage-frontend coverage-deno coverage-merge-all \
-        coverage-clean
+        coverage-clean \
+        lint lint-python lint-js
 
 # ---- Run every test layer ----
 
 test: test-rust test-frontend test-deno test-integration
+
+# ---- Code-quality lint (matches CodeQL quality suite). ----
+
+lint: lint-python lint-js
+
+lint-python:
+	@command -v ruff >/dev/null || { echo "ruff not installed: 'uv tool install ruff' or 'pip install ruff'"; exit 1; }
+	ruff check .
+
+lint-js:
+	@command -v npx >/dev/null || { echo "node/npx required"; exit 1; }
+	npx --yes @biomejs/biome lint
 
 test-rust:
 	@for p in $(RUST_PLUGINS); do \

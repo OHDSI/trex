@@ -13,7 +13,7 @@ import uuid
 
 import pytest
 
-from conftest import CQL2ELM_EXT, FHIR_EXT, Node, alloc_ports
+from conftest import FHIR_EXT, Node, alloc_ports
 
 os.environ.setdefault("FHIR_POOL_SIZE", "1")
 

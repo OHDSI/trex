@@ -2,7 +2,6 @@ import logging
 from ..shared import decorator
 from ..setup import setup_simple_console_log
 from .filter_card import FilterCard
-from .attribute import Attribute, Constraint
 from .advanced_time_filter import AdvanceTimeFilter
 from ..types.enum_types import CardType
 from typing import List
@@ -91,10 +90,9 @@ class Interactions():
         try:
             if len(frontend_config) > 0:
                 return frontend_config[0]['config']['patient']['interactions']
-            else:
-                return {}
+            return {}
         except (KeyError):
-            logger.debug(f'No interaction found in frontend config')
+            logger.debug('No interaction found in frontend config')
             return {}
 
     @staticmethod
