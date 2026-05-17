@@ -7,6 +7,7 @@
    multi-turn loop by re-POSTing the appended history."
   (:require [trexsql.agent.bedrock :as bedrock]
             [trexsql.agent.prompt :as prompt]
+            [trexsql.agent.route-context-format :as rcf]
             [trexsql.agent.sse :as sse]
             [trexsql.agent.tools :as tools]
             [clojure.string :as str]
@@ -107,36 +108,6 @@
 (defn- emit-finish [emit reason]
   (emit {:type "finish" :finishReason (or reason "stop")}))
 
-(defn- format-route-context
-  "Render the per-request route + open-artifact snapshot as a short text
-   block to append to the system prompt. Returns nil when no useful
-   context is available (no route, no open artifact)."
-  [route-ctx]
-  (when (map? route-ctx)
-    (let [route-name (some-> (:routeName route-ctx) str)
-          artifact   (:artifact route-ctx)
-          lines      (cond-> []
-                       (and route-name (not (str/blank? route-name)))
-                       (conj (str "Current screen: " route-name))
-
-                       (map? artifact)
-                       (conj (str "Open artifact: " (name (:kind artifact))
-                                  " \"" (:name artifact) "\""
-                                  " (id " (:id artifact) ")"))
-
-                       (and (map? artifact) (string? (:summary artifact))
-                            (not (str/blank? (:summary artifact))))
-                       (conj (str "Summary: " (:summary artifact))))]
-      (when (seq lines)
-        (str "## Current context\n"
-             (str/join "\n" lines)
-             "\n\nThe user is currently on this screen with this artifact open. "
-             "When they ask to modify it, call get_artifact first to load its "
-             "current state, then propose edits via the matching update_* tool "
-             "(or the cohort add_*/set_* tools when the artifact is a cohort). "
-             "Do NOT propose creating a new artifact when one is already open "
-             "and the user is asking to modify it.")))))
-
 (defn- chat-handler
   "POST /agent/chat — runs ONE Bedrock Converse streaming turn and emits
    the result as a Vercel UIMessageStream. The client (`useChat`) drives
@@ -145,7 +116,7 @@
   (let [body (or (:body-params request) {})
         ui-messages (or (:messages body) [])
         route-ctx (:routeContext body)
-        dynamic-context (format-route-context route-ctx)
+        dynamic-context (rcf/format-route-context route-ctx)
         history (bedrock-history ui-messages)
         message-id (str (UUID/randomUUID))
         ;; `text-state` tracks whether we've opened a text block so we can
