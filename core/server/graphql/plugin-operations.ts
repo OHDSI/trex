@@ -559,7 +559,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
             const schemaDir = Deno.env.get("SCHEMA_DIR");
             if (schemaDir) {
               try {
-                const sql = `SELECT version, name, status, applied_on, checksum FROM trex_migration_status_schema('${escapeSql(schemaDir)}', 'trex', '_config')`;
+                const sql = `SELECT version, name, status, applied_on, checksum FROM trex_migration_status_schema('${escapeSql(schemaDir)}', 'trexdb', '_config')`;
                 const result = await conn.execute(sql, []);
                 const rows = result?.rows || result || [];
                 const migrations = rows.map((r: any) => ({
@@ -576,7 +576,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
                   .reduce((max: number, m: any) => Math.max(max, m.version), 0);
                 summaries.push({
                   pluginName: "core",
-                  schema: "trex",
+                  schema: "trexdb",
                   database: "_config",
                   currentVersion: maxVersion || null,
                   totalMigrations: migrations.length,
@@ -759,7 +759,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
           try {
             // Periodic retention: delete logs older than 30 days (fire-and-forget)
             authPool.query(
-              `DELETE FROM trex.event_log WHERE created_at < NOW() - INTERVAL '30 days'`,
+              `DELETE FROM trexdb.event_log WHERE created_at < NOW() - INTERVAL '30 days'`,
             ).catch(() => {});
 
             const limit = Math.min(Math.max(args.limit || 100, 1), 500);
@@ -780,7 +780,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
             params.push(limit);
 
             const result = await authPool.query(
-              `SELECT id, event_type, level, message, created_at FROM trex.event_log ${where} ORDER BY id DESC LIMIT $${paramIdx}`,
+              `SELECT id, event_type, level, message, created_at FROM trexdb.event_log ${where} ORDER BY id DESC LIMIT $${paramIdx}`,
               params,
             );
 
@@ -907,7 +907,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
 
           try {
             const dbResult = await mainPool.query(
-              `SELECT host, port, "databaseName", dialect FROM trex.database WHERE id = $1`,
+              `SELECT host, port, "databaseName", dialect FROM trexdb.database WHERE id = $1`,
               [databaseId]
             );
             if (dbResult.rows.length === 0) {
@@ -917,7 +917,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
             const db = dbResult.rows[0];
 
             const credResult = await mainPool.query(
-              `SELECT username, password FROM trex.database_credential WHERE "databaseId" = $1 LIMIT 1`,
+              `SELECT username, password FROM trexdb.database_credential WHERE "databaseId" = $1 LIMIT 1`,
               [databaseId]
             );
             if (credResult.rows.length === 0) {
@@ -1029,7 +1029,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
 
             const schemaDir = Deno.env.get("SCHEMA_DIR");
             if (schemaDir) {
-              targets.push({ name: "core", path: schemaDir, schema: "trex", database: "_config" });
+              targets.push({ name: "core", path: schemaDir, schema: "trexdb", database: "_config" });
             }
 
             for (const target of targets) {
@@ -1087,7 +1087,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
 
           try {
             const dbResult = await mainPool.query(
-              `SELECT host, port, "databaseName" FROM trex.database WHERE id = $1`,
+              `SELECT host, port, "databaseName" FROM trexdb.database WHERE id = $1`,
               [databaseId]
             );
             if (dbResult.rows.length === 0) {
@@ -1096,7 +1096,7 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
             const db = dbResult.rows[0];
 
             const credResult = await mainPool.query(
-              `SELECT username, password FROM trex.database_credential WHERE "databaseId" = $1 LIMIT 1`,
+              `SELECT username, password FROM trexdb.database_credential WHERE "databaseId" = $1 LIMIT 1`,
               [databaseId]
             );
             if (credResult.rows.length === 0) {

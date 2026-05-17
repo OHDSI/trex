@@ -13,7 +13,7 @@ export function registerUserTools(server: McpServer) {
     },
     async ({ includeDeleted, search }) => {
       try {
-        let sql = `SELECT id, name, email, role, banned, "banReason", "emailVerified", "mustChangePassword", "deletedAt", "createdAt", "updatedAt" FROM trex."user"`;
+        let sql = `SELECT id, name, email, role, banned, "banReason", "emailVerified", "mustChangePassword", "deletedAt", "createdAt", "updatedAt" FROM trexdb."user"`;
         const conditions: string[] = [];
         const params: any[] = [];
 
@@ -46,7 +46,7 @@ export function registerUserTools(server: McpServer) {
     async ({ userId }) => {
       try {
         const userResult = await pool.query(
-          `SELECT id, name, email, role, banned, "banReason", "banExpires", "emailVerified", "mustChangePassword", "deletedAt", "createdAt", "updatedAt" FROM trex."user" WHERE id = $1`,
+          `SELECT id, name, email, role, banned, "banReason", "banExpires", "emailVerified", "mustChangePassword", "deletedAt", "createdAt", "updatedAt" FROM trexdb."user" WHERE id = $1`,
           [userId],
         );
         if (userResult.rows.length === 0) {
@@ -54,7 +54,7 @@ export function registerUserTools(server: McpServer) {
         }
 
         const rolesResult = await pool.query(
-          `SELECT r.id, r.name, r.description FROM trex.user_role ur JOIN trex.role r ON ur."roleId" = r.id WHERE ur."userId" = $1`,
+          `SELECT r.id, r.name, r.description FROM trexdb.user_role ur JOIN trexdb.role r ON ur."roleId" = r.id WHERE ur."userId" = $1`,
           [userId],
         );
 
@@ -83,20 +83,20 @@ export function registerUserTools(server: McpServer) {
         if (password) {
           const passwordHash = await hashPassword(password);
           await pool.query(
-            `INSERT INTO trex."user" (id, name, email, role, "emailVerified", email_confirmed_at, password_hash)
+            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at, password_hash)
              VALUES ($1, $2, $3, $4, true, NOW(), $5)`,
             [id, name, email, userRole, passwordHash],
           );
           // Also create account record for backward compat
           await pool.query(
-            `INSERT INTO trex.account (id, "userId", "accountId", "providerId", password)
+            `INSERT INTO trexdb.account (id, "userId", "accountId", "providerId", password)
              VALUES ($1, $2, $2, 'credential', $3)
              ON CONFLICT ("providerId", "accountId") DO NOTHING`,
             [crypto.randomUUID(), id, passwordHash],
           );
         } else {
           await pool.query(
-            `INSERT INTO trex."user" (id, name, email, role, "emailVerified", email_confirmed_at)
+            `INSERT INTO trexdb."user" (id, name, email, role, "emailVerified", email_confirmed_at)
              VALUES ($1, $2, $3, $4, true, NOW())`,
             [id, name, email, userRole],
           );
@@ -119,7 +119,7 @@ export function registerUserTools(server: McpServer) {
     async ({ userId, role }) => {
       try {
         const result = await pool.query(
-          `UPDATE trex."user" SET role = $1, "updatedAt" = NOW() WHERE id = $2 RETURNING id, name, email, role`,
+          `UPDATE trexdb."user" SET role = $1, "updatedAt" = NOW() WHERE id = $2 RETURNING id, name, email, role`,
           [role, userId],
         );
         if (result.rows.length === 0) {
@@ -144,7 +144,7 @@ export function registerUserTools(server: McpServer) {
     async ({ userId, banned, reason, expiresAt }) => {
       try {
         const result = await pool.query(
-          `UPDATE trex."user" SET banned = $1, "banReason" = $2, "banExpires" = $3, "updatedAt" = NOW() WHERE id = $4 RETURNING id, name, email, banned, "banReason"`,
+          `UPDATE trexdb."user" SET banned = $1, "banReason" = $2, "banExpires" = $3, "updatedAt" = NOW() WHERE id = $4 RETURNING id, name, email, banned, "banReason"`,
           [banned, banned ? (reason || null) : null, banned ? (expiresAt || null) : null, userId],
         );
         if (result.rows.length === 0) {

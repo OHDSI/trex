@@ -13,7 +13,7 @@ export function registerSessionTools(server: McpServer) {
     async ({ userId, includeExpired }) => {
       try {
         let sql = `SELECT s.id, s."userId", u.name AS "userName", u.email AS "userEmail", s."ipAddress", s."userAgent", s."expiresAt", s."createdAt"
-                    FROM trex.session s JOIN trex."user" u ON s."userId" = u.id`;
+                    FROM trexdb.session s JOIN trexdb."user" u ON s."userId" = u.id`;
         const conditions: string[] = [];
         const params: any[] = [];
 
@@ -46,7 +46,7 @@ export function registerSessionTools(server: McpServer) {
     async ({ sessionId }) => {
       try {
         const result = await pool.query(
-          `DELETE FROM trex.session WHERE id = $1 RETURNING id, "userId"`,
+          `DELETE FROM trexdb.session WHERE id = $1 RETURNING id, "userId"`,
           [sessionId],
         );
         if (result.rows.length === 0) {

@@ -3,20 +3,20 @@ import { admin, jwt, oidcProvider } from "better-auth/plugins";
 import { Pool } from "pg";
 import { BASE_PATH } from "./config.ts";
 import { poolSsl } from "./lib/db-ssl.ts";
+import { deriveSubkeyBase64, LABELS } from "./auth/keys.ts";
 
 const databaseUrl = Deno.env.get("DATABASE_URL");
 if (!databaseUrl) {
   throw new Error("DATABASE_URL environment variable is required");
 }
 
-const authSecret = Deno.env.get("BETTER_AUTH_SECRET");
-if (!authSecret) {
-  throw new Error("BETTER_AUTH_SECRET environment variable is required");
-}
+// Derive Better Auth's session secret from the root key. Better Auth's API
+// expects a string, so we base64-encode the 32 derived bytes.
+const authSecret = await deriveSubkeyBase64(LABELS.betterAuthSession);
 
 export const pool = new Pool({
   connectionString: databaseUrl,
-  options: "-c search_path=trex,public",
+  options: "-c search_path=trexdb,public",
   ...poolSsl(databaseUrl),
 });
 
@@ -151,14 +151,14 @@ async function loadProvidersFromDB(): Promise<Record<string, { clientId: string;
   const client = await pool.connect();
   try {
     const tableCheck = await client.query(
-      `SELECT 1 FROM information_schema.tables WHERE table_schema = 'trex' AND table_name = 'sso_provider' LIMIT 1`
+      `SELECT 1 FROM information_schema.tables WHERE table_schema = 'trexdb' AND table_name = 'sso_provider' LIMIT 1`
     );
     if (tableCheck.rows.length === 0) {
       return null; // table doesn't exist yet — fall back to env
     }
 
     const result = await client.query(
-      `SELECT id, "clientId", "clientSecret" FROM trex.sso_provider WHERE enabled = true`
+      `SELECT id, "clientId", "clientSecret" FROM trexdb.sso_provider WHERE enabled = true`
     );
 
     if (result.rows.length === 0) {

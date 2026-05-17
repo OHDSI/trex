@@ -36,6 +36,11 @@ struct ModelConfig {
     // which causes llama.cpp to pick the architecture's default (CLS for BERT,
     // MEAN for nomic-embed, etc.). 0 = NONE (per-token, used by decoder LLMs).
     int pooling_type = -1;
+    // Flash attention: -1=auto (llama default), 0=disabled, 1=enabled.
+    // CPU-only loads (n_gpu_layers == 0) force-disable in CreateNewContext
+    // when this is left at auto — some llama.cpp CPU FA paths hang on small
+    // or unusually-shaped models (e.g. TinyLLama v0).
+    int flash_attn = -1;
 };
 
 struct ChatMessage {

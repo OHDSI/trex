@@ -68,6 +68,13 @@
     :default nil
     :parse-fn #(Integer/parseInt %)
     :validate [#(<= 1 % 9999) "Must be between 1 and 9999"]]
+   [nil "--no-orchestrator" "Use bao's direct extension-load + single-instance server start path; do not delegate to db.trex's orchestrator even if $SWARM_CONFIG is set"
+    :default false]
+   [nil "--extensions EXT" "Comma-separated list of extension names to load (scoped mode); pool is auto-prepended unless --no-pool"
+    :parse-fn #(clojure.string/split % #",")]
+   [nil "--swarm-config-path PATH" "Path to a SWARM_CONFIG JSON file; wins over $SWARM_CONFIG env. (Named -path to disambiguate from the library opt :swarm-config which takes a map.)"]
+   [nil "--no-pool" "(With --extensions) suppress automatic prepend of pool to the load list"
+    :default false]
    ["-h" "--help" "Show this help message"]])
 
 (defn parse-args
@@ -127,6 +134,10 @@ Options:
   --allow-main-inspector    Allow inspector in main worker
   --worker-policy POLICY    Worker policy: per_worker (default), per_request, oneshot
   --max-parallelism COUNT   Max workers per service path (1-9999, default: CPU cores)
+  --no-orchestrator         Skip db.trex orchestrator delegation; use direct extension-load path
+  --extensions EXT          Comma-separated extension names to load (pool is auto-prepended unless --no-pool)
+  --swarm-config-path PATH  Path to SWARM_CONFIG JSON file; wins over $SWARM_CONFIG env
+  --no-pool                 (With --extensions) suppress automatic prepend of pool
   -h, --help                Show this help message")
 
 (defn get-proxy-routes []

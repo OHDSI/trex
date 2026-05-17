@@ -75,18 +75,22 @@
 (defn find-extensions
   "Find all TrexSQL extension files in the given directory.
    Searches recursively in @trex subdirectories.
-   Returns seq of {:name <string> :path <string> :requires-avx <boolean>}"
+   Returns seq of {:name <string> :path <string> :requires-avx <boolean>},
+   sorted with 'pool' first (load-order requirement of dependent extensions)
+   then alphabetic by name for determinism."
   [extensions-path]
   (let [base-dir (io/file extensions-path)]
     (when (.isDirectory base-dir)
-      (for [subdir (.listFiles base-dir)
-            :when (.isDirectory subdir)
-            ext-file (.listFiles subdir)
-            :when (extension-file? ext-file)
-            :let [name (extension-name ext-file)]]
-        {:name name
-         :path (.getAbsolutePath ext-file)
-         :requires-avx (= name "llama")}))))
+      (->> (for [subdir (.listFiles base-dir)
+                 :when (.isDirectory subdir)
+                 ext-file (.listFiles subdir)
+                 :when (extension-file? ext-file)
+                 :let [ext-name (extension-name ext-file)]]
+             {:name ext-name
+              :path (.getAbsolutePath ext-file)
+              :requires-avx (= ext-name "llama")})
+           (sort-by (fn [{ext-name :name}]
+                      [(if (= ext-name "pool") 0 1) ext-name]))))))
 
 (defn load-extension
   "Load a single extension into the TrexSQL connection.
@@ -165,6 +169,90 @@
       (let [results (map #(load-extension handle %) external-to-load)
             loaded (filter :loaded results)]
         (into embedded-loaded (map :name loaded))))))
+
+(defn pre-extract-all-embedded
+  "Extract every embedded JAR extension to the given directory using the
+   existing extract-embedded-extension mechanism. Returns the vector of
+   absolute paths to the extracted .trex files (or paths that were
+   already on disk).
+
+   Used by orchestrated-mode init so db.trex's orchestrator can LOAD
+   each extension by its conventional name without first having to
+   handle JAR-resource indirection."
+  [target-dir]
+  (let [tdir (io/file target-dir)]
+    (when-not (.exists tdir)
+      (.mkdirs tdir))
+    (vec
+      (for [ext-name (find-embedded-extensions)
+            :let [src (extract-embedded-extension ext-name)
+                  ;; src is already on disk: extract-embedded-extension writes the JAR
+                  ;; resource to a JVM-private temp dir on first call and returns its File.
+                  ;; Copy from there to the caller's target-dir so the orchestrator can LOAD by path.
+                  dst (io/file tdir (str ext-name ".trex"))]
+            :when src]
+        (do
+          ;; Size match is sufficient: .trex artifacts change with every build,
+          ;; so size collision across versions is vanishingly unlikely.
+          (when (or (not (.exists dst))
+                    (not= (.length src) (.length dst)))
+            (io/copy src dst))
+          (.getAbsolutePath dst))))))
+
+(defn load-scoped-extensions
+  "Load a caller-specified subset of extensions, ensuring pool is loaded
+   first (since other extensions depend on it at LOAD time).
+
+   Args:
+     handle           JNA Pointer to the open trexsql native database
+     ext-names        seq of extension names (keywords or strings)
+     extensions-path  directory to search for external .trex files
+     opts (optional)  map with:
+                        :no-pool true  skip auto-prepend of pool
+                                       (caller asserts no pool-dependent
+                                       extension is in the list)
+
+   Returns a set of successfully-loaded extension names."
+  [^Pointer handle ext-names extensions-path & [{:keys [no-pool]}]]
+  (let [requested  (mapv name ext-names)
+        with-pool  (if no-pool
+                     requested
+                     (cons "pool" (remove #{"pool"} requested)))
+        ;; Embedded names are resolved by find-embedded-extensions (filters to
+        ;; what's actually in the JAR); external names resolve via find-extensions.
+        embedded   (set (find-embedded-extensions))
+        external   (->> (find-extensions extensions-path)
+                        (map (juxt :name identity))
+                        (into {}))
+        loaded     (atom #{})]
+    (doseq [ename with-pool]
+      (cond
+        (contains? embedded ename)
+        (when (:loaded (load-embedded-extension handle ename))
+          (swap! loaded conj ename))
+
+        (contains? external ename)
+        (when (:loaded (load-extension handle (get external ename)))
+          (swap! loaded conj ename))
+
+        :else
+        (println (str "load-scoped-extensions: '" ename "' not found in embedded or " extensions-path))))
+    @loaded))
+
+(defn loaded-from-engine
+  "Query the trexsql engine for currently-loaded extensions. Returns a set
+   of extension-name strings. Used after orchestrated-mode init to sync
+   bao's bookkeeping with what the orchestrator actually loaded."
+  [^Pointer handle]
+  (try
+    (let [rows (native/query handle
+                  "SELECT extension_name FROM duckdb_extensions() WHERE loaded")]
+      ;; native/query returns ArrayList<HashMap<String,Object>> with string keys.
+      ;; Each row is a HashMap; extract the "extension_name" column by key.
+      (set (map #(get % "extension_name") rows)))
+    (catch Exception e
+      (println (str "loaded-from-engine: query failed (" (.getMessage e) ")"))
+      #{})))
 
 (defn loaded-extensions
   "Return set of loaded extension names from database state."

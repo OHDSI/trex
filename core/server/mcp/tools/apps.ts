@@ -10,7 +10,7 @@ export function registerAppTools(server: McpServer) {
     async () => {
       try {
         const result = await pool.query(
-          `SELECT id, name, icon, metadata, "clientId", "redirectURLs", type, disabled, "userId", "createdAt", "updatedAt" FROM trex.oauth_application ORDER BY "createdAt" DESC`,
+          `SELECT id, name, icon, metadata, "clientId", "redirectURLs", type, disabled, "userId", "createdAt", "updatedAt" FROM trexdb.oauth_application ORDER BY "createdAt" DESC`,
         );
         return { content: [{ type: "text", text: JSON.stringify(result.rows, null, 2) }] };
       } catch (err: any) {
@@ -36,7 +36,7 @@ export function registerAppTools(server: McpServer) {
         const clientSecret = crypto.randomUUID();
 
         const result = await pool.query(
-          `INSERT INTO trex.oauth_application (id, name, "clientId", "clientSecret", "redirectURLs", type, icon, metadata)
+          `INSERT INTO trexdb.oauth_application (id, name, "clientId", "clientSecret", "redirectURLs", type, icon, metadata)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id, name, "clientId", "clientSecret", "redirectURLs", type`,
           [id, name, clientId, clientSecret, redirectURLs, type || "web", icon || null, metadata || null],
         );
@@ -77,7 +77,7 @@ export function registerAppTools(server: McpServer) {
         }
 
         params.push(appId);
-        const sql = `UPDATE trex.oauth_application SET ${sets.join(", ")}, "updatedAt" = NOW() WHERE id = $${idx} RETURNING id, name, "clientId", "redirectURLs", type, disabled`;
+        const sql = `UPDATE trexdb.oauth_application SET ${sets.join(", ")}, "updatedAt" = NOW() WHERE id = $${idx} RETURNING id, name, "clientId", "redirectURLs", type, disabled`;
         const result = await pool.query(sql, params);
         if (result.rows.length === 0) {
           return { content: [{ type: "text", text: "Application not found" }], isError: true };
@@ -98,7 +98,7 @@ export function registerAppTools(server: McpServer) {
     async ({ appId }) => {
       try {
         const result = await pool.query(
-          `DELETE FROM trex.oauth_application WHERE id = $1 RETURNING id, name`,
+          `DELETE FROM trexdb.oauth_application WHERE id = $1 RETURNING id, name`,
           [appId],
         );
         if (result.rows.length === 0) {

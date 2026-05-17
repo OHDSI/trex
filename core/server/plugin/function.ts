@@ -472,13 +472,13 @@ export async function ensureRolesExist() {
     const pg = (await import("pg")).default;
     const pool = new pg.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
     try {
-      const existing = await pool.query("SELECT name FROM trex.role");
+      const existing = await pool.query("SELECT name FROM trexdb.role");
       const existingNames = new Set(existing.rows.map((r: any) => r.name));
       for (const name of roleNames) {
         if (existingNames.has(name)) continue;
         const id = crypto.randomUUID();
         await pool.query(
-          'INSERT INTO trex.role (id, name, description) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING',
+          'INSERT INTO trexdb.role (id, name, description) VALUES ($1, $2, $3) ON CONFLICT (name) DO NOTHING',
           [id, name, "Auto-created from plugin registration"]
         );
         console.log(`Auto-created role: ${name}`);

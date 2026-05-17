@@ -4,6 +4,7 @@ CLAUDE.md
 node_modules
 target/
 /specs
+/docs
 /extensions/*.trex
 /extensions/*.duckdb_extension
 plugins/*/*.trex
@@ -20,3 +21,5 @@ plugins/studio/build_static/
 # Deploy
 deploy/node_modules/
 deploy/bin/
+/secrets/
+deno.lock

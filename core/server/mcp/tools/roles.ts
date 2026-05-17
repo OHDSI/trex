@@ -11,7 +11,7 @@ export function registerRoleTools(server: McpServer) {
     },
     async ({ search }) => {
       try {
-        let sql = `SELECT id, name, description, "createdAt", "updatedAt" FROM trex.role`;
+        let sql = `SELECT id, name, description, "createdAt", "updatedAt" FROM trexdb.role`;
         const params: any[] = [];
         if (search) {
           params.push(`%${search}%`);
@@ -37,7 +37,7 @@ export function registerRoleTools(server: McpServer) {
     async ({ name, description }) => {
       try {
         const result = await pool.query(
-          `INSERT INTO trex.role (name, description) VALUES ($1, $2) RETURNING *`,
+          `INSERT INTO trexdb.role (name, description) VALUES ($1, $2) RETURNING *`,
           [name, description || null],
         );
         return { content: [{ type: "text", text: JSON.stringify(result.rows[0], null, 2) }] };
@@ -69,7 +69,7 @@ export function registerRoleTools(server: McpServer) {
         }
 
         params.push(roleId);
-        const sql = `UPDATE trex.role SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
+        const sql = `UPDATE trexdb.role SET ${sets.join(", ")} WHERE id = $${idx} RETURNING *`;
         const result = await pool.query(sql, params);
         if (result.rows.length === 0) {
           return { content: [{ type: "text", text: "Role not found" }], isError: true };
@@ -90,7 +90,7 @@ export function registerRoleTools(server: McpServer) {
     async ({ roleId }) => {
       try {
         const result = await pool.query(
-          `DELETE FROM trex.role WHERE id = $1 RETURNING id, name`,
+          `DELETE FROM trexdb.role WHERE id = $1 RETURNING id, name`,
           [roleId],
         );
         if (result.rows.length === 0) {
@@ -113,7 +113,7 @@ export function registerRoleTools(server: McpServer) {
     async ({ userId, roleId }) => {
       try {
         await pool.query(
-          `INSERT INTO trex.user_role ("userId", "roleId") VALUES ($1, $2) ON CONFLICT ("userId", "roleId") DO NOTHING`,
+          `INSERT INTO trexdb.user_role ("userId", "roleId") VALUES ($1, $2) ON CONFLICT ("userId", "roleId") DO NOTHING`,
           [userId, roleId],
         );
         return { content: [{ type: "text", text: `Role assigned to user` }] };
@@ -133,7 +133,7 @@ export function registerRoleTools(server: McpServer) {
     async ({ userId, roleId }) => {
       try {
         const result = await pool.query(
-          `DELETE FROM trex.user_role WHERE "userId" = $1 AND "roleId" = $2 RETURNING id`,
+          `DELETE FROM trexdb.user_role WHERE "userId" = $1 AND "roleId" = $2 RETURNING id`,
           [userId, roleId],
         );
         if (result.rows.length === 0) {

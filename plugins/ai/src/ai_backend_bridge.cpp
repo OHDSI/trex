@@ -129,6 +129,17 @@ static llama_capi::ModelConfig parse_model_config(const std::string& config_json
         config.use_mlock = yyjson_get_bool(use_mlock_val);
     }
 
+    // flash_attn: true/false sets enabled/disabled; integer -1/0/1 maps directly
+    // onto LLAMA_FLASH_ATTN_TYPE_AUTO/DISABLED/ENABLED.
+    yyjson_val *flash_attn_val = yyjson_obj_get(root, "flash_attn");
+    if (flash_attn_val) {
+        if (yyjson_is_bool(flash_attn_val)) {
+            config.flash_attn = yyjson_get_bool(flash_attn_val) ? 1 : 0;
+        } else if (yyjson_is_int(flash_attn_val)) {
+            config.flash_attn = static_cast<int>(yyjson_get_int(flash_attn_val));
+        }
+    }
+
     // Allow overriding pooling per load: "pooling_type" can be an int
     // (-1=unspec, 0=none, 1=mean, 2=cls, 3=last) or a string ("auto"/"none"/
     // "mean"/"cls"/"last").

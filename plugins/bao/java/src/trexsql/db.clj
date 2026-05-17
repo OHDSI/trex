@@ -60,17 +60,15 @@
 (defrecord TrexsqlDatabase [handle                ; JNA Pointer to native TrexDatabase
                             extensions-loaded      ; atom of set
                             config
-                            servers-running?       ; atom of boolean
                             closed?])              ; atom of boolean
 
 (defn make-database
   "Create a new TrexsqlDatabase record.
-   Uses atoms for mutable state (closed?, extensions-loaded, servers-running?)."
+   Uses atoms for mutable state (closed?, extensions-loaded)."
   [handle config]
   (map->TrexsqlDatabase {:handle handle
                          :extensions-loaded (atom #{})
                          :config config
-                         :servers-running? (atom false)
                          :closed? (atom false)}))
 
 (defn ensure-open!
@@ -251,3 +249,18 @@
   ^Pointer [^TrexsqlDatabase db]
   (ensure-open! db)
   (:handle db))
+
+(defn running-servers
+  "Query the trexsql engine for currently-running trexas servers.
+   Returns a vector of maps with keys :server-id, :host, :port, :status.
+   Returns empty vector if the trexas extension isn't loaded yet."
+  [^TrexsqlDatabase db]
+  (try
+    (->> (query db "SELECT server_id, ip, port, status FROM trex_list_servers()")
+         (mapv (fn [row]
+                 {:server-id (get row "server_id")
+                  :host      (get row "ip")
+                  :port      (get row "port")
+                  :status    (get row "status")})))
+    (catch Exception _
+      [])))
