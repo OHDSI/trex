@@ -14,8 +14,7 @@ RUN mkdir -p /opt/trexsql && \
     wget -O /tmp/libtrexsql.zip \
       https://github.com/p-hoffmann/trexsql-rs/releases/download/${TREXSQL_VERSION}/libtrexsql-linux-${TARGETARCH}.zip && \
     unzip /tmp/libtrexsql.zip -d /opt/trexsql && \
-    rm /tmp/libtrexsql.zip && \
-    ln -sf /opt/trexsql/libtrexsql.so /opt/trexsql/libduckdb.so
+    rm /tmp/libtrexsql.zip
 
 ENV TREXSQL_LIB_DIR=/opt/trexsql
 ENV TREXSQL_INCLUDE_DIR=/opt/trexsql
