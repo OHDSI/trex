@@ -40,6 +40,14 @@ fn escape_identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+/// Extract the per-client session token from a Flight request's metadata.
+fn extract_session_token<T>(req: &tonic::Request<T>) -> Option<String> {
+    req.metadata()
+        .get("x-trex-session")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+}
+
 /// Arrow Flight service backed by the shared trex_pool.
 #[derive(Clone)]
 pub struct DuckDBFlightService {
@@ -89,6 +97,51 @@ impl DuckDBFlightService {
         sql: &str,
     ) -> Result<(arrow::datatypes::SchemaRef, Vec<arrow::array::RecordBatch>), Status> {
         Self::execute_query_pooled(sql)
+    }
+
+    /// Execute `sql` on the session associated with `token`. If `token` is None,
+    /// run as a one-shot (matches legacy behaviour for the cluster-internal
+    /// coordinator). If a token is given but no entry exists, create the
+    /// session and store it.
+    fn execute_with_session(
+        token: Option<&str>,
+        sql: &str,
+    ) -> Result<(arrow::datatypes::SchemaRef, Vec<arrow::array::RecordBatch>), Status> {
+        use crate::flight_sessions::SessionRegistry;
+
+        match token {
+            None => Self::execute_query_pooled(sql),
+            Some(tok) => {
+                let registry = SessionRegistry::instance();
+                let sid = match registry.resolve(tok) {
+                    Some(s) => s,
+                    None => {
+                        let new_sid = trex_pool_client::create_session()
+                            .map_err(|e| Status::internal(format!("pool create_session: {e}")))?;
+                        match registry.put_if_absent(tok, new_sid) {
+                            None => new_sid,
+                            Some(existing) => {
+                                // Lost the race: another thread created and stored a
+                                // session for this token first. Release ours.
+                                let _ = trex_pool_client::destroy_session(new_sid);
+                                existing
+                            }
+                        }
+                    }
+                };
+                trex_pool_client::session_execute(sid, sql)
+                    .map_err(|e| Status::internal(format!("session_execute: {e}")))
+            }
+        }
+    }
+
+    pub fn advertised_action_names(&self) -> Vec<String> {
+        vec![
+            "query".into(),
+            "create_session".into(),
+            "destroy_session".into(),
+            "refresh_catalog".into(),
+        ]
     }
 
     /// Extract a SQL query from a FlightDescriptor (CMD or PATH).
@@ -321,13 +374,14 @@ impl FlightService for DuckDBFlightService {
         &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
+        let token = extract_session_token(&request);
         let ticket = request.into_inner();
         let sql = Self::parse_ticket_query(&ticket)?;
         SwarmLogger::info("do_get", &format!("Executing query on {}:{}", self.host, self.port));
-        SwarmLogger::debug("do_get", &format!("SQL: {sql}"));
+        SwarmLogger::debug("do_get", &format!("SQL: {sql} session={:?}", token));
 
         let (schema, batches) =
-            tokio::task::spawn_blocking(move || Self::execute_query(&sql))
+            tokio::task::spawn_blocking(move || Self::execute_with_session(token.as_deref(), &sql))
                 .await
                 .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
 
@@ -363,55 +417,81 @@ impl FlightService for DuckDBFlightService {
         &self,
         request: Request<Action>,
     ) -> Result<Response<Self::DoActionStream>, Status> {
+        let token = extract_session_token(&request);
         let action = request.into_inner();
 
         match action.r#type.as_str() {
             "query" => {
-                let body: serde_json::Value =
-                    serde_json::from_slice(&action.body).map_err(|e| {
-                        Status::invalid_argument(format!("Invalid JSON action body: {}", e))
-                    })?;
-
+                let body: serde_json::Value = serde_json::from_slice(&action.body).map_err(|e| {
+                    Status::invalid_argument(format!("Invalid JSON action body: {}", e))
+                })?;
                 let sql = body
-                    .get("query")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        Status::invalid_argument("Action body must contain a \"query\" field")
-                    })?
+                    .get("query").and_then(|v| v.as_str())
+                    .ok_or_else(|| Status::invalid_argument("Action body must contain a \"query\" field"))?
                     .to_string();
 
-                let result_msg = tokio::task::spawn_blocking(move || -> Result<String, Status> {
-                    crate::pool::execute(&sql)
-                        .map(|_| serde_json::json!({"status": "ok"}).to_string())
-                        .map_err(|e| Status::internal(format!("Failed to execute statement: {}", e)))
+                let token_owned = token.clone();
+                tokio::task::spawn_blocking(move || -> Result<(), Status> {
+                    let _ = Self::execute_with_session(token_owned.as_deref(), &sql)?;
+                    Ok(())
                 })
                 .await
                 .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
 
-                let result = arrow_flight::Result {
-                    body: result_msg.into_bytes().into(),
-                };
-
+                let result = arrow_flight::Result { body: r#"{"status":"ok"}"#.as_bytes().to_vec().into() };
                 let output = stream::once(async { Ok(result) }).boxed();
                 Ok(Response::new(output))
             }
-            "refresh_catalog" => {
-                tokio::task::spawn_blocking(|| {
-                    let _ = crate::catalog::advertise_local_tables();
+            "create_session" => {
+                let tok = token.ok_or_else(|| {
+                    Status::invalid_argument("create_session requires x-trex-session metadata header")
+                })?;
+                tokio::task::spawn_blocking(move || -> Result<(), Status> {
+                    use crate::flight_sessions::SessionRegistry;
+                    let registry = SessionRegistry::instance();
+                    if registry.resolve(&tok).is_some() {
+                        return Ok(());
+                    }
+                    let sid = trex_pool_client::create_session()
+                        .map_err(|e| Status::internal(format!("pool create_session: {e}")))?;
+                    if let Some(_existing) = registry.put_if_absent(&tok, sid) {
+                        // Lost a race against another concurrent create_session.
+                        let _ = trex_pool_client::destroy_session(sid);
+                    }
+                    Ok(())
+                })
+                .await
+                .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
+
+                let body = r#"{"status":"ok"}"#.as_bytes().to_vec();
+                let result = arrow_flight::Result { body: body.into() };
+                Ok(Response::new(stream::once(async { Ok(result) }).boxed()))
+            }
+            "destroy_session" => {
+                let tok = token.ok_or_else(|| {
+                    Status::invalid_argument("destroy_session requires x-trex-session metadata header")
+                })?;
+                tokio::task::spawn_blocking(move || {
+                    use crate::flight_sessions::SessionRegistry;
+                    if let Some(sid) = SessionRegistry::instance().remove(&tok) {
+                        let _ = trex_pool_client::destroy_session(sid);
+                    }
                 })
                 .await
                 .map_err(|e| Status::internal(format!("Task join error: {}", e)))?;
 
-                let result = arrow_flight::Result {
-                    body: r#"{"status":"ok"}"#.as_bytes().to_vec().into(),
-                };
-                let output = stream::once(async { Ok(result) }).boxed();
-                Ok(Response::new(output))
+                let body = r#"{"status":"ok"}"#.as_bytes().to_vec();
+                let result = arrow_flight::Result { body: body.into() };
+                Ok(Response::new(stream::once(async { Ok(result) }).boxed()))
             }
-            other => Err(Status::invalid_argument(format!(
-                "Unknown action type: {}",
-                other
-            ))),
+            "refresh_catalog" => {
+                tokio::task::spawn_blocking(|| { let _ = crate::catalog::advertise_local_tables(); })
+                    .await
+                    .map_err(|e| Status::internal(format!("Task join error: {}", e)))?;
+                let result = arrow_flight::Result { body: r#"{"status":"ok"}"#.as_bytes().to_vec().into() };
+                Ok(Response::new(stream::once(async { Ok(result) }).boxed()))
+            }
+            other => Err(Status::invalid_argument(format!("Unknown action type: {}", other))),
         }
     }
 
@@ -419,10 +499,14 @@ impl FlightService for DuckDBFlightService {
         &self,
         _request: Request<Empty>,
     ) -> Result<Response<Self::ListActionsStream>, Status> {
-        let actions = vec![ActionType {
-            r#type: "query".to_string(),
-            description: "Execute a SQL statement (DDL/DML) against trexsql".to_string(),
-        }];
+        let actions: Vec<ActionType> = self
+            .advertised_action_names()
+            .into_iter()
+            .map(|name| ActionType {
+                r#type: name,
+                description: "Flight action".to_string(),
+            })
+            .collect();
 
         let output = stream::iter(actions.into_iter().map(Ok)).boxed();
         Ok(Response::new(output))
@@ -623,6 +707,12 @@ pub fn start_flight_server(
                 })?;
                 let _ = trex_pool_client::destroy_session(probe_sid);
 
+                crate::flight_sessions::SessionRegistry::instance()
+                    .start_sweeper()
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
+
                 let service = DuckDBFlightService::new(
                     server_host.clone(),
                     server_port,
@@ -723,6 +813,12 @@ pub fn start_flight_server_with_tls(
                 })?;
                 let _ = trex_pool_client::destroy_session(probe_sid);
 
+                crate::flight_sessions::SessionRegistry::instance()
+                    .start_sweeper()
+                    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                        Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
+                    })?;
+
                 let service = DuckDBFlightService::new(
                     server_host.clone(),
                     server_port,
@@ -793,4 +889,26 @@ pub fn stop_flight_server(host: &str, port: u16) -> Result<String, String> {
         SwarmLogger::info("server", &format!("Flight server stopped on {host}:{port}"));
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extract_session_token_handles_missing() {
+        let mut req = tonic::Request::new(());
+        assert_eq!(extract_session_token(&req), None);
+        req.metadata_mut().insert("x-trex-session", "abc".parse().unwrap());
+        assert_eq!(extract_session_token(&req).as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn list_actions_includes_session_lifecycle() {
+        let svc = DuckDBFlightService::new("127.0.0.1".into(), 0);
+        let names = svc.advertised_action_names();
+        assert!(names.contains(&"query".to_string()));
+        assert!(names.contains(&"create_session".to_string()));
+        assert!(names.contains(&"destroy_session".to_string()));
+    }
 }

@@ -101,23 +101,30 @@ impl GossipRegistry {
             .build()
             .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
 
+        use std::net::ToSocketAddrs;
+
         let node_id = Uuid::new_v4().to_string();
 
+        // Resolve hostnames at start time. Container hostnames (Docker DNS) resolve
+        // to the container's own IP; numeric IPs pass through unchanged.
         let gossip_addr: SocketAddr = format!("{host}:{port}")
-            .parse()
-            .map_err(|e| format!("Invalid gossip address {host}:{port}: {e}"))?;
+            .to_socket_addrs()
+            .map_err(|e| format!("Invalid gossip address {host}:{port}: {e}"))?
+            .next()
+            .ok_or_else(|| format!("Failed to resolve gossip address {host}:{port}"))?;
 
-        // Skip our own address -- chitchat does not need to seed itself.
-        let seed_addrs: Vec<SocketAddr> = seeds
+        // Pass raw seed strings directly to chitchat. chitchat's `seed_nodes` field
+        // accepts either numeric SocketAddrs or hostname:port strings — the latter
+        // are re-resolved by chitchat's internal DNS-refresh loop, which is what we
+        // want when peer IPs may change (restart, redeploy). Filter out our own
+        // address using string match against the configured gossip_addr, since the
+        // resolved-IP-based equality check we'd otherwise use bypasses the very
+        // retry behaviour we want.
+        let own_addr_str = format!("{host}:{port}");
+        let seed_strings: Vec<String> = seeds
             .iter()
-            .filter_map(|s| {
-                let addr: SocketAddr = s.parse().ok()?;
-                if addr == gossip_addr {
-                    None
-                } else {
-                    Some(addr)
-                }
-            })
+            .filter(|s| s.as_str() != own_addr_str.as_str())
+            .cloned()
             .collect();
 
         let chitchat_id = ChitchatId::new(node_id.clone(), 0, gossip_addr);
@@ -127,7 +134,7 @@ impl GossipRegistry {
             cluster_id: cluster_id.to_string(),
             gossip_interval: Duration::from_millis(500),
             listen_addr: gossip_addr,
-            seed_nodes: seed_addrs.iter().map(|a| a.to_string()).collect(),
+            seed_nodes: seed_strings,
             failure_detector_config: FailureDetectorConfig::default(),
             marked_for_deletion_grace_period: Duration::from_secs(60),
             catchup_callback: None,

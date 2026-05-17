@@ -28,6 +28,7 @@ fn ensure_crypto_provider() {
 pub struct FlightClient {
     endpoint: String,
     client: FlightServiceClient<Channel>,
+    session_token: Option<String>,
 }
 
 impl FlightClient {
@@ -55,6 +56,7 @@ impl FlightClient {
         Ok(Self {
             endpoint: endpoint.to_string(),
             client,
+            session_token: None,
         })
     }
 
@@ -104,7 +106,29 @@ impl FlightClient {
         Ok(Self {
             endpoint: endpoint.to_string(),
             client,
+            session_token: None,
         })
+    }
+
+    /// Bind subsequent requests to a server-side session token.
+    pub fn with_session(mut self, token: String) -> Self {
+        self.session_token = Some(token);
+        self
+    }
+
+    /// Insert the `x-trex-session` metadata header into a tonic request.
+    /// Silent no-op if the token cannot be encoded as a metadata value.
+    pub(crate) fn attach_session_token<T>(req: &mut tonic::Request<T>, token: &str) {
+        if let Ok(v) = token.parse::<tonic::metadata::MetadataValue<tonic::metadata::Ascii>>() {
+            req.metadata_mut().insert("x-trex-session", v);
+        }
+    }
+
+    /// Apply the bound session token (if any) to an outgoing request.
+    fn attach_if_session<T>(&self, req: &mut tonic::Request<T>) {
+        if let Some(tok) = &self.session_token {
+            Self::attach_session_token(req, tok);
+        }
     }
 
     /// Execute SQL via DoGet with a JSON ticket `{"query": "<sql>"}`.
@@ -120,9 +144,12 @@ impl FlightClient {
         let ticket_payload = serde_json::json!({ "query": sql }).to_string();
         let ticket = Ticket::new(ticket_payload.into_bytes());
 
+        let mut request = tonic::Request::new(ticket);
+        self.attach_if_session(&mut request);
+
         let response = self
             .client
-            .do_get(ticket)
+            .do_get(request)
             .await
             .map_err(|e| format!("Flight query failed on {}: {e}", self.endpoint))?;
 
@@ -178,9 +205,12 @@ impl FlightClient {
             body: body.as_bytes().to_vec().into(),
         };
 
+        let mut request = tonic::Request::new(action);
+        self.attach_if_session(&mut request);
+
         let mut response = self
             .client
-            .do_action(action)
+            .do_action(request)
             .await
             .map_err(|e| format!("DoAction '{}' failed on {}: {e}", action_type, self.endpoint))?
             .into_inner();
@@ -236,6 +266,42 @@ pub async fn query_node_with_schema(
     client.execute_query(sql).await
 }
 
+/// One-shot create_session call. Idempotent on the server (server checks first).
+pub async fn create_session_on(endpoint: &str, token: &str) -> Result<(), String> {
+    let mut client = FlightClient::connect(endpoint).await?.with_session(token.to_string());
+    client.do_action("create_session", "{}").await?;
+    Ok(())
+}
+
+/// One-shot destroy_session call. Server returns Ok even if the session was already gone.
+pub async fn destroy_session_on(endpoint: &str, token: &str) -> Result<(), String> {
+    let mut client = FlightClient::connect(endpoint).await?.with_session(token.to_string());
+    client.do_action("destroy_session", "{}").await?;
+    Ok(())
+}
+
+/// Session-bound version of `query_node_with_schema`.
+pub async fn query_node_with_session(
+    endpoint: &str,
+    token: &str,
+    sql: &str,
+) -> Result<(SchemaRef, Vec<RecordBatch>), String> {
+    let mut client = FlightClient::connect(endpoint).await?.with_session(token.to_string());
+    client.execute_query(sql).await
+}
+
+/// Session-bound DDL/DML — mirrors execute_remote_sql but pins to a session.
+pub async fn execute_remote_sql_with_session(
+    endpoint: &str,
+    token: &str,
+    sql: &str,
+) -> Result<(), String> {
+    let mut client = FlightClient::connect(endpoint).await?.with_session(token.to_string());
+    let body = serde_json::json!({"query": sql}).to_string();
+    client.do_action("query", &body).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -271,5 +337,26 @@ mod tests {
             err.contains("Failed to connect to http://127.0.0.1:1"),
             "unexpected error: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn with_session_attaches_header_metadata() {
+        let metadata_value = "test-token-123";
+        let mut req = tonic::Request::new(arrow_flight::Ticket::new(vec![]));
+        FlightClient::attach_session_token(&mut req, metadata_value);
+        let got = req.metadata().get("x-trex-session").unwrap().to_str().unwrap();
+        assert_eq!(got, metadata_value);
+    }
+
+    #[tokio::test]
+    async fn create_session_on_returns_err_for_invalid_endpoint() {
+        let res = create_session_on("http://127.0.0.1:1", "tok").await;
+        assert!(res.is_err());
+    }
+
+    #[tokio::test]
+    async fn destroy_session_on_returns_err_for_invalid_endpoint() {
+        let res = destroy_session_on("http://127.0.0.1:1", "tok").await;
+        assert!(res.is_err());
     }
 }

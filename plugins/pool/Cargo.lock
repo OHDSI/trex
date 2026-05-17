@@ -2070,6 +2070,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trex-db-client"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-ipc",
+ "arrow-schema",
+ "libc",
+]
+
+[[package]]
 name = "trex-pool"
 version = "0.1.0"
 dependencies = [
@@ -2083,6 +2093,7 @@ dependencies = [
  "libduckdb-sys",
  "serde_json",
  "tracing",
+ "trex-db-client",
 ]
 
 [[package]]

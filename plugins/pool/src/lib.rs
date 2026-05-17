@@ -26,6 +26,59 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PoolBackend {
+    Local,
+    Remote,
+}
+
+/// Decide which backend the pool serves. Reads SWARM_CONFIG + SWARM_NODE
+/// directly to avoid pulling in trex-db's full config crate.
+pub fn decide_backend() -> PoolBackend {
+    let cfg = match std::env::var("SWARM_CONFIG").ok() {
+        Some(s) => s,
+        None => return PoolBackend::Local,
+    };
+    let node = match std::env::var("SWARM_NODE").ok() {
+        Some(s) => s,
+        None => return PoolBackend::Local,
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&cfg) {
+        Ok(v) => v,
+        Err(_) => return PoolBackend::Local,
+    };
+    let nodes = match parsed.get("nodes").and_then(|v| v.as_object()) {
+        Some(n) => n,
+        None => return PoolBackend::Local,
+    };
+    let this = match nodes.get(&node) {
+        Some(n) => n,
+        None => return PoolBackend::Local,
+    };
+    let is_data = this.get("data_node").and_then(|v| v.as_bool()).unwrap_or(true);
+    if is_data { PoolBackend::Local } else { PoolBackend::Remote }
+}
+
+static BACKEND: std::sync::OnceLock<PoolBackend> = std::sync::OnceLock::new();
+
+pub fn backend() -> PoolBackend {
+    *BACKEND.get_or_init(decide_backend)
+}
+
+const REMOTE_BIT: u64 = 1u64 << 63;
+
+fn remote_id_to_pool_id(id: u64) -> u64 {
+    id | REMOTE_BIT
+}
+
+fn pool_id_to_remote_id(id: u64) -> u64 {
+    id & !REMOTE_BIT
+}
+
+fn is_remote_id(id: u64) -> bool {
+    id & REMOTE_BIT != 0
+}
+
 struct SharedPool {
     sender: Sender<Connection>,
     receiver: Receiver<Connection>,
@@ -91,7 +144,7 @@ pub unsafe fn init(db_ptr: *mut c_void, pool_size: usize) -> Result<(), String> 
 
 /// Lease a Connection from the pool and register a session for it. Blocks
 /// until a Connection is available (channel backpressure when exhausted).
-pub fn create_session() -> Result<u64, String> {
+pub fn create_local_session() -> Result<u64, String> {
     let pool = get_pool()?;
     let conn = pool
         .receiver
@@ -112,17 +165,17 @@ pub fn create_session() -> Result<u64, String> {
 }
 
 /// Execute SQL on the session's leased Connection.
-pub fn session_execute(
+pub fn session_execute_local(
     session_id: u64,
     sql: &str,
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
-    session_execute_params(session_id, sql, &[])
+    session_execute_params_local(session_id, sql, &[])
 }
 
 /// Execute parameterised SQL on the session's leased Connection. The
 /// SESSIONS mutex is released before the query runs so other sessions are
 /// unaffected by a long-running statement.
-pub fn session_execute_params(
+pub fn session_execute_params_local(
     session_id: u64,
     sql: &str,
     params: &[String],
@@ -203,7 +256,7 @@ fn run_query(
 
 /// Destroy a session: remove from the map, run the cleanup sequence on the
 /// leased Connection, then return it to the pool channel.
-pub fn destroy_session(session_id: u64) {
+pub fn destroy_local_session(session_id: u64) {
     let (conn, dirty) = {
         let mut map = sessions().lock().expect("sessions lock poisoned");
         match map.remove(&session_id) {
@@ -223,6 +276,83 @@ pub fn destroy_session(session_id: u64) {
         if let Err(e) = pool.sender.send(conn) {
             warn!(error = %e, session_id, "failed to return connection to pool");
         }
+    }
+}
+
+fn do_retry_remote_create(
+    delay: std::time::Duration,
+    attempts: u32,
+) -> Result<u64, String> {
+    let mut last_err = "no attempts made".to_string();
+    for _ in 0..attempts {
+        match trex_db_client::create_remote_session() {
+            Ok(id) => return Ok(id),
+            Err(e) => {
+                last_err = e;
+                std::thread::sleep(delay);
+            }
+        }
+    }
+    Err(format!("create_remote_session: {}", last_err))
+}
+
+#[cfg(test)]
+fn retry_remote_create_for_test(
+    delay: std::time::Duration,
+    attempts: u32,
+) -> Result<u64, String> {
+    do_retry_remote_create(delay, attempts)
+}
+
+/// Lease a session. Dispatches to the local pool when this node is a data
+/// node, or to a remote data node via trex-db-client when this node is a
+/// server-only node. Remote ids are tagged with REMOTE_BIT so the caller can
+/// pass them back to `session_execute` / `destroy_session` without knowing.
+pub fn create_session() -> Result<u64, String> {
+    match backend() {
+        PoolBackend::Local => create_local_session(),
+        PoolBackend::Remote => do_retry_remote_create(
+            std::time::Duration::from_millis(200),
+            25, // ~5 s total tolerance for gossip convergence
+        ).map(remote_id_to_pool_id),
+    }
+}
+
+/// Execute SQL on a session — routes to the local pool or to trex-db-client
+/// based on the REMOTE_BIT in `session_id`.
+pub fn session_execute(
+    session_id: u64,
+    sql: &str,
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+    if is_remote_id(session_id) {
+        let remote = pool_id_to_remote_id(session_id);
+        trex_db_client::remote_session_execute(remote, sql)
+    } else {
+        session_execute_local(session_id, sql)
+    }
+}
+
+/// Execute parameterised SQL. Remote backend does not currently support
+/// parameter binding — returns Err with a clear message.
+pub fn session_execute_params(
+    session_id: u64,
+    sql: &str,
+    params: &[String],
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+    if is_remote_id(session_id) {
+        return Err(
+            "parameterised execution not supported on remote pool backend".to_string(),
+        );
+    }
+    session_execute_params_local(session_id, sql, params)
+}
+
+/// Destroy a session — routes by REMOTE_BIT. Silent no-op on unknown ids.
+pub fn destroy_session(session_id: u64) {
+    if is_remote_id(session_id) {
+        trex_db_client::destroy_remote_session(pool_id_to_remote_id(session_id));
+    } else {
+        destroy_local_session(session_id)
     }
 }
 
@@ -432,4 +562,65 @@ pub extern "C" fn trex_pool_session_execute_params_arrow(
 #[no_mangle]
 pub extern "C" fn trex_pool_session_destroy(session_id: u64) {
     destroy_session(session_id);
+}
+
+#[cfg(test)]
+mod backend_tests {
+    use super::*;
+
+    #[test]
+    fn decide_backend_dispatches_by_config() {
+        // local: no env vars set
+        std::env::remove_var("SWARM_CONFIG");
+        std::env::remove_var("SWARM_NODE");
+        assert!(matches!(decide_backend(), PoolBackend::Local));
+
+        // remote: data_node false
+        std::env::set_var("SWARM_NODE", "server");
+        std::env::set_var(
+            "SWARM_CONFIG",
+            r#"{"cluster_id":"c","nodes":{"server":{"gossip_addr":"127.0.0.1:7101","data_node":false}}}"#,
+        );
+        assert!(matches!(decide_backend(), PoolBackend::Remote));
+
+        // local: data_node true
+        std::env::set_var("SWARM_NODE", "data");
+        std::env::set_var(
+            "SWARM_CONFIG",
+            r#"{"cluster_id":"c","nodes":{"data":{"gossip_addr":"127.0.0.1:7100","data_node":true}}}"#,
+        );
+        assert!(matches!(decide_backend(), PoolBackend::Local));
+
+        std::env::remove_var("SWARM_CONFIG");
+        std::env::remove_var("SWARM_NODE");
+    }
+
+    #[test]
+    fn is_remote_id_detects_high_bit() {
+        assert!(!is_remote_id(0));
+        assert!(!is_remote_id(1));
+        assert!(!is_remote_id(u64::MAX >> 1));
+        assert!(is_remote_id(REMOTE_BIT));
+        assert!(is_remote_id(REMOTE_BIT | 7));
+    }
+
+    #[test]
+    fn pool_id_round_trip_preserves_remote_id() {
+        let remote = 42u64;
+        let pool = remote_id_to_pool_id(remote);
+        assert!(is_remote_id(pool));
+        assert_eq!(pool_id_to_remote_id(pool), remote);
+    }
+
+    #[test]
+    fn remote_create_retries_then_gives_up() {
+        let start = std::time::Instant::now();
+        let result = retry_remote_create_for_test(std::time::Duration::from_millis(50), 3);
+        let elapsed = start.elapsed();
+        // 3 attempts with 50ms sleep between attempts ≈ 150ms total. Allow
+        // a generous bound so the test isn't flaky on a loaded CI host.
+        assert!(elapsed.as_millis() >= 100, "elapsed too short: {:?}", elapsed);
+        assert!(elapsed.as_millis() < 2000, "elapsed too long: {:?}", elapsed);
+        assert!(result.is_err(), "should fail when no data node available");
+    }
 }

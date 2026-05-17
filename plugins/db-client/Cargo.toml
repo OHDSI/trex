@@ -1,0 +1,15 @@
+[package]
+name = "trex-db-client"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+libc = "0.2"
+arrow-ipc = "57"
+arrow-schema = "57"
+arrow-array = "57"
