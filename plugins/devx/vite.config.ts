@@ -1,0 +1,23 @@
+import path from "path"
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+const basePath = process.env.VITE_BASE_PATH || "/trex"
+const uiBasePath = process.env.VITE_UI_BASE_PATH || "/plugins/trex/devx"
+
+export default defineConfig({
+  base: `${uiBasePath}/`,
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
+  },
+  server: {
+    proxy: {
+      [`${basePath}/api`]: "http://localhost:8000",
+      "/plugins": "http://localhost:8000",
+    },
+  },
+})
