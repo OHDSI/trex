@@ -3,6 +3,15 @@
 -- Consolidated end-state of the previous V1..V16 incremental migrations.
 -- Creates the `trexdb` schema and all control-plane tables, RLS policies,
 -- functions, roles, and auth/realtime/storage compatibility surface.
+--
+-- BREAKING: this commit also renames the `trex` schema to `trexdb` and drops
+-- the `import_legacy_migrations` shim that previously seeded refinery history
+-- with the old V1..V15 checksums. In-place upgrade from a pre-`trexdb`
+-- deployment is NOT supported: such a database will retain its old `trex`
+-- schema untouched and the consolidated V1 here will run against a fresh
+-- empty `trexdb` schema, leaving two parallel schemas with no migration
+-- path. Operators upgrading an existing deployment must dump/reload
+-- manually. Fresh deployments are unaffected.
 
 CREATE SCHEMA IF NOT EXISTS trexdb;
 SET search_path TO trexdb;

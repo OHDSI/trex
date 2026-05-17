@@ -6,7 +6,7 @@
 // from the root and writes them to <secrets-dir>/derived.env in a format
 // suitable for docker-compose env_file consumption.
 
-import { deriveSubkeyBase64, LABELS, _resetRootKeyCache } from "../core/server/auth/keys.ts";
+import { deriveSubkey, deriveSubkeyBase64, LABELS, _resetRootKeyCache } from "../core/server/auth/keys.ts";
 
 const dir = Deno.args[0];
 if (!dir) {
@@ -56,12 +56,18 @@ _resetRootKeyCache();
 const jwtKey = await deriveSubkeyBase64(LABELS.jwtHs256);
 const pgmeta = await deriveSubkeyBase64(LABELS.pgmetaAes);
 // Realtime's SECRET_KEY_BASE: Erlang expects at least 64 chars. Concat two
-// derivations from distinct labels and trim.
+// derivations from distinct labels and trim. The base64 slicing is acceptable
+// here — the underlying HKDF output is 32 random bytes per label, and Erlang
+// only needs ≥64 chars of opaque secret material, not full entropy.
 const realtimeInternal = await deriveSubkeyBase64(LABELS.realtimeInternal);
 const realtimeExtra = await deriveSubkeyBase64(LABELS.dekWrap);
 const realtimeBase = (realtimeInternal + realtimeExtra).slice(0, 64);
 // Realtime's DB_ENC_KEY must be exactly 16 chars (upstream AES-128 limit).
-const realtimeDbEnc = realtimeInternal.slice(0, 16);
+// Use the first 8 bytes of HKDF output hex-encoded so all 128 bits of key
+// material come from the derivation; a base64 slice would only carry ~96
+// bits of entropy across 16 chars (6 bits per char).
+const realtimeDbEncBytes = (await deriveSubkey(LABELS.realtimeInternal)).slice(0, 8);
+const realtimeDbEnc = Array.from(realtimeDbEncBytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
 const lines = [
   `PGRST_JWT_SECRET=${jwtKey}`,          // postgrest

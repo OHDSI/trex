@@ -799,6 +799,12 @@ impl VScalar for DbOrchestrateSwarmScalar {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes every test in this module that touches process env.
+    // `cargo test` runs in parallel by default; without this guard the two
+    // env-mutating tests below race and cause flaky CI failures.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn db_orchestrate_swarm_rejects_invalid_json() {
@@ -824,20 +830,15 @@ mod tests {
 
     #[test]
     fn orchestrate_swarm_from_env_reads_swarm_config_and_node_from_env() {
-        // SAFETY: Tests in this module that mutate process env must be invoked with
-        // `cargo test -- --test-threads=1` to avoid races. In practice the parallel
-        // run also passes because the env var lifetimes don't overlap by ordering,
-        // but the only correct invocation is single-threaded.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation is serialized via ENV_LOCK above.
         unsafe {
             std::env::set_var("SWARM_CONFIG", r#"{"cluster_id":"x","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[]}}}"#);
             std::env::set_var("SWARM_NODE", "local");
         }
         let result = orchestrate_swarm_from_env();
         assert_eq!(result, "");
-        // SAFETY: Tests in this module that mutate process env must be invoked with
-        // `cargo test -- --test-threads=1` to avoid races. In practice the parallel
-        // run also passes because the env var lifetimes don't overlap by ordering,
-        // but the only correct invocation is single-threaded.
+        // SAFETY: env mutation is serialized via ENV_LOCK above.
         unsafe {
             std::env::remove_var("SWARM_CONFIG");
             std::env::remove_var("SWARM_NODE");
@@ -846,10 +847,8 @@ mod tests {
 
     #[test]
     fn orchestrate_swarm_from_env_errors_when_unset() {
-        // SAFETY: Tests in this module that mutate process env must be invoked with
-        // `cargo test -- --test-threads=1` to avoid races. In practice the parallel
-        // run also passes because the env var lifetimes don't overlap by ordering,
-        // but the only correct invocation is single-threaded.
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation is serialized via ENV_LOCK above.
         unsafe { std::env::remove_var("SWARM_CONFIG"); }
         let result = orchestrate_swarm_from_env();
         assert!(result.to_lowercase().contains("swarm_config"), "got: {result}");

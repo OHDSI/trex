@@ -63,12 +63,24 @@ export async function initDek(pool: { query: (sql: string, params?: unknown[]) =
   }
   const dek = crypto.getRandomValues(new Uint8Array(32));
   const wrapped = await wrapDek(dek);
-  await pool.query(
-    `INSERT INTO trexdb.kek_wrapped_dek (version, wrapped, active)
-     VALUES (1, $1, TRUE)
-     ON CONFLICT (version) DO NOTHING`,
-    [wrapped],
-  );
+  // ON CONFLICT(version) only absorbs the primary-key conflict. The partial
+  // unique index `kek_wrapped_dek_one_active` is a separate arbiter, and a
+  // concurrent first-boot from another replica can trip it before the PK
+  // check fires. Swallow the unique-violation here and fall through to the
+  // re-read branch below — whichever process won the race left the canonical
+  // active row, and unwrapping it gives every replica the same DEK.
+  try {
+    await pool.query(
+      `INSERT INTO trexdb.kek_wrapped_dek (version, wrapped, active)
+       VALUES (1, $1, TRUE)
+       ON CONFLICT (version) DO NOTHING`,
+      [wrapped],
+    );
+  } catch (err) {
+    const code = (err as { code?: string })?.code;
+    // 23505 = unique_violation. Anything else is a real error.
+    if (code !== "23505") throw err;
+  }
   // Re-read: pick up whichever row ended up active. On a clean race, that's
   // either our insert or the other node's. If neither inserted (because a
   // stale inactive version=1 row already existed and blocked the ON CONFLICT),

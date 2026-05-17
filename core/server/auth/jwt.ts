@@ -73,15 +73,6 @@ export async function getJwtSecret(): Promise<string> {
 /** Test-only. */
 export function _resetJwtSecretCache(): void { _jwtSecretCache = null; }
 
-/**
- * Verification accepts only the active key. The previous rotation list
- * (BETTER_AUTH_SECRETS) is removed; rotation now goes via versioned HKDF
- * labels — see plugins/docs/docs/operations/secret-rotation.md.
- */
-export async function getJwtSecrets(): Promise<string[]> {
-  return [await getJwtSecret()];
-}
-
 export interface AccessTokenClaims {
   sub: string;
   role: string;
@@ -143,8 +134,8 @@ export async function signAccessToken(
 export async function verifyAccessToken(
   token: string,
 ): Promise<AccessTokenClaims | null> {
-  const secrets = await getJwtSecrets();
-  if (secrets.length === 0 || !token) return null;
+  if (!token) return null;
+  const secret = await getJwtSecret();
 
   const parts = token.split(".");
   if (parts.length !== 3) return null;
@@ -154,18 +145,7 @@ export async function verifyAccessToken(
 
   try {
     const sigBytes = base64urlDecodeBytes(sig);
-
-    // Try the active key first, then each older key in turn. Any successful
-    // verification accepts the token. This supports overlap windows during
-    // signing-key rotation. See operations/secret-rotation.md.
-    let valid = false;
-    for (const secret of secrets) {
-      if (await hmacVerify(data, sigBytes, secret)) {
-        valid = true;
-        break;
-      }
-    }
-    if (!valid) return null;
+    if (!await hmacVerify(data, sigBytes, secret)) return null;
 
     const payload = JSON.parse(base64urlDecode(body));
 

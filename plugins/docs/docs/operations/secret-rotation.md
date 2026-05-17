@@ -13,11 +13,10 @@ with a hardcoded salt (`"trex/v1"`) and a distinct `info` label per purpose:
 | Subkey label                  | Used by                                      |
 |-------------------------------|----------------------------------------------|
 | `trex.better-auth.session.v1` | Better Auth session signing                  |
-| `trex.jwt.hs256.v1`           | All HS256 JWTs (access tokens, anon, service)|
-| `trex.pgrest.jwt.v1`          | PostgREST `PGRST_JWT_SECRET` + Studio `AUTH_JWT_SECRET` |
-| `trex.pgmeta.aes.v1`          | Studio `PG_META_CRYPTO_KEY`                  |
-| `trex.realtime.api.v1`        | Realtime `API_JWT_SECRET` / `METRICS_JWT_SECRET` / `DB_ENC_KEY` / `SECRET_KEY_BASE` |
-| `trex.dek.wrap.v1`            | KEK that wraps the Data Encryption Key       |
+| `trex.jwt.hs256.v1`           | All HS256 JWTs (access tokens, anon, service) — also exported to PostgREST (`PGRST_JWT_SECRET`), Studio (`AUTH_JWT_SECRET`), and Realtime (`API_JWT_SECRET` / `METRICS_JWT_SECRET`) so they can verify trex-issued tokens |
+| `trex.pgmeta.aes.v1`          | Studio / pg-meta `PG_META_CRYPTO_KEY`        |
+| `trex.realtime.internal.v1`   | Realtime-internal material: first 16 chars feed `DB_ENC_KEY` (AES-128), concatenated with the `dek.wrap` subkey to form Realtime's 64-char `SECRET_KEY_BASE` |
+| `trex.dek.wrap.v1`            | KEK that wraps the Data Encryption Key (also contributes entropy to Realtime's `SECRET_KEY_BASE`) |
 
 Data at rest (`trexdb.secret`, `trexdb.database_credential.password_encrypted`)
 is encrypted with a random 32-byte DEK that is itself wrapped under the
@@ -47,12 +46,23 @@ the old key but does NOT require re-encrypting stored secrets.
 
 1. Edit `core/server/auth/keys.ts`, change `jwtHs256: "trex.jwt.hs256.v1"`
    to `jwtHs256: "trex.jwt.hs256.v2"`.
-2. Deploy.
-3. On the next boot, the `index.ts` boot probe detects the stored
+2. Rebuild the runtime image (or otherwise redeploy the modified source)
+   so the new `LABELS.jwtHs256` value is picked up by both `core/server`
+   AND `scripts/derive-secrets.ts` running in the `trex-init` sidecar.
+3. Delete `./secrets/derived.env` (or `docker compose run --rm trex-init`)
+   so the `trex-init` one-shot regenerates the derived file with the new
+   `PGRST_JWT_SECRET` / `AUTH_JWT_SECRET` / `API_JWT_SECRET` /
+   `METRICS_JWT_SECRET`. The `root.env` is preserved — only the derived
+   subkeys change.
+4. Restart every downstream service that reads `derived.env` (postgrest,
+   studio, pg-meta, realtime) so they pick up the new value. Skipping
+   this step leaves them verifying with the old key, and every trex-
+   issued JWT will be rejected by them until restart.
+5. On the next core boot, the `index.ts` boot probe detects the stored
    `auth.jwtSecret` no longer matches the derived value and purges the
    three rows from `trexdb.setting`. `ensureAuthKeys` then re-issues
    `anon` and `service_role` keys signed with the new derivation.
-4. All clients using the previous anon/service_role keys must be
+6. All clients using the previous anon/service_role keys must be
    updated to the new values (visible via the admin API or in the
    `[auth] Anon key: ...` / `[auth] Service role key: ...` log lines).
 

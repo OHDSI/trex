@@ -22,3 +22,4 @@ plugins/studio/build_static/
 deploy/node_modules/
 deploy/bin/
 /secrets/
+deno.lock

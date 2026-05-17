@@ -434,7 +434,7 @@ app.all(`${BASE_PATH}/realtime/v1/*`, (req, res) => {
   req.pipe(proxyReq);
 });
 
-// Supabase CLI subdomain routing — the CLI hits https://{ref}.trexdb.local/storage/v1/...
+// Supabase CLI subdomain routing — the CLI hits https://{ref}.trex.local/storage/v1/...
 // without the BASE_PATH prefix. Rewrite to include the prefix so routes match.
 if (BASE_PATH && BASE_PATH !== "/") {
   const supabasePaths = ["/storage/v1/", "/auth/v1/", "/rest/v1/", "/functions/v1/"];

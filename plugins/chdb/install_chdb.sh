@@ -28,8 +28,9 @@ download_and_extract() {
     return 1
 }
 
-# Get the newest release version
-LATEST_RELEASE=$(curl --silent "https://api.github.com/repos/chdb-io/chdb/releases/tags/v3.6.0" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+# Pinned chdb release. Avoid the GitHub API roundtrip: unauthenticated calls
+# get rate-limited on CI runners, returning an empty tag and a broken URL.
+LATEST_RELEASE="v3.6.0"
 
 # Select the correct package based on OS and architecture
 case "$(uname -s)" in

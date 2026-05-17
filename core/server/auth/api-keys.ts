@@ -27,12 +27,9 @@ export async function ensureAuthKeys(): Promise<{
         typeof row.value === "string" ? row.value : JSON.parse(row.value);
     }
 
+    // getJwtSecret throws if TREX_ROOT_KEY is unset; treat its return as
+    // always present.
     const jwtSecret = await getJwtSecret();
-    if (!jwtSecret) {
-      throw new Error(
-        "TREX_ROOT_KEY is required to derive the JWT signing key",
-      );
-    }
 
     let anonKey = settings["auth.anonKey"];
     let serviceRoleKey = settings["auth.serviceRoleKey"];
