@@ -61,7 +61,6 @@ jobs:
           wget -O /tmp/libtrexsql.zip \
             https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
           unzip /tmp/libtrexsql.zip -d /tmp/trexsql
-          ln -sf /tmp/trexsql/libtrexsql.so /tmp/trexsql/libduckdb.so
 
       - name: Install cargo-pgrx (pg_trex only)
         if: matrix.plugin == 'pg_trex'

@@ -106,7 +106,6 @@ jobs:
           wget -O /tmp/libtrexsql.zip \
             https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
           unzip /tmp/libtrexsql.zip -d /tmp/trexsql
-          ln -sf /tmp/trexsql/libtrexsql.so /tmp/trexsql/libduckdb.so
 
       - uses: actions/cache@v4
         with:
