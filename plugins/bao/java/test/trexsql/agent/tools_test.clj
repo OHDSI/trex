@@ -36,3 +36,11 @@
   (testing "unknown server-side tool returns an :error result"
     (let [res (tools/dispatch-server-tool "nope" {} {})]
       (is (string? (:error res))))))
+
+(deftest navigate-to-enum-matches-manifest
+  (testing "navigate_to view enum equals agent-visible names from manifest"
+    (let [spec (some #(when (= (:name %) "navigate_to") %) tools/tool-specs)
+          enum-views (get-in spec [:input-schema :properties :view :enum])
+          rm (requiring-resolve 'trexsql.agent.routes-manifest/agent-visible-views)
+          manifest-views (rm)]
+      (is (= (sort enum-views) (sort manifest-views))))))
