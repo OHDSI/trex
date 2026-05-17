@@ -43,19 +43,32 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Root key presence check
 # ---------------------------------------------------------------------------
-if [ -z "${TREX_ROOT_KEY:-}" ]; then
-    echo "STARTUP: FATAL: TREX_ROOT_KEY is not set." >&2
-    echo "STARTUP: The trex-init service is responsible for generating it." >&2
-    echo "STARTUP: Check that the ./secrets directory is mounted and that" >&2
-    echo "STARTUP: trex-init has run to completion (depends_on:condition: service_completed_successfully)." >&2
-    exit 1
-fi
+# Skip the gate in --check mode: that path only loads extensions and exits,
+# so no key material is ever consumed. Requiring trex-init to have run just
+# to sanity-check extension loading would make local/CI use painful.
+skip_root_key_check=0
+for arg in "$@"; do
+    if [ "$arg" = "--check" ]; then
+        skip_root_key_check=1
+        break
+    fi
+done
 
-# Sanity-check length: 32 bytes base64-encoded is 43-44 chars (44 with padding,
-# 43 without). Refuse anything noticeably shorter.
-if [ "${#TREX_ROOT_KEY}" -lt 40 ]; then
-    echo "STARTUP: FATAL: TREX_ROOT_KEY is too short (${#TREX_ROOT_KEY} chars; expected ~43-44)." >&2
-    exit 1
+if [ "$skip_root_key_check" -eq 0 ]; then
+    if [ -z "${TREX_ROOT_KEY:-}" ]; then
+        echo "STARTUP: FATAL: TREX_ROOT_KEY is not set." >&2
+        echo "STARTUP: The trex-init service is responsible for generating it." >&2
+        echo "STARTUP: Check that the ./secrets directory is mounted and that" >&2
+        echo "STARTUP: trex-init has run to completion (depends_on:condition: service_completed_successfully)." >&2
+        exit 1
+    fi
+
+    # Sanity-check length: 32 bytes base64-encoded is 43-44 chars (44 with padding,
+    # 43 without). Refuse anything noticeably shorter.
+    if [ "${#TREX_ROOT_KEY}" -lt 40 ]; then
+        echo "STARTUP: FATAL: TREX_ROOT_KEY is too short (${#TREX_ROOT_KEY} chars; expected ~43-44)." >&2
+        exit 1
+    fi
 fi
 
 # ---------------------------------------------------------------------------
