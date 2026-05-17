@@ -230,12 +230,20 @@ function applyTailwindClasses(
     /className='([^']*)'/,
   );
 
+  // Sanitize class names before interpolating into JSX: drop anything that
+  // isn't a plain Tailwind-style token. Prevents attribute-injection if a
+  // caller smuggles a `"` or other meta-char through newClasses.
+  const sanitizedNew = newClasses.filter((c) => /^[A-Za-z0-9_:./\\[\]%@!#?+\-]+$/.test(c));
+
   if (classNameMatch) {
     const existingClasses = classNameMatch[1];
-    const merged = deduplicateClasses(existingClasses, newClasses);
+    const merged = deduplicateClasses(existingClasses, sanitizedNew);
+    const safeMerged = merged.split(/\s+/)
+      .filter((c) => /^[A-Za-z0-9_:./\\[\]%@!#?+\-]+$/.test(c))
+      .join(" ");
     const updatedRegion = region.replace(
       classNameMatch[0],
-      `className="${merged}"`,
+      `className="${safeMerged}"`,
     );
     const updatedLines = [
       ...lines.slice(0, startLine),
@@ -253,7 +261,7 @@ function applyTailwindClasses(
     const insertPos = line.indexOf(tagMatch[0]) + tagMatch[0].length;
     lines[targetLine] =
       line.slice(0, insertPos) +
-      ` className="${newClasses.join(" ")}"` +
+      ` className="${sanitizedNew.join(" ")}"` +
       line.slice(insertPos);
     return lines.join("\n");
   }

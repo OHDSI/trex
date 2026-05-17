@@ -230,7 +230,13 @@
       if (picked.length === 0) {
         bar.textContent = 'Click an option above, then tell the assistant in chat which one you picked';
       } else {
-        bar.innerHTML = 'Selected: <span class="selected-text">' + picked.join(', ') + '</span> — tell the assistant in chat';
+        bar.textContent = '';
+        bar.appendChild(document.createTextNode('Selected: '));
+        var span = document.createElement('span');
+        span.className = 'selected-text';
+        span.textContent = picked.join(', ');
+        bar.appendChild(span);
+        bar.appendChild(document.createTextNode(' — tell the assistant in chat'));
       }
     }
   </script>
