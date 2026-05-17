@@ -22,11 +22,6 @@ jobs:
     name: "Rust unit coverage (${{ matrix.plugin }})"
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    # Coverage reporting is informational. Individual plugin failures (latent
-    # test bugs, compile errors, external-service requirements) must not block
-    # the PR. Flip this to false per-plugin as each plugin's tests are
-    # stabilized.
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -83,8 +78,13 @@ jobs:
         if: matrix.plugin == 'runtime'
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
 
+      # The Run coverage steps below are intentionally continue-on-error: true.
+      # Coverage reporting is informational — latent failures in plugin test
+      # suites that never ran in CI before must surface without blocking the
+      # PR. Remove the flag per-plugin as each suite is stabilized.
       - name: Run coverage (pg_trex)
         if: matrix.plugin == 'pg_trex'
+        continue-on-error: true
         run: |
           mkdir -p build/coverage
           LIBRARY_PATH=/tmp/trexsql cargo llvm-cov --lcov --output-path build/coverage/lcov.info
@@ -92,6 +92,7 @@ jobs:
 
       - name: Run coverage (pgt)
         if: matrix.plugin == 'pgt'
+        continue-on-error: true
         run: |
           mkdir -p build/coverage
           cargo llvm-cov --lcov --output-path build/coverage/lcov.info
@@ -99,6 +100,7 @@ jobs:
 
       - name: Run coverage (other plugins)
         if: matrix.plugin != 'pg_trex' && matrix.plugin != 'pgt'
+        continue-on-error: true
         run: make coverage
         working-directory: plugins/${{ matrix.plugin }}
 
@@ -112,8 +114,6 @@ jobs:
     name: "Integration coverage (${{ matrix.suite }})"
     runs-on: ubuntu-24.04
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    # Same rationale as rust-unit-coverage: informational, never gating.
-    continue-on-error: true
     strategy:
       fail-fast: false
       matrix:
@@ -156,21 +156,26 @@ jobs:
             ~/.cargo/git
           key: integration-coverage-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('plugins/*/Cargo.lock') }}
 
+      # Same rationale as rust-unit-coverage: informational, never gating.
       - name: Build instrumented plugins
+        continue-on-error: true
         run: |
           for plugin in ${{ matrix.plugins }}; do
             (cd plugins/$plugin && make configure && make debug_coverage)
           done
 
       - name: Setup integration test env
+        continue-on-error: true
         run: make configure
         working-directory: integration-tests
 
       - name: Run tests with coverage instrumentation
+        continue-on-error: true
         run: TREX_COVERAGE=1 venv/bin/pytest -v ${{ matrix.tests }}
         working-directory: integration-tests
 
       - name: Merge coverage
+        continue-on-error: true
         run: make coverage-merge
         working-directory: integration-tests
 
