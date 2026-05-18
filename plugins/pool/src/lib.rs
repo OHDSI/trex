@@ -433,3 +433,173 @@ pub extern "C" fn trex_pool_session_execute_params_arrow(
 pub extern "C" fn trex_pool_session_destroy(session_id: u64) {
     destroy_session(session_id);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{Int32Array, StringArray};
+    use arrow_schema::{DataType, Field};
+
+    // --- sql_may_dirty_session: substring dispatcher for cleanup branch ---
+
+    #[test]
+    fn sql_may_dirty_session_flags_temp_table_creation() {
+        assert!(sql_may_dirty_session("CREATE TEMP TABLE foo (a INT)"));
+        // Lowercase must also match (function uppercases input).
+        assert!(sql_may_dirty_session("create temp table foo (a int)"));
+    }
+
+    #[test]
+    fn sql_may_dirty_session_flags_each_dirtying_keyword() {
+        let dirtying = [
+            "PREPARE s AS SELECT 1",
+            "DECLARE c CURSOR FOR SELECT 1",
+            "ATTACH 'x.db' AS x",
+            "SELECT * FROM #scratch",
+            "SELECT * FROM pg_temp.foo",
+            "SET memory_limit='1GB'",
+            "USE main",
+            "INSTALL httpfs",
+            "LOAD httpfs",
+        ];
+        for sql in dirtying {
+            assert!(
+                sql_may_dirty_session(sql),
+                "expected dirty for {sql:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sql_may_dirty_session_passes_through_hot_path_write() {
+        // The FHIR write hot path (BEGIN/INSERT/COMMIT) must not trigger
+        // the expensive cleanup branch.
+        assert!(!sql_may_dirty_session("BEGIN"));
+        assert!(!sql_may_dirty_session(
+            "INSERT INTO observations VALUES (1, 'x')"
+        ));
+        assert!(!sql_may_dirty_session("COMMIT"));
+        assert!(!sql_may_dirty_session("SELECT 1"));
+    }
+
+    // --- extract_panic_message: downcasts the three payload shapes ---
+
+    #[test]
+    fn extract_panic_message_handles_str_string_and_unknown() {
+        let from_str: Box<dyn std::any::Any + Send> = Box::new("boom");
+        assert_eq!(extract_panic_message(from_str), "boom");
+
+        let from_string: Box<dyn std::any::Any + Send> = Box::new(String::from("kaboom"));
+        assert_eq!(extract_panic_message(from_string), "kaboom");
+
+        // Neither &str nor String — should fall through to the default.
+        let from_other: Box<dyn std::any::Any + Send> = Box::new(42u32);
+        assert_eq!(extract_panic_message(from_other), "unknown panic");
+    }
+
+    // --- serialize_arrow_ipc: Arrow IPC stream round-trip ---
+
+    #[test]
+    fn serialize_arrow_ipc_roundtrips_schema_and_rows() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let batch = RecordBatch::try_new(
+            Arc::clone(&schema),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2, 3])),
+                Arc::new(StringArray::from(vec!["a", "b", "c"])),
+            ],
+        )
+        .expect("build batch");
+
+        let bytes = serialize_arrow_ipc(&schema, std::slice::from_ref(&batch))
+            .expect("serialize");
+        assert!(!bytes.is_empty());
+
+        let cursor = std::io::Cursor::new(bytes);
+        let reader = arrow_ipc::reader::StreamReader::try_new(cursor, None)
+            .expect("ipc reader");
+        assert_eq!(reader.schema().as_ref(), schema.as_ref());
+        let read_batches: Vec<RecordBatch> = reader.map(|r| r.expect("batch")).collect();
+        assert_eq!(read_batches.len(), 1);
+        assert_eq!(read_batches[0].num_rows(), 3);
+        assert_eq!(read_batches[0].num_columns(), 2);
+    }
+
+    #[test]
+    fn serialize_arrow_ipc_emits_header_for_empty_batch_list() {
+        // Even with zero batches, the writer must emit a valid stream
+        // (schema + EOS marker) so consumers can still read the schema.
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Int32, false)]));
+        let bytes = serialize_arrow_ipc(&schema, &[]).expect("serialize empty");
+        assert!(!bytes.is_empty());
+
+        let cursor = std::io::Cursor::new(bytes);
+        let reader = arrow_ipc::reader::StreamReader::try_new(cursor, None)
+            .expect("ipc reader");
+        assert_eq!(reader.schema().as_ref(), schema.as_ref());
+        assert_eq!(reader.count(), 0);
+    }
+
+    // --- CArrowResult C ABI: null + empty + error/data branches ---
+
+    #[test]
+    fn carrow_result_is_error_treats_null_as_error() {
+        // Null pointer must be reported as an error (defensive default).
+        assert_eq!(trex_pool_arrow_result_is_error(std::ptr::null()), 1);
+
+        let ok = Box::into_raw(Box::new(CArrowResult { data: vec![1, 2, 3], error: None }));
+        let err = Box::into_raw(Box::new(CArrowResult {
+            data: Vec::new(),
+            error: Some("nope".into()),
+        }));
+        assert_eq!(trex_pool_arrow_result_is_error(ok), 0);
+        assert_eq!(trex_pool_arrow_result_is_error(err), 1);
+        trex_pool_arrow_result_free(ok);
+        trex_pool_arrow_result_free(err);
+    }
+
+    #[test]
+    fn carrow_result_data_exposes_bytes_only_when_present() {
+        // Empty data returns 1 (no data); populated data returns 0 and the
+        // out-params point at the buffer.
+        let empty = Box::into_raw(Box::new(CArrowResult {
+            data: Vec::new(),
+            error: None,
+        }));
+        let mut p: *const u8 = std::ptr::null();
+        let mut l: usize = 0;
+        assert_eq!(trex_pool_arrow_result_data(empty, &mut p, &mut l), 1);
+        assert!(p.is_null());
+        assert_eq!(l, 0);
+
+        let full = Box::into_raw(Box::new(CArrowResult {
+            data: vec![9, 8, 7, 6],
+            error: None,
+        }));
+        assert_eq!(trex_pool_arrow_result_data(full, &mut p, &mut l), 0);
+        assert_eq!(l, 4);
+        let slice = unsafe { std::slice::from_raw_parts(p, l) };
+        assert_eq!(slice, &[9, 8, 7, 6]);
+
+        trex_pool_arrow_result_free(empty);
+        trex_pool_arrow_result_free(full);
+    }
+
+    #[test]
+    fn carrow_result_error_writes_message_bytes_when_set() {
+        let r = Box::into_raw(Box::new(CArrowResult {
+            data: Vec::new(),
+            error: Some("boom".to_string()),
+        }));
+        let mut p: *const u8 = std::ptr::null();
+        let mut l: usize = 0;
+        trex_pool_arrow_result_error(r, &mut p, &mut l);
+        assert_eq!(l, 4);
+        let bytes = unsafe { std::slice::from_raw_parts(p, l) };
+        assert_eq!(bytes, b"boom");
+        trex_pool_arrow_result_free(r);
+    }
+}

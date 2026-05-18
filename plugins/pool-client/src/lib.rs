@@ -227,3 +227,130 @@ pub fn destroy_session(session_id: u64) -> Result<(), String> {
     unsafe { (fns.session_destroy)(session_id) };
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{ArrayRef, Int32Array, RecordBatch, StringArray};
+    use arrow_ipc::writer::StreamWriter;
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    /// In a unit-test binary the trex_pool extension is never loaded, so symbol
+    /// discovery must fail with the documented error string. This pins the
+    /// behavior of `get_fns`.
+    #[test]
+    fn get_fns_reports_extension_not_loaded() {
+        let err = match get_fns() {
+            Ok(_) => panic!("expected error in unit-test process"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("trex_pool extension not loaded"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// All public entry points must propagate the "extension not loaded" error
+    /// rather than panic or invoke unresolved FFI symbols.
+    #[test]
+    fn public_entry_points_propagate_discovery_failure() {
+        let err = create_session().expect_err("expected discovery failure");
+        assert!(err.contains("trex_pool extension not loaded"), "got: {err}");
+
+        let err = session_execute(1, "SELECT 1").expect_err("expected discovery failure");
+        assert!(err.contains("trex_pool extension not loaded"), "got: {err}");
+
+        let err = session_execute_params(1, "SELECT ?", &["x".to_string()])
+            .expect_err("expected discovery failure");
+        assert!(err.contains("trex_pool extension not loaded"), "got: {err}");
+
+        let err = destroy_session(1).expect_err("expected discovery failure");
+        assert!(err.contains("trex_pool extension not loaded"), "got: {err}");
+    }
+
+    /// Empty IPC payloads must be rejected by the reader-init step, not silently
+    /// succeed. This protects callers from misinterpreting an empty buffer as a
+    /// valid empty stream.
+    #[test]
+    fn deserialize_arrow_ipc_rejects_empty_input() {
+        let err = deserialize_arrow_ipc(&[]).expect_err("empty buffer must not parse");
+        assert!(err.starts_with("ipc reader init:"), "unexpected: {err}");
+    }
+
+    /// Non-IPC garbage must be rejected by the reader-init step.
+    #[test]
+    fn deserialize_arrow_ipc_rejects_garbage() {
+        let err = deserialize_arrow_ipc(b"not an arrow stream")
+            .expect_err("garbage must not parse");
+        assert!(err.starts_with("ipc reader init:"), "unexpected: {err}");
+    }
+
+    fn ipc_bytes_for_test_batch() -> (Arc<Schema>, RecordBatch, Vec<u8>) {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+        let ids: ArrayRef = Arc::new(Int32Array::from(vec![1, 2, 3]));
+        let names: ArrayRef = Arc::new(StringArray::from(vec!["a", "b", "c"]));
+        let batch = RecordBatch::try_new(schema.clone(), vec![ids, names]).unwrap();
+
+        let mut buf = Vec::new();
+        {
+            let mut writer = StreamWriter::try_new(&mut buf, schema.as_ref()).unwrap();
+            writer.write(&batch).unwrap();
+            writer.finish().unwrap();
+        }
+        (schema, batch, buf)
+    }
+
+    /// Round-trip: a real Arrow IPC stream written by the writer must come back
+    /// with an equivalent schema and identical batch contents. This substitutes
+    /// for the plan's "TCP request/response roundtrip" — the wire format here
+    /// is Arrow IPC over the FFI boundary, not bytes over a socket.
+    #[test]
+    fn deserialize_arrow_ipc_roundtrips_real_batch() {
+        let (orig_schema, orig_batch, bytes) = ipc_bytes_for_test_batch();
+        let (schema, batches) = deserialize_arrow_ipc(&bytes).expect("ipc parse");
+
+        assert_eq!(schema.fields().len(), orig_schema.fields().len());
+        for (a, b) in schema.fields().iter().zip(orig_schema.fields().iter()) {
+            assert_eq!(a.name(), b.name());
+            assert_eq!(a.data_type(), b.data_type());
+        }
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].num_rows(), orig_batch.num_rows());
+        assert_eq!(batches[0].num_columns(), orig_batch.num_columns());
+
+        let ids = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(ids.values(), &[1, 2, 3]);
+
+        let names = batches[0]
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(names.value(0), "a");
+        assert_eq!(names.value(1), "b");
+        assert_eq!(names.value(2), "c");
+    }
+
+    /// Truncated IPC stream (header only, no end marker) must surface as a
+    /// reader-init error rather than partial data.
+    #[test]
+    fn deserialize_arrow_ipc_rejects_truncated_stream() {
+        let (_, _, bytes) = ipc_bytes_for_test_batch();
+        // Lop off the tail to corrupt the stream.
+        let truncated = &bytes[..bytes.len() / 2];
+        let err = deserialize_arrow_ipc(truncated)
+            .expect_err("truncated stream must not parse");
+        assert!(
+            err.starts_with("ipc reader init:") || err.starts_with("ipc read batch:"),
+            "unexpected: {err}"
+        );
+    }
+}

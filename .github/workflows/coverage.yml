@@ -199,3 +199,19 @@ jobs:
           # Coverage is informational only — never fail the gate. The job
           # still appears in PR checks so missing uploads are visible.
           exit 0
+
+  ratchet:
+    name: "Coverage ratchet"
+    runs-on: ubuntu-24.04
+    needs: rust-unit-coverage
+    if: github.event_name == 'pull_request'
+    continue-on-error: true  # informational until we have one week of green runs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - run: cargo install cargo-llvm-cov --locked
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: scripts/coverage-summary.sh coverage/current.json
+      - run: python3 scripts/coverage-ratchet.py coverage/current.json

@@ -1215,3 +1215,112 @@ mod arrow_value_tests {
         assert_eq!(arrow_value_to_string(&f, 0), "1.5");
     }
 }
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_migration(dir: &Path, filename: &str, contents: &str) -> std::path::PathBuf {
+        let path = dir.join(filename);
+        let mut f = fs::File::create(&path).expect("create migration file");
+        f.write_all(contents.as_bytes()).expect("write migration file");
+        path
+    }
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let mut d = std::env::temp_dir();
+        let unique = format!(
+            "trex-migration-tests-{}-{}-{}",
+            tag,
+            std::process::id(),
+            compute_checksum(tag, 0, ""),
+        );
+        d.push(unique);
+        fs::create_dir_all(&d).expect("create tmpdir");
+        d
+    }
+
+    #[test]
+    fn from_path_parses_valid_filename() {
+        let dir = tmpdir("valid");
+        let p = write_migration(&dir, "V123__create_users.sql", "SELECT 1;");
+        let m = MigrationFile::from_path(&p).expect("should parse");
+        assert_eq!(m.version, 123);
+        assert_eq!(m.name, "create_users");
+        assert_eq!(m.sql, "SELECT 1;");
+    }
+
+    #[test]
+    fn from_path_rejects_missing_v_prefix() {
+        let dir = tmpdir("noprefix");
+        let p = write_migration(&dir, "123__create_users.sql", "SELECT 1;");
+        assert!(MigrationFile::from_path(&p).is_none());
+    }
+
+    #[test]
+    fn from_path_rejects_missing_double_underscore() {
+        let dir = tmpdir("nosep");
+        let p = write_migration(&dir, "V123_create_users.sql", "SELECT 1;");
+        assert!(MigrationFile::from_path(&p).is_none());
+    }
+
+    #[test]
+    fn from_path_rejects_non_numeric_version() {
+        let dir = tmpdir("nonnum");
+        let p = write_migration(&dir, "Vabc__create_users.sql", "SELECT 1;");
+        assert!(MigrationFile::from_path(&p).is_none());
+    }
+
+    #[test]
+    fn from_path_rejects_non_alphanumeric_name() {
+        let dir = tmpdir("badname");
+        let p = write_migration(&dir, "V1__bad-name.sql", "SELECT 1;");
+        assert!(MigrationFile::from_path(&p).is_none());
+    }
+
+    #[test]
+    fn compute_checksum_is_deterministic() {
+        let a = compute_checksum("create_users", 1, "SELECT 1;");
+        let b = compute_checksum("create_users", 1, "SELECT 1;");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn compute_checksum_is_sensitive_to_inputs() {
+        let base = compute_checksum("create_users", 1, "SELECT 1;");
+        assert_ne!(base, compute_checksum("create_users", 1, "SELECT 2;"));
+        assert_ne!(base, compute_checksum("create_users", 2, "SELECT 1;"));
+        assert_ne!(base, compute_checksum("other_name", 1, "SELECT 1;"));
+    }
+
+    #[test]
+    fn escape_sql_str_doubles_single_quotes() {
+        assert_eq!(escape_sql_str("O'Brien"), "O''Brien");
+        assert_eq!(escape_sql_str("'); DROP TABLE x;--"), "''); DROP TABLE x;--");
+        assert_eq!(escape_sql_str("no quotes"), "no quotes");
+    }
+
+    #[test]
+    fn escape_sql_ident_doubles_double_quotes() {
+        assert_eq!(escape_sql_ident("weird\"name"), "weird\"\"name");
+        assert_eq!(escape_sql_ident("plain"), "plain");
+    }
+
+    #[test]
+    fn build_insert_migration_sql_escapes_quotes_in_name() {
+        let m = MigrationFile {
+            version: 7,
+            name: "evil'); DROP TABLE refinery_schema_history;--".to_string(),
+            sql: String::new(),
+            checksum: 42,
+        };
+        let sql = build_insert_migration_sql(&m);
+        // The injected quote must be doubled so the value remains a single string literal.
+        assert!(sql.contains("'evil''); DROP TABLE refinery_schema_history;--'"));
+        assert!(sql.starts_with(
+            "INSERT INTO refinery_schema_history (version, name, applied_on, checksum) VALUES (7, "
+        ));
+        assert!(sql.ends_with(", '42')"));
+    }
+}
