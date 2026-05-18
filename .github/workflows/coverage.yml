@@ -136,6 +136,15 @@ jobs:
           - suite: tpm
             plugins: "pool tpm"
             tests: "test_tpm_standalone.py"
+          - suite: chdb
+            plugins: "pool db chdb"
+            tests: "test_chdb_standalone.py test_chdb_db.py"
+          - suite: hana
+            plugins: "pool hana"
+            tests: "test_hana_standalone.py"
+          - suite: runtime
+            plugins: "pool db runtime"
+            tests: "test_trexas_standalone.py"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -156,6 +165,36 @@ jobs:
             ~/.cargo/git
           key: integration-coverage-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('plugins/*/Cargo.lock') }}
 
+      - name: Free disk space (hana only — HANA Express image is ~7 GB)
+        if: matrix.suite == 'hana'
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Install chdb native library (chdb only)
+        if: matrix.suite == 'chdb'
+        run: sudo apt-get update && sudo apt-get install -y libc6-dev clang && sudo bash ./install_chdb.sh
+        working-directory: plugins/chdb
+
+      - name: Install runtime build dependencies (runtime only)
+        if: matrix.suite == 'runtime'
+        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
+
+      - uses: denoland/setup-deno@v2
+        if: matrix.suite == 'runtime'
+        with:
+          deno-version: v2.x
+
+      - name: Start HANA Express container (hana only)
+        if: matrix.suite == 'hana'
+        run: docker compose -f integration-tests/docker-compose.hana.yml up -d
+
       # Same rationale as rust-unit-coverage: informational, never gating.
       - name: Build instrumented plugins
         continue-on-error: true
@@ -169,8 +208,26 @@ jobs:
         run: make configure
         working-directory: integration-tests
 
+      - name: Wait for HANA to be ready (hana only)
+        if: matrix.suite == 'hana'
+        run: |
+          echo "Waiting for HANA Express to be fully ready..."
+          for i in $(seq 1 120); do
+            if docker logs trex-hana 2>&1 | grep -q "Startup finished!"; then
+              echo "HANA startup finished after ~$((i * 5))s"
+              sleep 5
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "Timeout waiting for HANA (10 min)"
+          docker logs trex-hana 2>&1 | tail -20
+          exit 1
+
       - name: Run tests with coverage instrumentation
         continue-on-error: true
+        env:
+          HANA_TEST_URL: "hdbsqls://SYSTEM:Toor1234@localhost:39041/HDB?insecure_omit_server_certificate_check"
         run: TREX_COVERAGE=1 venv/bin/pytest -v ${{ matrix.tests }}
         working-directory: integration-tests
 
@@ -178,6 +235,10 @@ jobs:
         continue-on-error: true
         run: make coverage-merge
         working-directory: integration-tests
+
+      - name: Cleanup HANA container (hana only)
+        if: always() && matrix.suite == 'hana'
+        run: docker compose -f integration-tests/docker-compose.hana.yml down -v
 
       - uses: codecov/codecov-action@v4
         with:
