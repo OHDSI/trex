@@ -603,11 +603,12 @@ mod tests {
         assert_eq!(format_decimal256_string("5", 3), "0.005");
         assert_eq!(format_decimal256_string("-5", 3), "-0.005");
         assert_eq!(format_decimal256_string("123", -2), "12300");
-        // Out-of-i128-range value to prove string path preserves precision.
+        // Out-of-i128-range value to prove the string path preserves precision.
+        // Input is 42 digits; scale 6 splits at position 36.
         let huge = "170141183460469231731687303715884105727000";
         assert_eq!(
             format_decimal256_string(huge, 6),
-            "170141183460469231731687303715884105727.000000"
+            "170141183460469231731687303715884105.727000"
         );
     }
 

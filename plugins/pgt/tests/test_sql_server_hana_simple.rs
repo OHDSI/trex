@@ -270,6 +270,7 @@ fn test_string_position_pattern() -> Result<(), Box<dyn std::error::Error>> {
 
 // Test 11: SQL Server pattern - FLOOR function (using PostgreSQL FLOOR)
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_floor_function_pattern() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "SELECT 
                FLOOR(123.456) as floored_value,
@@ -307,6 +308,7 @@ fn test_complex_sql_server_patterns() -> Result<(), Box<dyn std::error::Error>> 
 
 // Test to verify environment loading
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_env_loading() -> Result<(), Box<dyn std::error::Error>> {
     init_test_env();
     
@@ -327,6 +329,7 @@ fn test_env_loading() -> Result<(), Box<dyn std::error::Error>> {
 
 // Test basic HANA connection
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_hana_connection() -> Result<(), Box<dyn std::error::Error>> {
     let sql = "SELECT 1 AS test_value FROM DUMMY";
     test_transformation_and_execution("basic HANA connection", sql, &["SELECT", "FROM"])
