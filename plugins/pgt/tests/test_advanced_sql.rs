@@ -128,6 +128,7 @@ mod phase3b_advanced_sql_tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_window_functions_row_number() -> Result<(), Box<dyn std::error::Error>> {
         // Following SAP HANA documentation pattern - create table with multiple rows
         println!("\n🧪 Testing window functions ROW_NUMBER with real table data");
@@ -169,6 +170,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_window_functions_rank() -> Result<(), Box<dyn std::error::Error>> {
         // Following SAP HANA documentation pattern
         println!("\n🧪 Testing window functions RANK with real table data");
@@ -211,6 +213,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_window_functions_dense_rank() -> Result<(), Box<dyn std::error::Error>> {
         // Following SAP HANA documentation pattern
         println!("\n🧪 Testing window functions DENSE_RANK with real table data");
@@ -253,6 +256,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_window_functions_lead_lag() -> Result<(), Box<dyn std::error::Error>> {
         // Following SAP HANA documentation pattern
         println!("\n🧪 Testing window functions LAG/LEAD with real table data");
@@ -297,6 +301,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_cte_simple() -> Result<(), Box<dyn std::error::Error>> {
         // Use exactly the pattern from SAP HANA documentation
         let sql = "WITH q1 AS (SELECT 1 AS test_col FROM DUMMY) SELECT * FROM q1";
@@ -308,6 +313,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_cte_recursive() -> Result<(), Box<dyn std::error::Error>> {
         // HANA doesn't support recursive CTEs, so we'll test a simple hierarchical query instead
         let sql = "SELECT 1 as id, 'Manager' as name, NULL as manager_id, 1 as level FROM DUMMY UNION ALL SELECT 2 as id, 'Employee' as name, 1 as manager_id, 2 as level FROM DUMMY";
@@ -319,6 +325,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_cte_multiple() -> Result<(), Box<dyn std::error::Error>> {
         let sql = r#"
             WITH
@@ -336,6 +343,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_advanced_join_full_outer() -> Result<(), Box<dyn std::error::Error>> {
         // Create temporary test tables for the join
         let _ = execute_hana_query("DROP TABLE users_temp");
@@ -364,6 +372,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_advanced_join_cross() -> Result<(), Box<dyn std::error::Error>> {
         // Create temporary test tables for the cross join
         let _ = execute_hana_query("DROP TABLE table1_temp");
@@ -390,6 +399,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_sequence_nextval_transformation() -> Result<(), Box<dyn std::error::Error>> {
         // First create a sequence for testing
         let _ = execute_hana_query("DROP SEQUENCE user_id_seq");
@@ -408,6 +418,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_sequence_currval_transformation() -> Result<(), Box<dyn std::error::Error>> {
         // Use same connection for the entire test to maintain session state
         let conn = get_hana_connection()?;
@@ -444,6 +455,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_sequence_in_insert() -> Result<(), Box<dyn std::error::Error>> {
         // Create sequence and table for testing
         let _ = execute_hana_query("DROP SEQUENCE user_seq_insert");
@@ -469,6 +481,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_index_transformation_btree() -> Result<(), Box<dyn std::error::Error>> {
         // Create a table first, then create an index on it
         let _ = execute_hana_query("DROP TABLE users_btree_test");
@@ -488,6 +501,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_index_transformation_gin() -> Result<(), Box<dyn std::error::Error>> {
         // Create a table first, then create an index on it
         let _ = execute_hana_query("DROP TABLE users_gin_test");
@@ -507,6 +521,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_constraint_transformation_check() -> Result<(), Box<dyn std::error::Error>> {
         // Create a table first, then add constraint
         let _ = execute_hana_query("DROP TABLE users_check_test");
@@ -528,6 +543,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_constraint_transformation_unique() -> Result<(), Box<dyn std::error::Error>> {
         // Create a table first, then add unique constraint
         let _ = execute_hana_query("DROP TABLE users_unique_test");
@@ -626,6 +642,7 @@ mod phase3b_advanced_sql_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_complex_query_with_multiple_features() -> Result<(), Box<dyn std::error::Error>> {
         // Create sequence and table first
         let _ = execute_hana_query("DROP SEQUENCE report_id_seq");

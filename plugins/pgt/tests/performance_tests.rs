@@ -4,6 +4,7 @@ use common::*;
 use std::time::Instant;
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_transformation_performance() {
     let mut runner = IntegrationTestRunner::new();
 
@@ -176,6 +177,7 @@ async fn test_transformation_performance() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_batch_transformation_performance() {
     let mut runner = IntegrationTestRunner::new();
 
@@ -260,6 +262,7 @@ async fn test_batch_transformation_performance() {
 }
 
 #[tokio::test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 async fn test_memory_usage_with_large_queries() {
     let mut runner = IntegrationTestRunner::new();
 

@@ -123,6 +123,7 @@ fn get_transformer() -> SqlTransformer {
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_serial_to_identity_simple() -> Result<(), Box<dyn std::error::Error>> {
     // Clean up and create test table with SERIAL-like pattern
     let table_name = "test_serial_simple";
@@ -150,6 +151,7 @@ fn test_serial_to_identity_simple() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_bigserial_to_identity() -> Result<(), Box<dyn std::error::Error>> {
     // Clean up and create test table with BIGSERIAL-like pattern
     let table_name = "test_bigserial";
@@ -177,6 +179,7 @@ fn test_bigserial_to_identity() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_multiple_columns_with_serial() -> Result<(), Box<dyn std::error::Error>> {
     // Test with one SERIAL column
     let table_name = "test_multiple_serial";
@@ -213,6 +216,7 @@ fn test_multiple_columns_with_serial() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_no_transformation_for_regular_columns() -> Result<(), Box<dyn std::error::Error>> {
     // Clean up and create test table with regular columns (no SERIAL)
     let table_name = "test_regular_columns";
@@ -240,6 +244,7 @@ fn test_no_transformation_for_regular_columns() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_other_default_values_preserved() -> Result<(), Box<dyn std::error::Error>> {
     // Clean up and create test table with other DEFAULT values
     let table_name = "test_default_values";

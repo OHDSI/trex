@@ -127,6 +127,7 @@ fn test_transformation_and_execution(
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_basic_transformation() -> Result<(), Box<dyn std::error::Error>> {
     // Test NOW() function with HANA database execution - NOW() should remain as is
     let sql = "SELECT NOW() FROM DUMMY";
@@ -138,6 +139,7 @@ fn test_basic_transformation() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_data_type_transformation() -> Result<(), Box<dyn std::error::Error>> {
     // Create a test table with PostgreSQL data types and execute it
     let _ = execute_hana_query("DROP TABLE integration_test_data_types");
@@ -161,6 +163,7 @@ fn test_data_type_transformation() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_function_transformation() -> Result<(), Box<dyn std::error::Error>> {
     // Test function transformations with database execution
     let sql = "SELECT NOW(), RANDOM() as random_val FROM DUMMY";
@@ -216,6 +219,7 @@ fn test_configuration_loading() {
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_complex_query_transformation() -> Result<(), Box<dyn std::error::Error>> {
     // Test complex CTE query with function transformations using DUMMY table
     let complex_sql = r#"
@@ -243,6 +247,7 @@ fn test_complex_query_transformation() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+#[ignore = "requires running HANA database (HANA_URL env)"]
 fn test_mixed_transformations() -> Result<(), Box<dyn std::error::Error>> {
     // Test mixed data type and function transformations with real database execution
     let _ = execute_hana_query("DROP TABLE integration_test_mixed");

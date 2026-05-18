@@ -185,6 +185,7 @@ mod sql_server_pattern_transformation_tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_conditional_table_creation_transformation() -> Result<(), Box<dyn std::error::Error>> {
         let table_name = "test_table_conditional";
         
@@ -206,6 +207,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_drop_table_if_exists_transformation() -> Result<(), Box<dyn std::error::Error>> {
         let table_name = "test_drop_table_unique";
         
@@ -223,6 +225,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_temporary_table_transformation() -> Result<(), Box<dyn std::error::Error>> {
         // Clean up and create test table with unique name
         let table_name = "temp_data_test";
@@ -247,6 +250,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_create_table_as_select_transformation() -> Result<(), Box<dyn std::error::Error>> {
         let users_table = "users_ctas_test";
         let new_users_table = "new_users_ctas_test";
@@ -281,6 +285,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_cte_with_create_table_transformation() -> Result<(), Box<dyn std::error::Error>> {
         let summary_table = "summary_cte_test";
         let orders_table = "orders_cte_test";
@@ -323,6 +328,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_length_function_transformation() -> Result<(), Box<dyn std::error::Error>> {
         let table_name = "products_length_test";
         
@@ -347,6 +353,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_string_concatenation_transformation() -> Result<(), Box<dyn std::error::Error>> {
         // Clean up and create test table with unique name
         let table_name = "users_concat_test";
@@ -370,6 +377,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_concat_function_transformation() -> Result<(), Box<dyn std::error::Error>> {
         // Clean up and create test table with unique name
         let table_name = "users_concat_func_test";
@@ -393,6 +401,7 @@ mod sql_server_pattern_transformation_tests {
     }
 
     #[test]
+    #[ignore = "requires running HANA database (HANA_URL env)"]
     fn test_floor_function_transformation() -> Result<(), Box<dyn std::error::Error>> {
         // Clean up and create test table with unique name
         let table_name = "products_floor_test";
