@@ -104,6 +104,9 @@
 (defn created [body]
   (response 201 body))
 
+(defn accepted [body]
+  (response 202 body))
+
 (defn no-content []
   (response 204 nil))
 
@@ -256,9 +259,21 @@
                         validated-config (datamart/java-map->datamart-config config-map)]
                     (when-let [error (datamart/validate-config validated-config)]
                       (throw (IllegalArgumentException. error)))
-                    (let [result (datamart/create-cache db validated-config nil)
-                          java-result (datamart/result->java-map result)]
-                      (ok (java-map->clj java-result))))
+                    ;; Dispatch the actual cache build to a background thread.
+                    ;; A full CDM batch copy takes 30s–minutes; HTTP callers
+                    ;; (the d2e dataset gateway) time out at 30s. Progress is
+                    ;; tracked in cache_generation_info — clients poll
+                    ;; GET /trexsql/<source-key>/cache/status to know when the
+                    ;; activeJob transitions to COMPLETE.
+                    (future
+                      (try
+                        (datamart/create-cache db validated-config nil)
+                        (catch Throwable t
+                          (log/error t (format "Async cache build failed for %s" database-code)))))
+                    (accepted {:success true
+                               :sourceKey source-key
+                               :databaseCode database-code
+                               :status "RUNNING"}))
                   (catch IllegalArgumentException e
                     (bad-request (.getMessage e)))
                   (catch Exception e
@@ -521,9 +536,17 @@
                     validated-config (datamart/java-map->datamart-config config-map)]
                 (when-let [error (datamart/validate-config validated-config)]
                   (throw (IllegalArgumentException. error)))
-                (let [result (datamart/create-cache db validated-config nil)
-                      java-result (datamart/result->java-map result)]
-                  (ok (java-map->clj java-result))))
+                ;; Dispatch the actual cache build to a background thread —
+                ;; see handle-create-cache for the rationale. Clients poll
+                ;; cache/status until activeJob status hits COMPLETE.
+                (future
+                  (try
+                    (datamart/create-cache db validated-config nil)
+                    (catch Throwable t
+                      (log/error t (format "Async cache build failed for %s" database-code)))))
+                (accepted {:sourceKey source-key
+                           :databaseCode database-code
+                           :status "RUNNING"}))
               (catch IllegalArgumentException e
                 (bad-request (.getMessage e)))
               (catch Exception e
