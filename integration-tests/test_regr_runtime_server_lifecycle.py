@@ -18,7 +18,6 @@ returns a fresh server id (not "Error: ...").
 """
 import json
 
-import pytest
 
 
 def _start_payload(host: str, port: int) -> str:

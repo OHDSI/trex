@@ -444,7 +444,7 @@ def test_concurrent_fhir_writes_and_pgwire_reads(env):
         for f in as_completed(futures):
             f.result()  # propagate exceptions
 
-    assert not errors, f"Concurrent errors:\n" + "\n".join(errors)
+    assert not errors, "Concurrent errors:\n" + "\n".join(errors)
 
     # Verify all written patients exist
     for i in range(0, num_ops, 2):
@@ -507,7 +507,7 @@ def test_concurrent_pgwire_writes_and_fhir_reads(env):
         for f in as_completed(futures):
             f.result()
 
-    assert not errors, f"Concurrent errors:\n" + "\n".join(errors)
+    assert not errors, "Concurrent errors:\n" + "\n".join(errors)
 
     # Verify PgWire writes landed
     conn = _pg_connect(pg_port)

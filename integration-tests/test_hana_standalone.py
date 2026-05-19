@@ -369,5 +369,5 @@ def test_hana_attach_empty_schema(node_factory):
 def test_hana_detach_nonexistent(node_factory):
     """trex_hana_detach() on a non-existent attachment returns 0 tables detached."""
     node = node_factory(load_hana=True, load_db=False)
-    result = node.execute(f"SELECT trex_hana_detach('nonexistent', 'NOPE')")
+    result = node.execute("SELECT trex_hana_detach('nonexistent', 'NOPE')")
     assert "Detached 0 tables" in result[0][0]

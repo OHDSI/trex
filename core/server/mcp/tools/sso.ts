@@ -37,7 +37,7 @@ export function registerSsoTools(server: McpServer) {
         );
         try {
           // SSO providers are loaded from DB on each request; no reload needed
-        } catch (e) {
+        } catch (_e) {
           // Non-fatal
         }
         return { content: [{ type: "text", text: `SSO provider '${id}' saved` }] };
@@ -64,7 +64,7 @@ export function registerSsoTools(server: McpServer) {
         }
         try {
           // SSO providers are loaded from DB on each request; no reload needed
-        } catch (e) {
+        } catch (_e) {
           // Non-fatal
         }
         return { content: [{ type: "text", text: `SSO provider '${id}' deleted` }] };

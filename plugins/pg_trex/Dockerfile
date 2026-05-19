@@ -12,8 +12,7 @@ RUN mkdir -p /opt/trexsql && \
     wget -O /tmp/libtrexsql.zip \
       https://github.com/p-hoffmann/trexsql-rs/releases/download/${TREXSQL_VERSION}/libtrexsql-linux-amd64.zip && \
     unzip /tmp/libtrexsql.zip -d /opt/trexsql && \
-    rm /tmp/libtrexsql.zip && \
-    ln -sf /opt/trexsql/libtrexsql.so /opt/trexsql/libduckdb.so
+    rm /tmp/libtrexsql.zip
 
 ENV TREXSQL_LIB_DIR=/opt/trexsql
 ENV TREXSQL_INCLUDE_DIR=/opt/trexsql
@@ -50,7 +49,7 @@ RUN . /root/.cargo/env && cargo install cargo-pgrx --version 0.16.1 --locked
 RUN . /root/.cargo/env && cargo pgrx init --pg17=$(which pg_config)
 
 COPY --from=trex-builder /opt/trexsql /opt/trexsql
-RUN ln -sf /opt/trexsql/libtrexsql.so /usr/lib/libduckdb.so && ldconfig
+RUN ln -sf /opt/trexsql/libtrexsql.so /usr/lib/libtrexsql.so && ldconfig
 ENV TREXSQL_LIB_DIR=/opt/trexsql
 ENV TREXSQL_INCLUDE_DIR=/opt/trexsql
 
@@ -116,15 +115,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 # ── libtrexsql for pg_trex (into PG lib dir) ──
 COPY --from=trex-builder /opt/trexsql/libtrexsql.so /usr/lib/postgresql/17/lib/libtrexsql.so.1.4
 RUN ln -sf libtrexsql.so.1.4 /usr/lib/postgresql/17/lib/libtrexsql.so && \
-    ln -sf libtrexsql.so.1.4 /usr/lib/postgresql/17/lib/libduckdb.so && \
-    ln -sf libtrexsql.so.1.4 /usr/lib/postgresql/17/lib/libduckdb.so.1.4 && \
     echo "/usr/lib/postgresql/17/lib" >> /etc/ld.so.conf.d/pg_trex.conf
 
 # ── Libraries for trex binary + versioned soname for pg_trex ──
 COPY --from=trex-builder /opt/trexsql/libtrexsql.so /usr/lib/libtrexsql.so.1.4
-RUN ln -sf libtrexsql.so.1.4 /usr/lib/libtrexsql.so && \
-    ln -sf libtrexsql.so.1.4 /usr/lib/libduckdb.so.1.4 && \
-    ln -sf libtrexsql.so.1.4 /usr/lib/libduckdb.so
+RUN ln -sf libtrexsql.so.1.4 /usr/lib/libtrexsql.so
 COPY --from=trex-builder /opt/libchdb.so /usr/lib/
 COPY --from=trex-builder /usr/src/trexsql/target/release/libtrexsql_engine.so /usr/lib/
 RUN ldconfig

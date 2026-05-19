@@ -1,0 +1,85 @@
+{
+  "name": "@trex/devx",
+  "version": "1.0.0",
+  "description": "DevX - AI code editor plugin for trex",
+  "type": "module",
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build && vite build --config vite.config.spa.ts && cp dist/assets/index-*.css dist/devx-spa.css",
+    "prepack": "npm run build",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "trex": {
+    "functions": {
+      "env": {
+        "_shared": {
+          "DATABASE_URL": "${DATABASE_URL}"
+        }
+      },
+      "api": [
+        {
+          "source": "/devx-api",
+          "function": "/functions",
+          "allowHostFsAccess": true
+        }
+      ]
+    },
+    "ui": {
+      "routes": [
+        {
+          "path": "/devx",
+          "dir": "dist",
+          "spa": true
+        }
+      ]
+    },
+    "migrations": {
+      "schema": "devx",
+      "database": "_config"
+    }
+  },
+  "dependencies": {
+    "@fontsource-variable/inter": "^5.2.8",
+    "@fontsource-variable/roboto-flex": "^5.2.8",
+    "@monaco-editor/react": "^4.7.0",
+    "@radix-ui/react-accordion": "^1.2.12",
+    "@tailwindcss/typography": "^0.5.19",
+    "class-variance-authority": "^0.7.1",
+    "single-spa": "^6.0.0",
+    "single-spa-react": "^6.0.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.564.0",
+    "monaco-editor": "^0.55.1",
+    "radix-ui": "^1.4.3",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-markdown": "^10.1.0",
+    "react-resizable-panels": "^2.1.7",
+    "react-router-dom": "^7.13.0",
+    "remark-gfm": "^4.0.1",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.4.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.1",
+    "@tailwindcss/vite": "^4.1.18",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "eslint": "^9.39.1",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "eslint-plugin-react-refresh": "^0.4.24",
+    "globals": "^16.5.0",
+    "shadcn": "^3.8.4",
+    "tailwindcss": "^4.1.18",
+    "tw-animate-css": "^1.4.0",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.48.0",
+    "vite": "^7.3.1"
+  }
+}

@@ -106,6 +106,11 @@ jobs:
             NODE_VERSION: "22.x"
           - PKGPATH: ./plugins/runtime
             RUNNER: ubuntu-24.04
+          - PKGPATH: ./plugins/devx
+            RUNNER: ubuntu-24.04
+          - PKGPATH: ./plugins/devx-ext
+            RUNNER: ubuntu-24.04
+            BUNDLE_IN_IMAGE: false
 
     runs-on: ${{ matrix.RUNNER || needs.pick_runner.outputs.random_runner }}
 
@@ -145,11 +150,10 @@ jobs:
           wget -q -O /tmp/libtrexsql.zip \
             https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
           unzip -o /tmp/libtrexsql.zip -d /tmp/trexsql
-          ln -sf /tmp/trexsql/libtrexsql.so /tmp/trexsql/libduckdb.so
           TREXSQL_LIB_DIR=/tmp/trexsql cargo build --release
           mkdir -p plugins/bao/java/resources/linux-x86-64
           cp target/release/libtrexsql_engine.so plugins/bao/java/resources/linux-x86-64/
-          cp /tmp/trexsql/libtrexsql.so plugins/bao/java/resources/linux-x86-64/libduckdb.so
+          cp /tmp/trexsql/libtrexsql.so plugins/bao/java/resources/linux-x86-64/
       - name: Set up Java 21
         if: matrix.PKGPATH == './plugins/bao'
         uses: actions/setup-java@v4
@@ -210,7 +214,7 @@ jobs:
           # artifact. Web/docs/notebook/cli/runtime/bao publish other shapes;
           # everything else is a DuckDB extension and must ship a .trex.
           case "${{ matrix.PKGPATH }}" in
-            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio)
+            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx)
               echo "skip — non-extension plugin"
               ;;
             *)
@@ -266,7 +270,10 @@ jobs:
         if: hashFiles(format('{0}/*.trex', matrix.PKGPATH)) != ''
         uses: actions/upload-artifact@v4
         with:
-          name: ext-${{ steps.extname.outputs.name }}-amd64
+          # Plugins with BUNDLE_IN_IMAGE: false upload as dx-* so the
+          # build-docker job's `ext-*-amd64` download pattern skips them
+          # (keeps devx-ext out of the default trex image).
+          name: ${{ matrix.BUNDLE_IN_IMAGE == false && format('dx-{0}-amd64', steps.extname.outputs.name) || format('ext-{0}-amd64', steps.extname.outputs.name) }}
           path: ${{ matrix.PKGPATH }}/*.trex
           retention-days: 1
 
@@ -562,7 +569,6 @@ jobs:
           wget -O /tmp/libtrexsql.zip \
             https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
           unzip /tmp/libtrexsql.zip -d /tmp/trexsql
-          ln -sf /tmp/trexsql/libtrexsql.so /tmp/trexsql/libduckdb.so
 
       - uses: actions/cache@v4
         with:

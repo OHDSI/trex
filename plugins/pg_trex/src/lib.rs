@@ -154,7 +154,7 @@ pub fn get_prev_planner_hook() -> pg_sys::planner_hook_type {
     unsafe { PREV_PLANNER_HOOK }
 }
 
-#[cfg(any(test, feature = "pg_test"))]
+#[cfg(feature = "pg_test")]
 #[pg_schema]
 mod tests {
     use pgrx::prelude::*;

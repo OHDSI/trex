@@ -391,3 +391,93 @@ fn rewrite_table_factor_dual(
         _ => {}
     }
 }
+
+#[cfg(test)]
+mod parser_tests {
+    use super::*;
+
+    fn names(set: &HashSet<String>) -> Vec<String> {
+        let mut v: Vec<String> = set.iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn extract_dependencies_finds_simple_from_table() {
+        let deps = extract_dependencies("SELECT * FROM upstream").unwrap();
+        assert_eq!(names(&deps), vec!["upstream".to_string()]);
+    }
+
+    #[test]
+    fn extract_dependencies_excludes_cte_names() {
+        let sql = "WITH inner_cte AS (SELECT * FROM real_table) \
+                   SELECT * FROM inner_cte";
+        let deps = extract_dependencies(sql).unwrap();
+        // The CTE name must not appear as a dep; the real underlying table does.
+        assert_eq!(names(&deps), vec!["real_table".to_string()]);
+    }
+
+    #[test]
+    fn extract_dependencies_collects_joined_tables() {
+        let sql = "SELECT a.x, b.y FROM left_tbl a JOIN right_tbl b ON a.id = b.id";
+        let deps = extract_dependencies(sql).unwrap();
+        assert_eq!(
+            names(&deps),
+            vec!["left_tbl".to_string(), "right_tbl".to_string()]
+        );
+    }
+
+    #[test]
+    fn extract_dependencies_returns_err_on_invalid_sql() {
+        // Substitute for the hinted "rejects_missing_sql_block": the real API
+        // returns a Boxed parser error rather than a typed variant. We assert
+        // the Err arm and downcast to the concrete sqlparser::ParserError.
+        let result = extract_dependencies("SELECT FROM WHERE");
+        let err = result.expect_err("malformed SQL should not parse");
+        let downcast = err.downcast_ref::<sqlparser::parser::ParserError>();
+        assert!(
+            downcast.is_some(),
+            "expected sqlparser::ParserError, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_table_references_qualifies_known_tables() {
+        let mut known = HashSet::new();
+        known.insert("orders".to_string());
+        let out = rewrite_table_references("SELECT * FROM orders", &known, "main").unwrap();
+        assert!(
+            out.contains("\"main\".orders"),
+            "expected qualified reference, got: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_table_references_leaves_unknown_tables_alone() {
+        let known: HashSet<String> = HashSet::new();
+        let out = rewrite_table_references("SELECT * FROM other", &known, "main").unwrap();
+        assert!(
+            !out.contains("\"main\""),
+            "unknown table should not be schema-qualified, got: {out}"
+        );
+        assert!(out.contains("other"));
+    }
+
+    #[test]
+    fn rewrite_table_references_dual_picks_source_vs_dest_schema() {
+        let mut known = HashSet::new();
+        known.insert("model_a".to_string());
+        let mut sources = HashSet::new();
+        sources.insert("raw_a".to_string());
+        let out = rewrite_table_references_dual(
+            "SELECT * FROM model_a JOIN raw_a ON model_a.id = raw_a.id",
+            &known,
+            &sources,
+            "dest",
+            "src",
+            )
+            .unwrap();
+        assert!(out.contains("\"dest\".model_a"), "dest schema missing: {out}");
+        assert!(out.contains("\"src\".raw_a"), "source schema missing: {out}");
+    }
+}

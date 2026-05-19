@@ -1,0 +1,12 @@
+{
+  "imports": {
+    "npm:ai": "npm:ai@latest",
+    "npm:@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@latest",
+    "npm:@ai-sdk/openai": "npm:@ai-sdk/openai@latest",
+    "npm:@ai-sdk/google": "npm:@ai-sdk/google@latest",
+    "npm:@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@latest",
+    "npm:@modelcontextprotocol/sdk/client/index.js": "npm:@modelcontextprotocol/sdk@1/client/index.js",
+    "npm:@modelcontextprotocol/sdk/client/stdio.js": "npm:@modelcontextprotocol/sdk@1/client/stdio.js",
+    "npm:@modelcontextprotocol/sdk/client/sse.js": "npm:@modelcontextprotocol/sdk@1/client/sse.js"
+  }
+}

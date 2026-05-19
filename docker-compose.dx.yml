@@ -1,0 +1,204 @@
+# Standalone compose stack that runs trex with the devx plugin and the
+# devx_ext DuckDB extension mounted in. Runs alongside the default
+# docker-compose.yml — ports are offset by +1000 on HTTP / +10 on pg.
+#
+# Prerequisites:
+#   git submodule update --init plugins/extension-ci-tools
+#
+# First-run setup is handled by two init containers:
+#   - devx-build      — npm ci + npm run build in plugins/devx, plus
+#                       npm install for fn-claude-code and fn-copilot
+#   - devx-ext-build  — make configure && make release for the Rust
+#                       extension (slow first time: 5-10 min on amd64)
+# Both short-circuit on subsequent boots if their build artifact exists.
+#
+# Run:
+#   docker compose -f docker-compose.dx.yml up -d
+# UI: http://localhost:9001/plugins/trex/devx/
+#
+# Notes:
+# - devx-build runs as uid 1000 so node_modules/dist end up owned by the
+#   host user on Linux.
+# - devx-ext-build runs as root because it apt-installs python3-venv;
+#   build artifacts (plugins/devx-ext/build/, target/) will be root-owned.
+#   To clean: `docker compose -f docker-compose.dx.yml run --rm clean`.
+# - Secrets: trex's entrypoint replaces known-default placeholder values
+#   for BETTER_AUTH_SECRET / PGRST_JWT_SECRET with random ones at boot.
+#   For trex ↔ postgrest JWTs to validate, both containers must see the
+#   SAME value, so set both in a .env file (or accept that first-boot
+#   random values only survive until the next `docker compose down`).
+
+volumes:
+  dx-pgdata:
+  devx-workspaces:
+  dx-claude-config:
+  dx-gh-config:
+
+services:
+  postgres:
+    image: postgres:16
+    # No container_name — avoids clashing with the default compose's postgres.
+    ports:
+      - 65443:5432
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypass}
+      POSTGRES_DB: testdb
+    volumes:
+      - dx-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  devx-build:
+    image: node:22-trixie-slim
+    user: "node"
+    working_dir: /work
+    volumes:
+      - ./plugins/devx:/work
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -d dist ] && [ -d fn-claude-code/node_modules ] && [ -d fn-copilot/node_modules ]; then
+          echo '[devx-build] artifacts present, skipping'
+          exit 0
+        fi
+        echo '[devx-build] preparing devx (first-run setup)'
+        [ -d node_modules ] || npm ci
+        [ -d dist ] || npm run build
+        [ -d fn-claude-code/node_modules ] || (cd fn-claude-code && npm install --omit=dev)
+        [ -d fn-copilot/node_modules ] || (cd fn-copilot && npm install --omit=dev)
+        echo '[devx-build] done'
+    restart: "no"
+
+  devx-ext-build:
+    image: rust:1.88-bookworm
+    working_dir: /work/plugins/devx-ext
+    volumes:
+      - ./plugins/devx-ext:/work/plugins/devx-ext
+      - ./plugins/extension-ci-tools:/work/plugins/extension-ci-tools
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        if [ -f build/release/devx_ext.trex ]; then
+          echo '[devx-ext-build] artifact present, skipping'
+          exit 0
+        fi
+        echo '[devx-ext-build] installing system deps'
+        apt-get update >/dev/null
+        apt-get install -y --no-install-recommends \
+          python3 python3-venv make pkg-config libssl-dev >/dev/null
+        echo '[devx-ext-build] running make configure && make release (slow first time)'
+        make configure
+        make release
+        echo '[devx-ext-build] done'
+    restart: "no"
+
+  # devx-workspaces is created root-owned by Docker; trex runs as uid 1000
+  # (`node`) and would hit EACCES on first mkdir inside it, surfacing as a
+  # 500 from devx-api routes. This one-shot chowns the volume.
+  devx-workspaces-init:
+    image: alpine
+    volumes:
+      - devx-workspaces:/work
+    command: ["sh", "-c", "chown 1000:1000 /work && echo '[devx-workspaces-init] done'"]
+    restart: "no"
+
+  trex:
+    # Override with a local image for development:
+    #   TREX_IMAGE=trexsql-test:dev docker compose -f docker-compose.dx.yml up -d
+    image: ${TREX_IMAGE:-ghcr.io/p-hoffmann/trexsql:latest}
+    platform: linux/amd64
+    # Ports offset by +1000 / +10 so this can run alongside the default
+    # docker-compose.yml (which uses 8000/8001/5433).
+    ports:
+      - 9000:8000
+      - 9001:8001
+      - 5443:5432
+    volumes:
+      # Whole devx plugin dir; trex's plugin scanner picks it up via package.json.
+      - ./plugins/devx:/usr/src/plugins-dev/devx
+      # Locally-built extension; mounted read-only into trex's extension dir.
+      - ./plugins/devx-ext/build/release/devx_ext.trex:/usr/lib/trexsql/extensions/devx_ext.trex:ro
+      # Workspace-less Deno config — the image's /usr/src/deno.json declares a
+      # `workspace` that excludes plugins-dev/**, so Deno ≥2.7 refuses to load
+      # plugin function configs like plugins-dev/devx/functions/deno.json.
+      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
+      - devx-workspaces:/tmp/devx-workspaces
+      - dx-claude-config:/home/node/.claude
+      - dx-gh-config:/home/node/.config/gh
+    depends_on:
+      postgres:
+        condition: service_healthy
+      devx-build:
+        condition: service_completed_successfully
+      devx-ext-build:
+        condition: service_completed_successfully
+      devx-workspaces-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}}
+      TREX_PRODUCTION_MODE: ${TREX_PRODUCTION_MODE:-0}
+      BASE_PATH: /trex
+      BETTER_AUTH_URL: http://localhost:9001/trex
+      PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
+      TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
+      PLUGINS_PATH: /usr/src/plugins
+      PLUGINS_DEV_PATH: /usr/src/plugins-dev
+      SCHEMA_DIR: /usr/src/core/schema
+      SWARM_CONFIG: >-
+        {"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[{"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server","event_worker_path":"/usr/src/core/event","tls_port":8000,"tls_cert_path":"/usr/src/server.crt","tls_key_path":"/usr/src/server.key"}},{"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}]}}}
+      SWARM_NODE: local
+      POSTGREST_HOST: postgrest
+      POSTGREST_PORT: "3000"
+      # Register devx in the web shell's top nav (consumed by plugins/web).
+      TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"DevX","plugin":"devx"}]'
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - 'node -e "fetch(''http://localhost:8001/trex/auth/v1/health'').then(r => { if (r.status !== 200) throw new Error(r.status) })"'
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.3
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET:-${BETTER_AUTH_SECRET:-dev-secret-at-least-32-characters-long!!}}
+      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
+      PGRST_DB_USE_LEGACY_GUCS: "false"
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
+
+  # On-demand cleanup helper — wipes build artifacts that may be root-owned.
+  # Run with: docker compose -f docker-compose.dx.yml run --rm clean
+  clean:
+    image: alpine
+    profiles: ["tools"]
+    working_dir: /work
+    volumes:
+      - .:/work
+    command:
+      - sh
+      - -c
+      - |
+        echo 'wiping build artifacts'
+        rm -rf plugins/devx/node_modules plugins/devx/dist \
+               plugins/devx/fn-claude-code/node_modules \
+               plugins/devx/fn-copilot/node_modules \
+               plugins/devx-ext/build plugins/devx-ext/target
+        echo 'done'

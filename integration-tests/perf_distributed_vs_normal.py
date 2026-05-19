@@ -112,7 +112,7 @@ def main():
     # Sanity check
     result = wait_for(
         node_a,
-        f"SELECT * FROM trex_db_query('SELECT COUNT(*) AS cnt FROM orders')",
+        "SELECT * FROM trex_db_query('SELECT COUNT(*) AS cnt FROM orders')",
         lambda r: len(r) >= 1 and int(r[0][0]) == total_rows,
         timeout=30,
     )

@@ -148,3 +148,182 @@ pub fn create_bundle_sync(
     bytes.len()
   ))
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use tempfile::tempdir;
+
+  // ---------- BundleOptions::get_checksum ----------
+
+  #[test]
+  fn get_checksum_none_when_unset_returns_none() {
+    let opts = BundleOptions::default();
+    let result = opts.get_checksum().expect("default checksum should be Ok");
+    assert!(result.is_none(), "default (None) should map to no checksum");
+  }
+
+  #[test]
+  fn get_checksum_explicit_none_string_returns_none() {
+    let opts = BundleOptions {
+      checksum: Some("none".to_string()),
+      ..Default::default()
+    };
+    let result = opts.get_checksum().expect("'none' should be Ok");
+    assert!(result.is_none(), "'none' string should map to no checksum");
+  }
+
+  #[test]
+  fn get_checksum_empty_string_returns_none() {
+    let opts = BundleOptions {
+      checksum: Some(String::new()),
+      ..Default::default()
+    };
+    let result = opts.get_checksum().expect("empty string should be Ok");
+    assert!(
+      result.is_none(),
+      "empty checksum string should map to no checksum"
+    );
+  }
+
+  #[test]
+  fn get_checksum_sha256_returns_some() {
+    let opts = BundleOptions {
+      checksum: Some("sha256".to_string()),
+      ..Default::default()
+    };
+    let result = opts.get_checksum().expect("'sha256' should parse");
+    assert!(result.is_some(), "'sha256' should yield Some(Checksum)");
+  }
+
+  #[test]
+  fn get_checksum_xxhash3_returns_some() {
+    let opts = BundleOptions {
+      checksum: Some("xxhash3".to_string()),
+      ..Default::default()
+    };
+    let result = opts.get_checksum().expect("'xxhash3' should parse");
+    assert!(result.is_some(), "'xxhash3' should yield Some(Checksum)");
+  }
+
+  #[test]
+  fn get_checksum_invalid_value_errors_with_helpful_message() {
+    let opts = BundleOptions {
+      checksum: Some("md5".to_string()),
+      ..Default::default()
+    };
+    let err = opts
+      .get_checksum()
+      .expect_err("unknown checksum should be rejected");
+    let msg = format!("{}", err);
+    assert!(
+      msg.contains("md5"),
+      "error should mention offending value, got: {msg}"
+    );
+    assert!(
+      msg.contains("sha256") && msg.contains("xxhash3") && msg.contains("none"),
+      "error should list valid options, got: {msg}"
+    );
+  }
+
+  // ---------- BundleOptions deserialization ----------
+
+  #[test]
+  fn bundle_options_deserializes_empty_object_to_defaults() {
+    let opts: BundleOptions = serde_json::from_str("{}").expect("empty {} valid");
+    assert!(opts.checksum.is_none());
+    assert!(opts.static_patterns.is_empty());
+    assert!(!opts.no_module_cache);
+    assert!(opts.timeout_sec.is_none());
+  }
+
+  #[test]
+  fn bundle_options_deserializes_all_fields() {
+    let json = r#"{
+      "checksum": "sha256",
+      "static_patterns": ["**/*.txt", "data/*.json"],
+      "no_module_cache": true,
+      "timeout_sec": 30
+    }"#;
+    let opts: BundleOptions =
+      serde_json::from_str(json).expect("valid JSON should parse");
+    assert_eq!(opts.checksum.as_deref(), Some("sha256"));
+    assert_eq!(opts.static_patterns, vec!["**/*.txt", "data/*.json"]);
+    assert!(opts.no_module_cache);
+    assert_eq!(opts.timeout_sec, Some(30));
+  }
+
+  #[test]
+  fn bundle_options_unknown_fields_are_ignored() {
+    // serde default behavior: unknown fields ignored (no #[serde(deny_unknown_fields)])
+    let json = r#"{"checksum": "none", "totally_unknown_field": 42}"#;
+    let opts: BundleOptions =
+      serde_json::from_str(json).expect("unknown fields should be tolerated");
+    assert_eq!(opts.checksum.as_deref(), Some("none"));
+  }
+
+  // ---------- create_bundle_sync entrypoint validation ----------
+
+  #[test]
+  fn create_bundle_sync_rejects_missing_entrypoint() {
+    let dir = tempdir().expect("tempdir");
+    let missing = dir.path().join("does_not_exist.ts");
+    let out = dir.path().join("out.eszip");
+
+    let err = create_bundle_sync(
+      missing.to_str().unwrap(),
+      out.to_str().unwrap(),
+      None,
+    )
+    .expect_err("missing entrypoint must be rejected");
+    let msg = format!("{}", err);
+    assert!(
+      msg.contains("does not exist"),
+      "error should explain missing path, got: {msg}"
+    );
+  }
+
+  #[test]
+  fn create_bundle_sync_rejects_directory_as_entrypoint() {
+    let dir = tempdir().expect("tempdir");
+    // The directory itself exists but is not a file.
+    let out = dir.path().join("out.eszip");
+
+    let err = create_bundle_sync(
+      dir.path().to_str().unwrap(),
+      out.to_str().unwrap(),
+      None,
+    )
+    .expect_err("directory entrypoint must be rejected");
+    let msg = format!("{}", err);
+    assert!(
+      msg.contains("not a file"),
+      "error should explain non-file path, got: {msg}"
+    );
+  }
+
+  #[test]
+  fn create_bundle_sync_propagates_invalid_checksum_option() {
+    // The entrypoint exists and is a file, so the function progresses past
+    // the path checks and then fails when get_checksum() rejects the value.
+    let dir = tempdir().expect("tempdir");
+    let entry = dir.path().join("entry.ts");
+    std::fs::write(&entry, "export default {}\n").expect("write entry");
+    let out = dir.path().join("out.eszip");
+
+    let err = create_bundle_sync(
+      entry.to_str().unwrap(),
+      out.to_str().unwrap(),
+      Some(BundleOptions {
+        checksum: Some("bogus".to_string()),
+        ..Default::default()
+      }),
+    )
+    .expect_err("invalid checksum must surface as error");
+    let msg = format!("{}", err);
+    assert!(
+      msg.contains("bogus") || msg.contains("Invalid checksum"),
+      "error should mention bad checksum, got: {msg}"
+    );
+  }
+}

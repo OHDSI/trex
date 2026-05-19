@@ -137,3 +137,61 @@ pub struct ChdbScanInitData {
     pub current_row: RwLock<usize>,
     pub done: RwLock<bool>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_level_from_str_happy_cases_are_case_insensitive() {
+        assert_eq!(LogLevel::from_str("ERROR"), LogLevel::Error);
+        assert_eq!(LogLevel::from_str("error"), LogLevel::Error);
+        assert_eq!(LogLevel::from_str("Error"), LogLevel::Error);
+
+        assert_eq!(LogLevel::from_str("WARN"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("warn"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("Warn"), LogLevel::Warn);
+
+        assert_eq!(LogLevel::from_str("INFO"), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("info"), LogLevel::Info);
+
+        assert_eq!(LogLevel::from_str("DEBUG"), LogLevel::Debug);
+        assert_eq!(LogLevel::from_str("debug"), LogLevel::Debug);
+
+        assert_eq!(LogLevel::from_str("TRACE"), LogLevel::Trace);
+        assert_eq!(LogLevel::from_str("trace"), LogLevel::Trace);
+    }
+
+    #[test]
+    fn log_level_from_str_warning_alias_maps_to_warn() {
+        assert_eq!(LogLevel::from_str("WARNING"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("warning"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("Warning"), LogLevel::Warn);
+    }
+
+    #[test]
+    fn log_level_from_str_unknown_defaults_to_info() {
+        assert_eq!(LogLevel::from_str(""), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("verbose"), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("FATAL"), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("xyz"), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_ordering_is_error_lt_warn_lt_info_lt_debug_lt_trace() {
+        assert!(LogLevel::Error < LogLevel::Warn);
+        assert!(LogLevel::Warn < LogLevel::Info);
+        assert!(LogLevel::Info < LogLevel::Debug);
+        assert!(LogLevel::Debug < LogLevel::Trace);
+
+        // Transitive
+        assert!(LogLevel::Error < LogLevel::Trace);
+
+        // as_str sanity
+        assert_eq!(LogLevel::Error.as_str(), "ERROR");
+        assert_eq!(LogLevel::Warn.as_str(), "WARN");
+        assert_eq!(LogLevel::Info.as_str(), "INFO");
+        assert_eq!(LogLevel::Debug.as_str(), "DEBUG");
+        assert_eq!(LogLevel::Trace.as_str(), "TRACE");
+    }
+}

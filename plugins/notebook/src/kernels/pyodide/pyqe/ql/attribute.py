@@ -138,9 +138,9 @@ class DateConstraint(Constraint):
         try:
             datetime.strptime(date, '%Y-%m-%d')
             return True
-        except ValueError:
+        except ValueError as err:
             raise ValueError(
-                f'date {date} is invalid: it should be a valid date which follows YYYY-MM-DD format')
+                f'date {date} is invalid: it should be a valid date which follows YYYY-MM-DD format') from err
 
     def _add(self, comparison_op: ComparisonOperator, date: str):
         self._validate_format(date)

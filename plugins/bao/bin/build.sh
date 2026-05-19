@@ -36,11 +36,11 @@ elif [[ -f "$NATIVE_LIB" ]]; then
     mkdir -p "$RESOURCE_DIR"
     cp "$NATIVE_LIB" "$RESOURCE_DIR/"
     echo "Bundled: $NATIVE_LIB"
-    # libduckdb.so is a runtime dependency of trexsql_engine.
-    for DUCKDB_LIB in /usr/local/lib/libduckdb.so /usr/lib/libduckdb.so /usr/lib/libtrexsql.so; do
-        if [[ -f "$DUCKDB_LIB" ]]; then
-            cp "$DUCKDB_LIB" "$RESOURCE_DIR/libduckdb.so"
-            echo "Bundled: $DUCKDB_LIB -> libduckdb.so"
+    # libtrexsql.so is the sole NEEDED dep of libtrexsql_engine.so (SONAME libtrexsql.so).
+    for TREXSQL_LIB in /usr/local/lib/libtrexsql.so /usr/lib/libtrexsql.so; do
+        if [[ -f "$TREXSQL_LIB" ]]; then
+            cp "$TREXSQL_LIB" "$RESOURCE_DIR/libtrexsql.so"
+            echo "Bundled: $TREXSQL_LIB -> libtrexsql.so"
             break
         fi
     done

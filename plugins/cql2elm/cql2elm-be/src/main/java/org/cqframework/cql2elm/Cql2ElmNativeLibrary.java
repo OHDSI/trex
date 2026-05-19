@@ -123,6 +123,7 @@ public class Cql2ElmNativeLibrary {
     }
 
     @CEntryPoint(name = "cql2elm_translate")
+    @SuppressWarnings("unused") // `thread` is required by @CEntryPoint contract.
     public static CCharPointer translate(IsolateThread thread, CCharPointer cqlTextPtr) {
         try {
             String cqlText = CTypeConversion.toJavaString(cqlTextPtr);
