@@ -29,9 +29,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -60,9 +61,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -91,7 +93,7 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -137,9 +139,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -168,9 +171,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -203,9 +207,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -234,9 +239,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -265,9 +271,10 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools plugins/runtime/trex-runtime"
+          paths: "plugins/extension-ci-tools plugins/runtime/trex-runtime"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -303,9 +310,10 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools plugins/atlas/circe-be"
+          paths: "plugins/extension-ci-tools plugins/atlas/circe-be"
 
       - uses: graalvm/setup-graalvm@v1
         with:
@@ -340,9 +348,10 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools plugins/ai/llama.cpp"
+          paths: "plugins/extension-ci-tools plugins/ai/llama.cpp"
 
       - name: Install ai build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libvulkan1 libvulkan-dev vulkan-tools glslc libshaderc1 spirv-tools vulkan-validationlayers mesa-vulkan-drivers
@@ -369,9 +378,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -399,9 +409,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -430,9 +441,10 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/extension-ci-tools"
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -467,7 +479,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -525,7 +537,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -582,7 +594,7 @@ jobs:
     timeout-minutes: 45
     needs: [build-pool, build-atlas]
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -613,7 +625,7 @@ jobs:
     timeout-minutes: 45
     needs: [build-pool, build-ai]
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -645,7 +657,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -708,7 +720,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -767,7 +779,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -817,7 +829,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -876,7 +888,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -926,7 +938,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -976,7 +988,7 @@ jobs:
       TREX_COVERAGE: "1"
     timeout-minutes: 45
     steps:
-      - uses: ./.github/actions/checkout-trex
+      - uses: actions/checkout@v4
 
       - name: Start HANA Express container
         run: docker compose -f integration-tests/docker-compose.hana.yml up -d
@@ -1062,9 +1074,10 @@ jobs:
           docker-images: true
           swap-storage: true
 
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          submodules: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
+          paths: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
 
       - uses: actions/setup-python@v5
         with:
