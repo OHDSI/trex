@@ -488,3 +488,378 @@ fn discover_tests(base: &Path, tests_path: &str) -> Result<Vec<TestFile>, Box<dy
     tests.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(tests)
 }
+
+#[cfg(test)]
+mod project_tests {
+    use super::*;
+    use std::fs;
+    use std::path::Path;
+    use tempfile::TempDir;
+
+    /// Build a model with sensible defaults so individual tests can override only
+    /// the fields they care about.
+    fn make_model(name: &str, materialization: Materialization) -> Model {
+        Model {
+            name: name.to_string(),
+            sql: "SELECT 1".to_string(),
+            materialization,
+            unique_key: None,
+            incremental_strategy: None,
+            updated_at: None,
+            batch_size: None,
+            lookback: None,
+            merge_update_columns: None,
+            merge_exclude_columns: None,
+            strategy: None,
+            check_cols: None,
+            pre_hooks: None,
+            post_hooks: None,
+            column_tests: Vec::new(),
+            yaml_content: None,
+            endpoint: None,
+        }
+    }
+
+    /// Write a file, creating parent directories as needed.
+    fn write_file(path: &Path, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dir");
+        }
+        fs::write(path, contents).expect("write fixture file");
+    }
+
+    /// Build a minimal project on disk: `project.yml` + one view model.
+    fn minimal_project(name: &str) -> TempDir {
+        let dir = TempDir::new().expect("create tempdir");
+        write_file(
+            &dir.path().join("project.yml"),
+            &format!("name: {}\n", name),
+        );
+        write_file(
+            &dir.path().join("models/m1.sql"),
+            "SELECT 1 AS x",
+        );
+        dir
+    }
+
+    #[test]
+    fn load_project_reads_minimal_layout() {
+        let dir = minimal_project("demo");
+        let project =
+            load_project(dir.path().to_str().unwrap()).expect("minimal project should load");
+        assert_eq!(project.config.name, "demo");
+        assert_eq!(project.models.len(), 1, "exactly one model expected");
+        assert_eq!(project.models[0].name, "m1");
+        assert_eq!(project.models[0].materialization, Materialization::View);
+        assert!(project.seeds.is_empty());
+        assert!(project.tests.is_empty());
+        assert!(project.sources.is_empty());
+    }
+
+    #[test]
+    fn load_project_honors_custom_paths() {
+        let dir = TempDir::new().expect("tempdir");
+        write_file(
+            &dir.path().join("project.yml"),
+            "name: custom\nmodels_path: mdl\nseeds_path: sd\ntests_path: ts\n",
+        );
+        write_file(&dir.path().join("mdl/a.sql"), "SELECT 1");
+        write_file(&dir.path().join("sd/people.csv"), "id,name\n1,foo\n");
+        write_file(&dir.path().join("ts/t1.sql"), "SELECT 1 WHERE FALSE");
+
+        let project = load_project(dir.path().to_str().unwrap()).expect("load");
+        assert_eq!(project.config.models_path, "mdl");
+        assert_eq!(project.config.seeds_path, "sd");
+        assert_eq!(project.config.tests_path, "ts");
+        assert_eq!(project.models.len(), 1, "model under custom path");
+        assert_eq!(project.seeds.len(), 1, "seed under custom path");
+        assert_eq!(project.tests.len(), 1, "test under custom path");
+        assert_eq!(project.seeds[0].name, "people");
+        assert_eq!(project.tests[0].name, "t1");
+    }
+
+    #[test]
+    fn load_project_missing_directory_errs() {
+        let err = load_project("/nonexistent/path/that/should/never/exist")
+            .expect_err("missing dir must Err");
+        assert!(
+            err.to_string().contains("Project directory not found"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_project_missing_yml_errs() {
+        let dir = TempDir::new().expect("tempdir");
+        // No project.yml inside.
+        let err =
+            load_project(dir.path().to_str().unwrap()).expect_err("missing project.yml must Err");
+        assert!(err.to_string().contains("project.yml not found"), "got: {err}");
+    }
+
+    #[test]
+    fn load_project_parses_materialization_variants() {
+        let dir = TempDir::new().expect("tempdir");
+        write_file(&dir.path().join("project.yml"), "name: mats\n");
+        // view (default — no yaml)
+        write_file(&dir.path().join("models/m_view.sql"), "SELECT 1");
+        // table
+        write_file(&dir.path().join("models/m_table.sql"), "SELECT 1");
+        write_file(
+            &dir.path().join("models/m_table.yml"),
+            "materialized: table\n",
+        );
+        // ephemeral
+        write_file(&dir.path().join("models/m_eph.sql"), "SELECT 1");
+        write_file(
+            &dir.path().join("models/m_eph.yml"),
+            "materialized: ephemeral\n",
+        );
+        // incremental (with delete_insert default — no extra fields required)
+        write_file(&dir.path().join("models/m_inc.sql"), "SELECT 1");
+        write_file(
+            &dir.path().join("models/m_inc.yml"),
+            "materialized: incremental\nincremental_strategy: append\n",
+        );
+        // snapshot — requires unique_key + (timestamp default) updated_at
+        write_file(&dir.path().join("models/m_snap.sql"), "SELECT 1");
+        write_file(
+            &dir.path().join("models/m_snap.yml"),
+            "materialized: snapshot\nunique_key: id\nupdated_at: ts\n",
+        );
+
+        let project = load_project(dir.path().to_str().unwrap()).expect("load");
+        // Models are sorted by name.
+        let by_name: HashMap<&str, Materialization> = project
+            .models
+            .iter()
+            .map(|m| (m.name.as_str(), m.materialization))
+            .collect();
+        assert_eq!(by_name["m_view"], Materialization::View);
+        assert_eq!(by_name["m_table"], Materialization::Table);
+        assert_eq!(by_name["m_eph"], Materialization::Ephemeral);
+        assert_eq!(by_name["m_inc"], Materialization::Incremental);
+        assert_eq!(by_name["m_snap"], Materialization::Snapshot);
+    }
+
+    #[test]
+    fn load_project_unknown_materialization_errs() {
+        let dir = TempDir::new().expect("tempdir");
+        write_file(&dir.path().join("project.yml"), "name: bad\n");
+        write_file(&dir.path().join("models/m.sql"), "SELECT 1");
+        write_file(
+            &dir.path().join("models/m.yml"),
+            "materialized: bogus\n",
+        );
+        let err =
+            load_project(dir.path().to_str().unwrap()).expect_err("unknown materialization");
+        assert!(
+            err.to_string().contains("Unknown materialization"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_project_parses_incremental_strategy_variants() {
+        // Each variant is exercised through load_project so we know YAML
+        // deserialization wires through to the typed enum.
+        let cases = [
+            ("append", IncrementalStrategy::Append),
+            ("delete_insert", IncrementalStrategy::DeleteInsert),
+        ];
+        for (yaml_value, expected) in cases {
+            let dir = TempDir::new().expect("tempdir");
+            write_file(&dir.path().join("project.yml"), "name: s\n");
+            write_file(&dir.path().join("models/m.sql"), "SELECT 1");
+            write_file(
+                &dir.path().join("models/m.yml"),
+                &format!(
+                    "materialized: incremental\nincremental_strategy: {}\n",
+                    yaml_value
+                ),
+            );
+            let project = load_project(dir.path().to_str().unwrap())
+                .unwrap_or_else(|e| panic!("variant {yaml_value} should load: {e}"));
+            assert_eq!(
+                project.models[0].incremental_strategy,
+                Some(expected),
+                "variant {yaml_value} did not round-trip"
+            );
+        }
+
+        // Merge needs unique_key; microbatch needs updated_at + batch_size.
+        let dir = TempDir::new().expect("tempdir");
+        write_file(&dir.path().join("project.yml"), "name: s\n");
+        write_file(&dir.path().join("models/m.sql"), "SELECT 1");
+        write_file(
+            &dir.path().join("models/m.yml"),
+            "materialized: incremental\nincremental_strategy: merge\nunique_key: id\n",
+        );
+        let project = load_project(dir.path().to_str().unwrap()).expect("merge load");
+        assert_eq!(
+            project.models[0].incremental_strategy,
+            Some(IncrementalStrategy::Merge)
+        );
+
+        let dir = TempDir::new().expect("tempdir");
+        write_file(&dir.path().join("project.yml"), "name: s\n");
+        write_file(&dir.path().join("models/m.sql"), "SELECT 1");
+        write_file(
+            &dir.path().join("models/m.yml"),
+            "materialized: incremental\nincremental_strategy: microbatch\nupdated_at: ts\nbatch_size: day\n",
+        );
+        let project = load_project(dir.path().to_str().unwrap()).expect("microbatch load");
+        assert_eq!(
+            project.models[0].incremental_strategy,
+            Some(IncrementalStrategy::Microbatch)
+        );
+    }
+
+    #[test]
+    fn validate_incremental_merge_requires_unique_key() {
+        let mut model = make_model("m", Materialization::Incremental);
+        model.incremental_strategy = Some(IncrementalStrategy::Merge);
+        let err = validate_incremental_config(&model).expect_err("merge needs unique_key");
+        assert!(err.to_string().contains("merge strategy requires unique_key"), "got: {err}");
+
+        model.unique_key = Some(vec!["id".into()]);
+        validate_incremental_config(&model).expect("with unique_key now passes");
+    }
+
+    #[test]
+    fn validate_incremental_microbatch_requires_updated_at_and_batch_size() {
+        let mut model = make_model("m", Materialization::Incremental);
+        model.incremental_strategy = Some(IncrementalStrategy::Microbatch);
+
+        let err =
+            validate_incremental_config(&model).expect_err("microbatch needs updated_at first");
+        assert!(
+            err.to_string().contains("microbatch strategy requires updated_at"),
+            "got: {err}"
+        );
+
+        model.updated_at = Some("ts".into());
+        let err = validate_incremental_config(&model)
+            .expect_err("microbatch still needs batch_size");
+        assert!(
+            err.to_string().contains("microbatch strategy requires batch_size"),
+            "got: {err}"
+        );
+
+        model.batch_size = Some(BatchSize::Day);
+        validate_incremental_config(&model).expect("microbatch fully configured passes");
+    }
+
+    #[test]
+    fn validate_incremental_append_and_delete_insert_pass_without_extras() {
+        let mut model = make_model("m", Materialization::Incremental);
+        model.incremental_strategy = Some(IncrementalStrategy::Append);
+        validate_incremental_config(&model).expect("append needs nothing extra");
+
+        model.incremental_strategy = Some(IncrementalStrategy::DeleteInsert);
+        validate_incremental_config(&model).expect("delete_insert needs nothing extra");
+
+        // Default (None) behaves like DeleteInsert and must also pass.
+        model.incremental_strategy = None;
+        validate_incremental_config(&model).expect("default strategy passes");
+    }
+
+    #[test]
+    fn validate_snapshot_requires_unique_key() {
+        let model = make_model("m", Materialization::Snapshot);
+        let err = validate_snapshot_config(&model).expect_err("snapshot needs unique_key");
+        assert!(
+            err.to_string().contains("snapshot requires unique_key"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_snapshot_timestamp_requires_updated_at() {
+        let mut model = make_model("m", Materialization::Snapshot);
+        model.unique_key = Some(vec!["id".into()]);
+        // strategy = None defaults to Timestamp.
+        let err = validate_snapshot_config(&model)
+            .expect_err("timestamp snapshot needs updated_at");
+        assert!(
+            err.to_string()
+                .contains("snapshot timestamp strategy requires updated_at"),
+            "got: {err}"
+        );
+
+        model.updated_at = Some("ts".into());
+        validate_snapshot_config(&model).expect("timestamp snapshot now valid");
+    }
+
+    #[test]
+    fn validate_snapshot_check_requires_check_cols() {
+        let mut model = make_model("m", Materialization::Snapshot);
+        model.unique_key = Some(vec!["id".into()]);
+        model.strategy = Some(SnapshotStrategy::Check);
+
+        let err =
+            validate_snapshot_config(&model).expect_err("check snapshot needs check_cols");
+        assert!(
+            err.to_string()
+                .contains("snapshot check strategy requires check_cols"),
+            "got: {err}"
+        );
+
+        model.check_cols = Some(vec!["status".into()]);
+        validate_snapshot_config(&model).expect("check snapshot now valid");
+    }
+
+    #[test]
+    fn materialization_as_str_covers_every_variant() {
+        assert_eq!(Materialization::View.as_str(), "view");
+        assert_eq!(Materialization::Table.as_str(), "table");
+        assert_eq!(Materialization::Incremental.as_str(), "incremental");
+        assert_eq!(Materialization::Snapshot.as_str(), "snapshot");
+        assert_eq!(Materialization::Ephemeral.as_str(), "ephemeral");
+        // Default is View — guards against accidental reorder of the enum.
+        assert_eq!(Materialization::default(), Materialization::View);
+    }
+
+    #[test]
+    fn incremental_strategy_as_str_covers_every_variant() {
+        assert_eq!(IncrementalStrategy::Append.as_str(), "append");
+        assert_eq!(IncrementalStrategy::DeleteInsert.as_str(), "delete_insert");
+        assert_eq!(IncrementalStrategy::Merge.as_str(), "merge");
+        assert_eq!(IncrementalStrategy::Microbatch.as_str(), "microbatch");
+    }
+
+    #[test]
+    fn default_paths_match_documented_defaults() {
+        assert_eq!(default_models_path(), "models");
+        assert_eq!(default_seeds_path(), "seeds");
+        assert_eq!(default_tests_path(), "tests");
+    }
+
+    #[test]
+    fn unique_key_config_columns_handles_single_and_composite() {
+        // Single string round-trips as a one-element column list.
+        let single: UniqueKeyConfig = serde_yaml::from_str("id").unwrap();
+        assert_eq!(single.columns(), vec!["id".to_string()]);
+
+        // List form preserves order.
+        let composite: UniqueKeyConfig =
+            serde_yaml::from_str("[customer_id, order_id]").unwrap();
+        assert_eq!(
+            composite.columns(),
+            vec!["customer_id".to_string(), "order_id".to_string()]
+        );
+    }
+
+    #[test]
+    fn load_project_reads_sources_yml_when_present() {
+        let dir = minimal_project("with-sources");
+        write_file(
+            &dir.path().join("sources.yml"),
+            "sources:\n  - name: raw_events\n    loaded_at_field: ingested_at\n",
+        );
+        let project = load_project(dir.path().to_str().unwrap()).expect("load");
+        assert_eq!(project.sources.len(), 1);
+        assert_eq!(project.sources[0].name, "raw_events");
+        assert_eq!(project.sources[0].loaded_at_field, "ingested_at");
+    }
+}

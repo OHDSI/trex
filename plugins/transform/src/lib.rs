@@ -287,4 +287,122 @@ mod tests {
         let u = UInt32Array::from(vec![123u32]);
         assert_eq!(arrow_value_to_string(&u, 0), "123");
     }
+
+    #[test]
+    fn escape_sql_ident_noop() {
+        assert_eq!(escape_sql_ident("foo"), "foo");
+        assert_eq!(escape_sql_ident(""), "");
+    }
+
+    #[test]
+    fn escape_sql_ident_doubles_quotes() {
+        assert_eq!(escape_sql_ident("a\"b"), "a\"\"b");
+        assert_eq!(escape_sql_ident("\"x\"y\""), "\"\"x\"\"y\"\"");
+    }
+
+    #[test]
+    fn escape_sql_str_noop() {
+        assert_eq!(escape_sql_str("foo"), "foo");
+        assert_eq!(escape_sql_str(""), "");
+    }
+
+    #[test]
+    fn escape_sql_str_doubles_quotes() {
+        assert_eq!(escape_sql_str("a'b"), "a''b");
+        assert_eq!(escape_sql_str("'x'y'"), "''x''y''");
+    }
+
+    #[test]
+    fn arrow_value_utf8() {
+        let s = StringArray::from(vec!["hello"]);
+        assert_eq!(arrow_value_to_string(&s, 0), "hello");
+    }
+
+    #[test]
+    fn arrow_value_large_utf8() {
+        let s = LargeStringArray::from(vec!["world"]);
+        assert_eq!(arrow_value_to_string(&s, 0), "world");
+    }
+
+    #[test]
+    fn arrow_value_int8() {
+        let a = Int8Array::from(vec![-7i8]);
+        assert_eq!(arrow_value_to_string(&a, 0), "-7");
+    }
+
+    #[test]
+    fn arrow_value_int16() {
+        let a = Int16Array::from(vec![1234i16]);
+        assert_eq!(arrow_value_to_string(&a, 0), "1234");
+    }
+
+    #[test]
+    fn arrow_value_int64() {
+        let a = Int64Array::from(vec![9999999999i64]);
+        assert_eq!(arrow_value_to_string(&a, 0), "9999999999");
+    }
+
+    #[test]
+    fn arrow_value_uint8() {
+        let a = UInt8Array::from(vec![255u8]);
+        assert_eq!(arrow_value_to_string(&a, 0), "255");
+    }
+
+    #[test]
+    fn arrow_value_uint16() {
+        let a = UInt16Array::from(vec![65535u16]);
+        assert_eq!(arrow_value_to_string(&a, 0), "65535");
+    }
+
+    #[test]
+    fn arrow_value_uint64() {
+        let a = UInt64Array::from(vec![1234567890u64]);
+        assert_eq!(arrow_value_to_string(&a, 0), "1234567890");
+    }
+
+    #[test]
+    fn arrow_value_float32() {
+        let a = Float32Array::from(vec![2.5f32]);
+        assert_eq!(arrow_value_to_string(&a, 0), "2.5");
+    }
+
+    #[test]
+    fn arrow_value_boolean() {
+        let t = BooleanArray::from(vec![true]);
+        assert_eq!(arrow_value_to_string(&t, 0), "true");
+        let f = BooleanArray::from(vec![false]);
+        assert_eq!(arrow_value_to_string(&f, 0), "false");
+    }
+
+    #[test]
+    fn arrow_value_date32() {
+        // Day 0 since unix epoch is 1970-01-01.
+        let a = Date32Array::from(vec![0i32]);
+        assert_eq!(arrow_value_to_string(&a, 0), "1970-01-01");
+    }
+
+    #[test]
+    fn arrow_value_timestamp_micros() {
+        // 0 microseconds since unix epoch.
+        let a = TimestampMicrosecondArray::from(vec![0i64]);
+        assert_eq!(arrow_value_to_string(&a, 0), "1970-01-01T00:00:00+00:00");
+    }
+
+    #[test]
+    fn arrow_value_binary() {
+        let a = BinaryArray::from_vec(vec![&[0xDE, 0xAD, 0xBE, 0xEF][..]]);
+        assert_eq!(arrow_value_to_string(&a, 0), "\\xdeadbeef");
+    }
+
+    #[test]
+    fn arrow_value_large_binary() {
+        let a = LargeBinaryArray::from_vec(vec![&[0xDE, 0xAD, 0xBE, 0xEF][..]]);
+        assert_eq!(arrow_value_to_string(&a, 0), "\\xdeadbeef");
+    }
+
+    #[test]
+    fn arrow_value_fallback_null() {
+        let a = NullArray::new(1);
+        assert_eq!(arrow_value_to_string(&a, 0), "");
+    }
 }
