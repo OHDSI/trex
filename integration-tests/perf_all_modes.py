@@ -91,8 +91,8 @@ def main():
 
     # --- Baseline: plain DuckDB, no extension ---
     log("Setting up baseline node (normal query, no extension overhead)...")
-    gp0, fp0, pp0 = alloc_ports()
-    baseline = Node([DB_EXT], gp0, fp0, pp0)
+    gp0, fp0, pp0, tp0 = alloc_ports()
+    baseline = Node([DB_EXT], gp0, fp0, pp0, tp0)
     baseline.execute(TABLE_SQL.format(start=0, end=total_rows))
     log("  Baseline ready.")
 
