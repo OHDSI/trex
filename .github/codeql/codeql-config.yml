@@ -1,0 +1,15 @@
+name: trex CodeQL config
+paths-ignore:
+  # Vendored third-party JS bundles (Monaco editor, etc.). Many are minified
+  # and CodeQL findings against them are not actionable.
+  - "**/monaco/**"
+  - "**/public/**/assets/**"
+  - "**/dist/**"
+  - "**/build/**"
+  # Vendored OHDSI pyqe library: imported wholesale into plugins/notebook.
+  # Style fixes happen upstream; quality findings here are noise.
+  - "plugins/notebook/src/kernels/pyodide/pyqe/**"
+  # Build/coverage output.
+  - "**/coverage/**"
+  - "**/.next/**"
+  - "**/node_modules/**"
