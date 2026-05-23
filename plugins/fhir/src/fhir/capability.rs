@@ -123,4 +123,57 @@ mod tests {
         assert!(cs["rest"].as_array().unwrap().len() == 1);
         assert_eq!(cs["rest"][0]["mode"], "server");
     }
+
+    #[test]
+    fn test_capability_id_includes_dataset() {
+        let registry = ResourceRegistry::new();
+        let search_params = SearchParamRegistry::load_from_json(r#"{"resourceType":"Bundle","entry":[]}"#).unwrap();
+        let cs = build_capability_statement(&registry, &search_params, "mydata");
+        assert_eq!(cs["id"], "mydata-capability");
+        assert!(cs["implementation"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("mydata"));
+    }
+
+    #[test]
+    fn test_capability_lists_resources_when_registry_populated() {
+        let registry = ResourceRegistry::with_definitions(
+            crate::fhir_server::load_default_definitions().expect("definitions"),
+        );
+        let search_params = crate::fhir_server::load_search_parameters().expect("search params");
+
+        let cs = build_capability_statement(&registry, &search_params, "ds1");
+
+        let resources = cs["rest"][0]["resource"].as_array().expect("resource array");
+        assert!(resources.len() >= 100, "expected ≥100 resources, got {}", resources.len());
+
+        let patient = resources.iter().find(|r| r["type"] == "Patient").expect("Patient resource");
+        // Patient must list standard interactions
+        let interactions: Vec<&str> = patient["interaction"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["code"].as_str().unwrap())
+            .collect();
+        assert!(interactions.contains(&"read"));
+        assert!(interactions.contains(&"create"));
+        assert!(interactions.contains(&"search-type"));
+
+        // Patient should have search params attached
+        assert!(patient.get("searchParam").is_some(), "Patient should have searchParam");
+    }
+
+    #[test]
+    fn test_search_param_type_str_all_variants() {
+        assert_eq!(search_param_type_str(SearchParamType::String), "string");
+        assert_eq!(search_param_type_str(SearchParamType::Token), "token");
+        assert_eq!(search_param_type_str(SearchParamType::Reference), "reference");
+        assert_eq!(search_param_type_str(SearchParamType::Date), "date");
+        assert_eq!(search_param_type_str(SearchParamType::Quantity), "quantity");
+        assert_eq!(search_param_type_str(SearchParamType::Number), "number");
+        assert_eq!(search_param_type_str(SearchParamType::Uri), "uri");
+        assert_eq!(search_param_type_str(SearchParamType::Composite), "composite");
+        assert_eq!(search_param_type_str(SearchParamType::Special), "special");
+    }
 }

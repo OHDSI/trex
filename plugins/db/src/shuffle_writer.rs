@@ -292,4 +292,182 @@ mod tests {
             1,
         );
     }
+
+    // ---------- Additional coverage ----------
+
+    fn make_writer(local_partition_id: usize) -> ShuffleWriterExec {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
+        ]));
+        let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema));
+        ShuffleWriterExec::new(
+            empty,
+            sample_descriptor(),
+            vec![0],
+            local_partition_id,
+            rt.handle().clone(),
+        )
+    }
+
+    #[test]
+    fn shuffle_writer_schema_matches_input() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
+            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, true),
+        ]));
+        let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema.clone()));
+        let writer = ShuffleWriterExec::new(
+            empty,
+            sample_descriptor(),
+            vec![0],
+            0,
+            rt.handle().clone(),
+        );
+        assert_eq!(writer.properties().eq_properties.schema(), &schema);
+    }
+
+    #[test]
+    fn shuffle_writer_display_format_contains_metadata() {
+        let writer = make_writer(0);
+        let display = format!(
+            "{}",
+            datafusion::physical_plan::displayable(&writer).indent(false)
+        );
+        assert!(display.contains("ShuffleWriterExec"));
+        assert!(display.contains("test-writer"));
+        assert!(display.contains("partitions=2"));
+        assert!(display.contains("local_partition=0"));
+    }
+
+    #[test]
+    fn shuffle_writer_debug_format() {
+        let writer = make_writer(1);
+        let dbg = format!("{:?}", writer);
+        assert!(dbg.contains("ShuffleWriterExec"));
+    }
+
+    #[test]
+    fn shuffle_writer_with_new_children_swaps_child() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
+        ]));
+        let empty1 = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+            schema.clone(),
+        ));
+        let writer = Arc::new(ShuffleWriterExec::new(
+            empty1,
+            sample_descriptor(),
+            vec![0],
+            0,
+            rt.handle().clone(),
+        ));
+        let empty2: Arc<dyn ExecutionPlan> = Arc::new(
+            datafusion::physical_plan::empty::EmptyExec::new(schema.clone()),
+        );
+        let new_plan = writer.with_new_children(vec![empty2.clone()]).unwrap();
+        assert_eq!(new_plan.name(), "ShuffleWriterExec");
+        assert_eq!(new_plan.children().len(), 1);
+    }
+
+    #[test]
+    fn shuffle_writer_with_new_children_rejects_wrong_count() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
+        ]));
+        let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+            schema.clone(),
+        ));
+        let writer = Arc::new(ShuffleWriterExec::new(
+            empty,
+            sample_descriptor(),
+            vec![0],
+            0,
+            rt.handle().clone(),
+        ));
+
+        // Zero children — should error.
+        let err = writer.clone().with_new_children(vec![]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("exactly one child"));
+
+        // Two children — should error.
+        let c1: Arc<dyn ExecutionPlan> =
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema.clone()));
+        let c2: Arc<dyn ExecutionPlan> =
+            Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema));
+        let err = writer.with_new_children(vec![c1, c2]).unwrap_err();
+        assert!(err.to_string().contains("exactly one child"));
+    }
+
+    #[test]
+    fn shuffle_writer_as_any_round_trip() {
+        let writer = make_writer(0);
+        let any = writer.as_any();
+        assert!(any.is::<ShuffleWriterExec>());
+    }
+
+    #[test]
+    fn shuffle_writer_execute_with_empty_input_yields_no_batches() {
+        // Use a tokio runtime — execute spawns work onto its handle and
+        // submits the local (empty) partition to the registry.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
+        ]));
+        let empty = Arc::new(datafusion::physical_plan::empty::EmptyExec::new(
+            schema.clone(),
+        ));
+
+        // Use a unique shuffle_id so the registry insert doesn't collide.
+        let descriptor = ShuffleDescriptor {
+            shuffle_id: format!("test-writer-empty-{}", uuid::Uuid::new_v4()),
+            join_keys: vec!["id".to_string()],
+            num_partitions: 2,
+            target_table: None,
+            partition_targets: vec![
+                ShuffleTarget {
+                    partition_id: 0,
+                    flight_endpoint: "http://127.0.0.1:0".to_string(),
+                    node_name: "node-a".to_string(),
+                },
+                ShuffleTarget {
+                    partition_id: 1,
+                    flight_endpoint: "http://127.0.0.1:0".to_string(),
+                    node_name: "node-b".to_string(),
+                },
+            ],
+        };
+        // Register so submit_partition has somewhere to land.
+        crate::shuffle_registry::register_shuffle(&descriptor.shuffle_id, 2);
+
+        let writer = ShuffleWriterExec::new(
+            empty,
+            descriptor,
+            vec![0],
+            0,
+            rt.handle().clone(),
+        );
+        let ctx = Arc::new(TaskContext::default());
+        let stream = writer.execute(0, ctx).unwrap();
+
+        // Drive the stream to completion; should yield zero batches (empty input).
+        let batches: Vec<_> = rt.block_on(async {
+            use futures::StreamExt;
+            stream.collect().await
+        });
+        for b in &batches {
+            assert!(b.is_ok());
+        }
+        // EmptyExec yields no rows, so writer emits no batches.
+        let total_rows: usize = batches
+            .iter()
+            .filter_map(|r| r.as_ref().ok())
+            .map(|b| b.num_rows())
+            .sum();
+        assert_eq!(total_rows, 0);
+    }
 }

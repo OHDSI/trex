@@ -617,10 +617,12 @@ dependencies = [
  "chrono",
  "duckdb",
  "duckdb-loadable-macros",
+ "http-body-util",
  "libduckdb-sys",
  "serde",
  "serde_json",
  "tokio",
+ "tower",
  "trex-pool-client",
  "uuid",
 ]

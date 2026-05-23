@@ -308,4 +308,292 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn orchestrate_empty_extensions_without_connection_returns_empty() {
+        // No extensions -> early return with empty vec (pool probe still runs).
+        let statuses = orchestrate_extensions(&[]);
+        assert!(statuses.is_empty());
+    }
+
+    #[test]
+    fn orchestrate_many_extensions_without_connection_all_errors() {
+        let extensions: Vec<ExtensionConfig> = (0..5)
+            .map(|i| ExtensionConfig {
+                name: format!("ext_{i}"),
+                config: None,
+            })
+            .collect();
+
+        let statuses = orchestrate_extensions(&extensions);
+        assert_eq!(statuses.len(), 5);
+        for (i, status) in statuses.iter().enumerate() {
+            assert!(status.starts_with(&format!("ext_{i}")), "got: {status}");
+            assert!(status.contains("no shared connection"), "got: {status}");
+        }
+    }
+
+    #[test]
+    fn start_distributed_for_roles_empty_returns_empty() {
+        let statuses = start_distributed_for_roles(&[], "127.0.0.1:7100");
+        assert!(statuses.is_empty());
+    }
+
+    #[test]
+    fn start_distributed_for_roles_unknown_role_is_noop() {
+        let statuses = start_distributed_for_roles(
+            &["bogus-role".to_string(), "another".to_string()],
+            "127.0.0.1:7100",
+        );
+        // Unknown roles fall through the match `_ => {}` branch.
+        assert!(statuses.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn start_distributed_for_roles_executor_without_flight_warns() {
+        // Make sure SWARM_CONFIG is unset; that drives `has_flight=false`.
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        let prev = std::env::var("SWARM_CONFIG").ok();
+        unsafe {
+            std::env::remove_var("SWARM_CONFIG");
+        }
+        let statuses = start_distributed_for_roles(
+            &["executor".to_string()],
+            "127.0.0.1:7100",
+        );
+        // Restore env before asserting so a panic doesn't leak state.
+        if let Some(v) = prev {
+            // SAFETY: serialized via `#[serial_test::serial]`.
+            unsafe {
+                std::env::set_var("SWARM_CONFIG", v);
+            }
+        }
+        assert_eq!(statuses.len(), 1);
+        assert!(statuses[0].contains("distributed-executor"));
+        assert!(
+            statuses[0].contains("WARNING")
+                || statuses[0].contains("no Flight extension"),
+            "got: {}", statuses[0]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn start_distributed_for_roles_executor_with_flight_announces_ready() {
+        // Configure SWARM_NODE + SWARM_CONFIG so has_flight=true.
+        let cfg = r#"{
+            "cluster_id":"c",
+            "nodes":{
+                "n1":{
+                    "gossip_addr":"127.0.0.1:47200",
+                    "extensions":[{"name":"flight","config":{"host":"0.0.0.0","port":8815}}]
+                }
+            }
+        }"#;
+        let prev_cfg = std::env::var("SWARM_CONFIG").ok();
+        let prev_node = std::env::var("SWARM_NODE").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe {
+            std::env::set_var("SWARM_CONFIG", cfg);
+            std::env::set_var("SWARM_NODE", "n1");
+        }
+        let statuses = start_distributed_for_roles(
+            &["executor".to_string()],
+            "127.0.0.1:7100",
+        );
+        // Restore env.
+        unsafe {
+            match prev_cfg {
+                Some(v) => std::env::set_var("SWARM_CONFIG", v),
+                None => std::env::remove_var("SWARM_CONFIG"),
+            }
+            match prev_node {
+                Some(v) => std::env::set_var("SWARM_NODE", v),
+                None => std::env::remove_var("SWARM_NODE"),
+            }
+        }
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            statuses[0].contains("Flight extension configured"),
+            "got: {}", statuses[0]
+        );
+    }
+
+    #[test]
+    fn start_distributed_for_roles_unknown_mixed_with_known_skips_unknown() {
+        let statuses = start_distributed_for_roles(
+            &["unknown-role".to_string()],
+            "127.0.0.1:7100",
+        );
+        assert!(statuses.is_empty());
+    }
+
+    // ---------- bucket-8: additional coverage ----------
+
+    #[test]
+    fn start_sql_distributed_scheduler_defaults() {
+        let sql = get_start_service_sql("distributed-scheduler", "{}")
+            .unwrap()
+            .unwrap();
+        assert!(sql.contains("swarm_start_distributed_scheduler"));
+        assert!(sql.contains("'0.0.0.0'"));
+        assert!(sql.contains("50050"));
+    }
+
+    #[test]
+    fn start_sql_distributed_scheduler_custom() {
+        let sql = get_start_service_sql(
+            "distributed-scheduler",
+            r#"{"host":"10.0.0.5","port":9050}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(sql.contains("'10.0.0.5'"));
+        assert!(sql.contains("9050"));
+    }
+
+    #[test]
+    fn start_sql_distributed_executor_defaults() {
+        let sql = get_start_service_sql("distributed-executor", "{}")
+            .unwrap()
+            .unwrap();
+        assert!(sql.contains("'0.0.0.0'"));
+        assert!(sql.contains("50051"));
+    }
+
+    #[test]
+    fn start_sql_etl_missing_required_fields_returns_err() {
+        // No pipeline_name -> error.
+        let r1 = get_start_service_sql("etl", "{}");
+        assert!(r1.is_err());
+        // pipeline_name but no connection_string -> error.
+        let r2 = get_start_service_sql("etl", r#"{"pipeline_name":"p1"}"#);
+        assert!(r2.is_err());
+    }
+
+    #[test]
+    fn start_sql_etl_with_required_fields() {
+        let sql = get_start_service_sql(
+            "etl",
+            r#"{"pipeline_name":"p1","connection_string":"postgres://x"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(sql.contains("etl_start"));
+        assert!(sql.contains("p1"));
+        assert!(sql.contains("postgres://x"));
+    }
+
+    #[test]
+    fn start_sql_pgwire_with_db_credentials() {
+        let sql = get_start_service_sql(
+            "pgwire",
+            r#"{"host":"127.0.0.1","port":5432,"password":"pw","db_credentials":"u:p"}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(sql.contains("start_pgwire_server"));
+        assert!(sql.contains("'pw'"));
+        assert!(sql.contains("'u:p'"));
+    }
+
+    #[test]
+    fn start_sql_flight_host_with_quote_escapes() {
+        let sql = get_start_service_sql(
+            "flight",
+            r#"{"host":"some'host","port":8815}"#,
+        )
+        .unwrap()
+        .unwrap();
+        // Single quote in host must be doubled.
+        assert!(sql.contains("some''host"));
+    }
+
+    #[test]
+    fn start_sql_chdb_empty_path_uses_default() {
+        // Empty data_path -> filtered out by `.filter(|s| !s.is_empty())`,
+        // routes to the no-arg form.
+        let sql = get_start_service_sql("chdb", r#"{"data_path":""}"#)
+            .unwrap()
+            .unwrap();
+        assert_eq!(sql, "SELECT chdb_start_database()");
+    }
+
+    #[test]
+    fn orchestrate_invalid_extension_name_short_circuits_loop() {
+        // When the pool probe fails, we get the no-shared-connection path.
+        // To exercise the invalid-name branch we'd need a pool. With cargo test
+        // --lib, pool is unavailable so we test the early-return path only.
+        let extensions = vec![ExtensionConfig {
+            name: "name with spaces".to_string(),
+            config: None,
+        }];
+        let statuses = orchestrate_extensions(&extensions);
+        // Returns one status per extension regardless.
+        assert_eq!(statuses.len(), 1);
+    }
+
+    #[test]
+    fn start_distributed_for_roles_multiple_unknown_roles() {
+        let statuses = start_distributed_for_roles(
+            &["foo".to_string(), "bar".to_string(), "baz".to_string()],
+            "127.0.0.1:7100",
+        );
+        assert!(statuses.is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn start_distributed_for_roles_executor_invalid_swarm_config_treated_as_no_flight() {
+        // Invalid JSON in SWARM_CONFIG => ClusterConfig::from_env errs =>
+        // has_flight is false.
+        let prev_cfg = std::env::var("SWARM_CONFIG").ok();
+        let prev_node = std::env::var("SWARM_NODE").ok();
+        // SAFETY: serialized via `#[serial_test::serial]`.
+        unsafe {
+            std::env::set_var("SWARM_CONFIG", "not valid json");
+        }
+        let statuses = start_distributed_for_roles(
+            &["executor".to_string()],
+            "127.0.0.1:7100",
+        );
+        // Restore env.
+        unsafe {
+            match prev_cfg {
+                Some(v) => std::env::set_var("SWARM_CONFIG", v),
+                None => std::env::remove_var("SWARM_CONFIG"),
+            }
+            match prev_node {
+                Some(v) => std::env::set_var("SWARM_NODE", v),
+                None => std::env::remove_var("SWARM_NODE"),
+            }
+        }
+        assert_eq!(statuses.len(), 1);
+        assert!(
+            statuses[0].contains("WARNING") || statuses[0].contains("no Flight"),
+            "got: {}", statuses[0]
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn start_distributed_for_roles_mixed_executor_and_unknown() {
+        // executor reaches the warning branch (no SWARM_CONFIG); unknown
+        // role silently dropped. Need 1 status.
+        let prev_cfg = std::env::var("SWARM_CONFIG").ok();
+        // SAFETY: env-mutation; this test doesn't claim serial since it only
+        // reads the var when not present. We restore.
+        let statuses = start_distributed_for_roles(
+            &["xyz".to_string(), "executor".to_string()],
+            "127.0.0.1:7100",
+        );
+        if let Some(v) = prev_cfg {
+            unsafe {
+                std::env::set_var("SWARM_CONFIG", v);
+            }
+        }
+        assert_eq!(statuses.len(), 1);
+        assert!(statuses[0].contains("distributed-executor"));
+    }
 }

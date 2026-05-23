@@ -15,6 +15,123 @@ use crate::state::AppState;
 
 const MAX_BUNDLE_ENTRIES: usize = 10_000;
 
+/// Build the response entry for a POST in a transaction/batch bundle.
+pub fn build_post_response_entry(dataset_id: &str, resource_type: &str, server_id: &str) -> Value {
+    json!({
+        "response": {
+            "status": "201 Created",
+            "location": format!("/{}/{}/{}", dataset_id, resource_type, server_id),
+            "etag": "W/\"1\""
+        }
+    })
+}
+
+/// Build the response entry for a PUT in a transaction/batch bundle.
+pub fn build_put_response_entry(
+    dataset_id: &str,
+    resource_type: &str,
+    server_id: &str,
+    version: i64,
+    is_new: bool,
+) -> Value {
+    let status = if is_new { "201 Created" } else { "200 OK" };
+    json!({
+        "response": {
+            "status": status,
+            "location": format!("/{}/{}/{}", dataset_id, resource_type, server_id),
+            "etag": format!("W/\"{}\"", version)
+        }
+    })
+}
+
+/// Build the response entry for a DELETE in a transaction/batch bundle.
+pub fn build_delete_response_entry() -> Value {
+    json!({
+        "response": {
+            "status": "204 No Content"
+        }
+    })
+}
+
+/// Build an OperationOutcome wrapper for a single failing entry in a batch bundle.
+pub fn build_batch_error_entry(error_message: &str) -> Value {
+    json!({
+        "response": {
+            "status": "400 Bad Request",
+            "outcome": {
+                "resourceType": "OperationOutcome",
+                "issue": [{
+                    "severity": "error",
+                    "code": "processing",
+                    "diagnostics": error_message
+                }]
+            }
+        }
+    })
+}
+
+/// Build the outer Bundle response wrapper given the per-entry list and the type
+/// ("transaction-response" or "batch-response").
+pub fn build_bundle_response(entries: Vec<Value>, bundle_type: &str) -> Value {
+    json!({
+        "resourceType": "Bundle",
+        "type": bundle_type,
+        "entry": entries
+    })
+}
+
+/// Build the SELECT used by the bundle DELETE branch to fetch current version + raw.
+pub fn build_delete_check_sql(schema_name: &str, resource_type: &str) -> String {
+    format!(
+        "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = $1 AND NOT _is_deleted",
+        schema = schema_name,
+        table = resource_type.to_lowercase(),
+    )
+}
+
+/// Build the soft-delete UPDATE used by the bundle DELETE branch.
+pub fn build_bundle_delete_sql(schema_name: &str, resource_type: &str, new_version: i64) -> String {
+    format!(
+        "UPDATE {schema}.\"{table}\" SET _is_deleted = true, \
+         _version_id = {version}, _last_updated = CURRENT_TIMESTAMP \
+         WHERE _id = $1",
+        schema = schema_name,
+        table = resource_type.to_lowercase(),
+        version = new_version,
+    )
+}
+
+/// Stamp `id` and meta (versionId=1, lastUpdated) on a POST'd resource.
+pub fn stamp_post_resource_meta(resource: &mut Value, server_id: &str, now: &str) {
+    if let Some(obj) = resource.as_object_mut() {
+        obj.insert("id".to_string(), Value::String(server_id.to_string()));
+        obj.insert(
+            "meta".to_string(),
+            json!({
+                "versionId": "1",
+                "lastUpdated": now
+            }),
+        );
+    }
+}
+
+fn classify_bundle(body: &Value) -> Result<&str, AppError> {
+    let rt = body.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
+    if rt != "Bundle" {
+        return Err(AppError::BadRequest(
+            "Expected a FHIR Bundle resource".to_string(),
+        ));
+    }
+    let bundle_type = body.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    match bundle_type {
+        "transaction" | "batch" => Ok(bundle_type),
+        _ => Err(AppError::BadRequest(format!(
+            "Unsupported Bundle type: '{}'. Must be 'transaction' or 'batch'",
+            bundle_type
+        ))),
+    }
+}
+
 pub async fn process_bundle(
     State(state): State<Arc<AppState>>,
     Path(dataset_id): Path<String>,
@@ -22,28 +139,12 @@ pub async fn process_bundle(
 ) -> Result<impl IntoResponse, AppError> {
     validate_dataset_id(&dataset_id)?;
 
-    let rt = body
-        .get("resourceType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if rt != "Bundle" {
-        return Err(AppError::BadRequest(
-            "Expected a FHIR Bundle resource".to_string(),
-        ));
-    }
-
-    let bundle_type = body
-        .get("type")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let bundle_type = classify_bundle(&body)?;
 
     match bundle_type {
         "transaction" => process_transaction(state, &dataset_id, &body).await,
         "batch" => process_batch(state, &dataset_id, &body).await,
-        _ => Err(AppError::BadRequest(format!(
-            "Unsupported Bundle type: '{}'. Must be 'transaction' or 'batch'",
-            bundle_type
-        ))),
+        _ => unreachable!("classify_bundle only returns transaction/batch"),
     }
 }
 
@@ -58,11 +159,7 @@ async fn process_transaction(
     if entries.is_empty() {
         return Ok((
             StatusCode::OK,
-            Json(json!({
-                "resourceType": "Bundle",
-                "type": "transaction-response",
-                "entry": []
-            })),
+            Json(build_bundle_response(vec![], "transaction-response")),
         ));
     }
 
@@ -105,11 +202,7 @@ async fn process_transaction(
 
     Ok((
         StatusCode::OK,
-        Json(json!({
-            "resourceType": "Bundle",
-            "type": "transaction-response",
-            "entry": response_entries
-        })),
+        Json(build_bundle_response(response_entries, "transaction-response")),
     ))
 }
 
@@ -124,11 +217,7 @@ async fn process_batch(
     if entries.is_empty() {
         return Ok((
             StatusCode::OK,
-            Json(json!({
-                "resourceType": "Bundle",
-                "type": "batch-response",
-                "entry": []
-            })),
+            Json(build_bundle_response(vec![], "batch-response")),
         ));
     }
 
@@ -141,30 +230,14 @@ async fn process_batch(
                 response_entries.push(resp_entry);
             }
             Err(e) => {
-                response_entries.push(json!({
-                    "response": {
-                        "status": "400 Bad Request",
-                        "outcome": {
-                            "resourceType": "OperationOutcome",
-                            "issue": [{
-                                "severity": "error",
-                                "code": "processing",
-                                "diagnostics": e.to_string()
-                            }]
-                        }
-                    }
-                }));
+                response_entries.push(build_batch_error_entry(&e.to_string()));
             }
         }
     }
 
     Ok((
         StatusCode::OK,
-        Json(json!({
-            "resourceType": "Bundle",
-            "type": "batch-response",
-            "entry": response_entries
-        })),
+        Json(build_bundle_response(response_entries, "batch-response")),
     ))
 }
 
@@ -183,16 +256,7 @@ async fn process_single_entry(
                 .format("%Y-%m-%dT%H:%M:%SZ")
                 .to_string();
             let mut resource = entry.resource.clone();
-            if let Some(obj) = resource.as_object_mut() {
-                obj.insert("id".to_string(), Value::String(entry.server_id.clone()));
-                obj.insert(
-                    "meta".to_string(),
-                    json!({
-                        "versionId": "1",
-                        "lastUpdated": now
-                    }),
-                );
-            }
+            stamp_post_resource_meta(&mut resource, &entry.server_id, &now);
             let raw_json = serde_json::to_string(&resource)
                 .map_err(|e| format!("JSON serialize: {}", e))?;
 
@@ -214,13 +278,7 @@ async fn process_single_entry(
 
             match result {
                 QueryResult::Error(e) => Err(format!("Insert failed: {}", e)),
-                _ => Ok(json!({
-                    "response": {
-                        "status": "201 Created",
-                        "location": format!("/{}/{}/{}", dataset_id, entry.resource_type, entry.server_id),
-                        "etag": "W/\"1\""
-                    }
-                })),
+                _ => Ok(build_post_response_entry(dataset_id, &entry.resource_type, &entry.server_id)),
             }
         }
         "PUT" => {
@@ -242,25 +300,20 @@ async fn process_single_entry(
             )
             .await?;
 
-            let status = if result.is_new { "201 Created" } else { "200 OK" };
-            Ok(json!({
-                "response": {
-                    "status": status,
-                    "location": format!("/{}/{}/{}", dataset_id, entry.resource_type, entry.server_id),
-                    "etag": format!("W/\"{}\"", result.version)
-                }
-            }))
+            Ok(build_put_response_entry(
+                dataset_id,
+                &entry.resource_type,
+                &entry.server_id,
+                result.version,
+                result.is_new,
+            ))
         }
         "DELETE" => {
             if entry.server_id.is_empty() {
                 return Err("DELETE entry missing resource id".to_string());
             }
 
-            let check_sql = format!(
-                "SELECT _version_id::VARCHAR, _raw FROM {schema}.\"{table}\" WHERE _id = $1 AND NOT _is_deleted",
-                schema = schema_name,
-                table = table_name,
-            );
+            let check_sql = build_delete_check_sql(schema_name, &entry.resource_type);
 
             // Reuse the outer transaction conn when present so all delete-related
             // statements run on the same connection; otherwise use a fresh per-op conn.
@@ -300,25 +353,13 @@ async fn process_single_entry(
 
             let new_version = current_version + 1;
 
-            let history_sql = format!(
-                "INSERT INTO {schema}._history (_id, _resource_type, _version_id, _last_updated, _raw, _is_deleted) \
-                 VALUES ($1, $2, {version}, CURRENT_TIMESTAMP, $3, false)",
-                schema = schema_name,
-                version = current_version,
-            );
+            let history_sql = crate::handlers::crud::build_history_insert_sql(schema_name, current_version);
             let history_params = vec![entry.server_id.clone(), entry.resource_type.clone(), current_raw];
             if let QueryResult::Error(e) = conn_ref.execute_params(history_sql, history_params).await {
                 eprintln!("[fhir] WARNING: history write failed for {}/{}: {}", entry.resource_type, entry.server_id, e);
             }
 
-            let delete_sql = format!(
-                "UPDATE {schema}.\"{table}\" SET _is_deleted = true, \
-                 _version_id = {version}, _last_updated = CURRENT_TIMESTAMP \
-                 WHERE _id = $1",
-                schema = schema_name,
-                table = table_name,
-                version = new_version,
-            );
+            let delete_sql = build_bundle_delete_sql(schema_name, &entry.resource_type, new_version);
 
             let result = conn_ref
                 .execute_params(delete_sql, vec![entry.server_id.clone()])
@@ -326,13 +367,128 @@ async fn process_single_entry(
 
             match result {
                 QueryResult::Error(e) => Err(format!("Delete failed: {}", e)),
-                _ => Ok(json!({
-                    "response": {
-                        "status": "204 No Content"
-                    }
-                })),
+                _ => Ok(build_delete_response_entry()),
             }
         }
         _ => Err(format!("Unsupported method: {}", entry.method)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn classify_rejects_non_bundle() {
+        let v = json!({"resourceType": "Patient"});
+        let res = classify_bundle(&v);
+        assert!(matches!(res, Err(AppError::BadRequest(_))));
+    }
+
+    #[test]
+    fn classify_rejects_unknown_bundle_type() {
+        let v = json!({"resourceType": "Bundle", "type": "searchset"});
+        let res = classify_bundle(&v);
+        assert!(matches!(res, Err(AppError::BadRequest(_))));
+    }
+
+    #[test]
+    fn classify_accepts_transaction() {
+        let v = json!({"resourceType": "Bundle", "type": "transaction"});
+        assert_eq!(classify_bundle(&v).unwrap(), "transaction");
+    }
+
+    #[test]
+    fn classify_accepts_batch() {
+        let v = json!({"resourceType": "Bundle", "type": "batch"});
+        assert_eq!(classify_bundle(&v).unwrap(), "batch");
+    }
+
+    #[test]
+    fn post_response_entry_shape() {
+        let e = build_post_response_entry("ds", "Patient", "abc");
+        assert_eq!(e["response"]["status"], "201 Created");
+        assert_eq!(e["response"]["location"], "/ds/Patient/abc");
+        assert_eq!(e["response"]["etag"], "W/\"1\"");
+    }
+
+    #[test]
+    fn put_response_entry_new_is_201() {
+        let e = build_put_response_entry("ds", "Patient", "abc", 1, true);
+        assert_eq!(e["response"]["status"], "201 Created");
+        assert_eq!(e["response"]["etag"], "W/\"1\"");
+    }
+
+    #[test]
+    fn put_response_entry_existing_is_200() {
+        let e = build_put_response_entry("ds", "Patient", "abc", 3, false);
+        assert_eq!(e["response"]["status"], "200 OK");
+        assert_eq!(e["response"]["etag"], "W/\"3\"");
+        assert_eq!(e["response"]["location"], "/ds/Patient/abc");
+    }
+
+    #[test]
+    fn delete_response_entry_is_204() {
+        let e = build_delete_response_entry();
+        assert_eq!(e["response"]["status"], "204 No Content");
+    }
+
+    #[test]
+    fn batch_error_entry_wraps_operation_outcome() {
+        let e = build_batch_error_entry("boom");
+        assert_eq!(e["response"]["status"], "400 Bad Request");
+        assert_eq!(e["response"]["outcome"]["resourceType"], "OperationOutcome");
+        assert_eq!(e["response"]["outcome"]["issue"][0]["severity"], "error");
+        assert_eq!(e["response"]["outcome"]["issue"][0]["code"], "processing");
+        assert_eq!(e["response"]["outcome"]["issue"][0]["diagnostics"], "boom");
+    }
+
+    #[test]
+    fn bundle_response_wraps_entries_with_type() {
+        let entries = vec![json!({"a": 1}), json!({"b": 2})];
+        let bundle = build_bundle_response(entries, "batch-response");
+        assert_eq!(bundle["resourceType"], "Bundle");
+        assert_eq!(bundle["type"], "batch-response");
+        assert_eq!(bundle["entry"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn bundle_response_empty_entries() {
+        let bundle = build_bundle_response(vec![], "transaction-response");
+        assert!(bundle["entry"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn delete_check_sql_lowercases_table() {
+        let sql = build_delete_check_sql("\"db\".\"ds\"", "MedicationRequest");
+        assert!(sql.contains("\"medicationrequest\""));
+        assert!(sql.contains("WHERE _id = $1"));
+        assert!(sql.contains("NOT _is_deleted"));
+    }
+
+    #[test]
+    fn bundle_delete_sql_sets_flags_and_version() {
+        let sql = build_bundle_delete_sql("\"db\".\"ds\"", "Patient", 9);
+        assert!(sql.contains("\"patient\""));
+        assert!(sql.contains("_is_deleted = true"));
+        assert!(sql.contains("_version_id = 9"));
+        assert!(sql.contains("WHERE _id = $1"));
+    }
+
+    #[test]
+    fn stamp_post_resource_meta_sets_id_and_version_one() {
+        let mut r = json!({"resourceType": "Patient"});
+        stamp_post_resource_meta(&mut r, "p1", "2026-05-23T10:00:00Z");
+        assert_eq!(r["id"], "p1");
+        assert_eq!(r["meta"]["versionId"], "1");
+        assert_eq!(r["meta"]["lastUpdated"], "2026-05-23T10:00:00Z");
+    }
+
+    #[test]
+    fn stamp_post_resource_meta_noop_on_non_object() {
+        let mut r = json!("not-object");
+        stamp_post_resource_meta(&mut r, "p1", "now");
+        assert_eq!(r, json!("not-object"));
     }
 }

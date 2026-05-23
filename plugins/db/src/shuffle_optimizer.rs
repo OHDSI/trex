@@ -530,4 +530,228 @@ mod tests {
         let names = extract_table_names_from_plan(&(empty as Arc<dyn ExecutionPlan>));
         assert!(names.is_empty());
     }
+
+    // ---------- Additional coverage ----------
+
+    fn empty_exec_plan() -> Arc<dyn ExecutionPlan> {
+        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("id", arrow::datatypes::DataType::Int64, false),
+        ]));
+        Arc::new(datafusion::physical_plan::empty::EmptyExec::new(schema))
+    }
+
+    #[test]
+    fn catalog_stats_debug_format() {
+        let stats = stats_with_tables(vec![("t1", 100, vec!["http://x:1"])]);
+        let dbg = format!("{:?}", stats);
+        assert!(dbg.contains("CatalogStats"));
+        assert!(dbg.contains("table_count"));
+        assert!(dbg.contains("broadcast_threshold"));
+    }
+
+    #[test]
+    fn from_catalog_uses_default_threshold_without_env_override() {
+        // SWARM_BROADCAST_THRESHOLD env may or may not be set in the test
+        // process; only assert that the threshold is a positive u64 and
+        // the local_endpoint resolution path doesn't panic.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stats = CatalogStats::from_catalog(rt.handle().clone());
+        assert!(stats.broadcast_threshold > 0);
+        // Without an active gossip/catalog, table_stats may be empty.
+        // Just check we got a HashMap (no panic).
+        let _ = stats.table_stats.len();
+    }
+
+    #[test]
+    fn broadcast_threshold_boundary_exactly_at_limit() {
+        // A table exactly at the broadcast threshold is treated as small.
+        let stats = stats_with_tables(vec![
+            (
+                "small",
+                DEFAULT_BROADCAST_THRESHOLD,
+                vec!["http://10.0.0.1:8815"],
+            ),
+            (
+                "large",
+                DEFAULT_BROADCAST_THRESHOLD * 100,
+                vec!["http://10.0.0.2:8815"],
+            ),
+        ]);
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let strategy = rule.choose_strategy(
+            &["small".to_string()],
+            &["large".to_string()],
+        );
+        assert_eq!(
+            strategy,
+            JoinStrategy::Broadcast {
+                small_side: BroadcastSide::Left,
+            }
+        );
+    }
+
+    #[test]
+    fn pull_to_coordinator_when_only_left_has_stats() {
+        // Mixed: left has stats, right is unknown -> falls back to
+        // PullToCoordinator (because both rows are required to decide).
+        let stats = stats_with_tables(vec![
+            ("orders", 1_000_000, vec!["http://10.0.0.1:8815"]),
+        ]);
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let strategy = rule.choose_strategy(
+            &["orders".to_string()],
+            &["unknown_table".to_string()],
+        );
+        assert_eq!(strategy, JoinStrategy::PullToCoordinator);
+    }
+
+    #[test]
+    fn pull_to_coordinator_when_only_right_has_stats() {
+        let stats = stats_with_tables(vec![
+            ("orders", 1_000_000, vec!["http://10.0.0.1:8815"]),
+        ]);
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let strategy = rule.choose_strategy(
+            &["unknown_table".to_string()],
+            &["orders".to_string()],
+        );
+        assert_eq!(strategy, JoinStrategy::PullToCoordinator);
+    }
+
+    #[test]
+    fn co_located_via_shared_endpoint_among_multi_endpoint_tables() {
+        // Same table replicated on multiple endpoints; co-location wins as
+        // long as ANY endpoint is shared.
+        let stats = stats_with_tables(vec![
+            (
+                "left",
+                1_000_000,
+                vec!["http://10.0.0.1:8815", "http://10.0.0.3:8815"],
+            ),
+            (
+                "right",
+                500_000,
+                vec!["http://10.0.0.2:8815", "http://10.0.0.3:8815"],
+            ),
+        ]);
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let strategy = rule.choose_strategy(
+            &["left".to_string()],
+            &["right".to_string()],
+        );
+        assert_eq!(strategy, JoinStrategy::CoLocated);
+    }
+
+    #[test]
+    fn multi_table_side_sums_rows() {
+        // Two tables on the right side: rows should sum.
+        let stats = stats_with_tables(vec![
+            ("big", 200_000_000, vec!["http://10.0.0.1:8815"]),
+            ("r1", 30_000, vec!["http://10.0.0.2:8815"]),
+            ("r2", 30_000, vec!["http://10.0.0.3:8815"]),
+        ]);
+        // Right side total = 60_000 (below threshold 100_000) -> broadcast right.
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let strategy = rule.choose_strategy(
+            &["big".to_string()],
+            &["r1".to_string(), "r2".to_string()],
+        );
+        assert_eq!(
+            strategy,
+            JoinStrategy::Broadcast {
+                small_side: BroadcastSide::Right,
+            }
+        );
+    }
+
+    #[test]
+    fn optimize_returns_plan_unchanged_when_no_join() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let stats = stats_with_tables(vec![
+            ("t1", 5_000_000, vec!["http://10.0.0.1:8815"]),
+            ("t2", 5_000_000, vec!["http://10.0.0.2:8815"]),
+        ]);
+        let _ = rt; // keep alive
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let plan = empty_exec_plan();
+        let cfg = ConfigOptions::new();
+        let optimized = rule.optimize(plan.clone(), &cfg).unwrap();
+        // No-op plan returns same shape (still EmptyExec).
+        assert_eq!(optimized.name(), plan.name());
+    }
+
+    #[test]
+    fn optimize_traverses_children_recursively() {
+        // Wrap empty exec in a coalescing partitions exec to exercise
+        // recursive child traversal in optimize_node.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _ = rt;
+        let inner = empty_exec_plan();
+        let coalesce = Arc::new(
+            datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                inner,
+            ),
+        );
+        let stats = empty_stats();
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let cfg = ConfigOptions::new();
+        let result = rule.optimize(coalesce as Arc<dyn ExecutionPlan>, &cfg);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn insert_shuffle_errors_on_non_hash_join() {
+        // Defensive path: insert_shuffle requires a HashJoinExec.
+        let stats = empty_stats();
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let plan = empty_exec_plan();
+        let result = rule.insert_shuffle(plan);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rule_debug_format() {
+        let stats = empty_stats();
+        let rule = ShuffleInsertionRule::new(Arc::new(stats));
+        let dbg = format!("{:?}", rule);
+        assert!(dbg.contains("ShuffleInsertionRule"));
+    }
+
+    #[test]
+    fn join_strategy_clone_and_eq() {
+        let a = JoinStrategy::CoLocated;
+        let b = a.clone();
+        assert_eq!(a, b);
+        let c = JoinStrategy::HashShuffle;
+        assert_ne!(a, c);
+        let d = JoinStrategy::Broadcast {
+            small_side: BroadcastSide::Left,
+        };
+        let e = JoinStrategy::Broadcast {
+            small_side: BroadcastSide::Right,
+        };
+        assert_ne!(d, e);
+    }
+
+    #[test]
+    fn broadcast_side_clone_eq() {
+        assert_eq!(BroadcastSide::Left, BroadcastSide::Left);
+        assert_ne!(BroadcastSide::Left, BroadcastSide::Right);
+        let l = BroadcastSide::Left;
+        let l2 = l.clone();
+        assert_eq!(l, l2);
+    }
+
+    #[test]
+    fn extract_table_names_nested_plan() {
+        // Names from a nested plan (no DistributedExec) is empty + sorted.
+        let inner = empty_exec_plan();
+        let coalesce: Arc<dyn ExecutionPlan> = Arc::new(
+            datafusion::physical_plan::coalesce_partitions::CoalescePartitionsExec::new(
+                inner,
+            ),
+        );
+        let names = extract_table_names_from_plan(&coalesce);
+        assert!(names.is_empty());
+    }
 }

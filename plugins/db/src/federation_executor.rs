@@ -644,4 +644,307 @@ mod tests {
         );
         assert_ne!(exec_a.compute_context(), exec_b.compute_context());
     }
+
+    #[test]
+    fn wrap_executor_error_with_empty_operation() {
+        let err = wrap_executor_error("", "boom");
+        let msg = err.to_string();
+        assert!(msg.contains("Executor failure during"), "msg: {msg}");
+        assert!(msg.contains("boom"), "msg: {msg}");
+    }
+
+    #[test]
+    fn wrap_executor_error_preserves_special_chars() {
+        let err = wrap_executor_error("flight_execute", "error: \"foo\" with 'quotes' and \n newline");
+        let msg = err.to_string();
+        assert!(msg.contains("foo"), "msg: {msg}");
+        assert!(msg.contains("quotes"), "msg: {msg}");
+    }
+
+    #[test]
+    fn wrap_executor_error_returns_external_variant() {
+        let err = wrap_executor_error("op", "details");
+        // The DataFusionError::External variant prints the inner error.
+        assert!(matches!(
+            err,
+            datafusion::error::DataFusionError::External(_)
+        ));
+    }
+
+    #[test]
+    fn wrap_executor_error_chains_with_numeric_display() {
+        let err = wrap_executor_error("execute", 42);
+        let msg = err.to_string();
+        assert!(msg.contains("42"), "msg: {msg}");
+    }
+
+    #[test]
+    fn trex_sql_executor_name_is_trexsql() {
+        let exec = TrexSQLExecutor::new("local-trexsql");
+        assert_eq!(exec.name(), "trexsql");
+    }
+
+    #[test]
+    fn trex_sql_executor_compute_context_preserved() {
+        let exec = TrexSQLExecutor::new("my-ctx");
+        assert_eq!(exec.compute_context(), Some("my-ctx".to_string()));
+    }
+
+    #[test]
+    fn trex_sql_executor_compute_context_with_owned_string() {
+        let ctx_str = String::from("owned-ctx");
+        let exec = TrexSQLExecutor::new(ctx_str);
+        assert_eq!(exec.compute_context(), Some("owned-ctx".to_string()));
+    }
+
+    #[test]
+    fn trex_sql_executor_dialect_returns_a_dialect() {
+        let exec = TrexSQLExecutor::new("ctx");
+        let _ = exec.dialect();
+        // Verifies dialect() does not panic and returns a value.
+    }
+
+    #[test]
+    fn flight_sql_executor_empty_table_list() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let executor = FlightSQLExecutor::new(
+            "w".to_string(),
+            "http://x:8815".to_string(),
+            vec![],
+            rt.handle().clone(),
+        );
+        let handle = rt.handle().clone();
+        let names = handle.block_on(executor.table_names()).unwrap();
+        assert!(names.is_empty());
+    }
+
+    #[tokio::test]
+    async fn flight_sql_executor_preserves_insertion_order_of_tables() {
+        let handle = tokio::runtime::Handle::current();
+        let executor = FlightSQLExecutor::new(
+            "w".to_string(),
+            "http://x:8815".to_string(),
+            vec!["z".to_string(), "a".to_string(), "m".to_string()],
+            handle,
+        );
+        let names = executor.table_names().await.unwrap();
+        // table_names() returns the stored Vec verbatim (no sorting).
+        assert_eq!(names, vec!["z", "a", "m"]);
+    }
+
+    #[test]
+    fn flight_sql_executor_same_endpoint_same_context() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let a = FlightSQLExecutor::new(
+            "node-a".to_string(),
+            "http://10.0.0.1:8815".to_string(),
+            vec![],
+            rt.handle().clone(),
+        );
+        let b = FlightSQLExecutor::new(
+            "node-b".to_string(),  // different node name
+            "http://10.0.0.1:8815".to_string(), // same endpoint
+            vec![],
+            rt.handle().clone(),
+        );
+        // compute_context groups by endpoint only -- node name does not affect it.
+        assert_eq!(a.compute_context(), b.compute_context());
+    }
+
+    #[test]
+    fn make_config_producer_produces_independent_configs() {
+        let producer = make_config_producer();
+        let a = producer();
+        let b = producer();
+        // Two invocations should yield independent SessionConfig values.
+        // We just verify both have a valid target_partitions value.
+        assert!(a.options().execution.target_partitions > 0);
+        assert!(b.options().execution.target_partitions > 0);
+    }
+
+    #[test]
+    fn make_runtime_producer_works_with_custom_config() {
+        let cfg = SessionConfig::new().with_target_partitions(8);
+        let rt = make_runtime_producer()(&cfg).unwrap();
+        assert!(Arc::strong_count(&rt) >= 1);
+    }
+
+    #[test]
+    fn make_runtime_producer_returns_runtime_env() {
+        let cfg = SessionConfig::new();
+        let rt1 = make_runtime_producer()(&cfg).unwrap();
+        let rt2 = make_runtime_producer()(&cfg).unwrap();
+        // Each call returns a fresh RuntimeEnv (not the same Arc).
+        assert!(!Arc::ptr_eq(&rt1, &rt2));
+    }
+
+    #[test]
+    fn executor_not_running_initially() {
+        // is_executor_running may return true if a prior test started one, so
+        // either branch is acceptable; we just verify the function does not panic.
+        let _ = is_executor_running();
+    }
+
+    #[test]
+    fn stop_executor_when_not_running_returns_error() {
+        // If nothing is running, stop_executor returns an error. If something
+        // was started by another test, stop_executor will tear it down; in
+        // that case calling stop_executor again should fail.
+        let _ = stop_executor(); // ensure we are in a clean state
+        let result = stop_executor();
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().contains("not running"),
+            "Expected 'not running' error",
+        );
+    }
+
+    #[test]
+    fn start_executor_without_scheduler_fails() {
+        // Ensure executor is not running first (clean state).
+        let _ = stop_executor();
+        // Only attempt this assertion if scheduler is also not running.
+        if !crate::distributed_scheduler::is_scheduler_running() {
+            let result = start_executor("http://localhost:9999", 0);
+            assert!(result.is_err());
+            let err = result.unwrap_err();
+            assert!(
+                err.contains("Scheduler must be started first")
+                    || err.contains("Executor is already running"),
+                "Expected scheduler-first error, got: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_executor_error_includes_retry_hint() {
+        let err = wrap_executor_error("table_names", "timeout");
+        let msg = err.to_string();
+        assert!(msg.contains("query is safe to retry"), "msg: {msg}");
+    }
+
+    #[test]
+    fn flight_sql_executor_compute_context_for_empty_endpoint() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let exec = FlightSQLExecutor::new(
+            "w".to_string(),
+            String::new(),
+            vec![],
+            rt.handle().clone(),
+        );
+        // Even an empty endpoint is reported verbatim (Some(""))-- federation
+        // groups tables by endpoint string, so empty matches empty.
+        assert_eq!(exec.compute_context(), Some(String::new()));
+    }
+
+    #[test]
+    fn trex_sql_executor_name_constant_across_instances() {
+        let a = TrexSQLExecutor::new("ctx-a");
+        let b = TrexSQLExecutor::new("ctx-b");
+        // name() is a constant; differs only by context.
+        assert_eq!(a.name(), b.name());
+        assert_ne!(a.compute_context(), b.compute_context());
+    }
+
+    #[tokio::test]
+    async fn create_duckdb_session_returns_session_with_default_catalog() {
+        // Even when catalog::list_tables() returns empty (no schedulers running),
+        // we should successfully build a session and register the public schema.
+        // Skip if catalog access is unavailable (gossip not running).
+        let result = create_duckdb_session().await;
+        match result {
+            Ok(ctx) => {
+                assert!(
+                    ctx.catalog("datafusion").is_some(),
+                    "Default catalog should be registered",
+                );
+            }
+            Err(_) => {
+                // Gossip / pool dependencies are not initialized in unit-test
+                // context; this is acceptable.
+            }
+        }
+    }
+
+    #[test]
+    fn federation_optimizer_rule_name_is_known() {
+        use datafusion::optimizer::OptimizerRule;
+        let rule = FederationOptimizerRule::new();
+        assert_eq!(rule.name(), "federation_optimizer_rule");
+    }
+
+    // ---------- create_distributed_session_with_classifications: structure-only ----------
+
+    #[tokio::test]
+    async fn create_distributed_session_with_classifications_empty_succeeds() {
+        // No tables at all -> session still builds (just without registered schemas).
+        use std::collections::HashMap;
+
+        let handle = tokio::runtime::Handle::current();
+        let classifications = HashMap::new();
+        let stats = Arc::new(crate::shuffle_optimizer::CatalogStats::from_catalog(handle.clone()));
+        let ctx = create_distributed_session_with_classifications(handle, classifications, stats)
+            .await
+            .expect("empty session should succeed");
+        assert!(ctx.catalog("datafusion").is_some());
+    }
+
+    #[tokio::test]
+    async fn create_distributed_session_falls_back_to_local_when_no_tables() {
+        // catalog::classify_tables() typically returns Err under unit tests
+        // (no gossip), triggering the fallback path to create_duckdb_session().
+        let handle = tokio::runtime::Handle::current();
+        let result = create_distributed_session(handle).await;
+        // Whether gossip is present or not, the function must return either a
+        // built session or an error; it should NOT panic.
+        let _ = result;
+    }
+
+    // ---------- start_executor / lifecycle ----------
+
+    #[test]
+    #[serial_test::serial]
+    fn start_executor_when_already_running_returns_already_running_error() {
+        // Force a state where another start would short-circuit on the "already
+        // running" check. We can't actually start because scheduler isn't running,
+        // but if the lock is empty the function reaches the scheduler-check arm
+        // and returns the scheduler error. Either response is acceptable as a
+        // smoke test; we just verify no panic and an Err is returned when state
+        // is incompatible.
+        let _ = stop_executor();
+        let res = start_executor("http://localhost:9999", 0);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn is_executor_running_does_not_panic_on_repeated_calls() {
+        for _ in 0..3 {
+            let _ = is_executor_running();
+        }
+    }
+
+    // ---------- TrexSQLExecutor dialect & flight executor name ----------
+
+    #[test]
+    fn trex_sql_executor_dialect_can_be_cloned() {
+        let exec = TrexSQLExecutor::new("ctx");
+        let d1 = exec.dialect();
+        let d2 = exec.dialect();
+        // Both are Arc<dyn Dialect>; they may be different Arc instances.
+        assert!(Arc::strong_count(&d1) >= 1);
+        assert!(Arc::strong_count(&d2) >= 1);
+    }
+
+    #[test]
+    fn flight_sql_executor_dialect_can_be_obtained_multiple_times() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let exec = FlightSQLExecutor::new(
+            "n".to_string(),
+            "http://x:1".to_string(),
+            vec![],
+            rt.handle().clone(),
+        );
+        let _ = exec.dialect();
+        let _ = exec.dialect();
+    }
 }

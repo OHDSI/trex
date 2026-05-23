@@ -463,4 +463,405 @@ mod tests {
         let tables = extract_table_names_from_sql("NOT VALID SQL !!!@#$");
         assert!(tables.is_empty(), "Invalid SQL should return empty vec: {:?}", tables);
     }
+
+    #[test]
+    fn extract_tables_empty_sql_returns_empty() {
+        let tables = extract_table_names_from_sql("");
+        assert!(tables.is_empty(), "Empty SQL should return empty vec: {:?}", tables);
+    }
+
+    #[test]
+    fn extract_tables_qualified_name_uses_last_part() {
+        let tables = extract_table_names_from_sql("SELECT * FROM myschema.orders");
+        assert_eq!(tables, vec!["orders"]);
+    }
+
+    #[test]
+    fn extract_tables_three_part_qualified_name() {
+        let tables = extract_table_names_from_sql("SELECT * FROM mydb.myschema.orders");
+        assert_eq!(tables, vec!["orders"]);
+    }
+
+    #[test]
+    fn extract_tables_dedups_repeated_references() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders o1 JOIN orders o2 ON o1.parent_id = o2.id",
+        );
+        assert_eq!(tables, vec!["orders"]);
+    }
+
+    #[test]
+    fn extract_tables_set_operation_union() {
+        let tables = extract_table_names_from_sql(
+            "SELECT id FROM orders UNION SELECT id FROM customers",
+        );
+        // Sorted: customers, orders
+        assert_eq!(tables, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn extract_tables_set_operation_intersect() {
+        let tables = extract_table_names_from_sql(
+            "SELECT id FROM orders INTERSECT SELECT id FROM customers",
+        );
+        assert_eq!(tables, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn extract_tables_derived_subquery() {
+        let tables = extract_table_names_from_sql(
+            "SELECT x.id FROM (SELECT id FROM orders) x",
+        );
+        assert_eq!(tables, vec!["orders"]);
+    }
+
+    #[test]
+    fn extract_tables_nested_subquery_in_set_expr() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM (SELECT id FROM orders UNION SELECT id FROM customers) sub",
+        );
+        assert_eq!(tables, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn extract_tables_multiple_joins() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders o \
+             JOIN customers c ON o.cust_id = c.id \
+             JOIN products p ON o.prod_id = p.id",
+        );
+        assert_eq!(tables, vec!["customers", "orders", "products"]);
+    }
+
+    #[test]
+    fn extract_tables_left_outer_join() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders LEFT JOIN customers ON orders.id = customers.id",
+        );
+        assert_eq!(tables, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn extract_tables_results_are_sorted() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM zebras z JOIN apples a ON z.id = a.id JOIN mangos m ON a.id = m.id",
+        );
+        let mut sorted = tables.clone();
+        sorted.sort();
+        assert_eq!(tables, sorted);
+    }
+
+    #[test]
+    fn extract_tables_non_select_statement() {
+        // CREATE TABLE is not a Query statement -- should return empty.
+        let tables = extract_table_names_from_sql("CREATE TABLE foo (id INT)");
+        assert!(tables.is_empty(), "Non-query statement should return empty: {:?}", tables);
+    }
+
+    #[test]
+    fn extract_tables_where_clause_subquery_ignored_or_included() {
+        // WHERE clause subqueries aren't visited via SetExpr::Select.from, so
+        // they should not appear -- only top-level FROM tables.
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders WHERE id IN (SELECT id FROM customers)",
+        );
+        assert!(tables.contains(&"orders".to_string()), "Expected orders: {:?}", tables);
+    }
+
+    #[test]
+    fn check_colocation_for_sql_with_invalid_sql_returns_none() {
+        // Invalid SQL parses to empty table list, which short-circuits to Ok(None).
+        let result = check_colocation_for_sql("NOT VALID @@@");
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn check_colocation_for_sql_with_empty_query_returns_none() {
+        let result = check_colocation_for_sql("");
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn refresh_session_when_not_running_returns_error() {
+        let result = refresh_session();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not running"));
+    }
+
+    #[test]
+    fn extract_tables_cte_with_main_query() {
+        // CTEs are query-level constructs; the main FROM still picks up orders.
+        let tables = extract_table_names_from_sql(
+            "WITH cte AS (SELECT 1 AS x) SELECT * FROM orders",
+        );
+        assert!(tables.contains(&"orders".to_string()), "Expected orders in {:?}", tables);
+    }
+
+    #[test]
+    fn query_guard_decrements_on_drop() {
+        let active = Arc::new(AtomicUsize::new(5));
+        {
+            let _g = QueryGuard(Arc::clone(&active));
+            assert_eq!(active.load(AtomicOrdering::SeqCst), 5);
+        }
+        assert_eq!(active.load(AtomicOrdering::SeqCst), 4);
+    }
+
+    #[test]
+    fn query_guard_multiple_drops_decrement_independently() {
+        let active = Arc::new(AtomicUsize::new(3));
+        {
+            let _g1 = QueryGuard(Arc::clone(&active));
+            let _g2 = QueryGuard(Arc::clone(&active));
+            let _g3 = QueryGuard(Arc::clone(&active));
+            assert_eq!(active.load(AtomicOrdering::SeqCst), 3);
+        }
+        assert_eq!(active.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn scheduler_config_holds_bind_addr() {
+        let cfg = SchedulerConfig {
+            bind_addr: "0.0.0.0:9999".to_string(),
+        };
+        assert_eq!(cfg.bind_addr, "0.0.0.0:9999");
+    }
+
+    // ---------- extract_table_names_from_sql: additional SQL shapes ----------
+
+    #[test]
+    fn extract_tables_full_outer_join() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders FULL OUTER JOIN customers ON orders.cid = customers.id",
+        );
+        assert_eq!(tables, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn extract_tables_cross_join() {
+        let tables = extract_table_names_from_sql("SELECT * FROM a CROSS JOIN b");
+        assert_eq!(tables, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn extract_tables_intersect_set_operation() {
+        let tables = extract_table_names_from_sql(
+            "SELECT id FROM a INTERSECT SELECT id FROM b",
+        );
+        assert_eq!(tables, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn extract_tables_except_set_operation() {
+        let tables = extract_table_names_from_sql(
+            "SELECT id FROM a EXCEPT SELECT id FROM b",
+        );
+        assert_eq!(tables, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn extract_tables_multiple_unions() {
+        let tables = extract_table_names_from_sql(
+            "SELECT id FROM a UNION SELECT id FROM b UNION SELECT id FROM c",
+        );
+        assert_eq!(tables, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn extract_tables_nested_derived_subquery() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM (SELECT * FROM (SELECT * FROM inner_t) AS m) AS o",
+        );
+        assert_eq!(tables, vec!["inner_t"]);
+    }
+
+    #[test]
+    fn extract_tables_subquery_in_join() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders JOIN (SELECT id FROM customers) c ON orders.cid = c.id",
+        );
+        assert_eq!(tables, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn extract_tables_quoted_identifier() {
+        let tables = extract_table_names_from_sql(r#"SELECT * FROM "Order Items""#);
+        assert_eq!(tables, vec!["Order Items"]);
+    }
+
+    #[test]
+    fn extract_tables_with_order_by_and_limit() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders ORDER BY id LIMIT 10",
+        );
+        assert_eq!(tables, vec!["orders"]);
+    }
+
+    #[test]
+    fn extract_tables_with_group_by_having() {
+        let tables = extract_table_names_from_sql(
+            "SELECT cust, SUM(total) FROM orders GROUP BY cust HAVING SUM(total) > 100",
+        );
+        assert_eq!(tables, vec!["orders"]);
+    }
+
+    #[test]
+    fn extract_tables_select_constant_returns_empty() {
+        // SELECT without FROM should still return empty.
+        let tables = extract_table_names_from_sql("SELECT 1 + 1");
+        assert!(tables.is_empty());
+    }
+
+    #[test]
+    fn extract_tables_select_only_whitespace_returns_empty() {
+        let tables = extract_table_names_from_sql("   \n\t  ");
+        assert!(tables.is_empty());
+    }
+
+    #[test]
+    fn extract_tables_multiple_distinct_qualified_names() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM s1.orders JOIN s2.customers ON s1.orders.cid = s2.customers.id",
+        );
+        // Last component is used; both names survive in sorted order.
+        assert_eq!(tables, vec!["customers", "orders"]);
+    }
+
+    #[test]
+    fn extract_tables_drop_statement_returns_empty() {
+        let tables = extract_table_names_from_sql("DROP TABLE foo");
+        assert!(tables.is_empty());
+    }
+
+    #[test]
+    fn extract_tables_insert_statement_returns_empty() {
+        let tables = extract_table_names_from_sql("INSERT INTO foo VALUES (1)");
+        assert!(tables.is_empty());
+    }
+
+    #[test]
+    fn extract_tables_update_statement_returns_empty() {
+        let tables = extract_table_names_from_sql("UPDATE foo SET x = 1");
+        assert!(tables.is_empty());
+    }
+
+    #[test]
+    fn extract_tables_with_clause_then_join() {
+        // CTE with a join in the main query — both joined tables surface.
+        let tables = extract_table_names_from_sql(
+            "WITH cte AS (SELECT 1) SELECT * FROM orders JOIN customers ON orders.cid = customers.id",
+        );
+        assert!(tables.contains(&"orders".to_string()));
+        assert!(tables.contains(&"customers".to_string()));
+    }
+
+    // ---------- check_colocation / check_colocation_for_sql edge cases ----------
+
+    #[test]
+    fn check_colocation_without_gossip_returns_err() {
+        // Non-empty table list reaches catalog::get_all_tables() which requires gossip.
+        let result = check_colocation(&["orders".to_string()]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn check_colocation_for_sql_with_valid_query_without_gossip_returns_err() {
+        // Valid SQL produces a non-empty table list -> check_colocation -> gossip err.
+        let result = check_colocation_for_sql("SELECT * FROM orders");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn check_colocation_for_sql_whitespace_returns_none() {
+        // Whitespace -> empty table list -> short-circuits to Ok(None).
+        let result = check_colocation_for_sql("    ");
+        assert_eq!(result.unwrap(), None);
+    }
+
+    #[test]
+    fn check_colocation_for_sql_select_constant_returns_none() {
+        // No FROM clause -> empty table list -> Ok(None).
+        let result = check_colocation_for_sql("SELECT 1");
+        assert_eq!(result.unwrap(), None);
+    }
+
+    // ---------- query_guard / scheduler lifecycle ----------
+
+    #[test]
+    fn query_guard_starts_from_zero() {
+        let active = Arc::new(AtomicUsize::new(1));
+        {
+            let _g = QueryGuard(Arc::clone(&active));
+        }
+        assert_eq!(active.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn submit_query_with_select_from_table_returns_not_running_error() {
+        // Even valid SELECT — without a running scheduler we get the same error.
+        let result = submit_query("SELECT * FROM orders");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not running"));
+    }
+
+    #[test]
+    fn submit_query_empty_string_returns_not_running_error() {
+        let result = submit_query("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scheduler_config_can_be_constructed_with_arbitrary_address() {
+        let cfg = SchedulerConfig {
+            bind_addr: "[::1]:0".to_string(),
+        };
+        assert_eq!(cfg.bind_addr, "[::1]:0");
+    }
+
+    // ---------- extract_table_names_from_sql: more edge SQL shapes ----------
+
+    #[test]
+    fn extract_tables_natural_join() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders NATURAL JOIN customers",
+        );
+        assert!(tables.contains(&"orders".to_string()));
+        assert!(tables.contains(&"customers".to_string()));
+    }
+
+    #[test]
+    fn extract_tables_self_join_via_aliases() {
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM employees e1 JOIN employees e2 ON e1.mgr_id = e2.id",
+        );
+        // Same underlying table — dedup keeps it once.
+        assert_eq!(tables, vec!["employees"]);
+    }
+
+    #[test]
+    fn extract_tables_union_all_keeps_both() {
+        let tables = extract_table_names_from_sql(
+            "SELECT id FROM a UNION ALL SELECT id FROM b",
+        );
+        assert_eq!(tables, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn extract_tables_idempotent_on_repeated_call() {
+        let sql = "SELECT * FROM orders JOIN customers ON orders.cid = customers.id";
+        let a = extract_table_names_from_sql(sql);
+        let b = extract_table_names_from_sql(sql);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn extract_tables_complex_query_with_subquery_in_where() {
+        // WHERE-clause subqueries are NOT visited (only FROM/JOIN are walked).
+        let tables = extract_table_names_from_sql(
+            "SELECT * FROM orders WHERE id IN (SELECT order_id FROM line_items)",
+        );
+        // Only "orders" comes from FROM; "line_items" lives in a WHERE subquery.
+        assert!(tables.contains(&"orders".to_string()));
+        assert!(!tables.contains(&"line_items".to_string()));
+    }
 }
