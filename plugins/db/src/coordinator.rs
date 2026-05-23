@@ -522,4 +522,473 @@ mod tests {
         let total_rows: usize = result.batches.iter().map(|b| b.num_rows()).sum();
         assert_eq!(total_rows, 5);
     }
+
+    #[test]
+    fn merge_with_aggregation_without_local_conn_errors() {
+        // local_connections is not initialized under cargo test --lib, so the
+        // duckdb-backed merge path returns a "not initialized" error.
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+
+        let decomposed = DecomposedQuery {
+            node_sql: "SELECT SUM(a) FROM t".to_string(),
+            merge_sql: "SELECT SUM(a) FROM _merged".to_string(),
+            has_aggregations: true,
+        };
+
+        let result = merge_batches(vec![vec![batch]], &decomposed);
+        let err = match result {
+            Ok(_) => panic!("expected merge_batches to fail without local connections"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("not initialized") || err.contains("local conn"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn extract_table_union_set_operation() {
+        let sql = "SELECT a FROM orders UNION ALL SELECT a FROM other";
+        let result = extract_table_name(sql).unwrap();
+        assert_eq!(result, "orders");
+    }
+
+    #[test]
+    fn extract_table_nested_select() {
+        // (SELECT * FROM (SELECT * FROM orders))
+        let sql = "SELECT * FROM (SELECT * FROM (SELECT * FROM orders) a) b";
+        let result = extract_table_name(sql).unwrap();
+        assert_eq!(result, "orders");
+    }
+
+    #[test]
+    fn extract_table_empty_sql_errors() {
+        let result = extract_table_name("");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_table_update_unsupported() {
+        let result = extract_table_name("UPDATE orders SET active = false");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("Only SELECT queries are supported"));
+    }
+
+    #[test]
+    fn execute_distributed_query_no_from_errors_without_pool() {
+        // No FROM clause -> execute_local_query path, which needs pool::read_arrow.
+        // Under cargo test --lib the pool is not loaded, so this returns Err.
+        let result = execute_distributed_query("SELECT 1 + 2", false);
+        assert!(matches!(result, Err(_)), "expected pool failure");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn execute_distributed_query_with_table_errors_without_gossip() {
+        // catalog::resolve_table calls GossipRegistry which is not running here.
+        let _ = crate::gossip::GossipRegistry::instance().stop();
+        let result = execute_distributed_query("SELECT * FROM orders", false);
+        assert!(matches!(result, Err(_)), "expected gossip failure");
+    }
+
+    #[test]
+    fn execute_distributed_query_propagates_invalid_sql() {
+        let result = execute_distributed_query("NOT VALID SQL !!!", false);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn query_result_struct_holds_schema_and_batches() {
+        let schema = Arc::new(arrow::datatypes::Schema::empty());
+        let qr = QueryResult {
+            schema: schema.clone(),
+            batches: vec![],
+        };
+        assert_eq!(qr.schema.fields().len(), 0);
+        assert!(qr.batches.is_empty());
+    }
+
+    // ---------- Additional extract_table_name shapes ----------
+
+    #[test]
+    fn extract_table_three_part_qualified_name_uses_last() {
+        let sql = "SELECT * FROM mydb.myschema.orders";
+        assert_eq!(extract_table_name(sql).unwrap(), "orders");
+    }
+
+    #[test]
+    fn extract_table_quoted_identifier() {
+        let sql = r#"SELECT * FROM "Order Items""#;
+        assert_eq!(extract_table_name(sql).unwrap(), "Order Items");
+    }
+
+    #[test]
+    fn extract_table_with_inner_join_and_alias_finds_first() {
+        let sql = "SELECT * FROM customers c INNER JOIN orders o ON c.id = o.customer_id";
+        assert_eq!(extract_table_name(sql).unwrap(), "customers");
+    }
+
+    #[test]
+    fn extract_table_with_multiple_joins_returns_first_table() {
+        let sql = "SELECT * FROM a JOIN b ON a.x = b.x JOIN c ON b.y = c.y";
+        assert_eq!(extract_table_name(sql).unwrap(), "a");
+    }
+
+    #[test]
+    fn extract_table_with_left_join() {
+        let sql = "SELECT * FROM orders LEFT JOIN customers ON orders.cid = customers.id";
+        assert_eq!(extract_table_name(sql).unwrap(), "orders");
+    }
+
+    #[test]
+    fn extract_table_with_full_outer_join() {
+        let sql = "SELECT * FROM orders FULL OUTER JOIN customers ON orders.cid = customers.id";
+        assert_eq!(extract_table_name(sql).unwrap(), "orders");
+    }
+
+    #[test]
+    fn extract_table_intersect_set_operation() {
+        let sql = "SELECT id FROM left_table INTERSECT SELECT id FROM right_table";
+        assert_eq!(extract_table_name(sql).unwrap(), "left_table");
+    }
+
+    #[test]
+    fn extract_table_except_set_operation() {
+        let sql = "SELECT id FROM left_table EXCEPT SELECT id FROM right_table";
+        assert_eq!(extract_table_name(sql).unwrap(), "left_table");
+    }
+
+    #[test]
+    fn extract_table_with_order_by_and_limit() {
+        let sql = "SELECT * FROM orders ORDER BY id DESC LIMIT 10";
+        assert_eq!(extract_table_name(sql).unwrap(), "orders");
+    }
+
+    #[test]
+    fn extract_table_delete_unsupported() {
+        let sql = "DELETE FROM orders WHERE id = 1";
+        let err = extract_table_name(sql).unwrap_err();
+        assert!(err.contains("Only SELECT queries are supported"));
+    }
+
+    #[test]
+    fn extract_table_create_table_unsupported() {
+        let sql = "CREATE TABLE foo (id INT)";
+        let err = extract_table_name(sql).unwrap_err();
+        assert!(err.contains("Only SELECT queries are supported"));
+    }
+
+    #[test]
+    fn extract_table_drop_unsupported() {
+        let sql = "DROP TABLE foo";
+        let err = extract_table_name(sql).unwrap_err();
+        assert!(err.contains("Only SELECT queries are supported"));
+    }
+
+    #[test]
+    fn extract_table_whitespace_only_errors() {
+        // sqlparser typically rejects whitespace-only as empty.
+        let result = extract_table_name("   ");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_table_explicit_cross_join() {
+        let sql = "SELECT * FROM a CROSS JOIN b";
+        assert_eq!(extract_table_name(sql).unwrap(), "a");
+    }
+
+    #[test]
+    fn extract_table_nested_join_factor() {
+        // (a JOIN b) JOIN c — surfaces via NestedJoin in some parsers.
+        let sql = "SELECT * FROM (a JOIN b ON a.x = b.x) JOIN c ON a.y = c.y";
+        // Generic dialect may or may not synthesize NestedJoin; either way the
+        // first table 'a' is returned.
+        let name = extract_table_name(sql).unwrap();
+        assert!(name == "a" || name == "b" || name == "c", "got: {name}");
+    }
+
+    // ---------- merge_batches additional shapes ----------
+
+    #[test]
+    fn merge_batches_single_node_no_agg_preserves_schema() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+        ]));
+        let b = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![10, 20, 30]))],
+        )
+        .unwrap();
+
+        let decomposed = DecomposedQuery {
+            node_sql: "SELECT id FROM t".to_string(),
+            merge_sql: "SELECT * FROM _merged".to_string(),
+            has_aggregations: false,
+        };
+        let result = merge_batches(vec![vec![b]], &decomposed).unwrap();
+        // Schema preserved from the first batch.
+        assert_eq!(result.schema.fields().len(), 1);
+        assert_eq!(result.schema.field(0).name(), "id");
+    }
+
+    #[test]
+    fn merge_batches_all_empty_node_lists_no_agg() {
+        let decomposed = DecomposedQuery {
+            node_sql: "SELECT * FROM t".to_string(),
+            merge_sql: "SELECT * FROM _merged".to_string(),
+            has_aggregations: false,
+        };
+        // Two nodes, each returned zero batches.
+        let result = merge_batches(vec![vec![], vec![]], &decomposed).unwrap();
+        assert!(result.batches.is_empty());
+        // Schema is empty since no batches were available.
+        assert_eq!(result.schema.fields().len(), 0);
+    }
+
+    #[test]
+    fn merge_batches_multi_node_multi_batch_no_agg() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("x", DataType::Int32, false),
+        ]));
+        let make = |vals: Vec<i32>| {
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int32Array::from(vals))]).unwrap()
+        };
+        let node_a = vec![make(vec![1, 2]), make(vec![3])];
+        let node_b = vec![make(vec![4, 5, 6])];
+        let decomposed = DecomposedQuery {
+            node_sql: "SELECT x FROM t".to_string(),
+            merge_sql: "SELECT * FROM _merged".to_string(),
+            has_aggregations: false,
+        };
+        let result = merge_batches(vec![node_a, node_b], &decomposed).unwrap();
+        let total: usize = result.batches.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total, 6);
+        assert_eq!(result.batches.len(), 3);
+    }
+
+    // ---------- execute_distributed_query: error paths without pool/gossip ----------
+
+    #[test]
+    fn execute_distributed_query_delete_returns_err() {
+        let result = execute_distributed_query("DELETE FROM orders", false);
+        let err = match result {
+            Ok(_) => panic!("expected DELETE to be rejected"),
+            Err(e) => e,
+        };
+        assert!(
+            err.contains("Only SELECT queries are supported"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn execute_distributed_query_update_returns_err() {
+        let result = execute_distributed_query("UPDATE orders SET x = 1", false);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn execute_distributed_query_create_table_returns_err() {
+        let result = execute_distributed_query("CREATE TABLE foo (id INT)", false);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn execute_distributed_query_empty_sql_returns_err() {
+        let result = execute_distributed_query("", false);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn execute_distributed_query_partial_results_flag_does_not_change_parse_path() {
+        // Same parse-error regardless of partial-results flag.
+        let r1 = execute_distributed_query("NOT VALID", false);
+        let r2 = execute_distributed_query("NOT VALID", true);
+        assert!(matches!(r1, Err(_)));
+        assert!(matches!(r2, Err(_)));
+    }
+
+    // ---------- bucket-8: additional coverage ----------
+
+    #[test]
+    fn extract_table_with_having() {
+        let sql = "SELECT a, SUM(b) FROM t GROUP BY a HAVING SUM(b) > 0";
+        assert_eq!(extract_table_name(sql).unwrap(), "t");
+    }
+
+    #[test]
+    fn extract_table_with_distinct() {
+        let sql = "SELECT DISTINCT a FROM users";
+        assert_eq!(extract_table_name(sql).unwrap(), "users");
+    }
+
+    #[test]
+    fn extract_table_with_offset() {
+        let sql = "SELECT * FROM page OFFSET 5 LIMIT 10";
+        assert_eq!(extract_table_name(sql).unwrap(), "page");
+    }
+
+    #[test]
+    fn extract_table_with_cte() {
+        // Common-table expression: outer query may pick the CTE alias name.
+        let sql = "WITH c AS (SELECT * FROM orders) SELECT * FROM c";
+        let result = extract_table_name(sql);
+        // Either "c" (uses the CTE alias) or "orders" — both are valid for our impl.
+        assert!(result.is_ok(), "got: {result:?}");
+    }
+
+    #[test]
+    fn extract_table_with_function_call_in_select() {
+        let sql = "SELECT COUNT(*) FROM events WHERE ts > NOW()";
+        assert_eq!(extract_table_name(sql).unwrap(), "events");
+    }
+
+    #[test]
+    fn extract_table_truncate_unsupported() {
+        // TRUNCATE is not a SELECT, so it's rejected.
+        let result = extract_table_name("TRUNCATE TABLE foo");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_table_alter_unsupported() {
+        let result = extract_table_name("ALTER TABLE foo ADD COLUMN x INT");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extract_table_values_no_from() {
+        // VALUES has no FROM table — parses but extraction should fail.
+        let result = extract_table_name("VALUES (1, 2), (3, 4)");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_batches_aggregation_path_propagates_local_conn_failure() {
+        // Aggregation path goes through DuckDB; without local_connections this
+        // returns a deterministic error. Reaches `merge_with_duckdb` branch.
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Int32, false)]));
+        let b1 = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        let b2 = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![3, 4]))],
+        )
+        .unwrap();
+        let decomposed = DecomposedQuery {
+            node_sql: "SELECT k FROM t".to_string(),
+            merge_sql: "SELECT SUM(k) FROM _merged".to_string(),
+            has_aggregations: true,
+        };
+        // Two node batches, both merged.
+        let result = merge_batches(vec![vec![b1], vec![b2]], &decomposed);
+        assert!(result.is_err(), "expected merge failure");
+    }
+
+    #[test]
+    fn merge_batches_one_empty_one_nonempty_no_agg() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int32, false)]));
+        let b = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int32Array::from(vec![42]))],
+        )
+        .unwrap();
+        let decomposed = DecomposedQuery {
+            node_sql: "x".to_string(),
+            merge_sql: "y".to_string(),
+            has_aggregations: false,
+        };
+        // First node empty, second has a batch.
+        let result = merge_batches(vec![vec![], vec![b]], &decomposed).unwrap();
+        assert_eq!(result.batches.len(), 1);
+        assert_eq!(result.batches[0].num_rows(), 1);
+    }
+
+    #[test]
+    fn query_result_can_hold_batches() {
+        use arrow::array::Int32Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Int32, false)]));
+        let b = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int32Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let qr = QueryResult {
+            schema,
+            batches: vec![b],
+        };
+        assert_eq!(qr.batches.len(), 1);
+        assert_eq!(qr.batches[0].num_rows(), 3);
+        assert_eq!(qr.schema.fields().len(), 1);
+    }
+
+    #[test]
+    fn extract_table_subquery_with_join() {
+        let sql = "SELECT * FROM (SELECT x FROM t1) s JOIN t2 ON s.x = t2.x";
+        let name = extract_table_name(sql).unwrap();
+        // Derived subquery name comes back as the inner table.
+        assert_eq!(name, "t1");
+    }
+
+    #[test]
+    fn extract_table_select_with_window_function() {
+        let sql = "SELECT id, ROW_NUMBER() OVER (PARTITION BY a ORDER BY b) FROM events";
+        assert_eq!(extract_table_name(sql).unwrap(), "events");
+    }
+
+    #[test]
+    fn extract_table_multiline_sql() {
+        let sql = "SELECT *\n  FROM orders\n WHERE active = true";
+        assert_eq!(extract_table_name(sql).unwrap(), "orders");
+    }
+
+    #[test]
+    fn extract_table_with_only_semicolon_errors() {
+        let result = extract_table_name(";");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn execute_distributed_query_drop_table_returns_err() {
+        let result = execute_distributed_query("DROP TABLE foo", false);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn execute_distributed_query_insert_returns_err() {
+        let result = execute_distributed_query("INSERT INTO foo VALUES (1)", false);
+        assert!(matches!(result, Err(_)));
+    }
+
+    #[test]
+    fn execute_distributed_query_select_constant_no_pool() {
+        // SELECT without FROM goes through local query path which needs pool.
+        let result = execute_distributed_query("SELECT 'hello'", false);
+        assert!(matches!(result, Err(_)));
+    }
 }

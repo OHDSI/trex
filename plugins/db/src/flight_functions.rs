@@ -289,3 +289,87 @@ impl VTab for FlightServerStatusTable {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_port_accepts_minimum() {
+        assert_eq!(validate_port(1).unwrap(), 1u16);
+    }
+
+    #[test]
+    fn validate_port_accepts_typical() {
+        assert_eq!(validate_port(8815).unwrap(), 8815u16);
+    }
+
+    #[test]
+    fn validate_port_accepts_maximum() {
+        assert_eq!(validate_port(65535).unwrap(), 65535u16);
+    }
+
+    #[test]
+    fn validate_port_rejects_zero() {
+        let err = validate_port(0).unwrap_err();
+        assert!(err.to_string().contains("Port must be between"));
+        assert!(err.to_string().contains("0"));
+    }
+
+    #[test]
+    fn validate_port_rejects_negative() {
+        let err = validate_port(-1).unwrap_err();
+        assert!(err.to_string().contains("Port must be between"));
+    }
+
+    #[test]
+    fn validate_port_rejects_above_max() {
+        let err = validate_port(65536).unwrap_err();
+        assert!(err.to_string().contains("Port must be between"));
+        assert!(err.to_string().contains("65536"));
+    }
+
+    #[test]
+    fn validate_port_rejects_large_negative() {
+        let err = validate_port(i32::MIN).unwrap_err();
+        assert!(err.to_string().contains("Port must be between"));
+    }
+
+    #[test]
+    fn validate_port_rejects_i32_max() {
+        let err = validate_port(i32::MAX).unwrap_err();
+        assert!(err.to_string().contains("Port must be between"));
+    }
+
+    // VScalar::signatures() and VTab::parameters() invoke LogicalTypeHandle
+    // constructors which call into the DuckDB C API. Unit tests run outside
+    // a DuckDB connection, so those panic with "DuckDB API not initialized".
+    // We skip them here; they're exercised by integration tests that load the
+    // extension into a live DuckDB.
+
+    #[test]
+    fn flight_server_status_bind_data_constructs() {
+        let _bind_data = FlightServerStatusBindData {};
+    }
+
+    #[test]
+    fn flight_server_status_init_data_constructs() {
+        let init_data = FlightServerStatusInitData {
+            done: AtomicBool::new(false),
+        };
+        assert!(!init_data.done.load(Ordering::Relaxed));
+        init_data.done.store(true, Ordering::Relaxed);
+        assert!(init_data.done.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn flight_server_status_init_data_swap_semantics() {
+        // Mirrors the func() guard: swap(true) returns previous value (false on
+        // first call, true thereafter).
+        let init_data = FlightServerStatusInitData {
+            done: AtomicBool::new(false),
+        };
+        assert!(!init_data.done.swap(true, Ordering::Relaxed));
+        assert!(init_data.done.swap(true, Ordering::Relaxed));
+    }
+}
