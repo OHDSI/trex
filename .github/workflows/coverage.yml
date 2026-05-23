@@ -29,6 +29,10 @@ jobs:
         plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: ${{ matrix.plugin == 'runtime' && 'plugins/extension-ci-tools plugins/runtime/trex-runtime' || 'plugins/extension-ci-tools' }}
@@ -133,6 +137,10 @@ jobs:
     continue-on-error: true  # informational until we have one week of green runs
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

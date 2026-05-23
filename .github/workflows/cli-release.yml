@@ -12,6 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: ./.github/actions/checkout-trex

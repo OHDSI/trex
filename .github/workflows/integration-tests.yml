@@ -30,6 +30,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -62,6 +66,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -94,6 +102,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -140,6 +152,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -172,6 +188,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -208,6 +228,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -240,6 +264,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -272,6 +300,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools plugins/runtime/trex-runtime"
@@ -311,6 +343,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools plugins/atlas/circe-be"
@@ -349,6 +385,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools plugins/ai/llama.cpp"
@@ -379,6 +419,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -410,6 +454,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -442,6 +490,10 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/extension-ci-tools"
@@ -480,6 +532,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -538,6 +594,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -595,6 +655,10 @@ jobs:
     needs: [build-pool, build-atlas]
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -626,6 +690,10 @@ jobs:
     needs: [build-pool, build-ai]
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -658,6 +726,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -721,6 +793,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -780,6 +856,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -830,6 +910,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -889,6 +973,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -939,6 +1027,10 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -989,6 +1081,10 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - name: Start HANA Express container
         run: docker compose -f integration-tests/docker-compose.hana.yml up -d
@@ -1075,6 +1171,10 @@ jobs:
           swap-storage: true
 
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
