@@ -9,5 +9,10 @@
     "runtime": "12 tests (bundle options + create_bundle_sync validation) — verification deferred to CI (heavy deps, empty trex-runtime submodule)",
     "tpm": "18 tests (npm registry + types) — verified passing locally (cargo test --lib)",
     "transform": "13 tests (parser_tests + dag_tests) — verified passing locally"
+  },
+  "db": {
+    "lines": 70.76,
+    "regions": 71.14,
+    "functions": 74.45
   }
 }
