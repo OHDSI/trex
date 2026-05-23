@@ -8,7 +8,14 @@ on:
     branches: [main, develop]
   merge_group:
   workflow_dispatch:
+    inputs:
+      d2e_branch:
+        description: "D2E branch to test against (for the e2e-d2e job)"
+        default: "develop"
+        type: string
 
+# read-all suffices for the build/test matrix; the e2e-d2e job overrides this
+# to grant checks/pull-requests:write needed by ctrf-io/github-test-reporter.
 permissions: read-all
 
 concurrency:
@@ -1258,6 +1265,300 @@ jobs:
           docker push ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
 
   # ===========================================================================
+  # Layer 2b: D2E end-to-end (consumes ext-* artifacts from the build jobs above
+  # so we don't rebuild the 7 plugins again — that was the dedupe win that the
+  # original 1e474e2 "optimize ci" intended via workflow_run; doing it inline
+  # here keeps it as a real PR status check while still avoiding duplicate
+  # builds.)
+  # ===========================================================================
+
+  e2e-d2e:
+    name: "E2E (D2E)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    needs:
+      - build-pool
+      - build-trexas
+      - build-atlas
+      - build-hana
+      - build-pgwire
+      - build-fhir
+      - build-tpm
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    env:
+      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
+      VERSION: develop
+    steps:
+      - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      # extension-ci-tools is needed for sign-if-key.sh below.
+      - uses: ./.github/actions/checkout-trex
+        with:
+          paths: "plugins/extension-ci-tools"
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Increase swap to 15G
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 15G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      # Pull the 7 extensions that d2e-trex bind-mounts. These are the same
+      # debug_coverage builds the test-* jobs consume; if d2e-trex ever starts
+      # rejecting unsigned/debug builds we'll need to add release+sign here.
+      - uses: actions/download-artifact@v4
+        with: { name: ext-trexas, path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-atlas,  path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-hana,   path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-pgwire, path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-fhir,   path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-pool,   path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-tpm,    path: ./trex-artifacts/ }
+
+      - name: Sign extensions (no-op without DUCKDB_EXTENSION_SIGNING_KEY)
+        env:
+          DUCKDB_EXTENSION_SIGNING_KEY: ${{ secrets.DUCKDB_EXTENSION_SIGNING_KEY }}
+        run: |
+          bash plugins/extension-ci-tools/extension_signing/sign-if-key.sh ./trex-artifacts
+
+      - name: Checkout D2E
+        uses: actions/checkout@v4
+        with:
+          repository: OHDSI/Data2Evidence
+          ref: ${{ env.D2E_BRANCH }}
+          path: d2e
+          submodules: recursive
+
+      - name: Setup D2E
+        working-directory: d2e
+        run: npm install
+
+      - name: Patch seed config for e2e tests
+        working-directory: d2e
+        run: node ./scripts/patch-seed-for-e2e.js
+
+      - name: Initialize D2E
+        working-directory: d2e
+        run: |
+          init_choice=y ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} init
+
+      - name: Stage trex extensions for mount
+        run: |
+          mkdir -p d2e/.ci-overlay
+          cp ./trex-artifacts/*.trex d2e/.ci-overlay/
+          ls -l d2e/.ci-overlay/
+
+      - name: Create CI compose override
+        run: |
+          cat > d2e/docker-compose-ci.yml << 'EOF'
+          services:
+            alp-caddy:
+              ports: !override
+                - ${CADDY_PORT:-${PORT:-443}}:443
+            trex:
+              build: !reset null
+              image: ${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${DOCKER_TAG_NAME:-develop}
+              pull_policy: always
+              volumes:
+                - ./.ci-overlay/trexas.trex:/usr/src/node_modules/@trex/as/trexas.trex:ro
+                - ./.ci-overlay/circe.trex:/usr/src/node_modules/@trex/circe/circe.trex:ro
+                - ./.ci-overlay/hana_scan.trex:/usr/src/node_modules/@trex/hana/hana_scan.trex:ro
+                - ./.ci-overlay/pgwire.trex:/usr/src/node_modules/@trex/pgwire/pgwire.trex:ro
+                - ./.ci-overlay/fhir.trex:/usr/src/node_modules/@trex/fhir/fhir.trex:ro
+                - ./.ci-overlay/pool.trex:/usr/src/node_modules/@trex/pool/pool.trex:ro
+                - ./.ci-overlay/tpm.trex:/usr/src/node_modules/@trex/tpm/tpm.trex:ro
+          EOF
+          cat d2e/docker-compose-ci.yml
+
+      - name: Start D2E services
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          retry_wait_seconds: 100
+          max_attempts: 2
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml --pull start
+            docker ps --format "{{.Names}},{{.Status}}"
+            docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
+
+      - name: Wait for services to be healthy
+        timeout-minutes: 5
+        run: |
+          echo "Waiting for d2e-trex to become healthy..."
+          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
+            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+            sleep 5
+          done
+          echo "d2e-trex is healthy"
+          docker ps --format "{{.Names}},{{.Status}}"
+
+      - name: Run setupdemo
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          retry_wait_seconds: 100
+          max_attempts: 2
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml setupdemo
+
+      - name: Run checkflow
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          max_attempts: 1
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml checkflow
+
+      - name: Logs after checkflow
+        if: success() || failure()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
+
+      - name: Check app status (informational)
+        continue-on-error: true
+        run: |
+          echo "=== Checking if app is reachable ==="
+          HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:443/d2e/portal || echo "000")
+          echo "HTTP Status: $HTTP_CODE"
+          curl -k -I https://localhost:443/d2e/portal || true
+
+      - name: Restart d2e services
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml start
+
+      - name: Wait for d2e-trex healthy after restart
+        timeout-minutes: 5
+        run: |
+          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
+            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+            sleep 5
+          done
+          echo "d2e-trex is healthy"
+
+      - name: Wait for d2e-ui plugin to be available
+        run: |
+          echo "Waiting for d2e-ui plugin to be available..."
+          max_attempts=60
+          attempt=0
+          start_time=$(date +%s)
+          while [ $attempt -lt $max_attempts ]; do
+            if docker exec d2e-trex test -f /usr/src/bundled-plugins/d2e-ui/package.json >/dev/null 2>&1; then
+              end_time=$(date +%s)
+              elapsed=$((end_time - start_time))
+              echo "d2e-ui plugin is ready (took ${elapsed}s)"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "  Attempt $attempt/$max_attempts: waiting..."
+            sleep 2
+          done
+          if [ $attempt -eq $max_attempts ]; then
+            echo "Timeout waiting for d2e-ui plugin to be available"
+            docker exec d2e-trex ls -la /usr/src/bundled-plugins/ || true
+            exit 1
+          fi
+
+      - name: Wait for webapi-init to complete
+        run: |
+          echo "Waiting for webapi-init to complete..."
+          for i in $(seq 1 60); do
+            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -q "Exited (0)"; then
+              echo "webapi-init completed successfully"
+              break
+            fi
+            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -qE "Exited \([1-9]"; then
+              echo "webapi-init failed!"
+              docker logs d2e-webapi-init || true
+              exit 1
+            fi
+            echo "Waiting for webapi-init... ($i/60)"
+            sleep 5
+          done
+
+      - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
+        run: sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+
+      - name: Build e2e Docker image
+        working-directory: d2e/tests/e2e
+        run: docker build -t d2e-e2e .
+
+      - name: Run e2e tests
+        working-directory: d2e/tests/e2e
+        timeout-minutes: 45
+        run: |
+          docker run --rm \
+            --network=host \
+            --ipc=host \
+            -v "$(pwd)/test-results:/work/test-results" \
+            -v "$(pwd)/ctrf:/work/ctrf" \
+            -e D2E_BASE_URL=https://localhost:443 \
+            -e CI=true \
+            -e GITHUB_ACTIONS=true \
+            d2e-e2e npm test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d2e-test-results
+          path: d2e/tests/e2e/test-results/**/*
+          if-no-files-found: warn
+
+      - name: Publish Test Report
+        if: always()
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: "./d2e/tests/e2e/ctrf/*.json"
+          file-report: true
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
+
+      - name: Stop D2E services
+        if: always()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
+
+      - name: Prune system
+        if: always()
+        run: docker system prune -af
+
+  # ===========================================================================
   # Layer 3: Status Gate
   # ===========================================================================
 
@@ -1278,6 +1579,7 @@ jobs:
       - test-hana
       - test-etl
       - test-pg-trex
+      - e2e-d2e
     steps:
       - name: Check test results
         run: |
@@ -1292,6 +1594,7 @@ jobs:
           echo "test-hana:        ${{ needs.test-hana.result }}"
           echo "test-etl:         ${{ needs.test-etl.result }}"
           echo "test-pg-trex:     ${{ needs.test-pg-trex.result }}"
+          echo "e2e-d2e:          ${{ needs.e2e-d2e.result }}"
 
           if [[ "${{ needs.test-distributed.result }}" == "failure" ||
                 "${{ needs.test-pgwire.result }}" == "failure" ||
@@ -1303,7 +1606,8 @@ jobs:
                 "${{ needs.test-pg-trex.result }}" == "failure" ||
                 "${{ needs.test-migration.result }}" == "failure" ||
                 "${{ needs.test-fhir.result }}" == "failure" ||
-                "${{ needs.test-hana.result }}" == "failure" ]]; then
+                "${{ needs.test-hana.result }}" == "failure" ||
+                "${{ needs.e2e-d2e.result }}" == "failure" ]]; then
             echo "::error::One or more integration test jobs failed"
             exit 1
           fi
