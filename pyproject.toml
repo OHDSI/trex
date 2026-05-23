@@ -15,9 +15,12 @@ select = [
     "E711",   # comparison to None
     "E712",   # comparison to True/False
     "E714",   # not-is
+    "E722",   # bare except
     "RET",    # flake8-return: implicit/explicit return mix
     "ERA",    # commented-out code
     "B904",   # raise-without-from in except
+    "BLE001", # blind except (except Exception:)
+    "S110",   # try-except-pass (empty except handler)
     "PLE",    # pylint errors (wrong args, mismatched assignment, etc.)
     "PLW",    # pylint warnings
 ]
