@@ -8,7 +8,7 @@ on:
         required: false
         type: choice
         options:
-          - OHDSI/trexsql-ext
+          - OHDSI/trex
       GIT_BRANCH_NAME:
         default: develop
         description: Enter BranchName / ReleaseTagName
@@ -121,15 +121,31 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
       - if: steps.checkout_1.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
+      - name: Init submodules
+        shell: bash
+        run: |
+          # Drop the source-repo-scoped basic auth header so cross-repo public
+          # submodules can clone reliably (401 otherwise triggers prompt fallback).
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 --recursive --force; then
+              echo "Submodule init succeeded on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::Submodule init failed after 3 attempts"
+          exit 1
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -300,15 +316,29 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
       - if: steps.checkout_2.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
+      - name: Init submodules
+        shell: bash
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 --recursive --force; then
+              echo "Submodule init succeeded on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::Submodule init failed after 3 attempts"
+          exit 1
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -447,13 +477,27 @@ jobs:
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
       - if: steps.checkout_4.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
+      - name: Init submodules
+        shell: bash
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 --recursive --force; then
+              echo "Submodule init succeeded on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::Submodule init failed after 3 attempts"
+          exit 1
 
       - name: Download amd64 extension artifacts
         uses: actions/download-artifact@v4
