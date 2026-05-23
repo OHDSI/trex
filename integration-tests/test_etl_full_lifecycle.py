@@ -124,7 +124,7 @@ def _wait_for_rows(name, min_rows, timeout_s=60.0, interval_s=0.5):
 def _check_trex_running():
     res = subprocess.run(
         ["docker", "ps", "--format", "{{.Names}}"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     names = res.stdout.split()
     return "trexsql-trex-1" in names

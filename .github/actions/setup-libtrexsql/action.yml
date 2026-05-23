@@ -1,0 +1,27 @@
+name: "Setup libtrexsql"
+description: "Download and unpack libtrexsql to /tmp/trexsql, cached by version."
+inputs:
+  version:
+    description: "Release tag (e.g. v1.4.4-trex)"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: Cache libtrexsql archive
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: /tmp/libtrexsql.zip
+        key: libtrexsql-${{ inputs.version }}-linux-amd64
+    - name: Download libtrexsql (cache miss)
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        curl --retry 3 --retry-delay 5 --retry-all-errors -fsSL \
+          -o /tmp/libtrexsql.zip \
+          "https://github.com/p-hoffmann/trexsql-rs/releases/download/${{ inputs.version }}/libtrexsql-linux-amd64.zip"
+    - name: Unpack
+      shell: bash
+      run: |
+        mkdir -p /tmp/trexsql
+        unzip -o /tmp/libtrexsql.zip -d /tmp/trexsql

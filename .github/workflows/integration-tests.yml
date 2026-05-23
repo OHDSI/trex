@@ -8,7 +8,14 @@ on:
     branches: [main, develop]
   merge_group:
   workflow_dispatch:
+    inputs:
+      d2e_branch:
+        description: "D2E branch to test against (for the e2e-d2e job)"
+        default: "develop"
+        type: string
 
+# read-all suffices for the build/test matrix; the e2e-d2e job overrides this
+# to grant checks/pull-requests:write needed by ctrf-io/github-test-reporter.
 permissions: read-all
 
 concurrency:
@@ -26,11 +33,17 @@ jobs:
   build-pool:
     name: "Build pool"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -44,7 +57,7 @@ jobs:
           restore-keys: pool-${{ runner.os }}-
 
       - name: Build pool
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/pool
 
       - uses: actions/upload-artifact@v4
@@ -56,11 +69,17 @@ jobs:
   build-rust-core:
     name: "Build db"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -74,7 +93,7 @@ jobs:
           restore-keys: rust-core-${{ runner.os }}-
 
       - name: Build db
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/db
 
       - uses: actions/upload-artifact@v4
@@ -86,11 +105,14 @@ jobs:
   build-pg-trex:
     name: "Build pg_trex"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -101,11 +123,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-17 postgresql-server-dev-17
 
-      - name: Download libtrexsql
-        run: |
-          wget -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
-          unzip /tmp/libtrexsql.zip -d /tmp/trexsql
+      - uses: ./.github/actions/setup-libtrexsql
+        with:
+          version: v1.4.4-trex
 
       - uses: actions/cache@v4
         with:
@@ -135,11 +155,17 @@ jobs:
   build-pgwire:
     name: "Build pgwire"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -153,7 +179,7 @@ jobs:
           restore-keys: rust-pgwire-${{ runner.os }}-
 
       - name: Build pgwire
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/pgwire
 
       - uses: actions/upload-artifact@v4
@@ -165,11 +191,17 @@ jobs:
   build-chdb:
     name: "Build chdb"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -187,7 +219,7 @@ jobs:
           restore-keys: rust-chdb-${{ runner.os }}-
 
       - name: Build chdb
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/chdb
 
       - uses: actions/upload-artifact@v4
@@ -199,11 +231,17 @@ jobs:
   build-hana:
     name: "Build hana"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -217,7 +255,7 @@ jobs:
           restore-keys: rust-hana-${{ runner.os }}-
 
       - name: Build hana
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/hana
 
       - uses: actions/upload-artifact@v4
@@ -229,11 +267,17 @@ jobs:
   build-tpm:
     name: "Build tpm"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -247,7 +291,7 @@ jobs:
           restore-keys: rust-tpm-${{ runner.os }}-
 
       - name: Build tpm
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/tpm
 
       - uses: actions/upload-artifact@v4
@@ -259,11 +303,17 @@ jobs:
   build-trexas:
     name: "Build trexas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools plugins/runtime/trex-runtime"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -284,7 +334,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
 
       - name: Build trexas
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/runtime
 
       - uses: actions/upload-artifact@v4
@@ -296,11 +346,17 @@ jobs:
   build-atlas:
     name: "Build atlas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools plugins/atlas/circe-be"
 
       - uses: graalvm/setup-graalvm@v1
         with:
@@ -332,11 +388,17 @@ jobs:
   build-ai:
     name: "Build ai"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools plugins/ai/llama.cpp"
 
       - name: Install ai build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libvulkan1 libvulkan-dev vulkan-tools glslc libshaderc1 spirv-tools vulkan-validationlayers mesa-vulkan-drivers
@@ -360,11 +422,17 @@ jobs:
   build-etl:
     name: "Build etl"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -377,7 +445,7 @@ jobs:
           restore-keys: rust-etl-${{ runner.os }}-
 
       - name: Build etl
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/etl
 
       - uses: actions/upload-artifact@v4
@@ -389,11 +457,17 @@ jobs:
   build-migration:
     name: "Build migration"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -407,13 +481,49 @@ jobs:
           restore-keys: rust-migration-${{ runner.os }}-
 
       - name: Build migration
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/migration
 
       - uses: actions/upload-artifact@v4
         with:
           name: ext-migration
           path: plugins/migration/build/debug/extension/migration/migration.trex
+          retention-days: 1
+
+  build-fhir:
+    name: "Build fhir"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    steps:
+      - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
+        with:
+          paths: "plugins/extension-ci-tools"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plugins/fhir/target
+          key: rust-fhir-${{ runner.os }}-${{ hashFiles('plugins/fhir/Cargo.lock') }}
+          restore-keys: rust-fhir-${{ runner.os }}-
+
+      - name: Build fhir
+        run: make configure && make debug_coverage
+        working-directory: plugins/fhir
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ext-fhir
+          path: plugins/fhir/build/debug/extension/fhir/fhir.trex
           retention-days: 1
 
   # ===========================================================================
@@ -423,13 +533,24 @@ jobs:
   test-distributed:
     name: "Test distributed (tier1/2/3)"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core]
+    env:
+      TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -457,16 +578,41 @@ jobs:
         run: venv/bin/pytest -v test_tier3_aggregation.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-distributed
+          fail_ci_if_error: false
+
   test-pgwire:
     name: "Test pgwire"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core, build-pgwire]
+    env:
+      TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -495,12 +641,31 @@ jobs:
         run: venv/bin/pytest -v test_pgwire_db.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-pgwire
+          fail_ci_if_error: false
+
   test-atlas:
     name: "Test atlas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-atlas]
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -527,9 +692,15 @@ jobs:
   test-ai:
     name: "Test ai"
     runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 45
     needs: [build-pool, build-ai]
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -556,13 +727,24 @@ jobs:
   test-chdb:
     name: "Test chdb"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core, build-chdb]
+    env:
+      TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Install chdb native library
         run: sudo bash ./install_chdb.sh
@@ -595,18 +777,41 @@ jobs:
         run: venv/bin/pytest -v test_chdb_db.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-chdb
+          fail_ci_if_error: false
+
   test-trexas:
     name: "Test trexas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core, build-trexas]
+    env:
+      TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -635,16 +840,41 @@ jobs:
         run: venv/bin/pytest -v test_trexas_swarm.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-runtime
+          fail_ci_if_error: false
+
   test-tpm:
     name: "Test tpm"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-tpm]
+    env:
+      TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -664,16 +894,41 @@ jobs:
         run: venv/bin/pytest -v test_tpm_standalone.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-tpm
+          fail_ci_if_error: false
+
   test-etl:
     name: "Test etl"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-etl, build-rust-core]
+    env:
+      TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -702,16 +957,41 @@ jobs:
         run: venv/bin/pytest -v test_etl_db.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-etl
+          fail_ci_if_error: false
+
   test-migration:
     name: "Test migration"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-migration]
+    env:
+      TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -730,14 +1010,88 @@ jobs:
       - name: Run migration standalone tests
         run: venv/bin/pytest -v test_migration_standalone.py
         working-directory: integration-tests
-        
+
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-migration
+          fail_ci_if_error: false
+
+  test-fhir:
+    name: "Test fhir"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [build-pool, build-fhir]
+    env:
+      TREX_COVERAGE: "1"
+    steps:
+      - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ext-pool
+          path: plugins/pool/build/debug/extension/pool/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ext-fhir
+          path: plugins/fhir/build/debug/extension/fhir/
+
+      - name: Setup test environment
+        run: make configure
+        working-directory: integration-tests
+
+      - name: Run fhir standalone tests
+        run: venv/bin/pytest -v test_fhir_standalone.py
+        working-directory: integration-tests
+
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-fhir
+          fail_ci_if_error: false
+
   test-hana:
     name: "Test hana"
     runs-on: ubuntu-24.04
     needs: [build-pool, build-hana]
-    timeout-minutes: 25
+    env:
+      TREX_COVERAGE: "1"
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - name: Start HANA Express container
         run: docker compose -f integration-tests/docker-compose.hana.yml up -d
@@ -745,6 +1099,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -785,11 +1143,28 @@ jobs:
         if: always()
         run: docker compose -f integration-tests/docker-compose.hana.yml down -v
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-hana
+          fail_ci_if_error: false
+
   test-pg-trex:
     name: "Test pg_trex"
     runs-on: ubuntu-24.04
     needs: [build-pool, build-rust-core, build-pg-trex]
-    timeout-minutes: 25
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@v1.3.1
@@ -803,8 +1178,13 @@ jobs:
           swap-storage: true
 
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
 
       - uses: actions/setup-python@v5
         with:
@@ -863,6 +1243,321 @@ jobs:
         if: always()
         run: docker compose -f integration-tests/docker-compose.pg_trex.yml down -v
 
+      - name: Build pg-trex image for GHCR
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        run: docker build -t pg-trex-test -f plugins/pg_trex/Dockerfile .
+
+      - name: Login to GHCR
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        run: |
+          NS="${GITHUB_REPOSITORY_OWNER,,}"
+          docker tag pg-trex-test ghcr.io/$NS/pg-trex:latest
+          docker tag pg-trex-test ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
+          docker push ghcr.io/$NS/pg-trex:latest
+          docker push ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
+
+  # ===========================================================================
+  # Layer 2b: D2E end-to-end (consumes ext-* artifacts from the build jobs above
+  # so we don't rebuild the 7 plugins again — that was the dedupe win that the
+  # original 1e474e2 "optimize ci" intended via workflow_run; doing it inline
+  # here keeps it as a real PR status check while still avoiding duplicate
+  # builds.)
+  # ===========================================================================
+
+  e2e-d2e:
+    name: "E2E (D2E)"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    needs:
+      - build-pool
+      - build-trexas
+      - build-atlas
+      - build-hana
+      - build-pgwire
+      - build-fhir
+      - build-tpm
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    env:
+      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
+      VERSION: develop
+    steps:
+      - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      # extension-ci-tools is needed for sign-if-key.sh below.
+      - uses: ./.github/actions/checkout-trex
+        with:
+          paths: "plugins/extension-ci-tools"
+
+      - name: Free Disk Space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: Increase swap to 15G
+        run: |
+          sudo swapoff -a
+          sudo fallocate -l 15G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+      # Pull the 7 extensions that d2e-trex bind-mounts. These are the same
+      # debug_coverage builds the test-* jobs consume; if d2e-trex ever starts
+      # rejecting unsigned/debug builds we'll need to add release+sign here.
+      - uses: actions/download-artifact@v4
+        with: { name: ext-trexas, path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-atlas,  path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-hana,   path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-pgwire, path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-fhir,   path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-pool,   path: ./trex-artifacts/ }
+      - uses: actions/download-artifact@v4
+        with: { name: ext-tpm,    path: ./trex-artifacts/ }
+
+      - name: Sign extensions (no-op without DUCKDB_EXTENSION_SIGNING_KEY)
+        env:
+          DUCKDB_EXTENSION_SIGNING_KEY: ${{ secrets.DUCKDB_EXTENSION_SIGNING_KEY }}
+        run: |
+          bash plugins/extension-ci-tools/extension_signing/sign-if-key.sh ./trex-artifacts
+
+      - name: Checkout D2E
+        uses: actions/checkout@v4
+        with:
+          repository: OHDSI/Data2Evidence
+          ref: ${{ env.D2E_BRANCH }}
+          path: d2e
+          submodules: recursive
+
+      - name: Setup D2E
+        working-directory: d2e
+        run: npm install
+
+      - name: Patch seed config for e2e tests
+        working-directory: d2e
+        run: node ./scripts/patch-seed-for-e2e.js
+
+      - name: Initialize D2E
+        working-directory: d2e
+        run: |
+          init_choice=y ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} init
+
+      - name: Stage trex extensions for mount
+        run: |
+          mkdir -p d2e/.ci-overlay
+          cp ./trex-artifacts/*.trex d2e/.ci-overlay/
+          ls -l d2e/.ci-overlay/
+
+      - name: Create CI compose override
+        run: |
+          cat > d2e/docker-compose-ci.yml << 'EOF'
+          services:
+            alp-caddy:
+              ports: !override
+                - ${CADDY_PORT:-${PORT:-443}}:443
+            trex:
+              build: !reset null
+              image: ${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${DOCKER_TAG_NAME:-develop}
+              pull_policy: always
+              volumes:
+                - ./.ci-overlay/trexas.trex:/usr/src/node_modules/@trex/as/trexas.trex:ro
+                - ./.ci-overlay/circe.trex:/usr/src/node_modules/@trex/circe/circe.trex:ro
+                - ./.ci-overlay/hana_scan.trex:/usr/src/node_modules/@trex/hana/hana_scan.trex:ro
+                - ./.ci-overlay/pgwire.trex:/usr/src/node_modules/@trex/pgwire/pgwire.trex:ro
+                - ./.ci-overlay/fhir.trex:/usr/src/node_modules/@trex/fhir/fhir.trex:ro
+                - ./.ci-overlay/pool.trex:/usr/src/node_modules/@trex/pool/pool.trex:ro
+                - ./.ci-overlay/tpm.trex:/usr/src/node_modules/@trex/tpm/tpm.trex:ro
+          EOF
+          cat d2e/docker-compose-ci.yml
+
+      - name: Start D2E services
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          retry_wait_seconds: 100
+          max_attempts: 2
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml --pull start
+            docker ps --format "{{.Names}},{{.Status}}"
+            docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
+
+      - name: Wait for services to be healthy
+        timeout-minutes: 5
+        run: |
+          echo "Waiting for d2e-trex to become healthy..."
+          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
+            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+            sleep 5
+          done
+          echo "d2e-trex is healthy"
+          docker ps --format "{{.Names}},{{.Status}}"
+
+      - name: Run setupdemo
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          retry_wait_seconds: 100
+          max_attempts: 2
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml setupdemo
+
+      - name: Run checkflow
+        uses: nick-fields/retry@v3
+        with:
+          timeout_seconds: 1800
+          max_attempts: 1
+          command: |
+            cd d2e
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml checkflow
+
+      - name: Logs after checkflow
+        if: success() || failure()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
+
+      - name: Check app status (informational)
+        continue-on-error: true
+        run: |
+          echo "=== Checking if app is reachable ==="
+          HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:443/d2e/portal || echo "000")
+          echo "HTTP Status: $HTTP_CODE"
+          curl -k -I https://localhost:443/d2e/portal || true
+
+      - name: Restart d2e services
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml start
+
+      - name: Wait for d2e-trex healthy after restart
+        timeout-minutes: 5
+        run: |
+          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
+            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+            sleep 5
+          done
+          echo "d2e-trex is healthy"
+
+      - name: Wait for d2e-ui plugin to be available
+        run: |
+          echo "Waiting for d2e-ui plugin to be available..."
+          max_attempts=60
+          attempt=0
+          start_time=$(date +%s)
+          while [ $attempt -lt $max_attempts ]; do
+            if docker exec d2e-trex test -f /usr/src/bundled-plugins/d2e-ui/package.json >/dev/null 2>&1; then
+              end_time=$(date +%s)
+              elapsed=$((end_time - start_time))
+              echo "d2e-ui plugin is ready (took ${elapsed}s)"
+              break
+            fi
+            attempt=$((attempt + 1))
+            echo "  Attempt $attempt/$max_attempts: waiting..."
+            sleep 2
+          done
+          if [ $attempt -eq $max_attempts ]; then
+            echo "Timeout waiting for d2e-ui plugin to be available"
+            docker exec d2e-trex ls -la /usr/src/bundled-plugins/ || true
+            exit 1
+          fi
+
+      - name: Wait for webapi-init to complete
+        run: |
+          echo "Waiting for webapi-init to complete..."
+          for i in $(seq 1 60); do
+            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -q "Exited (0)"; then
+              echo "webapi-init completed successfully"
+              break
+            fi
+            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -qE "Exited \([1-9]"; then
+              echo "webapi-init failed!"
+              docker logs d2e-webapi-init || true
+              exit 1
+            fi
+            echo "Waiting for webapi-init... ($i/60)"
+            sleep 5
+          done
+
+      - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
+        run: sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+
+      - name: Build e2e Docker image
+        working-directory: d2e/tests/e2e
+        run: docker build -t d2e-e2e .
+
+      - name: Run e2e tests
+        working-directory: d2e/tests/e2e
+        timeout-minutes: 45
+        run: |
+          docker run --rm \
+            --network=host \
+            --ipc=host \
+            -v "$(pwd)/test-results:/work/test-results" \
+            -v "$(pwd)/ctrf:/work/ctrf" \
+            -e D2E_BASE_URL=https://localhost:443 \
+            -e CI=true \
+            -e GITHUB_ACTIONS=true \
+            d2e-e2e npm test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: d2e-test-results
+          path: d2e/tests/e2e/test-results/**/*
+          if-no-files-found: warn
+
+      - name: Publish Test Report
+        if: always()
+        uses: ctrf-io/github-test-reporter@v1
+        with:
+          report-path: "./d2e/tests/e2e/ctrf/*.json"
+          file-report: true
+
+      - name: Collect logs on failure
+        if: failure()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
+
+      - name: Stop D2E services
+        if: always()
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
+
+      - name: Prune system
+        if: always()
+        run: docker system prune -af
+
   # ===========================================================================
   # Layer 3: Status Gate
   # ===========================================================================
@@ -871,44 +1566,48 @@ jobs:
     name: "Integration Tests Status"
     if: always()
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     needs:
       - test-distributed
       - test-pgwire
       - test-atlas
-      - test-ai
       - test-chdb
       - test-trexas
       - test-tpm
       - test-migration
+      - test-fhir
       - test-hana
       - test-etl
       - test-pg-trex
+      - e2e-d2e
     steps:
       - name: Check test results
         run: |
           echo "test-distributed: ${{ needs.test-distributed.result }}"
           echo "test-pgwire:      ${{ needs.test-pgwire.result }}"
           echo "test-atlas:       ${{ needs.test-atlas.result }}"
-          echo "test-ai:          ${{ needs.test-ai.result }}"
           echo "test-chdb:        ${{ needs.test-chdb.result }}"
           echo "test-trexas:      ${{ needs.test-trexas.result }}"
           echo "test-tpm:         ${{ needs.test-tpm.result }}"
           echo "test-migration:   ${{ needs.test-migration.result }}"
+          echo "test-fhir:        ${{ needs.test-fhir.result }}"
           echo "test-hana:        ${{ needs.test-hana.result }}"
           echo "test-etl:         ${{ needs.test-etl.result }}"
           echo "test-pg-trex:     ${{ needs.test-pg-trex.result }}"
+          echo "e2e-d2e:          ${{ needs.e2e-d2e.result }}"
 
           if [[ "${{ needs.test-distributed.result }}" == "failure" ||
                 "${{ needs.test-pgwire.result }}" == "failure" ||
                 "${{ needs.test-atlas.result }}" == "failure" ||
-                "${{ needs.test-ai.result }}" == "failure" ||
                 "${{ needs.test-chdb.result }}" == "failure" ||
                 "${{ needs.test-trexas.result }}" == "failure" ||
                 "${{ needs.test-tpm.result }}" == "failure" ||
                 "${{ needs.test-etl.result }}" == "failure" ||
                 "${{ needs.test-pg-trex.result }}" == "failure" ||
                 "${{ needs.test-migration.result }}" == "failure" ||
-                "${{ needs.test-hana.result }}" == "failure" ]]; then
+                "${{ needs.test-fhir.result }}" == "failure" ||
+                "${{ needs.test-hana.result }}" == "failure" ||
+                "${{ needs.e2e-d2e.result }}" == "failure" ]]; then
             echo "::error::One or more integration test jobs failed"
             exit 1
           fi

@@ -8,7 +8,7 @@ on:
         required: false
         type: choice
         options:
-          - OHDSI/trexsql-ext
+          - OHDSI/trex
       GIT_BRANCH_NAME:
         default: develop
         description: Enter BranchName / ReleaseTagName
@@ -116,11 +116,36 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        id: checkout_1
+        continue-on-error: true
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
+      - if: steps.checkout_1.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+          fetch-depth: 0
+      - name: Init submodules
+        shell: bash
+        run: |
+          # Drop the source-repo-scoped basic auth header so cross-repo public
+          # submodules can clone reliably (401 otherwise triggers prompt fallback).
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 --recursive --force; then
+              echo "Submodule init succeeded on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::Submodule init failed after 3 attempts"
+          exit 1
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -143,13 +168,13 @@ jobs:
       - name: Set up Rust toolchain
         if: matrix.PKGPATH == './plugins/bao'
         uses: dtolnay/rust-toolchain@stable
-      - name: Download libtrexsql and build native library
+      - uses: ./.github/actions/setup-libtrexsql
+        if: matrix.PKGPATH == './plugins/bao'
+        with:
+          version: v1.4.4-trex
+      - name: Build bao native library
         if: matrix.PKGPATH == './plugins/bao'
         run: |
-          mkdir -p /tmp/trexsql
-          wget -q -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
-          unzip -o /tmp/libtrexsql.zip -d /tmp/trexsql
           TREXSQL_LIB_DIR=/tmp/trexsql cargo build --release
           mkdir -p plugins/bao/java/resources/linux-x86-64
           cp target/release/libtrexsql_engine.so plugins/bao/java/resources/linux-x86-64/
@@ -233,23 +258,9 @@ jobs:
               tar -tzf "$TARBALL" | grep '\.trex$'
               ;;
           esac
-      # These tests are run in CI for the first time with this change. They
-      # surface latent failures (drifted assertions, compile errors, suites
-      # that need external services) that pre-existed this PR. Marked
-      # continue-on-error so the build pipeline stays green; remove the flag
-      # per-plugin as each suite is stabilized.
-      - name: Run Rust unit tests
-        if: contains(fromJSON('["./plugins/db", "./plugins/fhir", "./plugins/hana", "./plugins/migration", "./plugins/pgt", "./plugins/pgwire", "./plugins/transform"]'), matrix.PKGPATH)
-        continue-on-error: true
-        run: cargo test --no-fail-fast
-        working-directory: ${{ matrix.PKGPATH }}
-
-      - name: Run sqllogic tests
-        if: contains(fromJSON('["./plugins/ai", "./plugins/atlas", "./plugins/cql2elm", "./plugins/db", "./plugins/etl", "./plugins/fhir", "./plugins/hana", "./plugins/migration", "./plugins/pgwire", "./plugins/tpm", "./plugins/transform"]'), matrix.PKGPATH)
-        continue-on-error: true
-        run: make test_debug
-        working-directory: ${{ matrix.PKGPATH }}
-
+      # Rust unit tests run in coverage.yml (rust-unit-coverage matrix); sqllogic
+      # tests run in integration-tests.yml. Running them here would force a debug
+      # rebuild inside this release-flavor job for no added signal.
       - name: Publish
         # Publish only from the canonical OHDSI/trex repository on develop or main.
         # Forks and feature branches build + verify but do not push to the registry.
@@ -300,11 +311,34 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        id: checkout_2
+        continue-on-error: true
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
           fetch-depth: 0
+      - if: steps.checkout_2.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+          fetch-depth: 0
+      - name: Init submodules
+        shell: bash
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 --recursive --force; then
+              echo "Submodule init succeeded on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::Submodule init failed after 3 attempts"
+          exit 1
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -367,6 +401,13 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        id: checkout_3
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+      - if: steps.checkout_3.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
@@ -431,10 +472,32 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        id: checkout_4
+        continue-on-error: true
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
+          submodules: false
+      - if: steps.checkout_4.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - name: Init submodules
+        shell: bash
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 --recursive --force; then
+              echo "Submodule init succeeded on attempt $attempt"
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::Submodule init failed after 3 attempts"
+          exit 1
 
       - name: Download amd64 extension artifacts
         uses: actions/download-artifact@v4
@@ -542,105 +605,14 @@ jobs:
             ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev
             ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev-sha-${{ github.sha }}
 
-  build-pg-trex:
-    needs: [build]
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ env.GIT_BRANCH_NAME }}
-          repository: ${{ env.GIT_REPO_FULL_NAME }}
-          submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install PostgreSQL 17 dev headers
-        run: |
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
-          sudo apt-get update
-          sudo apt-get install -y postgresql-17 postgresql-server-dev-17
-
-      - name: Download libtrexsql
-        run: |
-          wget -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
-          unzip /tmp/libtrexsql.zip -d /tmp/trexsql
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.pgrx
-            plugins/pg_trex/target
-          key: rust-pg-trex-${{ runner.os }}-${{ hashFiles('plugins/pg_trex/Cargo.lock') }}
-          restore-keys: rust-pg-trex-${{ runner.os }}-
-
-      - name: Install cargo-pgrx and init
-        run: |
-          cargo install cargo-pgrx --version 0.16.1 --locked
-          cargo pgrx init --pg17=$(which pg_config)
-
-      - name: Build pg_trex
-        run: LIBRARY_PATH=/tmp/trexsql cargo build
-        working-directory: plugins/pg_trex
-
-      - name: Download extension artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ext-*-amd64
-          path: extensions/
-          merge-multiple: true
-
-      - name: List extensions
-        run: ls -la extensions/
-
-      - name: Build pg_trex Docker image
-        run: docker build -t pg-trex-test -f plugins/pg_trex/Dockerfile .
-
-      - name: Smoke test
-        run: |
-          docker run -d --name pg-trex-smoke \
-            pg-trex-test \
-            postgres \
-            -c shared_preload_libraries=pg_trex \
-            -c pg_trex.swarm_extension_path=/usr/lib/trexsql/extensions/db.trex
-          sleep 8
-          docker exec pg-trex-smoke pg_isready -U postgres
-          docker exec pg-trex-smoke psql -U postgres -c "SELECT state FROM pg_trex_status()"
-          docker rm -f pg-trex-smoke
-
-      - name: Login to GHCR
-        # Push only from canonical repo on develop/main.
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push to GHCR
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        run: |
-          # GHCR rejects uppercase repo names; lowercase the owner.
-          NS="${GITHUB_REPOSITORY_OWNER,,}"
-          docker tag pg-trex-test ghcr.io/$NS/pg-trex:latest
-          docker tag pg-trex-test ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
-          docker push ghcr.io/$NS/pg-trex:latest
-          docker push ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
-
   success:
-    needs: [build, build-arm, build-docker, build-pg-trex, create-release]
+    needs: [build, build-arm, build-docker, create-release]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check
         run: |
-          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-arm.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.build-pg-trex.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" ]]; then
+          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-arm.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" ]]; then
             echo "::error::One or more jobs failed"
             exit 1
           fi
