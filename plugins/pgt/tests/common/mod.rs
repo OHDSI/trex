@@ -1,3 +1,10 @@
+#![allow(dead_code)]
+
+pub mod fixtures;
+
+#[cfg(feature = "hana-it")]
+pub mod hana_container;
+
 use hdbconnect::{Connection, HdbResult};
 use pgt::{SqlTransformer, TransformationConfig};
 use std::env;

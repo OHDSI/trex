@@ -112,4 +112,58 @@ mod tests {
         assert!(backup_path.exists());
         assert_eq!(read_sql_file(&backup_path).unwrap(), content);
     }
+
+    #[test]
+    fn test_backup_file_nonexistent_returns_none() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("no_such_file.sql");
+        let result = backup_file(&missing).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_get_file_size() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("size_test.sql");
+        let content = "SELECT 1;";
+        write_sql_file(&file_path, content).unwrap();
+        let size = get_file_size(&file_path).unwrap();
+        assert_eq!(size, content.len() as u64);
+    }
+
+    #[test]
+    fn test_is_readable_file_existing() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("readable.sql");
+        write_sql_file(&file_path, "SELECT 1;").unwrap();
+        assert!(is_readable_file(&file_path));
+    }
+
+    #[test]
+    fn test_is_readable_file_missing() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("not_here.sql");
+        assert!(!is_readable_file(&missing));
+    }
+
+    #[test]
+    fn test_get_file_stem() {
+        assert_eq!(get_file_stem("path/to/query.sql"), Some("query".to_string()));
+        assert_eq!(get_file_stem("no_extension"), Some("no_extension".to_string()));
+    }
+
+    #[test]
+    fn test_read_sql_file_missing_returns_error() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("ghost.sql");
+        assert!(read_sql_file(&missing).is_err());
+    }
+
+    #[test]
+    fn test_ensure_parent_dir_existing_parent_is_noop() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("file.sql");
+        // parent already exists; should not fail
+        ensure_parent_dir(&file_path).unwrap();
+    }
 }
