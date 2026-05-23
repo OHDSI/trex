@@ -12,10 +12,10 @@ on:
         description: 'D2E branch to test against'
         default: 'develop'
         type: string
-  workflow_run:
-    workflows: ["d2e build plugin"]
-    types: [completed]
+  push:
     branches: [main, develop]
+  pull_request:
+    types: [opened, ready_for_review, reopened, synchronize]
 
 env:
   D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
@@ -26,9 +26,88 @@ env:
   # image build, so the runtime npm-install seed is no longer read.
 
 jobs:
+  build-extension:
+    runs-on: ubuntu-24.04
+    if: github.event.pull_request.draft == false
+    strategy:
+      fail-fast: false
+      matrix:
+        ext:
+          # plugin_dir: location under plugins/
+          # file:       produced .trex filename (matches EXTENSION_NAME in plugin Makefile)
+          # mount:      target path inside d2e-trex container (npm package location)
+          - { plugin_dir: runtime, file: trexas.trex,    mount: /usr/src/node_modules/@trex/as/trexas.trex }
+          - { plugin_dir: atlas,   file: circe.trex,     mount: /usr/src/node_modules/@trex/circe/circe.trex }
+          - { plugin_dir: hana,    file: hana_scan.trex, mount: /usr/src/node_modules/@trex/hana/hana_scan.trex }
+          - { plugin_dir: pgwire,  file: pgwire.trex,    mount: /usr/src/node_modules/@trex/pgwire/pgwire.trex }
+          - { plugin_dir: fhir,    file: fhir.trex,      mount: /usr/src/node_modules/@trex/fhir/fhir.trex }
+          - { plugin_dir: pool,    file: pool.trex,      mount: /usr/src/node_modules/@trex/pool/pool.trex }
+          - { plugin_dir: tpm,     file: tpm.trex,       mount: /usr/src/node_modules/@trex/tpm/tpm.trex }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install curl unzip libopenblas-dev libglib2.0-dev
+
+      - name: Install TrexSQL library
+        run: |
+          curl --retry 3 --retry-delay 5 --retry-all-errors -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/${{ env.TREXSQL_VERSION }}/libtrexsql-linux-amd64.zip
+          unzip libtrexsql-linux-amd64.zip
+          sudo cp duckdb.h /usr/local/include/
+          sudo cp libtrexsql.so /usr/local/lib/
+          sudo ldconfig
+
+      - name: Setup Rust
+        working-directory: plugins/${{ matrix.ext.plugin_dir }}
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: plugins/${{ matrix.ext.plugin_dir }}
+
+      - name: Clean V8 cache
+        working-directory: plugins/${{ matrix.ext.plugin_dir }}
+        run: rm -rf target/*/gn_out target/*/obj/librusty_v8.a || true
+
+      - name: Install GraalVM and Maven (atlas only)
+        if: matrix.ext.plugin_dir == 'atlas'
+        working-directory: plugins/atlas
+        run: |
+          sudo apt-get install -y --no-install-recommends maven xxd
+          export GRAAL_HOME=/opt/graalvm
+          sudo -E bash ./install-graalvm.sh
+          echo "GRAAL_HOME=/opt/graalvm" >> "$GITHUB_ENV"
+          echo "JAVA_HOME=/opt/graalvm" >> "$GITHUB_ENV"
+          echo "/opt/graalvm/bin" >> "$GITHUB_PATH"
+
+      - name: Build extension
+        working-directory: plugins/${{ matrix.ext.plugin_dir }}
+        run: |
+          make configure
+          make release
+
+      - name: Sign extension
+        working-directory: plugins/${{ matrix.ext.plugin_dir }}
+        env:
+          DUCKDB_EXTENSION_SIGNING_KEY: ${{ secrets.DUCKDB_EXTENSION_SIGNING_KEY }}
+        run: |
+          ./extension-ci-tools/extension_signing/sign-if-key.sh build/release
+
+      - name: Upload extension artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trex-ext-${{ matrix.ext.plugin_dir }}
+          path: plugins/${{ matrix.ext.plugin_dir }}/build/release/${{ matrix.ext.file }}
+          retention-days: 1
+          if-no-files-found: error
+
   run-e2e-tests:
-    # Only proceed when the upstream plugin-ci run succeeded (or this was triggered manually).
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    needs: build-extension
     runs-on: ubuntu-24.04
     steps:
       - name: Free Disk Space
@@ -50,14 +129,12 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-      - name: Download extension artifacts from plugin-ci run
+      - name: Download extension artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ext-*-amd64
+          pattern: trex-ext-*
           path: ./trex-artifacts
           merge-multiple: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id || github.run_id }}
 
       - name: Checkout D2E
         uses: actions/checkout@v4
