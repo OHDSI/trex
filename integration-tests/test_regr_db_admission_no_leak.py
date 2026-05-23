@@ -35,6 +35,9 @@ import time
 import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -146,8 +149,8 @@ def test_admission_does_not_leak_on_queued():
                     cur.execute(sql)
                     try:
                         cur.fetchall()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("ignoring %s: %s", type(e).__name__, e)
                 finally:
                     cur.close()
             except Exception:
@@ -170,6 +173,6 @@ def test_admission_does_not_leak_on_queued():
     finally:
         try:
             _scalar(conn, "SELECT trex_db_set_distributed(false)")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         conn.close()
