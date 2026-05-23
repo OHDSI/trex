@@ -13,3 +13,11 @@ paths-ignore:
   - "**/coverage/**"
   - "**/.next/**"
   - "**/node_modules/**"
+  - "**/target/**"
+  # Python virtualenvs (e.g. integration-tests/venv/).
+  - "**/venv/**"
+  - "**/.venv/**"
+  # Explicit minified/bundled JS patterns.
+  - "**/*.worker-*.js"
+  - "**/*.min.js"
+  - "**/*.bundle.js"
