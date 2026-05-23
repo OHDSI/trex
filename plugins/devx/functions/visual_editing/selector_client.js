@@ -113,7 +113,7 @@
 
     dragPrepareTimer = setTimeout(function () {
       if (dragState === "preparing") {
-        startDrag(e.clientX, e.clientY);
+        startDrag();
       }
     }, DRAG_PREPARE_MS);
 

@@ -7,11 +7,12 @@ const client = new Client({
   port: 5432,
 });
 await client.connect();
-let result
 try {
-result = await client.queryArray("CREATE TABLE Persons (PersonID int,City varchar(255))");
-} catch (e) {}
-result = await client.queryArray("insert into persons values (12,'asd')");
+  await client.queryArray("CREATE TABLE Persons (PersonID int,City varchar(255))");
+} catch (_e) {
+  // Table may already exist; intentionally ignored.
+}
+let result = await client.queryArray("insert into persons values (12,'asd')");
 console.log(result.rows);
 result = await client.queryArray("select count(1) from demo_cdm.person");
 console.log(result.rows);

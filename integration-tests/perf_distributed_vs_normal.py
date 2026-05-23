@@ -56,8 +56,8 @@ def main():
     log("=" * 85)
 
     # --- Single node (baseline) with all data ---
-    gp0, fp0, pp0 = alloc_ports()
-    baseline = Node([DB_EXT], gp0, fp0, pp0)
+    gp0, fp0, pp0, tp0 = alloc_ports()
+    baseline = Node([DB_EXT], gp0, fp0, pp0, tp0)
     log("Creating baseline node with all data...")
     baseline.execute(
         f"CREATE TABLE orders AS "
@@ -71,8 +71,8 @@ def main():
     log("Creating two-node cluster (50/50 split)...")
 
     # Node A: first half
-    gp_a, fp_a, pp_a = alloc_ports()
-    node_a = Node([DB_EXT], gp_a, fp_a, pp_a)
+    gp_a, fp_a, pp_a, tp_a = alloc_ports()
+    node_a = Node([DB_EXT], gp_a, fp_a, pp_a, tp_a)
     node_a.execute(
         f"CREATE TABLE orders AS "
         f"SELECT i AS id, "
@@ -85,8 +85,8 @@ def main():
     node_a.execute(f"SELECT trex_db_register_service('flight', '127.0.0.1', {fp_a})")
 
     # Node B: second half
-    gp_b, fp_b, pp_b = alloc_ports()
-    node_b = Node([DB_EXT], gp_b, fp_b, pp_b)
+    gp_b, fp_b, pp_b, tp_b = alloc_ports()
+    node_b = Node([DB_EXT], gp_b, fp_b, pp_b, tp_b)
     node_b.execute(
         f"CREATE TABLE orders AS "
         f"SELECT i AS id, "

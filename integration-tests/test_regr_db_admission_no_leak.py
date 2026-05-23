@@ -35,6 +35,9 @@ import time
 import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -115,20 +118,20 @@ def test_admission_does_not_leak_on_queued():
         # Force the distributed admission path so submit_or_check is exercised.
         try:
             _scalar(conn, "SELECT trex_db_set_distributed(true)")
-        except Exception:
+        except Exception as e:
             # Some builds expose this as an integer/text result; ignore the type
             # mismatch from the prepared-statement path and assume it succeeded.
-            pass
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
         # Quota = 1 makes any second concurrent in-flight query queue.
         try:
             _scalar(conn,
                     "SELECT trex_db_set_user_quota(%s, %s)",
                     USER_ID, 1)
-        except Exception:
+        except Exception as e:
             # Fall back to the default user used by the binding. The test still
             # exercises the leak path; we just rely on the global cap.
-            pass
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
         # Snapshot baseline: the admission table may already have entries from
         # prior tests or background activity.
@@ -146,15 +149,15 @@ def test_admission_does_not_leak_on_queued():
                     cur.execute(sql)
                     try:
                         cur.fetchall()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("ignoring %s: %s", type(e).__name__, e)
                 finally:
                     cur.close()
-            except Exception:
+            except Exception as e:
                 # Queued / Rejected returns surface as a pgwire error from the
                 # bind() failure. We do not care about the per-call status —
                 # only that the controller cleans up afterward.
-                pass
+                logger.debug("ignoring %s: %s", type(e).__name__, e)
 
         # Give the controller a moment in case any cancel landed asynchronously.
         time.sleep(0.5)
@@ -170,6 +173,6 @@ def test_admission_does_not_leak_on_queued():
     finally:
         try:
             _scalar(conn, "SELECT trex_db_set_distributed(false)")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         conn.close()

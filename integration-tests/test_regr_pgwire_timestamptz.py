@@ -43,6 +43,9 @@ from __future__ import annotations
 import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -124,8 +127,8 @@ def trex_conn():
     finally:
         try:
             conn.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 @pytest.fixture(scope="module")
@@ -165,8 +168,8 @@ def populated_table(trex_conn):
             cur = trex_conn.cursor()
             cur.execute(f"DROP TABLE IF EXISTS {TABLE}")
             cur.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 def test_pgwire_select_now_does_not_crash(trex_conn):

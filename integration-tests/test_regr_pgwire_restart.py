@@ -32,6 +32,9 @@ host's ``localhost:5433`` with seeded ``trex / trex`` credentials.
 from __future__ import annotations
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg2
@@ -100,8 +103,8 @@ def _ensure_clean_port():
                 (PGWIRE_HOST.replace("localhost", "127.0.0.1"), RESTART_PORT),
             )
             cur.fetchone()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         cur.close()
     finally:
         conn.close()

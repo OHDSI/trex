@@ -18,6 +18,9 @@ import uuid
 import pytest
 
 from conftest import Node, POOL_EXT, FHIR_EXT, alloc_ports
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Pool sizes to test: single-threaded and multi-threaded.
 # Each parametrized value starts a separate FHIR server instance.
@@ -172,8 +175,8 @@ def fhir(request):
             s, _, _ = client.get("/health")
             if s == 200:
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         time.sleep(0.5)
     else:
         node.close()
@@ -185,8 +188,8 @@ def fhir(request):
 
     try:
         node.execute(f"SELECT trex_fhir_stop('127.0.0.1', {fhir_port})")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     node.close()
     if fhir_db_dir:
         shutil.rmtree(fhir_db_dir, ignore_errors=True)
