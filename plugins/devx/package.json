@@ -7,6 +7,9 @@
     "dist/"
   ],
   "scripts": {
+    "postinstall": "node scripts/sync-monaco.mjs",
+    "predev": "node scripts/sync-monaco.mjs",
+    "prebuild": "node scripts/sync-monaco.mjs",
     "dev": "vite",
     "build": "tsc -b && vite build && vite build --config vite.config.spa.ts && cp dist/assets/index-*.css dist/devx-spa.css",
     "prepack": "npm run build",
