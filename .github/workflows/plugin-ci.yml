@@ -116,6 +116,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        id: __checkout_1
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: recursive
+          fetch-depth: 0
+      - if: steps.__checkout_1.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
@@ -286,6 +295,15 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        id: __checkout_2
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: recursive
+          fetch-depth: 0
+      - if: steps.__checkout_2.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
@@ -353,6 +371,13 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        id: __checkout_3
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+      - if: steps.__checkout_3.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
@@ -417,6 +442,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        id: __checkout_4
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: recursive
+      - if: steps.__checkout_4.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}

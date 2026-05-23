@@ -29,6 +29,12 @@ jobs:
         plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
     steps:
       - uses: actions/checkout@v4
+        id: __checkout_1
+        continue-on-error: true
+        with:
+          submodules: recursive
+      - if: steps.__checkout_1.outcome == 'failure'
+        uses: actions/checkout@v4
         with:
           submodules: recursive
 
@@ -132,6 +138,10 @@ jobs:
     continue-on-error: true  # informational until we have one week of green runs
     steps:
       - uses: actions/checkout@v4
+        id: __checkout_2
+        continue-on-error: true
+      - if: steps.__checkout_2.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
