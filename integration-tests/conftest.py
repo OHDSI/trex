@@ -69,20 +69,24 @@ for src, dst in [
     if os.path.exists(src) and not os.path.exists(dst):
         os.symlink(src, dst)
 
-_next_gossip_port = 19000
-_next_flight_port = 19100
-_next_pgwire_port = 19200
-_next_trexas_port = 19300
+class _PortCounter:
+    """Module-level counters bundled in a class to avoid `global` statements."""
+    gossip = 19000
+    flight = 19100
+    pgwire = 19200
+    trexas = 19300
 
 
 def alloc_ports():
     """Allocate a unique gossip+flight+pgwire+trexas port tuple per call."""
-    global _next_gossip_port, _next_flight_port, _next_pgwire_port, _next_trexas_port
-    gp, fp, pp, tp = _next_gossip_port, _next_flight_port, _next_pgwire_port, _next_trexas_port
-    _next_gossip_port += 1
-    _next_flight_port += 1
-    _next_pgwire_port += 1
-    _next_trexas_port += 1
+    gp = _PortCounter.gossip
+    fp = _PortCounter.flight
+    pp = _PortCounter.pgwire
+    tp = _PortCounter.trexas
+    _PortCounter.gossip += 1
+    _PortCounter.flight += 1
+    _PortCounter.pgwire += 1
+    _PortCounter.trexas += 1
     return gp, fp, pp, tp
 
 
