@@ -124,11 +124,7 @@ async fn fhir_content_type_middleware(request: Request<Body>, next: Next) -> Res
     let path = request.uri().path().to_string();
     let mut response = next.run(request).await;
 
-    let is_fhir_endpoint = !path.starts_with("/health")
-        && !path.starts_with("/metrics")
-        && !path.starts_with("/datasets");
-
-    if is_fhir_endpoint {
+    if is_fhir_endpoint_path(&path) {
         if let Some(ct) = response.headers().get(header::CONTENT_TYPE) {
             if ct.to_str().unwrap_or("").contains("application/json") {
                 response.headers_mut().insert(
@@ -140,4 +136,159 @@ async fn fhir_content_type_middleware(request: Request<Body>, next: Next) -> Res
     }
 
     response
+}
+
+/// Whether a request path should have its `application/json` response rewritten to
+/// `application/fhir+json`. The infra endpoints (`/health`, `/metrics`, `/datasets`)
+/// are excluded so callers can keep using plain JSON tooling.
+pub fn is_fhir_endpoint_path(path: &str) -> bool {
+    !path.starts_with("/health")
+        && !path.starts_with("/metrics")
+        && !path.starts_with("/datasets")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::response::IntoResponse;
+    use axum::routing::get;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    #[test]
+    fn is_fhir_endpoint_excludes_infra_paths() {
+        assert!(!is_fhir_endpoint_path("/health"));
+        assert!(!is_fhir_endpoint_path("/health/ready"));
+        assert!(!is_fhir_endpoint_path("/metrics"));
+        assert!(!is_fhir_endpoint_path("/datasets"));
+        assert!(!is_fhir_endpoint_path("/datasets/abc"));
+    }
+
+    #[test]
+    fn is_fhir_endpoint_includes_resource_paths() {
+        assert!(is_fhir_endpoint_path("/ds1/Patient"));
+        assert!(is_fhir_endpoint_path("/ds1/Patient/abc"));
+        assert!(is_fhir_endpoint_path("/ds1/metadata"));
+    }
+
+    /// Mount the production middleware over a tiny test route that returns
+    /// `application/json`. Hitting a FHIR-prefixed path should yield the
+    /// rewritten `application/fhir+json` content type.
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_rewrites_json_on_fhir_path() {
+        async fn handler() -> axum::Json<serde_json::Value> {
+            axum::Json(serde_json::json!({"ok": true}))
+        }
+
+        let app: Router = Router::new()
+            .route("/ds1/Patient", get(handler))
+            .layer(middleware::from_fn(fhir_content_type_middleware));
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/ds1/Patient")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+        assert!(ct.contains("application/fhir+json"), "got: {}", ct);
+
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(body["ok"], true);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_leaves_health_json_alone() {
+        async fn handler() -> axum::Json<serde_json::Value> {
+            axum::Json(serde_json::json!({"status": "ok"}))
+        }
+
+        let app: Router = Router::new()
+            .route("/health", get(handler))
+            .layer(middleware::from_fn(fhir_content_type_middleware));
+
+        let resp = app
+            .oneshot(Request::builder().uri("/health").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+        // Excluded path: original application/json passes through unchanged.
+        assert!(ct.contains("application/json"), "got: {}", ct);
+        assert!(!ct.contains("fhir+json"), "got: {}", ct);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_leaves_text_plain_alone_on_fhir_path() {
+        async fn handler() -> axum::response::Response {
+            (StatusCode::OK, [("content-type", "text/plain")], "hi").into_response()
+        }
+
+        let app: Router = Router::new()
+            .route("/ds1/Patient", get(handler))
+            .layer(middleware::from_fn(fhir_content_type_middleware));
+
+        let resp = app
+            .oneshot(Request::builder().uri("/ds1/Patient").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+        assert!(ct.contains("text/plain"), "got: {}", ct);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn logging_middleware_passes_request_through() {
+        async fn handler() -> &'static str {
+            "ok"
+        }
+
+        let app: Router = Router::new()
+            .route("/x", get(handler))
+            .layer(middleware::from_fn(logging_middleware));
+
+        let resp = app
+            .oneshot(Request::builder().uri("/x").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&body_bytes[..], b"ok");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_constructs_routes_and_serves_metrics() {
+        // Build the full production router with a real (no-defs) AppState.
+        // /metrics doesn't need a DB connection, so it should return 200.
+        let registry = crate::fhir::resource_registry::ResourceRegistry::new();
+        let search_params = crate::fhir::search_parameter::SearchParamRegistry::load_from_json(
+            r#"{"resourceType":"Bundle","entry":[]}"#,
+        )
+        .unwrap();
+        let state = std::sync::Arc::new(crate::state::AppState::new(
+            std::sync::Arc::new(registry),
+            std::sync::Arc::new(search_params),
+            "memory".to_string(),
+        ));
+
+        let app = build_router(state);
+
+        let resp = app
+            .oneshot(Request::builder().uri("/metrics").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap();
+        assert!(ct.contains("text/plain"), "got: {}", ct);
+    }
 }

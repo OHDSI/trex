@@ -113,3 +113,40 @@ impl ServerRegistry {
         server_info
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn server_key_formats_host_port() {
+        assert_eq!(ServerRegistry::server_key("127.0.0.1", 8080), "127.0.0.1:8080");
+        assert_eq!(ServerRegistry::server_key("0.0.0.0", 0), "0.0.0.0:0");
+    }
+
+    #[test]
+    fn empty_registry_reports_not_running() {
+        let r = ServerRegistry::new();
+        assert!(!r.is_server_running("127.0.0.1", 8080));
+    }
+
+    #[test]
+    fn stop_missing_server_returns_err() {
+        let r = ServerRegistry::new();
+        let res = r.stop_server("127.0.0.1", 8080);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("No server running"));
+    }
+
+    #[test]
+    fn empty_registry_get_servers_info_empty() {
+        let r = ServerRegistry::new();
+        assert!(r.get_servers_info().is_empty());
+    }
+
+    #[test]
+    fn deregister_missing_is_noop() {
+        let r = ServerRegistry::new();
+        r.deregister_server("127.0.0.1", 8080);
+    }
+}

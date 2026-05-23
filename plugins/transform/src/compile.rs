@@ -242,3 +242,293 @@ impl VTab for CompileVTab {
         Some(vec![LogicalTypeHandle::from(LogicalTypeId::Varchar)])
     }
 }
+
+#[cfg(test)]
+mod compile_tests {
+    use super::*;
+    use crate::project::{
+        EndpointConfig, Materialization, Model, Project, ProjectConfig, Seed,
+    };
+
+    fn project_config() -> ProjectConfig {
+        ProjectConfig {
+            name: "test".to_string(),
+            models_path: "models".to_string(),
+            seeds_path: "seeds".to_string(),
+            tests_path: "tests".to_string(),
+            source_tables: Vec::new(),
+        }
+    }
+
+    fn make_project(models: Vec<Model>, seeds: Vec<Seed>) -> Project {
+        Project {
+            config: project_config(),
+            models,
+            seeds,
+            tests: Vec::new(),
+            sources: Vec::new(),
+            source_tables: Vec::new(),
+            base_path: String::new(),
+        }
+    }
+
+    fn make_model(name: &str, sql: &str) -> Model {
+        Model {
+            name: name.to_string(),
+            sql: sql.to_string(),
+            materialization: Materialization::View,
+            unique_key: None,
+            incremental_strategy: None,
+            updated_at: None,
+            batch_size: None,
+            lookback: None,
+            merge_update_columns: None,
+            merge_exclude_columns: None,
+            strategy: None,
+            check_cols: None,
+            pre_hooks: None,
+            post_hooks: None,
+            column_tests: Vec::new(),
+            yaml_content: None,
+            endpoint: None,
+        }
+    }
+
+    fn position(results: &[CompileResult], name: &str) -> usize {
+        results
+            .iter()
+            .position(|r| r.name == name)
+            .expect("expected model missing from compile output")
+    }
+
+    #[test]
+    fn compile_project_returns_empty_for_empty_project() {
+        let project = make_project(Vec::new(), Vec::new());
+        let results = compile_project(&project).unwrap();
+        assert!(
+            results.is_empty(),
+            "empty project should produce no compile rows, got {}",
+            results.len()
+        );
+    }
+
+    #[test]
+    fn compile_project_emits_single_ok_row_for_single_model() {
+        let project = make_project(
+            vec![make_model("solo", "SELECT 1 AS x")],
+            Vec::new(),
+        );
+        let results = compile_project(&project).unwrap();
+        assert_eq!(results.len(), 1, "expected one compile row");
+        let row = &results[0];
+        assert_eq!(row.name, "solo");
+        assert_eq!(row.status, "ok", "status should be ok, got {}", row.status);
+        assert_eq!(row.message, "", "ok rows should have empty message");
+        assert_eq!(row.order, 0, "single model should get order 0");
+        assert_eq!(row.materialized, "view");
+        assert_eq!(row.dependencies, "");
+    }
+
+    #[test]
+    fn compile_project_orders_dependent_after_dependency() {
+        // model_b depends on model_a; expected topo order: a before b.
+        let project = make_project(
+            vec![
+                make_model("model_a", "SELECT 1 AS id"),
+                make_model("model_b", "SELECT * FROM model_a"),
+            ],
+            Vec::new(),
+        );
+        let results = compile_project(&project).unwrap();
+        assert_eq!(results.len(), 2);
+        let pa = position(&results, "model_a");
+        let pb = position(&results, "model_b");
+        assert!(pa < pb, "model_a should come before model_b (got {pa} vs {pb})");
+        assert_eq!(results[pa].order as usize, pa);
+        assert_eq!(results[pb].order as usize, pb);
+        assert_eq!(results[pa].dependencies, "");
+        assert_eq!(results[pb].dependencies, "model_a");
+        assert!(results.iter().all(|r| r.status == "ok"));
+    }
+
+    #[test]
+    fn compile_project_excludes_unknown_table_refs_from_dependencies() {
+        // model_b references model_a (known) and ghost_table (unknown).
+        let project = make_project(
+            vec![
+                make_model("model_a", "SELECT 1 AS id"),
+                make_model(
+                    "model_b",
+                    "SELECT * FROM model_a JOIN ghost_table ON model_a.id = ghost_table.id",
+                ),
+            ],
+            Vec::new(),
+        );
+        let results = compile_project(&project).unwrap();
+        let b = &results[position(&results, "model_b")];
+        assert_eq!(
+            b.dependencies, "model_a",
+            "unknown table 'ghost_table' must not appear in deps; got: {}",
+            b.dependencies
+        );
+    }
+
+    #[test]
+    fn compile_project_reports_parse_error_with_order_minus_one() {
+        // Malformed SQL — parser should fail; we expect a single error row with order -1.
+        let project = make_project(
+            vec![make_model("broken", "SELECT FROM WHERE")],
+            Vec::new(),
+        );
+        let results = compile_project(&project).unwrap();
+        assert_eq!(results.len(), 1, "exactly one error row expected");
+        let row = &results[0];
+        assert_eq!(row.name, "broken");
+        assert_eq!(row.status, "error", "status should be error, got {}", row.status);
+        assert_eq!(row.order, -1, "error rows must carry order = -1");
+        assert!(
+            !row.message.is_empty(),
+            "error row must carry a non-empty message"
+        );
+        assert!(
+            row.message.contains("SQL parse error"),
+            "expected parse-error context in message, got: {}",
+            row.message
+        );
+        // Materialization still flows through even on error.
+        assert_eq!(row.materialized, "view");
+    }
+
+    #[test]
+    fn compile_project_errors_on_cycle_between_models() {
+        // model_a depends on model_b and vice versa — topological_sort surfaces a cycle error.
+        let project = make_project(
+            vec![
+                make_model("model_a", "SELECT * FROM model_b"),
+                make_model("model_b", "SELECT * FROM model_a"),
+            ],
+            Vec::new(),
+        );
+        let msg = match compile_project(&project) {
+            Ok(_) => panic!("cycle should bubble up as Err, but compile_project returned Ok"),
+            Err(e) => e.to_string(),
+        };
+        assert!(
+            msg.contains("Circular dependency"),
+            "expected circular-dependency error, got: {msg}"
+        );
+        assert!(msg.contains("model_a") && msg.contains("model_b"));
+    }
+
+    #[test]
+    fn compile_project_includes_seed_references_in_dependencies() {
+        // Seeds count as known names; a model referencing a seed must pick it up.
+        let project = make_project(
+            vec![make_model("uses_seed", "SELECT * FROM my_seed")],
+            vec![Seed {
+                name: "my_seed".to_string(),
+                path: "/tmp/my_seed.csv".to_string(),
+            }],
+        );
+        let results = compile_project(&project).unwrap();
+        assert_eq!(results.len(), 2, "should contain seed and model rows");
+        let seed_row = &results[position(&results, "my_seed")];
+        assert_eq!(seed_row.materialized, "seed");
+        assert_eq!(seed_row.dependencies, "");
+        let model_row = &results[position(&results, "uses_seed")];
+        assert_eq!(
+            model_row.dependencies, "my_seed",
+            "seed should appear in model's dependencies"
+        );
+        // Seed sorts before its dependent.
+        assert!(
+            position(&results, "my_seed") < position(&results, "uses_seed"),
+            "seed must come before model that depends on it"
+        );
+    }
+
+    #[test]
+    fn compile_project_filters_self_references_from_dependencies() {
+        // Even if a model's SQL names itself, that self-ref must not appear in deps.
+        let project = make_project(
+            vec![make_model(
+                "recursive_ish",
+                "SELECT * FROM recursive_ish",
+            )],
+            Vec::new(),
+        );
+        let results = compile_project(&project).unwrap();
+        assert_eq!(results.len(), 1);
+        let row = &results[0];
+        assert_eq!(row.status, "ok");
+        assert_eq!(
+            row.dependencies, "",
+            "self-reference must be stripped from deps; got: {}",
+            row.dependencies
+        );
+    }
+
+    #[test]
+    fn compile_project_propagates_endpoint_metadata() {
+        let mut model = make_model("api_model", "SELECT 1 AS id");
+        model.materialization = Materialization::Table;
+        model.endpoint = Some(EndpointConfig {
+            path: "/v1/api_model".to_string(),
+            roles: vec!["admin".to_string(), "viewer".to_string()],
+            formats: vec!["json".to_string(), "csv".to_string()],
+        });
+        let project = make_project(vec![model], Vec::new());
+        let results = compile_project(&project).unwrap();
+        assert_eq!(results.len(), 1);
+        let row = &results[0];
+        assert_eq!(row.endpoint_path, "/v1/api_model");
+        assert_eq!(
+            row.endpoint_roles, "admin,viewer",
+            "roles should be comma-joined in declared order"
+        );
+        assert_eq!(
+            row.endpoint_formats, "json,csv",
+            "formats should be comma-joined in declared order"
+        );
+        assert_eq!(row.materialized, "table");
+    }
+
+    #[test]
+    fn compile_project_leaves_endpoint_fields_empty_when_unset() {
+        let project = make_project(
+            vec![make_model("plain", "SELECT 1")],
+            Vec::new(),
+        );
+        let results = compile_project(&project).unwrap();
+        let row = &results[0];
+        assert_eq!(row.endpoint_path, "");
+        assert_eq!(row.endpoint_roles, "");
+        assert_eq!(row.endpoint_formats, "");
+    }
+
+    #[test]
+    fn compile_project_sorts_multiple_dependencies_alphabetically() {
+        // model_c depends on model_a and model_b — deps string must be sorted.
+        let project = make_project(
+            vec![
+                make_model("model_a", "SELECT 1 AS id"),
+                make_model("model_b", "SELECT 1 AS id"),
+                make_model(
+                    "model_c",
+                    "SELECT * FROM model_b JOIN model_a ON model_a.id = model_b.id",
+                ),
+            ],
+            Vec::new(),
+        );
+        let results = compile_project(&project).unwrap();
+        let c = &results[position(&results, "model_c")];
+        assert_eq!(
+            c.dependencies, "model_a, model_b",
+            "deps must be alphabetically sorted and comma-space joined"
+        );
+        // Both upstreams come before model_c.
+        let pc = position(&results, "model_c");
+        assert!(position(&results, "model_a") < pc);
+        assert!(position(&results, "model_b") < pc);
+    }
+}

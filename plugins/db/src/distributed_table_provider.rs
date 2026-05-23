@@ -539,4 +539,115 @@ mod tests {
         let result = provider.supports_filters_pushdown(&[&expr]).unwrap();
         assert_eq!(result, vec![TableProviderFilterPushDown::Exact]);
     }
+
+    // ---------- Additional coverage ----------
+
+    #[test]
+    fn build_shard_sql_with_filter() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let provider = DistributedTableProvider {
+            table_name: "orders".to_string(),
+            schema: test_schema(),
+            shards: test_shards(),
+            runtime_handle: rt.handle().clone(),
+        };
+        let expr = datafusion::prelude::col("id").gt(datafusion::prelude::lit(10));
+        let sql = provider.build_shard_sql(None, &[expr], None);
+        assert!(sql.starts_with("SELECT * FROM \"orders\""));
+        assert!(sql.contains("WHERE"));
+        // Either `id > 10` or `"id" > 10` depending on unparser quoting.
+        assert!(sql.contains(">"));
+        assert!(sql.contains("10"));
+    }
+
+    #[test]
+    fn build_shard_sql_empty_projection_uses_dummy_column() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let provider = DistributedTableProvider {
+            table_name: "orders".to_string(),
+            schema: test_schema(),
+            shards: test_shards(),
+            runtime_handle: rt.handle().clone(),
+        };
+        let sql = provider.build_shard_sql(Some(&vec![]), &[], None);
+        // Empty projection -> "1 AS _row" for COUNT(*) style queries.
+        assert!(sql.contains("1 AS _row"));
+        assert!(sql.contains("FROM \"orders\""));
+    }
+
+    #[test]
+    fn build_shard_sql_combines_projection_filter_and_limit() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let provider = DistributedTableProvider {
+            table_name: "orders".to_string(),
+            schema: test_schema(),
+            shards: test_shards(),
+            runtime_handle: rt.handle().clone(),
+        };
+        let expr = datafusion::prelude::col("id").gt(datafusion::prelude::lit(0));
+        let sql = provider.build_shard_sql(Some(&vec![0]), &[expr], Some(50));
+        assert!(sql.contains("\"id\""));
+        assert!(sql.contains("FROM \"orders\""));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("LIMIT 50"));
+    }
+
+    #[test]
+    fn distributed_exec_with_new_children_is_noop() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let exec = Arc::new(DistributedExec::new(
+            "orders".to_string(),
+            test_schema(),
+            test_shards(),
+            "SELECT * FROM orders".to_string(),
+            rt.handle().clone(),
+        ));
+        // DistributedExec is a leaf — with_new_children returns self.
+        let new = exec.clone().with_new_children(vec![]).unwrap();
+        assert_eq!(new.name(), "DistributedExec");
+    }
+
+    #[test]
+    fn distributed_exec_as_any_roundtrip() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let exec = DistributedExec::new(
+            "orders".to_string(),
+            test_schema(),
+            test_shards(),
+            "SELECT * FROM orders".to_string(),
+            rt.handle().clone(),
+        );
+        let any = exec.as_any();
+        assert!(any.is::<DistributedExec>());
+    }
+
+    #[test]
+    fn distributed_exec_display_shows_shard_count() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let exec = Arc::new(DistributedExec::new(
+            "orders".to_string(),
+            test_schema(),
+            test_shards(),
+            "SELECT * FROM orders".to_string(),
+            rt.handle().clone(),
+        )) as Arc<dyn ExecutionPlan>;
+        let s = format!("{}", datafusion::physical_plan::displayable(&*exec).indent(false));
+        assert!(s.contains("DistributedExec"));
+        assert!(s.contains("table=orders"));
+        assert!(s.contains("shards=2"));
+    }
+
+    #[tokio::test]
+    async fn new_distributed_table_provider_rejects_empty_shards() {
+        let rt_handle = tokio::runtime::Handle::current();
+        let result = DistributedTableProvider::new(
+            "any_table".to_string(),
+            vec![],
+            rt_handle,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("no shards provided"));
+    }
 }

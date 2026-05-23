@@ -63,7 +63,7 @@ fn log_debug(_msg: &str) {
 
 /// Redact credentials from connection URLs and sensitive key=value patterns in log messages.
 #[allow(dead_code)]
-fn sanitize_log_message(msg: &str) -> String {
+pub(crate) fn sanitize_log_message(msg: &str) -> String {
     // Redact credentials in connection URLs like hdbsql://user:pass@host
     let mut result = msg.to_string();
     // Pattern: protocol://user:password@host
@@ -159,7 +159,7 @@ pub fn check_database_action(database_name: &str, db_credentials: &str) -> Datab
     DatabaseAction::Skip
 }
 
-fn get_hana_credentials_if_available(
+pub(crate) fn get_hana_credentials_if_available(
     database: &Option<String>,
     server_host: &str,
     server_port: u16,
@@ -180,7 +180,7 @@ fn get_hana_credentials_if_available(
     }
 }
 
-fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> String {
+pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> String {
     let escaped_query = query.replace("'", "''");
     let escaped_username = hana_creds.username.replace("'", "''");
     let escaped_password = hana_creds.password.replace("'", "''");
@@ -210,7 +210,7 @@ fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> String {
     }
 }
 
-fn execute_with_fallback<F, R>(
+pub(crate) fn execute_with_fallback<F, R>(
     primary_query: &str,
     fallback_query: Option<&str>,
     operation: F,
@@ -231,7 +231,7 @@ where
 /// standard Postgres clients SET on connect. DuckDB doesn't recognize them,
 /// so without this intercept the very first statement of a JDBC handshake
 /// fails with "Catalog Error: unrecognized configuration parameter".
-fn is_postgres_only_set(sql: &str) -> bool {
+pub(crate) fn is_postgres_only_set(sql: &str) -> bool {
     let s = sql.trim_start();
     if s.len() < 4 || !s[..4].eq_ignore_ascii_case("SET ") {
         return false;
@@ -318,7 +318,7 @@ impl TrexQueryHandler {
 }
 
 /// Convert trexsql statement columns to pgwire field info (for describe operations)
-fn row_desc_from_stmt(stmt: &duckdb::Statement, format: &Format) -> PgWireResult<Vec<FieldInfo>> {
+pub(crate) fn row_desc_from_stmt(stmt: &duckdb::Statement, format: &Format) -> PgWireResult<Vec<FieldInfo>> {
     let columns = stmt.column_count();
     if columns == 1 {
         let name = stmt.column_name(0).cloned().unwrap_or_default();
@@ -349,7 +349,7 @@ fn row_desc_from_stmt(stmt: &duckdb::Statement, format: &Format) -> PgWireResult
 /// queries name their columns from the projection. Treating these as
 /// CommandComplete is required for libpq-based clients (psycopg2) which
 /// otherwise see a RowDescription where they expect none.
-fn is_duckdb_non_query_schema(schema: &duckdb::arrow::datatypes::Schema) -> bool {
+pub(crate) fn is_duckdb_non_query_schema(schema: &duckdb::arrow::datatypes::Schema) -> bool {
     use duckdb::arrow::datatypes::DataType;
     let fields = schema.fields();
     if fields.len() != 1 {
@@ -367,7 +367,7 @@ fn is_duckdb_non_query_schema(schema: &duckdb::arrow::datatypes::Schema) -> bool
 /// The pg type is derived from the *original* Arrow data type (so TIMESTAMPTZ
 /// columns advertise OID 1184 to the client) even when the column is later
 /// cast to Utf8 by `rebuild_record_batch_for_pg` for safe text encoding.
-fn schema_to_field_info(schema: &duckdb::arrow::datatypes::Schema, format: &Format) -> PgWireResult<Vec<FieldInfo>> {
+pub(crate) fn schema_to_field_info(schema: &duckdb::arrow::datatypes::Schema, format: &Format) -> PgWireResult<Vec<FieldInfo>> {
     schema.fields().iter().enumerate().map(|(idx, field)| {
         let pg_type = arrow_type_to_pg_type(field.data_type());
         Ok(FieldInfo::new(
@@ -381,7 +381,7 @@ fn schema_to_field_info(schema: &duckdb::arrow::datatypes::Schema, format: &Form
 }
 
 /// Convert Arrow data type to PostgreSQL type
-fn arrow_type_to_pg_type(arrow_type: &duckdb::arrow::datatypes::DataType) -> Type {
+pub(crate) fn arrow_type_to_pg_type(arrow_type: &duckdb::arrow::datatypes::DataType) -> Type {
     use duckdb::arrow::datatypes::DataType;
     match arrow_type {
         DataType::Boolean => Type::BOOL,
@@ -413,7 +413,7 @@ fn arrow_type_to_pg_type(arrow_type: &duckdb::arrow::datatypes::DataType) -> Typ
     }
 }
 
-fn extract_panic_message(err: Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn extract_panic_message(err: Box<dyn std::any::Any + Send>) -> String {
     if let Some(s) = err.downcast_ref::<&str>() {
         s.to_string()
     } else if let Some(s) = err.downcast_ref::<String>() {
@@ -435,7 +435,7 @@ fn extract_panic_message(err: Box<dyn std::any::Any + Send>) -> String {
 /// using DuckDB's own ISO-8601 formatter; the wire field still advertises
 /// OID 1184 (TIMESTAMPTZ) via `arrow_type_to_pg_type`, so clients see the
 /// correct column type while we ship the bytes as text.
-fn needs_string_cast(dt: &duckdb::arrow::datatypes::DataType) -> bool {
+pub(crate) fn needs_string_cast(dt: &duckdb::arrow::datatypes::DataType) -> bool {
     use duckdb::arrow::datatypes::DataType;
     match dt {
         DataType::Float16
@@ -481,7 +481,7 @@ fn needs_string_cast(dt: &duckdb::arrow::datatypes::DataType) -> bool {
 ///
 /// The output values include a `+00` offset so the string is unambiguous on
 /// the wire as a TIMESTAMPTZ literal.
-fn format_timestamptz_as_utf8(
+pub(crate) fn format_timestamptz_as_utf8(
     arr: &dyn duckdb::arrow::array::Array,
     unit: &duckdb::arrow::datatypes::TimeUnit,
 ) -> duckdb::arrow::array::ArrayRef {
@@ -544,7 +544,7 @@ fn format_timestamptz_as_utf8(
 /// The wire field type stays NUMERIC because `arrow_type_to_pg_type` is
 /// driven by the *original* schema in `schema_to_field_info`; psycopg2
 /// parses NUMERIC text as `decimal.Decimal`, which round-trips losslessly.
-fn format_decimal128_as_utf8(
+pub(crate) fn format_decimal128_as_utf8(
     arr: &dyn duckdb::arrow::array::Array,
     scale: i8,
 ) -> duckdb::arrow::array::ArrayRef {
@@ -571,7 +571,7 @@ fn format_decimal128_as_utf8(
 /// Format an i128 as a fixed-point decimal string with `scale` fractional
 /// digits. Negative scales are treated as zero-scale (DuckDB rejects them
 /// at parse time, but we handle defensively).
-fn format_i128_with_scale(v: i128, scale: i8) -> String {
+pub(crate) fn format_i128_with_scale(v: i128, scale: i8) -> String {
     let scale = if scale < 0 { 0 } else { scale as usize };
     if scale == 0 {
         return v.to_string();
@@ -613,7 +613,7 @@ fn format_i128_with_scale(v: i128, scale: i8) -> String {
 /// — so a SQL NULL row ships e.g. "62206777 years 4 mons 31872 days" on
 /// the wire. We avoid that by checking `is_null` ourselves and emitting a
 /// wire NULL (as `Option<String>::None` in the StringArray).
-fn format_interval_as_utf8(
+pub(crate) fn format_interval_as_utf8(
     arr: &dyn duckdb::arrow::array::Array,
     unit: &duckdb::arrow::datatypes::IntervalUnit,
 ) -> duckdb::arrow::array::ArrayRef {
@@ -667,7 +667,7 @@ fn format_interval_as_utf8(
     arr
 }
 
-fn format_interval_day_micros(months: i32, days: i32, micros: i64) -> String {
+pub(crate) fn format_interval_day_micros(months: i32, days: i32, micros: i64) -> String {
     let years = months / 12;
     let mons = months % 12;
     let total_secs = micros.div_euclid(1_000_000);
@@ -690,7 +690,7 @@ fn format_interval_day_micros(months: i32, days: i32, micros: i64) -> String {
     }
 }
 
-fn rebuild_record_batch_for_pg(rb: RecordBatch) -> RecordBatch {
+pub(crate) fn rebuild_record_batch_for_pg(rb: RecordBatch) -> RecordBatch {
     use duckdb::arrow::array::ArrayRef;
     use duckdb::arrow::compute::kernels::cast::cast;
     use duckdb::arrow::datatypes::{DataType, Field, Schema};
@@ -765,7 +765,7 @@ fn rebuild_record_batch_for_pg(rb: RecordBatch) -> RecordBatch {
     RecordBatch::try_new(new_schema, new_columns).unwrap_or(rb)
 }
 
-fn rebuild_schema_for_pg(schema: &Schema) -> Schema {
+pub(crate) fn rebuild_schema_for_pg(schema: &Schema) -> Schema {
     use duckdb::arrow::datatypes::{DataType, Field};
     if !schema.fields().iter().any(|f| needs_string_cast(f.data_type())) {
         return schema.clone();
@@ -784,7 +784,7 @@ fn rebuild_schema_for_pg(schema: &Schema) -> Schema {
     Schema::new(new_fields)
 }
 
-fn encode_batches_safely(
+pub(crate) fn encode_batches_safely(
     header: Arc<Vec<FieldInfo>>,
     batches: Vec<RecordBatch>,
 ) -> Vec<PgWireResult<pgwire::messages::data::DataRow>> {
@@ -1311,6 +1311,26 @@ pub fn start_pgwire_server_capi(
 pub fn stop_pgwire_server(host: &str, port: u16) -> Result<String, String> {
     ServerRegistry::instance().stop_server(host, port)
 }
+
+// Per-workstream test submodules. Files live at
+// `src/pgwire_server/tests/*.rs`. `#[path]` here is resolved relative to the
+// directory of the file containing the declaration (`src/`), so the explicit
+// `pgwire_server/tests/...` prefix is required.
+#[cfg(test)]
+#[path = "pgwire_server/tests/common.rs"]
+mod common;
+#[cfg(test)]
+#[path = "pgwire_server/tests/registry_tests.rs"]
+mod registry_tests;
+#[cfg(test)]
+#[path = "pgwire_server/tests/hana_tests.rs"]
+mod hana_tests;
+#[cfg(test)]
+#[path = "pgwire_server/tests/type_format_tests.rs"]
+mod type_format_tests;
+#[cfg(test)]
+#[path = "pgwire_server/tests/handler_tests.rs"]
+mod handler_tests;
 
 #[cfg(test)]
 mod tests {

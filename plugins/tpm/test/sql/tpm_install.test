@@ -1,0 +1,26 @@
+# name: test/sql/tpm_install.test
+# description: test trex_plugin_install end-to-end
+# group: [tpm]
+
+require tpm
+
+# install is-number@7.0.0 into a temp dir under /tmp; the test runner does
+# not provide $TMPDIR substitution, so use a fixed unique path.
+query III
+SELECT
+  json_extract_string(install_results, '$.package'),
+  json_extract_string(install_results, '$.version'),
+  json_extract_string(install_results, '$.success')
+FROM trex_plugin_install('is-number@7.0.0', '/tmp/tpm_test_install_v1');
+----
+is-number	7.0.0	true
+
+# tpm_install alias must behave identically
+query III
+SELECT
+  json_extract_string(install_results, '$.package'),
+  json_extract_string(install_results, '$.version'),
+  json_extract_string(install_results, '$.success')
+FROM tpm_install('is-number@7.0.0', '/tmp/tpm_test_install_v2');
+----
+is-number	7.0.0	true

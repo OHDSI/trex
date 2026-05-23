@@ -171,3 +171,31 @@ pub fn start_fhir_server(host: String, port: u16, db_name: String, _db_path: Str
 pub fn stop_fhir_server(host: &str, port: u16) -> Result<String, String> {
     ServerRegistry::instance().stop_server(host, port)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn load_default_definitions_succeeds() {
+        let defs = load_default_definitions().expect("FHIR R4 definitions must parse");
+        let names = defs.resource_type_names();
+        assert!(
+            names.len() >= 100,
+            "expected at least 100 resource types, got {}",
+            names.len()
+        );
+        assert!(names.iter().any(|n| n == "Patient"));
+        assert!(names.iter().any(|n| n == "Observation"));
+    }
+
+    #[test]
+    fn load_search_parameters_succeeds() {
+        let params = load_search_parameters().expect("FHIR R4 search parameters must parse");
+        let patient_params = params.params_for_type("Patient");
+        assert!(
+            !patient_params.is_empty(),
+            "expected Patient to have search parameters"
+        );
+    }
+}

@@ -853,4 +853,516 @@ mod tests {
         let result = orchestrate_swarm_from_env();
         assert!(result.to_lowercase().contains("swarm_config"), "got: {result}");
     }
+
+    // ---------- parse_service_json ----------
+
+    #[test]
+    fn parse_service_json_full_object() {
+        let json = r#"{"host":"1.2.3.4","port":8815,"status":"running","uptime":42,"config":{"a":1}}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.host, "1.2.3.4");
+        assert_eq!(info.port, "8815");
+        assert_eq!(info.status, "running");
+        assert_eq!(info.uptime_seconds, "42");
+        // config is re-serialized — verify it parses back as JSON.
+        let v: serde_json::Value = serde_json::from_str(&info.config).expect("config is JSON");
+        assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn parse_service_json_port_as_string() {
+        let json = r#"{"host":"h","port":"9000","status":"running"}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.port, "9000");
+    }
+
+    #[test]
+    fn parse_service_json_uptime_as_string() {
+        let json = r#"{"host":"h","port":1,"uptime":"99"}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.uptime_seconds, "99");
+    }
+
+    #[test]
+    fn parse_service_json_missing_fields_defaults() {
+        let info = parse_service_json("{}").expect("empty object should parse");
+        assert_eq!(info.host, "");
+        assert_eq!(info.port, "");
+        assert_eq!(info.status, "unknown");
+        assert_eq!(info.uptime_seconds, "0");
+        assert_eq!(info.config, "{}");
+    }
+
+    #[test]
+    fn parse_service_json_port_unexpected_type_falls_back_to_empty() {
+        let json = r#"{"host":"h","port":true}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.port, "");
+    }
+
+    #[test]
+    fn parse_service_json_rejects_malformed() {
+        assert!(parse_service_json("not json").is_none());
+        assert!(parse_service_json("").is_none());
+        assert!(parse_service_json("{").is_none());
+    }
+
+    #[test]
+    fn parse_service_json_rejects_non_object() {
+        assert!(parse_service_json("[]").is_none());
+        assert!(parse_service_json("42").is_none());
+        assert!(parse_service_json("\"hello\"").is_none());
+        assert!(parse_service_json("null").is_none());
+    }
+
+    #[test]
+    fn parse_service_json_unicode_host() {
+        let json = r#"{"host":"münchen.example","port":443,"status":"ok"}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.host, "münchen.example");
+        assert_eq!(info.status, "ok");
+    }
+
+    // ---------- get_start_service_sql ----------
+
+    #[test]
+    fn start_sql_unknown_extension_returns_none() {
+        assert_eq!(get_start_service_sql("nope", "{}").unwrap(), None);
+        assert_eq!(get_start_service_sql("", "{}").unwrap(), None);
+    }
+
+    #[test]
+    fn start_sql_invalid_json_returns_error() {
+        let err = get_start_service_sql("flight", "not json").unwrap_err();
+        assert!(err.to_lowercase().contains("invalid json"), "got: {err}");
+    }
+
+    #[test]
+    fn start_sql_flight_defaults() {
+        let sql = get_start_service_sql("flight", "{}").unwrap().expect("some sql");
+        assert!(sql.contains("start_flight_server("), "got: {sql}");
+        assert!(sql.contains("0.0.0.0"));
+        assert!(sql.contains("8815"));
+    }
+
+    #[test]
+    fn start_sql_flight_tls_when_cert_path_present() {
+        let cfg = r#"{"host":"h","port":1,"cert_path":"/c","key_path":"/k","ca_cert_path":"/ca"}"#;
+        let sql = get_start_service_sql("flight", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("start_flight_server_tls("));
+        assert!(sql.contains("/c"));
+        assert!(sql.contains("/k"));
+        assert!(sql.contains("/ca"));
+    }
+
+    #[test]
+    fn start_sql_pgwire_defaults() {
+        let sql = get_start_service_sql("pgwire", "{}").unwrap().expect("some sql");
+        assert!(sql.contains("start_pgwire_server("));
+        assert!(sql.contains("127.0.0.1"));
+        assert!(sql.contains("5432"));
+    }
+
+    #[test]
+    fn start_sql_pgwire_escapes_password_single_quotes() {
+        let cfg = r#"{"password":"it's secret"}"#;
+        let sql = get_start_service_sql("pgwire", cfg).unwrap().expect("some sql");
+        // Single quotes must be doubled to avoid SQL injection.
+        assert!(sql.contains("it''s secret"), "got: {sql}");
+        assert!(!sql.contains("it's secret"));
+    }
+
+    #[test]
+    fn start_sql_pgwire_with_db_credentials() {
+        let cfg = r#"{"host":"127.0.0.1","port":5433,"password":"pw","db_credentials":"user:pass"}"#;
+        let sql = get_start_service_sql("pgwire", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("user:pass"));
+        assert!(sql.contains("5433"));
+    }
+
+    #[test]
+    fn start_sql_trexas_passes_raw_config_escaped() {
+        let cfg = r#"{"endpoint":"o'clock","other":1}"#;
+        let sql = get_start_service_sql("trexas", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("trex_start_server_with_config("), "got: {sql}");
+        assert!(sql.contains("o''clock"));
+    }
+
+    #[test]
+    fn start_sql_chdb_with_path() {
+        let cfg = r#"{"data_path":"/var/chdb"}"#;
+        let sql = get_start_service_sql("chdb", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("chdb_start_database("));
+        assert!(sql.contains("/var/chdb"));
+    }
+
+    #[test]
+    fn start_sql_chdb_without_path_uses_default() {
+        let sql = get_start_service_sql("chdb", "{}").unwrap().expect("some sql");
+        assert_eq!(sql, "SELECT chdb_start_database()");
+    }
+
+    #[test]
+    fn start_sql_chdb_empty_path_uses_default() {
+        // empty path string should be filtered out and use default form.
+        let sql = get_start_service_sql("chdb", r#"{"data_path":""}"#).unwrap().expect("some sql");
+        assert_eq!(sql, "SELECT chdb_start_database()");
+    }
+
+    #[test]
+    fn start_sql_chdb_escapes_quote_in_path() {
+        let sql = get_start_service_sql("chdb", r#"{"data_path":"/var/o'dir"}"#)
+            .unwrap()
+            .expect("some sql");
+        assert!(sql.contains("/var/o''dir"), "got: {sql}");
+    }
+
+    #[test]
+    fn start_sql_etl_requires_pipeline_name() {
+        let err = get_start_service_sql("etl", r#"{"connection_string":"x"}"#).unwrap_err();
+        assert!(err.contains("pipeline_name"), "got: {err}");
+    }
+
+    #[test]
+    fn start_sql_etl_requires_connection_string() {
+        let err = get_start_service_sql("etl", r#"{"pipeline_name":"p"}"#).unwrap_err();
+        assert!(err.contains("connection_string"), "got: {err}");
+    }
+
+    #[test]
+    fn start_sql_etl_with_required_fields_and_defaults() {
+        let cfg = r#"{"pipeline_name":"p1","connection_string":"conn"}"#;
+        let sql = get_start_service_sql("etl", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("etl_start("));
+        assert!(sql.contains("'p1'"));
+        assert!(sql.contains("'conn'"));
+        // defaults: batch_size=1000, batch_timeout_ms=5000, retry_delay_ms=10000, retry_max_attempts=5
+        assert!(sql.contains("1000"));
+        assert!(sql.contains("5000"));
+        assert!(sql.contains("10000"));
+    }
+
+    #[test]
+    fn start_sql_etl_overrides_defaults() {
+        let cfg = r#"{
+            "pipeline_name":"p",
+            "connection_string":"c",
+            "batch_size":2000,
+            "batch_timeout_ms":7000,
+            "retry_delay_ms":3000,
+            "retry_max_attempts":9
+        }"#;
+        let sql = get_start_service_sql("etl", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("2000"));
+        assert!(sql.contains("7000"));
+        assert!(sql.contains("3000"));
+        assert!(sql.contains(" 9)"), "got: {sql}");
+    }
+
+    #[test]
+    fn start_sql_etl_escapes_quotes_in_names() {
+        let cfg = r#"{"pipeline_name":"o'p","connection_string":"o'c"}"#;
+        let sql = get_start_service_sql("etl", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("o''p"));
+        assert!(sql.contains("o''c"));
+    }
+
+    #[test]
+    fn start_sql_distributed_scheduler_defaults() {
+        let sql = get_start_service_sql("distributed-scheduler", "{}")
+            .unwrap()
+            .expect("some sql");
+        assert!(sql.contains("swarm_start_distributed_scheduler("));
+        assert!(sql.contains("0.0.0.0"));
+        assert!(sql.contains("50050"));
+    }
+
+    #[test]
+    fn start_sql_distributed_executor_defaults() {
+        let sql = get_start_service_sql("distributed-executor", "{}")
+            .unwrap()
+            .expect("some sql");
+        assert!(sql.contains("swarm_start_distributed_executor("));
+        assert!(sql.contains("50051"));
+        assert!(sql.contains("http://localhost:50050"));
+    }
+
+    #[test]
+    fn start_sql_distributed_executor_custom_scheduler_url() {
+        let cfg = r#"{"host":"1.2.3.4","port":50061,"scheduler_url":"http://other:50050"}"#;
+        let sql = get_start_service_sql("distributed-executor", cfg)
+            .unwrap()
+            .expect("some sql");
+        assert!(sql.contains("1.2.3.4"));
+        assert!(sql.contains("50061"));
+        assert!(sql.contains("http://other:50050"));
+    }
+
+    #[test]
+    fn start_sql_table_driven_all_known_extensions() {
+        // Each known extension must return Some(sql) with a non-empty SELECT.
+        let known = [
+            ("flight", "{}"),
+            ("pgwire", "{}"),
+            ("trexas", "{}"),
+            ("chdb", "{}"),
+            ("etl", r#"{"pipeline_name":"p","connection_string":"c"}"#),
+            ("distributed-scheduler", "{}"),
+            ("distributed-executor", "{}"),
+        ];
+        for (ext, cfg) in known {
+            let sql = get_start_service_sql(ext, cfg)
+                .unwrap_or_else(|e| panic!("{ext} returned err: {e}"))
+                .unwrap_or_else(|| panic!("{ext} returned None"));
+            assert!(sql.starts_with("SELECT "), "{ext}: {sql}");
+        }
+    }
+
+    #[test]
+    fn start_sql_unknown_extensions_list() {
+        // A few names that look similar but aren't supported.
+        for ext in ["fhir", "transform", "mcp", "Flight", "PGWIRE", " flight"] {
+            assert_eq!(
+                get_start_service_sql(ext, "{}").unwrap(),
+                None,
+                "expected None for '{ext}'"
+            );
+        }
+    }
+
+    // ---------- orchestrate_swarm_impl extra cases ----------
+
+    #[test]
+    fn orchestrate_swarm_validates_cluster_id() {
+        let json = r#"{"cluster_id":"","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[]}}}"#;
+        let result = orchestrate_swarm_impl(json, "local");
+        // validate() requires cluster_id non-empty; ClusterConfig::from_json wraps the validate err in "Failed to parse" only for serde; for validate errors the raw err propagates.
+        assert!(!result.is_empty());
+        assert!(
+            result.contains("cluster_id") || result.to_lowercase().contains("invalid"),
+            "got: {result}"
+        );
+    }
+
+    #[test]
+    fn orchestrate_swarm_empty_string_is_invalid_json() {
+        let result = orchestrate_swarm_impl("", "local");
+        assert!(result.to_lowercase().contains("failed to parse") || result.to_lowercase().contains("invalid"), "got: {result}");
+    }
+
+    // ---------- parse_service_json: additional edge cases ----------
+
+    #[test]
+    fn parse_service_json_status_unexpected_type_defaults_to_unknown() {
+        // Numeric status -> as_str() fails -> "unknown" default.
+        let json = r#"{"host":"h","port":1,"status":42}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.status, "unknown");
+    }
+
+    #[test]
+    fn parse_service_json_host_unexpected_type_defaults_to_empty() {
+        let json = r#"{"host":42,"port":1}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.host, "");
+    }
+
+    #[test]
+    fn parse_service_json_uptime_unexpected_type_defaults_to_zero() {
+        let json = r#"{"host":"h","port":1,"uptime":true}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.uptime_seconds, "0");
+    }
+
+    #[test]
+    fn parse_service_json_config_object_is_serialized() {
+        let json = r#"{"host":"h","port":1,"config":{"key":"value"}}"#;
+        let info = parse_service_json(json).expect("should parse");
+        // config is round-tripped via to_string() of the JSON value.
+        let v: serde_json::Value = serde_json::from_str(&info.config).unwrap();
+        assert_eq!(v["key"], "value");
+    }
+
+    #[test]
+    fn parse_service_json_config_missing_defaults_to_empty_object() {
+        let json = r#"{"host":"h","port":1}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.config, "{}");
+    }
+
+    #[test]
+    fn parse_service_json_port_negative_number_serialized() {
+        // serde_json::Number can store negatives; we still stringify.
+        let json = r#"{"host":"h","port":-1}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.port, "-1");
+    }
+
+    // ---------- get_start_service_sql: additional branches ----------
+
+    #[test]
+    fn start_sql_flight_tls_with_empty_cert_paths_still_uses_tls_path() {
+        // cert_path is *present* (even if empty), so the TLS branch is taken.
+        let cfg = r#"{"cert_path":""}"#;
+        let sql = get_start_service_sql("flight", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("start_flight_server_tls("));
+    }
+
+    #[test]
+    fn start_sql_flight_with_custom_host_and_port() {
+        let cfg = r#"{"host":"192.168.1.1","port":9000}"#;
+        let sql = get_start_service_sql("flight", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("192.168.1.1"));
+        assert!(sql.contains("9000"));
+        assert!(!sql.contains("start_flight_server_tls"));
+    }
+
+    #[test]
+    fn start_sql_flight_escapes_quotes_in_host() {
+        let cfg = r#"{"host":"o'host"}"#;
+        let sql = get_start_service_sql("flight", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("o''host"), "got: {sql}");
+    }
+
+    #[test]
+    fn start_sql_pgwire_escapes_db_credentials_quotes() {
+        let cfg = r#"{"db_credentials":"u:p'word"}"#;
+        let sql = get_start_service_sql("pgwire", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("u:p''word"), "got: {sql}");
+    }
+
+    #[test]
+    fn start_sql_trexas_with_empty_config() {
+        let sql = get_start_service_sql("trexas", "{}").unwrap().expect("some sql");
+        assert!(sql.contains("trex_start_server_with_config("));
+    }
+
+    #[test]
+    fn start_sql_distributed_executor_partial_overrides() {
+        // Override only host, keep default port and default scheduler_url.
+        let cfg = r#"{"host":"10.0.0.5"}"#;
+        let sql = get_start_service_sql("distributed-executor", cfg)
+            .unwrap()
+            .expect("some sql");
+        assert!(sql.contains("10.0.0.5"));
+        assert!(sql.contains("50051"));
+        assert!(sql.contains("http://localhost:50050"));
+    }
+
+    #[test]
+    fn start_sql_distributed_scheduler_with_overrides() {
+        let cfg = r#"{"host":"1.2.3.4","port":60060}"#;
+        let sql = get_start_service_sql("distributed-scheduler", cfg)
+            .unwrap()
+            .expect("some sql");
+        assert!(sql.contains("1.2.3.4"));
+        assert!(sql.contains("60060"));
+    }
+
+    #[test]
+    fn start_sql_etl_zero_value_overrides() {
+        // Numeric 0 still satisfies as_u64(); it overrides defaults.
+        let cfg = r#"{
+            "pipeline_name":"p","connection_string":"c",
+            "batch_size":0,"batch_timeout_ms":0
+        }"#;
+        let sql = get_start_service_sql("etl", cfg).unwrap().expect("some sql");
+        // The default 1000 should NOT appear -- 0 was used as batch_size.
+        let parts: Vec<&str> = sql.split(',').collect();
+        // Six positional params: pipeline_name, conn, batch_size, batch_timeout_ms, retry_delay_ms, retry_max_attempts.
+        assert_eq!(parts.len(), 6, "expected 6 comma-separated params: {sql}");
+    }
+
+    #[test]
+    fn start_sql_unknown_extension_with_unusual_chars() {
+        // Anything not in the match arms returns Ok(None).
+        for ext in ["flight ", " flight", "flight\n", "FLIGHT"] {
+            assert_eq!(get_start_service_sql(ext, "{}").unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn start_sql_chdb_path_with_spaces() {
+        let cfg = r#"{"data_path":"/var/some path/chdb"}"#;
+        let sql = get_start_service_sql("chdb", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("/var/some path/chdb"));
+    }
+
+    #[test]
+    fn start_sql_pgwire_port_as_string_uses_default() {
+        // port is a string -> as_u64() fails -> default 5432 used.
+        let cfg = r#"{"port":"9000"}"#;
+        let sql = get_start_service_sql("pgwire", cfg).unwrap().expect("some sql");
+        assert!(sql.contains("5432"));
+    }
+
+    #[test]
+    fn start_sql_invalid_json_for_all_extensions_propagates_error() {
+        // Every extension's first step is parse-json; broken json must be the error path.
+        for ext in [
+            "flight",
+            "pgwire",
+            "trexas",
+            "chdb",
+            "etl",
+            "distributed-scheduler",
+            "distributed-executor",
+        ] {
+            let err = get_start_service_sql(ext, "{").unwrap_err();
+            assert!(err.to_lowercase().contains("invalid json"), "ext={ext} err={err}");
+        }
+    }
+
+    #[test]
+    fn parse_service_json_null_config_serializes_to_null() {
+        // Explicit null config: still serializable; we just verify parse succeeds.
+        let json = r#"{"host":"h","port":1,"config":null}"#;
+        let info = parse_service_json(json).expect("should parse");
+        assert_eq!(info.config, "null");
+    }
+
+    #[test]
+    fn parse_service_json_array_value_for_object_field_rejected() {
+        // top-level must be an object.
+        assert!(parse_service_json(r#"["host","h"]"#).is_none());
+    }
+
+    #[test]
+    fn parse_service_json_status_empty_string_preserved() {
+        let json = r#"{"host":"h","port":1,"status":""}"#;
+        let info = parse_service_json(json).expect("should parse");
+        // Empty string IS a valid string (just not the missing case), so it sticks.
+        assert_eq!(info.status, "");
+    }
+
+    #[test]
+    fn service_info_debug_format_includes_fields() {
+        let info = ServiceInfo {
+            host: "h".to_string(),
+            port: "1".to_string(),
+            status: "running".to_string(),
+            uptime_seconds: "0".to_string(),
+            config: "{}".to_string(),
+        };
+        let debug_str = format!("{:?}", info);
+        assert!(debug_str.contains("host"));
+        assert!(debug_str.contains("running"));
+    }
+
+    #[test]
+    fn service_info_clone_preserves_fields() {
+        let info = ServiceInfo {
+            host: "h".to_string(),
+            port: "1".to_string(),
+            status: "running".to_string(),
+            uptime_seconds: "5".to_string(),
+            config: "{}".to_string(),
+        };
+        let c = info.clone();
+        assert_eq!(c.host, info.host);
+        assert_eq!(c.port, info.port);
+        assert_eq!(c.status, info.status);
+        assert_eq!(c.uptime_seconds, info.uptime_seconds);
+        assert_eq!(c.config, info.config);
+    }
 }

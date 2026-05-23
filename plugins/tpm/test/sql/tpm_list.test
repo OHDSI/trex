@@ -1,0 +1,20 @@
+# name: test/sql/tpm_list.test
+# description: test trex_plugin_list against a freshly installed package
+# group: [tpm]
+
+require tpm
+
+# Install first so the list has something to find
+query I
+SELECT json_extract_string(install_results, '$.success')
+FROM trex_plugin_install('is-number@7.0.0', '/tmp/tpm_test_list_dir');
+----
+true
+
+# Listing should include is-number
+query I
+SELECT count(*)
+FROM trex_plugin_list('/tmp/tpm_test_list_dir')
+WHERE json_extract_string(list_info, '$.package') = 'is-number';
+----
+1

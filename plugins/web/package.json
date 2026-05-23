@@ -44,7 +44,10 @@
     "urql": "^5.0.1"
   },
   "overrides": {
-    "brace-expansion": "^2.0.2"
+    "brace-expansion": "^2.0.2",
+    "hono": "^4.12.18",
+    "fast-uri": "^3.1.2",
+    "ip-address": "^10.1.1"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.1",

@@ -74,3 +74,45 @@ impl std::fmt::Display for AppError {
 }
 
 impl std::error::Error for AppError {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn status_code_mapping() {
+        assert_eq!(AppError::NotFound("x".into()).status_code(), StatusCode::NOT_FOUND);
+        assert_eq!(AppError::BadRequest("x".into()).status_code(), StatusCode::BAD_REQUEST);
+        assert_eq!(AppError::Conflict("x".into()).status_code(), StatusCode::CONFLICT);
+        assert_eq!(AppError::Gone("x".into()).status_code(), StatusCode::GONE);
+        assert_eq!(AppError::Internal("x".into()).status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(AppError::Timeout("x".into()).status_code(), StatusCode::REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn issue_code_mapping() {
+        assert_eq!(AppError::NotFound("x".into()).issue_code(), "not-found");
+        assert_eq!(AppError::BadRequest("x".into()).issue_code(), "invalid");
+        assert_eq!(AppError::Conflict("x".into()).issue_code(), "conflict");
+        assert_eq!(AppError::Gone("x".into()).issue_code(), "deleted");
+        assert_eq!(AppError::Internal("x".into()).issue_code(), "exception");
+        assert_eq!(AppError::Timeout("x".into()).issue_code(), "timeout");
+    }
+
+    #[test]
+    fn operation_outcome_shape() {
+        let err = AppError::NotFound("missing patient".into());
+        let v = err.operation_outcome();
+        assert_eq!(v["resourceType"], "OperationOutcome");
+        assert_eq!(v["issue"][0]["severity"], "error");
+        assert_eq!(v["issue"][0]["code"], "not-found");
+        assert_eq!(v["issue"][0]["diagnostics"], "missing patient");
+    }
+
+    #[test]
+    fn display_returns_diagnostics() {
+        let err = AppError::BadRequest("bad id".into());
+        assert_eq!(format!("{}", err), "bad id");
+    }
+}

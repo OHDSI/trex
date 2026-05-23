@@ -91,33 +91,41 @@ fn process_incremental_markers(sql: &str, schema: &str, model_name: &str, is_new
     result
 }
 
+fn build_append_sql(schema: &str, model_name: &str, rewritten: &str) -> Vec<String> {
+    let esc_schema = escape_sql_ident(schema);
+    let esc_name = escape_sql_ident(model_name);
+    vec![format!(
+        "INSERT INTO \"{esc_schema}\".\"{esc_name}\" {rewritten}"
+    )]
+}
+
 fn materialize_append(
     schema: &str,
     model_name: &str,
     rewritten: &str,
 ) -> Result<(), Box<dyn Error>> {
-    let esc_schema = escape_sql_ident(schema);
-    let esc_name = escape_sql_ident(model_name);
-    execute_sql(&format!(
-        "INSERT INTO \"{esc_schema}\".\"{esc_name}\" {rewritten}"
-    ))
+    for sql in build_append_sql(schema, model_name, rewritten) {
+        execute_sql(&sql)?;
+    }
+    Ok(())
 }
 
-fn materialize_delete_insert(
+fn build_delete_insert_sql(
     schema: &str,
     model_name: &str,
     rewritten: &str,
     unique_key: &[String],
-) -> Result<(), Box<dyn Error>> {
+) -> Vec<String> {
     let esc_schema = escape_sql_ident(schema);
     let esc_name = escape_sql_ident(model_name);
 
+    let mut stmts = Vec::with_capacity(2);
     if unique_key.len() == 1 {
         let esc_key = escape_sql_ident(&unique_key[0]);
-        execute_sql(&format!(
+        stmts.push(format!(
             "DELETE FROM \"{esc_schema}\".\"{esc_name}\" \
              WHERE \"{esc_key}\" IN (SELECT \"{esc_key}\" FROM ({rewritten}))"
-        ))?;
+        ));
     } else {
         let where_clause: Vec<String> = unique_key
             .iter()
@@ -126,68 +134,61 @@ fn materialize_delete_insert(
                 format!("\"{esc_schema}\".\"{esc_name}\".\"{ek}\" = __src__.\"{ek}\"")
             })
             .collect();
-        execute_sql(&format!(
+        stmts.push(format!(
             "DELETE FROM \"{esc_schema}\".\"{esc_name}\" WHERE EXISTS (\
              SELECT 1 FROM ({rewritten}) AS __src__ WHERE {})",
             where_clause.join(" AND ")
-        ))?;
+        ));
     }
 
-    execute_sql(&format!(
+    stmts.push(format!(
         "INSERT INTO \"{esc_schema}\".\"{esc_name}\" {rewritten}"
-    ))
+    ));
+    stmts
 }
 
-fn materialize_merge(
+fn materialize_delete_insert(
     schema: &str,
     model_name: &str,
     rewritten: &str,
     unique_key: &[String],
-    merge_update_columns: Option<&Vec<String>>,
-    merge_exclude_columns: Option<&Vec<String>>,
 ) -> Result<(), Box<dyn Error>> {
-    let staging = format!("__staging_{model_name}__");
-    let esc_staging = escape_sql_ident(&staging);
-
-    execute_sql(&format!(
-        "CREATE TEMPORARY TABLE \"{esc_staging}\" AS {rewritten}"
-    ))?;
-
-    let result = materialize_merge_inner(
-        schema,
-        model_name,
-        &staging,
-        &esc_staging,
-        unique_key,
-        merge_update_columns,
-        merge_exclude_columns,
-    );
-
-    let _ = execute_sql(&format!("DROP TABLE IF EXISTS \"{esc_staging}\""));
-
-    result
+    for sql in build_delete_insert_sql(schema, model_name, rewritten, unique_key) {
+        execute_sql(&sql)?;
+    }
+    Ok(())
 }
 
-fn materialize_merge_inner(
+fn build_merge_staging_create_sql(esc_staging: &str, rewritten: &str) -> Vec<String> {
+    vec![format!(
+        "CREATE TEMPORARY TABLE \"{esc_staging}\" AS {rewritten}"
+    )]
+}
+
+fn build_merge_staging_drop_sql(esc_staging: &str) -> Vec<String> {
+    vec![format!("DROP TABLE IF EXISTS \"{esc_staging}\"")]
+}
+
+fn build_merge_staging_columns_query_sql(staging: &str) -> String {
+    format!(
+        "SELECT column_name FROM information_schema.columns \
+         WHERE table_schema = 'temp' AND table_name = '{}'",
+        escape_sql_str(staging)
+    )
+}
+
+fn build_merge_inner_sql(
     schema: &str,
     model_name: &str,
-    staging: &str,
     esc_staging: &str,
     unique_key: &[String],
     merge_update_columns: Option<&Vec<String>>,
     merge_exclude_columns: Option<&Vec<String>>,
-) -> Result<(), Box<dyn Error>> {
+    all_columns: &[String],
+) -> Vec<String> {
     let esc_schema = escape_sql_ident(schema);
     let esc_name = escape_sql_ident(model_name);
 
-    // Temporary tables live in the 'temp' schema
-    let col_rows = query_sql(&format!(
-        "SELECT column_name FROM information_schema.columns \
-         WHERE table_schema = 'temp' AND table_name = '{}'",
-        escape_sql_str(staging)
-    ))?;
-
-    let all_columns: Vec<String> = col_rows.iter().map(|r| r.columns[0].clone()).collect();
     let key_set: HashSet<&str> = unique_key.iter().map(|s| s.as_str()).collect();
 
     let update_cols: Vec<&String> = if let Some(whitelist) = merge_update_columns {
@@ -201,6 +202,8 @@ fn materialize_merge_inner(
             .filter(|c| !key_set.contains(c.as_str()) && !exclude_set.contains(c.as_str()))
             .collect()
     };
+
+    let mut stmts = Vec::new();
 
     if !update_cols.is_empty() {
         let set_clause: Vec<String> = update_cols
@@ -221,12 +224,12 @@ fn materialize_merge_inner(
             })
             .collect();
 
-        execute_sql(&format!(
+        stmts.push(format!(
             "UPDATE \"{esc_schema}\".\"{esc_name}\" SET {} \
              FROM \"{esc_staging}\" AS __stg__ WHERE {}",
             set_clause.join(", "),
             join_clause.join(" AND ")
-        ))?;
+        ));
     }
 
     let insert_join: Vec<String> = unique_key
@@ -244,7 +247,7 @@ fn materialize_merge_inner(
         .map(|c| format!("\"{}\"", escape_sql_ident(c)))
         .collect();
 
-    execute_sql(&format!(
+    stmts.push(format!(
         "INSERT INTO \"{esc_schema}\".\"{esc_name}\" ({cols}) \
          SELECT {cols} FROM \"{esc_staging}\" \
          WHERE NOT EXISTS (\
@@ -252,9 +255,138 @@ fn materialize_merge_inner(
          )",
         cols = col_list.join(", "),
         join = insert_join.join(" AND ")
-    ))?;
+    ));
+
+    stmts
+}
+
+fn materialize_merge(
+    schema: &str,
+    model_name: &str,
+    rewritten: &str,
+    unique_key: &[String],
+    merge_update_columns: Option<&Vec<String>>,
+    merge_exclude_columns: Option<&Vec<String>>,
+) -> Result<(), Box<dyn Error>> {
+    let staging = format!("__staging_{model_name}__");
+    let esc_staging = escape_sql_ident(&staging);
+
+    for sql in build_merge_staging_create_sql(&esc_staging, rewritten) {
+        execute_sql(&sql)?;
+    }
+
+    let result = materialize_merge_inner(
+        schema,
+        model_name,
+        &staging,
+        &esc_staging,
+        unique_key,
+        merge_update_columns,
+        merge_exclude_columns,
+    );
+
+    for sql in build_merge_staging_drop_sql(&esc_staging) {
+        let _ = execute_sql(&sql);
+    }
+
+    result
+}
+
+fn materialize_merge_inner(
+    schema: &str,
+    model_name: &str,
+    staging: &str,
+    esc_staging: &str,
+    unique_key: &[String],
+    merge_update_columns: Option<&Vec<String>>,
+    merge_exclude_columns: Option<&Vec<String>>,
+) -> Result<(), Box<dyn Error>> {
+    // Temporary tables live in the 'temp' schema
+    let col_rows = query_sql(&build_merge_staging_columns_query_sql(staging))?;
+    let all_columns: Vec<String> = col_rows.iter().map(|r| r.columns[0].clone()).collect();
+
+    for sql in build_merge_inner_sql(
+        schema,
+        model_name,
+        esc_staging,
+        unique_key,
+        merge_update_columns,
+        merge_exclude_columns,
+        &all_columns,
+    ) {
+        execute_sql(&sql)?;
+    }
 
     Ok(())
+}
+
+fn build_microbatch_batch_end_query_sql(batch_size: BatchSize) -> String {
+    let trunc = batch_size.as_trunc();
+    format!("SELECT date_trunc('{trunc}', CURRENT_TIMESTAMP)::VARCHAR")
+}
+
+fn build_microbatch_batch_start_query_sql(
+    watermark: &str,
+    lookback: u32,
+    batch_size: BatchSize,
+) -> String {
+    let interval = batch_size.as_interval();
+    format!(
+        "SELECT ('{watermark}'::TIMESTAMP - {lookback} * INTERVAL '{interval}')::VARCHAR",
+        watermark = escape_sql_str(watermark),
+        lookback = lookback,
+        interval = interval,
+    )
+}
+
+fn build_microbatch_min_query_sql(schema: &str, model_name: &str, updated_at: &str) -> String {
+    let esc_schema = escape_sql_ident(schema);
+    let esc_name = escape_sql_ident(model_name);
+    let esc_updated_at = escape_sql_ident(updated_at);
+    format!("SELECT MIN(\"{esc_updated_at}\")::VARCHAR FROM \"{esc_schema}\".\"{esc_name}\"")
+}
+
+fn build_microbatch_empty_insert_sql(
+    schema: &str,
+    model_name: &str,
+    rewritten: &str,
+) -> Vec<String> {
+    let esc_schema = escape_sql_ident(schema);
+    let esc_name = escape_sql_ident(model_name);
+    vec![format!(
+        "INSERT INTO \"{esc_schema}\".\"{esc_name}\" {rewritten}"
+    )]
+}
+
+fn build_microbatch_apply_sql(
+    schema: &str,
+    model_name: &str,
+    rewritten: &str,
+    updated_at: &str,
+    batch_start: &str,
+    batch_end: &str,
+) -> Vec<String> {
+    let esc_schema = escape_sql_ident(schema);
+    let esc_name = escape_sql_ident(model_name);
+    let esc_updated_at = escape_sql_ident(updated_at);
+
+    vec![
+        format!(
+            "DELETE FROM \"{esc_schema}\".\"{esc_name}\" \
+             WHERE \"{esc_updated_at}\" >= '{batch_start}'::TIMESTAMP \
+             AND \"{esc_updated_at}\" < '{batch_end}'::TIMESTAMP",
+            batch_start = escape_sql_str(batch_start),
+            batch_end = escape_sql_str(batch_end),
+        ),
+        format!(
+            "INSERT INTO \"{esc_schema}\".\"{esc_name}\" \
+             SELECT * FROM ({rewritten}) AS __batch__ \
+             WHERE \"{esc_updated_at}\" >= '{batch_start}'::TIMESTAMP \
+             AND \"{esc_updated_at}\" < '{batch_end}'::TIMESTAMP",
+            batch_start = escape_sql_str(batch_start),
+            batch_end = escape_sql_str(batch_end),
+        ),
+    ]
 }
 
 fn materialize_microbatch(
@@ -266,35 +398,22 @@ fn materialize_microbatch(
     lookback: u32,
     last_watermark: Option<&str>,
 ) -> Result<Option<String>, Box<dyn Error>> {
-    let esc_schema = escape_sql_ident(schema);
-    let esc_name = escape_sql_ident(model_name);
-    let esc_updated_at = escape_sql_ident(updated_at);
-    let trunc = batch_size.as_trunc();
-    let interval = batch_size.as_interval();
-
-    let batch_end_rows = query_sql(&format!(
-        "SELECT date_trunc('{trunc}', CURRENT_TIMESTAMP)::VARCHAR"
-    ))?;
+    let batch_end_rows = query_sql(&build_microbatch_batch_end_query_sql(batch_size))?;
     let batch_end = batch_end_rows
         .first()
         .map(|r| r.columns[0].clone())
         .ok_or("Failed to compute batch_end")?;
 
     let batch_start = if let Some(watermark) = last_watermark {
-        let start_rows = query_sql(&format!(
-            "SELECT ('{watermark}'::TIMESTAMP - {lookback} * INTERVAL '{interval}')::VARCHAR",
-            watermark = escape_sql_str(watermark),
-            lookback = lookback,
-            interval = interval,
+        let start_rows = query_sql(&build_microbatch_batch_start_query_sql(
+            watermark, lookback, batch_size,
         ))?;
         start_rows
             .first()
             .map(|r| r.columns[0].clone())
             .ok_or_else(|| "Failed to compute batch_start".to_string())?
     } else {
-        let min_rows = query_sql(&format!(
-            "SELECT MIN(\"{esc_updated_at}\")::VARCHAR FROM \"{esc_schema}\".\"{esc_name}\""
-        ))?;
+        let min_rows = query_sql(&build_microbatch_min_query_sql(schema, model_name, updated_at))?;
         let min_val = min_rows
             .first()
             .and_then(|r| {
@@ -304,30 +423,24 @@ fn materialize_microbatch(
         match min_val {
             Some(v) => v,
             None => {
-                execute_sql(&format!(
-                    "INSERT INTO \"{esc_schema}\".\"{esc_name}\" {rewritten}"
-                ))?;
+                for sql in build_microbatch_empty_insert_sql(schema, model_name, rewritten) {
+                    execute_sql(&sql)?;
+                }
                 return Ok(Some(batch_end));
             }
         }
     };
 
-    execute_sql(&format!(
-        "DELETE FROM \"{esc_schema}\".\"{esc_name}\" \
-         WHERE \"{esc_updated_at}\" >= '{batch_start}'::TIMESTAMP \
-         AND \"{esc_updated_at}\" < '{batch_end}'::TIMESTAMP",
-        batch_start = escape_sql_str(&batch_start),
-        batch_end = escape_sql_str(&batch_end),
-    ))?;
-
-    execute_sql(&format!(
-        "INSERT INTO \"{esc_schema}\".\"{esc_name}\" \
-         SELECT * FROM ({rewritten}) AS __batch__ \
-         WHERE \"{esc_updated_at}\" >= '{batch_start}'::TIMESTAMP \
-         AND \"{esc_updated_at}\" < '{batch_end}'::TIMESTAMP",
-        batch_start = escape_sql_str(&batch_start),
-        batch_end = escape_sql_str(&batch_end),
-    ))?;
+    for sql in build_microbatch_apply_sql(
+        schema,
+        model_name,
+        rewritten,
+        updated_at,
+        &batch_start,
+        &batch_end,
+    ) {
+        execute_sql(&sql)?;
+    }
 
     Ok(Some(batch_end))
 }
@@ -448,22 +561,12 @@ fn inline_ephemeral_models(
     }
 }
 
-fn materialize_snapshot(
-    schema: &str,
-    model_name: &str,
-    rewritten: &str,
-    is_new: bool,
-    unique_key: &[String],
+fn build_snapshot_hash_expr(
     strategy: SnapshotStrategy,
     updated_at: Option<&str>,
     check_cols: Option<&Vec<String>>,
-) -> Result<(), Box<dyn Error>> {
-    let esc_schema = escape_sql_ident(schema);
-    let esc_name = escape_sql_ident(model_name);
-    let staging = format!("__snap_staging_{model_name}__");
-    let esc_staging = escape_sql_ident(&staging);
-
-    let hash_expr = match strategy {
+) -> String {
+    match strategy {
         SnapshotStrategy::Timestamp => {
             let col = escape_sql_ident(updated_at.unwrap());
             format!("hash(\"{col}\"::VARCHAR)")
@@ -476,50 +579,73 @@ fn materialize_snapshot(
                 .collect();
             format!("hash({})", parts.join(" || '|' || "))
         }
-    };
+    }
+}
 
-    execute_sql(&format!(
+fn build_snapshot_staging_create_sql(
+    esc_staging: &str,
+    rewritten: &str,
+    hash_expr: &str,
+) -> Vec<String> {
+    vec![format!(
         "CREATE TEMPORARY TABLE \"{esc_staging}\" AS \
          SELECT *, {hash_expr} AS _stg_hash FROM ({rewritten})"
-    ))?;
+    )]
+}
 
-    let result = if is_new {
-        execute_sql(&format!(
-            "CREATE TABLE \"{esc_schema}\".\"{esc_name}\" AS \
-             SELECT *, CURRENT_TIMESTAMP AS _snapshot_valid_from, \
-             NULL::TIMESTAMP AS _snapshot_valid_to, \
-             _stg_hash AS _snapshot_hash \
-             FROM \"{esc_staging}\""
-        ))
-    } else {
-        let key_match_target_staging: Vec<String> = unique_key
-            .iter()
-            .map(|k| {
-                let ek = escape_sql_ident(k);
-                format!(
-                    "\"{esc_schema}\".\"{esc_name}\".\"{ek}\" = \"{esc_staging}\".\"{ek}\""
-                )
-            })
-            .collect();
-        let key_match_str = key_match_target_staging.join(" AND ");
+fn build_snapshot_staging_drop_sql(esc_staging: &str) -> Vec<String> {
+    vec![format!("DROP TABLE IF EXISTS \"{esc_staging}\"")]
+}
 
-        let key_match_staging_tgt: Vec<String> = unique_key
-            .iter()
-            .map(|k| {
-                let ek = escape_sql_ident(k);
-                format!("\"{esc_staging}\".\"{ek}\" = __tgt__.\"{ek}\"")
-            })
-            .collect();
-        let key_match_staging_tgt_str = key_match_staging_tgt.join(" AND ");
+fn build_snapshot_new_sql(schema: &str, model_name: &str, esc_staging: &str) -> Vec<String> {
+    let esc_schema = escape_sql_ident(schema);
+    let esc_name = escape_sql_ident(model_name);
+    vec![format!(
+        "CREATE TABLE \"{esc_schema}\".\"{esc_name}\" AS \
+         SELECT *, CURRENT_TIMESTAMP AS _snapshot_valid_from, \
+         NULL::TIMESTAMP AS _snapshot_valid_to, \
+         _stg_hash AS _snapshot_hash \
+         FROM \"{esc_staging}\""
+    )]
+}
 
-        execute_sql(&format!(
+fn build_snapshot_update_sql(
+    schema: &str,
+    model_name: &str,
+    esc_staging: &str,
+    unique_key: &[String],
+) -> Vec<String> {
+    let esc_schema = escape_sql_ident(schema);
+    let esc_name = escape_sql_ident(model_name);
+
+    let key_match_target_staging: Vec<String> = unique_key
+        .iter()
+        .map(|k| {
+            let ek = escape_sql_ident(k);
+            format!(
+                "\"{esc_schema}\".\"{esc_name}\".\"{ek}\" = \"{esc_staging}\".\"{ek}\""
+            )
+        })
+        .collect();
+    let key_match_str = key_match_target_staging.join(" AND ");
+
+    let key_match_staging_tgt: Vec<String> = unique_key
+        .iter()
+        .map(|k| {
+            let ek = escape_sql_ident(k);
+            format!("\"{esc_staging}\".\"{ek}\" = __tgt__.\"{ek}\"")
+        })
+        .collect();
+    let key_match_staging_tgt_str = key_match_staging_tgt.join(" AND ");
+
+    vec![
+        format!(
             "UPDATE \"{esc_schema}\".\"{esc_name}\" SET _snapshot_valid_to = CURRENT_TIMESTAMP \
              WHERE _snapshot_valid_to IS NULL \
              AND (NOT EXISTS (SELECT 1 FROM \"{esc_staging}\" WHERE {key_match_str}) \
                   OR _snapshot_hash != (SELECT _stg_hash FROM \"{esc_staging}\" WHERE {key_match_str}))"
-        ))?;
-
-        execute_sql(&format!(
+        ),
+        format!(
             "INSERT INTO \"{esc_schema}\".\"{esc_name}\" \
              SELECT \"{esc_staging}\".*, CURRENT_TIMESTAMP, NULL, \"{esc_staging}\"._stg_hash \
              FROM \"{esc_staging}\" \
@@ -529,10 +655,61 @@ fn materialize_snapshot(
                  AND __tgt__._snapshot_valid_to IS NULL \
                  AND __tgt__._snapshot_hash = \"{esc_staging}\"._stg_hash\
              )"
-        ))
+        ),
+    ]
+}
+
+fn materialize_snapshot(
+    schema: &str,
+    model_name: &str,
+    rewritten: &str,
+    is_new: bool,
+    unique_key: &[String],
+    strategy: SnapshotStrategy,
+    updated_at: Option<&str>,
+    check_cols: Option<&Vec<String>>,
+) -> Result<(), Box<dyn Error>> {
+    let staging = format!("__snap_staging_{model_name}__");
+    let esc_staging = escape_sql_ident(&staging);
+
+    let hash_expr = build_snapshot_hash_expr(strategy, updated_at, check_cols);
+
+    for sql in build_snapshot_staging_create_sql(&esc_staging, rewritten, &hash_expr) {
+        execute_sql(&sql)?;
+    }
+
+    let result: Result<(), Box<dyn Error>> = if is_new {
+        // Original called execute_sql once and used the Result as `result`.
+        let mut last: Result<(), Box<dyn Error>> = Ok(());
+        for sql in build_snapshot_new_sql(schema, model_name, &esc_staging) {
+            last = execute_sql(&sql);
+            if last.is_err() {
+                break;
+            }
+        }
+        last
+    } else {
+        // Original: first UPDATE used `?` (propagates Err out of the whole function
+        // before DROP runs); second INSERT was the trailing expression returned as
+        // `result`. Preserve that: short-circuit out of the function on UPDATE error.
+        let stmts = build_snapshot_update_sql(schema, model_name, &esc_staging, unique_key);
+        let mut iter = stmts.into_iter();
+        if let Some(update_sql) = iter.next() {
+            execute_sql(&update_sql)?;
+        }
+        let mut last: Result<(), Box<dyn Error>> = Ok(());
+        for sql in iter {
+            last = execute_sql(&sql);
+            if last.is_err() {
+                break;
+            }
+        }
+        last
     };
 
-    let _ = execute_sql(&format!("DROP TABLE IF EXISTS \"{esc_staging}\""));
+    for sql in build_snapshot_staging_drop_sql(&esc_staging) {
+        let _ = execute_sql(&sql);
+    }
     result
 }
 
@@ -1055,5 +1232,625 @@ impl VTab for RunVTab {
         Some(vec![
             ("source_schema".to_string(), LogicalTypeHandle::from(LogicalTypeId::Varchar)),
         ])
+    }
+}
+
+#[cfg(test)]
+mod run_tests {
+    use super::*;
+
+    // ---- compute_model_checksum -------------------------------------------------
+
+    #[test]
+    fn compute_model_checksum_is_stable_for_identical_input() {
+        let a = compute_model_checksum("orders", "SELECT 1", Some("config: yes"));
+        let b = compute_model_checksum("orders", "SELECT 1", Some("config: yes"));
+        assert_eq!(a, b, "checksum must be deterministic");
+    }
+
+    #[test]
+    fn compute_model_checksum_changes_when_sql_changes() {
+        let a = compute_model_checksum("orders", "SELECT 1", None);
+        let b = compute_model_checksum("orders", "SELECT 2", None);
+        assert_ne!(a, b, "SQL change must change the checksum");
+    }
+
+    #[test]
+    fn compute_model_checksum_changes_when_yaml_changes() {
+        let a = compute_model_checksum("orders", "SELECT 1", Some("a: 1"));
+        let b = compute_model_checksum("orders", "SELECT 1", Some("a: 2"));
+        assert_ne!(a, b, "YAML change must change the checksum");
+    }
+
+    #[test]
+    fn compute_model_checksum_distinguishes_none_from_some_yaml() {
+        let none_yaml = compute_model_checksum("orders", "SELECT 1", None);
+        let empty_yaml = compute_model_checksum("orders", "SELECT 1", Some(""));
+        assert_ne!(
+            none_yaml, empty_yaml,
+            "None vs Some(\"\") must produce distinct checksums"
+        );
+    }
+
+    // ---- process_incremental_markers --------------------------------------------
+    //
+    // The incremental block is delimited by the raw SQL comment markers
+    //   -- __is_incremental__
+    //   -- __end_incremental__
+    // (the user-facing Jinja-style `{% if is_incremental %}` is rewritten upstream
+    // to these markers). When `is_new` is true the block is dropped; otherwise it
+    // is kept and `__this__` is replaced by the fully-qualified table reference.
+
+    #[test]
+    fn process_incremental_markers_passes_through_sql_without_markers() {
+        let sql = "SELECT * FROM upstream";
+        let out_new = process_incremental_markers(sql, "main", "orders", true);
+        let out_inc = process_incremental_markers(sql, "main", "orders", false);
+        assert_eq!(out_new, sql, "no-marker SQL must be returned unchanged (is_new)");
+        assert_eq!(out_inc, sql, "no-marker SQL must be returned unchanged (incremental)");
+    }
+
+    #[test]
+    fn process_incremental_markers_strips_block_for_new_model() {
+        // On the first build (`is_new = true`) the block is dropped entirely so the
+        // model performs a full refresh.
+        let sql = "SELECT *\nFROM upstream\n-- __is_incremental__\nWHERE ts > (SELECT max(ts) FROM __this__)\n-- __end_incremental__";
+        let out = process_incremental_markers(sql, "main", "orders", true);
+        assert!(!out.contains("WHERE ts >"), "incremental filter should be stripped for new model: {out}");
+        assert!(!out.contains("__is_incremental__"), "markers should be gone: {out}");
+        assert!(!out.contains("__this__"), "__this__ placeholder should be gone: {out}");
+        assert!(out.contains("FROM upstream"), "base query should remain: {out}");
+    }
+
+    #[test]
+    fn process_incremental_markers_keeps_block_and_substitutes_this_when_not_new() {
+        let sql = "SELECT *\nFROM upstream\n-- __is_incremental__\nWHERE ts > (SELECT max(ts) FROM __this__)\n-- __end_incremental__";
+        let out = process_incremental_markers(sql, "main", "orders", false);
+        assert!(out.contains("WHERE ts >"), "incremental filter should be kept: {out}");
+        assert!(
+            out.contains("\"main\".\"orders\""),
+            "__this__ should be replaced with fully-qualified ref: {out}"
+        );
+        assert!(!out.contains("__this__"), "no raw __this__ placeholder should remain: {out}");
+        assert!(!out.contains("__is_incremental__"), "markers themselves should be removed: {out}");
+    }
+
+    #[test]
+    fn process_incremental_markers_handles_multiple_blocks() {
+        let sql = "A\n-- __is_incremental__X-- __end_incremental__\nB\n-- __is_incremental__Y-- __end_incremental__\nC";
+        let kept = process_incremental_markers(sql, "main", "m", false);
+        // Both inner contents are kept when not new.
+        assert!(kept.contains('X'), "first block kept: {kept}");
+        assert!(kept.contains('Y'), "second block kept: {kept}");
+
+        let stripped = process_incremental_markers(sql, "main", "m", true);
+        assert!(!stripped.contains('X'), "first block stripped: {stripped}");
+        assert!(!stripped.contains('Y'), "second block stripped: {stripped}");
+        assert!(stripped.contains('A') && stripped.contains('B') && stripped.contains('C'));
+    }
+
+    #[test]
+    fn process_incremental_markers_escapes_quotes_in_identifiers() {
+        // escape_sql_ident doubles embedded quotes; the resulting reference must
+        // therefore contain the doubled-quote form.
+        let sql = "-- __is_incremental__\nFROM __this__\n-- __end_incremental__";
+        let out = process_incremental_markers(sql, "sch\"ema", "mo\"del", false);
+        assert!(
+            out.contains("\"sch\"\"ema\".\"mo\"\"del\""),
+            "embedded quotes should be doubled in the qualified ref: {out}"
+        );
+    }
+
+    // ---- inline_ephemeral_models ------------------------------------------------
+
+    #[test]
+    fn inline_ephemeral_models_returns_unchanged_when_no_ephemerals() {
+        let eph: HashMap<String, String> = HashMap::new();
+        let known: HashSet<String> = HashSet::new();
+        let sql = "SELECT * FROM upstream";
+        let out = inline_ephemeral_models(sql, &eph, "main", &known, None, None);
+        assert_eq!(out, sql, "empty ephemeral map should be a no-op");
+    }
+
+    #[test]
+    fn inline_ephemeral_models_returns_unchanged_when_no_ephemeral_referenced() {
+        // An ephemeral model exists but the SQL does not reference it.
+        let mut eph: HashMap<String, String> = HashMap::new();
+        eph.insert("eph_a".to_string(), "SELECT 1 AS x".to_string());
+        let known: HashSet<String> = ["eph_a".to_string()].into_iter().collect();
+        let sql = "SELECT * FROM something_else";
+        let out = inline_ephemeral_models(sql, &eph, "main", &known, None, None);
+        assert_eq!(out, sql, "unreferenced ephemeral should not be inlined");
+    }
+
+    #[test]
+    fn inline_ephemeral_models_inlines_referenced_ephemeral_as_cte() {
+        let mut eph: HashMap<String, String> = HashMap::new();
+        eph.insert("eph_a".to_string(), "SELECT 1 AS x".to_string());
+        let known: HashSet<String> = ["eph_a".to_string()].into_iter().collect();
+        let sql = "SELECT * FROM eph_a";
+        let out = inline_ephemeral_models(sql, &eph, "main", &known, None, None);
+        assert!(out.starts_with("WITH "), "expected CTE prefix, got: {out}");
+        assert!(out.contains("eph_a AS ("), "expected eph_a CTE, got: {out}");
+        assert!(out.contains("SELECT 1 AS x"), "CTE body should be inlined: {out}");
+        assert!(out.contains("FROM eph_a"), "outer SELECT should survive: {out}");
+    }
+
+    #[test]
+    fn inline_ephemeral_models_inlines_transitive_ephemerals() {
+        // eph_b depends on eph_a; the outer SQL only references eph_b directly,
+        // but both must end up in the CTE block.
+        let mut eph: HashMap<String, String> = HashMap::new();
+        eph.insert("eph_a".to_string(), "SELECT 1 AS x".to_string());
+        eph.insert("eph_b".to_string(), "SELECT * FROM eph_a".to_string());
+        let known: HashSet<String> = ["eph_a".to_string(), "eph_b".to_string()]
+            .into_iter()
+            .collect();
+        let sql = "SELECT * FROM eph_b";
+        let out = inline_ephemeral_models(sql, &eph, "main", &known, None, None);
+        assert!(out.contains("eph_a AS ("), "transitive ephemeral missing: {out}");
+        assert!(out.contains("eph_b AS ("), "direct ephemeral missing: {out}");
+        // eph_a must be defined before eph_b in the WITH clause.
+        let pos_a = out.find("eph_a AS (").expect("eph_a CTE present");
+        let pos_b = out.find("eph_b AS (").expect("eph_b CTE present");
+        assert!(pos_a < pos_b, "eph_a must precede eph_b in CTE order: {out}");
+    }
+
+    // ---- build_append_sql -------------------------------------------------------
+
+    #[test]
+    fn build_append_sql_emits_single_insert() {
+        let stmts = build_append_sql("main", "orders", "SELECT 1");
+        assert_eq!(stmts.len(), 1, "append builder must emit exactly one statement");
+        assert_eq!(
+            stmts[0],
+            "INSERT INTO \"main\".\"orders\" SELECT 1",
+            "unexpected INSERT shape: {}",
+            stmts[0]
+        );
+    }
+
+    #[test]
+    fn build_append_sql_escapes_embedded_quotes_in_identifiers() {
+        let stmts = build_append_sql("sch\"ema", "or\"ders", "SELECT 1");
+        assert_eq!(
+            stmts[0],
+            "INSERT INTO \"sch\"\"ema\".\"or\"\"ders\" SELECT 1",
+            "embedded quotes in schema/model must be doubled: {}",
+            stmts[0]
+        );
+    }
+
+    // ---- build_delete_insert_sql ------------------------------------------------
+
+    #[test]
+    fn build_delete_insert_sql_single_unique_key_uses_in_subquery() {
+        let stmts = build_delete_insert_sql(
+            "main",
+            "orders",
+            "SELECT * FROM src",
+            &["id".to_string()],
+        );
+        assert_eq!(stmts.len(), 2, "delete+insert must emit two statements");
+        assert_eq!(
+            stmts[0],
+            "DELETE FROM \"main\".\"orders\" WHERE \"id\" IN (SELECT \"id\" FROM (SELECT * FROM src))",
+            "single-key DELETE shape mismatch: {}",
+            stmts[0]
+        );
+        assert_eq!(
+            stmts[1],
+            "INSERT INTO \"main\".\"orders\" SELECT * FROM src",
+            "INSERT shape mismatch: {}",
+            stmts[1]
+        );
+    }
+
+    #[test]
+    fn build_delete_insert_sql_composite_unique_key_uses_exists_subquery() {
+        let stmts = build_delete_insert_sql(
+            "main",
+            "orders",
+            "SELECT * FROM src",
+            &["a".to_string(), "b".to_string()],
+        );
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(
+            stmts[0],
+            "DELETE FROM \"main\".\"orders\" WHERE EXISTS (\
+             SELECT 1 FROM (SELECT * FROM src) AS __src__ WHERE \
+             \"main\".\"orders\".\"a\" = __src__.\"a\" AND \
+             \"main\".\"orders\".\"b\" = __src__.\"b\")",
+            "composite-key DELETE shape mismatch: {}",
+            stmts[0]
+        );
+    }
+
+    #[test]
+    fn build_delete_insert_sql_escapes_identifiers() {
+        let stmts = build_delete_insert_sql(
+            "sch\"ema",
+            "ord\"ers",
+            "SELECT 1",
+            &["i\"d".to_string()],
+        );
+        // The DELETE should contain doubled quotes inside identifiers.
+        assert!(
+            stmts[0].contains("\"sch\"\"ema\".\"ord\"\"ers\""),
+            "schema/name not properly escaped: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("\"i\"\"d\""),
+            "key identifier not properly escaped: {}",
+            stmts[0]
+        );
+    }
+
+    // ---- build_merge_inner_sql --------------------------------------------------
+
+    #[test]
+    fn build_merge_inner_sql_single_key_and_default_update_cols() {
+        // No whitelist/exclude: every non-key column becomes an UPDATE target.
+        let all_cols = vec!["id".to_string(), "name".to_string(), "amt".to_string()];
+        let stmts = build_merge_inner_sql(
+            "main",
+            "orders",
+            "__staging_orders__",
+            &["id".to_string()],
+            None,
+            None,
+            &all_cols,
+        );
+        assert_eq!(stmts.len(), 2, "merge_inner must emit UPDATE + INSERT");
+        assert!(
+            stmts[0].starts_with("UPDATE \"main\".\"orders\" SET "),
+            "UPDATE prefix wrong: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("\"name\" = __stg__.\"name\""),
+            "non-key 'name' should be in SET clause: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("\"amt\" = __stg__.\"amt\""),
+            "non-key 'amt' should be in SET clause: {}",
+            stmts[0]
+        );
+        // The SET clause is the part between "SET " and " FROM ".
+        let set_part = stmts[0]
+            .split_once(" SET ")
+            .and_then(|(_, rest)| rest.split_once(" FROM "))
+            .map(|(s, _)| s)
+            .unwrap_or("");
+        assert!(
+            !set_part.contains("\"id\" = __stg__.\"id\""),
+            "key 'id' must NOT be in SET clause (set_part = {:?}, full = {})",
+            set_part,
+            stmts[0]
+        );
+        assert!(
+            stmts[1].contains(
+                "INSERT INTO \"main\".\"orders\" (\"id\", \"name\", \"amt\")"
+            ),
+            "INSERT column list shape wrong: {}",
+            stmts[1]
+        );
+        assert!(
+            stmts[1].contains("FROM \"__staging_orders__\""),
+            "INSERT must source from staging: {}",
+            stmts[1]
+        );
+    }
+
+    #[test]
+    fn build_merge_inner_sql_composite_key_join_conditions() {
+        let all_cols = vec!["a".to_string(), "b".to_string(), "v".to_string()];
+        let stmts = build_merge_inner_sql(
+            "main",
+            "t",
+            "__staging_t__",
+            &["a".to_string(), "b".to_string()],
+            None,
+            None,
+            &all_cols,
+        );
+        assert!(
+            stmts[0].contains(
+                "\"main\".\"t\".\"a\" = __stg__.\"a\" AND \"main\".\"t\".\"b\" = __stg__.\"b\""
+            ),
+            "composite UPDATE join clause wrong: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[1].contains(
+                "\"main\".\"t\".\"a\" = \"__staging_t__\".\"a\" AND \
+                 \"main\".\"t\".\"b\" = \"__staging_t__\".\"b\""
+            ),
+            "composite INSERT NOT EXISTS join wrong: {}",
+            stmts[1]
+        );
+    }
+
+    #[test]
+    fn build_merge_inner_sql_whitelist_skips_update_when_only_keys() {
+        // When the whitelist contains only key columns, update_cols is empty so
+        // the UPDATE statement is omitted entirely.
+        let all_cols = vec!["id".to_string(), "v".to_string()];
+        let stmts = build_merge_inner_sql(
+            "main",
+            "t",
+            "__staging_t__",
+            &["id".to_string()],
+            Some(&vec!["id".to_string()]),
+            None,
+            &all_cols,
+        );
+        assert_eq!(stmts.len(), 1, "no update_cols => only INSERT emitted");
+        assert!(
+            stmts[0].starts_with("INSERT INTO "),
+            "sole stmt must be INSERT: {}",
+            stmts[0]
+        );
+    }
+
+    #[test]
+    fn build_merge_inner_sql_exclude_columns_drops_them_from_set_clause() {
+        let all_cols = vec![
+            "id".to_string(),
+            "name".to_string(),
+            "secret".to_string(),
+        ];
+        let stmts = build_merge_inner_sql(
+            "main",
+            "t",
+            "__staging_t__",
+            &["id".to_string()],
+            None,
+            Some(&vec!["secret".to_string()]),
+            &all_cols,
+        );
+        assert!(
+            stmts[0].contains("\"name\" = __stg__.\"name\""),
+            "'name' should be updated: {}",
+            stmts[0]
+        );
+        assert!(
+            !stmts[0].contains("\"secret\""),
+            "'secret' should be excluded from UPDATE: {}",
+            stmts[0]
+        );
+        // INSERT still references all columns (including 'secret').
+        assert!(
+            stmts[1].contains("\"secret\""),
+            "INSERT must still include all columns: {}",
+            stmts[1]
+        );
+    }
+
+    // ---- build_merge_staging_*_sql ----------------------------------------------
+
+    #[test]
+    fn build_merge_staging_create_and_drop_emit_expected_sql() {
+        let create = build_merge_staging_create_sql("__staging_t__", "SELECT 1");
+        assert_eq!(
+            create,
+            vec!["CREATE TEMPORARY TABLE \"__staging_t__\" AS SELECT 1".to_string()]
+        );
+        let drop = build_merge_staging_drop_sql("__staging_t__");
+        assert_eq!(
+            drop,
+            vec!["DROP TABLE IF EXISTS \"__staging_t__\"".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_merge_staging_columns_query_escapes_staging_name() {
+        let q = build_merge_staging_columns_query_sql("weird'name");
+        // escape_sql_str doubles single quotes inside string literals.
+        assert!(
+            q.contains("table_name = 'weird''name'"),
+            "staging name not escaped: {q}"
+        );
+    }
+
+    // ---- build_microbatch_* -----------------------------------------------------
+
+    #[test]
+    fn build_microbatch_batch_end_query_uses_trunc_unit() {
+        let q = build_microbatch_batch_end_query_sql(BatchSize::Day);
+        assert_eq!(q, "SELECT date_trunc('day', CURRENT_TIMESTAMP)::VARCHAR");
+        let q_h = build_microbatch_batch_end_query_sql(BatchSize::Hour);
+        assert!(q_h.contains("'hour'"), "hour trunc unit missing: {q_h}");
+    }
+
+    #[test]
+    fn build_microbatch_batch_start_query_uses_lookback_and_interval() {
+        let q = build_microbatch_batch_start_query_sql("2024-01-01", 2, BatchSize::Day);
+        assert_eq!(
+            q,
+            "SELECT ('2024-01-01'::TIMESTAMP - 2 * INTERVAL '1 DAY')::VARCHAR"
+        );
+    }
+
+    #[test]
+    fn build_microbatch_min_query_quotes_identifiers() {
+        let q = build_microbatch_min_query_sql("main", "orders", "ts");
+        assert_eq!(
+            q,
+            "SELECT MIN(\"ts\")::VARCHAR FROM \"main\".\"orders\""
+        );
+    }
+
+    #[test]
+    fn build_microbatch_empty_insert_emits_plain_insert() {
+        let stmts = build_microbatch_empty_insert_sql("main", "t", "SELECT 1");
+        assert_eq!(stmts, vec!["INSERT INTO \"main\".\"t\" SELECT 1".to_string()]);
+    }
+
+    #[test]
+    fn build_microbatch_apply_sql_emits_delete_then_insert_with_bounds() {
+        let stmts = build_microbatch_apply_sql(
+            "main",
+            "t",
+            "SELECT * FROM src",
+            "ts",
+            "2024-01-01 00:00:00",
+            "2024-01-02 00:00:00",
+        );
+        assert_eq!(stmts.len(), 2, "apply must emit DELETE then INSERT");
+        assert!(
+            stmts[0].starts_with("DELETE FROM \"main\".\"t\""),
+            "DELETE prefix wrong: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("\"ts\" >= '2024-01-01 00:00:00'::TIMESTAMP"),
+            "DELETE lower bound missing: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("\"ts\" < '2024-01-02 00:00:00'::TIMESTAMP"),
+            "DELETE upper bound missing: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[1].contains("SELECT * FROM (SELECT * FROM src) AS __batch__"),
+            "INSERT subquery shape wrong: {}",
+            stmts[1]
+        );
+    }
+
+    // ---- build_snapshot_* -------------------------------------------------------
+
+    #[test]
+    fn build_snapshot_hash_expr_timestamp_strategy_uses_updated_at_column() {
+        let h = build_snapshot_hash_expr(SnapshotStrategy::Timestamp, Some("updated_at"), None);
+        assert_eq!(h, "hash(\"updated_at\"::VARCHAR)");
+    }
+
+    #[test]
+    fn build_snapshot_hash_expr_check_strategy_concatenates_columns() {
+        let cols = vec!["a".to_string(), "b".to_string()];
+        let h = build_snapshot_hash_expr(SnapshotStrategy::Check, None, Some(&cols));
+        assert_eq!(
+            h,
+            "hash(\"a\"::VARCHAR || '|' || \"b\"::VARCHAR)",
+            "check-strategy hash expression wrong: {h}"
+        );
+    }
+
+    #[test]
+    fn build_snapshot_staging_create_includes_hash_expr() {
+        let stmts =
+            build_snapshot_staging_create_sql("__snap__", "SELECT 1", "hash(\"x\"::VARCHAR)");
+        assert_eq!(
+            stmts,
+            vec![
+                "CREATE TEMPORARY TABLE \"__snap__\" AS \
+                 SELECT *, hash(\"x\"::VARCHAR) AS _stg_hash FROM (SELECT 1)"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn build_snapshot_new_sql_creates_target_with_snapshot_columns() {
+        let stmts = build_snapshot_new_sql("main", "snap", "__snap_staging_snap__");
+        assert_eq!(stmts.len(), 1);
+        assert!(
+            stmts[0].starts_with("CREATE TABLE \"main\".\"snap\" AS "),
+            "CREATE TABLE prefix wrong: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("CURRENT_TIMESTAMP AS _snapshot_valid_from"),
+            "missing valid_from: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("NULL::TIMESTAMP AS _snapshot_valid_to"),
+            "missing valid_to: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0].contains("_stg_hash AS _snapshot_hash"),
+            "missing hash column: {}",
+            stmts[0]
+        );
+    }
+
+    #[test]
+    fn build_snapshot_update_sql_emits_update_then_insert_with_key_matches() {
+        let stmts = build_snapshot_update_sql(
+            "main",
+            "snap",
+            "__snap_staging_snap__",
+            &["id".to_string()],
+        );
+        assert_eq!(stmts.len(), 2, "snapshot update branch must emit UPDATE + INSERT");
+        assert!(
+            stmts[0].starts_with("UPDATE \"main\".\"snap\" SET _snapshot_valid_to = "),
+            "UPDATE prefix wrong: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[0]
+                .contains("\"main\".\"snap\".\"id\" = \"__snap_staging_snap__\".\"id\""),
+            "UPDATE key match missing: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[1].starts_with("INSERT INTO \"main\".\"snap\""),
+            "INSERT prefix wrong: {}",
+            stmts[1]
+        );
+        assert!(
+            stmts[1].contains("\"__snap_staging_snap__\".\"id\" = __tgt__.\"id\""),
+            "INSERT NOT EXISTS key match missing: {}",
+            stmts[1]
+        );
+    }
+
+    #[test]
+    fn build_snapshot_update_sql_supports_composite_unique_keys() {
+        let stmts = build_snapshot_update_sql(
+            "main",
+            "snap",
+            "__snap_staging_snap__",
+            &["a".to_string(), "b".to_string()],
+        );
+        assert!(
+            stmts[0].contains(
+                "\"main\".\"snap\".\"a\" = \"__snap_staging_snap__\".\"a\" AND \
+                 \"main\".\"snap\".\"b\" = \"__snap_staging_snap__\".\"b\""
+            ),
+            "composite UPDATE key match wrong: {}",
+            stmts[0]
+        );
+        assert!(
+            stmts[1].contains(
+                "\"__snap_staging_snap__\".\"a\" = __tgt__.\"a\" AND \
+                 \"__snap_staging_snap__\".\"b\" = __tgt__.\"b\""
+            ),
+            "composite INSERT key match wrong: {}",
+            stmts[1]
+        );
+    }
+
+    #[test]
+    fn inline_ephemeral_models_extends_existing_with_clause() {
+        let mut eph: HashMap<String, String> = HashMap::new();
+        eph.insert("eph_a".to_string(), "SELECT 1 AS x".to_string());
+        let known: HashSet<String> = ["eph_a".to_string()].into_iter().collect();
+        // The outer query already has its own CTE — the function must merge rather
+        // than nest WITHs.
+        let sql = "WITH user_cte AS (SELECT 2) SELECT * FROM eph_a JOIN user_cte ON 1=1";
+        let out = inline_ephemeral_models(sql, &eph, "main", &known, None, None);
+        let with_count = out.matches("WITH").count();
+        assert_eq!(with_count, 1, "expected a single merged WITH, got {with_count}: {out}");
+        assert!(out.contains("eph_a AS ("), "ephemeral CTE missing: {out}");
+        assert!(out.contains("user_cte AS"), "original CTE must survive: {out}");
     }
 }

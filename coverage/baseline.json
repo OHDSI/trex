@@ -1,6 +1,24 @@
 {
-  "_README": "Regenerate per plugin with: make -C plugins/pgt coverage-baseline.",
-  "_generated": "2026-05-23",
-  "pgt_lib_lines_pct": 91.58,
-  "pgt_full_lines_pct": 92.77
+  "_README": "Per-plugin baselines. Regenerate pgt with: make -C plugins/pgt coverage-baseline. Older stub entries: cargo install cargo-llvm-cov --locked && scripts/coverage-summary.sh coverage/baseline.json.",
+  "_generated": "stub",
+  "_phase1_new_tests": {
+    "chdb": "14 tests (4 LogLevel + 10 SafeQueryResult) — verification deferred to CI (chdb.h unavailable in sandbox)",
+    "migration": "10 tests (parser_tests) — verified passing locally",
+    "pgt": "386 lib unit tests + 4 CLI smoke tests + 1 proptest fuzzer; HANA integration tests gated behind --features hana-it via testcontainers — verified passing locally",
+    "pool": "9 tests (sql_may_dirty_session, extract_panic_message, serialize_arrow_ipc, C-ABI accessors) — verified passing locally",
+    "pool-client": "6 tests (get_fns, public entry points, deserialize_arrow_ipc) — verified passing locally",
+    "runtime": "12 tests (bundle options + create_bundle_sync validation) — verification deferred to CI (heavy deps, empty trex-runtime submodule)",
+    "tpm": "55 tests + 4 SQL .test files + 17 Python integration tests — Rust unit and Python verified; SQL blocked by pre-existing .trex runner issue. Coverage (cargo llvm-cov, plugins/tpm only): regions 75.57%, lines 68.76%, functions 67.08%; npm/registry.rs lines 79.84%, functions 68.75%; npm/types.rs lines 93.42%, functions 100%.",
+    "transform": "13 tests (parser_tests + dag_tests) — verified passing locally"
+  },
+  "db": {
+    "lines": 70.76,
+    "regions": 71.14,
+    "functions": 74.45
+  },
+  "pgt": {
+    "lines": 92.77,
+    "regions": 93.39,
+    "functions": 95.81
+  }
 }

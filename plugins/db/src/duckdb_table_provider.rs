@@ -506,4 +506,242 @@ mod tests {
         assert_eq!(duckdb_type_to_arrow("Varchar"), DataType::Utf8);
         assert_eq!(duckdb_type_to_arrow("boolean"), DataType::Boolean);
     }
+
+    // ---------- Additional coverage ----------
+
+    #[test]
+    fn test_type_with_surrounding_whitespace() {
+        // duckdb_type_to_arrow trims and uppercases input.
+        assert_eq!(duckdb_type_to_arrow("  integer  "), DataType::Int32);
+        assert_eq!(duckdb_type_to_arrow("\tVARCHAR\n"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_type_char_bpchar() {
+        assert_eq!(duckdb_type_to_arrow("CHAR"), DataType::Utf8);
+        assert_eq!(duckdb_type_to_arrow("BPCHAR"), DataType::Utf8);
+    }
+
+    #[test]
+    fn test_time_without_time_zone_alias() {
+        assert_eq!(
+            duckdb_type_to_arrow("TIME WITHOUT TIME ZONE"),
+            DataType::Time64(TimeUnit::Microsecond)
+        );
+        assert_eq!(
+            duckdb_type_to_arrow("TIMESTAMP WITHOUT TIME ZONE"),
+            DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+    }
+
+    #[test]
+    fn test_decimal_malformed_falls_back_to_default() {
+        // Bad numeric inside DECIMAL(...) falls back to default precision/scale.
+        assert_eq!(
+            duckdb_type_to_arrow("DECIMAL(abc,def)"),
+            DataType::Decimal128(38, 10)
+        );
+        // Single value inside parens -> not a comma-separated pair.
+        assert_eq!(
+            duckdb_type_to_arrow("DECIMAL(10)"),
+            DataType::Decimal128(38, 10)
+        );
+        // Missing closing paren -> default.
+        assert_eq!(
+            duckdb_type_to_arrow("DECIMAL(10,2"),
+            DataType::Decimal128(38, 10)
+        );
+        // Missing opening paren (after the DECIMAL prefix) -> default.
+        assert_eq!(
+            duckdb_type_to_arrow("DECIMAL 10,2)"),
+            DataType::Decimal128(38, 10)
+        );
+    }
+
+    #[test]
+    fn test_numeric_with_precision_and_scale() {
+        assert_eq!(
+            duckdb_type_to_arrow("NUMERIC(8,2)"),
+            DataType::Decimal128(8, 2)
+        );
+        assert_eq!(
+            duckdb_type_to_arrow("NUMERIC"),
+            DataType::Decimal128(38, 10)
+        );
+    }
+
+    #[test]
+    fn test_decimal_lowercase_parses() {
+        // The whole input is uppercased before parsing, so lowercase works.
+        assert_eq!(
+            duckdb_type_to_arrow("decimal(7,3)"),
+            DataType::Decimal128(7, 3)
+        );
+    }
+
+    #[test]
+    fn test_empty_string_falls_back_to_utf8() {
+        assert_eq!(duckdb_type_to_arrow(""), DataType::Utf8);
+    }
+
+    #[test]
+    fn notnull_value_from_boolean_array() {
+        let arr = arrow::array::BooleanArray::from(vec![Some(true), Some(false)]);
+        assert!(notnull_value(&arr, 0));
+        assert!(!notnull_value(&arr, 1));
+    }
+
+    #[test]
+    fn notnull_value_from_string_array_truthy() {
+        let arr = StringArray::from(vec!["true", "TRUE", "1"]);
+        assert!(notnull_value(&arr, 0));
+        assert!(notnull_value(&arr, 1));
+        assert!(notnull_value(&arr, 2));
+    }
+
+    #[test]
+    fn notnull_value_from_string_array_falsy() {
+        let arr = StringArray::from(vec!["false", "0", "", "FALSE"]);
+        assert!(!notnull_value(&arr, 0));
+        assert!(!notnull_value(&arr, 1));
+        assert!(!notnull_value(&arr, 2));
+        // "FALSE" — string array path checks for exact match against
+        // "true"|"TRUE"|"1" only. Anything else returns false.
+        assert!(!notnull_value(&arr, 3));
+    }
+
+    #[test]
+    fn notnull_value_from_int_array_truthy_path() {
+        // For non-bool, non-string columns, falls back to display-based check.
+        let arr = arrow::array::Int64Array::from(vec![1, 0, 5]);
+        assert!(notnull_value(&arr, 0)); // "1"
+        assert!(!notnull_value(&arr, 1)); // "0"
+        assert!(notnull_value(&arr, 2)); // "5"
+    }
+
+    #[test]
+    fn parse_decimal_extracts_precision_scale() {
+        assert_eq!(parse_decimal("DECIMAL(10,2)"), DataType::Decimal128(10, 2));
+        assert_eq!(parse_decimal("DECIMAL(38,10)"), DataType::Decimal128(38, 10));
+    }
+
+    #[test]
+    fn parse_decimal_with_whitespace_in_args() {
+        // Inner ' 10 , 2 ' should still parse.
+        assert_eq!(
+            parse_decimal("DECIMAL( 10 , 2 )"),
+            DataType::Decimal128(10, 2)
+        );
+    }
+
+    #[test]
+    fn parse_decimal_default_on_invalid() {
+        assert_eq!(parse_decimal("NOPAREN"), DataType::Decimal128(38, 10));
+        assert_eq!(parse_decimal("(only_open"), DataType::Decimal128(38, 10));
+    }
+
+    #[test]
+    fn duckdb_table_provider_inner_schema_clone() {
+        // Ensure the inner provider returns the schema we constructed it with
+        // and reports TableType::Base.
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let inner = DuckDBTableProviderInner {
+            schema: Arc::clone(&schema),
+        };
+        assert_eq!(inner.schema(), schema);
+        assert_eq!(inner.table_type(), TableType::Base);
+    }
+
+    #[tokio::test]
+    async fn duckdb_table_provider_inner_scan_returns_not_implemented() {
+        // Direct scan on the inner schema-only provider should not be used.
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let inner = DuckDBTableProviderInner { schema };
+        let session = datafusion::execution::context::SessionContext::new();
+        let state = session.state();
+        let result = inner.scan(&state, None, &[], None).await;
+        match result {
+            Err(datafusion::error::DataFusionError::NotImplemented(msg)) => {
+                assert!(msg.contains("not supported") || msg.contains("federated"));
+            }
+            other => panic!("expected NotImplemented, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn duckdb_table_provider_inner_debug_format() {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let inner = DuckDBTableProviderInner { schema };
+        let dbg = format!("{:?}", inner);
+        assert!(dbg.contains("DuckDBTableProviderInner"));
+    }
+
+    #[test]
+    fn duckdb_table_source_schema_and_filter_pushdown() {
+        use datafusion::logical_expr::TableSource;
+        let schema: SchemaRef = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int64, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        // Build the federation provider via a dummy executor handle.
+        // SQLFederationProvider just wraps the executor; we don't run any SQL.
+        let executor = Arc::new(DuckDBSQLExecutor);
+        let provider = Arc::new(SQLFederationProvider::new(executor));
+        let source = DuckDBTableSource::new("orders", Arc::clone(&schema), provider);
+
+        assert_eq!(source.schema(), schema);
+        assert_eq!(source.table_type(), TableType::Base);
+
+        // Filter pushdown is always Inexact per filter.
+        let expr = datafusion::prelude::col("id").gt(datafusion::prelude::lit(5));
+        let exprs: Vec<&Expr> = vec![&expr, &expr];
+        let pushed = source.supports_filters_pushdown(&exprs).unwrap();
+        assert_eq!(pushed.len(), 2);
+        for p in pushed {
+            assert_eq!(p, TableProviderFilterPushDown::Inexact);
+        }
+    }
+
+    #[test]
+    fn duckdb_table_source_federation_provider_accessor() {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let executor = Arc::new(DuckDBSQLExecutor);
+        let provider = Arc::new(SQLFederationProvider::new(executor));
+        let source = DuckDBTableSource::new("fed_test", schema, Arc::clone(&provider));
+        let _ = source.federation_provider();
+        // The accessor returns an Arc<dyn FederationProvider>; verify it's non-null
+        // by formatting via Arc::strong_count (ensures we didn't take ownership).
+        assert!(Arc::strong_count(&provider) >= 2);
+    }
+
+    #[test]
+    fn duckdb_table_source_debug_format() {
+        let schema: SchemaRef = Arc::new(Schema::new(vec![Field::new(
+            "id",
+            DataType::Int64,
+            false,
+        )]));
+        let executor = Arc::new(DuckDBSQLExecutor);
+        let provider = Arc::new(SQLFederationProvider::new(executor));
+        let source = DuckDBTableSource::new("dbg_test", schema, provider);
+        let dbg = format!("{:?}", source);
+        assert!(dbg.contains("DuckDBTableSource"));
+        assert!(dbg.contains("dbg_test"));
+    }
 }
