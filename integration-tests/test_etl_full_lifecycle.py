@@ -15,6 +15,9 @@ import time
 import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -77,8 +80,8 @@ def _trex_exec(sql):
         if PSYCOPG_VERSION == 2 and not getattr(conn, "autocommit", False):
             try:
                 conn.commit()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("ignoring %s: %s", type(e).__name__, e)
         conn.close()
 
 
@@ -170,8 +173,8 @@ def _teardown_source():
     # Drop replicated table in trex (best-effort).
     try:
         _trex_exec(f'DROP TABLE IF EXISTS "public"."{SOURCE_TABLE}"')
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 @pytest.fixture(scope="module")
@@ -238,6 +241,6 @@ def test_etl_full_lifecycle_copy_and_cdc(trex_available):
         # Best-effort stop in case the test failed before reaching the stop call.
         try:
             _trex_exec(f"SELECT trex_etl_stop('{PIPELINE_NAME}')")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         _teardown_source()
