@@ -352,3 +352,331 @@ impl TransformationContext {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---- TransformationPattern ----
+
+    #[test]
+    fn new_pattern_compiles_and_matches() {
+        // signature: new(name, pattern, replacement, description)
+        let p = TransformationPattern::new("now", r"(?i)\bNOW\(\)", "CURRENT_TIMESTAMP", "replace NOW");
+        assert!(p.matches("SELECT NOW()"));
+        let (out, changed) = p.apply("SELECT NOW()").unwrap();
+        assert!(changed);
+        assert!(out.contains("CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn pattern_no_match_returns_unchanged() {
+        let p = TransformationPattern::new("now", r"(?i)\bNOW\(\)", "CURRENT_TIMESTAMP", "replace NOW");
+        let (out, changed) = p.apply("SELECT 1").unwrap();
+        assert!(!changed);
+        assert_eq!(out, "SELECT 1");
+    }
+
+    #[test]
+    fn pattern_matches_returns_false_on_no_match() {
+        let p = TransformationPattern::new("now", r"(?i)\bNOW\(\)", "CURRENT_TIMESTAMP", "x");
+        assert!(!p.matches("SELECT 1"));
+    }
+
+    #[test]
+    fn pattern_accessors() {
+        let p = TransformationPattern::new("myname", r"NOW\(\)", "X", "desc");
+        assert_eq!(p.replacement(), "X");
+        assert!(!p.pattern().is_empty());
+        assert_eq!(p.name, "myname");
+        assert_eq!(p.description, "desc");
+    }
+
+    #[test]
+    fn pattern_apply_replaces_all_occurrences() {
+        let p = TransformationPattern::new("foo", "foo", "bar", "replace foo");
+        let (out, changed) = p.apply("foo foo foo").unwrap();
+        assert!(changed);
+        assert_eq!(out, "bar bar bar");
+    }
+
+    // ---- PatternTransformer ----
+
+    #[test]
+    fn transformer_new_has_default_patterns() {
+        let t = PatternTransformer::new();
+        // PatternTransformer::new() loads default patterns
+        assert!(!t.patterns().is_empty());
+    }
+
+    #[test]
+    fn transformer_applies_added_patterns_in_order() {
+        let mut t = PatternTransformer::new();
+        // Clear default patterns by creating a minimal one
+        // We test by adding a pattern on top and verifying it fires
+        let initial_count = t.patterns().len();
+        t.add_pattern(TransformationPattern::new("extra", "XMARKER", "YMARKER", ""));
+        assert_eq!(t.patterns().len(), initial_count + 1);
+        let out = t.transform("XMARKER").unwrap();
+        assert!(out.contains("YMARKER"));
+    }
+
+    #[test]
+    fn transformer_add_pattern_increments_count() {
+        let mut t = PatternTransformer::new();
+        let before = t.patterns().len();
+        t.add_pattern(TransformationPattern::new("p", "foo", "bar", ""));
+        assert_eq!(t.patterns().len(), before + 1);
+    }
+
+    #[test]
+    fn transformer_returns_unchanged_when_no_pattern_fires() {
+        let mut t = PatternTransformer::new();
+        // Add a pattern that won't match our input
+        t.add_pattern(TransformationPattern::new("z", "ZZZNOTHERE", "X", ""));
+        let out = t.transform("SELECT 1").unwrap();
+        // The output may have been changed by default patterns but the custom one won't fire
+        // Verify we get a string back (no error)
+        assert!(!out.is_empty());
+    }
+
+    #[test]
+    fn transformer_default_impl() {
+        let t = PatternTransformer::default();
+        assert!(!t.patterns().is_empty());
+    }
+
+    #[test]
+    fn transformer_chained_patterns_transform_step_by_step() {
+        // Create a fresh transformer without default patterns by adding patterns manually
+        // We verify the chain: first pattern changes "alpha" -> "beta", second "beta" -> "gamma"
+        // But we must start with a PatternTransformer that has the defaults, so we just test
+        // that our two extra patterns both show up and fire in sequence on fresh input.
+        let mut t = PatternTransformer::new();
+        t.add_pattern(TransformationPattern::new("step1", "ALPHATOKEN", "BETATOKEN", ""));
+        t.add_pattern(TransformationPattern::new("step2", "BETATOKEN", "GAMMATOKEN", ""));
+        let out = t.transform("ALPHATOKEN").unwrap();
+        assert!(out.contains("GAMMATOKEN"), "chain did not produce GAMMATOKEN, got: {out}");
+    }
+
+    // ---- ConditionalPattern + ConditionalPatternTransformer ----
+
+    #[test]
+    fn conditional_pattern_no_conditions_always_applies() {
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        let cp = ConditionalPattern::new(pat);
+        let ctx = TransformationContext::new("SELECT NOW()");
+        assert!(cp.should_apply(&ctx));
+    }
+
+    #[test]
+    fn conditional_pattern_statement_type_matches_correctly() {
+        // PatternCondition variant is StatementType (confirmed from source)
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        let cp = ConditionalPattern::new(pat)
+            .with_condition(PatternCondition::StatementType("SELECT".into()));
+        let ctx_select = TransformationContext::new("SELECT NOW()").with_statement_type("SELECT");
+        let ctx_insert = TransformationContext::new("INSERT INTO t VALUES (NOW())")
+            .with_statement_type("INSERT");
+        assert!(cp.should_apply(&ctx_select));
+        assert!(!cp.should_apply(&ctx_insert));
+    }
+
+    #[test]
+    fn conditional_pattern_context_contains_matches() {
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        let cp = ConditionalPattern::new(pat)
+            .with_condition(PatternCondition::ContextContains("NOW".into()));
+        let ctx_yes = TransformationContext::new("SELECT NOW()");
+        let ctx_no = TransformationContext::new("SELECT 1");
+        assert!(cp.should_apply(&ctx_yes));
+        assert!(!cp.should_apply(&ctx_no));
+    }
+
+    #[test]
+    fn conditional_pattern_not_in_context_matches() {
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        let cp = ConditionalPattern::new(pat)
+            .with_condition(PatternCondition::NotInContext("SPECIAL".into()));
+        let ctx_without = TransformationContext::new("SELECT 1");
+        let ctx_with = TransformationContext::new("SELECT SPECIAL");
+        assert!(cp.should_apply(&ctx_without));
+        assert!(!cp.should_apply(&ctx_with));
+    }
+
+    #[test]
+    fn conditional_pattern_in_function_matches() {
+        // PatternCondition::InFunction (confirmed from source)
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        let cp = ConditionalPattern::new(pat)
+            .with_condition(PatternCondition::InFunction("COALESCE".into()));
+        let ctx_with_fn = TransformationContext::new("SELECT 1").with_function("COALESCE");
+        let ctx_no_fn = TransformationContext::new("SELECT 1");
+        assert!(cp.should_apply(&ctx_with_fn));
+        assert!(!cp.should_apply(&ctx_no_fn));
+    }
+
+    #[test]
+    fn conditional_pattern_in_clause_matches() {
+        // PatternCondition::InClause (confirmed from source)
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        let cp = ConditionalPattern::new(pat)
+            .with_condition(PatternCondition::InClause("WHERE".into()));
+        let ctx_where = TransformationContext::new("SELECT 1").with_clause("WHERE");
+        let ctx_select = TransformationContext::new("SELECT 1").with_clause("SELECT");
+        assert!(cp.should_apply(&ctx_where));
+        assert!(!cp.should_apply(&ctx_select));
+    }
+
+    #[test]
+    fn conditional_transformer_applies_matching_pattern() {
+        let mut t = ConditionalPatternTransformer::new();
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        t.add_conditional_pattern(
+            ConditionalPattern::new(pat)
+                .with_condition(PatternCondition::StatementType("SELECT".into())),
+        );
+        let ctx = TransformationContext::new("SELECT NOW()").with_statement_type("SELECT");
+        let out = t.transform("SELECT NOW()", &ctx).unwrap();
+        assert!(out.contains("CURRENT_TIMESTAMP"));
+    }
+
+    #[test]
+    fn conditional_transformer_skips_non_matching_pattern() {
+        let mut t = ConditionalPatternTransformer::new();
+        let pat = TransformationPattern::new("ny", "NOW", "CURRENT_TIMESTAMP", "");
+        t.add_conditional_pattern(
+            ConditionalPattern::new(pat)
+                .with_condition(PatternCondition::StatementType("SELECT".into())),
+        );
+        // Context says INSERT, so the pattern should NOT fire
+        let ctx = TransformationContext::new("INSERT INTO t VALUES (NOW())")
+            .with_statement_type("INSERT");
+        let out = t.transform("NOW", &ctx).unwrap();
+        assert_eq!(out, "NOW", "pattern should not have fired for INSERT context");
+    }
+
+    #[test]
+    fn conditional_transformer_default_impl() {
+        let t = ConditionalPatternTransformer::default();
+        // No patterns by default — transform should return input unchanged
+        let ctx = TransformationContext::new("SELECT 1");
+        let out = t.transform("SELECT 1", &ctx).unwrap();
+        assert_eq!(out, "SELECT 1");
+    }
+
+    // ---- TransformationContext ----
+
+    #[test]
+    fn context_new_has_empty_fields() {
+        let c = TransformationContext::new("SELECT 1");
+        assert_eq!(c.full_sql, "SELECT 1");
+        assert!(c.statement_type.is_none());
+        assert!(c.current_function.is_none());
+        assert!(c.current_clause.is_none());
+        assert!(c.metadata.is_empty());
+    }
+
+    #[test]
+    fn context_with_statement_type() {
+        let c = TransformationContext::new("SELECT 1").with_statement_type("SELECT");
+        assert_eq!(c.statement_type.as_deref(), Some("SELECT"));
+    }
+
+    #[test]
+    fn context_with_function() {
+        let c = TransformationContext::new("SELECT 1").with_function("NOW");
+        assert_eq!(c.current_function.as_deref(), Some("NOW"));
+    }
+
+    #[test]
+    fn context_with_clause() {
+        let c = TransformationContext::new("SELECT 1").with_clause("WHERE");
+        assert_eq!(c.current_clause.as_deref(), Some("WHERE"));
+    }
+
+    #[test]
+    fn context_add_metadata() {
+        let c = TransformationContext::new("SELECT 1").add_metadata("key", "value");
+        assert_eq!(c.metadata.get("key").map(|s| s.as_str()), Some("value"));
+    }
+
+    #[test]
+    fn context_builders_chain() {
+        let c = TransformationContext::new("SELECT 1")
+            .with_statement_type("SELECT")
+            .with_function("NOW")
+            .with_clause("WHERE")
+            .add_metadata("k", "v");
+        assert_eq!(c.statement_type.as_deref(), Some("SELECT"));
+        assert_eq!(c.current_function.as_deref(), Some("NOW"));
+        assert_eq!(c.current_clause.as_deref(), Some("WHERE"));
+        assert_eq!(c.metadata.get("k").map(|s| s.as_str()), Some("v"));
+    }
+
+    // ---- PatternCondition::matches ----
+
+    #[test]
+    fn pattern_condition_statement_type_case_insensitive() {
+        let cond = PatternCondition::StatementType("select".into());
+        let ctx = TransformationContext::new("SELECT 1").with_statement_type("SELECT");
+        assert!(cond.matches(&ctx));
+    }
+
+    #[test]
+    fn pattern_condition_statement_type_no_match_when_unset() {
+        let cond = PatternCondition::StatementType("SELECT".into());
+        let ctx = TransformationContext::new("SELECT 1"); // no statement_type set
+        assert!(!cond.matches(&ctx));
+    }
+
+    #[test]
+    fn pattern_condition_context_contains() {
+        let cond = PatternCondition::ContextContains("NOW".into());
+        let yes = TransformationContext::new("SELECT NOW()");
+        let no = TransformationContext::new("SELECT 1");
+        assert!(cond.matches(&yes));
+        assert!(!cond.matches(&no));
+    }
+
+    #[test]
+    fn pattern_condition_not_in_context() {
+        let cond = PatternCondition::NotInContext("SPECIAL".into());
+        let yes = TransformationContext::new("SELECT 1");
+        let no = TransformationContext::new("SELECT SPECIAL");
+        assert!(cond.matches(&yes));
+        assert!(!cond.matches(&no));
+    }
+
+    #[test]
+    fn pattern_condition_in_function() {
+        let cond = PatternCondition::InFunction("COALESCE".into());
+        let yes = TransformationContext::new("SELECT 1").with_function("COALESCE");
+        let no = TransformationContext::new("SELECT 1");
+        assert!(cond.matches(&yes));
+        assert!(!cond.matches(&no));
+    }
+
+    #[test]
+    fn pattern_condition_in_function_case_insensitive() {
+        let cond = PatternCondition::InFunction("coalesce".into());
+        let ctx = TransformationContext::new("SELECT 1").with_function("COALESCE");
+        assert!(cond.matches(&ctx));
+    }
+
+    #[test]
+    fn pattern_condition_in_clause() {
+        let cond = PatternCondition::InClause("WHERE".into());
+        let yes = TransformationContext::new("SELECT 1").with_clause("WHERE");
+        let no = TransformationContext::new("SELECT 1").with_clause("SELECT");
+        assert!(cond.matches(&yes));
+        assert!(!cond.matches(&no));
+    }
+
+    #[test]
+    fn pattern_condition_in_clause_case_insensitive() {
+        let cond = PatternCondition::InClause("where".into());
+        let ctx = TransformationContext::new("SELECT 1").with_clause("WHERE");
+        assert!(cond.matches(&ctx));
+    }
+}

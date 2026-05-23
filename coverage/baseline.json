@@ -1,13 +1,6 @@
 {
-  "_README": "Stub baseline. Regenerate with: cargo install cargo-llvm-cov --locked && scripts/coverage-summary.sh coverage/baseline.json. Until regenerated, the ratchet has no entries to compare and will always pass.",
-  "_generated": "stub",
-  "_phase1_new_tests": {
-    "chdb": "14 tests (4 LogLevel + 10 SafeQueryResult) — verification deferred to CI (chdb.h unavailable in sandbox)",
-    "migration": "10 tests (parser_tests) — verified passing locally",
-    "pool": "9 tests (sql_may_dirty_session, extract_panic_message, serialize_arrow_ipc, C-ABI accessors) — verified passing locally",
-    "pool-client": "6 tests (get_fns, public entry points, deserialize_arrow_ipc) — verified passing locally",
-    "runtime": "12 tests (bundle options + create_bundle_sync validation) — verification deferred to CI (heavy deps, empty trex-runtime submodule)",
-    "tpm": "18 tests (npm registry + types) — verified passing locally (cargo test --lib)",
-    "transform": "13 tests (parser_tests + dag_tests) — verified passing locally"
-  }
+  "_README": "Regenerate per plugin with: make -C plugins/pgt coverage-baseline.",
+  "_generated": "2026-05-23",
+  "pgt_lib_lines_pct": 91.58,
+  "pgt_full_lines_pct": 92.77
 }
