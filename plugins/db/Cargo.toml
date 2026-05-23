@@ -57,3 +57,7 @@ async-trait = "0.1"
 # DataFusion distributed query engine
 datafusion = "51"
 datafusion-federation = { version = "0.4.12", features = ["sql"] }
+
+[dev-dependencies]
+serial_test = "3"
+tempfile = "3"

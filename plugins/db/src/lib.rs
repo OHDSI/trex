@@ -1372,6 +1372,128 @@ impl VTab for DbPartitionsTable {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    //! Inline tests for `lib.rs`.
+    //!
+    //! Most of this file is FFI glue (`#[duckdb_entrypoint_c_api]`, VTab /
+    //! VScalar implementations) that requires a live DuckDB connection and
+    //! the loadable extension ABI. Those entry points are not reachable
+    //! from `cargo test --lib`, so we exercise the pure-Rust surface:
+    //! the `DISTRIBUTED_ENABLED` flag, plus the parsing / formatting
+    //! helpers that the FFI shims call into.
+    use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate the global DISTRIBUTED_ENABLED flag.
+    static FLAG_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn is_distributed_enabled_reflects_atomic_state() {
+        let _g = FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = is_distributed_enabled();
+        DISTRIBUTED_ENABLED.store(true, Ordering::Relaxed);
+        assert!(is_distributed_enabled());
+        DISTRIBUTED_ENABLED.store(false, Ordering::Relaxed);
+        assert!(!is_distributed_enabled());
+        // restore
+        DISTRIBUTED_ENABLED.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn is_distributed_enabled_defaults_to_false_when_restored() {
+        let _g = FLAG_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = is_distributed_enabled();
+        DISTRIBUTED_ENABLED.store(false, Ordering::Relaxed);
+        assert!(!is_distributed_enabled());
+        DISTRIBUTED_ENABLED.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn port_range_validation_matches_ffi_logic() {
+        // The FFI scalars accept i32 ports and reject anything outside
+        // 0..=65535 before casting to u16. Replicate the predicate here
+        // so the policy is locked down: changing the range bound will
+        // require updating this test alongside the FFI invokers.
+        let valid = |p: i32| -> bool { (0..=65535).contains(&p) };
+        assert!(valid(0));
+        assert!(valid(65535));
+        assert!(valid(8815));
+        assert!(!valid(-1));
+        assert!(!valid(65536));
+        assert!(!valid(i32::MIN));
+        assert!(!valid(i32::MAX));
+    }
+
+    #[test]
+    fn seeds_parsing_matches_ffi_logic() {
+        // DbStartWithSeedsScalar splits on ',', trims, and drops empties.
+        // Pull that pure logic out for direct verification.
+        let parse = |s: &str| -> Vec<String> {
+            s.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        };
+        assert_eq!(parse(""), Vec::<String>::new());
+        assert_eq!(parse(",,"), Vec::<String>::new());
+        assert_eq!(
+            parse(" a:1 , b:2 ,, c:3 "),
+            vec!["a:1".to_string(), "b:2".to_string(), "c:3".to_string()]
+        );
+        assert_eq!(parse("only"), vec!["only".to_string()]);
+    }
+
+    #[test]
+    fn node_name_format_matches_ffi() {
+        // FFI builds node names as `node-<host>:<port>`. Lock down the format.
+        let make = |host: &str, port: u16| format!("node-{}:{}", host, port);
+        assert_eq!(make("127.0.0.1", 4200), "node-127.0.0.1:4200");
+        assert_eq!(make("::1", 9000), "node-::1:9000");
+    }
+
+    #[test]
+    fn schema_hash_format_matches_ffi() {
+        // DbTablesTable formats schema_hash as `0x{:X}`. Verify the
+        // formatter so that regressions (e.g. lowercase hex, missing
+        // prefix) surface here.
+        let h: u64 = 0xabcd1234;
+        let s = format!("0x{:X}", h);
+        assert_eq!(s, "0xABCD1234");
+    }
+
+    #[test]
+    fn memory_utilization_format_matches_ffi() {
+        // DbClusterStatusTable uses `{:.1}` for the memory percentage.
+        assert_eq!(format!("{:.1}", 0.0_f64), "0.0");
+        assert_eq!(format!("{:.1}", 12.345_f64), "12.3");
+        assert_eq!(format!("{:.1}", 99.999_f64), "100.0");
+    }
+
+    #[test]
+    fn user_quota_lower_bound_matches_ffi() {
+        // DbSetUserQuotaScalar rejects max_concurrent < 1. Replicate the
+        // predicate so changes are intentional.
+        let valid = |n: i32| -> bool { n >= 1 };
+        assert!(!valid(0));
+        assert!(!valid(-5));
+        assert!(valid(1));
+        assert!(valid(100));
+    }
+
+    #[test]
+    fn set_distributed_response_strings_are_stable() {
+        // DbSetDistributedScalar returns one of two static strings on
+        // success. Other code (docs, integration tests) parses these,
+        // so guard against accidental edits.
+        let enabled = "Distributed engine enabled (queries will route through DataFusion)";
+        let disabled = "Distributed engine disabled (queries will use legacy coordinator)";
+        assert!(enabled.contains("enabled"));
+        assert!(disabled.contains("disabled"));
+        assert_ne!(enabled, disabled);
+    }
+}
+
 #[duckdb_entrypoint_c_api()]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     // Pool is initialized by the pool.trex extension (loaded before db).

@@ -40,22 +40,20 @@ impl DuckDbDestination {
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })
     }
 
-    fn ensure_schema(&self, schema_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let sql = format!(
+    fn build_ensure_schema_sql(schema_name: &str) -> String {
+        format!(
             "CREATE SCHEMA IF NOT EXISTS \"{}\"",
             schema_name.replace('"', "\"\"")
-        );
-        self.execute_sql(&sql)
+        )
     }
 
-    fn ensure_table(
-        &self,
-        table_schema: &TableSchema,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn ensure_schema(&self, schema_name: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.execute_sql(&Self::build_ensure_schema_sql(schema_name))
+    }
+
+    fn build_ensure_table_sql(table_schema: &TableSchema) -> String {
         let schema_name = &table_schema.name.schema;
         let table_name = &table_schema.name.name;
-
-        self.ensure_schema(schema_name)?;
 
         let columns: Vec<String> = table_schema
             .column_schemas
@@ -70,31 +68,47 @@ impl DuckDbDestination {
             })
             .collect();
 
-        let sql = format!(
+        format!(
             "CREATE TABLE IF NOT EXISTS \"{}\".\"{}\" ({})",
             schema_name.replace('"', "\"\""),
             table_name.replace('"', "\"\""),
             columns.join(", ")
-        );
-        self.execute_sql(&sql)
+        )
+    }
+
+    fn ensure_table(
+        &self,
+        table_schema: &TableSchema,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.ensure_schema(&table_schema.name.schema)?;
+        self.execute_sql(&Self::build_ensure_table_sql(table_schema))
+    }
+
+    fn build_schema_evolution_sqls(table_schema: &TableSchema) -> Vec<String> {
+        let schema_name = &table_schema.name.schema;
+        let table_name = &table_schema.name.name;
+
+        table_schema
+            .column_schemas
+            .iter()
+            .map(|col| {
+                let duckdb_type = pg_type_to_duckdb(&col.typ);
+                format!(
+                    "ALTER TABLE \"{}\".\"{}\" ADD COLUMN IF NOT EXISTS \"{}\" {}",
+                    schema_name.replace('"', "\"\""),
+                    table_name.replace('"', "\"\""),
+                    col.name.replace('"', "\"\""),
+                    duckdb_type
+                )
+            })
+            .collect()
     }
 
     fn handle_schema_evolution(
         &self,
         table_schema: &TableSchema,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let schema_name = &table_schema.name.schema;
-        let table_name = &table_schema.name.name;
-
-        for col in &table_schema.column_schemas {
-            let duckdb_type = pg_type_to_duckdb(&col.typ);
-            let sql = format!(
-                "ALTER TABLE \"{}\".\"{}\" ADD COLUMN IF NOT EXISTS \"{}\" {}",
-                schema_name.replace('"', "\"\""),
-                table_name.replace('"', "\"\""),
-                col.name.replace('"', "\"\""),
-                duckdb_type
-            );
+        for sql in Self::build_schema_evolution_sqls(table_schema) {
             let _ = self.execute_sql(&sql);
         }
         Ok(())
@@ -415,5 +429,288 @@ impl Destination for DuckDbDestination {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use etl_lib::types::{Cell, TableRow, Type};
+    use etl_postgres::types::{ColumnSchema, TableId, TableName, TableSchema};
+    use std::sync::Arc;
+
+    fn make_schema(cols: Vec<(&str, Type, bool)>) -> TableSchema {
+        TableSchema {
+            id: TableId::new(1),
+            name: TableName {
+                schema: "public".to_string(),
+                name: "t".to_string(),
+            },
+            column_schemas: cols
+                .into_iter()
+                .map(|(n, ty, pk)| ColumnSchema {
+                    name: n.to_string(),
+                    typ: ty,
+                    modifier: -1,
+                    nullable: !pk,
+                    primary: pk,
+                })
+                .collect(),
+        }
+    }
+
+    fn dest() -> DuckDbDestination {
+        DuckDbDestination::new(
+            "p".to_string(),
+            Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        )
+    }
+
+    // --- build_ensure_schema_sql ---
+
+    #[test]
+    fn build_ensure_schema_basic() {
+        assert_eq!(
+            DuckDbDestination::build_ensure_schema_sql("public"),
+            "CREATE SCHEMA IF NOT EXISTS \"public\""
+        );
+    }
+
+    #[test]
+    fn build_ensure_schema_quotes_embedded_quote() {
+        // a" should become a"" inside the quoted identifier.
+        assert_eq!(
+            DuckDbDestination::build_ensure_schema_sql("a\"b"),
+            "CREATE SCHEMA IF NOT EXISTS \"a\"\"b\""
+        );
+    }
+
+    // --- build_ensure_table_sql ---
+
+    #[test]
+    fn build_ensure_table_basic() {
+        let s = make_schema(vec![
+            ("id", Type::INT4, true),
+            ("name", Type::VARCHAR, false),
+        ]);
+        let sql = DuckDbDestination::build_ensure_table_sql(&s);
+        assert_eq!(
+            sql,
+            "CREATE TABLE IF NOT EXISTS \"public\".\"t\" (\"id\" INTEGER, \"name\" VARCHAR)"
+        );
+    }
+
+    #[test]
+    fn build_ensure_table_quotes_identifiers() {
+        let mut s = make_schema(vec![("a\"b", Type::INT4, true)]);
+        s.name.schema = "sch\"ema".to_string();
+        s.name.name = "ta\"ble".to_string();
+        let sql = DuckDbDestination::build_ensure_table_sql(&s);
+        assert!(sql.contains("\"sch\"\"ema\".\"ta\"\"ble\""));
+        assert!(sql.contains("\"a\"\"b\" INTEGER"));
+    }
+
+    #[test]
+    fn build_ensure_table_no_columns() {
+        let s = make_schema(vec![]);
+        let sql = DuckDbDestination::build_ensure_table_sql(&s);
+        assert_eq!(sql, "CREATE TABLE IF NOT EXISTS \"public\".\"t\" ()");
+    }
+
+    // --- build_schema_evolution_sqls ---
+
+    #[test]
+    fn build_schema_evolution_sqls_one_per_column() {
+        let s = make_schema(vec![
+            ("id", Type::INT4, true),
+            ("name", Type::VARCHAR, false),
+        ]);
+        let sqls = DuckDbDestination::build_schema_evolution_sqls(&s);
+        assert_eq!(sqls.len(), 2);
+        assert_eq!(
+            sqls[0],
+            "ALTER TABLE \"public\".\"t\" ADD COLUMN IF NOT EXISTS \"id\" INTEGER"
+        );
+        assert_eq!(
+            sqls[1],
+            "ALTER TABLE \"public\".\"t\" ADD COLUMN IF NOT EXISTS \"name\" VARCHAR"
+        );
+    }
+
+    #[test]
+    fn build_schema_evolution_sqls_quotes_identifiers() {
+        let mut s = make_schema(vec![("c\"x", Type::INT4, false)]);
+        s.name.schema = "s\"ch".to_string();
+        s.name.name = "t\"bl".to_string();
+        let sqls = DuckDbDestination::build_schema_evolution_sqls(&s);
+        assert_eq!(sqls.len(), 1);
+        assert_eq!(
+            sqls[0],
+            "ALTER TABLE \"s\"\"ch\".\"t\"\"bl\" ADD COLUMN IF NOT EXISTS \"c\"\"x\" INTEGER"
+        );
+    }
+
+    #[test]
+    fn build_schema_evolution_sqls_empty() {
+        let s = make_schema(vec![]);
+        let sqls = DuckDbDestination::build_schema_evolution_sqls(&s);
+        assert!(sqls.is_empty());
+    }
+
+    // --- build_insert_sql ---
+
+    #[test]
+    fn build_insert_sql_basic() {
+        let d = dest();
+        let s = make_schema(vec![("id", Type::INT4, true), ("name", Type::VARCHAR, false)]);
+        let row = TableRow {
+            values: vec![Cell::I32(7), Cell::String("alice".into())],
+        };
+        let sql = d.build_insert_sql("public", "t", &s.column_schemas, &row);
+        assert_eq!(
+            sql,
+            "INSERT INTO \"public\".\"t\" (\"id\", \"name\") VALUES (7, 'alice')"
+        );
+    }
+
+    #[test]
+    fn build_insert_sql_quotes_identifiers_and_values() {
+        let d = dest();
+        let s = make_schema(vec![("c\"x", Type::VARCHAR, false)]);
+        let row = TableRow {
+            values: vec![Cell::String("a'b".into())],
+        };
+        let sql = d.build_insert_sql("sch\"x", "t\"x", &s.column_schemas, &row);
+        assert!(sql.contains("\"sch\"\"x\".\"t\"\"x\""));
+        assert!(sql.contains("\"c\"\"x\""));
+        assert!(sql.contains("'a''b'"));
+    }
+
+    #[test]
+    fn build_insert_sql_handles_nulls() {
+        let d = dest();
+        let s = make_schema(vec![("id", Type::INT4, true), ("name", Type::VARCHAR, false)]);
+        let row = TableRow {
+            values: vec![Cell::I32(1), Cell::Null],
+        };
+        let sql = d.build_insert_sql("public", "t", &s.column_schemas, &row);
+        assert_eq!(
+            sql,
+            "INSERT INTO \"public\".\"t\" (\"id\", \"name\") VALUES (1, NULL)"
+        );
+    }
+
+    // --- build_update_sql ---
+
+    #[test]
+    fn build_update_sql_basic() {
+        let d = dest();
+        let s = make_schema(vec![
+            ("id", Type::INT4, true),
+            ("name", Type::VARCHAR, false),
+            ("active", Type::BOOL, false),
+        ]);
+        let row = TableRow {
+            values: vec![Cell::I32(7), Cell::String("bob".into()), Cell::Bool(true)],
+        };
+        let sql = d
+            .build_update_sql("public", "t", &s.column_schemas, &row)
+            .unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE \"public\".\"t\" SET \"name\" = 'bob', \"active\" = TRUE WHERE \"id\" = 7"
+        );
+    }
+
+    #[test]
+    fn build_update_sql_no_primary_key_returns_none() {
+        let d = dest();
+        let s = make_schema(vec![("a", Type::INT4, false), ("b", Type::INT4, false)]);
+        let row = TableRow {
+            values: vec![Cell::I32(1), Cell::I32(2)],
+        };
+        assert!(d
+            .build_update_sql("public", "t", &s.column_schemas, &row)
+            .is_none());
+    }
+
+    #[test]
+    fn build_update_sql_all_columns_primary_returns_none() {
+        // No non-primary columns → no SET clauses → None.
+        let d = dest();
+        let s = make_schema(vec![("a", Type::INT4, true), ("b", Type::INT4, true)]);
+        let row = TableRow {
+            values: vec![Cell::I32(1), Cell::I32(2)],
+        };
+        assert!(d
+            .build_update_sql("public", "t", &s.column_schemas, &row)
+            .is_none());
+    }
+
+    #[test]
+    fn build_update_sql_composite_primary_key() {
+        let d = dest();
+        let s = make_schema(vec![
+            ("a", Type::INT4, true),
+            ("b", Type::INT4, true),
+            ("v", Type::VARCHAR, false),
+        ]);
+        let row = TableRow {
+            values: vec![Cell::I32(1), Cell::I32(2), Cell::String("x".into())],
+        };
+        let sql = d
+            .build_update_sql("public", "t", &s.column_schemas, &row)
+            .unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE \"public\".\"t\" SET \"v\" = 'x' WHERE \"a\" = 1 AND \"b\" = 2"
+        );
+    }
+
+    // --- build_delete_sql ---
+
+    #[test]
+    fn build_delete_sql_basic() {
+        let d = dest();
+        let s = make_schema(vec![("id", Type::INT4, true), ("name", Type::VARCHAR, false)]);
+        let row = TableRow {
+            values: vec![Cell::I32(7), Cell::String("ignored".into())],
+        };
+        let sql = d
+            .build_delete_sql("public", "t", &s.column_schemas, &row)
+            .unwrap();
+        assert_eq!(sql, "DELETE FROM \"public\".\"t\" WHERE \"id\" = 7");
+    }
+
+    #[test]
+    fn build_delete_sql_no_primary_key_returns_none() {
+        let d = dest();
+        let s = make_schema(vec![("a", Type::INT4, false)]);
+        let row = TableRow {
+            values: vec![Cell::I32(1)],
+        };
+        assert!(d
+            .build_delete_sql("public", "t", &s.column_schemas, &row)
+            .is_none());
+    }
+
+    #[test]
+    fn build_delete_sql_composite_primary_key() {
+        let d = dest();
+        let s = make_schema(vec![
+            ("a", Type::INT4, true),
+            ("b", Type::INT4, true),
+            ("v", Type::VARCHAR, false),
+        ]);
+        let row = TableRow {
+            values: vec![Cell::I32(1), Cell::I32(2), Cell::String("x".into())],
+        };
+        let sql = d
+            .build_delete_sql("public", "t", &s.column_schemas, &row)
+            .unwrap();
+        assert_eq!(
+            sql,
+            "DELETE FROM \"public\".\"t\" WHERE \"a\" = 1 AND \"b\" = 2"
+        );
     }
 }

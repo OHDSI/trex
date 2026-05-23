@@ -40,3 +40,49 @@ where
         .map_err(|e| format!("local conn lock: {e}"))?;
     f(&guard)
 }
+
+#[cfg(test)]
+mod tests {
+    //! Inline tests for the local connections pool.
+    //!
+    //! `LOCAL_CONNS` is a process-global `OnceLock`. Production code
+    //! initializes it once at extension load. Under `cargo test --lib` it
+    //! is never initialized, so `with_connection` always returns the
+    //! "not initialized" error. We exercise both the early-out path and
+    //! the call-shape (closure never invoked when uninitialized).
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn with_connection_without_init_errors() {
+        let err = with_connection(|_| Ok::<(), String>(())).unwrap_err();
+        assert!(
+            err.contains("not initialized"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn with_connection_does_not_invoke_closure_when_uninitialized() {
+        // Track whether the closure ran. If LOCAL_CONNS is unset, the
+        // function must short-circuit and return Err before calling `f`.
+        let called = AtomicBool::new(false);
+        let result: Result<i32, String> = with_connection(|_| {
+            called.store(true, Ordering::SeqCst);
+            Ok(0)
+        });
+        assert!(result.is_err());
+        assert!(
+            !called.load(Ordering::SeqCst),
+            "closure must not be invoked when uninitialized"
+        );
+    }
+
+    #[test]
+    fn with_connection_propagates_error_type_string() {
+        // Closure return type is `Result<R, String>`; the wrapper preserves it.
+        let r: Result<String, String> = with_connection(|_| Ok("ok".to_string()));
+        // Err because uninitialized, but compile-time confirms the generic R.
+        assert!(r.is_err());
+    }
+}

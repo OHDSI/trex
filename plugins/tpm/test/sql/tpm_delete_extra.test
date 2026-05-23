@@ -1,0 +1,26 @@
+# name: test/sql/tpm_delete_extra.test
+# description: test install + delete round-trip
+# group: [tpm]
+
+require tpm
+
+# Install
+query I
+SELECT json_extract_string(install_results, '$.success')
+FROM trex_plugin_install('is-number@7.0.0', '/tmp/tpm_test_delete_dir');
+----
+true
+
+# Delete
+query I
+SELECT json_extract_string(delete_results, '$.deleted')
+FROM trex_plugin_delete('is-number', '/tmp/tpm_test_delete_dir');
+----
+true
+
+# Second delete should be a no-op
+query I
+SELECT json_extract_string(delete_results, '$.deleted')
+FROM trex_plugin_delete('is-number', '/tmp/tpm_test_delete_dir');
+----
+false

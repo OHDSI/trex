@@ -25,6 +25,10 @@ jobs:
         working-directory: plugins/bao/java
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
 
       - name: Set up JDK 21
         uses: actions/setup-java@v4
@@ -34,13 +38,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Download libtrexsql
-        working-directory: .
-        run: |
-          mkdir -p /tmp/trexsql
-          wget -q -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/${{ env.TREXSQL_VERSION }}/libtrexsql-linux-amd64.zip
-          unzip -o /tmp/libtrexsql.zip -d /tmp/trexsql
+      - uses: ./.github/actions/setup-libtrexsql
+        with:
+          version: ${{ env.TREXSQL_VERSION }}
 
       - name: Build native library
         working-directory: .

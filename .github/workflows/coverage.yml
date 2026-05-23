@@ -21,6 +21,7 @@ jobs:
   rust-unit-coverage:
     name: "Rust unit coverage (${{ matrix.plugin }})"
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     strategy:
       fail-fast: false
@@ -28,8 +29,13 @@ jobs:
         plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: ${{ matrix.plugin == 'runtime' && 'plugins/extension-ci-tools plugins/runtime/trex-runtime' || 'plugins/extension-ci-tools' }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -55,12 +61,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-17 postgresql-server-dev-17
 
-      - name: Download libtrexsql (pg_trex only)
+      - uses: ./.github/actions/setup-libtrexsql
         if: matrix.plugin == 'pg_trex'
-        run: |
-          wget -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
-          unzip /tmp/libtrexsql.zip -d /tmp/trexsql
+        with:
+          version: v1.4.4-trex
 
       - name: Install cargo-pgrx (pg_trex only)
         if: matrix.plugin == 'pg_trex'
@@ -110,153 +114,16 @@ jobs:
           flags: unit-${{ matrix.plugin }}
           fail_ci_if_error: false
 
-  integration-coverage:
-    name: "Integration coverage (${{ matrix.suite }})"
-    runs-on: ubuntu-24.04
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: distributed
-            plugins: "pool db"
-            tests: "test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py"
-          - suite: pgwire
-            plugins: "pool db pgwire"
-            tests: "test_pgwire_standalone.py test_pgwire_db.py"
-          - suite: etl
-            plugins: "pool db etl"
-            tests: "test_etl_standalone.py test_etl_db.py"
-          - suite: fhir
-            plugins: "pool fhir"
-            tests: "test_fhir_standalone.py"
-          - suite: migration
-            plugins: "pool migration"
-            tests: "test_migration_standalone.py"
-          - suite: tpm
-            plugins: "pool tpm"
-            tests: "test_tpm_standalone.py"
-          - suite: chdb
-            plugins: "pool db chdb"
-            tests: "test_chdb_standalone.py test_chdb_db.py"
-          - suite: hana
-            plugins: "pool hana"
-            tests: "test_hana_standalone.py"
-          - suite: runtime
-            plugins: "pool db runtime"
-            tests: "test_trexas_standalone.py"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: integration-coverage-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('plugins/*/Cargo.lock') }}
-
-      - name: Free disk space (hana only — HANA Express image is ~7 GB)
-        if: matrix.suite == 'hana'
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: Install chdb native library (chdb only)
-        if: matrix.suite == 'chdb'
-        run: sudo apt-get update && sudo apt-get install -y libc6-dev clang && sudo bash ./install_chdb.sh
-        working-directory: plugins/chdb
-
-      - name: Install runtime build dependencies (runtime only)
-        if: matrix.suite == 'runtime'
-        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
-
-      - uses: denoland/setup-deno@v2
-        if: matrix.suite == 'runtime'
-        with:
-          deno-version: v2.x
-
-      - name: Start HANA Express container (hana only)
-        if: matrix.suite == 'hana'
-        run: docker compose -f integration-tests/docker-compose.hana.yml up -d
-
-      # Same rationale as rust-unit-coverage: informational, never gating.
-      - name: Build instrumented plugins
-        continue-on-error: true
-        run: |
-          for plugin in ${{ matrix.plugins }}; do
-            (cd plugins/$plugin && make configure && make debug_coverage)
-          done
-
-      - name: Setup integration test env
-        continue-on-error: true
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Wait for HANA to be ready (hana only)
-        if: matrix.suite == 'hana'
-        run: |
-          echo "Waiting for HANA Express to be fully ready..."
-          for i in $(seq 1 120); do
-            if docker logs trex-hana 2>&1 | grep -q "Startup finished!"; then
-              echo "HANA startup finished after ~$((i * 5))s"
-              sleep 5
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Timeout waiting for HANA (10 min)"
-          docker logs trex-hana 2>&1 | tail -20
-          exit 1
-
-      - name: Run tests with coverage instrumentation
-        continue-on-error: true
-        env:
-          HANA_TEST_URL: "hdbsqls://SYSTEM:Toor1234@localhost:39041/HDB?insecure_omit_server_certificate_check"
-        run: TREX_COVERAGE=1 venv/bin/pytest -v ${{ matrix.tests }}
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - name: Cleanup HANA container (hana only)
-        if: always() && matrix.suite == 'hana'
-        run: docker compose -f integration-tests/docker-compose.hana.yml down -v
-
-      - uses: codecov/codecov-action@v4
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-${{ matrix.suite }}
-          fail_ci_if_error: false
-
   coverage-status:
     name: "Coverage Status"
     if: always()
     runs-on: ubuntu-24.04
-    needs: [rust-unit-coverage, integration-coverage]
+    timeout-minutes: 5
+    needs: [rust-unit-coverage]
     steps:
       - name: Check
         run: |
           echo "rust-unit-coverage: ${{ needs.rust-unit-coverage.result }}"
-          echo "integration-coverage: ${{ needs.integration-coverage.result }}"
           # Coverage is informational only — never fail the gate. The job
           # still appears in PR checks so missing uploads are visible.
           exit 0
@@ -264,11 +131,16 @@ jobs:
   ratchet:
     name: "Coverage ratchet"
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: rust-unit-coverage
     if: github.event_name == 'pull_request'
     continue-on-error: true  # informational until we have one week of green runs
     steps:
       - uses: actions/checkout@v4
+        id: co_checkout
+        continue-on-error: true
+      - if: steps.co_checkout.outcome == 'failure'
+        uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

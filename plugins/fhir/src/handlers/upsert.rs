@@ -4,6 +4,30 @@ use crate::query_executor::{QueryResult, RequestConn};
 use crate::schema::sql_builder;
 use crate::state::AppState;
 
+/// Stamp id and meta (versionId, lastUpdated) on a resource object used by upsert.
+pub fn stamp_upsert_meta(resource: &mut Value, id: &str, version: i64, now: &str) {
+    if let Some(obj) = resource.as_object_mut() {
+        obj.insert("id".to_string(), Value::String(id.to_string()));
+        obj.insert(
+            "meta".to_string(),
+            json!({
+                "versionId": version.to_string(),
+                "lastUpdated": now
+            }),
+        );
+    }
+}
+
+/// Build the parameterized INSERT into `_history` used by the upsert path.
+pub fn build_upsert_history_sql(schema: &str, current_version: i64) -> String {
+    format!(
+        "INSERT INTO {schema}._history (_id, _resource_type, _version_id, _last_updated, _raw, _is_deleted) \
+         VALUES ($1, $2, {version}, CURRENT_TIMESTAMP, $3, false)",
+        schema = schema,
+        version = current_version,
+    )
+}
+
 pub struct UpsertResult {
     pub version: i64,
     pub is_new: bool,
@@ -102,27 +126,13 @@ async fn upsert_resource_inner(
         .format("%Y-%m-%dT%H:%M:%SZ")
         .to_string();
 
-    if let Some(obj) = resource.as_object_mut() {
-        obj.insert("id".to_string(), Value::String(id.to_string()));
-        obj.insert(
-            "meta".to_string(),
-            json!({
-                "versionId": new_version.to_string(),
-                "lastUpdated": now
-            }),
-        );
-    }
+    stamp_upsert_meta(resource, id, new_version, &now);
 
     let raw_json = serde_json::to_string(&resource)
         .map_err(|e| format!("JSON serialize: {}", e))?;
 
     if !is_new {
-        let history_sql = format!(
-            "INSERT INTO {schema}._history (_id, _resource_type, _version_id, _last_updated, _raw, _is_deleted) \
-             VALUES ($1, $2, {version}, CURRENT_TIMESTAMP, $3, false)",
-            schema = schema,
-            version = current_version,
-        );
+        let history_sql = build_upsert_history_sql(schema, current_version);
         let params = vec![id.to_string(), resource_type.to_string(), current_raw];
         if let QueryResult::Error(e) = conn.execute_params(history_sql, params).await {
             if owns_transaction {
@@ -158,4 +168,52 @@ async fn upsert_resource_inner(
         version: new_version,
         is_new,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn stamp_upsert_meta_sets_fields() {
+        let mut r = json!({"resourceType": "Patient"});
+        stamp_upsert_meta(&mut r, "x", 3, "2026-05-23T10:00:00Z");
+        assert_eq!(r["id"], "x");
+        assert_eq!(r["meta"]["versionId"], "3");
+        assert_eq!(r["meta"]["lastUpdated"], "2026-05-23T10:00:00Z");
+    }
+
+    #[test]
+    fn stamp_upsert_meta_overwrites_existing() {
+        let mut r = json!({"id": "old", "meta": {"versionId": "99"}});
+        stamp_upsert_meta(&mut r, "new", 1, "now");
+        assert_eq!(r["id"], "new");
+        assert_eq!(r["meta"]["versionId"], "1");
+    }
+
+    #[test]
+    fn stamp_upsert_meta_noop_on_non_object() {
+        let mut r = json!("string");
+        stamp_upsert_meta(&mut r, "x", 1, "now");
+        assert_eq!(r, json!("string"));
+    }
+
+    #[test]
+    fn upsert_history_sql_embeds_current_version() {
+        let sql = build_upsert_history_sql("\"db\".\"ds\"", 7);
+        assert!(sql.contains("\"db\".\"ds\"._history"));
+        assert!(sql.contains(", 7, "));
+        assert!(sql.contains("$1"));
+        assert!(sql.contains("$2"));
+        assert!(sql.contains("$3"));
+        assert!(sql.contains("_is_deleted"));
+    }
+
+    #[test]
+    fn upsert_result_holds_version_and_is_new() {
+        let r = UpsertResult { version: 5, is_new: true };
+        assert_eq!(r.version, 5);
+        assert!(r.is_new);
+    }
 }

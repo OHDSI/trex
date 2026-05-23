@@ -300,3 +300,362 @@ impl Default for RulesConfig {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    // Helper: generate a valid TOML string by serializing the default config.
+    // This ensures the TOML always has all required fields (including custom_mappings tables).
+    fn full_toml() -> String {
+        let c = TransformationConfig::default();
+        toml::to_string_pretty(&c).expect("default config should serialize to TOML")
+    }
+
+    // --- TransformationConfig::default ---
+
+    #[test]
+    fn default_has_all_subconfigs() {
+        let c = TransformationConfig::default();
+        // access each subconfig field to verify they exist
+        let _ = c.data_types;
+        let _ = c.functions;
+        let _ = c.schema_handling;
+        let _ = c.optimization;
+        let _ = c.formatting;
+        let _ = c.rules;
+    }
+
+    #[test]
+    fn default_data_types_preserve_precision_is_true() {
+        let c = TransformationConfig::default();
+        assert!(c.data_types.preserve_precision);
+    }
+
+    #[test]
+    fn default_functions_preserve_case_is_false() {
+        let c = TransformationConfig::default();
+        assert!(!c.functions.preserve_case);
+    }
+
+    #[test]
+    fn default_schema_handling_default_schema_is_public() {
+        let c = TransformationConfig::default();
+        assert_eq!(c.schema_handling.default_schema, "PUBLIC");
+    }
+
+    // --- TransformationConfig::to_file / from_file ---
+
+    #[test]
+    fn to_file_then_from_file_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        let original = TransformationConfig::default();
+        original.to_file(&path).unwrap();
+        let parsed = TransformationConfig::from_file(&path).unwrap();
+        assert_eq!(
+            parsed.data_types.preserve_precision,
+            original.data_types.preserve_precision
+        );
+        assert_eq!(
+            parsed.functions.preserve_case,
+            original.functions.preserve_case
+        );
+        assert_eq!(
+            parsed.schema_handling.default_schema,
+            original.schema_handling.default_schema
+        );
+    }
+
+    #[test]
+    fn from_file_parses_valid_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        std::fs::write(&path, full_toml()).unwrap();
+        let c = TransformationConfig::from_file(&path).unwrap();
+        assert!(c.data_types.preserve_precision);
+    }
+
+    #[test]
+    fn from_file_missing_file_errors() {
+        let result = TransformationConfig::from_file("/nonexistent/path/missing.toml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_file_invalid_toml_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.toml");
+        std::fs::write(&path, "not valid toml {{ }}").unwrap();
+        let result = TransformationConfig::from_file(&path);
+        assert!(result.is_err());
+    }
+
+    // --- TransformationConfig::from_env ---
+
+    #[test]
+    fn from_env_reads_preserve_precision_false() {
+        std::env::set_var("PGT_PRESERVE_PRECISION", "false");
+        let c = TransformationConfig::from_env();
+        std::env::remove_var("PGT_PRESERVE_PRECISION");
+        assert!(!c.data_types.preserve_precision);
+    }
+
+    #[test]
+    fn from_env_reads_preserve_case_true() {
+        std::env::set_var("PGT_PRESERVE_CASE", "true");
+        let c = TransformationConfig::from_env();
+        std::env::remove_var("PGT_PRESERVE_CASE");
+        assert!(c.functions.preserve_case);
+    }
+
+    #[test]
+    fn from_env_reads_strict_mode() {
+        std::env::set_var("PGT_STRICT_MODE", "true");
+        let c = TransformationConfig::from_env();
+        std::env::remove_var("PGT_STRICT_MODE");
+        assert!(c.rules.enable_strict_mode);
+    }
+
+    #[test]
+    fn from_env_reads_validate_compatibility_false() {
+        std::env::set_var("PGT_VALIDATE_COMPATIBILITY", "false");
+        let c = TransformationConfig::from_env();
+        std::env::remove_var("PGT_VALIDATE_COMPATIBILITY");
+        assert!(!c.rules.validate_hana_compatibility);
+    }
+
+    #[test]
+    fn from_env_no_vars_never_panics() {
+        // Remove all known env vars to test default behavior
+        std::env::remove_var("PGT_PRESERVE_PRECISION");
+        std::env::remove_var("PGT_PRESERVE_CASE");
+        std::env::remove_var("PGT_STRICT_MODE");
+        std::env::remove_var("PGT_VALIDATE_COMPATIBILITY");
+        let c = TransformationConfig::from_env();
+        c.validate().unwrap();
+    }
+
+    // --- TransformationConfig::merge ---
+
+    #[test]
+    fn merge_combines_non_default_fields() {
+        let a = TransformationConfig::default();
+        let b = TransformationConfig::default();
+        let merged = TransformationConfig::merge(vec![a, b]).unwrap();
+        merged.validate().unwrap();
+    }
+
+    #[test]
+    fn merge_empty_vec_produces_default() {
+        let merged = TransformationConfig::merge(vec![]).unwrap();
+        merged.validate().unwrap();
+    }
+
+    #[test]
+    fn merge_last_wins_for_schema() {
+        let mut a = TransformationConfig::default();
+        a.schema_handling.default_schema = "SCHEMA_A".to_string();
+        let mut b = TransformationConfig::default();
+        b.schema_handling.default_schema = "SCHEMA_B".to_string();
+        let merged = TransformationConfig::merge(vec![a, b]).unwrap();
+        assert_eq!(merged.schema_handling.default_schema, "SCHEMA_B");
+    }
+
+    #[test]
+    fn merge_extends_custom_data_type_mappings() {
+        let mut a = TransformationConfig::default();
+        a.data_types.custom_mappings.insert("FOO".to_string(), "BAR".to_string());
+        let mut b = TransformationConfig::default();
+        b.data_types.custom_mappings.insert("BAZ".to_string(), "QUX".to_string());
+        let merged = TransformationConfig::merge(vec![a, b]).unwrap();
+        assert!(merged.data_types.custom_mappings.contains_key("FOO"));
+        assert!(merged.data_types.custom_mappings.contains_key("BAZ"));
+    }
+
+    // --- TransformationConfig::validate ---
+
+    #[test]
+    fn validate_accepts_default() {
+        TransformationConfig::default().validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_empty_key_in_data_type_mappings() {
+        let mut c = TransformationConfig::default();
+        c.data_types.custom_mappings.insert("".to_string(), "NVARCHAR".to_string());
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_value_in_data_type_mappings() {
+        let mut c = TransformationConfig::default();
+        c.data_types.custom_mappings.insert("TEXT".to_string(), "".to_string());
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_key_in_function_mappings() {
+        let mut c = TransformationConfig::default();
+        c.functions.custom_mappings.insert("".to_string(), "RAND".to_string());
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_empty_value_in_function_mappings() {
+        let mut c = TransformationConfig::default();
+        c.functions.custom_mappings.insert("NOW".to_string(), "".to_string());
+        assert!(c.validate().is_err());
+    }
+
+    // --- TransformationConfig::apply_defaults ---
+
+    #[test]
+    fn apply_defaults_populates_missing_mappings() {
+        let mut c = TransformationConfig::default();
+        c.apply_defaults();
+        c.validate().unwrap();
+        // apply_defaults fills custom_mappings when empty
+        assert!(!c.data_types.custom_mappings.is_empty());
+        assert!(!c.functions.custom_mappings.is_empty());
+    }
+
+    #[test]
+    fn apply_defaults_does_not_overwrite_existing_mappings() {
+        let mut c = TransformationConfig::default();
+        c.data_types.custom_mappings.insert("MYTYPE".to_string(), "NVARCHAR".to_string());
+        c.apply_defaults();
+        // Existing mappings are preserved (apply_defaults only fills when empty)
+        assert!(c.data_types.custom_mappings.contains_key("MYTYPE"));
+    }
+
+    // --- TransformationConfig::get_default_data_type_mappings ---
+
+    #[test]
+    fn default_data_type_mappings_includes_serial() {
+        let m = TransformationConfig::get_default_data_type_mappings();
+        assert!(m.contains_key("SERIAL"), "missing SERIAL mapping: {:?}", m.keys());
+    }
+
+    #[test]
+    fn default_data_type_mappings_includes_bigserial() {
+        let m = TransformationConfig::get_default_data_type_mappings();
+        assert!(m.contains_key("BIGSERIAL"));
+    }
+
+    #[test]
+    fn default_data_type_mappings_includes_text() {
+        let m = TransformationConfig::get_default_data_type_mappings();
+        assert!(m.contains_key("TEXT"));
+    }
+
+    #[test]
+    fn default_data_type_mappings_non_empty() {
+        let m = TransformationConfig::get_default_data_type_mappings();
+        assert!(!m.is_empty());
+    }
+
+    // --- TransformationConfig::get_default_function_mappings ---
+
+    #[test]
+    fn default_function_mappings_includes_random() {
+        // Per source: RANDOM → RAND (NOW is NOT in the map - it's natively supported)
+        let m = TransformationConfig::get_default_function_mappings();
+        assert!(
+            m.contains_key("RANDOM") || m.contains_key("random"),
+            "missing RANDOM mapping: {:?}", m.keys()
+        );
+    }
+
+    #[test]
+    fn default_function_mappings_non_empty() {
+        let m = TransformationConfig::get_default_function_mappings();
+        assert!(!m.is_empty());
+    }
+
+    // --- DataTypeConfig shape ---
+
+    #[test]
+    fn data_type_config_fields_accessible() {
+        let c = DataTypeConfig::default();
+        let _ = c.preserve_precision;
+        let _ = c.custom_mappings;
+        let _ = c.handle_arrays;
+    }
+
+    // --- ArrayHandlingStrategy shape ---
+
+    #[test]
+    fn array_handling_strategy_variants_are_clone_debug() {
+        let variants = [
+            ArrayHandlingStrategy::AsJson,
+            ArrayHandlingStrategy::AsDelimitedString,
+            ArrayHandlingStrategy::AsMultipleColumns,
+            ArrayHandlingStrategy::Error,
+        ];
+        for v in &variants {
+            let cloned = v.clone();
+            let _ = format!("{:?}", cloned);
+        }
+    }
+
+    // --- FunctionConfig shape ---
+
+    #[test]
+    fn function_config_fields_accessible() {
+        let c = FunctionConfig::default();
+        let _ = c.preserve_case;
+        let _ = c.enable_custom_functions;
+        let _ = c.custom_mappings;
+    }
+
+    // --- SchemaConfig shape ---
+
+    #[test]
+    fn schema_config_fields_accessible() {
+        let c = SchemaConfig::default();
+        let _ = c.default_schema;
+        let _ = c.preserve_schema_names;
+        let _ = c.schema_mappings;
+    }
+
+    // --- OptimizationConfig shape ---
+
+    #[test]
+    fn optimization_config_fields_accessible() {
+        let c = OptimizationConfig::default();
+        let _ = c.use_column_store_hints;
+        let _ = c.enable_parallel_execution;
+        let _ = c.suggest_indexes;
+    }
+
+    // --- FormattingConfig shape ---
+
+    #[test]
+    fn formatting_config_fields_accessible() {
+        let c = FormattingConfig::default();
+        let _ = c.indent_size;
+        let _ = c.max_line_length;
+        let _ = c.capitalize_keywords;
+        let _ = c.preserve_comments;
+    }
+
+    // --- RulesConfig shape ---
+
+    #[test]
+    fn rules_config_fields_accessible() {
+        let c = RulesConfig::default();
+        let _ = c.enable_strict_mode;
+        let _ = c.validate_hana_compatibility;
+        let _ = c.transformation_rules;
+    }
+
+    #[test]
+    fn rules_config_default_values() {
+        let c = RulesConfig::default();
+        assert!(!c.enable_strict_mode);
+        assert!(c.validate_hana_compatibility);
+        assert!(c.transformation_rules.is_empty());
+    }
+}

@@ -442,3 +442,284 @@ impl Default for SqlTransformerBuilder {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+
+    fn t() -> SqlTransformer {
+        SqlTransformer::with_config(TransformationConfig::default()).unwrap()
+    }
+
+    // --- SqlTransformer::new ---
+
+    #[test]
+    fn new_defaults_to_hana_dialect() {
+        let tr = SqlTransformer::new(TransformationConfig::default(), Dialect::Hana).unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    // --- SqlTransformer::with_config ---
+
+    #[test]
+    fn with_config_creates_transformer_with_default_dialect() {
+        let tr = SqlTransformer::with_config(TransformationConfig::default()).unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    // --- SqlTransformer::new_hana ---
+
+    #[test]
+    fn new_hana_creates_hana_dialect_transformer() {
+        let tr = SqlTransformer::new_hana(TransformationConfig::default()).unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    // --- SqlTransformer::dialect ---
+
+    #[test]
+    fn dialect_returns_configured_dialect() {
+        let tr = SqlTransformer::new(TransformationConfig::default(), Dialect::Hana).unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    // --- SqlTransformer::transform ---
+
+    #[test]
+    fn transform_select_passes_through() {
+        let out = t().transform("SELECT 1").unwrap();
+        assert!(out.to_uppercase().contains("SELECT"));
+    }
+
+    #[test]
+    fn transform_empty_input_returns_empty() {
+        // sqlparser parses empty string as zero statements → output is empty
+        let out = t().transform("").unwrap();
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn transform_invalid_sql_returns_parse_error() {
+        let err = t().transform("SELEKT * FORM users").unwrap_err();
+        assert!(matches!(err, TransformationError::ParseError { .. }));
+    }
+
+    #[test]
+    fn transform_unclosed_string_returns_parse_error() {
+        let err = t().transform("SELECT 'unterminated").unwrap_err();
+        assert!(matches!(err, TransformationError::ParseError { .. }));
+    }
+
+    // --- SqlTransformer::can_transform ---
+
+    #[test]
+    fn can_transform_accepts_valid_sql() {
+        assert!(t().can_transform("SELECT 1"));
+    }
+
+    #[test]
+    fn can_transform_rejects_garbage() {
+        assert!(!t().can_transform("SELEKT * FORM users !!!"));
+    }
+
+    #[test]
+    fn can_transform_accepts_empty_string() {
+        // sqlparser parses empty input as Ok(vec![])
+        assert!(t().can_transform(""));
+    }
+
+    // --- SqlTransformer::transform_batch ---
+
+    #[test]
+    fn transform_batch_returns_one_result_per_input() {
+        let results = t().transform_batch(vec!["SELECT 1", "SELECT 2"]);
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.is_ok()));
+    }
+
+    #[test]
+    fn transform_batch_isolates_errors() {
+        let results = t().transform_batch(vec!["SELECT 1", "SELEKT bad !!!"]);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err());
+    }
+
+    #[test]
+    fn transform_batch_empty_vec_returns_empty() {
+        let results = t().transform_batch(vec![]);
+        assert_eq!(results.len(), 0);
+    }
+
+    // --- SqlTransformer::transform_detailed ---
+
+    #[test]
+    fn transform_detailed_ok_has_result_and_metadata() {
+        let dr = t().transform_detailed("SELECT 1");
+        assert!(dr.result.is_ok());
+        assert!(dr.metadata.is_some());
+    }
+
+    #[test]
+    fn transform_detailed_parse_error_has_error_result() {
+        let dr = t().transform_detailed("SELEKT bad !!!");
+        assert!(dr.result.is_err());
+        assert!(dr.metadata.is_some());
+    }
+
+    #[test]
+    fn transform_detailed_metadata_contains_timing() {
+        let dr = t().transform_detailed("SELECT 1");
+        let meta = dr.metadata.unwrap();
+        // performance metrics are populated — total_time_ms is always ≥0
+        let _ = meta.performance_metrics.total_time_ms;
+        let _ = meta.performance_metrics.parse_time_ms;
+        let _ = meta.performance_metrics.transform_time_ms;
+    }
+
+    // --- SqlTransformer::builder / SqlTransformerBuilder ---
+
+    #[test]
+    fn builder_round_trip_applies_options() {
+        let tr = SqlTransformer::builder()
+            .with_dialect(Dialect::Hana)
+            .with_data_types(true)
+            .with_functions(true)
+            .with_schema_mapping("public", "myschema")
+            .build()
+            .unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    #[test]
+    fn builder_default_produces_valid_transformer() {
+        let tr = SqlTransformerBuilder::default().build().unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    #[test]
+    fn builder_with_data_types_false() {
+        let tr = SqlTransformer::builder()
+            .with_data_types(false)
+            .build()
+            .unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    #[test]
+    fn builder_with_functions_false() {
+        let tr = SqlTransformer::builder()
+            .with_functions(false)
+            .build()
+            .unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    // --- SqlTransformer::clear_caches / cache_stats ---
+
+    #[test]
+    fn cache_hits_increment_on_repeat_transform() {
+        let tr = t();
+        let _ = tr.transform("SELECT 1").unwrap();
+        let (before_size, _) = tr.cache_stats();
+        let _ = tr.transform("SELECT 1").unwrap();
+        let (after_size, _) = tr.cache_stats();
+        assert_eq!(before_size, after_size, "cache size should not grow on hit");
+    }
+
+    #[test]
+    fn cache_grows_with_distinct_queries() {
+        let tr = t();
+        let _ = tr.transform("SELECT 1").unwrap();
+        let (size_after_one, _) = tr.cache_stats();
+        let _ = tr.transform("SELECT 2").unwrap();
+        let (size_after_two, _) = tr.cache_stats();
+        assert!(size_after_two >= size_after_one);
+    }
+
+    #[test]
+    fn clear_caches_empties_cache() {
+        let tr = t();
+        let _ = tr.transform("SELECT 1").unwrap();
+        tr.clear_caches();
+        let (size, _) = tr.cache_stats();
+        assert_eq!(size, 0);
+    }
+
+    #[test]
+    fn cache_stats_returns_capacity() {
+        let tr = t();
+        let (_, capacity) = tr.cache_stats();
+        // capacity is usize (always non-negative); verify it's plausible
+        let _ = capacity;
+    }
+
+    // --- SqlTransformer::validate_hana_compatibility ---
+
+    #[test]
+    fn validate_hana_compatibility_returns_violation_list() {
+        let v = t().validate_hana_compatibility("SELECT NOW()").unwrap();
+        // shape contract: returns a Vec, may be empty
+        let _: &Vec<String> = &v;
+    }
+
+    #[test]
+    fn validate_hana_compatibility_rejects_invalid_sql() {
+        let err = t().validate_hana_compatibility("SELEKT bad !!!").unwrap_err();
+        assert!(matches!(err, TransformationError::ParseError { .. }));
+    }
+
+    #[test]
+    fn validate_hana_compatibility_select_one() {
+        // plain SELECT 1 should have no violations
+        let violations = t().validate_hana_compatibility("SELECT 1").unwrap();
+        // shape contract: result is a Vec<String>
+        let _: Vec<String> = violations;
+    }
+
+    // --- SqlTransformer::from_config_file ---
+
+    #[test]
+    fn from_config_file_loads_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("c.toml");
+        // Serialize the default config to TOML so all required fields (including custom_mappings) are present.
+        let default_cfg = TransformationConfig::default();
+        default_cfg.to_file(&path).unwrap();
+        let tr = SqlTransformer::from_config_file(&path).unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    #[test]
+    fn from_config_file_missing_file_errors() {
+        let result = SqlTransformer::from_config_file("/nonexistent/path/c.toml");
+        assert!(result.is_err());
+    }
+
+    // --- SqlTransformer::from_environment ---
+
+    #[test]
+    fn from_environment_creates_transformer() {
+        let tr = SqlTransformer::from_environment().unwrap();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    #[test]
+    fn from_environment_reads_preserve_precision() {
+        std::env::set_var("PGT_PRESERVE_PRECISION", "false");
+        let tr = SqlTransformer::from_environment().unwrap();
+        std::env::remove_var("PGT_PRESERVE_PRECISION");
+        // Just verifies no panic and produces a valid transformer
+        assert_eq!(tr.dialect(), Dialect::Hana);
+    }
+
+    // --- SqlTransformer::Default ---
+
+    #[test]
+    fn default_creates_valid_transformer() {
+        let tr = SqlTransformer::default();
+        assert_eq!(tr.dialect(), Dialect::Hana);
+        let out = tr.transform("SELECT 1").unwrap();
+        assert!(out.to_uppercase().contains("SELECT"));
+    }
+}

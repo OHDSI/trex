@@ -5,6 +5,12 @@ extern crate libduckdb_sys;
 mod pgwire_server;
 mod server_registry;
 
+// Re-exports for integration tests in `tests/*.rs`. No `#[cfg(test)]` guard:
+// the integration test crate compiles the library without `--cfg test`, so a
+// gated re-export would be invisible to it.
+pub use pgwire_server::{start_pgwire_server_capi, stop_pgwire_server};
+pub use server_registry::{ServerHandle, ServerRegistry};
+
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
     vtab::{BindInfo, InitInfo, TableFunctionInfo, VTab, arrow::WritableVector},

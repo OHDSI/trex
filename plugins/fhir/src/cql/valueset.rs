@@ -2,6 +2,53 @@ use serde_json::Value;
 
 use crate::query_executor::{QueryResult, RequestConn};
 
+/// Build the SQL that deletes prior expansion rows for a given ValueSet URL.
+pub fn build_delete_expansion_sql(schema_name: &str, valueset_url: &str) -> String {
+    format!(
+        "DELETE FROM {schema}._valueset_expansion WHERE valueset_url = '{url}'",
+        schema = schema_name,
+        url = valueset_url.replace('\'', "''")
+    )
+}
+
+/// Build the SQL that inserts one expansion row.
+pub fn build_insert_expansion_sql(
+    schema_name: &str,
+    valueset_url: &str,
+    valueset_version: &str,
+    code: &str,
+    system: &str,
+    display: &str,
+) -> String {
+    format!(
+        "INSERT INTO {schema}._valueset_expansion (valueset_url, valueset_version, code, system, display) \
+         VALUES ('{url}', '{ver}', '{code}', '{sys}', '{disp}')",
+        schema = schema_name,
+        url = valueset_url.replace('\'', "''"),
+        ver = valueset_version.replace('\'', "''"),
+        code = code.replace('\'', "''"),
+        sys = system.replace('\'', "''"),
+        disp = display.replace('\'', "''")
+    )
+}
+
+/// Build the SELECT that checks whether `code` exists in the given ValueSet expansion.
+pub fn build_lookup_sql(
+    schema_name: &str,
+    valueset_url: &str,
+    system: &str,
+    code: &str,
+) -> String {
+    format!(
+        "SELECT 1 FROM {schema}._valueset_expansion \
+         WHERE valueset_url = '{url}' AND system = '{sys}' AND code = '{code}' LIMIT 1",
+        schema = schema_name,
+        url = valueset_url.replace('\'', "''"),
+        sys = system.replace('\'', "''"),
+        code = code.replace('\'', "''")
+    )
+}
+
 pub async fn expand_valueset(
     conn: &RequestConn,
     schema_name: &str,
@@ -27,12 +74,7 @@ pub async fn expand_valueset(
         None => return Ok(0),
     };
 
-    let delete_sql = format!(
-        "DELETE FROM {schema}._valueset_expansion WHERE valueset_url = '{url}'",
-        schema = schema_name,
-        url = url.replace('\'', "''")
-    );
-    let _ = conn.execute(delete_sql).await;
+    let _ = conn.execute(build_delete_expansion_sql(schema_name, url)).await;
 
     let mut count = 0;
     for entry in entries {
@@ -58,15 +100,8 @@ fn insert_expansion_entry<'a>(
         return Ok(0);
     }
 
-    let sql = format!(
-        "INSERT INTO {schema}._valueset_expansion (valueset_url, valueset_version, code, system, display) \
-         VALUES ('{url}', '{ver}', '{code}', '{sys}', '{disp}')",
-        schema = schema_name,
-        url = valueset_url.replace('\'', "''"),
-        ver = valueset_version.replace('\'', "''"),
-        code = code.replace('\'', "''"),
-        sys = system.replace('\'', "''"),
-        disp = display.replace('\'', "''")
+    let sql = build_insert_expansion_sql(
+        schema_name, valueset_url, valueset_version, code, system, display,
     );
 
     match conn.execute(sql).await {
@@ -98,18 +133,68 @@ pub async fn code_in_valueset(
     system: &str,
     code: &str,
 ) -> Result<bool, String> {
-    let sql = format!(
-        "SELECT 1 FROM {schema}._valueset_expansion \
-         WHERE valueset_url = '{url}' AND system = '{sys}' AND code = '{code}' LIMIT 1",
-        schema = schema_name,
-        url = valueset_url.replace('\'', "''"),
-        sys = system.replace('\'', "''"),
-        code = code.replace('\'', "''")
-    );
+    let sql = build_lookup_sql(schema_name, valueset_url, system, code);
 
     match conn.execute(sql).await {
         QueryResult::Select { rows, .. } => Ok(!rows.is_empty()),
         QueryResult::Error(e) => Err(format!("ValueSet lookup failed: {}", e)),
         _ => Ok(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_sql_escapes_quotes() {
+        let sql = build_delete_expansion_sql("\"db\".\"ds\"", "http://o'r/vs");
+        assert!(sql.starts_with("DELETE FROM \"db\".\"ds\"._valueset_expansion"));
+        assert!(sql.contains("'http://o''r/vs'"));
+    }
+
+    #[test]
+    fn insert_sql_includes_all_columns() {
+        let sql = build_insert_expansion_sql(
+            "\"db\".\"ds\"",
+            "http://vs",
+            "1.0",
+            "C1",
+            "http://snomed",
+            "Disp",
+        );
+        assert!(sql.contains("'http://vs'"));
+        assert!(sql.contains("'1.0'"));
+        assert!(sql.contains("'C1'"));
+        assert!(sql.contains("'http://snomed'"));
+        assert!(sql.contains("'Disp'"));
+        assert!(sql.contains("(valueset_url, valueset_version, code, system, display)"));
+    }
+
+    #[test]
+    fn insert_sql_escapes_each_param() {
+        let sql = build_insert_expansion_sql(
+            "\"db\".\"ds\"",
+            "u'rl",
+            "v'er",
+            "c'ode",
+            "s'ys",
+            "d'isp",
+        );
+        assert!(sql.contains("'u''rl'"));
+        assert!(sql.contains("'v''er'"));
+        assert!(sql.contains("'c''ode'"));
+        assert!(sql.contains("'s''ys'"));
+        assert!(sql.contains("'d''isp'"));
+    }
+
+    #[test]
+    fn lookup_sql_builds_select_with_filters() {
+        let sql = build_lookup_sql("\"db\".\"ds\"", "http://vs", "http://sys", "code1");
+        assert!(sql.starts_with("SELECT 1 FROM \"db\".\"ds\"._valueset_expansion"));
+        assert!(sql.contains("valueset_url = 'http://vs'"));
+        assert!(sql.contains("system = 'http://sys'"));
+        assert!(sql.contains("code = 'code1'"));
+        assert!(sql.contains("LIMIT 1"));
     }
 }

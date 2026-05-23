@@ -4,7 +4,7 @@ extern crate duckdb_loadable_macros;
 #[cfg(feature = "loadable-extension")]
 extern crate libduckdb_sys;
 
-mod credential_mask;
+pub mod credential_mask;
 pub mod destination;
 #[cfg(feature = "loadable-extension")]
 mod etl_start;

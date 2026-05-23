@@ -12,5 +12,10 @@
     "postgraphile": "^5.0.0-rc.4",
     "postgraphile-plugin-connection-filter": "^3.0.0-rc.1",
     "zod": "^3.25.0"
+  },
+  "overrides": {
+    "hono": "^4.12.18",
+    "fast-uri": "^3.1.2",
+    "ip-address": "^10.1.1"
   }
 }

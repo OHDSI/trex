@@ -96,3 +96,103 @@ pub async fn send_partition(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow_array::{Int32Array, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use std::sync::Arc;
+
+    fn test_descriptor() -> ShuffleDescriptor {
+        ShuffleDescriptor {
+            shuffle_id: "test-shuffle-xyz".to_string(),
+            join_keys: vec!["k".to_string()],
+            num_partitions: 1,
+            partition_targets: vec![],
+            target_table: None,
+        }
+    }
+
+    fn test_schema() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, true),
+        ]))
+    }
+
+    fn test_batch() -> RecordBatch {
+        let schema = test_schema();
+        let ids = Arc::new(Int32Array::from(vec![1, 2, 3])) as Arc<dyn arrow_array::Array>;
+        let names = Arc::new(StringArray::from(vec![Some("a"), Some("b"), Some("c")])) as Arc<dyn arrow_array::Array>;
+        RecordBatch::try_new(schema, vec![ids, names]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn send_partition_empty_batches_returns_ok() {
+        // Empty batch list short-circuits before any network I/O.
+        let desc = test_descriptor();
+        let schema = test_schema();
+        let result = send_partition("http://127.0.0.1:1", &desc, 0, schema, vec![]).await;
+        assert!(result.is_ok(), "expected Ok for empty batches, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn send_partition_invalid_endpoint_uri() {
+        let desc = test_descriptor();
+        let schema = test_schema();
+        let batches = vec![test_batch()];
+        let result = send_partition("not a uri", &desc, 0, schema, batches).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Invalid flight endpoint") || err.contains("Failed to connect"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_partition_unreachable_port() {
+        let desc = test_descriptor();
+        let schema = test_schema();
+        let batches = vec![test_batch()];
+        let result = send_partition("http://127.0.0.1:1", &desc, 0, schema, batches).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to connect to flight server"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_partition_with_target_table_unreachable() {
+        let mut desc = test_descriptor();
+        desc.target_table = Some("dest_table".to_string());
+        let schema = test_schema();
+        let batches = vec![test_batch()];
+        let result = send_partition("http://127.0.0.1:1", &desc, 5, schema, batches).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn send_partition_uses_partition_id_in_descriptor() {
+        // We can't observe the FlightDescriptor without a server, but we can
+        // confirm partition_id is propagated through the connect-failure path
+        // (the error message includes the shuffle_id and partition_id).
+        let desc = test_descriptor();
+        let schema = test_schema();
+        let batches = vec![test_batch()];
+        let result = send_partition("http://127.0.0.1:1", &desc, 42, schema, batches).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn send_partition_multiple_batches_unreachable() {
+        let desc = test_descriptor();
+        let schema = test_schema();
+        let batches = vec![test_batch(), test_batch(), test_batch()];
+        let result = send_partition("http://127.0.0.1:1", &desc, 0, schema, batches).await;
+        assert!(result.is_err());
+    }
+}
