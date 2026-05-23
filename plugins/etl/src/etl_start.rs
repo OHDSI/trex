@@ -225,14 +225,21 @@ impl VScalar for EtlStartScalar {
     }
 }
 
-fn start_pipeline(
-    pipeline_name: &str,
-    connection_string: &str,
-    mode: PipelineMode,
-    params: PipelineParams,
-) -> Result<String, Box<dyn std::error::Error>> {
-    ensure_crypto_provider();
+#[derive(Debug)]
+pub(crate) struct ParsedConnParams {
+    pub host: String,
+    pub port: u16,
+    pub dbname: String,
+    pub username: String,
+    pub password: Option<SecretString>,
+    pub publication: String,
+    pub schema_name: String,
+}
 
+fn parse_pipeline_params(
+    connection_string: &str,
+    mode: &PipelineMode,
+) -> Result<ParsedConnParams, Box<dyn std::error::Error>> {
     let host = credential_mask::extract_param(connection_string, "host")
         .unwrap_or("localhost")
         .to_string();
@@ -248,7 +255,6 @@ fn start_pipeline(
     let password = credential_mask::extract_param(connection_string, "password")
         .map(|p| SecretString::from(p.to_string()));
 
-    // Publication is required for CDC modes, not for copy_only
     let publication = match mode {
         PipelineMode::CopyOnly => {
             credential_mask::extract_param(connection_string, "publication")
@@ -265,6 +271,79 @@ fn start_pipeline(
     let schema_name = credential_mask::extract_param(connection_string, "schema")
         .unwrap_or("public")
         .to_string();
+
+    Ok(ParsedConnParams {
+        host,
+        port,
+        dbname,
+        username,
+        password,
+        publication,
+        schema_name,
+    })
+}
+
+fn build_attach_name(pipeline_name: &str) -> String {
+    format!("__etl_{}", pipeline_name.replace('-', "_"))
+}
+
+fn build_attach_sql(conn_str: &str, attach_name: &str) -> String {
+    let stripped = strip_non_libpq_params(conn_str);
+    let escaped_conn = stripped.replace('\'', "''");
+    format!(
+        "ATTACH IF NOT EXISTS '{}' AS \"{}\" (TYPE postgres, READ_ONLY)",
+        escaped_conn, attach_name
+    )
+}
+
+fn build_list_tables_sql(attach_name: &str, schema: &str) -> String {
+    let escaped_schema = schema.replace('\'', "''");
+    format!(
+        "SELECT table_name FROM \"{}\".information_schema.tables WHERE table_schema = '{}'",
+        attach_name, escaped_schema
+    )
+}
+
+fn build_copy_table_sql(schema: &str, table: &str, attach_name: &str) -> String {
+    let escaped_table = table.replace('"', "\"\"");
+    let escaped_schema = schema.replace('"', "\"\"");
+    format!(
+        "CREATE TABLE IF NOT EXISTS \"{}\".\"{}\" AS SELECT * FROM \"{}\".\"{}\".\"{}\";",
+        escaped_schema, escaped_table, attach_name, escaped_schema, escaped_table
+    )
+}
+
+fn build_count_table_sql(schema: &str, table: &str) -> String {
+    let escaped_schema = schema.replace('"', "\"\"");
+    let escaped_table = table.replace('"', "\"\"");
+    format!(
+        "SELECT COUNT(*) FROM \"{}\".\"{}\"",
+        escaped_schema, escaped_table
+    )
+}
+
+fn build_detach_sql(attach_name: &str) -> String {
+    format!("DETACH \"{}\"", attach_name)
+}
+
+fn start_pipeline(
+    pipeline_name: &str,
+    connection_string: &str,
+    mode: PipelineMode,
+    params: PipelineParams,
+) -> Result<String, Box<dyn std::error::Error>> {
+    ensure_crypto_provider();
+
+    let parsed = parse_pipeline_params(connection_string, &mode)?;
+    let ParsedConnParams {
+        host,
+        port,
+        dbname,
+        username,
+        password,
+        publication,
+        schema_name,
+    } = parsed;
 
     let masked_conn = credential_mask::mask_password(connection_string);
 
@@ -452,7 +531,7 @@ fn start_copy_only_pipeline(
     let name_for_thread = name_for_thread.to_string();
     let conn_str = connection_string.to_string();
     let schema = schema_name.to_string();
-    let attach_name = format!("__etl_{}", pipeline_name.replace('-', "_"));
+    let attach_name = build_attach_name(&pipeline_name);
 
     let thread_result = thread::Builder::new()
         .name(format!("etl-copy-{}", pipeline_name))
@@ -475,12 +554,7 @@ fn start_copy_only_pipeline(
                 // DuckDB's postgres scanner uses libpq directly and rejects
                 // ETL-specific keys like `publication=` and `schema=`. Strip them
                 // before ATTACH or libpq returns "invalid connection option".
-                let attach_conn = strip_non_libpq_params(&conn_str);
-                let escaped_conn = attach_conn.replace('\'', "''");
-                let attach_sql = format!(
-                    "ATTACH IF NOT EXISTS '{}' AS \"{}\" (TYPE postgres, READ_ONLY)",
-                    escaped_conn, attach_name
-                );
+                let attach_sql = build_attach_sql(&conn_str, &attach_name);
                 trex_pool_client::session_execute(session_id, &attach_sql)
                     .map_err(|e| format!("Failed to attach source: {}", e))?;
 
@@ -488,11 +562,7 @@ fn start_copy_only_pipeline(
                     .update_state(&pipeline_name, PipelineState::Snapshotting);
 
                 let tables: Vec<String> = {
-                    let escaped_schema = schema.replace('\'', "''");
-                    let sql = format!(
-                        "SELECT table_name FROM \"{}\".information_schema.tables WHERE table_schema = '{}'",
-                        attach_name, escaped_schema
-                    );
+                    let sql = build_list_tables_sql(&attach_name, &schema);
                     let (_schema, batches) = trex_pool_client::session_execute(session_id, &sql)
                         .map_err(|e| format!("Failed to query tables: {}", e))?;
                     extract_string_column(&batches, "table_name")
@@ -506,24 +576,16 @@ fn start_copy_only_pipeline(
                                 .update_state(&pipeline_name, PipelineState::Stopping);
                             let _ = trex_pool_client::session_execute(
                                 session_id,
-                                &format!("DETACH \"{}\"", attach_name),
+                                &build_detach_sql(&attach_name),
                             );
                             return Ok(());
                         }
                         Err(oneshot::error::TryRecvError::Empty) => {}
                     }
 
-                    let escaped_table = table.replace('"', "\"\"");
                     let escaped_schema = schema.replace('"', "\"\"");
 
-                    let copy_sql = format!(
-                        "CREATE TABLE IF NOT EXISTS \"{}\".\"{}\" AS SELECT * FROM \"{}\".\"{}\".\"{}\";",
-                        escaped_schema,
-                        escaped_table,
-                        attach_name,
-                        escaped_schema,
-                        escaped_table
-                    );
+                    let copy_sql = build_copy_table_sql(&schema, table, &attach_name);
 
                     let ensure_schema_sql = format!(
                         "CREATE SCHEMA IF NOT EXISTS \"{}\"",
@@ -535,10 +597,7 @@ fn start_copy_only_pipeline(
                     }
                     match trex_pool_client::session_execute(session_id, &copy_sql) {
                         Ok(_) => {
-                            let count_sql = format!(
-                                "SELECT COUNT(*) FROM \"{}\".\"{}\"",
-                                escaped_schema, escaped_table
-                            );
+                            let count_sql = build_count_table_sql(&schema, table);
                             let row_count = trex_pool_client::session_execute(session_id, &count_sql)
                                 .ok()
                                 .and_then(|(_s, batches)| extract_i64_scalar(&batches))
@@ -558,7 +617,7 @@ fn start_copy_only_pipeline(
 
                 let _ = trex_pool_client::session_execute(
                     session_id,
-                    &format!("DETACH \"{}\"", attach_name),
+                    &build_detach_sql(&attach_name),
                 );
 
                 if had_error {
@@ -703,4 +762,296 @@ fn extract_i64_scalar(batches: &[trex_pool_client::arrow_array::RecordBatch]) ->
         return Some(arr.value(0) as i64);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use trex_pool_client::arrow_array::{
+        Int32Array, Int64Array, RecordBatch, StringArray, UInt64Array,
+    };
+    use trex_pool_client::arrow_schema::{DataType, Field, Schema};
+
+    // --- strip_non_libpq_params ---
+
+    #[test]
+    fn strip_removes_publication_key() {
+        let s = strip_non_libpq_params("host=h port=5432 publication=mypub dbname=d");
+        assert!(!s.contains("publication"));
+        assert!(s.contains("host=h"));
+        assert!(s.contains("port=5432"));
+        assert!(s.contains("dbname=d"));
+    }
+
+    #[test]
+    fn strip_removes_schema_key() {
+        let s = strip_non_libpq_params("host=h schema=public dbname=d");
+        assert!(!s.contains("schema"));
+        assert!(s.contains("host=h"));
+        assert!(s.contains("dbname=d"));
+    }
+
+    #[test]
+    fn strip_removes_both_keys() {
+        let s = strip_non_libpq_params("host=h publication=p schema=s dbname=d");
+        assert!(!s.contains("publication"));
+        assert!(!s.contains("schema"));
+    }
+
+    #[test]
+    fn strip_is_case_insensitive() {
+        let s = strip_non_libpq_params("host=h PUBLICATION=p SCHEMA=s");
+        assert!(!s.to_lowercase().contains("publication="));
+        assert!(!s.to_lowercase().contains("schema="));
+    }
+
+    #[test]
+    fn strip_preserves_quoted_values() {
+        let s = strip_non_libpq_params("host=h password='se cret' publication=p");
+        assert!(s.contains("password='se cret'"));
+        assert!(!s.contains("publication"));
+    }
+
+    #[test]
+    fn strip_no_change_when_nothing_to_strip() {
+        let s = strip_non_libpq_params("host=h port=5432 dbname=d");
+        assert!(s.contains("host=h"));
+        assert!(s.contains("port=5432"));
+        assert!(s.contains("dbname=d"));
+    }
+
+    #[test]
+    fn strip_empty_input() {
+        assert_eq!(strip_non_libpq_params(""), "");
+    }
+
+    // --- extract_string_column ---
+
+    #[test]
+    fn extract_string_column_basic() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, true),
+            Field::new("other", DataType::Int32, true),
+        ]));
+        let names = StringArray::from(vec![Some("alice"), Some("bob"), None]);
+        let others = Int32Array::from(vec![1, 2, 3]);
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(names), Arc::new(others)],
+        )
+        .unwrap();
+
+        let got = extract_string_column(&[batch], "name");
+        assert_eq!(got, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn extract_string_column_missing_column_returns_empty() {
+        let schema = Arc::new(Schema::new(vec![Field::new("x", DataType::Utf8, true)]));
+        let xs = StringArray::from(vec![Some("a")]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(xs)]).unwrap();
+
+        let got = extract_string_column(&[batch], "missing");
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn extract_string_column_no_batches() {
+        let got = extract_string_column(&[], "any");
+        assert!(got.is_empty());
+    }
+
+    // --- extract_i64_scalar ---
+
+    #[test]
+    fn extract_i64_scalar_int64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Int64, false)]));
+        let arr = Int64Array::from(vec![42]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert_eq!(extract_i64_scalar(&[batch]), Some(42));
+    }
+
+    #[test]
+    fn extract_i64_scalar_int32_widened() {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Int32, false)]));
+        let arr = Int32Array::from(vec![7]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert_eq!(extract_i64_scalar(&[batch]), Some(7));
+    }
+
+    #[test]
+    fn extract_i64_scalar_uint64() {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::UInt64, false)]));
+        let arr = UInt64Array::from(vec![100]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert_eq!(extract_i64_scalar(&[batch]), Some(100));
+    }
+
+    #[test]
+    fn extract_i64_scalar_empty_batches_returns_none() {
+        assert_eq!(extract_i64_scalar(&[]), None);
+    }
+
+    #[test]
+    fn extract_i64_scalar_zero_rows_returns_none() {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Int64, false)]));
+        let arr = Int64Array::from(Vec::<i64>::new());
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert_eq!(extract_i64_scalar(&[batch]), None);
+    }
+
+    #[test]
+    fn extract_i64_scalar_unsupported_type_returns_none() {
+        let schema = Arc::new(Schema::new(vec![Field::new("c", DataType::Utf8, false)]));
+        let arr = StringArray::from(vec!["nope"]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        assert_eq!(extract_i64_scalar(&[batch]), None);
+    }
+
+    // --- parse_pipeline_params ---
+
+    #[test]
+    fn parse_params_extracts_all_fields() {
+        let conn = "host=db.example.com port=6543 dbname=mydb user=alice password=secret publication=pub1 schema=myschema";
+        let p = parse_pipeline_params(conn, &PipelineMode::CopyAndCdc).unwrap();
+        assert_eq!(p.host, "db.example.com");
+        assert_eq!(p.port, 6543);
+        assert_eq!(p.dbname, "mydb");
+        assert_eq!(p.username, "alice");
+        assert!(p.password.is_some());
+        assert_eq!(p.publication, "pub1");
+        assert_eq!(p.schema_name, "myschema");
+    }
+
+    #[test]
+    fn parse_params_defaults() {
+        // host=h is required by extract_param ordering — anything else
+        // omitted should fall back to documented defaults.
+        let p = parse_pipeline_params(
+            "host=h publication=p",
+            &PipelineMode::CopyAndCdc,
+        ).unwrap();
+        assert_eq!(p.host, "h");
+        assert_eq!(p.port, 5432);
+        assert_eq!(p.dbname, "postgres");
+        assert_eq!(p.username, "postgres");
+        assert!(p.password.is_none());
+        assert_eq!(p.publication, "p");
+        assert_eq!(p.schema_name, "public");
+    }
+
+    #[test]
+    fn parse_params_publication_required_for_cdc() {
+        let err = parse_pipeline_params("host=h", &PipelineMode::CopyAndCdc);
+        assert!(err.is_err());
+        let err = parse_pipeline_params("host=h", &PipelineMode::CdcOnly);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn parse_params_publication_optional_for_copy_only() {
+        let p = parse_pipeline_params("host=h", &PipelineMode::CopyOnly).unwrap();
+        assert_eq!(p.publication, "");
+    }
+
+    #[test]
+    fn parse_params_invalid_port_fails() {
+        let err = parse_pipeline_params(
+            "host=h port=notanumber publication=p",
+            &PipelineMode::CopyAndCdc,
+        );
+        assert!(err.is_err());
+    }
+
+    // --- build_attach_name ---
+
+    #[test]
+    fn attach_name_basic() {
+        assert_eq!(build_attach_name("pipeline"), "__etl_pipeline");
+    }
+
+    #[test]
+    fn attach_name_dashes_become_underscores() {
+        assert_eq!(build_attach_name("my-pipe-line"), "__etl_my_pipe_line");
+    }
+
+    // --- build_attach_sql ---
+
+    #[test]
+    fn attach_sql_strips_etl_keys() {
+        let sql = build_attach_sql(
+            "host=h publication=p schema=s",
+            "__etl_p",
+        );
+        assert!(!sql.contains("publication"));
+        assert!(!sql.contains("schema="));
+        assert!(sql.contains("host=h"));
+        assert!(sql.contains("ATTACH IF NOT EXISTS"));
+        assert!(sql.contains("AS \"__etl_p\""));
+        assert!(sql.contains("(TYPE postgres, READ_ONLY)"));
+    }
+
+    #[test]
+    fn attach_sql_escapes_single_quotes_in_conn() {
+        // A password with a literal apostrophe must be doubled inside the SQL.
+        let sql = build_attach_sql("host=h password=ab'cd", "__etl_p");
+        assert!(sql.contains("ab''cd"));
+    }
+
+    // --- build_list_tables_sql ---
+
+    #[test]
+    fn list_tables_sql_basic() {
+        let sql = build_list_tables_sql("__etl_p", "public");
+        assert_eq!(
+            sql,
+            "SELECT table_name FROM \"__etl_p\".information_schema.tables WHERE table_schema = 'public'"
+        );
+    }
+
+    #[test]
+    fn list_tables_sql_escapes_schema_apostrophe() {
+        let sql = build_list_tables_sql("__etl_p", "a'b");
+        assert!(sql.contains("'a''b'"));
+    }
+
+    // --- build_copy_table_sql ---
+
+    #[test]
+    fn copy_table_sql_basic() {
+        let sql = build_copy_table_sql("public", "users", "__etl_p");
+        assert_eq!(
+            sql,
+            "CREATE TABLE IF NOT EXISTS \"public\".\"users\" AS SELECT * FROM \"__etl_p\".\"public\".\"users\";"
+        );
+    }
+
+    #[test]
+    fn copy_table_sql_escapes_identifier_quotes() {
+        let sql = build_copy_table_sql("sch\"x", "ta\"b", "__etl_p");
+        // schema/table get embedded twice — once on dest side, once on source.
+        assert!(sql.contains("\"sch\"\"x\".\"ta\"\"b\""));
+    }
+
+    // --- build_count_table_sql ---
+
+    #[test]
+    fn count_table_sql_basic() {
+        let sql = build_count_table_sql("public", "users");
+        assert_eq!(sql, "SELECT COUNT(*) FROM \"public\".\"users\"");
+    }
+
+    #[test]
+    fn count_table_sql_escapes_quotes() {
+        let sql = build_count_table_sql("s\"c", "t\"b");
+        assert_eq!(sql, "SELECT COUNT(*) FROM \"s\"\"c\".\"t\"\"b\"");
+    }
+
+    // --- build_detach_sql ---
+
+    #[test]
+    fn detach_sql_basic() {
+        assert_eq!(build_detach_sql("__etl_p"), "DETACH \"__etl_p\"");
+    }
 }
