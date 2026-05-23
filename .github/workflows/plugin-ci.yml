@@ -166,27 +166,27 @@ jobs:
             jq --arg v "-$(date +%s)-$GITHUB_SHA" '.version+=$v' package.json > tmppkg; mv tmppkg package.json
           fi
       - name: Set up Rust toolchain
-        if: matrix.PKGPATH == './plugins/bao' && (github.event_name == 'push' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        if: matrix.PKGPATH == './plugins/bao'
         uses: dtolnay/rust-toolchain@stable
       - uses: ./.github/actions/setup-libtrexsql
-        if: matrix.PKGPATH == './plugins/bao' && (github.event_name == 'push' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        if: matrix.PKGPATH == './plugins/bao'
         with:
           version: v1.4.4-trex
       - name: Build bao native library
-        if: matrix.PKGPATH == './plugins/bao' && (github.event_name == 'push' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        if: matrix.PKGPATH == './plugins/bao'
         run: |
           TREXSQL_LIB_DIR=/tmp/trexsql cargo build --release
           mkdir -p plugins/bao/java/resources/linux-x86-64
           cp target/release/libtrexsql_engine.so plugins/bao/java/resources/linux-x86-64/
           cp /tmp/trexsql/libtrexsql.so plugins/bao/java/resources/linux-x86-64/
       - name: Set up Java 21
-        if: matrix.PKGPATH == './plugins/bao' && (github.event_name == 'push' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        if: matrix.PKGPATH == './plugins/bao'
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
       - name: Install Leiningen
-        if: matrix.PKGPATH == './plugins/bao' && (github.event_name == 'push' || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+        if: matrix.PKGPATH == './plugins/bao'
         run: |
           sudo curl -sL https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein -o /usr/local/bin/lein
           sudo chmod +x /usr/local/bin/lein
