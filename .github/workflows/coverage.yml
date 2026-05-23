@@ -28,7 +28,7 @@ jobs:
       matrix:
         plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
         with:
           submodules: recursive
 
@@ -131,7 +131,7 @@ jobs:
     if: github.event_name == 'pull_request'
     continue-on-error: true  # informational until we have one week of green runs
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

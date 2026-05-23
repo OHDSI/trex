@@ -115,7 +115,7 @@ jobs:
     runs-on: ${{ matrix.RUNNER || needs.pick_runner.outputs.random_runner }}
 
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
@@ -285,7 +285,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
 
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
@@ -352,7 +352,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
@@ -416,7 +416,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
         with:
           ref: ${{ env.GIT_BRANCH_NAME }}
           repository: ${{ env.GIT_REPO_FULL_NAME }}
