@@ -1,0 +1,21 @@
+# name: test/sql/tpm_tree_extra.test
+# description: dependency tree returns depth metadata
+# group: [tpm]
+
+require tpm
+
+# Root row has depth 0
+query I
+SELECT json_extract(tree_info, '$.depth')::INTEGER
+FROM trex_plugin_tree('is-number@7.0.0')
+LIMIT 1;
+----
+0
+
+# At least one row, and the root parent is NULL
+query I
+SELECT json_extract_string(tree_info, '$.parent') IS NULL
+FROM trex_plugin_tree('is-number@7.0.0')
+LIMIT 1;
+----
+true

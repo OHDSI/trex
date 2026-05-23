@@ -7,7 +7,7 @@
     "pool": "9 tests (sql_may_dirty_session, extract_panic_message, serialize_arrow_ipc, C-ABI accessors) — verified passing locally",
     "pool-client": "6 tests (get_fns, public entry points, deserialize_arrow_ipc) — verified passing locally",
     "runtime": "12 tests (bundle options + create_bundle_sync validation) — verification deferred to CI (heavy deps, empty trex-runtime submodule)",
-    "tpm": "18 tests (npm registry + types) — verified passing locally (cargo test --lib)",
+    "tpm": "55 tests + 4 SQL .test files + 17 Python integration tests — Rust unit and Python verified; SQL blocked by pre-existing .trex runner issue. Coverage (cargo llvm-cov, plugins/tpm only): regions 75.57%, lines 68.76%, functions 67.08%; npm/registry.rs lines 79.84%, functions 68.75%; npm/types.rs lines 93.42%, functions 100%.",
     "transform": "13 tests (parser_tests + dag_tests) — verified passing locally"
   },
   "db": {
