@@ -25,9 +25,9 @@ jobs:
         working-directory: plugins/bao/java
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_1
+        id: checkout_1
         continue-on-error: true
-      - if: steps.__checkout_1.outcome == 'failure'
+      - if: steps.checkout_1.outcome == 'failure'
         uses: actions/checkout@v4
 
       - name: Set up JDK 21

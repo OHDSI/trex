@@ -30,11 +30,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_1
+        id: checkout_1
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_1.outcome == 'failure'
+      - if: steps.checkout_1.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -67,11 +67,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_2
+        id: checkout_2
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_2.outcome == 'failure'
+      - if: steps.checkout_2.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -104,11 +104,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_3
+        id: checkout_3
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_3.outcome == 'failure'
+      - if: steps.checkout_3.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -158,11 +158,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_4
+        id: checkout_4
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_4.outcome == 'failure'
+      - if: steps.checkout_4.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -195,11 +195,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_5
+        id: checkout_5
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_5.outcome == 'failure'
+      - if: steps.checkout_5.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -236,11 +236,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_6
+        id: checkout_6
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_6.outcome == 'failure'
+      - if: steps.checkout_6.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -273,11 +273,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_7
+        id: checkout_7
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_7.outcome == 'failure'
+      - if: steps.checkout_7.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -310,11 +310,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_8
+        id: checkout_8
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_8.outcome == 'failure'
+      - if: steps.checkout_8.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -354,11 +354,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_9
+        id: checkout_9
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_9.outcome == 'failure'
+      - if: steps.checkout_9.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -397,11 +397,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_10
+        id: checkout_10
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_10.outcome == 'failure'
+      - if: steps.checkout_10.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -432,11 +432,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_11
+        id: checkout_11
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_11.outcome == 'failure'
+      - if: steps.checkout_11.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -468,11 +468,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_12
+        id: checkout_12
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_12.outcome == 'failure'
+      - if: steps.checkout_12.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -505,11 +505,11 @@ jobs:
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_13
+        id: checkout_13
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_13.outcome == 'failure'
+      - if: steps.checkout_13.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -548,9 +548,9 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_14
+        id: checkout_14
         continue-on-error: true
-      - if: steps.__checkout_14.outcome == 'failure'
+      - if: steps.checkout_14.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -610,9 +610,9 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_15
+        id: checkout_15
         continue-on-error: true
-      - if: steps.__checkout_15.outcome == 'failure'
+      - if: steps.checkout_15.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -671,9 +671,9 @@ jobs:
     needs: [build-pool, build-atlas]
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_16
+        id: checkout_16
         continue-on-error: true
-      - if: steps.__checkout_16.outcome == 'failure'
+      - if: steps.checkout_16.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -706,9 +706,9 @@ jobs:
     needs: [build-pool, build-ai]
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_17
+        id: checkout_17
         continue-on-error: true
-      - if: steps.__checkout_17.outcome == 'failure'
+      - if: steps.checkout_17.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -742,9 +742,9 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_18
+        id: checkout_18
         continue-on-error: true
-      - if: steps.__checkout_18.outcome == 'failure'
+      - if: steps.checkout_18.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -809,11 +809,11 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_19
+        id: checkout_19
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_19.outcome == 'failure'
+      - if: steps.checkout_19.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -876,9 +876,9 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_20
+        id: checkout_20
         continue-on-error: true
-      - if: steps.__checkout_20.outcome == 'failure'
+      - if: steps.checkout_20.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -930,9 +930,9 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_21
+        id: checkout_21
         continue-on-error: true
-      - if: steps.__checkout_21.outcome == 'failure'
+      - if: steps.checkout_21.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -993,9 +993,9 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_22
+        id: checkout_22
         continue-on-error: true
-      - if: steps.__checkout_22.outcome == 'failure'
+      - if: steps.checkout_22.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -1047,9 +1047,9 @@ jobs:
       TREX_COVERAGE: "1"
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_23
+        id: checkout_23
         continue-on-error: true
-      - if: steps.__checkout_23.outcome == 'failure'
+      - if: steps.checkout_23.outcome == 'failure'
         uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -1101,9 +1101,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_24
+        id: checkout_24
         continue-on-error: true
-      - if: steps.__checkout_24.outcome == 'failure'
+      - if: steps.checkout_24.outcome == 'failure'
         uses: actions/checkout@v4
 
       - name: Start HANA Express container
@@ -1191,11 +1191,11 @@ jobs:
           swap-storage: true
 
       - uses: actions/checkout@v4
-        id: __checkout_25
+        id: checkout_25
         continue-on-error: true
         with:
           submodules: recursive
-      - if: steps.__checkout_25.outcome == 'failure'
+      - if: steps.checkout_25.outcome == 'failure'
         uses: actions/checkout@v4
         with:
           submodules: recursive

@@ -14,9 +14,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_1
+        id: checkout_1
         continue-on-error: true
-      - if: steps.__checkout_1.outcome == 'failure'
+      - if: steps.checkout_1.outcome == 'failure'
         uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
         with:
@@ -26,9 +26,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        id: __checkout_2
+        id: checkout_2
         continue-on-error: true
-      - if: steps.__checkout_2.outcome == 'failure'
+      - if: steps.checkout_2.outcome == 'failure'
         uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
