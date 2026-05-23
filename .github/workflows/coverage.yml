@@ -28,15 +28,12 @@ jobs:
       matrix:
         plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_1
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_1.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          # extension-ci-tools is harmless for pg_trex (it builds via cargo) but
+          # required for every other matrix entry. runtime additionally needs
+          # the trex-runtime submodule.
+          submodules: ${{ matrix.plugin == 'runtime' && 'plugins/extension-ci-tools plugins/runtime/trex-runtime' || 'plugins/extension-ci-tools' }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,11 +134,7 @@ jobs:
     if: github.event_name == 'pull_request'
     continue-on-error: true  # informational until we have one week of green runs
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_2
-        continue-on-error: true
-      - if: steps.checkout_2.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview

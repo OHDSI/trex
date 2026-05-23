@@ -29,15 +29,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_1
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_1.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -66,15 +60,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_2
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_2.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -103,15 +91,7 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_3
-        continue-on-error: true
-        with:
-          submodules: recursive
-      - if: steps.checkout_3.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: ./.github/actions/checkout-trex
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -157,15 +137,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_4
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_4.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -194,15 +168,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_5
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_5.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -235,15 +203,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_6
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_6.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -272,15 +234,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_7
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_7.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -309,15 +265,9 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_8
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_8.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools plugins/runtime/trex-runtime"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -353,15 +303,9 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_9
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_9.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools plugins/atlas/circe-be"
 
       - uses: graalvm/setup-graalvm@v1
         with:
@@ -396,15 +340,9 @@ jobs:
     timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_10
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_10.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools plugins/ai/llama.cpp"
 
       - name: Install ai build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libvulkan1 libvulkan-dev vulkan-tools glslc libshaderc1 spirv-tools vulkan-validationlayers mesa-vulkan-drivers
@@ -431,15 +369,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_11
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_11.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -467,15 +399,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_12
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_12.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -504,15 +430,9 @@ jobs:
     timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_13
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_13.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/extension-ci-tools"
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -547,11 +467,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_14
-        continue-on-error: true
-      - if: steps.checkout_14.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -609,11 +525,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_15
-        continue-on-error: true
-      - if: steps.checkout_15.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -670,11 +582,7 @@ jobs:
     timeout-minutes: 45
     needs: [build-pool, build-atlas]
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_16
-        continue-on-error: true
-      - if: steps.checkout_16.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -705,11 +613,7 @@ jobs:
     timeout-minutes: 45
     needs: [build-pool, build-ai]
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_17
-        continue-on-error: true
-      - if: steps.checkout_17.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -741,11 +645,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_18
-        continue-on-error: true
-      - if: steps.checkout_18.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -808,15 +708,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_19
-        continue-on-error: true
-        with:
-          submodules: recursive
-      - if: steps.checkout_19.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -875,11 +767,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_20
-        continue-on-error: true
-      - if: steps.checkout_20.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -929,11 +817,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_21
-        continue-on-error: true
-      - if: steps.checkout_21.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -992,11 +876,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_22
-        continue-on-error: true
-      - if: steps.checkout_22.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -1046,11 +926,7 @@ jobs:
     env:
       TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_23
-        continue-on-error: true
-      - if: steps.checkout_23.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - uses: actions/setup-python@v5
         with:
@@ -1100,11 +976,7 @@ jobs:
       TREX_COVERAGE: "1"
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_24
-        continue-on-error: true
-      - if: steps.checkout_24.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
 
       - name: Start HANA Express container
         run: docker compose -f integration-tests/docker-compose.hana.yml up -d
@@ -1190,15 +1062,9 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - uses: actions/checkout@v4
-        id: checkout_25
-        continue-on-error: true
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
-      - if: steps.checkout_25.outcome == 'failure'
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+          submodules: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
 
       - uses: actions/setup-python@v5
         with:

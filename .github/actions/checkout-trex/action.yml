@@ -1,0 +1,58 @@
+name: "Checkout trex"
+description: >
+  Checkout the trex repo with retry, then init only the specified git submodules
+  (also with retry). Clears the per-repo auth header before submodule init so
+  cross-repo public submodules (storage, studio, pg-meta, circe-be, llama.cpp,
+  etc.) can clone reliably — `actions/checkout` otherwise injects an
+  AUTHORIZATION basic header scoped to the source repo that 401s for other repos
+  and triggers `could not read Username for 'https://github.com'`.
+
+inputs:
+  submodules:
+    description: "Space-separated submodule paths to init. Empty = no submodules."
+    required: false
+    default: ""
+  fetch-depth:
+    description: "Forwarded to actions/checkout (0 = full history)."
+    required: false
+    default: "1"
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/checkout@v4
+      id: co1
+      continue-on-error: true
+      with:
+        submodules: false
+        fetch-depth: ${{ inputs.fetch-depth }}
+    - if: steps.co1.outcome == 'failure'
+      uses: actions/checkout@v4
+      with:
+        submodules: false
+        fetch-depth: ${{ inputs.fetch-depth }}
+
+    - name: Init submodules
+      if: inputs.submodules != ''
+      shell: bash
+      env:
+        SUBMODULE_PATHS: ${{ inputs.submodules }}
+      run: |
+        set -u
+        # Drop the source-repo-scoped basic auth header so cross-repo public
+        # submodules can clone without 401. Loop because checkout sets it both
+        # locally (`.git/config`) and globally (`~/.gitconfig`).
+        git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+        git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+
+        for attempt in 1 2 3; do
+          if git submodule update --init --depth=1 --recursive --force $SUBMODULE_PATHS; then
+            echo "Submodule init succeeded on attempt $attempt"
+            exit 0
+          fi
+          sleep_for=$((attempt * 10))
+          echo "Submodule init attempt $attempt failed; retrying in ${sleep_for}s..."
+          sleep "$sleep_for"
+        done
+        echo "::error::Submodule init failed after 3 attempts for: $SUBMODULE_PATHS"
+        exit 1

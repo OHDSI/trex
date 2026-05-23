@@ -13,11 +13,7 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_1
-        continue-on-error: true
-      - if: steps.checkout_1.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
       - uses: astral-sh/ruff-action@v3
         with:
           args: check .
@@ -25,11 +21,7 @@ jobs:
   javascript:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        id: checkout_2
-        continue-on-error: true
-      - if: steps.checkout_2.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
