@@ -23,6 +23,9 @@ import urllib.request
 
 import psycopg2
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 CONTAINER = "trexsql-trex-1"
@@ -99,8 +102,8 @@ def _safe_unload(cur, name: str) -> None:
     try:
         cur.execute("SELECT trex_ai_unload_model(%s)", (name,))
         cur.fetchall()
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 def test_alias_respected(conn, tiny_model_in_container):
