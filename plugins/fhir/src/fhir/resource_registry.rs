@@ -110,3 +110,49 @@ impl ResourceRegistry {
             .unwrap_or_default()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn table_name_lowercases() {
+        assert_eq!(ResourceRegistry::table_name("Patient"), "patient");
+        assert_eq!(ResourceRegistry::table_name("Observation"), "observation");
+        assert_eq!(ResourceRegistry::table_name("MedicationRequest"), "medicationrequest");
+    }
+
+    #[test]
+    fn empty_registry_knows_no_types() {
+        let r = ResourceRegistry::new();
+        assert!(!r.is_known_type("Patient"));
+        assert!(r.resource_type_names().is_empty());
+    }
+
+    #[test]
+    fn ddl_without_definitions_errors() {
+        let r = ResourceRegistry::new();
+        let err = r.get_ddl("Patient", "mydb.myschema").unwrap_err();
+        assert!(err.contains("No definitions loaded"));
+    }
+
+    #[test]
+    fn json_transform_without_definitions_errors() {
+        let r = ResourceRegistry::new();
+        let err = r.get_json_transform("Patient").unwrap_err();
+        assert!(err.contains("No definitions loaded"));
+    }
+
+    #[test]
+    fn column_names_without_definitions_errors() {
+        let r = ResourceRegistry::new();
+        let err = r.get_column_names("Patient").unwrap_err();
+        assert!(err.contains("No definitions loaded"));
+    }
+
+    #[test]
+    fn generate_all_ddl_empty_when_no_definitions() {
+        let r = ResourceRegistry::new();
+        assert!(r.generate_all_ddl("mydb.myschema").is_empty());
+    }
+}

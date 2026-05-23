@@ -361,4 +361,181 @@ mod tests {
         let v = column_value_to_json(&arr, 0, &DataType::Int32);
         assert_eq!(v, serde_json::Value::Null);
     }
+
+    #[test]
+    fn format_decimal_zero_or_negative_scale() {
+        assert_eq!(format_decimal_string("123", 0), "123");
+        assert_eq!(format_decimal_string("123", -2), "12300");
+    }
+
+    #[test]
+    fn format_decimal_negative_value() {
+        assert_eq!(format_decimal_string("-12345", 2), "-123.45");
+        assert_eq!(format_decimal_string("-5", 3), "-0.005");
+    }
+
+    #[test]
+    fn format_hex_empty_and_single_byte() {
+        assert_eq!(format_hex_bytes(&[]), "\\x");
+        assert_eq!(format_hex_bytes(&[0x00]), "\\x00");
+        assert_eq!(format_hex_bytes(&[0xff]), "\\xff");
+    }
+
+    #[test]
+    fn arrow_to_json_utf8_and_large_utf8() {
+        let s = StringArray::from(vec![Some("hello")]);
+        let v = column_value_to_json(&s, 0, &DataType::Utf8);
+        assert_eq!(v, serde_json::Value::String("hello".into()));
+
+        let ls = LargeStringArray::from(vec![Some("big")]);
+        let v = column_value_to_json(&ls, 0, &DataType::LargeUtf8);
+        assert_eq!(v, serde_json::Value::String("big".into()));
+    }
+
+    #[test]
+    fn arrow_to_json_boolean() {
+        let arr = BooleanArray::from(vec![Some(true), Some(false)]);
+        assert_eq!(
+            column_value_to_json(&arr, 0, &DataType::Boolean),
+            serde_json::Value::String("true".into())
+        );
+        assert_eq!(
+            column_value_to_json(&arr, 1, &DataType::Boolean),
+            serde_json::Value::String("false".into())
+        );
+    }
+
+    #[test]
+    fn arrow_to_json_signed_integers() {
+        assert_eq!(
+            column_value_to_json(&Int8Array::from(vec![-12i8]), 0, &DataType::Int8),
+            serde_json::Value::String("-12".into())
+        );
+        assert_eq!(
+            column_value_to_json(&Int16Array::from(vec![-1234i16]), 0, &DataType::Int16),
+            serde_json::Value::String("-1234".into())
+        );
+        assert_eq!(
+            column_value_to_json(&Int32Array::from(vec![42i32]), 0, &DataType::Int32),
+            serde_json::Value::String("42".into())
+        );
+        assert_eq!(
+            column_value_to_json(
+                &Int64Array::from(vec![9_999_999_999i64]),
+                0,
+                &DataType::Int64
+            ),
+            serde_json::Value::String("9999999999".into())
+        );
+    }
+
+    #[test]
+    fn arrow_to_json_unsigned_integers() {
+        assert_eq!(
+            column_value_to_json(&UInt8Array::from(vec![5u8]), 0, &DataType::UInt8),
+            serde_json::Value::String("5".into())
+        );
+        assert_eq!(
+            column_value_to_json(&UInt16Array::from(vec![500u16]), 0, &DataType::UInt16),
+            serde_json::Value::String("500".into())
+        );
+        assert_eq!(
+            column_value_to_json(&UInt32Array::from(vec![50000u32]), 0, &DataType::UInt32),
+            serde_json::Value::String("50000".into())
+        );
+        assert_eq!(
+            column_value_to_json(
+                &UInt64Array::from(vec![9_999_999_999u64]),
+                0,
+                &DataType::UInt64
+            ),
+            serde_json::Value::String("9999999999".into())
+        );
+    }
+
+    #[test]
+    fn arrow_to_json_floats() {
+        let v = column_value_to_json(
+            &Float32Array::from(vec![1.5f32]),
+            0,
+            &DataType::Float32,
+        );
+        assert_eq!(v, serde_json::Value::String("1.5".into()));
+
+        let v = column_value_to_json(
+            &Float64Array::from(vec![3.14f64]),
+            0,
+            &DataType::Float64,
+        );
+        assert_eq!(v, serde_json::Value::String("3.14".into()));
+    }
+
+    #[test]
+    fn arrow_to_json_date32() {
+        // 2024-01-01 = 19723 days since epoch
+        let arr = Date32Array::from(vec![19723]);
+        let v = column_value_to_json(&arr, 0, &DataType::Date32);
+        assert_eq!(v, serde_json::Value::String("2024-01-01".into()));
+    }
+
+    #[test]
+    fn arrow_to_json_timestamp_units() {
+        // 2024-01-01T00:00:00Z
+        let secs = 1704067200i64;
+
+        let arr = TimestampSecondArray::from(vec![secs]);
+        let v = column_value_to_json(&arr, 0, &DataType::Timestamp(TimeUnit::Second, None));
+        assert!(v.as_str().unwrap().starts_with("2024-01-01"));
+
+        let arr = TimestampMillisecondArray::from(vec![secs * 1000]);
+        let v = column_value_to_json(&arr, 0, &DataType::Timestamp(TimeUnit::Millisecond, None));
+        assert!(v.as_str().unwrap().starts_with("2024-01-01"));
+
+        let arr = TimestampMicrosecondArray::from(vec![secs * 1_000_000]);
+        let v = column_value_to_json(&arr, 0, &DataType::Timestamp(TimeUnit::Microsecond, None));
+        assert!(v.as_str().unwrap().starts_with("2024-01-01"));
+
+        let arr = TimestampNanosecondArray::from(vec![secs * 1_000_000_000]);
+        let v = column_value_to_json(&arr, 0, &DataType::Timestamp(TimeUnit::Nanosecond, None));
+        assert!(v.as_str().unwrap().starts_with("2024-01-01"));
+    }
+
+    #[test]
+    fn arrow_to_json_time_units() {
+        // 01:00:00 = 3600 seconds
+        let arr = Time32SecondArray::from(vec![3600]);
+        let v = column_value_to_json(&arr, 0, &DataType::Time32(TimeUnit::Second));
+        assert_eq!(v, serde_json::Value::String("01:00:00".into()));
+
+        let arr = Time32MillisecondArray::from(vec![3_600_500]);
+        let v = column_value_to_json(&arr, 0, &DataType::Time32(TimeUnit::Millisecond));
+        let s = v.as_str().unwrap();
+        assert!(s.starts_with("01:00:00."));
+
+        let arr = Time64MicrosecondArray::from(vec![3_600_000_500i64]);
+        let v = column_value_to_json(&arr, 0, &DataType::Time64(TimeUnit::Microsecond));
+        let s = v.as_str().unwrap();
+        assert!(s.starts_with("01:00:00."));
+
+        let arr = Time64NanosecondArray::from(vec![3_600_000_000_500i64]);
+        let v = column_value_to_json(&arr, 0, &DataType::Time64(TimeUnit::Nanosecond));
+        let s = v.as_str().unwrap();
+        assert!(s.starts_with("01:00:00."));
+    }
+
+    #[test]
+    fn arrow_to_json_large_binary() {
+        let arr = LargeBinaryArray::from(vec![Some(&[0xab, 0xcd][..])]);
+        let v = column_value_to_json(&arr, 0, &DataType::LargeBinary);
+        assert_eq!(v, serde_json::Value::String("\\xabcd".into()));
+    }
+
+    #[test]
+    fn arrow_to_json_unsupported_type_returns_null() {
+        // Use a Decimal256 with no test data — but unsupported via wildcard branch.
+        // Float16 is an example of an unmapped type.
+        let arr = Int32Array::from(vec![Some(1)]);
+        let v = column_value_to_json(&arr, 0, &DataType::Float16);
+        assert_eq!(v, serde_json::Value::Null);
+    }
 }

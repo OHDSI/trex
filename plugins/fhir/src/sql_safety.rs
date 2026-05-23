@@ -176,4 +176,46 @@ mod tests {
             "\"mydb\".\"_fhir_meta\""
         );
     }
+
+    #[test]
+    fn test_validate_resource_type_rejects_empty() {
+        let registry = ResourceRegistry::new();
+        assert!(validate_resource_type("", &registry).is_err());
+    }
+
+    #[test]
+    fn test_validate_resource_type_rejects_too_long() {
+        let registry = ResourceRegistry::new();
+        let long = "A".repeat(65);
+        assert!(validate_resource_type(&long, &registry).is_err());
+    }
+
+    #[test]
+    fn test_validate_resource_type_rejects_non_alphanumeric() {
+        let registry = ResourceRegistry::new();
+        assert!(validate_resource_type("Patient-1", &registry).is_err());
+        assert!(validate_resource_type("Patient'", &registry).is_err());
+        assert!(validate_resource_type("Pati ent", &registry).is_err());
+    }
+
+    #[test]
+    fn test_validate_resource_type_rejects_unknown_type() {
+        let registry = ResourceRegistry::new();
+        // syntactically valid but not registered
+        let err = validate_resource_type("Patient", &registry).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("Unknown resource type"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_validate_uuid_accepts_valid() {
+        assert!(validate_uuid("550e8400-e29b-41d4-a716-446655440000").is_ok());
+    }
+
+    #[test]
+    fn test_validate_uuid_rejects_invalid() {
+        assert!(validate_uuid("not-a-uuid").is_err());
+        assert!(validate_uuid("").is_err());
+        assert!(validate_uuid("550e8400-e29b-41d4-a716").is_err());
+    }
 }

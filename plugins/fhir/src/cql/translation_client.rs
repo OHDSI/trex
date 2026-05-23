@@ -52,3 +52,38 @@ impl CqlTranslationClient {
         cache.insert(cache_key, elm);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn base_url_trims_trailing_slash() {
+        let c = CqlTranslationClient::new("http://example.com/");
+        assert_eq!(c.base_url(), "http://example.com");
+        let c2 = CqlTranslationClient::new("http://example.com");
+        assert_eq!(c2.base_url(), "http://example.com");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn translate_uses_cache_when_pre_populated() {
+        let c = CqlTranslationClient::new("http://example.com");
+        c.cache_elm("urn:lib", "1.0.0", json!({"elm": "yes"}));
+        let v = c
+            .translate("ignored", Some("urn:lib"), Some("1.0.0"))
+            .await
+            .unwrap();
+        assert_eq!(v["elm"], "yes");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn translate_without_cache_returns_unavailable_error() {
+        let c = CqlTranslationClient::new("http://example.com");
+        let err = c
+            .translate("define x: 1", Some("urn:other"), Some("1.0.0"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("not available"));
+    }
+}
