@@ -140,7 +140,7 @@
       (is (= "testdb" (:database-code config)))
       (is (= "public" (:schema-name config)))
       (is (= "public" (:target-schema-name config)))  ; defaults to schema-name
-      (is (= ["concept"] (:fts-tables config)))       ; default FTS tables
+      (is (= ["concept" "concept_synonym"] (:fts-tables config))) ; default FTS tables
       (is (= "./data/cache" (:cache-path config)))    ; default cache path
       (is (= "postgres" (:dialect (:source-credentials config))))
       (is (= "jdbc:postgresql://localhost:5432/mydb"
@@ -210,3 +210,29 @@
 
 ;; Filter and SELECT/WHERE construction now live in trexsql.batch
 ;; (see batch.clj's build-select-query) and are exercised through batch-test.
+
+;; Document Identifier / FTS Config Tests
+
+(deftest get-document-identifier-uses-config-for-synthetic-pk-tables-test
+  (testing "tables without a natural PK return the synthetic fts_document_identifier_id"
+    ;; db is unused on the config-hit path; nil proves we don't touch it.
+    (doseq [t ["concept_synonym" "concept_relationship"
+               "concept_ancestor" "concept_recommended"]]
+      (is (= "fts_document_identifier_id"
+             (datamart/get-document-identifier nil "cache" "cdm" t))
+          (str t " must use the synthetic document identifier")))))
+
+(deftest get-document-identifier-uses-config-for-natural-pk-tables-test
+  (testing "tables with a natural PK return their declared id from config"
+    (is (= "concept_id"        (datamart/get-document-identifier nil "cache" "cdm" "concept")))
+    (is (= "vocabulary_id"     (datamart/get-document-identifier nil "cache" "cdm" "vocabulary")))
+    (is (= "relationship_id"   (datamart/get-document-identifier nil "cache" "cdm" "relationship")))
+    (is (= "concept_class_id"  (datamart/get-document-identifier nil "cache" "cdm" "concept_class")))
+    (is (= "domain_id"         (datamart/get-document-identifier nil "cache" "cdm" "domain")))
+    (is (= "note_id"           (datamart/get-document-identifier nil "cache" "cdm" "note")))))
+
+(deftest get-document-identifier-falls-back-to-heuristic-test
+  (testing "tables not in fts-config fall back to the information_schema heuristic"
+    ;; No DB available here — heuristic path throws on db query, caller logs
+    ;; the warning and we get nil. Test asserts no NPE and graceful nil.
+    (is (nil? (datamart/get-document-identifier nil "cache" "cdm" "totally_unknown_table")))))
