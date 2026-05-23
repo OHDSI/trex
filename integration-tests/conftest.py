@@ -5,12 +5,15 @@ import pytest
 import tempfile
 import time
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Must use 'spawn' so each child gets a fresh process (no inherited static state).
 try:
     mp.set_start_method("spawn")
-except RuntimeError:
-    pass
+except RuntimeError as e:
+    logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 if os.environ.get("TREX_COVERAGE") == "1":
     _profraw_dir = pathlib.Path(__file__).parent / "coverage" / "profraw"
@@ -158,8 +161,8 @@ class Node:
         try:
             self._cmd_queue.put(None)
             self._process.join(timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         if self._process.is_alive():
             self._process.kill()
             self._process.join(timeout=2)
@@ -237,8 +240,8 @@ def node_factory():
     for node in nodes:
         try:
             node.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 def create_node_with_tables(node_factory_fn, tables_sql_list, node_name, cluster_id,
