@@ -26,9 +26,10 @@ jobs:
   build-pool:
     name: "Build pool"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -44,7 +45,7 @@ jobs:
           restore-keys: pool-${{ runner.os }}-
 
       - name: Build pool
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/pool
 
       - uses: actions/upload-artifact@v4
@@ -56,9 +57,10 @@ jobs:
   build-rust-core:
     name: "Build db"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -74,7 +76,7 @@ jobs:
           restore-keys: rust-core-${{ runner.os }}-
 
       - name: Build db
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/db
 
       - uses: actions/upload-artifact@v4
@@ -86,9 +88,10 @@ jobs:
   build-pg-trex:
     name: "Build pg_trex"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -101,11 +104,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-17 postgresql-server-dev-17
 
-      - name: Download libtrexsql
-        run: |
-          wget -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
-          unzip /tmp/libtrexsql.zip -d /tmp/trexsql
+      - uses: ./.github/actions/setup-libtrexsql
+        with:
+          version: v1.4.4-trex
 
       - uses: actions/cache@v4
         with:
@@ -135,9 +136,10 @@ jobs:
   build-pgwire:
     name: "Build pgwire"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -153,7 +155,7 @@ jobs:
           restore-keys: rust-pgwire-${{ runner.os }}-
 
       - name: Build pgwire
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/pgwire
 
       - uses: actions/upload-artifact@v4
@@ -165,9 +167,10 @@ jobs:
   build-chdb:
     name: "Build chdb"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -187,7 +190,7 @@ jobs:
           restore-keys: rust-chdb-${{ runner.os }}-
 
       - name: Build chdb
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/chdb
 
       - uses: actions/upload-artifact@v4
@@ -199,9 +202,10 @@ jobs:
   build-hana:
     name: "Build hana"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -217,7 +221,7 @@ jobs:
           restore-keys: rust-hana-${{ runner.os }}-
 
       - name: Build hana
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/hana
 
       - uses: actions/upload-artifact@v4
@@ -229,9 +233,10 @@ jobs:
   build-tpm:
     name: "Build tpm"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -247,7 +252,7 @@ jobs:
           restore-keys: rust-tpm-${{ runner.os }}-
 
       - name: Build tpm
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/tpm
 
       - uses: actions/upload-artifact@v4
@@ -259,9 +264,10 @@ jobs:
   build-trexas:
     name: "Build trexas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -284,7 +290,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
 
       - name: Build trexas
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/runtime
 
       - uses: actions/upload-artifact@v4
@@ -296,9 +302,10 @@ jobs:
   build-atlas:
     name: "Build atlas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -332,9 +339,10 @@ jobs:
   build-ai:
     name: "Build ai"
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -360,9 +368,10 @@ jobs:
   build-etl:
     name: "Build etl"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -377,7 +386,7 @@ jobs:
           restore-keys: rust-etl-${{ runner.os }}-
 
       - name: Build etl
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/etl
 
       - uses: actions/upload-artifact@v4
@@ -389,9 +398,10 @@ jobs:
   build-migration:
     name: "Build migration"
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -407,13 +417,44 @@ jobs:
           restore-keys: rust-migration-${{ runner.os }}-
 
       - name: Build migration
-        run: make configure && make debug
+        run: make configure && make debug_coverage
         working-directory: plugins/migration
 
       - uses: actions/upload-artifact@v4
         with:
           name: ext-migration
           path: plugins/migration/build/debug/extension/migration/migration.trex
+          retention-days: 1
+
+  build-fhir:
+    name: "Build fhir"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    steps:
+      - uses: ./.github/actions/checkout-with-retry
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plugins/fhir/target
+          key: rust-fhir-${{ runner.os }}-${{ hashFiles('plugins/fhir/Cargo.lock') }}
+          restore-keys: rust-fhir-${{ runner.os }}-
+
+      - name: Build fhir
+        run: make configure && make debug_coverage
+        working-directory: plugins/fhir
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ext-fhir
+          path: plugins/fhir/build/debug/extension/fhir/fhir.trex
           retention-days: 1
 
   # ===========================================================================
@@ -423,13 +464,20 @@ jobs:
   test-distributed:
     name: "Test distributed (tier1/2/3)"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core]
+    env:
+      TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -457,16 +505,37 @@ jobs:
         run: venv/bin/pytest -v test_tier3_aggregation.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-distributed
+          fail_ci_if_error: false
+
   test-pgwire:
     name: "Test pgwire"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core, build-pgwire]
+    env:
+      TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -495,12 +564,27 @@ jobs:
         run: venv/bin/pytest -v test_pgwire_db.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-pgwire
+          fail_ci_if_error: false
+
   test-atlas:
     name: "Test atlas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-atlas]
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
@@ -527,9 +611,11 @@ jobs:
   test-ai:
     name: "Test ai"
     runs-on: ubuntu-24.04
+    continue-on-error: true
+    timeout-minutes: 45
     needs: [build-pool, build-ai]
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
@@ -556,13 +642,20 @@ jobs:
   test-chdb:
     name: "Test chdb"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core, build-chdb]
+    env:
+      TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - name: Install chdb native library
         run: sudo bash ./install_chdb.sh
@@ -595,18 +688,39 @@ jobs:
         run: venv/bin/pytest -v test_chdb_db.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-chdb
+          fail_ci_if_error: false
+
   test-trexas:
     name: "Test trexas"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-rust-core, build-trexas]
+    env:
+      TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -635,16 +749,37 @@ jobs:
         run: venv/bin/pytest -v test_trexas_swarm.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-runtime
+          fail_ci_if_error: false
+
   test-tpm:
     name: "Test tpm"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-tpm]
+    env:
+      TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -664,16 +799,37 @@ jobs:
         run: venv/bin/pytest -v test_tpm_standalone.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-tpm
+          fail_ci_if_error: false
+
   test-etl:
     name: "Test etl"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-etl, build-rust-core]
+    env:
+      TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -702,16 +858,37 @@ jobs:
         run: venv/bin/pytest -v test_etl_db.py
         working-directory: integration-tests
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-etl
+          fail_ci_if_error: false
+
   test-migration:
     name: "Test migration"
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     needs: [build-pool, build-migration]
+    env:
+      TREX_COVERAGE: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -730,14 +907,80 @@ jobs:
       - name: Run migration standalone tests
         run: venv/bin/pytest -v test_migration_standalone.py
         working-directory: integration-tests
-        
+
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-migration
+          fail_ci_if_error: false
+
+  test-fhir:
+    name: "Test fhir"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [build-pool, build-fhir]
+    env:
+      TREX_COVERAGE: "1"
+    steps:
+      - uses: ./.github/actions/checkout-with-retry
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ext-pool
+          path: plugins/pool/build/debug/extension/pool/
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ext-fhir
+          path: plugins/fhir/build/debug/extension/fhir/
+
+      - name: Setup test environment
+        run: make configure
+        working-directory: integration-tests
+
+      - name: Run fhir standalone tests
+        run: venv/bin/pytest -v test_fhir_standalone.py
+        working-directory: integration-tests
+
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-fhir
+          fail_ci_if_error: false
+
   test-hana:
     name: "Test hana"
     runs-on: ubuntu-24.04
     needs: [build-pool, build-hana]
-    timeout-minutes: 25
+    env:
+      TREX_COVERAGE: "1"
+    timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
 
       - name: Start HANA Express container
         run: docker compose -f integration-tests/docker-compose.hana.yml up -d
@@ -745,6 +988,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
 
       - uses: actions/download-artifact@v4
         with:
@@ -785,11 +1032,28 @@ jobs:
         if: always()
         run: docker compose -f integration-tests/docker-compose.hana.yml down -v
 
+      - name: Merge coverage
+        if: always()
+        continue-on-error: true
+        run: make coverage-merge
+        working-directory: integration-tests
+
+      - uses: codecov/codecov-action@v4
+        if: always()
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          directory: integration-tests/coverage/lcov
+          flags: integration-hana
+          fail_ci_if_error: false
+
   test-pg-trex:
     name: "Test pg_trex"
     runs-on: ubuntu-24.04
     needs: [build-pool, build-rust-core, build-pg-trex]
-    timeout-minutes: 25
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@v1.3.1
@@ -802,7 +1066,7 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
         with:
           submodules: recursive
 
@@ -863,6 +1127,27 @@ jobs:
         if: always()
         run: docker compose -f integration-tests/docker-compose.pg_trex.yml down -v
 
+      - name: Build pg-trex image for GHCR
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        run: docker build -t pg-trex-test -f plugins/pg_trex/Dockerfile .
+
+      - name: Login to GHCR
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        run: |
+          NS="${GITHUB_REPOSITORY_OWNER,,}"
+          docker tag pg-trex-test ghcr.io/$NS/pg-trex:latest
+          docker tag pg-trex-test ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
+          docker push ghcr.io/$NS/pg-trex:latest
+          docker push ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
+
   # ===========================================================================
   # Layer 3: Status Gate
   # ===========================================================================
@@ -871,15 +1156,16 @@ jobs:
     name: "Integration Tests Status"
     if: always()
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     needs:
       - test-distributed
       - test-pgwire
       - test-atlas
-      - test-ai
       - test-chdb
       - test-trexas
       - test-tpm
       - test-migration
+      - test-fhir
       - test-hana
       - test-etl
       - test-pg-trex
@@ -889,11 +1175,11 @@ jobs:
           echo "test-distributed: ${{ needs.test-distributed.result }}"
           echo "test-pgwire:      ${{ needs.test-pgwire.result }}"
           echo "test-atlas:       ${{ needs.test-atlas.result }}"
-          echo "test-ai:          ${{ needs.test-ai.result }}"
           echo "test-chdb:        ${{ needs.test-chdb.result }}"
           echo "test-trexas:      ${{ needs.test-trexas.result }}"
           echo "test-tpm:         ${{ needs.test-tpm.result }}"
           echo "test-migration:   ${{ needs.test-migration.result }}"
+          echo "test-fhir:        ${{ needs.test-fhir.result }}"
           echo "test-hana:        ${{ needs.test-hana.result }}"
           echo "test-etl:         ${{ needs.test-etl.result }}"
           echo "test-pg-trex:     ${{ needs.test-pg-trex.result }}"
@@ -901,13 +1187,13 @@ jobs:
           if [[ "${{ needs.test-distributed.result }}" == "failure" ||
                 "${{ needs.test-pgwire.result }}" == "failure" ||
                 "${{ needs.test-atlas.result }}" == "failure" ||
-                "${{ needs.test-ai.result }}" == "failure" ||
                 "${{ needs.test-chdb.result }}" == "failure" ||
                 "${{ needs.test-trexas.result }}" == "failure" ||
                 "${{ needs.test-tpm.result }}" == "failure" ||
                 "${{ needs.test-etl.result }}" == "failure" ||
                 "${{ needs.test-pg-trex.result }}" == "failure" ||
                 "${{ needs.test-migration.result }}" == "failure" ||
+                "${{ needs.test-fhir.result }}" == "failure" ||
                 "${{ needs.test-hana.result }}" == "failure" ]]; then
             echo "::error::One or more integration test jobs failed"
             exit 1

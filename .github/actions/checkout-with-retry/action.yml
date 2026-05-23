@@ -1,0 +1,56 @@
+name: "Checkout with retry"
+description: "Wrapper around actions/checkout that retries up to 3 times to absorb transient GitHub infra failures."
+inputs:
+  submodules:
+    description: "Same as actions/checkout 'submodules' input"
+    required: false
+    default: "false"
+  fetch-depth:
+    description: "Same as actions/checkout 'fetch-depth' input"
+    required: false
+    default: "1"
+  ref:
+    description: "Same as actions/checkout 'ref' input"
+    required: false
+    default: ""
+  repository:
+    description: "Same as actions/checkout 'repository' input"
+    required: false
+    default: ""
+  path:
+    description: "Same as actions/checkout 'path' input"
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - name: Checkout (attempt 1)
+      id: try1
+      uses: actions/checkout@v4
+      continue-on-error: true
+      with:
+        submodules: ${{ inputs.submodules }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+        ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        path: ${{ inputs.path }}
+    - name: Checkout (attempt 2)
+      if: steps.try1.outcome == 'failure'
+      id: try2
+      uses: actions/checkout@v4
+      continue-on-error: true
+      with:
+        submodules: ${{ inputs.submodules }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+        ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        path: ${{ inputs.path }}
+    - name: Checkout (attempt 3)
+      if: steps.try1.outcome == 'failure' && steps.try2.outcome == 'failure'
+      uses: actions/checkout@v4
+      with:
+        submodules: ${{ inputs.submodules }}
+        fetch-depth: ${{ inputs.fetch-depth }}
+        ref: ${{ inputs.ref }}
+        repository: ${{ inputs.repository }}
+        path: ${{ inputs.path }}
