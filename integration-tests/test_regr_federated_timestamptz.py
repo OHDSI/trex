@@ -43,6 +43,9 @@ import subprocess
 import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -242,6 +245,6 @@ def test_federated_pg_timestamptz_does_not_crash_engine(source_table):
             cur = conn.cursor()
             cur.execute(f"DETACH {ATTACH_ALIAS}")
             cur.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         conn.close()
