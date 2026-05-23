@@ -1403,7 +1403,7 @@ jobs:
           max_attempts: 2
           command: |
             cd d2e
-            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml --pull start
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml --pull start
             docker ps --format "{{.Names}},{{.Status}}"
             docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
@@ -1426,7 +1426,7 @@ jobs:
           max_attempts: 2
           command: |
             cd d2e
-            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml setupdemo
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml setupdemo
 
       - name: Run checkflow
         uses: nick-fields/retry@v3
@@ -1435,13 +1435,13 @@ jobs:
           max_attempts: 1
           command: |
             cd d2e
-            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml checkflow
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml checkflow
 
       - name: Logs after checkflow
         if: success() || failure()
         working-directory: d2e
         run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml logs
 
       - name: Check app status (informational)
         continue-on-error: true
@@ -1454,8 +1454,8 @@ jobs:
       - name: Restart d2e services
         working-directory: d2e
         run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml start
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml stop
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml start
 
       - name: Wait for d2e-trex healthy after restart
         timeout-minutes: 5
@@ -1491,19 +1491,25 @@ jobs:
 
       - name: Wait for webapi-init to complete
         run: |
-          echo "Waiting for webapi-init to complete..."
+          echo "Waiting for webapi-init to complete (ensures logto admin user is created)..."
           for i in $(seq 1 60); do
-            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -q "Exited (0)"; then
+            status=$(docker ps -a --filter "name=webapi-init" --format '{{.Status}}')
+            if echo "$status" | grep -q "(healthy)"; then
               echo "webapi-init completed successfully"
               break
             fi
-            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -qE "Exited \([1-9]"; then
+            if echo "$status" | grep -qE "Exited \([1-9]"; then
               echo "webapi-init failed!"
               docker logs d2e-webapi-init || true
               exit 1
             fi
-            echo "Waiting for webapi-init... ($i/60)"
+            echo "Waiting for webapi-init... ($i/60) (status: $status)"
             sleep 5
+            if [ $i -eq 60 ]; then
+              echo "::error::Timed out waiting for webapi-init to become healthy (final status: $status)"
+              docker logs d2e-webapi-init || true
+              exit 1
+            fi
           done
 
       - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
@@ -1546,13 +1552,13 @@ jobs:
         if: failure()
         working-directory: d2e
         run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml logs
 
       - name: Stop D2E services
         if: always()
         working-directory: d2e
         run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml stop
 
       - name: Prune system
         if: always()
