@@ -1276,19 +1276,18 @@ jobs:
     name: "E2E (D2E)"
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    needs:
-      - build-pool
-      - build-trexas
-      - build-atlas
-      - build-hana
-      - build-pgwire
-      - build-fhir
-      - build-tpm
+    # No needs: on integration-tests build jobs. The trex extensions we
+    # bind-mount into d2e-trex come from plugin-ci's release (`make release`)
+    # artifacts (ext-*-amd64), pulled below via dawidd6/action-download-artifact.
+    # The integration-tests build-* jobs produce debug_coverage builds which
+    # are ~50x slower at runtime and were causing deno cold-start to blow past
+    # the playwright 20s click timeout.
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     permissions:
       contents: read
       checks: write
       pull-requests: write
+      actions: read  # dawidd6/action-download-artifact reads plugin-ci's run
     env:
       D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
       VERSION: develop
@@ -1322,23 +1321,46 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
 
-      # Pull the 7 extensions that d2e-trex bind-mounts. These are the same
-      # debug_coverage builds the test-* jobs consume; if d2e-trex ever starts
-      # rejecting unsigned/debug builds we'll need to add release+sign here.
-      - uses: actions/download-artifact@v4
-        with: { name: ext-trexas, path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-atlas,  path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-hana,   path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-pgwire, path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-fhir,   path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-pool,   path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-tpm,    path: ./trex-artifacts/ }
+      # Pull the 7 extensions that d2e-trex bind-mounts. These come from
+      # plugin-ci.yml's release-flavor build matrix on the SAME commit
+      # (artifact name `ext-{plugin}-amd64`, contents `{ext}.trex`).
+      # dawidd6/action-download-artifact polls until the artifact appears,
+      # so each step waits for that plugin's plugin-ci matrix entry to finish.
+      # We use release builds (not integration-tests' debug_coverage) so
+      # trex's deno isolates don't add ~20s cold-start latency that races
+      # the playwright test's 20s click timeout.
+      - name: Fetch ext-pool (release)
+        uses: dawidd6/action-download-artifact@v6
+        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-pool-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+      - name: Fetch ext-atlas (release, contains circe.trex)
+        uses: dawidd6/action-download-artifact@v6
+        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-atlas-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+      - name: Fetch ext-hana (release, contains hana_scan.trex)
+        uses: dawidd6/action-download-artifact@v6
+        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-hana-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+      - name: Fetch ext-pgwire (release)
+        uses: dawidd6/action-download-artifact@v6
+        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-pgwire-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+      - name: Fetch ext-fhir (release)
+        uses: dawidd6/action-download-artifact@v6
+        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-fhir-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+      - name: Fetch ext-tpm (release)
+        uses: dawidd6/action-download-artifact@v6
+        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-tpm-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+      - name: Fetch ext-runtime (release, contains trexas.trex)
+        uses: dawidd6/action-download-artifact@v6
+        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-runtime-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+      - name: Verify required extensions present
+        run: |
+          set -e
+          ls -lh ./trex-artifacts/
+          for f in trexas.trex circe.trex hana_scan.trex pgwire.trex fhir.trex pool.trex tpm.trex; do
+            if [ ! -f "./trex-artifacts/$f" ]; then
+              echo "::error::missing ./trex-artifacts/$f"
+              ls -la ./trex-artifacts/
+              exit 1
+            fi
+          done
 
       - name: Sign extensions (no-op without DUCKDB_EXTENSION_SIGNING_KEY)
         env:
@@ -1537,24 +1559,44 @@ jobs:
       - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
         run: sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
 
-      - name: Warm up sign-in page
-        # Logto's sign-in page does an OIDC handshake + loads ~14 i18n
-        # phrase chunks client-side. First render in CI takes ~18s which
-        # races the playwright click's 20s "stable" wait. Pre-hitting the
-        # full flow warms Caddy/Logto so the test's render is faster.
+      - name: Warm up portal API + sign-in page
+        # First request to trex's deno-served portal endpoints cold-starts
+        # the deno isolate and takes 20+s (caddy traces confirm
+        # /system-portal/{feature/list,dataset/public/list,config/public/*}
+        # all hit a ~20s wall on the first call). Playwright's portal load
+        # races these and times out the click at 20s.
+        #
+        # Hit each endpoint with a generous per-call timeout so the deno
+        # cold-start happens here, not during the test. Then prefetch the
+        # sign-in page chunks so Logto's i18n bundle is in the cache too.
         continue-on-error: true
         run: |
           set -x
-          # Follow the portal -> oidc/auth -> sign-in redirect chain so
-          # Logto materializes its sign-in experience config.
+          BASE="https://localhost:443"
+          # Public portal endpoints the SPA fetches on /d2e/portal load.
+          for path in \
+            "/d2e/system-portal/feature/list" \
+            "/d2e/system-portal/dataset/public/list" \
+            "/d2e/system-portal/config/public/overview-description" \
+            "/d2e/system-portal/config/public/header-image"; do
+            curl -k -sS -o /dev/null -m 60 \
+              -w "$path: %{http_code} (%{time_total}s)\n" \
+              "$BASE$path" || true
+          done
+          # Re-hit once now that the isolate is warm; should be fast.
+          for path in \
+            "/d2e/system-portal/feature/list" \
+            "/d2e/system-portal/dataset/public/list"; do
+            curl -k -sS -o /dev/null -m 10 \
+              -w "$path (warm): %{http_code} (%{time_total}s)\n" \
+              "$BASE$path" || true
+          done
+          # Portal SPA shell + Logto sign-in page (HTML and asset chunks).
           curl -k -sSL -o /dev/null -w "portal: %{http_code} (%{time_total}s)\n" \
-            -b /tmp/d2e.jar -c /tmp/d2e.jar \
-            "https://localhost:443/d2e/portal" || true
-          # Hit the sign-in page directly a few times to warm Logto's
-          # asset/i18n chunk caches.
+            "$BASE/d2e/portal" || true
           for i in 1 2 3; do
             curl -k -sSL -o /dev/null -w "sign-in #$i: %{http_code} (%{time_total}s)\n" \
-              "https://localhost:443/sign-in" || true
+              "$BASE/sign-in" || true
           done
 
       - name: Build e2e Docker image
