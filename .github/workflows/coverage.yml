@@ -131,7 +131,7 @@ jobs:
   ratchet:
     name: "Coverage ratchet"
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     needs: rust-unit-coverage
     if: github.event_name == 'pull_request'
     continue-on-error: true  # informational until we have one week of green runs

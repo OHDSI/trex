@@ -1324,32 +1324,69 @@ jobs:
       # Pull the 7 extensions that d2e-trex bind-mounts. These come from
       # plugin-ci.yml's release-flavor build matrix on the SAME commit
       # (artifact name `ext-{plugin}-amd64`, contents `{ext}.trex`).
-      # dawidd6/action-download-artifact polls until the artifact appears,
-      # so each step waits for that plugin's plugin-ci matrix entry to finish.
       # We use release builds (not integration-tests' debug_coverage) so
       # trex's deno isolates don't add ~20s cold-start latency that races
       # the playwright test's 20s click timeout.
+      #
+      # dawidd6/action-download-artifact only matches *completed* runs, so
+      # poll the plugin-ci run on this commit first and wait for it to
+      # finish before invoking the action. (The action's `wait_for_completion`
+      # input doesn't exist — earlier attempts silently no-op'd.)
+      - name: Wait for plugin-ci run to complete
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -e
+          echo "Waiting for plugin-ci.yml run on commit $COMMIT_SHA to complete..."
+          DEADLINE=$(( $(date +%s) + 1800 ))   # 30 min cap
+          while :; do
+            RUN_JSON=$(gh api "repos/${{ github.repository }}/actions/workflows/plugin-ci.yml/runs?head_sha=$COMMIT_SHA&per_page=1" --jq '.workflow_runs[0]')
+            if [ -z "$RUN_JSON" ] || [ "$RUN_JSON" = "null" ]; then
+              echo "no plugin-ci run for $COMMIT_SHA yet; will retry"
+            else
+              STATUS=$(echo "$RUN_JSON" | jq -r '.status')
+              CONCLUSION=$(echo "$RUN_JSON" | jq -r '.conclusion // ""')
+              RUN_ID=$(echo "$RUN_JSON" | jq -r '.id')
+              echo "plugin-ci run $RUN_ID: status=$STATUS conclusion=$CONCLUSION"
+              if [ "$STATUS" = "completed" ]; then
+                if [ "$CONCLUSION" = "success" ]; then
+                  echo "PLUGIN_CI_RUN_ID=$RUN_ID" >> "$GITHUB_ENV"
+                  break
+                else
+                  echo "::error::plugin-ci run $RUN_ID concluded as $CONCLUSION; cannot fetch release extensions"
+                  exit 1
+                fi
+              fi
+            fi
+            if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+              echo "::error::timed out waiting 30m for plugin-ci on $COMMIT_SHA"
+              exit 1
+            fi
+            sleep 30
+          done
+
       - name: Fetch ext-pool (release)
         uses: dawidd6/action-download-artifact@v6
-        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-pool-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+        with: { run_id: '${{ env.PLUGIN_CI_RUN_ID }}', name: ext-pool-amd64,    path: ./trex-artifacts/, if_no_artifact_found: fail }
       - name: Fetch ext-atlas (release, contains circe.trex)
         uses: dawidd6/action-download-artifact@v6
-        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-atlas-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+        with: { run_id: '${{ env.PLUGIN_CI_RUN_ID }}', name: ext-atlas-amd64,   path: ./trex-artifacts/, if_no_artifact_found: fail }
       - name: Fetch ext-hana (release, contains hana_scan.trex)
         uses: dawidd6/action-download-artifact@v6
-        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-hana-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+        with: { run_id: '${{ env.PLUGIN_CI_RUN_ID }}', name: ext-hana-amd64,    path: ./trex-artifacts/, if_no_artifact_found: fail }
       - name: Fetch ext-pgwire (release)
         uses: dawidd6/action-download-artifact@v6
-        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-pgwire-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+        with: { run_id: '${{ env.PLUGIN_CI_RUN_ID }}', name: ext-pgwire-amd64,  path: ./trex-artifacts/, if_no_artifact_found: fail }
       - name: Fetch ext-fhir (release)
         uses: dawidd6/action-download-artifact@v6
-        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-fhir-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+        with: { run_id: '${{ env.PLUGIN_CI_RUN_ID }}', name: ext-fhir-amd64,    path: ./trex-artifacts/, if_no_artifact_found: fail }
       - name: Fetch ext-tpm (release)
         uses: dawidd6/action-download-artifact@v6
-        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-tpm-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+        with: { run_id: '${{ env.PLUGIN_CI_RUN_ID }}', name: ext-tpm-amd64,     path: ./trex-artifacts/, if_no_artifact_found: fail }
       - name: Fetch ext-runtime (release, contains trexas.trex)
         uses: dawidd6/action-download-artifact@v6
-        with: { workflow: plugin-ci.yml, commit: '${{ github.event.pull_request.head.sha || github.sha }}', name: ext-runtime-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail, wait_for_completion: true, wait_timeout_seconds: 1800 }
+        with: { run_id: '${{ env.PLUGIN_CI_RUN_ID }}', name: ext-runtime-amd64, path: ./trex-artifacts/, if_no_artifact_found: fail }
       - name: Verify required extensions present
         run: |
           set -e
