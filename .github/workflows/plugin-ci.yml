@@ -119,7 +119,7 @@ jobs:
             RUNNER: ubuntu-24.04
           - PKGPATH: ./plugins/devx-ext
             RUNNER: ubuntu-24.04
-            BUNDLE_IN_IMAGE: false
+            EXCLUDE_FROM_IMAGE: true
 
     runs-on: ${{ matrix.RUNNER || needs.pick_runner.outputs.random_runner }}
 
@@ -307,10 +307,13 @@ jobs:
         if: hashFiles(format('{0}/*.trex', matrix.PKGPATH)) != ''
         uses: actions/upload-artifact@v4
         with:
-          # Plugins with BUNDLE_IN_IMAGE: false upload as dx-* so the
-          # build-docker job's `ext-*-amd64` download pattern skips them
-          # (keeps devx-ext out of the default trex image).
-          name: ${{ matrix.BUNDLE_IN_IMAGE == false && format('dx-{0}-amd64', steps.extname.outputs.name) || format('ext-{0}-amd64', steps.extname.outputs.name) }}
+          # Plugins with EXCLUDE_FROM_IMAGE: true upload as dx-* so the
+          # build-docker / create-release jobs' `ext-*-amd64` download pattern
+          # skips them (keeps devx-ext out of the default trex image). The
+          # previous condition `matrix.BUNDLE_IN_IMAGE == false` matched
+          # null (unset) too, which had silently dropped EVERY x64 artifact
+          # to `dx-*` for months.
+          name: ${{ matrix.EXCLUDE_FROM_IMAGE && format('dx-{0}-amd64', steps.extname.outputs.name) || format('ext-{0}-amd64', steps.extname.outputs.name) }}
           path: ${{ matrix.PKGPATH }}/*.trex
           retention-days: 7
 
