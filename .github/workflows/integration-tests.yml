@@ -118,9 +118,10 @@ jobs:
               ~/.pgrx
             timeout: 30
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodule-paths: plugins/extension-ci-tools ${{ matrix.extra-submodules }}
+          paths: plugins/extension-ci-tools ${{ matrix.extra-submodules }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -280,7 +281,7 @@ jobs:
               exit 1
             service-down: docker compose -f integration-tests/docker-compose.hana.yml down -v
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
@@ -398,9 +399,10 @@ jobs:
           docker-images: true
           swap-storage: true
 
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodule-paths: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
+          paths: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
 
       - uses: actions/setup-python@v5
         with:

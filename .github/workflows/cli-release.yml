@@ -11,10 +11,12 @@ jobs:
   goreleaser:
     runs-on: ubuntu-latest
     steps:
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: actions/checkout@v4
         with:
-          submodule-paths: plugins/cli
-          fetch-depth: '0'
+          fetch-depth: 0
+      - uses: ./.github/actions/checkout-trex
+        with:
+          paths: plugins/cli
 
       - uses: actions/setup-go@v5
         with:

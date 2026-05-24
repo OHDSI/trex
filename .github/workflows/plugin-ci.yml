@@ -645,8 +645,11 @@ jobs:
       D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
       VERSION: develop
     steps:
+      - uses: actions/checkout@v4
       # extension-ci-tools is needed for sign-if-key.sh below.
-      - uses: ./.github/actions/checkout-with-retry
+      - uses: ./.github/actions/checkout-trex
+        with:
+          paths: plugins/extension-ci-tools
 
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@v1.3.1
