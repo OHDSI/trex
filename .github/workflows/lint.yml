@@ -13,11 +13,9 @@ jobs:
   python:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
+        with:
+          submodule-paths: ''
       - uses: astral-sh/ruff-action@v3
         with:
           args: check .
@@ -25,11 +23,9 @@ jobs:
   javascript:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-with-retry
+        with:
+          submodule-paths: ''
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
