@@ -1395,6 +1395,28 @@ jobs:
           EOF
           cat d2e/docker-compose-ci.yml
 
+      - name: Pre-pull flow images
+        # Mirrors D2E's CI step. These flow images aren't referenced from
+        # docker-compose so `--pull start` won't fetch them — they're
+        # spawned later by the dataflow worker and would block the first
+        # workflow run on a cold pull (~hundreds of MB each).
+        env:
+          REG_URL: ghcr.io/ohdsi
+          PREPULL_FLOW_IMAGES: "flow-base flow-i2b2 flow-data-management flow-search-embedding"
+        run: |
+          for img in $PREPULL_FLOW_IMAGES; do
+            docker pull "${REG_URL}/d2e/${img}:${{ env.VERSION }}" || \
+              echo "::warning::failed to pre-pull ${img}:${{ env.VERSION }}"
+          done
+
+      - name: Pull docker compose images
+        # Separate pull step so pull failures surface clearly instead of
+        # being conflated with start failures.
+        working-directory: d2e
+        run: |
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml pull
+          docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
+
       - name: Start D2E services
         uses: nick-fields/retry@v3
         with:
@@ -1403,7 +1425,7 @@ jobs:
           max_attempts: 2
           command: |
             cd d2e
-            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml --pull start
+            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml start
             docker ps --format "{{.Names}},{{.Status}}"
             docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
@@ -1514,6 +1536,26 @@ jobs:
 
       - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
         run: sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+
+      - name: Warm up sign-in page
+        # Logto's sign-in page does an OIDC handshake + loads ~14 i18n
+        # phrase chunks client-side. First render in CI takes ~18s which
+        # races the playwright click's 20s "stable" wait. Pre-hitting the
+        # full flow warms Caddy/Logto so the test's render is faster.
+        continue-on-error: true
+        run: |
+          set -x
+          # Follow the portal -> oidc/auth -> sign-in redirect chain so
+          # Logto materializes its sign-in experience config.
+          curl -k -sSL -o /dev/null -w "portal: %{http_code} (%{time_total}s)\n" \
+            -b /tmp/d2e.jar -c /tmp/d2e.jar \
+            "https://localhost:443/d2e/portal" || true
+          # Hit the sign-in page directly a few times to warm Logto's
+          # asset/i18n chunk caches.
+          for i in 1 2 3; do
+            curl -k -sSL -o /dev/null -w "sign-in #$i: %{http_code} (%{time_total}s)\n" \
+              "https://localhost:443/sign-in" || true
+          done
 
       - name: Build e2e Docker image
         working-directory: d2e/tests/e2e
