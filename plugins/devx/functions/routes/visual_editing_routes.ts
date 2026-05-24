@@ -240,7 +240,8 @@ function applyTailwindClasses(
     const merged = deduplicateClasses(existingClasses, sanitizedNew);
     const safeMerged = merged.split(/\s+/)
       .filter((c) => /^[A-Za-z0-9_:./\\[\]%@!#?+\-]+$/.test(c))
-      .join(" ");
+      .join(" ")
+      .replace(/["'<>]/g, "");
     const updatedRegion = region.replace(
       classNameMatch[0],
       `className="${safeMerged}"`,
@@ -259,9 +260,10 @@ function applyTailwindClasses(
   const tagMatch = line.match(/<([A-Za-z][A-Za-z0-9.]*)/);
   if (tagMatch) {
     const insertPos = line.indexOf(tagMatch[0]) + tagMatch[0].length;
+    const safeAttr = sanitizedNew.join(" ").replace(/["'<>]/g, "");
     lines[targetLine] =
       line.slice(0, insertPos) +
-      ` className="${sanitizedNew.join(" ")}"` +
+      ` className="${safeAttr}"` +
       line.slice(insertPos);
     return lines.join("\n");
   }
