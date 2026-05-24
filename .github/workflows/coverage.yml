@@ -29,10 +29,6 @@ jobs:
         plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
     steps:
       - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: ${{ matrix.plugin == 'runtime' && 'plugins/extension-ci-tools plugins/runtime/trex-runtime' || 'plugins/extension-ci-tools' }}
@@ -42,7 +38,9 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - uses: actions/cache@v4
         with:
@@ -68,9 +66,12 @@ jobs:
 
       - name: Install cargo-pgrx (pg_trex only)
         if: matrix.plugin == 'pg_trex'
-        run: |
-          cargo install cargo-pgrx --version 0.16.1 --locked
-          cargo pgrx init --pg17=$(which pg_config)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-pgrx@0.16.1
+      - name: pgrx init (pg_trex only)
+        if: matrix.plugin == 'pg_trex'
+        run: cargo pgrx init --pg17=$(which pg_config)
 
       - name: Install chdb native lib
         if: matrix.plugin == 'chdb'
@@ -131,20 +132,18 @@ jobs:
   ratchet:
     name: "Coverage ratchet"
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 30
     needs: rust-unit-coverage
     if: github.event_name == 'pull_request'
     continue-on-error: true  # informational until we have one week of green runs
     steps:
       - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      - run: cargo install cargo-llvm-cov --locked
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
       - run: sudo apt-get update && sudo apt-get install -y jq
       - run: scripts/coverage-summary.sh coverage/current.json
       - run: python3 scripts/coverage-ratchet.py coverage/current.json

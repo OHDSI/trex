@@ -8,14 +8,7 @@ on:
     branches: [main, develop]
   merge_group:
   workflow_dispatch:
-    inputs:
-      d2e_branch:
-        description: "D2E branch to test against (for the e2e-d2e job)"
-        default: "develop"
-        type: string
 
-# read-all suffices for the build/test matrix; the e2e-d2e job overrides this
-# to grant checks/pull-requests:write needed by ctrf-io/github-test-reporter.
 permissions: read-all
 
 concurrency:
@@ -27,1141 +20,370 @@ env:
 
 jobs:
   # ===========================================================================
-  # Layer 1: Build Jobs (all run in parallel)
+  # Layer 1: Build (one matrix entry per plugin)
   # ===========================================================================
+  #
+  # Per-plugin overrides in matrix.include:
+  #   dir              — plugins/{dir} (defaults to {plugin})
+  #   target           — make target (defaults to debug_coverage)
+  #   build-cmd        — full override of the build command
+  #   tool             — extra toolchain to install: deno|graalvm|pgrx
+  #   apt              — space-separated apt packages
+  #   apt-pgdg         — true to register pgdg repo before apt-get install
+  #   extra-submodules — extra submodule paths to init alongside extension-ci-tools
+  #   pre-build        — shell command to run after apt+toolchain, before build
+  #   pre-build-dir    — working-directory for pre-build
+  #   artifact-name    — defaults to ext-{plugin}
+  #   artifact         — full path to artifact (required)
+  #   cache-paths      — newline-separated extra cache paths
+  #   cache-lockfile   — single glob for hashFiles; defaults to plugins/{dir}/Cargo.lock
+  #   timeout          — minutes, defaults to 20
 
-  build-pool:
-    name: "Build pool"
+  build:
+    name: "Build ${{ matrix.plugin }}"
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: ${{ matrix.timeout || 20 }}
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plugin: pool
+            artifact: plugins/pool/build/debug/extension/pool/pool.trex
+
+          - plugin: db
+            artifact: plugins/db/build/debug/extension/db/db.trex
+
+          - plugin: pgwire
+            artifact: plugins/pgwire/build/debug/extension/pgwire/pgwire.trex
+
+          - plugin: chdb
+            apt: libc6-dev clang
+            pre-build: sudo bash ./install_chdb.sh
+            pre-build-dir: plugins/chdb
+            artifact: plugins/chdb/build/debug/extension/chdb/chdb.trex
+
+          - plugin: hana
+            artifact: plugins/hana/build/debug/extension/hana_scan/hana_scan.trex
+
+          - plugin: tpm
+            artifact: plugins/tpm/build/debug/extension/tpm/tpm.trex
+
+          - plugin: trexas
+            dir: runtime
+            extra-submodules: plugins/runtime/trex-runtime
+            tool: deno
+            apt: libopenblas-dev
+            artifact: plugins/runtime/build/debug/extension/trexas/trexas.trex
+            timeout: 30
+
+          - plugin: atlas
+            target: release
+            tool: graalvm
+            apt: cmake libssl-dev xxd maven
+            extra-submodules: plugins/atlas/circe-be
+            artifact: plugins/atlas/build/release/extension/circe/circe.trex
+            cache-paths: |
+              plugins/atlas/build
+              plugins/atlas/circe-be/target
+            cache-lockfile: plugins/atlas/circe-be/pom.xml
+            timeout: 30
+
+          - plugin: ai
+            target: debug
+            apt: cmake libssl-dev libvulkan1 libvulkan-dev vulkan-tools glslc libshaderc1 spirv-tools vulkan-validationlayers mesa-vulkan-drivers
+            extra-submodules: plugins/ai/llama.cpp
+            artifact: plugins/ai/build/debug/extension/ai/ai.trex
+            cache-paths: plugins/ai/build
+            cache-lockfile: plugins/ai/llama.cpp/CMakeLists.txt
+            timeout: 30
+
+          - plugin: etl
+            artifact: plugins/etl/build/debug/extension/etl/etl.trex
+
+          - plugin: migration
+            artifact: plugins/migration/build/debug/extension/migration/migration.trex
+
+          - plugin: fhir
+            artifact: plugins/fhir/build/debug/extension/fhir/fhir.trex
+
+          - plugin: pg_trex
+            tool: pgrx
+            apt-pgdg: true
+            apt: postgresql-17 postgresql-server-dev-17
+            build-cmd: LIBRARY_PATH=/tmp/trexsql cargo build
+            artifact-name: pg-trex-build
+            artifact: plugins/pg_trex/target/debug/libpg_trex.so
+            cache-paths: |
+              ~/.pgrx
+            timeout: 30
     steps:
       - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
-          paths: "plugins/extension-ci-tools"
+          paths: plugins/extension-ci-tools ${{ matrix.extra-submodules }}
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/pool/target
-          key: pool-${{ runner.os }}-${{ hashFiles('plugins/pool/Cargo.lock') }}
-          restore-keys: pool-${{ runner.os }}-
-
-      - name: Build pool
-        run: make configure && make debug_coverage
-        working-directory: plugins/pool
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/pool.trex
-          retention-days: 1
-
-  build-rust-core:
-    name: "Build db"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/db/target
-          key: rust-core-${{ runner.os }}-${{ hashFiles('plugins/db/Cargo.lock') }}
-          restore-keys: rust-core-${{ runner.os }}-
-
-      - name: Build db
-        run: make configure && make debug_coverage
-        working-directory: plugins/db
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-db
-          path: plugins/db/build/debug/extension/db/db.trex
-          retention-days: 1
-
-  build-pg-trex:
-    name: "Build pg_trex"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install PostgreSQL 17 dev headers
-        run: |
-          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
-          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
-          sudo apt-get update
-          sudo apt-get install -y postgresql-17 postgresql-server-dev-17
-
-      - uses: ./.github/actions/setup-libtrexsql
-        with:
-          version: v1.4.4-trex
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.pgrx
-            plugins/pg_trex/target
-          key: rust-pg-trex-${{ runner.os }}-${{ hashFiles('plugins/pg_trex/Cargo.lock') }}
-          restore-keys: rust-pg-trex-${{ runner.os }}-
-
-      - name: Install cargo-pgrx and init
-        run: |
-          cargo install cargo-pgrx --version 0.16.1 --locked
-          cargo pgrx init --pg17=$(which pg_config)
-
-      - name: Build pg_trex
-        run: LIBRARY_PATH=/tmp/trexsql cargo build
-        working-directory: plugins/pg_trex
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: pg-trex-build
-          path: plugins/pg_trex/target/debug/libpg_trex.so
-          retention-days: 1
-
-  build-pgwire:
-    name: "Build pgwire"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/pgwire/target
-          key: rust-pgwire-${{ runner.os }}-${{ hashFiles('plugins/pgwire/Cargo.lock') }}
-          restore-keys: rust-pgwire-${{ runner.os }}-
-
-      - name: Build pgwire
-        run: make configure && make debug_coverage
-        working-directory: plugins/pgwire
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-pgwire
-          path: plugins/pgwire/build/debug/extension/pgwire/pgwire.trex
-          retention-days: 1
-
-  build-chdb:
-    name: "Build chdb"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - name: Install chdb native library
-        run: sudo apt-get update && sudo apt-get install -y libc6-dev clang && sudo bash ./install_chdb.sh
-        working-directory: plugins/chdb
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/chdb/target
-          key: rust-chdb-${{ runner.os }}-${{ hashFiles('plugins/chdb/Cargo.lock') }}
-          restore-keys: rust-chdb-${{ runner.os }}-
-
-      - name: Build chdb
-        run: make configure && make debug_coverage
-        working-directory: plugins/chdb
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-chdb
-          path: plugins/chdb/build/debug/extension/chdb/chdb.trex
-          retention-days: 1
-
-  build-hana:
-    name: "Build hana"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/hana/target
-          key: rust-hana-${{ runner.os }}-${{ hashFiles('plugins/hana/Cargo.lock') }}
-          restore-keys: rust-hana-${{ runner.os }}-
-
-      - name: Build hana
-        run: make configure && make debug_coverage
-        working-directory: plugins/hana
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-hana
-          path: plugins/hana/build/debug/extension/hana_scan/hana_scan.trex
-          retention-days: 1
-
-  build-tpm:
-    name: "Build tpm"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/tpm/target
-          key: rust-tpm-${{ runner.os }}-${{ hashFiles('plugins/tpm/Cargo.lock') }}
-          restore-keys: rust-tpm-${{ runner.os }}-
-
-      - name: Build tpm
-        run: make configure && make debug_coverage
-        working-directory: plugins/tpm
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-tpm
-          path: plugins/tpm/build/debug/extension/tpm/tpm.trex
-          retention-days: 1
-
-  build-trexas:
-    name: "Build trexas"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools plugins/runtime/trex-runtime"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: denoland/setup-deno@v2
+      - if: matrix.tool == 'deno'
+        uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/runtime/target
-          key: rust-trexas-${{ runner.os }}-${{ hashFiles('plugins/runtime/Cargo.lock') }}
-          restore-keys: rust-trexas-${{ runner.os }}-
-
-      - name: Install trexas build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev
-
-      - name: Build trexas
-        run: make configure && make debug_coverage
-        working-directory: plugins/runtime
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-trexas
-          path: plugins/runtime/build/debug/extension/trexas/trexas.trex
-          retention-days: 1
-
-  build-atlas:
-    name: "Build atlas"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools plugins/atlas/circe-be"
-
-      - uses: graalvm/setup-graalvm@v1
+      - if: matrix.tool == 'graalvm'
+        uses: graalvm/setup-graalvm@v1
         with:
           java-version: "21"
           components: native-image
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install circe build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev xxd maven
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            plugins/atlas/build
-            plugins/atlas/circe-be/target
-          key: circe-${{ runner.os }}-${{ hashFiles('plugins/atlas/CMakeLists.txt', 'plugins/atlas/extension_config.cmake', 'plugins/atlas/circe-be/pom.xml', 'plugins/atlas/graalvm-config/**') }}
-          restore-keys: circe-${{ runner.os }}-
-
-      - name: Build atlas
-        run: make configure && make release
-        working-directory: plugins/atlas
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-atlas
-          path: plugins/atlas/build/release/extension/circe/circe.trex
-          retention-days: 1
-
-  build-ai:
-    name: "Build ai"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools plugins/ai/llama.cpp"
-
-      - name: Install ai build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake libssl-dev libvulkan1 libvulkan-dev vulkan-tools glslc libshaderc1 spirv-tools vulkan-validationlayers mesa-vulkan-drivers
-
-      - uses: actions/cache@v4
-        with:
-          path: plugins/ai/build
-          key: ai-cmake-${{ runner.os }}-${{ hashFiles('plugins/ai/CMakeLists.txt', 'plugins/ai/llama.cpp/CMakeLists.txt') }}
-          restore-keys: ai-cmake-${{ runner.os }}-
-
-      - name: Build ai
-        run: make configure && make debug
-        working-directory: plugins/ai
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-ai
-          path: plugins/ai/build/debug/extension/ai/ai.trex
-          retention-days: 1
-
-  build-etl:
-    name: "Build etl"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            plugins/etl/target
-          key: rust-etl-${{ runner.os }}-${{ hashFiles('plugins/etl/Cargo.lock') }}
-          restore-keys: rust-etl-${{ runner.os }}-
-
-      - name: Build etl
-        run: make configure && make debug_coverage
-        working-directory: plugins/etl
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-etl
-          path: plugins/etl/build/debug/extension/etl/etl.trex
-          retention-days: 1
-    
-  build-migration:
-    name: "Build migration"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/migration/target
-          key: rust-migration-${{ runner.os }}-${{ hashFiles('plugins/migration/Cargo.lock') }}
-          restore-keys: rust-migration-${{ runner.os }}-
-
-      - name: Build migration
-        run: make configure && make debug_coverage
-        working-directory: plugins/migration
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-migration
-          path: plugins/migration/build/debug/extension/migration/migration.trex
-          retention-days: 1
-
-  build-fhir:
-    name: "Build fhir"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/fhir/target
-          key: rust-fhir-${{ runner.os }}-${{ hashFiles('plugins/fhir/Cargo.lock') }}
-          restore-keys: rust-fhir-${{ runner.os }}-
-
-      - name: Build fhir
-        run: make configure && make debug_coverage
-        working-directory: plugins/fhir
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ext-fhir
-          path: plugins/fhir/build/debug/extension/fhir/fhir.trex
-          retention-days: 1
-
-  # ===========================================================================
-  # Layer 2: Test Jobs
-  # ===========================================================================
-
-  test-distributed:
-    name: "Test distributed (tier1/2/3)"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-rust-core]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-db
-          path: plugins/db/build/debug/extension/db/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run tier1 tests
-        run: venv/bin/pytest -v test_tier1_single_node.py
-        working-directory: integration-tests
-
-      - name: Run tier2 tests
-        run: venv/bin/pytest -v test_tier2_two_node.py
-        working-directory: integration-tests
-
-      - name: Run tier3 tests
-        run: venv/bin/pytest -v test_tier3_aggregation.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-distributed
-          fail_ci_if_error: false
-
-  test-pgwire:
-    name: "Test pgwire"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-rust-core, build-pgwire]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-db
-          path: plugins/db/build/debug/extension/db/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pgwire
-          path: plugins/pgwire/build/debug/extension/pgwire/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run pgwire standalone tests
-        run: venv/bin/pytest -v test_pgwire_standalone.py
-        working-directory: integration-tests
-
-      - name: Run pgwire db tests
-        run: venv/bin/pytest -v test_pgwire_db.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-pgwire
-          fail_ci_if_error: false
-
-  test-atlas:
-    name: "Test atlas"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-atlas]
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-atlas
-          path: plugins/atlas/build/release/extension/circe/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run atlas standalone tests
-        run: venv/bin/pytest -v test_atlas_standalone.py
-        working-directory: integration-tests
-
-  test-ai:
-    name: "Test ai"
-    runs-on: ubuntu-24.04
-    continue-on-error: true
-    timeout-minutes: 45
-    needs: [build-pool, build-ai]
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-ai
-          path: plugins/ai/build/debug/extension/ai/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run ai standalone tests
-        run: venv/bin/pytest -v test_ai_standalone.py
-        working-directory: integration-tests
-
-  test-chdb:
-    name: "Test chdb"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-rust-core, build-chdb]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - name: Install chdb native library
-        run: sudo bash ./install_chdb.sh
-        working-directory: plugins/chdb
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-db
-          path: plugins/db/build/debug/extension/db/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-chdb
-          path: plugins/chdb/build/debug/extension/chdb/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run chdb standalone tests
-        run: venv/bin/pytest -v test_chdb_standalone.py
-        working-directory: integration-tests
-
-      - name: Run chdb db tests
-        run: venv/bin/pytest -v test_chdb_db.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-chdb
-          fail_ci_if_error: false
-
-  test-trexas:
-    name: "Test trexas"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-rust-core, build-trexas]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-db
-          path: plugins/db/build/debug/extension/db/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-trexas
-          path: plugins/runtime/build/debug/extension/trexas/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run trexas standalone tests
-        run: venv/bin/pytest -v test_trexas_standalone.py
-        working-directory: integration-tests
-
-      - name: Run trexas swarm tests
-        run: venv/bin/pytest -v test_trexas_swarm.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-runtime
-          fail_ci_if_error: false
-
-  test-tpm:
-    name: "Test tpm"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-tpm]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-tpm
-          path: plugins/tpm/build/debug/extension/tpm/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run tpm standalone tests
-        run: venv/bin/pytest -v test_tpm_standalone.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-tpm
-          fail_ci_if_error: false
-
-  test-etl:
-    name: "Test etl"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-etl, build-rust-core]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-etl
-          path: plugins/etl/build/debug/extension/etl/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-db
-          path: plugins/db/build/debug/extension/db/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run etl standalone tests
-        run: venv/bin/pytest -v test_etl_standalone.py
-        working-directory: integration-tests
-
-      - name: Run etl db tests
-        run: venv/bin/pytest -v test_etl_db.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-etl
-          fail_ci_if_error: false
-
-  test-migration:
-    name: "Test migration"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-migration]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-migration
-          path: plugins/migration/build/debug/extension/migration/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run migration standalone tests
-        run: venv/bin/pytest -v test_migration_standalone.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-migration
-          fail_ci_if_error: false
-
-  test-fhir:
-    name: "Test fhir"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    needs: [build-pool, build-fhir]
-    env:
-      TREX_COVERAGE: "1"
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-fhir
-          path: plugins/fhir/build/debug/extension/fhir/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run fhir standalone tests
-        run: venv/bin/pytest -v test_fhir_standalone.py
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        if: always()
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        if: always()
-        with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          directory: integration-tests/coverage/lcov
-          flags: integration-fhir
-          fail_ci_if_error: false
-
-  test-hana:
-    name: "Test hana"
-    runs-on: ubuntu-24.04
-    needs: [build-pool, build-hana]
-    env:
-      TREX_COVERAGE: "1"
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-
-      - name: Start HANA Express container
-        run: docker compose -f integration-tests/docker-compose.hana.yml up -d
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: plugins/pool/build/debug/extension/pool/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: ext-hana
-          path: plugins/hana/build/debug/extension/hana_scan/
-
-      - name: Setup test environment
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Wait for HANA to be ready
+      - name: Add pgdg apt repo
+        if: matrix.apt-pgdg
         run: |
-          echo "Waiting for HANA Express to be fully ready..."
-          for i in $(seq 1 120); do
-            if docker logs trex-hana 2>&1 | grep -q "Startup finished!"; then
-              echo "HANA startup finished after ~$((i * 5))s"
-              sleep 5  # extra grace period after startup message
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "Timeout waiting for HANA (10 min)"
-          docker logs trex-hana 2>&1 | tail -20
-          exit 1
+          sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo gpg --dearmor -o /etc/apt/trusted.gpg.d/postgresql.gpg
 
-      - name: Run hana standalone tests
-        run: venv/bin/pytest -v test_hana_standalone.py
+      - name: Install apt packages
+        if: matrix.apt
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
+
+      - uses: ./.github/actions/setup-libtrexsql
+        if: matrix.tool == 'pgrx'
+        with:
+          version: v1.4.4-trex
+
+      - if: matrix.tool == 'pgrx'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-pgrx@0.16.1
+      - name: pgrx init
+        if: matrix.tool == 'pgrx'
+        run: cargo pgrx init --pg17=$(which pg_config)
+
+      - name: Pre-build step
+        if: matrix.pre-build
+        working-directory: ${{ matrix.pre-build-dir }}
+        run: ${{ matrix.pre-build }}
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plugins/${{ matrix.dir || matrix.plugin }}/target
+            ${{ matrix.cache-paths }}
+          key: build-${{ matrix.plugin }}-${{ runner.os }}-${{ hashFiles(matrix.cache-lockfile || format('plugins/{0}/Cargo.lock', matrix.dir || matrix.plugin)) }}
+          restore-keys: build-${{ matrix.plugin }}-${{ runner.os }}-
+
+      - name: Build
+        working-directory: plugins/${{ matrix.dir || matrix.plugin }}
+        run: ${{ matrix.build-cmd || format('make configure && make {0}', matrix.target || 'debug_coverage') }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name || format('ext-{0}', matrix.plugin) }}
+          path: ${{ matrix.artifact }}
+          retention-days: 7
+
+  # ===========================================================================
+  # Layer 2: Test (one matrix entry per test suite)
+  # ===========================================================================
+  #
+  # Per-entry overrides in matrix.include:
+  #   name           — short id (also default for display + coverage flag suffix)
+  #   display        — pretty name shown in the check (defaults to {name})
+  #   exts           — space-separated extension names to download
+  #   tests          — space-separated python test files to run
+  #   coverage       — set to false to skip TREX_COVERAGE + codecov upload
+  #   coverage-flags — codecov flags (defaults to integration-{name})
+  #   pre-test       — shell command to run after extension downloads
+  #   service-up     — shell command to start service container(s) before tests
+  #   service-wait   — shell command to wait for service readiness
+  #   service-down   — shell command to tear down services (runs always())
+  #
+  # pg_trex is intentionally NOT in this matrix — it has unique needs
+  # (different artifact paths, extra submodules, packages: write) and
+  # lives in its own job below.
+
+  test:
+    name: "Test ${{ matrix.display || matrix.name }}"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [build]
+    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
+    env:
+      TREX_COVERAGE: ${{ matrix.coverage != false && '1' || '' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: distributed
+            display: "distributed (tier1/2/3)"
+            exts: pool db
+            tests: test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py
+
+          - name: pgwire
+            exts: pool db pgwire
+            tests: test_pgwire_standalone.py test_pgwire_db.py
+
+          - name: atlas
+            exts: pool atlas
+            tests: test_atlas_standalone.py
+            coverage: false
+
+          - name: ai
+            exts: pool ai
+            tests: test_ai_standalone.py
+            coverage: false
+
+          - name: chdb
+            exts: pool db chdb
+            tests: test_chdb_standalone.py test_chdb_db.py
+            pre-test: cd plugins/chdb && sudo bash ./install_chdb.sh
+
+          - name: trexas
+            exts: pool db trexas
+            tests: test_trexas_standalone.py test_trexas_swarm.py
+            coverage-flags: integration-runtime
+
+          - name: tpm
+            exts: pool tpm
+            tests: test_tpm_standalone.py
+
+          - name: etl
+            exts: pool db etl
+            tests: test_etl_standalone.py test_etl_db.py
+
+          - name: migration
+            exts: pool migration
+            tests: test_migration_standalone.py
+
+          - name: fhir
+            exts: pool fhir
+            tests: test_fhir_standalone.py
+
+          - name: hana
+            exts: pool hana
+            tests: test_hana_standalone.py
+            service-up: docker compose -f integration-tests/docker-compose.hana.yml up -d
+            service-wait: |
+              echo "Waiting for HANA Express to be fully ready..."
+              for i in $(seq 1 120); do
+                if docker logs trex-hana 2>&1 | grep -q "Startup finished!"; then
+                  echo "HANA startup finished after ~$((i * 5))s"
+                  sleep 5
+                  exit 0
+                fi
+                sleep 5
+              done
+              echo "Timeout waiting for HANA (10 min)"
+              docker logs trex-hana 2>&1 | tail -20
+              exit 1
+            service-down: docker compose -f integration-tests/docker-compose.hana.yml down -v
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Pre-test step
+        if: matrix.pre-test
+        run: ${{ matrix.pre-test }}
+
+      # Per-extension downloads. Each step is a no-op when the matrix entry
+      # doesn't list that extension. Cheaper than dynamic shell+gh-cli and
+      # keeps artifact paths visible at a glance.
+      - if: contains(matrix.exts, 'pool')
+        uses: actions/download-artifact@v4
+        with: { name: ext-pool,      path: plugins/pool/build/debug/extension/pool/ }
+      - if: contains(matrix.exts, 'db')
+        uses: actions/download-artifact@v4
+        with: { name: ext-db,        path: plugins/db/build/debug/extension/db/ }
+      - if: contains(matrix.exts, 'pgwire')
+        uses: actions/download-artifact@v4
+        with: { name: ext-pgwire,    path: plugins/pgwire/build/debug/extension/pgwire/ }
+      - if: contains(matrix.exts, 'chdb')
+        uses: actions/download-artifact@v4
+        with: { name: ext-chdb,      path: plugins/chdb/build/debug/extension/chdb/ }
+      - if: contains(matrix.exts, 'hana')
+        uses: actions/download-artifact@v4
+        with: { name: ext-hana,      path: plugins/hana/build/debug/extension/hana_scan/ }
+      - if: contains(matrix.exts, 'tpm')
+        uses: actions/download-artifact@v4
+        with: { name: ext-tpm,       path: plugins/tpm/build/debug/extension/tpm/ }
+      - if: contains(matrix.exts, 'trexas')
+        uses: actions/download-artifact@v4
+        with: { name: ext-trexas,    path: plugins/runtime/build/debug/extension/trexas/ }
+      - if: contains(matrix.exts, 'atlas')
+        uses: actions/download-artifact@v4
+        with: { name: ext-atlas,     path: plugins/atlas/build/release/extension/circe/ }
+      - if: contains(matrix.exts, 'ai')
+        uses: actions/download-artifact@v4
+        with: { name: ext-ai,        path: plugins/ai/build/debug/extension/ai/ }
+      - if: contains(matrix.exts, 'etl')
+        uses: actions/download-artifact@v4
+        with: { name: ext-etl,       path: plugins/etl/build/debug/extension/etl/ }
+      - if: contains(matrix.exts, 'migration')
+        uses: actions/download-artifact@v4
+        with: { name: ext-migration, path: plugins/migration/build/debug/extension/migration/ }
+      - if: contains(matrix.exts, 'fhir')
+        uses: actions/download-artifact@v4
+        with: { name: ext-fhir,      path: plugins/fhir/build/debug/extension/fhir/ }
+
+      - name: Start service
+        if: matrix.service-up
+        run: ${{ matrix.service-up }}
+
+      - name: Wait for service
+        if: matrix.service-wait
+        run: ${{ matrix.service-wait }}
+
+      - name: Setup test environment
+        run: make configure
         working-directory: integration-tests
-        env:
-          HANA_TEST_URL: "hdbsqls://SYSTEM:Toor1234@localhost:39041/HDB?insecure_omit_server_certificate_check"
 
-      - name: Cleanup HANA container
-        if: always()
-        run: docker compose -f integration-tests/docker-compose.hana.yml down -v
+      - name: Run tests
+        run: |
+          for t in ${{ matrix.tests }}; do
+            echo "::group::pytest $t"
+            venv/bin/pytest -v "$t"
+            echo "::endgroup::"
+          done
+        working-directory: integration-tests
+
+      - name: Tear down service
+        if: always() && matrix.service-down
+        run: ${{ matrix.service-down }}
 
       - name: Merge coverage
-        if: always()
+        if: always() && matrix.coverage != false
         continue-on-error: true
         run: make coverage-merge
         working-directory: integration-tests
 
-      - uses: codecov/codecov-action@v4
-        if: always()
+      - if: always() && matrix.coverage != false
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           directory: integration-tests/coverage/lcov
-          flags: integration-hana
+          flags: ${{ matrix.coverage-flags || format('integration-{0}', matrix.name) }}
           fail_ci_if_error: false
 
+  # pg_trex is the odd one out: extensions go to a flat `extensions/` dir
+  # (the container expects them there), it pulls extra submodules used by
+  # docker-compose.pg_trex.yml to build the test image, and it needs
+  # packages: write. Easier to keep as a separate job than to special-case
+  # the matrix.
   test-pg-trex:
     name: "Test pg_trex"
     runs-on: ubuntu-24.04
-    needs: [build-pool, build-rust-core, build-pg-trex]
     timeout-minutes: 45
+    needs: [build]
     permissions:
       contents: read
       packages: write
@@ -1178,10 +400,6 @@ jobs:
           swap-storage: true
 
       - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
       - uses: ./.github/actions/checkout-trex
         with:
           paths: "plugins/pg-meta/postgres-meta plugins/studio/supabase-studio plugins/storage/supabase-storage"
@@ -1191,19 +409,11 @@ jobs:
           python-version: "3.12"
 
       - uses: actions/download-artifact@v4
-        with:
-          name: ext-pool
-          path: extensions/
-
+        with: { name: ext-pool,        path: extensions/ }
       - uses: actions/download-artifact@v4
-        with:
-          name: pg-trex-build
-          path: plugins/pg_trex/target/debug/
-
+        with: { name: ext-db,          path: extensions/ }
       - uses: actions/download-artifact@v4
-        with:
-          name: ext-db
-          path: extensions/
+        with: { name: pg-trex-build,   path: plugins/pg_trex/target/debug/ }
 
       - name: List pg_trex build context
         run: |
@@ -1237,326 +447,7 @@ jobs:
 
       - name: Show pg_trex logs on failure
         if: failure()
-        run: docker logs trex-pg-trex 2>&1 | tail -50
-
-      - name: Cleanup
-        if: always()
-        run: docker compose -f integration-tests/docker-compose.pg_trex.yml down -v
-
-      - name: Build pg-trex image for GHCR
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        run: docker build -t pg-trex-test -f plugins/pg_trex/Dockerfile .
-
-      - name: Login to GHCR
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Push to GHCR
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        run: |
-          NS="${GITHUB_REPOSITORY_OWNER,,}"
-          docker tag pg-trex-test ghcr.io/$NS/pg-trex:latest
-          docker tag pg-trex-test ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
-          docker push ghcr.io/$NS/pg-trex:latest
-          docker push ghcr.io/$NS/pg-trex:sha-${{ github.sha }}
-
-  # ===========================================================================
-  # Layer 2b: D2E end-to-end (consumes ext-* artifacts from the build jobs above
-  # so we don't rebuild the 7 plugins again — that was the dedupe win that the
-  # original 1e474e2 "optimize ci" intended via workflow_run; doing it inline
-  # here keeps it as a real PR status check while still avoiding duplicate
-  # builds.)
-  # ===========================================================================
-
-  e2e-d2e:
-    name: "E2E (D2E)"
-    runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    needs:
-      - build-pool
-      - build-trexas
-      - build-atlas
-      - build-hana
-      - build-pgwire
-      - build-fhir
-      - build-tpm
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    permissions:
-      contents: read
-      checks: write
-      pull-requests: write
-    env:
-      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
-      VERSION: develop
-    steps:
-      - uses: actions/checkout@v4
-        id: co_checkout
-        continue-on-error: true
-      - if: steps.co_checkout.outcome == 'failure'
-        uses: actions/checkout@v4
-      # extension-ci-tools is needed for sign-if-key.sh below.
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: "plugins/extension-ci-tools"
-
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: true
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: Increase swap to 15G
-        run: |
-          sudo swapoff -a
-          sudo fallocate -l 15G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
-
-      # Pull the 7 extensions that d2e-trex bind-mounts. These are the same
-      # debug_coverage builds the test-* jobs consume; if d2e-trex ever starts
-      # rejecting unsigned/debug builds we'll need to add release+sign here.
-      - uses: actions/download-artifact@v4
-        with: { name: ext-trexas, path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-atlas,  path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-hana,   path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-pgwire, path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-fhir,   path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-pool,   path: ./trex-artifacts/ }
-      - uses: actions/download-artifact@v4
-        with: { name: ext-tpm,    path: ./trex-artifacts/ }
-
-      - name: Sign extensions (no-op without DUCKDB_EXTENSION_SIGNING_KEY)
-        env:
-          DUCKDB_EXTENSION_SIGNING_KEY: ${{ secrets.DUCKDB_EXTENSION_SIGNING_KEY }}
-        run: |
-          bash plugins/extension-ci-tools/extension_signing/sign-if-key.sh ./trex-artifacts
-
-      - name: Checkout D2E
-        uses: actions/checkout@v4
-        with:
-          repository: OHDSI/Data2Evidence
-          ref: ${{ env.D2E_BRANCH }}
-          path: d2e
-          submodules: recursive
-
-      - name: Setup D2E
-        working-directory: d2e
-        run: npm install
-
-      - name: Patch seed config for e2e tests
-        working-directory: d2e
-        run: node ./scripts/patch-seed-for-e2e.js
-
-      - name: Initialize D2E
-        working-directory: d2e
-        run: |
-          init_choice=y ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} init
-
-      - name: Stage trex extensions for mount
-        run: |
-          mkdir -p d2e/.ci-overlay
-          cp ./trex-artifacts/*.trex d2e/.ci-overlay/
-          ls -l d2e/.ci-overlay/
-
-      - name: Create CI compose override
-        run: |
-          cat > d2e/docker-compose-ci.yml << 'EOF'
-          services:
-            alp-caddy:
-              ports: !override
-                - ${CADDY_PORT:-${PORT:-443}}:443
-            trex:
-              build: !reset null
-              image: ${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${DOCKER_TAG_NAME:-develop}
-              pull_policy: always
-              volumes:
-                - ./.ci-overlay/trexas.trex:/usr/src/node_modules/@trex/as/trexas.trex:ro
-                - ./.ci-overlay/circe.trex:/usr/src/node_modules/@trex/circe/circe.trex:ro
-                - ./.ci-overlay/hana_scan.trex:/usr/src/node_modules/@trex/hana/hana_scan.trex:ro
-                - ./.ci-overlay/pgwire.trex:/usr/src/node_modules/@trex/pgwire/pgwire.trex:ro
-                - ./.ci-overlay/fhir.trex:/usr/src/node_modules/@trex/fhir/fhir.trex:ro
-                - ./.ci-overlay/pool.trex:/usr/src/node_modules/@trex/pool/pool.trex:ro
-                - ./.ci-overlay/tpm.trex:/usr/src/node_modules/@trex/tpm/tpm.trex:ro
-          EOF
-          cat d2e/docker-compose-ci.yml
-
-      - name: Start D2E services
-        uses: nick-fields/retry@v3
-        with:
-          timeout_seconds: 1800
-          retry_wait_seconds: 100
-          max_attempts: 2
-          command: |
-            cd d2e
-            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml --pull start
-            docker ps --format "{{.Names}},{{.Status}}"
-            docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
-
-      - name: Wait for services to be healthy
-        timeout-minutes: 5
-        run: |
-          echo "Waiting for d2e-trex to become healthy..."
-          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
-            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
-            sleep 5
-          done
-          echo "d2e-trex is healthy"
-          docker ps --format "{{.Names}},{{.Status}}"
-
-      - name: Run setupdemo
-        uses: nick-fields/retry@v3
-        with:
-          timeout_seconds: 1800
-          retry_wait_seconds: 100
-          max_attempts: 2
-          command: |
-            cd d2e
-            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml setupdemo
-
-      - name: Run checkflow
-        uses: nick-fields/retry@v3
-        with:
-          timeout_seconds: 1800
-          max_attempts: 1
-          command: |
-            cd d2e
-            ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml checkflow
-
-      - name: Logs after checkflow
-        if: success() || failure()
-        working-directory: d2e
-        run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
-
-      - name: Check app status (informational)
-        continue-on-error: true
-        run: |
-          echo "=== Checking if app is reachable ==="
-          HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" https://localhost:443/d2e/portal || echo "000")
-          echo "HTTP Status: $HTTP_CODE"
-          curl -k -I https://localhost:443/d2e/portal || true
-
-      - name: Restart d2e services
-        working-directory: d2e
-        run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml start
-
-      - name: Wait for d2e-trex healthy after restart
-        timeout-minutes: 5
-        run: |
-          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
-            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
-            sleep 5
-          done
-          echo "d2e-trex is healthy"
-
-      - name: Wait for d2e-ui plugin to be available
-        run: |
-          echo "Waiting for d2e-ui plugin to be available..."
-          max_attempts=60
-          attempt=0
-          start_time=$(date +%s)
-          while [ $attempt -lt $max_attempts ]; do
-            if docker exec d2e-trex test -f /usr/src/bundled-plugins/d2e-ui/package.json >/dev/null 2>&1; then
-              end_time=$(date +%s)
-              elapsed=$((end_time - start_time))
-              echo "d2e-ui plugin is ready (took ${elapsed}s)"
-              break
-            fi
-            attempt=$((attempt + 1))
-            echo "  Attempt $attempt/$max_attempts: waiting..."
-            sleep 2
-          done
-          if [ $attempt -eq $max_attempts ]; then
-            echo "Timeout waiting for d2e-ui plugin to be available"
-            docker exec d2e-trex ls -la /usr/src/bundled-plugins/ || true
-            exit 1
-          fi
-
-      - name: Wait for webapi-init to complete
-        run: |
-          echo "Waiting for webapi-init to complete..."
-          for i in $(seq 1 60); do
-            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -q "Exited (0)"; then
-              echo "webapi-init completed successfully"
-              break
-            fi
-            if docker ps -a --filter "name=webapi-init" --format '{{.Status}}' | grep -qE "Exited \([1-9]"; then
-              echo "webapi-init failed!"
-              docker logs d2e-webapi-init || true
-              exit 1
-            fi
-            echo "Waiting for webapi-init... ($i/60)"
-            sleep 5
-          done
-
-      - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
-        run: sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
-
-      - name: Build e2e Docker image
-        working-directory: d2e/tests/e2e
-        run: docker build -t d2e-e2e .
-
-      - name: Run e2e tests
-        working-directory: d2e/tests/e2e
-        timeout-minutes: 45
-        run: |
-          docker run --rm \
-            --network=host \
-            --ipc=host \
-            -v "$(pwd)/test-results:/work/test-results" \
-            -v "$(pwd)/ctrf:/work/ctrf" \
-            -e D2E_BASE_URL=https://localhost:443 \
-            -e CI=true \
-            -e GITHUB_ACTIONS=true \
-            d2e-e2e npm test
-
-      - name: Upload test results
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: d2e-test-results
-          path: d2e/tests/e2e/test-results/**/*
-          if-no-files-found: warn
-
-      - name: Publish Test Report
-        if: always()
-        uses: ctrf-io/github-test-reporter@v1
-        with:
-          report-path: "./d2e/tests/e2e/ctrf/*.json"
-          file-report: true
-
-      - name: Collect logs on failure
-        if: failure()
-        working-directory: d2e
-        run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml logs
-
-      - name: Stop D2E services
-        if: always()
-        working-directory: d2e
-        run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./functions -c ./docker-compose-ci.yml stop
-
-      - name: Prune system
-        if: always()
-        run: docker system prune -af
+        run: docker logs trex-pg-trex 2>&1 | tail -100
 
   # ===========================================================================
   # Layer 3: Status Gate
@@ -1567,49 +458,17 @@ jobs:
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs:
-      - test-distributed
-      - test-pgwire
-      - test-atlas
-      - test-chdb
-      - test-trexas
-      - test-tpm
-      - test-migration
-      - test-fhir
-      - test-hana
-      - test-etl
-      - test-pg-trex
-      - e2e-d2e
+    needs: [build, test, test-pg-trex]
     steps:
-      - name: Check test results
+      - name: Check results
         run: |
-          echo "test-distributed: ${{ needs.test-distributed.result }}"
-          echo "test-pgwire:      ${{ needs.test-pgwire.result }}"
-          echo "test-atlas:       ${{ needs.test-atlas.result }}"
-          echo "test-chdb:        ${{ needs.test-chdb.result }}"
-          echo "test-trexas:      ${{ needs.test-trexas.result }}"
-          echo "test-tpm:         ${{ needs.test-tpm.result }}"
-          echo "test-migration:   ${{ needs.test-migration.result }}"
-          echo "test-fhir:        ${{ needs.test-fhir.result }}"
-          echo "test-hana:        ${{ needs.test-hana.result }}"
-          echo "test-etl:         ${{ needs.test-etl.result }}"
-          echo "test-pg-trex:     ${{ needs.test-pg-trex.result }}"
-          echo "e2e-d2e:          ${{ needs.e2e-d2e.result }}"
-
-          if [[ "${{ needs.test-distributed.result }}" == "failure" ||
-                "${{ needs.test-pgwire.result }}" == "failure" ||
-                "${{ needs.test-atlas.result }}" == "failure" ||
-                "${{ needs.test-chdb.result }}" == "failure" ||
-                "${{ needs.test-trexas.result }}" == "failure" ||
-                "${{ needs.test-tpm.result }}" == "failure" ||
-                "${{ needs.test-etl.result }}" == "failure" ||
-                "${{ needs.test-pg-trex.result }}" == "failure" ||
-                "${{ needs.test-migration.result }}" == "failure" ||
-                "${{ needs.test-fhir.result }}" == "failure" ||
-                "${{ needs.test-hana.result }}" == "failure" ||
-                "${{ needs.e2e-d2e.result }}" == "failure" ]]; then
+          echo "build:        ${{ needs.build.result }}"
+          echo "test:         ${{ needs.test.result }}"
+          echo "test-pg-trex: ${{ needs.test-pg-trex.result }}"
+          if [[ "${{ needs.build.result }}" == "failure" ||
+                "${{ needs.test.result }}" == "failure" ||
+                "${{ needs.test-pg-trex.result }}" == "failure" ]]; then
             echo "::error::One or more integration test jobs failed"
             exit 1
           fi
-
           echo "All required integration tests passed (or were skipped/cancelled)"
