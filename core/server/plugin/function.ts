@@ -39,7 +39,7 @@ if (Trex?.createRequestListener) {
         }
 
         const handler = fnmap[message.service];
-        if (!handler) {
+        if (handler === undefined) {
           respond({
             ok: false,
             status: 404,

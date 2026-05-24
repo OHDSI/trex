@@ -43,7 +43,7 @@ async function main() {
       await page.goto(params._currentUrl, { waitUntil: "networkidle", timeout: 15000 }).catch(() => {});
     }
 
-    let result = { ok: true };
+    let result;
 
     switch (action) {
       case "navigate": {
