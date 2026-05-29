@@ -44,14 +44,14 @@ class AdvanceTimeFilter():
 
         if value is not None or re.match(rangeRegex, value) or re.match(operatorRegex, value) or re.match(numRegex, value):
             return True
-        else:
-            return False
+        return False
 
     # similar to RegExp.prototype.exec() in javascript
     def regexExec(self, regex, string):
         match = re.search(regex, string)
         if (match):
             return [s for s in match.groups()]
+        return None
 
     def getReqObj(self) -> dict:
         return self._req_obj()
@@ -65,14 +65,13 @@ class AdvanceTimeFilter():
                 "after_before": "",
                 "operator": ""
             }
-        else:
-            return {
-                "value": self._targetInteraction,
-                "this": self._originSelection,
-                "other": "startdate" if self._targetSelection == "before_start" or self._targetSelection == "after_start" else "enddate",
-                "after_before": "before" if self._targetSelection == "before_start" or self._targetSelection == "before_end" else "after",
-                "operator": self._days
-            }
+        return {
+            "value": self._targetInteraction,
+            "this": self._originSelection,
+            "other": "startdate" if self._targetSelection == "before_start" or self._targetSelection == "after_start" else "enddate",
+            "after_before": "before" if self._targetSelection == "before_start" or self._targetSelection == "before_end" else "after",
+            "operator": self._days
+        }
 
     # functions here to determine the filters and request based on input
     def getRequest(self):

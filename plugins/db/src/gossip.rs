@@ -466,3 +466,154 @@ impl GossipRegistry {
         Ok(nodes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Stop any leftover instance so each test starts clean.
+    fn reset() {
+        let _ = GossipRegistry::instance().stop();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn not_running_initially_after_reset() {
+        reset();
+        let reg = GossipRegistry::instance();
+        assert!(!reg.is_running());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn operations_on_stopped_gossip_return_err() {
+        reset();
+        let reg = GossipRegistry::instance();
+        assert!(reg.set_key("k", "v").is_err());
+        assert!(reg.delete_key("k").is_err());
+        assert!(reg.list_keys_with_prefix("foo:").is_err());
+        assert!(reg.get_node_states().is_err());
+        assert!(reg.get_self_config().is_err());
+        assert!(reg.get_node_key_values().is_err());
+        assert!(reg.stop().is_err());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn start_invalid_addr_returns_err() {
+        reset();
+        let reg = GossipRegistry::instance();
+        let err = reg
+            .start("not-an-ip", 47010, "test-cluster", "n1", "true", vec![])
+            .unwrap_err();
+        assert!(
+            err.contains("Invalid gossip address") || err.contains("invalid"),
+            "got: {err}"
+        );
+        assert!(!reg.is_running());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn start_then_double_start_errors() {
+        reset();
+        let reg = GossipRegistry::instance();
+        let node_id = reg
+            .start("127.0.0.1", 47011, "test-cluster", "node-a", "true", vec![])
+            .expect("start failed");
+        assert!(!node_id.is_empty());
+        assert!(reg.is_running());
+
+        let err = reg
+            .start("127.0.0.1", 47012, "test-cluster", "node-b", "true", vec![])
+            .unwrap_err();
+        assert!(err.contains("already running"), "got: {err}");
+
+        reg.stop().expect("stop");
+        assert!(!reg.is_running());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn lifecycle_set_get_delete_list_prefix_and_states() {
+        reset();
+        let reg = GossipRegistry::instance();
+        let _ = reg
+            .start("127.0.0.1", 47013, "test-cluster", "node-x", "true", vec![])
+            .expect("start failed");
+
+        // set + list_keys_with_prefix
+        reg.set_key("catalog:orders", "{\"rows\":5}").unwrap();
+        reg.set_key("catalog:users", "{\"rows\":7}").unwrap();
+        reg.set_key("other:thing", "x").unwrap();
+        let mut keys = reg.list_keys_with_prefix("catalog:").unwrap();
+        keys.sort();
+        assert_eq!(keys, vec!["catalog:orders", "catalog:users"]);
+
+        // get_self_config exposes node_id, cluster_id, and initial KVs.
+        let cfg = reg.get_self_config().unwrap();
+        let map: std::collections::HashMap<String, String> = cfg.into_iter().collect();
+        assert_eq!(map.get("cluster_id").map(String::as_str), Some("test-cluster"));
+        assert_eq!(map.get("node_name").map(String::as_str), Some("node-x"));
+        assert_eq!(map.get("data_node").map(String::as_str), Some("true"));
+        assert!(map.contains_key("node_id"));
+        assert!(map.contains_key("generation_id"));
+        assert!(map.contains_key("gossip_advertise_addr"));
+
+        // get_node_states includes this node.
+        let states = reg.get_node_states().unwrap();
+        assert!(states.iter().any(|n| n.node_name == "node-x"));
+
+        // get_node_key_values exposes all keys for this node.
+        let nkv = reg.get_node_key_values().unwrap();
+        let self_kv = nkv
+            .iter()
+            .find(|n| n.node_name == "node-x")
+            .expect("self node missing");
+        let key_names: Vec<&str> =
+            self_kv.key_values.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(key_names.iter().any(|k| *k == "catalog:orders"));
+        assert!(key_names.iter().any(|k| *k == "other:thing"));
+
+        // delete_key tombstones the key; list_keys_with_prefix should
+        // no longer see it (chitchat hides tombstoned keys from `key_values`).
+        reg.delete_key("catalog:orders").unwrap();
+        let keys_after = reg.list_keys_with_prefix("catalog:").unwrap();
+        assert!(
+            !keys_after.iter().any(|k| k == "catalog:orders"),
+            "expected catalog:orders to be tombstoned, got: {keys_after:?}"
+        );
+
+        let msg = reg.stop().unwrap();
+        assert!(msg.contains("Gossip stopped for node"), "got: {msg}");
+        assert!(!reg.is_running());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn start_filters_self_address_from_seeds() {
+        reset();
+        let reg = GossipRegistry::instance();
+        // Pass our own address as a seed -- start() must filter it out and succeed.
+        let _ = reg
+            .start(
+                "127.0.0.1",
+                47014,
+                "test-cluster",
+                "node-y",
+                "true",
+                vec!["127.0.0.1:47014".to_string(), "not-an-addr".to_string()],
+            )
+            .expect("start failed");
+        assert!(reg.is_running());
+        reg.stop().unwrap();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn instance_is_singleton() {
+        let a = GossipRegistry::instance() as *const GossipRegistry;
+        let b = GossipRegistry::instance() as *const GossipRegistry;
+        assert_eq!(a, b);
+    }
+}

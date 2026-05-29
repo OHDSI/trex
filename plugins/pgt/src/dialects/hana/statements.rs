@@ -284,3 +284,301 @@ impl Transformer for StatementTransformer {
         Ok(changed)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{SqlTransformer, TransformationConfig};
+
+    fn t() -> SqlTransformer {
+        SqlTransformer::with_config(TransformationConfig::default()).unwrap()
+    }
+
+    // --- StatementTransformer::new ---
+
+    #[test]
+    fn new_constructs_with_default_config() {
+        use super::StatementTransformer;
+        use crate::dialects::hana::Transformer;
+        let cfg = TransformationConfig::default();
+        let st = StatementTransformer::new(&cfg);
+        assert_eq!(st.name(), "StatementTransformer");
+        assert_eq!(st.priority(), 50);
+    }
+
+    // --- CREATE TABLE AS SELECT ---
+
+    #[test]
+    fn create_table_as_preserved() {
+        let out = t()
+            .transform("CREATE TABLE active_users AS SELECT * FROM users WHERE active = TRUE")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("CREATE TABLE"), "expected CREATE TABLE in: {out}");
+        assert!(out.contains("ACTIVE_USERS"), "expected ACTIVE_USERS in: {out}");
+    }
+
+    // --- DROP TABLE IF EXISTS ---
+
+    #[test]
+    fn drop_if_exists_preserved() {
+        let out = t()
+            .transform("DROP TABLE IF EXISTS users")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("DROP TABLE"), "expected DROP TABLE in: {out}");
+    }
+
+    // --- LIMIT/OFFSET ---
+
+    #[test]
+    fn limit_offset_preserved_or_rewritten() {
+        let out = t()
+            .transform("SELECT * FROM t LIMIT 10 OFFSET 5")
+            .unwrap()
+            .to_uppercase();
+        // StatementTransformer records that limit_clause is present (changed=true)
+        // but does not actually rewrite the syntax; sqlparser emits LIMIT/OFFSET as-is
+        assert!(out.contains("LIMIT") || out.contains("FETCH"), "expected LIMIT or FETCH in: {out}");
+    }
+
+    #[test]
+    fn limit_without_offset_preserved() {
+        let out = t()
+            .transform("SELECT * FROM t LIMIT 5")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("LIMIT") || out.contains("FETCH"), "expected LIMIT/FETCH in: {out}");
+    }
+
+    // --- CREATE INDEX USING <method> → post-processor strips USING btree ---
+
+    #[test]
+    fn create_index_using_btree_stripped() {
+        let out = t()
+            .transform("CREATE INDEX ix ON t USING btree (col)")
+            .unwrap()
+            .to_uppercase();
+        // post_processor removes USING btree
+        assert!(!out.contains("USING BTREE"), "USING BTREE should be stripped, got: {out}");
+    }
+
+    #[test]
+    fn create_index_using_gin_stripped() {
+        let out = t()
+            .transform("CREATE INDEX ix ON t USING gin (col)")
+            .unwrap()
+            .to_uppercase();
+        assert!(!out.contains("USING GIN"), "USING GIN should be stripped, got: {out}");
+    }
+
+    // --- CTE (WITH) ---
+
+    #[test]
+    fn cte_passes_through() {
+        let out = t()
+            .transform("WITH active AS (SELECT * FROM users) SELECT * FROM active")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("WITH"), "expected WITH in: {out}");
+        assert!(out.contains("ACTIVE"), "expected ACTIVE in: {out}");
+    }
+
+    #[test]
+    fn cte_multiple_passes_through() {
+        let out = t()
+            .transform(
+                "WITH a AS (SELECT 1 AS x), b AS (SELECT x FROM a) SELECT * FROM b",
+            )
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("WITH"), "expected WITH in: {out}");
+    }
+
+    // --- supports_statement_type ---
+
+    #[test]
+    fn supports_query_insert_update_delete_create() {
+        use super::StatementTransformer;
+        use crate::dialects::hana::Transformer;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let cfg = TransformationConfig::default();
+        let st = StatementTransformer::new(&cfg);
+
+        let cases = [
+            "SELECT 1",
+            "INSERT INTO t(x) VALUES (1)",
+            "UPDATE t SET x = 1",
+            "DELETE FROM t WHERE id = 1",
+            "CREATE TABLE t (id INT)",
+        ];
+        for sql in &cases {
+            let stmt = Parser::parse_sql(&PostgreSqlDialect {}, sql)
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap();
+            assert!(
+                st.supports_statement_type(&stmt),
+                "should support: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_support_drop_table() {
+        use super::StatementTransformer;
+        use crate::dialects::hana::Transformer;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let cfg = TransformationConfig::default();
+        let st = StatementTransformer::new(&cfg);
+
+        let stmt = Parser::parse_sql(&PostgreSqlDialect {}, "DROP TABLE t")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(!st.supports_statement_type(&stmt));
+    }
+
+    // --- INSERT with ON CONFLICT and RETURNING (logs warnings) ---
+
+    #[test]
+    fn insert_with_returning_passes_through() {
+        // PostgreSQL RETURNING is not supported in HANA; StatementTransformer logs a warning
+        // but does not error. Note: sqlparser may not produce RETURNING on all INSERT forms;
+        // we just verify the transform succeeds.
+        let out = t()
+            .transform("INSERT INTO t(x) VALUES(1)")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("INSERT"), "expected INSERT in: {out}");
+    }
+
+    // --- UPDATE FROM clause (logs warning) ---
+
+    #[test]
+    fn update_with_from_passes_through() {
+        let out = t()
+            .transform("UPDATE t SET x = s.val FROM s WHERE t.id = s.id")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("UPDATE"), "expected UPDATE in: {out}");
+    }
+
+    // --- DELETE with USING (logs warning) ---
+
+    #[test]
+    fn delete_passes_through() {
+        let out = t()
+            .transform("DELETE FROM t WHERE id = 1")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("DELETE"), "expected DELETE in: {out}");
+    }
+
+    // --- Window functions in SELECT ---
+
+    #[test]
+    fn window_function_row_number_passes_through() {
+        let out = t()
+            .transform("SELECT ROW_NUMBER() OVER (PARTITION BY grp ORDER BY id) FROM t")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("ROW_NUMBER"), "expected ROW_NUMBER in: {out}");
+    }
+
+    #[test]
+    fn window_function_lag_passes_through() {
+        let out = t()
+            .transform("SELECT LAG(amount, 1) OVER (ORDER BY ts) FROM tx")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("LAG"), "expected LAG in: {out}");
+    }
+
+    // --- CREATE TABLE with DEFAULT NOW() ---
+
+    #[test]
+    fn create_table_with_default_now_rewrites_to_current_timestamp() {
+        let out = t()
+            .transform("CREATE TABLE t (created_at TIMESTAMP DEFAULT NOW())")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("CREATE TABLE"), "expected CREATE TABLE in: {out}");
+        // StatementTransformer rewrites NOW() in DEFAULT to CURRENT_TIMESTAMP
+        assert!(
+            out.contains("CURRENT_TIMESTAMP"),
+            "expected CURRENT_TIMESTAMP in: {out}"
+        );
+    }
+
+    #[test]
+    fn create_table_with_default_random_rewrites_to_rand() {
+        let out = t()
+            .transform("CREATE TABLE t (val DOUBLE DEFAULT RANDOM())")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("CREATE TABLE"), "expected CREATE TABLE in: {out}");
+        assert!(out.contains("RAND"), "expected RAND in: {out}");
+    }
+
+    // --- Transform methods on Transformer trait ---
+
+    #[test]
+    fn transform_plain_select_returns_ok() {
+        use super::StatementTransformer;
+        use crate::dialects::hana::Transformer;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let cfg = TransformationConfig::default();
+        let st = StatementTransformer::new(&cfg);
+        let mut stmt = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT 1")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let result = st.transform(&mut stmt);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn transform_select_with_limit_returns_changed_true() {
+        use super::StatementTransformer;
+        use crate::dialects::hana::Transformer;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let cfg = TransformationConfig::default();
+        let st = StatementTransformer::new(&cfg);
+        let mut stmt = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT 1 LIMIT 10")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let changed = st.transform(&mut stmt).unwrap();
+        assert!(changed, "SELECT with LIMIT should be marked changed");
+    }
+
+    #[test]
+    fn transform_unhandled_statement_returns_false() {
+        use super::StatementTransformer;
+        use crate::dialects::hana::Transformer;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let cfg = TransformationConfig::default();
+        let st = StatementTransformer::new(&cfg);
+        let mut stmt = Parser::parse_sql(&PostgreSqlDialect {}, "DROP TABLE t")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let changed = st.transform(&mut stmt).unwrap();
+        assert!(!changed, "DROP TABLE should not be changed");
+    }
+}

@@ -102,3 +102,103 @@ pub fn transitive_dependents(
 
     affected
 }
+
+#[cfg(test)]
+mod dag_tests {
+    use super::*;
+
+    fn s(x: &str) -> String {
+        x.to_string()
+    }
+
+    fn edge_map(pairs: &[(&str, &[&str])]) -> HashMap<String, HashSet<String>> {
+        pairs
+            .iter()
+            .map(|(node, deps)| {
+                (
+                    s(node),
+                    deps.iter().map(|d| s(d)).collect::<HashSet<String>>(),
+                )
+            })
+            .collect()
+    }
+
+    fn position(v: &[String], name: &str) -> usize {
+        v.iter().position(|n| n == name).expect("node missing from sort output")
+    }
+
+    #[test]
+    fn topological_sort_orders_dependencies_before_dependents() {
+        let nodes = vec![s("a"), s("b"), s("c")];
+        // c depends on b; b depends on a. Expected order: a, b, c.
+        let edges = edge_map(&[("b", &["a"]), ("c", &["b"])]);
+        let sorted = topological_sort(&nodes, &edges).unwrap();
+        assert_eq!(sorted.len(), 3);
+        assert!(position(&sorted, "a") < position(&sorted, "b"));
+        assert!(position(&sorted, "b") < position(&sorted, "c"));
+    }
+
+    #[test]
+    fn topological_sort_includes_disconnected_components() {
+        // a -> b plus standalone c — all three appear.
+        let nodes = vec![s("a"), s("b"), s("c")];
+        let edges = edge_map(&[("b", &["a"])]);
+        let sorted = topological_sort(&nodes, &edges).unwrap();
+        assert_eq!(sorted.len(), 3);
+        let mut as_set: HashSet<String> = sorted.iter().cloned().collect();
+        assert!(as_set.remove("a"));
+        assert!(as_set.remove("b"));
+        assert!(as_set.remove("c"));
+        assert!(as_set.is_empty());
+    }
+
+    #[test]
+    fn topological_sort_returns_error_on_cycle() {
+        // a depends on b; b depends on a — cycle.
+        let nodes = vec![s("a"), s("b")];
+        let edges = edge_map(&[("a", &["b"]), ("b", &["a"])]);
+        let err = topological_sort(&nodes, &edges)
+            .expect_err("cycle should surface as Err");
+        // The implementation returns a Box<dyn Error> built from a String;
+        // the message must name both nodes involved in the cycle.
+        let msg = err.to_string();
+        assert!(msg.contains("Circular dependency"), "got: {msg}");
+        assert!(msg.contains("a"), "cycle message should mention 'a': {msg}");
+        assert!(msg.contains("b"), "cycle message should mention 'b': {msg}");
+    }
+
+    #[test]
+    fn topological_sort_ignores_edges_to_unknown_nodes() {
+        // Edge from "a" to "ghost" (not in node list) must not stop "a" from
+        // becoming a root — otherwise it would be treated as having in-degree 1.
+        let nodes = vec![s("a")];
+        let edges = edge_map(&[("a", &["ghost"])]);
+        let sorted = topological_sort(&nodes, &edges).unwrap();
+        assert_eq!(sorted, vec![s("a")]);
+    }
+
+    #[test]
+    fn transitive_dependents_walks_reverse_edges() {
+        // a -> b -> c; if a changes, both b and c are affected (plus a itself).
+        let nodes = vec![s("a"), s("b"), s("c")];
+        let edges = edge_map(&[("b", &["a"]), ("c", &["b"])]);
+        let mut changed = HashSet::new();
+        changed.insert(s("a"));
+        let affected = transitive_dependents(&changed, &nodes, &edges);
+        let mut got: Vec<String> = affected.into_iter().collect();
+        got.sort();
+        assert_eq!(got, vec![s("a"), s("b"), s("c")]);
+    }
+
+    #[test]
+    fn transitive_dependents_leaves_unrelated_nodes_alone() {
+        // a -> b; standalone c. Changing c affects only c.
+        let nodes = vec![s("a"), s("b"), s("c")];
+        let edges = edge_map(&[("b", &["a"])]);
+        let mut changed = HashSet::new();
+        changed.insert(s("c"));
+        let affected = transitive_dependents(&changed, &nodes, &edges);
+        assert_eq!(affected.len(), 1);
+        assert!(affected.contains("c"));
+    }
+}

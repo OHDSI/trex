@@ -246,7 +246,7 @@ export const authClient = {
         saveSession(data);
         scheduleRefresh();
         return { data, error: null };
-      } catch (err) {
+      } catch (_err) {
         return { error: { message: "An unexpected error occurred." } };
       }
     },

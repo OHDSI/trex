@@ -34,9 +34,11 @@ from __future__ import annotations
 
 import os
 import time
-import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -122,12 +124,12 @@ def test_flight_server_failed_start_does_not_register_phantom():
             )
             try:
                 cur.fetchall()
-            except Exception:
-                pass
-        except Exception:
+            except Exception as e:
+                logger.debug("ignoring %s: %s", type(e).__name__, e)
+        except Exception as e:
             # Some pgwire bridges turn the "Error: ..." string into an
             # exception. Either way, the in-process registry is what we test.
-            pass
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         finally:
             cur.close()
 
@@ -155,6 +157,6 @@ def test_flight_server_failed_start_does_not_register_phantom():
             cur.execute("SELECT trex_db_flight_stop(%s, %s)",
                         (BAD_HOST, BAD_PORT))
             cur.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         conn.close()

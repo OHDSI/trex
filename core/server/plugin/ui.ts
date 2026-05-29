@@ -25,15 +25,12 @@ export function addPlugin(app: Express, value: any, dir: string, fullName: strin
       const fullPrefix = `${PLUGINS_BASE_PATH}${scopePrefix}${urlPrefix}`;
       console.log(`Registering static route: ${fullPrefix} -> ${fsPath}`);
       REGISTERED_UI_ROUTES.push({ pluginName: fullName, urlPrefix: fullPrefix, fsPath });
-      let staticRegistered = false;
       try {
         // deno-lint-ignore no-explicit-any
         (Deno as any).core.ops.op_register_static_route(fullPrefix, fsPath);
-        staticRegistered = true;
-      } catch (e) {
+      } catch {
         console.warn(`Native static route failed for ${fullPrefix}, using express.static fallback`);
         app.use(fullPrefix, express.static(fsPath));
-        staticRegistered = true;
       }
 
       // SPA fallback: serve index.html for non-file paths.

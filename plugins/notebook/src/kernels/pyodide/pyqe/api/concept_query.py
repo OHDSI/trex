@@ -29,7 +29,7 @@ class ConceptQuery(_AuthApi):
             'conceptCode': concept_code,
             'vocabularyId': vocabulary_id
         }
-        response = self._get(f'/analytics-svc/api/services/standard-concept', params=params)
+        response = self._get('/analytics-svc/api/services/standard-concept', params=params)
         concept = json.loads(response.text)
         return concept['conceptCode']
 
@@ -42,13 +42,12 @@ class ConceptQuery(_AuthApi):
         params = {
             'conceptCode': concept_code
         }
-        response = self._get(f'/analytics-svc/api/services/descendant-concepts', params=params)
+        response = self._get('/analytics-svc/api/services/descendant-concepts', params=params)
         json_response = json.loads(response.text)
         concepts = json_response['descendants']
         if len(concepts) > 0:
             return [concept['conceptCode'] for concept in concepts]
-        else:
-            raise ValueError('No descendant concept code found')
+        raise ValueError('No descendant concept code found')
 
     async def get_standard_concept_ids(self, concept_code: str, vocabulary_id: str = '') -> str:
         """Get standard concept id based on provided non-standard concept code & vocabulary ID
@@ -105,8 +104,7 @@ class ConceptSet:
         """
         if concept_code in self.excluded_concept_codes:
             raise ValueError(f'Concept code {concept_code} is excluded from ConceptSet')
-        else:
-            self.concept_codes.append(concept_code)
+        self.concept_codes.append(concept_code)
 
     def add_concept(self, concept: 'Concept'):
         """Add OMOP concept and its descendant concept codes in the ConceptSet

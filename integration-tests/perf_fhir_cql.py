@@ -19,6 +19,9 @@ import uuid
 # ---------------------------------------------------------------------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from conftest import Node, FHIR_EXT, alloc_ports
+import logging
+
+logger = logging.getLogger(__name__)
 
 os.environ.setdefault("FHIR_POOL_SIZE", "1")
 
@@ -232,8 +235,8 @@ def main():
             s, _ = client.get("/health")
             if s == 200:
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         time.sleep(0.5)
     else:
         node.close()
@@ -272,8 +275,8 @@ def main():
     # Cleanup
     try:
         node.execute(f"SELECT fhir_stop('127.0.0.1', {fhir_port})")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     node.close()
     print("Done.")
 

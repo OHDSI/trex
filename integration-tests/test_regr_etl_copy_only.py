@@ -34,12 +34,14 @@ Assumes trexsql-trex-1 is already running and reachable on port 5433.
 
 from __future__ import annotations
 
-import os
 import subprocess
 import time
 import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -273,14 +275,14 @@ def test_etl_copy_only_completes_to_stopped(source_pg):
             cur = conn.cursor()
             cur.execute("SELECT trex_etl_stop(%s)", (PIPELINE_NAME,))
             cur.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         try:
             cur = conn.cursor()
             cur.execute(f"DROP TABLE IF EXISTS {SOURCE_TABLE}")
             cur.close()
             if not getattr(conn, "autocommit", False):
                 conn.commit()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         conn.close()

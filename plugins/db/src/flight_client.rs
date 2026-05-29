@@ -359,4 +359,289 @@ mod tests {
         let res = destroy_session_on("http://127.0.0.1:1", "tok").await;
         assert!(res.is_err());
     }
+
+    #[tokio::test]
+    async fn query_node_with_schema_connection_error() {
+        let result = query_node_with_schema("http://127.0.0.1:1", "SELECT 1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to connect to http://127.0.0.1:1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_node_with_malformed_uri() {
+        let result = query_node("totally not a url", "SELECT 1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_remote_sql_connection_error() {
+        let result = execute_remote_sql("http://127.0.0.1:1", "CREATE TABLE t(x INT)").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to connect to http://127.0.0.1:1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_remote_sql_malformed_uri() {
+        let result = execute_remote_sql("::not-a-uri::", "SELECT 1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn refresh_remote_catalog_connection_error() {
+        let result = refresh_remote_catalog("http://127.0.0.1:1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to connect to http://127.0.0.1:1"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_remote_catalog_malformed_uri() {
+        let result = refresh_remote_catalog("not://valid").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_with_tls_missing_cert_file() {
+        let result = FlightClient::connect_with_tls(
+            "https://127.0.0.1:1",
+            "/nonexistent/client_cert.pem",
+            "/nonexistent/client_key.pem",
+            "/nonexistent/ca.pem",
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to read client certificate"),
+            "unexpected error: {err}"
+        );
+    }
+
+    fn write_temp_pem(label: &str, body: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!(
+            "trex-db-test-{}-{}-{}.pem",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn connect_with_tls_missing_key_file() {
+        let cert_path = write_temp_pem(
+            "cert-key",
+            "-----BEGIN CERTIFICATE-----\nfoo\n-----END CERTIFICATE-----\n",
+        );
+        let result = FlightClient::connect_with_tls(
+            "https://127.0.0.1:1",
+            cert_path.to_str().unwrap(),
+            "/nonexistent/client_key.pem",
+            "/nonexistent/ca.pem",
+        )
+        .await;
+        let _ = std::fs::remove_file(&cert_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to read client key"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_with_tls_missing_ca_file() {
+        let cert_path = write_temp_pem(
+            "cert-ca",
+            "-----BEGIN CERTIFICATE-----\nfoo\n-----END CERTIFICATE-----\n",
+        );
+        let key_path = write_temp_pem(
+            "key-ca",
+            "-----BEGIN PRIVATE KEY-----\nbar\n-----END PRIVATE KEY-----\n",
+        );
+        let result = FlightClient::connect_with_tls(
+            "https://127.0.0.1:1",
+            cert_path.to_str().unwrap(),
+            key_path.to_str().unwrap(),
+            "/nonexistent/ca.pem",
+        )
+        .await;
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Failed to read CA certificate"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_crypto_provider_is_idempotent_client() {
+        ensure_crypto_provider();
+        ensure_crypto_provider();
+    }
+
+    #[test]
+    fn flight_client_debug_format_works() {
+        // Just verify Debug derive compiles and produces something; we can't
+        // construct a real FlightClient without a connection, but we can
+        // confirm the trait is wired up via type system.
+        fn assert_debug<T: std::fmt::Debug>() {}
+        assert_debug::<FlightClient>();
+    }
+
+    // ---------- bucket-8: additional coverage ----------
+
+    #[tokio::test]
+    async fn connect_empty_endpoint_fails() {
+        let result = FlightClient::connect("").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_with_unknown_scheme_fails() {
+        let result = FlightClient::connect("foobar://localhost:1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_with_tls_to_invalid_host_fails() {
+        // All certs exist as valid PEM-ish strings, connect to dead host.
+        let cert_path = write_temp_pem(
+            "tlscert",
+            "-----BEGIN CERTIFICATE-----\nfoo\n-----END CERTIFICATE-----\n",
+        );
+        let key_path = write_temp_pem(
+            "tlskey",
+            "-----BEGIN PRIVATE KEY-----\nbar\n-----END PRIVATE KEY-----\n",
+        );
+        let ca_path = write_temp_pem(
+            "tlsca",
+            "-----BEGIN CERTIFICATE-----\nbaz\n-----END CERTIFICATE-----\n",
+        );
+        let result = FlightClient::connect_with_tls(
+            "https://127.0.0.1:1",
+            cert_path.to_str().unwrap(),
+            key_path.to_str().unwrap(),
+            ca_path.to_str().unwrap(),
+        )
+        .await;
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_file(&ca_path);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Either fails configuring TLS (bad PEM) or connecting.
+        assert!(
+            err.contains("Failed to configure TLS")
+                || err.contains("Failed to connect")
+                || err.contains("with TLS"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_node_with_schema_empty_endpoint() {
+        let result = query_node_with_schema("", "SELECT 1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_remote_sql_empty_endpoint() {
+        let result = execute_remote_sql("", "SELECT 1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn refresh_remote_catalog_empty_endpoint() {
+        let result = refresh_remote_catalog("").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_node_empty_endpoint() {
+        let result = query_node("", "SELECT 1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn connect_with_tls_uri_invalid_scheme() {
+        // Even with valid file paths, URI parsing comes first if files load.
+        let cert_path = write_temp_pem(
+            "tlsbadscheme-cert",
+            "-----BEGIN CERTIFICATE-----\nfoo\n-----END CERTIFICATE-----\n",
+        );
+        let key_path = write_temp_pem(
+            "tlsbadscheme-key",
+            "-----BEGIN PRIVATE KEY-----\nbar\n-----END PRIVATE KEY-----\n",
+        );
+        let ca_path = write_temp_pem(
+            "tlsbadscheme-ca",
+            "-----BEGIN CERTIFICATE-----\nbaz\n-----END CERTIFICATE-----\n",
+        );
+        let result = FlightClient::connect_with_tls(
+            "not a uri",
+            cert_path.to_str().unwrap(),
+            key_path.to_str().unwrap(),
+            ca_path.to_str().unwrap(),
+        )
+        .await;
+        let _ = std::fs::remove_file(&cert_path);
+        let _ = std::fs::remove_file(&key_path);
+        let _ = std::fs::remove_file(&ca_path);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_node_with_schema_malformed_uri() {
+        let result = query_node_with_schema("::not-a-uri::", "SELECT 1").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn refresh_remote_catalog_unsupported_scheme() {
+        let result = refresh_remote_catalog("ftp://example.com").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_remote_sql_unsupported_scheme() {
+        let result =
+            execute_remote_sql("ssh://example.com", "DROP TABLE x").await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn query_node_localhost_unreachable_port() {
+        // Use port 1 (privileged, never listening for our tests).
+        let result = query_node("http://127.0.0.1:1", "SELECT 1").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("Failed to connect"), "got: {err}");
+    }
+
+    #[test]
+    fn ensure_crypto_provider_can_be_called_repeatedly_sync() {
+        // The Once ensures only one install; the call should be idempotent.
+        ensure_crypto_provider();
+        ensure_crypto_provider();
+        ensure_crypto_provider();
+    }
 }

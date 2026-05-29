@@ -3,7 +3,6 @@ import logging
 from pyqe.api.base import _AuthApi
 from pyqe.setup import setup_simple_console_log
 from pyqe.shared import decorator
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 setup_simple_console_log()

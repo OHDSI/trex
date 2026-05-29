@@ -5,12 +5,15 @@ import pytest
 import tempfile
 import time
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Must use 'spawn' so each child gets a fresh process (no inherited static state).
 try:
     mp.set_start_method("spawn")
-except RuntimeError:
-    pass
+except RuntimeError as e:
+    logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 if os.environ.get("TREX_COVERAGE") == "1":
     _profraw_dir = pathlib.Path(__file__).parent / "coverage" / "profraw"
@@ -66,20 +69,24 @@ for src, dst in [
     if os.path.exists(src) and not os.path.exists(dst):
         os.symlink(src, dst)
 
-_next_gossip_port = 19000
-_next_flight_port = 19100
-_next_pgwire_port = 19200
-_next_trexas_port = 19300
+class _PortCounter:
+    """Module-level counters bundled in a class to avoid `global` statements."""
+    gossip = 19000
+    flight = 19100
+    pgwire = 19200
+    trexas = 19300
 
 
 def alloc_ports():
     """Allocate a unique gossip+flight+pgwire+trexas port tuple per call."""
-    global _next_gossip_port, _next_flight_port, _next_pgwire_port, _next_trexas_port
-    gp, fp, pp, tp = _next_gossip_port, _next_flight_port, _next_pgwire_port, _next_trexas_port
-    _next_gossip_port += 1
-    _next_flight_port += 1
-    _next_pgwire_port += 1
-    _next_trexas_port += 1
+    gp = _PortCounter.gossip
+    fp = _PortCounter.flight
+    pp = _PortCounter.pgwire
+    tp = _PortCounter.trexas
+    _PortCounter.gossip += 1
+    _PortCounter.flight += 1
+    _PortCounter.pgwire += 1
+    _PortCounter.trexas += 1
     return gp, fp, pp, tp
 
 
@@ -158,8 +165,8 @@ class Node:
         try:
             self._cmd_queue.put(None)
             self._process.join(timeout=5)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         if self._process.is_alive():
             self._process.kill()
             self._process.join(timeout=2)
@@ -237,8 +244,8 @@ def node_factory():
     for node in nodes:
         try:
             node.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 def create_node_with_tables(node_factory_fn, tables_sql_list, node_name, cluster_id,

@@ -16,6 +16,9 @@ import urllib.error
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from conftest import Node, FHIR_EXT, CQL2ELM_EXT, alloc_ports
+import logging
+
+logger = logging.getLogger(__name__)
 
 os.environ.setdefault("FHIR_POOL_SIZE", "1")
 
@@ -60,8 +63,8 @@ def main():
         try:
             if http(base, "GET", "/health")[0] == 200:
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         time.sleep(0.5)
     else:
         node.close()
@@ -92,7 +95,7 @@ def main():
     print("Inserting patients...")
     patient_ids = []
     for p in patients:
-        s, b = http(base, "POST", f"/{ds}/Patient", p)
+        _, b = http(base, "POST", f"/{ds}/Patient", p)
         pid = b["id"]
         patient_ids.append(pid)
         print(f"  {p['name'][0]['given'][0]} {p['name'][0]['family']} => ok")
@@ -102,7 +105,7 @@ def main():
     conditions[0]["subject"] = {"reference": f"Patient/{patient_ids[0]}"}
     conditions[1]["subject"] = {"reference": f"Patient/{patient_ids[2]}"}
     for c in conditions:
-        s, b = http(base, "POST", f"/{ds}/Condition", c)
+        http(base, "POST", f"/{ds}/Condition", c)
         display = c["code"]["coding"][0]["display"]
         ref = c["subject"]["reference"]
         print(f"  {display} for {ref} => ok")
@@ -208,8 +211,8 @@ def main():
     print("\n" + "=" * 60)
     try:
         node.execute(f"SELECT trex_fhir_stop('127.0.0.1', {fhir_port})")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     node.close()
     print("Done.")
 

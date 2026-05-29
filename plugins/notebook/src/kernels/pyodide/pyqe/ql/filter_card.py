@@ -3,8 +3,9 @@ from pyqe.ql.advanced_time_filter import AdvanceTimeFilter
 from pyqe.setup import setup_simple_console_log
 from pyqe.shared import decorator
 from pyqe.api.concept_query import ConceptSet
-from pyqe.types.enum_types import QueryType, FilterInfo, LogicalOperator, Domain, CardType
-from pyqe.ql.attribute import *
+from pyqe.types.enum_types import QueryType, LogicalOperator, Domain, CardType
+from pyqe.ql.attribute import Attribute, Constraint, Expression
+from pyqe.types.enum_types import ComparisonOperator
 from typing import List, Dict
 
 logger = logging.getLogger(__name__)
@@ -53,7 +54,9 @@ class FilterCard():
                                                   concept_set.excluded_concept_codes)
 
     def add_patient_id(self, constraints: List[Constraint] = []):
-        self.add_attribute(PatientId(constraints))
+        # PatientId class is not defined in upstream pyqe; the canonical pattern
+        # uses Attribute with the 'person.id' config path.
+        self.add_attribute(Attribute('person.id', constraints))
         return self
 
     def _create_attribute_content(self) -> list:
@@ -131,11 +134,10 @@ class FilterCard():
 
         if self.card_type == CardType.INCLUDED:
             return _req_obj
-        elif self.card_type == CardType.EXCLUDED:
+        if self.card_type == CardType.EXCLUDED:
             return {
                 'content': [_req_obj],
                 'type': QueryType.BOOLEAN_CONTAINER.value,
                 'op': LogicalOperator.NOT.value
             }
-        else:
-            raise ValueError(f'Invalid filter card type: {self.card_type}')
+        raise ValueError(f'Invalid filter card type: {self.card_type}')

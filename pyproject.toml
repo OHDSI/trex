@@ -1,0 +1,39 @@
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = [
+    "**/build/**",
+    "**/venv/**",
+    "**/.venv/**",
+    "**/node_modules/**",
+    "**/duckdb_capi/**",
+]
+
+[tool.ruff.lint]
+select = [
+    "F",      # pyflakes: unused imports/vars, redefinitions, import *
+    "E711",   # comparison to None
+    "E712",   # comparison to True/False
+    "E714",   # not-is
+    "E722",   # bare except
+    "RET",    # flake8-return: implicit/explicit return mix
+    "ERA",    # commented-out code
+    "B904",   # raise-without-from in except
+    "S110",   # try-except-pass (empty except handler)
+    "PLE",    # pylint errors (wrong args, mismatched assignment, etc.)
+    "PLW",    # pylint warnings
+]
+ignore = [
+    "RET504",  # unnecessary-assign-before-return (stylistic)
+    "PLW2901", # for-loop var overwrite
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Test/perf scripts contain prose-style comments that ERA001 mistakes for dead code.
+"integration-tests/**" = ["ERA001"]
+"**/conftest.py" = ["F401", "F811", "PLW0603"]
+# pytest fixture imports are re-bound by function params; F811 fires on every test.
+"integration-tests/test_fhir_pgwire_loadtest.py" = ["F811"]
+# pyqe builds classes via exec() and binds names through globals()[…].
+"plugins/notebook/src/kernels/pyodide/pyqe/ql/interaction.py" = ["F821"]
+"plugins/notebook/src/kernels/pyodide/pyqe/ql/person.py" = ["F821"]

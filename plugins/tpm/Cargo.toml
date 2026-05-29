@@ -35,3 +35,8 @@ flate2 = "1.0"
 tar = "0.4"
 semver = "1.0"
 sha1 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
+mockito = "1"
+serial_test = "3"

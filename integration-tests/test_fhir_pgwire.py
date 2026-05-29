@@ -19,6 +19,9 @@ import psycopg2
 import pytest
 
 from conftest import Node, POOL_EXT, FHIR_EXT, PGWIRE_EXT, alloc_ports
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 def _free_port():
@@ -111,8 +114,8 @@ def env(request):
             s, _ = client.get("/health")
             if s == 200:
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         time.sleep(0.5)
     else:
         node.close()
@@ -132,12 +135,12 @@ def env(request):
     os.environ.pop("TREX_POOL_SIZE", None)
     try:
         node.execute(f"SELECT trex_fhir_stop('127.0.0.1', {fhir_port})")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     try:
         node.execute(f"SELECT trex_pgwire_stop('127.0.0.1', {pg_port})")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     node.close()
 
 
@@ -444,7 +447,7 @@ def test_concurrent_fhir_writes_and_pgwire_reads(env):
         for f in as_completed(futures):
             f.result()  # propagate exceptions
 
-    assert not errors, f"Concurrent errors:\n" + "\n".join(errors)
+    assert not errors, "Concurrent errors:\n" + "\n".join(errors)
 
     # Verify all written patients exist
     for i in range(0, num_ops, 2):
@@ -507,7 +510,7 @@ def test_concurrent_pgwire_writes_and_fhir_reads(env):
         for f in as_completed(futures):
             f.result()
 
-    assert not errors, f"Concurrent errors:\n" + "\n".join(errors)
+    assert not errors, "Concurrent errors:\n" + "\n".join(errors)
 
     # Verify PgWire writes landed
     conn = _pg_connect(pg_port)

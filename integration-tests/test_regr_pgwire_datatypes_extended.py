@@ -36,6 +36,9 @@ import uuid
 from decimal import Decimal
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg2
@@ -112,15 +115,15 @@ def conn():
             for t in _CREATED_TABLES:
                 try:
                     cur.execute(f"DROP TABLE IF EXISTS {t}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug("ignoring %s: %s", type(e).__name__, e)
             cur.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         try:
             c.close()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 # -----------------------------------------------------------------------------
@@ -430,8 +433,8 @@ def test_json_column(conn):
     for sql in ("INSTALL json", "LOAD json"):
         try:
             cur.execute(sql)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
     cur.execute(f"DROP TABLE IF EXISTS {t}")
     cur.execute(f"CREATE TABLE {t} (id INT, j JSON)")
     cur.execute(

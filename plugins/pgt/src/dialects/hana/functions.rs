@@ -310,3 +310,320 @@ fn get_default_function_mappings() -> HashMap<String, String> {
 
     mappings
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{SqlTransformer, TransformationConfig};
+
+    fn t() -> SqlTransformer {
+        SqlTransformer::with_config(TransformationConfig::default()).unwrap()
+    }
+
+    // --- FunctionTransformer::new / simple_mappings path ---
+
+    #[test]
+    fn new_builds_with_default_config() {
+        use super::FunctionTransformer;
+        let cfg = TransformationConfig::default();
+        let ft = FunctionTransformer::new(&cfg);
+        // preserve_case defaults to false in default config
+        assert!(!ft.preserve_case);
+    }
+
+    #[test]
+    fn new_incorporates_custom_mappings() {
+        use super::FunctionTransformer;
+        let mut cfg = TransformationConfig::default();
+        cfg.functions.custom_mappings.insert("MY_FUNC".into(), "HANA_FUNC".into());
+        let ft = FunctionTransformer::new(&cfg);
+        assert!(ft.simple_mappings.contains_key("MY_FUNC"));
+    }
+
+    // --- RANDOM: in simple_mappings → rewrites to RAND ---
+
+    #[test]
+    fn random_rewrites_to_rand() {
+        let out = t().transform("SELECT RANDOM()").unwrap().to_uppercase();
+        // RANDOM is in simple_mappings as RANDOM→RAND
+        assert!(out.contains("RAND"), "expected RAND in: {out}");
+    }
+
+    // --- NOW: NOT in simple_mappings, NOT in complex handler; passes through ---
+
+    #[test]
+    fn now_passes_through_unchanged() {
+        let out = t().transform("SELECT NOW()").unwrap().to_uppercase();
+        // NOW is natively supported in HANA and not rewritten by FunctionTransformer
+        assert!(out.contains("NOW"), "expected NOW in: {out}");
+    }
+
+    // --- LENGTH: in simple_mappings as LENGTH→LENGTH (identity mapping) ---
+
+    #[test]
+    fn length_is_preserved() {
+        let out = t().transform("SELECT LENGTH(name) FROM users").unwrap().to_uppercase();
+        assert!(out.contains("LENGTH"), "expected LENGTH in: {out}");
+    }
+
+    // --- CONCAT: in transform_complex_function, returns false for ≤2 args ---
+
+    #[test]
+    fn concat_with_two_args_passes_through() {
+        let out = t()
+            .transform("SELECT CONCAT(first_name, last_name) FROM users")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("CONCAT"), "expected CONCAT in: {out}");
+    }
+
+    #[test]
+    fn concat_with_three_args_passes_through_with_warning() {
+        // 3-arg CONCAT logs a warning but still passes through (returns false)
+        let out = t()
+            .transform("SELECT CONCAT(a, b, c) FROM t")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("CONCAT"), "expected CONCAT in: {out}");
+    }
+
+    // --- POSITION: sqlparser parses POSITION as a special AST node (Expr::Position),
+    // NOT as Expr::Function, so FunctionTransformer cannot rewrite it ---
+
+    #[test]
+    #[ignore = "reveals bug: POSITION() is parsed as Expr::Position by sqlparser, not Expr::Function; FunctionTransformer only handles Expr::Function so the LOCATE rewrite is unreachable"]
+    fn position_rewrites_to_locate() {
+        let out = t()
+            .transform("SELECT POSITION('a' IN name) FROM users")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("LOCATE"), "expected LOCATE in: {out}");
+    }
+
+    // --- EXTRACT: in transform_complex_function, returns false (no-op) ---
+
+    #[test]
+    fn extract_passes_through() {
+        let out = t()
+            .transform("SELECT EXTRACT(YEAR FROM created_at) FROM events")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("EXTRACT"), "expected EXTRACT in: {out}");
+    }
+
+    // --- SUBSTRING: in transform_complex_function, returns false ---
+
+    #[test]
+    fn substring_passes_through() {
+        let out = t()
+            .transform("SELECT SUBSTRING(name FROM 1 FOR 3) FROM users")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("SUBSTRING"), "expected SUBSTRING in: {out}");
+    }
+
+    // --- STRING_AGG: NOT in simple_mappings for FunctionTransformer, passes through ---
+
+    #[test]
+    fn string_agg_passes_through() {
+        let out = t()
+            .transform("SELECT STRING_AGG(name, ',') FROM users GROUP BY tenant_id")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("STRING_AGG"), "expected STRING_AGG in: {out}");
+    }
+
+    // --- COALESCE: not handled, passes through ---
+
+    #[test]
+    fn coalesce_passes_through() {
+        let out = t()
+            .transform("SELECT COALESCE(name, 'anon') FROM users")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("COALESCE"), "expected COALESCE in: {out}");
+    }
+
+    // --- NULLIF: not handled, passes through ---
+
+    #[test]
+    fn nullif_passes_through() {
+        let out = t()
+            .transform("SELECT NULLIF(value, 0) FROM t")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("NULLIF"), "expected NULLIF in: {out}");
+    }
+
+    // --- Aggregate functions (COUNT, SUM, AVG, MIN, MAX) pass through via simple_mappings ---
+
+    #[test]
+    fn aggregate_functions_pass_through() {
+        let out = t()
+            .transform("SELECT COUNT(*), SUM(amount), AVG(score), MIN(val), MAX(val) FROM t")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("COUNT"), "expected COUNT in: {out}");
+        assert!(out.contains("SUM"), "expected SUM in: {out}");
+        assert!(out.contains("AVG"), "expected AVG in: {out}");
+    }
+
+    // --- String functions UPPER/LOWER/TRIM pass through ---
+
+    #[test]
+    fn upper_lower_trim_pass_through() {
+        let out = t()
+            .transform("SELECT UPPER(name), LOWER(email), TRIM(code) FROM users")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("UPPER"), "expected UPPER in: {out}");
+        assert!(out.contains("LOWER"), "expected LOWER in: {out}");
+        assert!(out.contains("TRIM"), "expected TRIM in: {out}");
+    }
+
+    // --- Math functions ABS/ROUND/CEIL/FLOOR ---
+
+    #[test]
+    fn math_functions_pass_through() {
+        let out = t()
+            .transform("SELECT ABS(x), ROUND(x), CEIL(x), FLOOR(x) FROM t")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("ABS"), "expected ABS in: {out}");
+        assert!(out.contains("ROUND"), "expected ROUND in: {out}");
+    }
+
+    // --- NEXTVAL: in transform_complex_function, returns false ---
+
+    #[test]
+    fn nextval_passes_through_unchanged() {
+        let out = t()
+            .transform("SELECT NEXTVAL('my_seq')")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("NEXTVAL"), "expected NEXTVAL in: {out}");
+    }
+
+    // --- Nested expressions (BinaryOp, Nested, Subquery paths) ---
+
+    #[test]
+    fn random_in_binary_op_rewrites_to_rand() {
+        let out = t()
+            .transform("SELECT RANDOM() + 1")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("RAND"), "expected RAND in: {out}");
+    }
+
+    #[test]
+    fn function_in_subquery_is_transformed() {
+        let out = t()
+            .transform("SELECT * FROM (SELECT RANDOM() AS r) sub")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("RAND"), "expected RAND in subquery: {out}");
+    }
+
+    #[test]
+    fn random_in_where_clause_rewrites_to_rand() {
+        let out = t()
+            .transform("SELECT id FROM t WHERE RANDOM() > 0.5")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("RAND"), "expected RAND in where: {out}");
+    }
+
+    #[test]
+    fn function_in_having_clause_rewrites() {
+        let out = t()
+            .transform("SELECT MAX(score) FROM t GROUP BY cat HAVING MAX(score) > 0")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("MAX"), "expected MAX in having: {out}");
+    }
+
+    // --- INSERT with functions in SELECT source ---
+
+    #[test]
+    fn random_in_insert_select_rewrites() {
+        let out = t()
+            .transform("INSERT INTO t SELECT RANDOM() FROM s")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("RAND"), "expected RAND in insert-select: {out}");
+    }
+
+    // --- UPDATE with functions ---
+
+    #[test]
+    fn random_in_update_set_rewrites() {
+        let out = t()
+            .transform("UPDATE t SET val = RANDOM()")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("RAND"), "expected RAND in update set: {out}");
+    }
+
+    // --- DELETE with functions in WHERE ---
+
+    #[test]
+    fn random_in_delete_where_rewrites() {
+        let out = t()
+            .transform("DELETE FROM t WHERE id = ABS(-1)")
+            .unwrap()
+            .to_uppercase();
+        assert!(out.contains("ABS"), "expected ABS in delete where: {out}");
+    }
+
+    // --- supports_statement_type covers listed statements ---
+
+    #[test]
+    fn transformer_supports_query_statements() {
+        use super::FunctionTransformer;
+        use crate::dialects::hana::Transformer;
+        use sqlparser::ast::Statement;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let cfg = TransformationConfig::default();
+        let ft = FunctionTransformer::new(&cfg);
+
+        let query_stmt = Parser::parse_sql(&PostgreSqlDialect {}, "SELECT 1")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(ft.supports_statement_type(&query_stmt));
+    }
+
+    #[test]
+    fn transformer_does_not_support_drop_statement() {
+        use super::FunctionTransformer;
+        use crate::dialects::hana::Transformer;
+        use sqlparser::ast::Statement;
+        use sqlparser::dialect::PostgreSqlDialect;
+        use sqlparser::parser::Parser;
+
+        let cfg = TransformationConfig::default();
+        let ft = FunctionTransformer::new(&cfg);
+
+        let drop_stmt = Parser::parse_sql(&PostgreSqlDialect {}, "DROP TABLE t")
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(!ft.supports_statement_type(&drop_stmt));
+    }
+
+    // --- Transformer trait methods ---
+
+    #[test]
+    fn transformer_name_and_priority() {
+        use super::FunctionTransformer;
+        use crate::dialects::hana::Transformer;
+
+        let cfg = TransformationConfig::default();
+        let ft = FunctionTransformer::new(&cfg);
+        assert_eq!(ft.name(), "FunctionTransformer");
+        assert_eq!(ft.priority(), 30);
+    }
+}

@@ -289,7 +289,7 @@ def test_loader_logs_announce_plugin(lifecycle_plugin):
     logs = _container_logs()
     assert f"Found plugin {PLUGIN_SHORTNAME}" in logs, (
         "expected loader to discover lifecycle-test plugin; "
-        f"loader markers missing in trex logs"
+        "loader markers missing in trex logs"
     )
     assert f"Registered plugin {PLUGIN_SHORTNAME} [dev]" in logs, (
         "expected loader to register lifecycle-test plugin"

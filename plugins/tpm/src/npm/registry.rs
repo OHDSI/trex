@@ -122,6 +122,11 @@ impl NpmRegistry {
     })
   }
 
+  /// Returns the configured npm registry URL (no trailing slash).
+  pub fn registry_url(&self) -> &str {
+    &self.registry_url
+  }
+
   pub fn get_package_info(&self, name: &str) -> NpmResult<PackageInfoResponse> {
     let url = format!("{}/{}", self.registry_url, name);
 
@@ -799,3 +804,6 @@ impl NpmRegistry {
     Ok(results)
   }
 }
+
+#[cfg(test)]
+mod registry_tests;

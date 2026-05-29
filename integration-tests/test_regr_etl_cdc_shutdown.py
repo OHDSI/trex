@@ -53,6 +53,9 @@ import time
 import uuid
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -157,8 +160,8 @@ def _install_ca_in_trex(ca_pem: str) -> None:
     finally:
         try:
             os.remove(tmp_path)
-        except OSError:
-            pass
+        except OSError as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 @pytest.fixture(scope="module")
@@ -364,6 +367,6 @@ def test_etl_cdc_only_shutdown_completes_cleanly(source_pg):
                 cur = conn.cursor()
                 cur.execute("SELECT trex_etl_stop(%s)", (n,))
                 cur.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("ignoring %s: %s", type(e).__name__, e)
         conn.close()

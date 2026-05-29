@@ -126,7 +126,7 @@
       :patient-filter (when-let [pf (:patient-filter clj-map)]
                         (vec pf))
       :timestamp-filter (:timestamp-filter clj-map)
-      :fts-tables (or (:fts-tables clj-map) ["concept"])
+      :fts-tables (or (:fts-tables clj-map) ["concept" "concept_synonym"])
       :cache-path (or (:cache-path clj-map) "./data/cache")
       :parallel-copy (boolean (:parallel-copy clj-map))})))
 
@@ -166,11 +166,32 @@
     (.put "fts-indexes-created" (ArrayList. ^java.util.Collection (or (:fts-indexes-created result) [])))
     (.put "duration-ms" (:duration-ms result))
     (.put "error" (:error result))))
+
+;; Mirrors d2e's DUCKDB_FULLTEXT_SEARCH_CONFIG
+;; (plugins/flows/base/create_cachedb_file_plugin/utils.py). Tables without a
+;; unique single-column PK in OMOP CDM declare a synthetic id column; the
+;; FTS step adds it before building the index because DuckDB's
+;; create_fts_index requires a unique document identifier.
+(def ^:private fts-config
+  {"concept"              {:document-identifier "concept_id"}
+   "vocabulary"           {:document-identifier "vocabulary_id"}
+   "relationship"         {:document-identifier "relationship_id"}
+   "concept_class"        {:document-identifier "concept_class_id"}
+   "domain"               {:document-identifier "domain_id"}
+   "note"                 {:document-identifier "note_id"}
+   "concept_synonym"      {:document-identifier "fts_document_identifier_id" :synthetic? true}
+   "concept_relationship" {:document-identifier "fts_document_identifier_id" :synthetic? true}
+   "concept_ancestor"     {:document-identifier "fts_document_identifier_id" :synthetic? true}
+   "concept_recommended"  {:document-identifier "fts_document_identifier_id" :synthetic? true}})
+
 (defn get-document-identifier
   "Get document identifier column name for a table.
-   Prioritizes columns matching {table}_id pattern, then columns ending with _id, then integer columns."
+   Consults the static fts-config first; falls back to a heuristic that picks
+   {table}_id, then any *_id column, then any integer column."
   [db cache-alias schema-name table-name]
-  (try
+  (or
+   (get-in fts-config [table-name :document-identifier])
+   (try
     (let [primary-id (str table-name "_id")
           [query-sql & params] (sql/format
                                  {:select [:column_name]
@@ -190,7 +211,7 @@
         (.get ^HashMap (first results) "column_name")))
     (catch Exception e
       (log/warn (format "Failed to get document identifier for %s: %s" table-name (.getMessage e)))
-      nil)))
+      nil))))
 
 (defn get-text-columns
   "Get text/varchar columns from a table for FTS indexing."
@@ -210,9 +231,32 @@
       (log/warn (format "Failed to get text columns for %s: %s" table-name (.getMessage e)))
       [])))
 
+(defn- ensure-synthetic-id-column!
+  "For tables flagged :synthetic? in fts-config, add an auto-increment INTEGER
+   column named by :document-identifier so the FTS PRAGMA has a unique input_id.
+   Idempotent — uses CREATE SEQUENCE IF NOT EXISTS and ADD COLUMN IF NOT EXISTS,
+   so re-running on an existing cache preserves sequence state and existing ids.
+   No-op for tables without :synthetic?."
+  [db cache-alias schema-name table-name]
+  (when-let [cfg (get fts-config table-name)]
+    (when (:synthetic? cfg)
+      (let [id-col (:document-identifier cfg)
+            seq-name (str table-name "_id_sequence")
+            _ (db/validate-identifier! id-col "column-name")
+            _ (db/validate-identifier! seq-name "sequence-name")
+            ;; Each segment is quoted so hyphenated database-codes
+            ;; (allowed by valid-database-code?) parse correctly inside
+            ;; the NEXTVAL string literal.
+            qualified-seq (format "\"%s\".\"%s\".\"%s\"" cache-alias schema-name seq-name)]
+        (db/execute! db (format "CREATE SEQUENCE IF NOT EXISTS %s START 1" qualified-seq))
+        (db/execute! db (format "ALTER TABLE \"%s\".\"%s\".\"%s\" ADD COLUMN IF NOT EXISTS \"%s\" INTEGER DEFAULT NEXTVAL('%s')"
+                                cache-alias schema-name table-name id-col qualified-seq))))))
+
 (defn create-fts-index
   "Create FTS index on a table. Returns table name on success, nil on failure.
-   Dynamically discovers document ID and text columns from information_schema."
+   Consults fts-config for the document identifier; if the table has no
+   natural PK, adds a synthetic auto-increment column first.
+   Text columns are discovered dynamically from information_schema."
   [db cache-alias schema-name table-name]
   (try
     (db/validate-identifier! cache-alias "cache-alias")
@@ -220,6 +264,8 @@
     (db/validate-identifier! table-name "table-name")
 
     (log/info (format "Creating FTS index on %s" table-name))
+    (ensure-synthetic-id-column! db cache-alias schema-name table-name)
+
     (let [qualified-table (format "\"%s\".\"%s\".\"%s\"" cache-alias schema-name table-name)
           id-column (get-document-identifier db cache-alias schema-name table-name)
           text-columns (get-text-columns db cache-alias schema-name table-name)]
@@ -239,7 +285,9 @@
         (do
           (doseq [col (cons id-column text-columns)]
             (db/validate-identifier! col "column-name"))
-          (let [fts-sql (format "PRAGMA create_fts_index(%s, %s, %s, stemmer='english', stopwords='english', strip_accents=1, lower=1, overwrite=1)"
+          ;; ignore= regex matches d2e's create_cachedb_file_plugin so
+          ;; tokenization is identical to Prefect-built caches.
+          (let [fts-sql (format "PRAGMA create_fts_index(%s, %s, %s, stemmer='english', stopwords='english', ignore='(\\.|[^a-z0-9!@#$%%^&*()`+\"\\-\\/])+', strip_accents=1, lower=1, overwrite=1)"
                                 qualified-table
                                 id-column
                                 (str/join ", " text-columns))]
@@ -290,7 +338,8 @@
   "Unified cache creation. Every supported dialect goes through the JDBC
    batch transfer path (HikariCP + SqlRender). After the table copy
    completes successfully, FTS indexes are built on the configured tables
-   (default: `concept`) inside the cache file. Returns a CacheResult.
+   (default: `concept`, `concept_synonym`) inside the cache file.
+   Returns a CacheResult.
    `progress-fn` is invoked with per-phase progress events during transfer."
   ([db config]
    (create-cache db config nil))
@@ -310,7 +359,7 @@
                          (create-fts-indexes db
                                              (:database-code result)
                                              (:schema-name result)
-                                             (or (:fts-tables config) ["concept"])
+                                             (or (:fts-tables config) ["concept" "concept_synonym"])
                                              (mapv (fn [t] {:table-name (:table-name t)})
                                                    tables-copied))
                          (catch Exception e

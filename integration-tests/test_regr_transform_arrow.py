@@ -15,12 +15,14 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 BASE_URL = "http://localhost:8001"
 ADMIN_EMAIL = "admin@trex.local"
@@ -152,8 +154,8 @@ def plugin_registered(admin_token):
             for p in json.loads(raw).get("data", {}).get("transformProjects", [])
             or []
         ]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     if PLUGIN_NAME in plugins:
         return PLUGIN_NAME
 

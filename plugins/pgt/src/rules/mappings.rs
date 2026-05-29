@@ -237,3 +237,171 @@ impl StaticMappings {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_type_mappings_has_serial() {
+        let m = StaticMappings::data_type_mappings();
+        assert!(!m.is_empty());
+        assert!(m.contains_key("SERIAL"), "missing SERIAL key");
+    }
+
+    #[test]
+    fn data_type_mappings_has_bigserial() {
+        let m = StaticMappings::data_type_mappings();
+        assert!(m.contains_key("BIGSERIAL"), "missing BIGSERIAL key");
+    }
+
+    #[test]
+    fn data_type_mappings_has_text() {
+        let m = StaticMappings::data_type_mappings();
+        assert!(m.contains_key("TEXT"), "missing TEXT key");
+        assert_eq!(m["TEXT"], "NCLOB");
+    }
+
+    #[test]
+    fn data_type_mappings_has_uuid() {
+        let m = StaticMappings::data_type_mappings();
+        assert!(m.contains_key("UUID"));
+    }
+
+    #[test]
+    fn data_type_mappings_has_jsonb() {
+        let m = StaticMappings::data_type_mappings();
+        assert!(m.contains_key("JSONB"));
+        assert_eq!(m["JSONB"], "NCLOB");
+    }
+
+    #[test]
+    fn function_mappings_non_empty() {
+        let m = StaticMappings::function_mappings();
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn function_mappings_has_random() {
+        let m = StaticMappings::function_mappings();
+        assert!(m.contains_key("RANDOM"), "missing RANDOM mapping");
+        assert_eq!(m["RANDOM"], "RAND");
+    }
+
+    #[test]
+    fn function_mappings_has_string_agg() {
+        let m = StaticMappings::function_mappings();
+        assert!(m.contains_key("STRING_AGG"), "missing STRING_AGG mapping");
+    }
+
+    #[test]
+    fn function_mappings_has_current_timestamp() {
+        let m = StaticMappings::function_mappings();
+        assert!(
+            m.contains_key("CURRENT_TIMESTAMP()"),
+            "missing CURRENT_TIMESTAMP() mapping"
+        );
+    }
+
+    #[test]
+    fn function_mappings_has_row_number() {
+        let m = StaticMappings::function_mappings();
+        assert!(m.contains_key("ROW_NUMBER"));
+    }
+
+    #[test]
+    fn operator_mappings_non_empty() {
+        let m = StaticMappings::operator_mappings();
+        assert!(!m.is_empty());
+    }
+
+    #[test]
+    fn operator_mappings_has_concat_op() {
+        let m = StaticMappings::operator_mappings();
+        assert!(m.contains_key("||"), "missing || operator mapping");
+    }
+
+    #[test]
+    fn operator_mappings_has_regex_op() {
+        let m = StaticMappings::operator_mappings();
+        assert!(m.contains_key("~"), "missing ~ regex operator mapping");
+    }
+
+    #[test]
+    fn operator_mappings_has_json_ops() {
+        let m = StaticMappings::operator_mappings();
+        assert!(m.contains_key("->"), "missing -> json operator");
+        assert!(m.contains_key("->>"), "missing ->> json operator");
+    }
+
+    #[test]
+    fn common_patterns_non_empty() {
+        let p = StaticMappings::common_patterns();
+        assert!(!p.is_empty());
+    }
+
+    #[test]
+    fn common_patterns_all_fields_non_empty() {
+        let p = StaticMappings::common_patterns();
+        for (name, pattern, replacement) in &p {
+            assert!(!name.is_empty(), "pattern name should be non-empty");
+            assert!(!pattern.is_empty(), "pattern regex should be non-empty");
+            assert!(!replacement.is_empty(), "pattern replacement should be non-empty");
+        }
+    }
+
+    #[test]
+    fn common_patterns_has_limit_offset() {
+        let p = StaticMappings::common_patterns();
+        let has_limit = p.iter().any(|(name, _, _)| name == "LIMIT_OFFSET");
+        assert!(has_limit, "missing LIMIT_OFFSET pattern");
+    }
+
+    #[test]
+    fn common_patterns_has_boolean_true() {
+        let p = StaticMappings::common_patterns();
+        let has_bool = p.iter().any(|(name, _, _)| name == "BOOLEAN_TRUE");
+        assert!(has_bool, "missing BOOLEAN_TRUE pattern");
+    }
+
+    #[test]
+    fn unsupported_features_non_empty() {
+        let f = StaticMappings::unsupported_features();
+        assert!(!f.is_empty());
+    }
+
+    #[test]
+    fn unsupported_features_contains_listen_notify() {
+        let f = StaticMappings::unsupported_features();
+        let has = f.iter().any(|s| s.contains("LISTEN"));
+        assert!(has, "missing LISTEN/NOTIFY in unsupported features");
+    }
+
+    #[test]
+    fn unsupported_features_contains_lateral() {
+        let f = StaticMappings::unsupported_features();
+        let has = f.iter().any(|s| s.to_uppercase().contains("LATERAL"));
+        assert!(has, "missing LATERAL in unsupported features");
+    }
+
+    #[test]
+    fn data_type_mappings_has_varchar() {
+        let m = StaticMappings::data_type_mappings();
+        assert!(m.contains_key("VARCHAR"));
+        assert_eq!(m["VARCHAR"], "NVARCHAR");
+    }
+
+    #[test]
+    fn data_type_mappings_has_bytea() {
+        let m = StaticMappings::data_type_mappings();
+        assert!(m.contains_key("BYTEA"));
+        assert_eq!(m["BYTEA"], "BLOB");
+    }
+
+    #[test]
+    fn function_mappings_has_md5() {
+        let m = StaticMappings::function_mappings();
+        assert!(m.contains_key("MD5"));
+        assert_eq!(m["MD5"], "HASH_MD5");
+    }
+}

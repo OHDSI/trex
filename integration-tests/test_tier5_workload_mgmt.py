@@ -16,10 +16,7 @@ wired up, but the admission responses (queued, rejected) happen BEFORE the
 distributed scheduler call and can be verified.
 """
 
-import time
-import os
 
-from conftest import wait_for
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +44,7 @@ def test_concurrency_limit(node_factory):
     assert status[0][1] == "0"  # active_queries
 
     # Query status may be empty or contain results from the admission calls themselves.
-    query_status = node.execute("SELECT * FROM trex_db_query_status()")
+    node.execute("SELECT * FROM trex_db_query_status()")
 
 
 # ---------------------------------------------------------------------------

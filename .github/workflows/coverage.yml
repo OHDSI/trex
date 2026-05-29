@@ -21,6 +21,7 @@ jobs:
   rust-unit-coverage:
     name: "Rust unit coverage (${{ matrix.plugin }})"
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     if: github.event_name != 'pull_request' || !github.event.pull_request.draft
     strategy:
       fail-fast: false
@@ -28,15 +29,18 @@ jobs:
         plugin: [chdb, db, etl, fhir, hana, migration, pg_trex, pgt, pgwire, pool, runtime, tpm, transform]
     steps:
       - uses: actions/checkout@v4
+      - uses: ./.github/actions/checkout-trex
         with:
-          submodules: recursive
+          paths: ${{ matrix.plugin == 'runtime' && 'plugins/extension-ci-tools plugins/runtime/trex-runtime' || 'plugins/extension-ci-tools' }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
 
       - uses: actions/cache@v4
         with:
@@ -55,19 +59,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-17 postgresql-server-dev-17
 
-      - name: Download libtrexsql (pg_trex only)
+      - uses: ./.github/actions/setup-libtrexsql
         if: matrix.plugin == 'pg_trex'
-        run: |
-          wget -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-amd64.zip
-          unzip /tmp/libtrexsql.zip -d /tmp/trexsql
-          ln -sf /tmp/trexsql/libtrexsql.so /tmp/trexsql/libduckdb.so
+        with:
+          version: v1.4.4-trex
 
       - name: Install cargo-pgrx (pg_trex only)
         if: matrix.plugin == 'pg_trex'
-        run: |
-          cargo install cargo-pgrx --version 0.16.1 --locked
-          cargo pgrx init --pg17=$(which pg_config)
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-pgrx@0.16.1
+      - name: pgrx init (pg_trex only)
+        if: matrix.plugin == 'pg_trex'
+        run: cargo pgrx init --pg17=$(which pg_config)
 
       - name: Install chdb native lib
         if: matrix.plugin == 'chdb'
@@ -106,95 +110,40 @@ jobs:
 
       - uses: codecov/codecov-action@v4
         with:
+          token: ${{ secrets.CODECOV_TOKEN }}
           files: plugins/${{ matrix.plugin }}/build/coverage/lcov.info
           flags: unit-${{ matrix.plugin }}
-          fail_ci_if_error: false
-
-  integration-coverage:
-    name: "Integration coverage (${{ matrix.suite }})"
-    runs-on: ubuntu-24.04
-    if: github.event_name != 'pull_request' || !github.event.pull_request.draft
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: distributed
-            plugins: "pool db"
-            tests: "test_tier1_single_node.py test_tier2_two_node.py test_tier3_aggregation.py"
-          - suite: pgwire
-            plugins: "pool db pgwire"
-            tests: "test_pgwire_standalone.py test_pgwire_db.py"
-          - suite: etl
-            plugins: "pool db etl"
-            tests: "test_etl_standalone.py test_etl_db.py"
-          - suite: fhir
-            plugins: "pool fhir"
-            tests: "test_fhir_standalone.py"
-          - suite: migration
-            plugins: "pool migration"
-            tests: "test_migration_standalone.py"
-          - suite: tpm
-            plugins: "pool tpm"
-            tests: "test_tpm_standalone.py"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: integration-coverage-${{ matrix.suite }}-${{ runner.os }}-${{ hashFiles('plugins/*/Cargo.lock') }}
-
-      # Same rationale as rust-unit-coverage: informational, never gating.
-      - name: Build instrumented plugins
-        continue-on-error: true
-        run: |
-          for plugin in ${{ matrix.plugins }}; do
-            (cd plugins/$plugin && make configure && make debug_coverage)
-          done
-
-      - name: Setup integration test env
-        continue-on-error: true
-        run: make configure
-        working-directory: integration-tests
-
-      - name: Run tests with coverage instrumentation
-        continue-on-error: true
-        run: TREX_COVERAGE=1 venv/bin/pytest -v ${{ matrix.tests }}
-        working-directory: integration-tests
-
-      - name: Merge coverage
-        continue-on-error: true
-        run: make coverage-merge
-        working-directory: integration-tests
-
-      - uses: codecov/codecov-action@v4
-        with:
-          directory: integration-tests/coverage/lcov
-          flags: integration-${{ matrix.suite }}
           fail_ci_if_error: false
 
   coverage-status:
     name: "Coverage Status"
     if: always()
     runs-on: ubuntu-24.04
-    needs: [rust-unit-coverage, integration-coverage]
+    timeout-minutes: 5
+    needs: [rust-unit-coverage]
     steps:
       - name: Check
         run: |
           echo "rust-unit-coverage: ${{ needs.rust-unit-coverage.result }}"
-          echo "integration-coverage: ${{ needs.integration-coverage.result }}"
           # Coverage is informational only — never fail the gate. The job
           # still appears in PR checks so missing uploads are visible.
           exit 0
+
+  ratchet:
+    name: "Coverage ratchet"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    needs: rust-unit-coverage
+    if: github.event_name == 'pull_request'
+    continue-on-error: true  # informational until we have one week of green runs
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: sudo apt-get update && sudo apt-get install -y jq
+      - run: scripts/coverage-summary.sh coverage/current.json
+      - run: python3 scripts/coverage-ratchet.py coverage/current.json

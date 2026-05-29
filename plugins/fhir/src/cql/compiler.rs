@@ -1251,4 +1251,217 @@ mod tests {
         assert!(!result.contains("rowid"));
         assert!(result.contains("ORDER BY 1 DESC LIMIT 1"));
     }
+
+    #[test]
+    fn elm_type_to_sql_basic_types() {
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}Boolean"), "BOOLEAN");
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}Integer"), "INTEGER");
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}Long"), "BIGINT");
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}Decimal"), "DOUBLE");
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}String"), "VARCHAR");
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}Date"), "DATE");
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}DateTime"), "TIMESTAMP");
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}Time"), "TIME");
+    }
+
+    #[test]
+    fn elm_type_to_sql_unknown_defaults_to_varchar() {
+        assert_eq!(elm_type_to_sql("{urn:hl7-org:elm-types:r1}Unknown"), "VARCHAR");
+        assert_eq!(elm_type_to_sql(""), "VARCHAR");
+    }
+
+    #[test]
+    fn elm_type_to_sql_unqualified_still_maps() {
+        // `extract_resource_type` is just `rsplit('}').next()`; for inputs with
+        // no `}` it returns the input unchanged, so bare names still map.
+        assert_eq!(elm_type_to_sql("Integer"), "INTEGER");
+        assert_eq!(elm_type_to_sql("Garbage"), "VARCHAR");
+    }
+
+    #[test]
+    fn compile_literal_integer_no_quotes() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::Literal {
+            value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+            value: Some("42".to_string()),
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert_eq!(result, "42");
+    }
+
+    #[test]
+    fn compile_literal_boolean() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::Literal {
+            value_type: Some("{urn:hl7-org:elm-types:r1}Boolean".to_string()),
+            value: Some("true".to_string()),
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert_eq!(result, "true");
+    }
+
+    #[test]
+    fn compile_literal_decimal() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::Literal {
+            value_type: Some("{urn:hl7-org:elm-types:r1}Decimal".to_string()),
+            value: Some("3.14".to_string()),
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert_eq!(result, "3.14");
+    }
+
+    #[test]
+    fn compile_equal_simple() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::Equal {
+            operand: [
+                Box::new(ElmExpression::Literal {
+                    value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                    value: Some("1".to_string()),
+                }),
+                Box::new(ElmExpression::Literal {
+                    value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                    value: Some("2".to_string()),
+                }),
+            ],
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(result.contains("="));
+        assert!(result.contains("1"));
+        assert!(result.contains("2"));
+    }
+
+    #[test]
+    fn compile_less_simple() {
+        let mut ctx = CompilationContext::new("test");
+        let expr = ElmExpression::Less {
+            operand: [
+                Box::new(ElmExpression::Literal {
+                    value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                    value: Some("1".to_string()),
+                }),
+                Box::new(ElmExpression::Literal {
+                    value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                    value: Some("2".to_string()),
+                }),
+            ],
+        };
+        let result = compile_expression(&expr, &mut ctx).unwrap();
+        assert!(result.contains("<"));
+    }
+
+    #[test]
+    fn compile_measure_population_errors_when_no_statements() {
+        let lib: ElmLibrary = serde_json::from_value(serde_json::json!({})).unwrap_or(ElmLibrary {
+            identifier: None,
+            parameters: None,
+            statements: None,
+            includes: None,
+            usings: None,
+            valueSets: None,
+            codeSystems: None,
+            codes: None,
+            contexts: None,
+        });
+        let err = compile_measure_population(&lib, "\"db\".\"ds\"", "Pop").unwrap_err();
+        assert!(err.contains("statements") || err.contains("no"));
+    }
+
+    fn empty_library() -> ElmLibrary {
+        ElmLibrary {
+            identifier: None,
+            parameters: None,
+            statements: None,
+            includes: None,
+            usings: None,
+            valueSets: None,
+            codeSystems: None,
+            codes: None,
+            contexts: None,
+        }
+    }
+
+    #[test]
+    fn compile_library_no_statements_returns_err() {
+        let lib = empty_library();
+        let err = compile_library(&lib, "\"db\".\"ds\"").unwrap_err();
+        assert!(err.contains("statements") || err.contains("no"));
+    }
+
+    #[test]
+    fn compile_library_only_patient_returns_err() {
+        let mut lib = empty_library();
+        lib.statements = Some(ElmStatements {
+            defs: vec![ElmExpressionDef {
+                name: "Patient".to_string(),
+                context: None,
+                access_level: None,
+                expression: Box::new(ElmExpression::Literal {
+                    value_type: Some("{urn:hl7-org:elm-types:r1}Boolean".to_string()),
+                    value: Some("true".to_string()),
+                }),
+                result_type_specifier: None,
+            }],
+        });
+        // Patient is skipped, so no CTEs are produced → error
+        let err = compile_library(&lib, "\"db\".\"ds\"").unwrap_err();
+        assert!(err.contains("No compilable"), "got: {}", err);
+    }
+
+    #[test]
+    fn compile_library_single_literal_expression() {
+        let mut lib = empty_library();
+        lib.statements = Some(ElmStatements {
+            defs: vec![ElmExpressionDef {
+                name: "MyCheck".to_string(),
+                context: None,
+                access_level: None,
+                expression: Box::new(ElmExpression::Literal {
+                    value_type: Some("{urn:hl7-org:elm-types:r1}Boolean".to_string()),
+                    value: Some("true".to_string()),
+                }),
+                result_type_specifier: None,
+            }],
+        });
+        let sql = compile_library(&lib, "\"db\".\"ds\"").unwrap();
+        assert!(sql.starts_with("WITH"));
+        assert!(sql.contains("\"MyCheck\""));
+        assert!(sql.contains("SELECT * FROM \"MyCheck\""));
+        assert!(sql.contains("SELECT (true) AS value"));
+    }
+
+    #[test]
+    fn compile_library_multiple_expressions_chains_ctes() {
+        let mut lib = empty_library();
+        lib.statements = Some(ElmStatements {
+            defs: vec![
+                ElmExpressionDef {
+                    name: "A".to_string(),
+                    context: None,
+                    access_level: None,
+                    expression: Box::new(ElmExpression::Literal {
+                        value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                        value: Some("1".to_string()),
+                    }),
+                    result_type_specifier: None,
+                },
+                ElmExpressionDef {
+                    name: "B".to_string(),
+                    context: None,
+                    access_level: None,
+                    expression: Box::new(ElmExpression::Literal {
+                        value_type: Some("{urn:hl7-org:elm-types:r1}Integer".to_string()),
+                        value: Some("2".to_string()),
+                    }),
+                    result_type_specifier: None,
+                },
+            ],
+        });
+        let sql = compile_library(&lib, "\"db\".\"ds\"").unwrap();
+        assert!(sql.contains("\"A\""));
+        assert!(sql.contains("\"B\""));
+        // Last def becomes the SELECT target
+        assert!(sql.ends_with("SELECT * FROM \"B\""));
+    }
 }

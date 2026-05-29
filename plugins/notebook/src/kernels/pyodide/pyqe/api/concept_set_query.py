@@ -37,7 +37,7 @@ class ConceptSetQuery(_AuthApi):
             "datasetId": self.study_id,
         }
 
-        response = await self._get(f"/terminology/concept-set", params=params)
+        response = await self._get("/terminology/concept-set", params=params)
         json_response: List[ConceptSet] = await response.json()
 
         # Cache concept_set in class variable

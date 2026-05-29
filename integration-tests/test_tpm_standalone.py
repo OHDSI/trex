@@ -4,7 +4,6 @@ Verifies that the plugin extension can load and execute npm package manager
 functions: info, resolve, tree, install, and list.
 """
 
-import pytest
 
 
 def test_tpm_hello(node_factory):
@@ -107,3 +106,113 @@ def test_tpm_install(node_factory, tmp_path):
     assert result[0][0] == "is-number"
     assert result[0][1] == "7.0.0"
     assert result[0][2] == "true"
+
+
+def test_tpm_install_with_deps(node_factory, tmp_path):
+    """trex_plugin_install_with_deps installs root + transitive deps."""
+    node = node_factory(load_tpm=True, load_db=False)
+    install_dir = str(tmp_path / "node_modules")
+    result = node.execute(
+        f"SELECT json_extract_string(install_results, '$.package') "
+        f"FROM trex_plugin_install_with_deps('chalk@4.1.0', '{install_dir}')"
+    )
+    pkgs = {row[0] for row in result}
+    assert "chalk" in pkgs, f"expected chalk in {pkgs}"
+    assert len(pkgs) > 1, f"expected > 1 package, got {pkgs}"
+
+
+def test_tpm_list_after_install(node_factory, tmp_path):
+    """trex_plugin_list reports a freshly installed package."""
+    node = node_factory(load_tpm=True, load_db=False)
+    install_dir = str(tmp_path / "node_modules")
+    node.execute(
+        f"SELECT * FROM trex_plugin_install('is-number@7.0.0', '{install_dir}')"
+    )
+    result = node.execute(
+        f"SELECT json_extract_string(list_info, '$.package') "
+        f"FROM trex_plugin_list('{install_dir}') "
+        f"WHERE json_extract_string(list_info, '$.package') = 'is-number'"
+    )
+    assert len(result) == 1
+    assert result[0][0] == "is-number"
+
+
+def test_tpm_delete_after_install(node_factory, tmp_path):
+    """trex_plugin_delete removes a previously installed package."""
+    node = node_factory(load_tpm=True, load_db=False)
+    install_dir = str(tmp_path / "node_modules")
+    node.execute(
+        f"SELECT * FROM trex_plugin_install('is-number@7.0.0', '{install_dir}')"
+    )
+    result = node.execute(
+        f"SELECT json_extract_string(delete_results, '$.deleted') "
+        f"FROM trex_plugin_delete('is-number', '{install_dir}')"
+    )
+    assert len(result) == 1
+    assert result[0][0] == "true"
+
+
+def test_tpm_delete_nonexistent_emits_error_json(node_factory, tmp_path):
+    """trex_plugin_delete returns deleted=false and an error string when missing."""
+    node = node_factory(load_tpm=True, load_db=False)
+    install_dir = str(tmp_path / "node_modules")
+    install_dir_path = tmp_path / "node_modules"
+    install_dir_path.mkdir()  # exists but empty
+    result = node.execute(
+        f"SELECT "
+        f"json_extract_string(delete_results, '$.deleted'), "
+        f"json_extract_string(delete_results, '$.error') "
+        f"FROM trex_plugin_delete('ghost-pkg', '{install_dir}')"
+    )
+    assert len(result) == 1
+    assert result[0][0] == "false"
+    assert result[0][1] and "not found" in result[0][1].lower()
+
+
+def test_tpm_resolve_no_match_emits_error_json(node_factory):
+    """Unsatisfiable semver request returns error JSON, not a panic."""
+    node = node_factory(load_tpm=True, load_db=False)
+    result = node.execute(
+        "SELECT json_extract_string(resolve_info, '$.error') "
+        "FROM trex_plugin_resolve('is-number@^99.99.99')"
+    )
+    assert len(result) == 1
+    assert result[0][0] and "no version matching" in result[0][0].lower()
+
+
+def test_tpm_info_versions_present_and_sorted(node_factory):
+    """trex_plugin_info.versions is a sorted, non-empty list."""
+    node = node_factory(load_tpm=True, load_db=False)
+    result = node.execute(
+        "SELECT package_info FROM trex_plugin_info('is-number')"
+    )
+    import json
+    info = json.loads(result[0][0])
+    versions = info["versions"]
+    assert versions, "versions should not be empty"
+    assert versions == sorted(versions), "versions should be sorted ascending"
+
+
+def test_tpm_tree_depth_zero_for_root(node_factory):
+    """trex_plugin_tree reports depth=0 on the root row."""
+    node = node_factory(load_tpm=True, load_db=False)
+    result = node.execute(
+        "SELECT json_extract(tree_info, '$.depth')::INTEGER "
+        "FROM trex_plugin_tree('is-number@7.0.0') LIMIT 1"
+    )
+    assert len(result) == 1
+    assert result[0][0] == 0
+
+
+def test_tpm_install_invalid_name_surfaces_as_error_row(node_factory, tmp_path):
+    """Path-traversal package names must not panic — they surface as error JSON."""
+    node = node_factory(load_tpm=True, load_db=False)
+    install_dir = str(tmp_path / "node_modules")
+    # The registry will respond 404 (no such package), but the bind+validate
+    # layer should never construct a path that escapes install_dir.
+    result = node.execute(
+        f"SELECT json_extract_string(install_results, '$.error') "
+        f"FROM trex_plugin_install('../escape', '{install_dir}')"
+    )
+    assert len(result) == 1
+    assert result[0][0], "expected non-null error string"

@@ -196,3 +196,177 @@ macro_rules! swarm_trace {
         $crate::logging::SwarmLogger::trace($category, &format!($($arg)*))
     };
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    // Tests touching SWARM_LOG_LEVEL share the process env; serialize.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn log_level_ordering() {
+        assert!(LogLevel::Error < LogLevel::Warn);
+        assert!(LogLevel::Warn < LogLevel::Info);
+        assert!(LogLevel::Info < LogLevel::Debug);
+        assert!(LogLevel::Debug < LogLevel::Trace);
+    }
+
+    #[test]
+    fn log_level_from_str_known_values() {
+        assert_eq!(LogLevel::from_str("ERROR"), LogLevel::Error);
+        assert_eq!(LogLevel::from_str("error"), LogLevel::Error);
+        assert_eq!(LogLevel::from_str("WARN"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("WARNING"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("warning"), LogLevel::Warn);
+        assert_eq!(LogLevel::from_str("INFO"), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("DEBUG"), LogLevel::Debug);
+        assert_eq!(LogLevel::from_str("trace"), LogLevel::Trace);
+    }
+
+    #[test]
+    fn log_level_from_str_unknown_defaults_to_info() {
+        assert_eq!(LogLevel::from_str("verbose"), LogLevel::Info);
+        assert_eq!(LogLevel::from_str(""), LogLevel::Info);
+        assert_eq!(LogLevel::from_str("garbage"), LogLevel::Info);
+    }
+
+    #[test]
+    fn log_level_as_str_roundtrip() {
+        for level in &[
+            LogLevel::Error,
+            LogLevel::Warn,
+            LogLevel::Info,
+            LogLevel::Debug,
+            LogLevel::Trace,
+        ] {
+            assert_eq!(LogLevel::from_str(level.as_str()), *level);
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn log_level_current_uses_env() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation serialized via ENV_LOCK
+        unsafe {
+            std::env::set_var("SWARM_LOG_LEVEL", "WARN");
+        }
+        assert_eq!(LogLevel::current(), LogLevel::Warn);
+        unsafe {
+            std::env::set_var("SWARM_LOG_LEVEL", "TRACE");
+        }
+        assert_eq!(LogLevel::current(), LogLevel::Trace);
+        unsafe {
+            std::env::remove_var("SWARM_LOG_LEVEL");
+        }
+        assert_eq!(LogLevel::current(), LogLevel::Info);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn log_level_current_invalid_falls_back_to_info() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation serialized via ENV_LOCK
+        unsafe {
+            std::env::set_var("SWARM_LOG_LEVEL", "not_a_level");
+        }
+        assert_eq!(LogLevel::current(), LogLevel::Info);
+        unsafe {
+            std::env::remove_var("SWARM_LOG_LEVEL");
+        }
+    }
+
+    #[test]
+    fn sanitize_redacts_password_equals_value() {
+        let s = SwarmLogger::sanitize("user=alice password=hunter2 other=stuff");
+        assert!(s.contains("password=[REDACTED]"), "got: {s}");
+        assert!(!s.contains("hunter2"), "got: {s}");
+        assert!(s.contains("user=alice"), "got: {s}");
+    }
+
+    #[test]
+    fn sanitize_redacts_password_colon_value() {
+        let s = SwarmLogger::sanitize("password:hunter2 trailing");
+        assert!(s.contains("password:[REDACTED]"), "got: {s}");
+        assert!(!s.contains("hunter2"));
+    }
+
+    #[test]
+    fn sanitize_redacts_token_and_secret_and_credential() {
+        let s = SwarmLogger::sanitize("token=abc secret=xyz credential=lmn");
+        assert!(s.contains("token=[REDACTED]"));
+        assert!(s.contains("secret=[REDACTED]"));
+        assert!(s.contains("credential=[REDACTED]"));
+        assert!(!s.contains("abc"));
+        assert!(!s.contains("xyz"));
+        assert!(!s.contains("lmn"));
+    }
+
+    #[test]
+    fn sanitize_handles_case_insensitive_pattern() {
+        let s = SwarmLogger::sanitize("PASSWORD=top_secret");
+        assert!(!s.contains("top_secret"), "got: {s}");
+    }
+
+    #[test]
+    fn sanitize_leaves_unrelated_text_untouched() {
+        let s = SwarmLogger::sanitize("starting server on host:port=8815");
+        // 'password' / 'token' / etc. not present so nothing is redacted
+        assert_eq!(s, "starting server on host:port=8815");
+    }
+
+    #[test]
+    fn sanitize_redacts_quoted_value() {
+        let s = SwarmLogger::sanitize("password='hunter2' more");
+        assert!(!s.contains("hunter2"), "got: {s}");
+    }
+
+    #[test]
+    fn timestamp_is_non_empty_and_contains_dot() {
+        let ts = SwarmLogger::timestamp();
+        assert!(!ts.is_empty());
+        assert!(ts.contains('.'), "got: {ts}");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn log_filters_below_current_level() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation serialized via ENV_LOCK
+        unsafe {
+            std::env::set_var("SWARM_LOG_LEVEL", "ERROR");
+        }
+        // These should be filtered out -- mostly we're checking they don't panic.
+        SwarmLogger::log(LogLevel::Debug, "test", "should be filtered");
+        SwarmLogger::log(LogLevel::Info, "test", "should be filtered");
+        SwarmLogger::log_with_context(
+            LogLevel::Debug,
+            "test",
+            &[("k", "v")],
+            "should be filtered",
+        );
+        // This one passes the level filter:
+        SwarmLogger::log(LogLevel::Error, "test", "should emit");
+        SwarmLogger::log_with_context(
+            LogLevel::Error,
+            "test",
+            &[("k", "v")],
+            "should emit",
+        );
+        unsafe {
+            std::env::remove_var("SWARM_LOG_LEVEL");
+        }
+    }
+
+    #[test]
+    fn level_helper_methods_do_not_panic() {
+        // Just exercise each helper for line coverage.
+        SwarmLogger::error("cat", "e");
+        SwarmLogger::warn("cat", "w");
+        SwarmLogger::info("cat", "i");
+        SwarmLogger::debug("cat", "d");
+        SwarmLogger::trace("cat", "t");
+    }
+}

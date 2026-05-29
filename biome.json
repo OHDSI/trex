@@ -1,0 +1,51 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
+  "files": {
+    "includes": [
+      "core/**/*.ts",
+      "core/**/*.tsx",
+      "core/**/*.js",
+      "core/**/*.mjs",
+      "plugins/*/functions/**/*.ts",
+      "plugins/*/functions/**/*.tsx",
+      "plugins/*/functions/**/*.js",
+      "plugins/*/src/**/*.ts",
+      "plugins/*/src/**/*.tsx",
+      "scripts/**/*.ts",
+      "scripts/**/*.mjs",
+      "deploy/**/*.ts",
+      "deploy/**/*.mjs",
+      "!**/node_modules/**",
+      "!**/dist/**",
+      "!**/build/**",
+      "!**/.next/**",
+      "!**/monaco/**",
+      "!**/public/**",
+      "!**/coverage/**"
+    ]
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "recommended": false,
+      "correctness": {
+        "noUnusedVariables": "error",
+        "noUnusedImports": "error",
+        "noUnusedFunctionParameters": "off",
+        "noUnusedPrivateClassMembers": "error",
+        "noPrecisionLoss": "error"
+      },
+      "suspicious": {
+        "noConfusingVoidType": "error",
+        "noDuplicateObjectKeys": "error",
+        "noSelfCompare": "error",
+        "noDoubleEquals": "error",
+        "noFallthroughSwitchClause": "error"
+      },
+      "style": {
+        "useTemplate": "off",
+        "noParameterAssign": "off"
+      }
+    }
+  }
+}

@@ -38,7 +38,7 @@ If HADES package defaults change, this file may need updates.
 from __future__ import annotations
 import json
 import math
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Any, Optional, Union
 
 

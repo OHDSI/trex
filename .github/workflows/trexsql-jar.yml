@@ -34,14 +34,9 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Download libtrexsql
-        working-directory: .
-        run: |
-          mkdir -p /tmp/trexsql
-          wget -q -O /tmp/libtrexsql.zip \
-            https://github.com/p-hoffmann/trexsql-rs/releases/download/${{ env.TREXSQL_VERSION }}/libtrexsql-linux-amd64.zip
-          unzip -o /tmp/libtrexsql.zip -d /tmp/trexsql
-          ln -sf /tmp/trexsql/libtrexsql.so /tmp/trexsql/libduckdb.so
+      - uses: ./.github/actions/setup-libtrexsql
+        with:
+          version: ${{ env.TREXSQL_VERSION }}
 
       - name: Build native library
         working-directory: .
@@ -53,7 +48,7 @@ jobs:
         run: |
           mkdir -p resources/linux-x86-64
           cp ../../../target/release/libtrexsql_engine.so resources/linux-x86-64/
-          cp /tmp/trexsql/libtrexsql.so resources/linux-x86-64/libduckdb.so
+          cp /tmp/trexsql/libtrexsql.so resources/linux-x86-64/
 
       - name: Install Leiningen
         run: |

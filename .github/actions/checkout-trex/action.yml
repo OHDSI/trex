@@ -1,0 +1,39 @@
+name: "Init trex submodules"
+description: >
+  Initialize only the specified git submodules (with retry). Clears the per-repo
+  auth header that `actions/checkout` injects so cross-repo public submodules
+  (storage, studio, pg-meta, circe-be, llama.cpp, etc.) can clone reliably —
+  the injected basic-auth token is scoped to the source repo and otherwise 401s
+  for other repos, surfacing as `could not read Username for 'https://github.com'`.
+
+  Must run AFTER `actions/checkout@v4` (this action lives inside the repo, so
+  the checkout has to land first).
+
+inputs:
+  paths:
+    description: "Space-separated submodule paths to init."
+    required: true
+
+runs:
+  using: "composite"
+  steps:
+    - name: Init submodules
+      shell: bash
+      env:
+        SUBMODULE_PATHS: ${{ inputs.paths }}
+      run: |
+        set -u
+        git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+        git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+
+        for attempt in 1 2 3; do
+          if git submodule update --init --depth=1 --recursive --force $SUBMODULE_PATHS; then
+            echo "Submodule init succeeded on attempt $attempt"
+            exit 0
+          fi
+          sleep_for=$((attempt * 10))
+          echo "Submodule init attempt $attempt failed; retrying in ${sleep_for}s..."
+          sleep "$sleep_for"
+        done
+        echo "::error::Submodule init failed after 3 attempts for: $SUBMODULE_PATHS"
+        exit 1

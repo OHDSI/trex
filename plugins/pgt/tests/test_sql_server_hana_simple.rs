@@ -3,6 +3,9 @@ use pgt::SqlTransformer;
 use std::env;
 use std::sync::Once;
 
+#[cfg(feature = "hana-it")]
+mod common;
+
 static INIT: Once = Once::new();
 
 /// Initialize test environment by loading .env file
@@ -14,44 +17,44 @@ fn init_test_env() {
 
 fn get_hana_connection() -> Result<Connection, Box<dyn std::error::Error>> {
     init_test_env();
-    
+
     let hana_url = env::var("HANA_URL")
         .map_err(|_| "HANA_URL environment variable not found in .env file")?;
-    
+
     // Parse HANA URL: hdbsql://user:password@host:port/database
     let url_parts: Vec<&str> = hana_url.split("://").collect();
     if url_parts.len() != 2 {
         return Err("Invalid HANA_URL format. Expected: hdbsql://user:password@host:port/database".into());
     }
-    
+
     let connection_part = url_parts[1];
     let auth_and_host: Vec<&str> = connection_part.split('@').collect();
     if auth_and_host.len() != 2 {
         return Err("Invalid HANA_URL format. Missing @ separator".into());
     }
-    
+
     let auth_part = auth_and_host[0];
     let host_part = auth_and_host[1];
-    
+
     let credentials: Vec<&str> = auth_part.split(':').collect();
     if credentials.len() != 2 {
         return Err("Invalid HANA_URL format. Missing credentials".into());
     }
-    
+
     let user = credentials[0];
     let password = credentials[1];
-    
+
     let host_and_port: Vec<&str> = host_part.split('/').collect();
     if host_and_port.is_empty() {
         return Err("Invalid HANA_URL format. Missing host".into());
     }
-    
+
     let host_port = host_and_port[0];
     let host_port_parts: Vec<&str> = host_port.split(':').collect();
     if host_port_parts.len() != 2 {
         return Err("Invalid HANA_URL format. Missing port".into());
     }
-    
+
     let host = host_port_parts[0];
     let port: u16 = host_port_parts[1].parse()
         .map_err(|_| "Invalid port number in HANA_URL")?;
@@ -70,16 +73,16 @@ fn get_hana_connection() -> Result<Connection, Box<dyn std::error::Error>> {
 
 fn execute_hana_query(query: &str) -> Result<(), Box<dyn std::error::Error>> {
     let conn = get_hana_connection()?;
-    
+
     // For SELECT queries, we need to handle the result differently
     if query.trim().to_uppercase().starts_with("SELECT") {
         let result = conn.query(query).map_err(|e| -> Box<dyn std::error::Error> {
             format!("Failed to execute HANA query: {}\nQuery: {}", e, query).into()
         })?;
-        
+
         // Just consume the result to verify it works
         let _rows: Vec<_> = result.collect();
-        
+
         println!(
             "✓ HANA query executed successfully: {}",
             query.lines().next().unwrap_or(query)
@@ -89,13 +92,13 @@ fn execute_hana_query(query: &str) -> Result<(), Box<dyn std::error::Error>> {
         conn.exec(query).map_err(|e| -> Box<dyn std::error::Error> {
             format!("Failed to execute HANA query: {}\nQuery: {}", e, query).into()
         })?;
-        
+
         println!(
             "✓ HANA query executed successfully: {}",
             query.lines().next().unwrap_or(query)
         );
     }
-    
+
     Ok(())
 }
 
@@ -270,12 +273,20 @@ fn test_string_position_pattern() -> Result<(), Box<dyn std::error::Error>> {
 
 // Test 11: SQL Server pattern - FLOOR function (using PostgreSQL FLOOR)
 #[test]
+#[cfg_attr(not(feature = "hana-it"), ignore = "requires --features hana-it (testcontainers HANA)")]
 fn test_floor_function_pattern() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = "SELECT 
+    #[cfg(feature = "hana-it")]
+    {
+        let hana = common::hana_container::start_hana();
+        std::env::set_var("HANA_URL", &hana.url);
+
+        let sql = "SELECT
                FLOOR(123.456) as floored_value,
                FLOOR(789.123 * 0.1) as ten_percent_floor
                FROM DUMMY";
-    test_transformation_and_execution("floor function pattern", sql, &["FLOOR"])
+        test_transformation_and_execution("floor function pattern", sql, &["FLOOR"])?;
+    }
+    Ok(())
 }
 
 // Test 12: Complex SQL Server pattern combination (transformation only)
@@ -307,27 +318,36 @@ fn test_complex_sql_server_patterns() -> Result<(), Box<dyn std::error::Error>> 
 
 // Test to verify environment loading
 #[test]
+#[cfg_attr(not(feature = "hana-it"), ignore = "requires --features hana-it (testcontainers HANA)")]
 fn test_env_loading() -> Result<(), Box<dyn std::error::Error>> {
-    init_test_env();
-    
-    let hana_url = env::var("HANA_URL")
-        .map_err(|_| "HANA_URL environment variable not found in .env file")?;
-    
-    println!("✅ HANA_URL loaded from .env: {}", hana_url);
-    
-    // Verify URL format
-    assert!(hana_url.starts_with("hdbsql://"), "HANA_URL should start with hdbsql://");
-    assert!(hana_url.contains("@"), "HANA_URL should contain @ separator");
-    assert!(hana_url.contains(":"), "HANA_URL should contain : separator");
-    
-    println!("✅ HANA_URL format validation passed");
-    
+    #[cfg(feature = "hana-it")]
+    {
+        let hana = common::hana_container::start_hana();
+        let hana_url = &hana.url;
+
+        println!("✅ HANA URL from testcontainers: {}", hana_url);
+
+        // Verify URL format
+        assert!(hana_url.starts_with("hdbsql://"), "HANA_URL should start with hdbsql://");
+        assert!(hana_url.contains("@"), "HANA_URL should contain @ separator");
+        assert!(hana_url.contains(":"), "HANA_URL should contain : separator");
+
+        println!("✅ HANA_URL format validation passed");
+    }
     Ok(())
 }
 
 // Test basic HANA connection
 #[test]
+#[cfg_attr(not(feature = "hana-it"), ignore = "requires --features hana-it (testcontainers HANA)")]
 fn test_hana_connection() -> Result<(), Box<dyn std::error::Error>> {
-    let sql = "SELECT 1 AS test_value FROM DUMMY";
-    test_transformation_and_execution("basic HANA connection", sql, &["SELECT", "FROM"])
+    #[cfg(feature = "hana-it")]
+    {
+        let hana = common::hana_container::start_hana();
+        std::env::set_var("HANA_URL", &hana.url);
+
+        let sql = "SELECT 1 AS test_value FROM DUMMY";
+        test_transformation_and_execution("basic HANA connection", sql, &["SELECT", "FROM"])?;
+    }
+    Ok(())
 }

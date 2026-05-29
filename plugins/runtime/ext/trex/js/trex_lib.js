@@ -14,7 +14,6 @@ const {
 	op_create_session,
 	op_destroy_session,
 	op_execute_query_session,
-	op_execute_query_pinned,
 	op_exit,
 	op_get_dbc,
 	op_set_dbc,

@@ -11,6 +11,9 @@ import socket
 import time
 
 import pytest
+import logging
+
+logger = logging.getLogger(__name__)
 
 # HANA Express requires TLS — use hdbsqls:// with insecure cert check skipped
 HANA_TEST_URL = os.environ.get(
@@ -96,8 +99,8 @@ def test_hana_execute_ddl(node_factory):
             node.execute(
                 f"SELECT trex_hana_execute('{HANA_TEST_URL}', 'DROP TABLE {table_name}')"
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 def test_hana_scan_multi_column(node_factory):
@@ -174,8 +177,8 @@ def test_hana_execute_multi_statement(node_factory):
                 node.execute(
                     f"SELECT trex_hana_execute('{HANA_TEST_URL}', 'DROP TABLE {t}')"
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug("ignoring %s: %s", type(e).__name__, e)
 
 
 def test_hana_execute_error_propagation(node_factory):
@@ -216,16 +219,16 @@ def _ensure_test_schema(node):
             f"SELECT trex_hana_execute('{HANA_TEST_URL}', "
             f"'CREATE SCHEMA {ATTACH_SCHEMA}')"
         )
-    except RuntimeError:
-        pass  # already exists
+    except RuntimeError as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     # Drop and recreate to ensure correct schema
     try:
         node.execute(
             f"SELECT trex_hana_execute('{HANA_TEST_URL}', "
             f"'DROP TABLE {ATTACH_SCHEMA}.T1')"
         )
-    except RuntimeError:
-        pass  # doesn't exist
+    except RuntimeError as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     node.execute(
         f"SELECT trex_hana_execute('{HANA_TEST_URL}', "
         f"'CREATE TABLE {ATTACH_SCHEMA}.T1 (ID INT, NAME NVARCHAR(50))')"
@@ -369,5 +372,5 @@ def test_hana_attach_empty_schema(node_factory):
 def test_hana_detach_nonexistent(node_factory):
     """trex_hana_detach() on a non-existent attachment returns 0 tables detached."""
     node = node_factory(load_hana=True, load_db=False)
-    result = node.execute(f"SELECT trex_hana_detach('nonexistent', 'NOPE')")
+    result = node.execute("SELECT trex_hana_detach('nonexistent', 'NOPE')")
     assert "Detached 0 tables" in result[0][0]

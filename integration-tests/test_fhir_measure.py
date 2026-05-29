@@ -13,7 +13,10 @@ import uuid
 
 import pytest
 
-from conftest import CQL2ELM_EXT, FHIR_EXT, Node, alloc_ports
+from conftest import FHIR_EXT, Node, alloc_ports
+import logging
+
+logger = logging.getLogger(__name__)
 
 os.environ.setdefault("FHIR_POOL_SIZE", "1")
 
@@ -271,8 +274,8 @@ def fhir():
             s, _, _ = client.get("/health")
             if s == 200:
                 break
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("ignoring %s: %s", type(e).__name__, e)
         time.sleep(0.5)
     else:
         node.close()
@@ -282,8 +285,8 @@ def fhir():
 
     try:
         node.execute(f"SELECT trex_fhir_stop('127.0.0.1', {fhir_port})")
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("ignoring %s: %s", type(e).__name__, e)
     node.close()
 
 
