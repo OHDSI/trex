@@ -97,6 +97,7 @@ jobs:
           - PKGPATH: ./plugins/ai
             RUNNER: ubuntu-24.04
           - PKGPATH: ./plugins/pgwire
+          - PKGPATH: ./plugins/hades
           - PKGPATH: ./plugins/tpm
           - PKGPATH: ./plugins/migration
           - PKGPATH: ./plugins/db
@@ -327,6 +328,7 @@ jobs:
         include:
           - PKGPATH: ./plugins/hana
           - PKGPATH: ./plugins/pgwire
+          - PKGPATH: ./plugins/hades
           - PKGPATH: ./plugins/tpm
           - PKGPATH: ./plugins/migration
           - PKGPATH: ./plugins/db
