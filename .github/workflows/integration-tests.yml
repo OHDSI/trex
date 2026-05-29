@@ -75,7 +75,7 @@ jobs:
             tool: deno
             apt: libopenblas-dev
             artifact: plugins/runtime/build/debug/extension/trexas/trexas.trex
-            timeout: 30
+            timeout: 60
 
           - plugin: atlas
             target: release
