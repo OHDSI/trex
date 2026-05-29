@@ -45,8 +45,6 @@ services:
       POSTGRES_DB: testdb
     volumes:
       - core-pgdata:/var/lib/postgresql/data
-      - ./core/seed.sql:/docker-entrypoint-initdb.d/seed.sql
-      - ./core/schema:/docker-entrypoint-initdb.d/schema
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -61,18 +59,12 @@ services:
       - 8001:8001
       - 5433:5432
     volumes:
+      # Only named volumes / generated state — no host source is required.
+      # Everything previously bind-mounted here (core/server, core/schema,
+      # plugins-dev/{storage,studio,web,pg-meta}, runtime deno.json) is baked
+      # into the published image, so the stack runs straight from ghcr.
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
-      - ./core/server:/usr/src/core/server
-      # Schema migrations: mount host dir so new V*.sql files added after the
-      # image was built actually get applied. Without this, only the migrations
-      # baked into the image at build time exist in /usr/src/core/schema.
-      - ./core/schema:/usr/src/core/schema
-      - ./plugins/storage:/usr/src/plugins-dev/storage
-      - ./plugins/studio:/usr/src/plugins-dev/studio
-      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
-      - ./plugins/web:/usr/src/plugins-dev/web
-      - ./plugins/pg-meta:/usr/src/plugins-dev/pg-meta
       # Shared with the studio sidecar: Studio's deploy writes here, trex reads.
       - studio-edge-functions:/app/edge-functions
     depends_on:
@@ -135,13 +127,16 @@ services:
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
 
   # Studio sidecar — internal-only; trex proxies /plugins/trex/studio/** to it.
+  # Runs from the published image (the trex-specific entrypoint + key-fetch
+  # helper are baked in). To build/refresh it locally for testing:
+  #   docker build plugins/studio/supabase-studio \
+  #     -f plugins/studio/supabase-studio/apps/studio/Dockerfile \
+  #     --target production \
+  #     --build-arg NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio \
+  #     -t ghcr.io/ohdsi/trex-studio:latest
   studio:
-    build:
-      context: ./plugins/studio/supabase-studio
-      dockerfile: apps/studio/Dockerfile
-      target: production
-      args:
-        NEXT_PUBLIC_BASE_PATH: /plugins/trex/studio
+    image: ghcr.io/ohdsi/trex-studio:latest
+    platform: linux/amd64
     container_name: trex-studio
     restart: unless-stopped
     # NOT exposing a host port: direct access would bypass trex's admin-only gate.
@@ -151,9 +146,9 @@ services:
       trex:
         condition: service_healthy
     volumes:
-      # Wrapper entrypoint fetches SUPABASE_ANON_KEY / SUPABASE_SERVICE_KEY from trex.setting at boot.
-      - ./plugins/studio/supabase-studio/apps/studio/docker-entrypoint.sh:/usr/local/bin/docker-entrypoint.sh:ro
-      - ./plugins/studio/supabase-studio/apps/studio/fetch-trex-keys.cjs:/app/apps/studio/fetch-trex-keys.cjs:ro
+      # The wrapper entrypoint + fetch-trex-keys.cjs (which read
+      # SUPABASE_ANON_KEY / SUPABASE_SERVICE_KEY from trex.setting at boot) are
+      # baked into the image, so no host bind mounts are needed here.
       - studio-snippets:/app/snippets
       - studio-edge-functions:/app/edge-functions
     healthcheck:
