@@ -86,7 +86,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 # Deno is required by docker/trex-init-entrypoint.sh (runs scripts/derive-secrets.ts)
-# and by the runtime extension. Install to /usr/local/bin so it's on PATH.
+# and by the runtime extension. Install to /usr/local/bin so it's on PATH for the
+# trex-init compose service.
 RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --yes \
     && /usr/local/bin/deno --version
 

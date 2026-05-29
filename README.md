@@ -1,6 +1,6 @@
 # Trex
 
-A self-hosted backend platform that combines a Supabase-compatible API surface with an embedded analytical column-store, packaged as a single binary.
+A self-hosted backend platform that combines a Supabase-compatible API surface with an embedded analytical column-store.
 
 Trex preserves the Supabase wire contracts for Auth, REST, and Functions, so existing clients and tooling work unchanged. On top of that it embeds an analytical engine you can point at Parquet on S3, BigQuery, ClickHouse, another Postgres, and other sources — queried in the same SQL as your application data.
 
