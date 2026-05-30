@@ -20,3 +20,4 @@ tracing = "0.1"
 arrow-ipc = "57"
 arrow-schema = "57"
 arrow-array = "57"
+trex-db-client = { path = "../db-client" }

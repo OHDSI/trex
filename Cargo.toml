@@ -15,6 +15,7 @@ path = "src/main.rs"
 duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex" }
 signal-hook = "0.3"
 hex = "0.4"
+serde_json = "1"
 
 [profile.release]
 lto = true

@@ -30,9 +30,12 @@ pub mod shuffle_reader;
 pub mod shuffle_optimizer;
 pub mod flight_server;
 pub mod flight_functions;
+pub mod flight_sessions;
 pub mod server_registry;
 pub mod partition;
 pub mod pool;
+pub mod remote_endpoint;
+pub mod remote_session;
 
 use duckdb::{
     core::{DataChunkHandle, Inserter, LogicalTypeHandle, LogicalTypeId},
@@ -1605,8 +1608,8 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
 
     if let Ok(config) = config::ClusterConfig::from_env() {
         if let Some((node_name, node_cfg)) = config::get_this_node_config(&config) {
-            let addr: std::net::SocketAddr = match node_cfg.gossip_addr.parse() {
-                Ok(a) => a,
+            let (host, port) = match crate::config::parse_host_port(&node_cfg.gossip_addr) {
+                Ok(hp) => hp,
                 Err(_) => return Ok(()),
             };
 
@@ -1620,8 +1623,8 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
             let data_node = if node_cfg.data_node { "true" } else { "false" };
 
             let _ = GossipRegistry::instance().start(
-                &addr.ip().to_string(),
-                addr.port(),
+                &host,
+                port,
                 &config.cluster_id,
                 node_name,
                 data_node,

@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::env;
-use std::net::SocketAddr;
 
 /// Cluster configuration parsed from the `SWARM_CONFIG` env var.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -106,17 +105,28 @@ impl ClusterConfig {
             return Err("cluster_id must be non-empty".to_string());
         }
 
-        let mut seen_addrs: HashSet<SocketAddr> = HashSet::new();
+        let mut seen_addrs: HashSet<String> = HashSet::new();
 
         for (name, node) in &self.nodes {
-            let addr: SocketAddr = node.gossip_addr.parse().map_err(|e| {
+            let (host, port) = parse_host_port(&node.gossip_addr).map_err(|e| {
                 format!(
-                    "node '{name}': gossip_addr '{}' is not a valid SocketAddr: {e}",
+                    "node '{name}': gossip_addr '{}' is invalid: {e}",
                     node.gossip_addr
                 )
             })?;
-
-            if !seen_addrs.insert(addr) {
+            if host.is_empty() {
+                return Err(format!(
+                    "node '{name}': gossip_addr '{}' has empty host",
+                    node.gossip_addr
+                ));
+            }
+            if port == 0 {
+                return Err(format!(
+                    "node '{name}': gossip_addr '{}' has invalid port 0",
+                    node.gossip_addr
+                ));
+            }
+            if !seen_addrs.insert(node.gossip_addr.clone()) {
                 return Err(format!(
                     "node '{name}': gossip_addr '{}' is a duplicate (already used by another node)",
                     node.gossip_addr
@@ -161,6 +171,26 @@ impl ClusterConfig {
 
         Ok(())
     }
+}
+
+/// Parse a `host:port` string. Accepts hostnames, IPv4 literals, and bracketed
+/// IPv6 (`[::1]:4200`). Returns `(host, port)`.
+pub(crate) fn parse_host_port(s: &str) -> Result<(String, u16), String> {
+    // Bracketed IPv6: [::1]:4200
+    if let Some(stripped) = s.strip_prefix('[') {
+        let end = stripped.find(']').ok_or("missing ']'")?;
+        let host = &stripped[..end];
+        let rest = &stripped[end + 1..];
+        let port_str = rest.strip_prefix(':').ok_or("missing ':' after ']'")?;
+        let port: u16 = port_str.parse().map_err(|e| format!("invalid port: {e}"))?;
+        return Ok((host.to_string(), port));
+    }
+    // hostname or IPv4: split on the last ':' so we tolerate host names containing nothing weird.
+    let idx = s.rfind(':').ok_or("missing ':'")?;
+    let host = &s[..idx];
+    let port_str = &s[idx + 1..];
+    let port: u16 = port_str.parse().map_err(|e| format!("invalid port: {e}"))?;
+    Ok((host.to_string(), port))
 }
 
 pub fn get_node_name() -> Result<String, String> {
@@ -252,11 +282,23 @@ mod tests {
     fn invalid_gossip_addr_rejected() {
         let json = r#"{
             "cluster_id": "c",
-            "nodes": { "n": { "gossip_addr": "not-a-socket-addr" } }
+            "nodes": { "n": { "gossip_addr": "no-port-here" } }
         }"#;
         let err = ClusterConfig::from_json(json).unwrap_err();
         assert!(err.contains("gossip_addr"), "error was: {err}");
-        assert!(err.contains("not-a-socket-addr"), "error was: {err}");
+        assert!(err.contains("no-port-here"), "error was: {err}");
+    }
+
+    #[test]
+    fn hostname_gossip_addr_accepted() {
+        let json = r#"{
+            "cluster_id": "c",
+            "nodes": {
+                "a": { "gossip_addr": "trex-data:4200" },
+                "b": { "gossip_addr": "trex-server:4200" }
+            }
+        }"#;
+        assert!(ClusterConfig::from_json(json).is_ok());
     }
 
     #[test]

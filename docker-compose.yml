@@ -8,6 +8,22 @@
 # and every issued JWT.
 # ---------------------------------------------------------------------------
 
+x-swarm-config: &swarm-config
+  SWARM_CONFIG: >-
+    {"cluster_id":"local","nodes":{
+      "data":{
+        "gossip_addr":"trex-data:4200","data_node":true,
+        "extensions":[
+          {"name":"flight","config":{"host":"0.0.0.0","port":50051}}
+        ]},
+      "server":{
+        "gossip_addr":"trex-server:4200","data_node":false,
+        "extensions":[
+          {"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server","event_worker_path":"/usr/src/core/event","tls_port":8000,"tls_cert_path":"/usr/src/server.crt","tls_key_path":"/usr/src/server.key"}},
+          {"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}
+        ]}
+    }}
+
 volumes:
   core-pgdata:
   claude-config:
@@ -51,20 +67,19 @@ services:
       timeout: 5s
       retries: 10
 
-  trex:
+  trex-data:
     image: ghcr.io/ohdsi/trexsql:latest
     platform: linux/amd64
-    ports:
-      - 8000:8000
-      - 8001:8001
-      - 5433:5432
     volumes:
-      # Only named volumes / generated state — no host source is required.
-      # Everything previously bind-mounted here (core/server, core/schema,
-      # plugins-dev/{storage,studio,web,pg-meta}, runtime deno.json) is baked
-      # into the published image, so the stack runs straight from ghcr.
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
+      - ./core/server:/usr/src/core/server
+      - ./core/schema:/usr/src/core/schema
+      - ./plugins/storage:/usr/src/plugins-dev/storage
+      - ./plugins/studio:/usr/src/plugins-dev/studio
+      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
+      - ./plugins/web:/usr/src/plugins-dev/web
+      - ./plugins/pg-meta:/usr/src/plugins-dev/pg-meta
       # Shared with the studio sidecar: Studio's deploy writes here, trex reads.
       - studio-edge-functions:/app/edge-functions
     depends_on:
@@ -78,6 +93,50 @@ services:
       - path: ./secrets/derived.env
         required: false
     environment:
+      <<: *swarm-config
+      SWARM_NODE: data
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
+      SCHEMA_DIR: /usr/src/core/schema
+      PLUGINS_PATH: /usr/src/plugins
+      PLUGINS_DEV_PATH: /usr/src/plugins-dev
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 50051"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  trex-server:
+    image: ghcr.io/ohdsi/trexsql:latest
+    platform: linux/amd64
+    ports:
+      - 8000:8000
+      - 8001:8001
+      - 5433:5432
+    volumes:
+      - claude-config:/home/node/.claude
+      - gh-config:/home/node/.config/gh
+      - ./core/server:/usr/src/core/server
+      - ./plugins/storage:/usr/src/plugins-dev/storage
+      - ./plugins/studio:/usr/src/plugins-dev/studio
+      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
+      - ./plugins/web:/usr/src/plugins-dev/web
+      - ./plugins/pg-meta:/usr/src/plugins-dev/pg-meta
+      # Shared with the studio sidecar: Studio's deploy writes here, trex reads.
+      - studio-edge-functions:/app/edge-functions
+    depends_on:
+      trex-init:
+        condition: service_completed_successfully
+      trex-data:
+        condition: service_healthy
+    env_file:
+      - path: ./secrets/root.env
+        required: false
+      - path: ./secrets/derived.env
+        required: false
+    environment:
+      <<: *swarm-config
+      SWARM_NODE: server
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
       BASE_PATH: /trex
       BETTER_AUTH_URL: http://localhost:8001/trex
@@ -85,10 +144,6 @@ services:
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
       PLUGINS_DEV_PATH: /usr/src/plugins-dev
-      SCHEMA_DIR: /usr/src/core/schema
-      SWARM_CONFIG: >-
-        {"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[{"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server","event_worker_path":"/usr/src/core/event","tls_port":8000,"tls_cert_path":"/usr/src/server.crt","tls_key_path":"/usr/src/server.key"}},{"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}]}}}
-      SWARM_NODE: local
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: "3000"
       STUDIO_INTERNAL_URL: http://studio:3000
@@ -105,7 +160,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 30s
+      start_period: 60s
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
@@ -143,7 +198,7 @@ services:
     depends_on:
       trex-init:
         condition: service_completed_successfully
-      trex:
+      trex-server:
         condition: service_healthy
     volumes:
       # The wrapper entrypoint + fetch-trex-keys.cjs (which read
@@ -163,7 +218,7 @@ services:
         required: false
     environment:
       HOSTNAME: "0.0.0.0"
-      STUDIO_PG_META_URL: http://trex:8001/trex/pg/v1
+      STUDIO_PG_META_URL: http://trex-server:8001/trex/pg/v1
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: testdb
@@ -175,7 +230,7 @@ services:
       PGRST_DB_SCHEMAS: public,storage
       DEFAULT_ORGANIZATION_NAME: trex
       DEFAULT_PROJECT_NAME: default
-      SUPABASE_URL: http://trex:8001/trex
+      SUPABASE_URL: http://trex-server:8001/trex
       SUPABASE_PUBLIC_URL: http://localhost:8001/trex
       SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:-}
       SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY:-}

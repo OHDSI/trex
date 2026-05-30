@@ -20,136 +20,25 @@ fn redact_url(msg: &str) -> String {
     result
 }
 
-/// Start services from SWARM_CONFIG after all extensions are loaded.
-fn start_swarm_services(conn: &Connection, swarm_json: &str, swarm_node: &str) {
-    let node_key = format!("\"{}\"", swarm_node);
-    let node_start = match swarm_json.find(&node_key) {
-        Some(pos) => pos,
-        None => return,
+fn is_data_node() -> bool {
+    let cfg = match env::var("SWARM_CONFIG") {
+        Ok(v) => v,
+        Err(_) => return true, // standalone fallback
     };
-
-    let after_node = &swarm_json[node_start..];
-    let ext_start = match after_node.find("\"extensions\"") {
-        Some(pos) => node_start + pos,
-        None => return,
+    let node = match env::var("SWARM_NODE") {
+        Ok(v) => v,
+        Err(_) => return true,
     };
-
-    let rest = &swarm_json[ext_start..];
-    let arr_start = match rest.find('[') {
-        Some(pos) => ext_start + pos,
-        None => return,
+    let parsed: serde_json::Value = match serde_json::from_str(&cfg) {
+        Ok(v) => v,
+        Err(_) => return true,
     };
-
-    let arr_bytes = swarm_json[arr_start..].as_bytes();
-    let mut depth = 0i32;
-    let mut arr_end = arr_start;
-    for (i, &b) in arr_bytes.iter().enumerate() {
-        match b {
-            b'[' => depth += 1,
-            b']' => {
-                depth -= 1;
-                if depth == 0 {
-                    arr_end = arr_start + i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    let extensions_str = &swarm_json[arr_start..arr_end];
-    let mut pos = 0;
-    while let Some(name_start) = extensions_str[pos..].find("\"name\"") {
-        let abs = pos + name_start;
-        let after_name = &extensions_str[abs + 6..];
-        let colon = match after_name.find(':') {
-            Some(p) => p,
-            None => break,
-        };
-        let after_colon = &after_name[colon + 1..];
-        let q1 = match after_colon.find('"') {
-            Some(p) => p,
-            None => break,
-        };
-        let after_q1 = &after_colon[q1 + 1..];
-        let q2 = match after_q1.find('"') {
-            Some(p) => p,
-            None => break,
-        };
-        let ext_name = &after_q1[..q2];
-
-        let search_start = abs + 6 + colon + 1 + q1 + 1 + q2 + 1;
-        let remaining = &extensions_str[search_start..];
-
-        let config_json = if let Some(cfg_pos) = remaining.find("\"config\"") {
-            let after_cfg = &remaining[cfg_pos + 8..];
-            if let Some(brace) = after_cfg.find('{') {
-                let obj_start_abs = search_start + cfg_pos + 8 + brace;
-                let obj_bytes = extensions_str[obj_start_abs..].as_bytes();
-                let mut d = 0i32;
-                let mut obj_end = obj_start_abs;
-                for (i, &b) in obj_bytes.iter().enumerate() {
-                    match b {
-                        b'{' => d += 1,
-                        b'}' => {
-                            d -= 1;
-                            if d == 0 {
-                                obj_end = obj_start_abs + i + 1;
-                                break;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Some(extensions_str[obj_start_abs..obj_end].to_string())
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
-        if let Some(cfg) = &config_json {
-            let start_sql = match ext_name {
-                "trexas" => {
-                    let escaped = cfg.replace('\'', "''");
-                    Some(format!("SELECT trex_start_server_with_config('{escaped}')"))
-                }
-                "pgwire" => {
-                    let v: Vec<&str> = cfg.split('"').collect();
-                    let mut host = "0.0.0.0";
-                    let mut port = 5432u64;
-                    for i in 0..v.len() {
-                        if v[i] == "host" {
-                            if let Some(h) = v.get(i + 2) { host = h; }
-                        }
-                    }
-                    if let Some(p) = cfg.find("\"port\"") {
-                        let after = &cfg[p + 6..];
-                        if let Some(colon) = after.find(':') {
-                            let num_str: String = after[colon + 1..].chars()
-                                .skip_while(|c| c.is_whitespace())
-                                .take_while(|c| c.is_ascii_digit())
-                                .collect();
-                            if let Ok(p) = num_str.parse() { port = p; }
-                        }
-                    }
-                    Some(format!("SELECT start_pgwire_server('{host}', {port}, '', '')"))
-                }
-                _ => None,
-            };
-
-            if let Some(sql) = start_sql {
-                print!("Starting service '{ext_name}' ... ");
-                match conn.execute(&sql, []) {
-                    Ok(_) => println!("ok"),
-                    Err(e) => println!("FAILED: {e}"),
-                }
-            }
-        }
-
-        pos = search_start;
-    }
+    parsed
+        .get("nodes")
+        .and_then(|n| n.get(&node))
+        .and_then(|n| n.get("data_node"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
 }
 
 fn main() {
@@ -254,23 +143,18 @@ fn main() {
 
     // Run core schema migrations via the migration extension
     if let Ok(schema_dir) = env::var("SCHEMA_DIR") {
-        let safe_dir = schema_dir.replace('\'', "''");
-        let migration_sql = format!(
-            "SELECT * FROM trex_migration_run_schema('{safe_dir}', 'trexdb', '_config')"
-        );
-        print!("Running core schema migrations ... ");
-        match conn.execute(&migration_sql, []) {
-            Ok(_) => println!("ok"),
-            Err(e) => eprintln!("FAILED: {e}"),
-        }
-    }
-
-    // Re-run SWARM_CONFIG service startup after all extensions are loaded.
-    // The db.trex orchestrator runs during db.trex init (before trexas/pgwire
-    // are loaded), so its LOAD calls fail. Now all extensions are available.
-    if let Ok(swarm_json) = env::var("SWARM_CONFIG") {
-        if let Ok(swarm_node) = env::var("SWARM_NODE") {
-            start_swarm_services(&conn, &swarm_json, &swarm_node);
+        if is_data_node() {
+            let safe_dir = schema_dir.replace('\'', "''");
+            let migration_sql = format!(
+                "SELECT * FROM trex_migration_run_schema('{safe_dir}', 'trexdb', '_config')"
+            );
+            print!("Running core schema migrations ... ");
+            match conn.execute(&migration_sql, []) {
+                Ok(_) => println!("ok"),
+                Err(e) => eprintln!("FAILED: {e}"),
+            }
+        } else {
+            println!("Skipping schema migrations (this node is not a data node)");
         }
     }
 
