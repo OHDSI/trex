@@ -3,20 +3,53 @@ use crate::gossip::GossipRegistry;
 use crate::logging::SwarmLogger;
 use crate::service_functions::get_start_service_sql;
 
+/// Run a statement on a local connection (a clone of the node's main DuckDB
+/// connection, with all extensions already loaded).
+///
+/// Services belong to the node that hosts them, so they must be started here —
+/// NOT via `crate::pool` (the shared session pool), which on a server-only node
+/// is remote-backed and would run the start on a *different* node (and isn't
+/// even reachable until the cluster converges).
+fn run_local(sql: &str) -> Result<(), String> {
+    crate::local_connections::with_connection(|conn| {
+        conn.execute_batch(sql).map_err(|e| e.to_string())
+    })
+}
+
+/// Load a service's extension by full path and run its start statement on the
+/// SAME local connection.
+///
+/// Two reasons this must be one closure rather than two `run_local` calls:
+///   * Orchestration runs during db.trex's own load — before main.rs has
+///     loaded the later service extensions (trexas, pgwire, …) — and in this
+///     DuckDB build extension scalar functions are registered per connection,
+///     so the start function won't exist until we LOAD it here.
+///   * `with_connection` hands out connections round-robin, so a separate LOAD
+///     call could land on a different connection than the start.
+///
+/// The LOAD is best-effort: a service merged into an already-loaded extension
+/// (e.g. flight in db.trex) has no standalone file, and the subsequent start
+/// surfaces any genuinely-missing-function error.
+fn start_service_local(ext_name: &str, start_sql: &str) -> Result<(), String> {
+    let ext_dir = std::env::var("EXTENSION_DIR")
+        .unwrap_or_else(|_| "/usr/lib/trexsql/extensions".to_string())
+        .replace('\'', "''");
+    let load_sql = format!("LOAD '{ext_dir}/{ext_name}.trex'");
+    crate::local_connections::with_connection(|conn| {
+        let _ = conn.execute_batch(&load_sql);
+        conn.execute_batch(start_sql).map_err(|e| e.to_string())
+    })
+}
+
 /// Load extensions, start their services, and publish endpoints to gossip.
 pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
-    // Probe the pool extension by leasing a session.
-    match trex_pool_client::create_session() {
-        Ok(sid) => {
-            let _ = trex_pool_client::destroy_session(sid);
-        }
-        Err(_) => {
-            SwarmLogger::error("orchestrator", "Connection pool is not available");
-            return extensions
-                .iter()
-                .map(|ext| format!("{}: error — no shared connection", ext.name))
-                .collect();
-        }
+    // Probe a local connection — services for this node are started locally.
+    if let Err(e) = run_local("SELECT 1") {
+        SwarmLogger::error("orchestrator", &format!("Local connection not available: {e}"));
+        return extensions
+            .iter()
+            .map(|ext| format!("{}: error — no local connection", ext.name))
+            .collect();
     }
 
     let mut statuses: Vec<String> = Vec::with_capacity(extensions.len());
@@ -28,20 +61,7 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
             statuses.push(msg);
             continue;
         }
-        let load_sql = format!("LOAD '{}.trex'", ext.name);
         SwarmLogger::info("orchestrator", &format!("Loading extension: {}", ext.name));
-
-        // LOAD may fail if the extension is statically merged into another
-        // (e.g. flight is now part of db.trex — no separate flight.trex file).
-        // In that case the start_*_server functions are already registered
-        // and we proceed to the start step. A true failure (missing start
-        // function) will surface as a clean error in the start_sql lookup.
-        if let Err(e) = crate::pool::write(&load_sql) {
-            SwarmLogger::warn(
-                "orchestrator",
-                &format!("{}: LOAD failed ({e}); attempting start anyway", ext.name),
-            );
-        }
 
         let config_json = match &ext.config {
             Some(cfg) => serde_json::to_string(cfg).unwrap_or_else(|_| "{}".to_string()),
@@ -84,7 +104,17 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
             &format!("Starting service: {} on {}:{}", ext.name, host, port),
         );
 
-        if let Err(e) = crate::pool::write(&start_sql) {
+        // Flight's server is compiled into this (db) extension, so call the
+        // in-crate implementation directly. Every other service lives in its
+        // own .trex, which must be loaded onto the local connection before its
+        // start function can be called (see start_service_local).
+        let start_result = if ext.name == "flight" {
+            start_flight_service(&cfg_val)
+        } else {
+            start_service_local(&ext.name, &start_sql)
+        };
+
+        if let Err(e) = start_result {
             let msg = format!("{}: start failed — {}", ext.name, e);
             SwarmLogger::error("orchestrator", &msg);
             statuses.push(msg);
@@ -116,6 +146,30 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
     }
 
     statuses
+}
+
+/// Start the Arrow Flight server using the implementation compiled into this
+/// (db) extension.
+///
+/// Flight has no standalone `flight.trex`; its server lives in
+/// [`crate::flight_server`]. Calling it directly (rather than via a pooled SQL
+/// session) guarantees the registered server implementation is the one that
+/// actually runs, regardless of which extensions a given pool connection has
+/// loaded.
+fn start_flight_service(config: &serde_json::Value) -> Result<(), String> {
+    let host = config["host"].as_str().unwrap_or("0.0.0.0").to_string();
+    let port_u64 = config["port"].as_u64().unwrap_or(8815);
+    let port = u16::try_from(port_u64)
+        .map_err(|_| format!("port {port_u64} out of range (0-65535)"))?;
+
+    if config.get("cert_path").is_some() {
+        let cert = config["cert_path"].as_str().unwrap_or("");
+        let key = config["key_path"].as_str().unwrap_or("");
+        let ca = config["ca_cert_path"].as_str().unwrap_or("");
+        crate::flight_server::start_flight_server_with_tls(host, port, cert, key, ca).map(|_| ())
+    } else {
+        crate::flight_server::start_flight_server(host, port, false).map(|_| ())
+    }
 }
 
 /// Start distributed scheduler/executor based on node roles.
@@ -214,6 +268,16 @@ mod tests {
     }
 
     #[test]
+    fn start_flight_service_rejects_out_of_range_port() {
+        // The flight service is started via the in-crate implementation, not a
+        // pooled SQL session. Ports above u16 must be rejected before we ever
+        // attempt to bind.
+        let cfg = serde_json::json!({ "host": "0.0.0.0", "port": 70000 });
+        let err = start_flight_service(&cfg).unwrap_err();
+        assert!(err.contains("out of range"), "got: {err}");
+    }
+
+    #[test]
     fn start_sql_flight_tls() {
         let sql = get_start_service_sql(
             "flight",
@@ -308,7 +372,7 @@ mod tests {
         assert_eq!(statuses.len(), 2);
         for status in &statuses {
             assert!(
-                status.contains("no shared connection"),
+                status.contains("no local connection"),
                 "unexpected status: {status}"
             );
         }
@@ -334,7 +398,7 @@ mod tests {
         assert_eq!(statuses.len(), 5);
         for (i, status) in statuses.iter().enumerate() {
             assert!(status.starts_with(&format!("ext_{i}")), "got: {status}");
-            assert!(status.contains("no shared connection"), "got: {status}");
+            assert!(status.contains("no local connection"), "got: {status}");
         }
     }
 
@@ -527,7 +591,7 @@ mod tests {
 
     #[test]
     fn orchestrate_invalid_extension_name_short_circuits_loop() {
-        // When the pool probe fails, we get the no-shared-connection path.
+        // When the local-connection probe fails, we get the no-local-connection path.
         // To exercise the invalid-name branch we'd need a pool. With cargo test
         // --lib, pool is unavailable so we test the early-return path only.
         let extensions = vec![ExtensionConfig {

@@ -1498,9 +1498,36 @@ mod tests {
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     // Pool is initialized by the pool.trex extension (loaded before db).
     // Probe by leasing a session and immediately releasing it.
-    let probe_sid = trex_pool_client::create_session()
-        .map_err(|e| -> Box<dyn Error> { format!("trex_pool not loaded: {e}").into() })?;
-    let _ = trex_pool_client::destroy_session(probe_sid);
+    //
+    // On a data node the pool is local and ready the moment pool.trex has
+    // loaded, so a probe failure means the pool is genuinely broken — fail
+    // fast. On a server-only node the pool is remote-backed: create_session
+    // leases from a data node over Flight, discovered via gossip. But gossip
+    // for *this* node isn't started until later in this same entrypoint, so
+    // the probe cannot possibly succeed yet. Treat a probe failure as
+    // non-fatal there and let gossip start + service orchestration proceed;
+    // the remote pool becomes usable once the cluster converges.
+    let is_data_node = config::ClusterConfig::from_env()
+        .ok()
+        .and_then(|cfg| {
+            config::get_this_node_config(&cfg).map(|(_, node)| node.data_node)
+        })
+        .unwrap_or(true); // standalone / no swarm config => behave as data node
+
+    match trex_pool_client::create_session() {
+        Ok(probe_sid) => {
+            let _ = trex_pool_client::destroy_session(probe_sid);
+        }
+        Err(e) if is_data_node => {
+            return Err(format!("trex_pool not loaded: {e}").into());
+        }
+        Err(e) => {
+            eprintln!(
+                "db: deferring pool probe on non-data node (remote pool not \
+                 reachable until cluster converges): {e}"
+            );
+        }
+    }
 
     // Local connections for closure-based operations (ArrowVTab, appender)
     local_connections::init(&con, 4)
