@@ -2,6 +2,7 @@
   "WebAPI integration handlers with Reitit routing."
   (:require [trexsql.datamart :as datamart]
             [trexsql.jobs :as jobs]
+            [trexsql.study :as study]
             [trexsql.vocab :as vocab]
             [trexsql.circe :as circe]
             [trexsql.db :as db]
@@ -295,6 +296,18 @@
               :processedRows (:processed-rows job-status)}
    :error (:error-message job-status)})
 
+(defn- study-status->summary [study-status]
+  {:studyId (:study-id study-status)
+   :jobId (:job-execution-id study-status)
+   :status (:status study-status)
+   :startTime (str (:start-time study-status))
+   :endTime (when (:end-time study-status) (str (:end-time study-status)))
+   :progress {:currentModule (:current-module study-status)
+              :modulesCompleted (:modules-completed study-status)}
+   :envName (:env-name study-status)
+   :databaseName (:database-name study-status)
+   :error (:error-message study-status)})
+
 (defn- handle-get-cache-status [db source-key params]
   (let [source (find-source-by-key source-key)]
     (if-not source
@@ -389,6 +402,155 @@
             (if (.delete cache-file)
               (no-content)
               (internal-error "Failed to delete cache file"))))))))
+
+;; Study execution handlers
+
+(defn- handle-execute-study [db source-key body params]
+  (let [source (find-source-by-key source-key)]
+    (if-not source
+      (not-found (str "Source not found: " source-key))
+      (let [request (parse-json body)]
+        (if-not request
+          (bad-request "Invalid JSON body")
+          (let [required-fields [:analysisSpecPath :cdmDatabaseSchema :workDatabaseSchema
+                                 :outputPath :databaseName :envName :envBaseDir]
+                missing (filter #(str/blank? (get request %)) required-fields)]
+            (if (seq missing)
+              (bad-request (str "Missing required fields: " (str/join ", " (map name missing))))
+              (try
+                (let [result (study/execute-study! db
+                               {:source-key source-key
+                                :analysis-spec-path (:analysisSpecPath request)
+                                :cdm-database-schema (:cdmDatabaseSchema request)
+                                :work-database-schema (:workDatabaseSchema request)
+                                :output-path (:outputPath request)
+                                :database-name (:databaseName request)
+                                :env-name (:envName request)
+                                :env-base-dir (:envBaseDir request)})]
+                  (accepted {:success true
+                             :sourceKey source-key
+                             :studyId (:study-id result)
+                             :status "RUNNING"}))
+                (catch Exception e
+                  (internal-error (.getMessage e)))))))))))
+
+(defn- handle-get-study-status [db source-key params]
+  (let [source (find-source-by-key source-key)]
+    (if-not source
+      (not-found (str "Source not found: " source-key))
+      (let [study-id (:studyId params)]
+        (if (str/blank? study-id)
+          (bad-request "studyId parameter is required")
+          (let [study-status (try (jobs/get-study-status db study-id) (catch Exception _ nil))
+                terminal? (and study-status
+                               (contains? #{"COMPLETED" "FAILED" "CANCELLED"} (:status study-status)))
+                summary (when study-status (study-status->summary study-status))]
+            (ok {:sourceKey source-key
+                 :activeStudy (when (and summary (not terminal?)) summary)
+                 :lastStudy (when (and summary terminal?) summary)})))))))
+
+(defn- handle-cancel-study [db source-key params]
+  (let [source (find-source-by-key source-key)]
+    (if-not source
+      (not-found (str "Source not found: " source-key))
+      (let [study-id (:studyId params)]
+        (if (str/blank? study-id)
+          (bad-request "studyId parameter is required")
+          (let [study-status (try (jobs/get-study-status db study-id) (catch Exception _ nil))]
+            (cond
+              (nil? study-status)
+              (not-found (str "No study job found for: " study-id))
+
+              (not= "RUNNING" (:status study-status))
+              (conflict (str "Study is not running. Current status: " (:status study-status)))
+
+              :else
+              (do
+                (study/cancel-study! db study-id)
+                (ok {:studyId study-id
+                     :status "CANCELLED"
+                     :message "Study cancellation requested"})))))))))
+
+(defn- handle-list-study-jobs [db params]
+  (try
+    (let [status (:status params)
+          studies (if status
+                    (jobs/list-study-jobs db :status status)
+                    (jobs/list-study-jobs db))]
+      (ok {:studies (mapv (fn [s]
+                            {:studyId (:study-id s)
+                             :sourceKey (:source-key s)
+                             :status (:status s)
+                             :startTime (str (:start-time s))
+                             :endTime (when (:end-time s) (str (:end-time s)))
+                             :currentModule (:current-module s)
+                             :modulesCompleted (:modules-completed s)
+                             :envName (:env-name s)
+                             :databaseName (:database-name s)
+                             :error (:error-message s)})
+                          studies)
+           :count (count studies)}))
+    (catch Exception e
+      (internal-error (.getMessage e)))))
+
+(defn- execute-study-handler [request]
+  (let [{:keys [db path-params body-params query-params]} request]
+    (handle-execute-study db (:source-key path-params) body-params query-params)))
+
+(defn- get-study-status-handler [request]
+  (let [{:keys [db path-params query-params]} request]
+    (handle-get-study-status db (:source-key path-params) query-params)))
+
+(defn- cancel-study-handler [request]
+  (let [{:keys [db path-params query-params]} request]
+    (handle-cancel-study db (:source-key path-params) query-params)))
+
+(defn- list-study-jobs-handler [request]
+  (let [{:keys [db query-params]} request]
+    (handle-list-study-jobs db query-params)))
+
+(defn- handle-setup-env [db body params]
+  (let [request (parse-json body)]
+    (if-not request
+      (bad-request "Invalid JSON body")
+      (let [required-fields [:lockfilePath :envName :envBaseDir]
+            missing (filter #(str/blank? (get request %)) required-fields)]
+        (if (seq missing)
+          (bad-request (str "Missing required fields: " (str/join ", " (map name missing))))
+          (try
+            (let [result (study/setup-environment! db
+                           (:lockfilePath request)
+                           (:envName request)
+                           (:envBaseDir request))]
+              (if (= "ok" (:status result))
+                (ok result)
+                (internal-error (or (:error result) "Environment setup failed"))))
+            (catch Exception e
+              (internal-error (.getMessage e)))))))))
+
+(defn- setup-env-handler [request]
+  (let [{:keys [db body-params query-params]} request]
+    (handle-setup-env db body-params query-params)))
+
+(defn- handle-list-envs [db params]
+  (let [base-dir (:envBaseDir params)]
+    (if (str/blank? base-dir)
+      (bad-request "envBaseDir parameter is required")
+      (try
+        (let [sql (format "SELECT * FROM hades_envs('%s')"
+                          (clojure.string/replace base-dir "'" "''"))
+              results (db/query db sql)]
+          (ok {:environments (mapv (fn [^HashMap row]
+                                     {:envName (.get row "env_name")
+                                      :path (.get row "path")})
+                                   results)
+               :count (count results)}))
+        (catch Exception e
+          (internal-error (.getMessage e)))))))
+
+(defn- list-envs-handler [request]
+  (let [{:keys [db query-params]} request]
+    (handle-list-envs db query-params)))
 
 (defn- handle-execute-circe [db source-key body params]
   (let [source (find-source-by-key source-key)]
@@ -1016,6 +1178,9 @@
   (vec
     (concat
       [["/cache/jobs" {:get {:handler list-cache-jobs-handler}}]
+       ["/study/jobs" {:get {:handler list-study-jobs-handler}}]
+       ["/study/env" {:post {:handler setup-env-handler}}]
+       ["/study/envs" {:get {:handler list-envs-handler}}]
        ["/:source-key"
         ["/cache" {:post {:handler create-cache-handler}
                    :delete {:handler delete-cache-handler}}]
@@ -1024,6 +1189,9 @@
         ["/cache/inclusion" {:post {:handler count-inclusion-handler}}]
         ["/cache/table1" {:post {:handler table1-handler}}]
         ["/cache/job" {:delete {:handler cancel-cache-job-handler}}]
+        ["/study/execute" {:post {:handler execute-study-handler}}]
+        ["/study/status" {:get {:handler get-study-status-handler}}]
+        ["/study/cancel" {:delete {:handler cancel-study-handler}}]
         ["/circe/execute" {:post {:handler execute-circe-handler}}]
         ["/circe/render" {:post {:handler render-circe-handler}}]
         ["/vocab/search" {:get {:handler search-vocab-handler}}]]]

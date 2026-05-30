@@ -59,6 +59,22 @@
             retry_count       INTEGER DEFAULT 0,
             last_error        VARCHAR
           )"))
+        (db/execute! trexsql-db (str "
+          CREATE TABLE IF NOT EXISTS " jobs-db-name ".study_execution_info (
+            study_id          VARCHAR PRIMARY KEY,
+            job_execution_id  BIGINT,
+            source_key        VARCHAR NOT NULL,
+            status            VARCHAR NOT NULL,
+            start_time        TIMESTAMP,
+            end_time          TIMESTAMP,
+            current_module    VARCHAR,
+            modules_completed JSON,
+            error_message     VARCHAR,
+            env_name          VARCHAR,
+            database_name     VARCHAR,
+            analysis_spec     VARCHAR,
+            config            JSON
+          )"))
         (swap! jobs-db-initialized assoc file-path conn-hash)))
     jobs-db-name))
 
@@ -176,6 +192,100 @@
              :total-tables (.get row "total_tables")
              :completed-tables (.get row "completed_tables")
              :error-message (.get row "error_message")})
+          results)))
+
+(defn create-study-job!
+  "Insert study execution job record. Returns study-id."
+  [trexsql-db study-id {:keys [job-execution-id source-key env-name database-name analysis-spec config]}]
+  (let [jobs-db (get-jobs-db trexsql-db)
+        now (LocalDateTime/now)
+        config-json (when config (json/write-str config))]
+    (db/execute-with-params! trexsql-db
+      (str "INSERT OR REPLACE INTO " jobs-db ".study_execution_info "
+           "(study_id, job_execution_id, source_key, status, start_time, "
+           "current_module, modules_completed, env_name, database_name, "
+           "analysis_spec, config) "
+           "VALUES (?, ?, ?, 'RUNNING', ?, '', '[]', ?, ?, ?, ?)")
+      [study-id
+       job-execution-id
+       (or source-key "")
+       now
+       (or env-name "")
+       (or database-name "")
+       (or analysis-spec "")
+       config-json])
+    study-id))
+
+(defn update-study-progress!
+  "Update study execution progress from hades_status result."
+  [trexsql-db study-id {:keys [status current-module modules-completed error-message]}]
+  (let [jobs-db (get-jobs-db trexsql-db)
+        set-map (cond-> {}
+                  (some? status) (assoc :status status)
+                  (some? current-module) (assoc :current_module current-module)
+                  (some? modules-completed) (assoc :modules_completed (json/write-str modules-completed))
+                  (some? error-message) (assoc :error_message error-message))
+        terminal? (contains? #{"COMPLETED" "FAILED" "CANCELLED"} status)
+        set-map (if terminal? (assoc set-map :end_time (LocalDateTime/now)) set-map)]
+    (when (seq set-map)
+      (let [[update-sql & params] (sql/format
+                                    {:update (keyword (str jobs-db ".study_execution_info"))
+                                     :set set-map
+                                     :where [:= :study_id study-id]})]
+        (db/execute-with-params! trexsql-db update-sql (vec params))))))
+
+(defn get-study-status
+  "Get study execution status. Returns nil if not found."
+  [trexsql-db study-id]
+  (let [jobs-db (get-jobs-db trexsql-db)
+        [query-sql & params] (sql/format
+                               {:select [:*]
+                                :from [(keyword (str jobs-db ".study_execution_info"))]
+                                :where [:= :study_id study-id]})
+        results (db/query-with-params trexsql-db query-sql (vec params))]
+    (when (seq results)
+      (let [row (first results)]
+        {:study-id (.get ^HashMap row "study_id")
+         :job-execution-id (.get ^HashMap row "job_execution_id")
+         :source-key (.get ^HashMap row "source_key")
+         :status (.get ^HashMap row "status")
+         :start-time (.get ^HashMap row "start_time")
+         :end-time (.get ^HashMap row "end_time")
+         :current-module (.get ^HashMap row "current_module")
+         :modules-completed (parse-json-field (.get ^HashMap row "modules_completed"))
+         :error-message (.get ^HashMap row "error_message")
+         :env-name (.get ^HashMap row "env_name")
+         :database-name (.get ^HashMap row "database_name")
+         :analysis-spec (.get ^HashMap row "analysis_spec")
+         :config (parse-json-field (.get ^HashMap row "config"))}))))
+
+(defn list-study-jobs
+  "List study execution jobs, optionally filtered by status."
+  [trexsql-db & {:keys [status]}]
+  (let [jobs-db (get-jobs-db trexsql-db)
+        base-query {:select [:study_id :source_key :status :start_time :end_time
+                             :current_module :modules_completed :error_message
+                             :env_name :database_name]
+                    :from [(keyword (str jobs-db ".study_execution_info"))]
+                    :order-by [[:start_time :desc]]}
+        query (if status
+                (assoc base-query :where [:= :status status])
+                base-query)
+        [query-sql & params] (sql/format query)
+        results (if (seq params)
+                  (db/query-with-params trexsql-db query-sql (vec params))
+                  (db/query trexsql-db query-sql))]
+    (mapv (fn [^HashMap row]
+            {:study-id (.get row "study_id")
+             :source-key (.get row "source_key")
+             :status (.get row "status")
+             :start-time (.get row "start_time")
+             :end-time (.get row "end_time")
+             :current-module (.get row "current_module")
+             :modules-completed (parse-json-field (.get row "modules_completed"))
+             :error-message (.get row "error_message")
+             :env-name (.get row "env_name")
+             :database-name (.get row "database_name")})
           results)))
 
 (defn update-retry-status!

@@ -1,0 +1,11 @@
+[package]
+name = "hades-tests"
+version = "0.1.0"
+edition = "2021"
+
+# This crate runs the integration tests for the hades DuckDB extension.
+# It uses the bundled DuckDB (no loadable-extension) so that
+# Connection::open_in_memory() works in the test binary.
+
+[dependencies]
+duckdb = { git = "https://github.com/p-hoffmann/trexsql-rs", tag = "v1.4.4-trex", features = ["bundled"] }
