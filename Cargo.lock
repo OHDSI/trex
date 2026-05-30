@@ -1954,6 +1954,7 @@ version = "0.1.0"
 dependencies = [
  "duckdb",
  "hex",
+ "serde_json",
  "signal-hook",
 ]
 

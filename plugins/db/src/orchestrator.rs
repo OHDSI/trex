@@ -31,11 +31,16 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
         let load_sql = format!("LOAD '{}.trex'", ext.name);
         SwarmLogger::info("orchestrator", &format!("Loading extension: {}", ext.name));
 
+        // LOAD may fail if the extension is statically merged into another
+        // (e.g. flight is now part of db.trex — no separate flight.trex file).
+        // In that case the start_*_server functions are already registered
+        // and we proceed to the start step. A true failure (missing start
+        // function) will surface as a clean error in the start_sql lookup.
         if let Err(e) = crate::pool::write(&load_sql) {
-            let msg = format!("{}: load failed — {}", ext.name, e);
-            SwarmLogger::error("orchestrator", &msg);
-            statuses.push(msg);
-            continue;
+            SwarmLogger::warn(
+                "orchestrator",
+                &format!("{}: LOAD failed ({e}); attempting start anyway", ext.name),
+            );
         }
 
         let config_json = match &ext.config {

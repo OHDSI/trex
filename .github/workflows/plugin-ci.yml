@@ -580,6 +580,18 @@ jobs:
           build-args: |
             BASE_IMAGE=trexsql-test:prod
 
+      - name: Build amd64 studio image for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: plugins/studio/supabase-studio
+          file: plugins/studio/supabase-studio/apps/studio/Dockerfile
+          target: production
+          platforms: linux/amd64
+          load: true
+          tags: trex-studio-test:prod
+          build-args: |
+            NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio
+
       - name: Test extensions load (amd64 only)
         run: |
           OUTPUT=$(docker run --rm trexsql-test:prod --check 2>&1) || true
@@ -635,6 +647,23 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev
             ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev-sha-${{ github.sha }}
+
+      - name: Build and push studio sidecar image
+        # The studio sidecar (referenced by docker-compose.yml) ships as its own
+        # image so the compose stack runs mount/build-free from ghcr.
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        uses: docker/build-push-action@v6
+        with:
+          context: plugins/studio/supabase-studio
+          file: plugins/studio/supabase-studio/apps/studio/Dockerfile
+          target: production
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio
+          tags: |
+            ghcr.io/${{ env.IMAGE_NS }}/trex-studio:latest
+            ghcr.io/${{ env.IMAGE_NS }}/trex-studio:sha-${{ github.sha }}
 
   e2e-d2e:
     name: "E2E (D2E)"
