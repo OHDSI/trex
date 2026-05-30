@@ -73,13 +73,12 @@ services:
     volumes:
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
-      - ./core/server:/usr/src/core/server
-      - ./core/schema:/usr/src/core/schema
-      - ./plugins/storage:/usr/src/plugins-dev/storage
-      - ./plugins/studio:/usr/src/plugins-dev/studio
-      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
-      - ./plugins/web:/usr/src/plugins-dev/web
-      - ./plugins/pg-meta:/usr/src/plugins-dev/pg-meta
+      # core/server, core/schema and the plugins (web, studio, storage, pg-meta)
+      # are built into the image (see the builder stages in the Dockerfile), so
+      # we do NOT bind-mount host source over them here — doing so shadowed the
+      # built artifacts (e.g. web/dist) and broke the UIs. For live development
+      # against host source, use docker-compose.dev.yml, which mounts only the
+      # built outputs (e.g. ./plugins/web/dist).
       # Shared with the studio sidecar: Studio's deploy writes here, trex reads.
       - studio-edge-functions:/app/edge-functions
     depends_on:
@@ -100,7 +99,10 @@ services:
       PLUGINS_PATH: /usr/src/plugins
       PLUGINS_DEV_PATH: /usr/src/plugins-dev
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 50051"]
+      # Probe the flight gRPC port with node (the image ships node, not nc).
+      test:
+        - CMD-SHELL
+        - "node -e \"require('net').connect(50051,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""
       interval: 5s
       timeout: 3s
       retries: 30
@@ -116,12 +118,10 @@ services:
     volumes:
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
-      - ./core/server:/usr/src/core/server
-      - ./plugins/storage:/usr/src/plugins-dev/storage
-      - ./plugins/studio:/usr/src/plugins-dev/studio
-      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
-      - ./plugins/web:/usr/src/plugins-dev/web
-      - ./plugins/pg-meta:/usr/src/plugins-dev/pg-meta
+      # Plugins (web, studio, storage, pg-meta) and core/server are built into
+      # the image; not bind-mounting host source over them (that shadowed the
+      # built artifacts and broke the UIs). Use docker-compose.dev.yml for
+      # live development against host source.
       # Shared with the studio sidecar: Studio's deploy writes here, trex reads.
       - studio-edge-functions:/app/edge-functions
     depends_on:
