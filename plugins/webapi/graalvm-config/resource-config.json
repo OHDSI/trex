@@ -1,0 +1,12 @@
+{
+  "resources": {
+    "includes": [
+      { "pattern": ".*\\.clj$" },
+      { "pattern": ".*\\.cljc$" },
+      { "pattern": "clojure/.*" },
+      { "pattern": "trexsql/.*" },
+      { "pattern": "META-INF/services/.*" },
+      { "pattern": "META-INF/spring/.*" }
+    ]
+  }
+}
