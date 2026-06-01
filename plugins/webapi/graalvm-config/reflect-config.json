@@ -28,11 +28,6 @@
     "allPublicMethods": true
   },
   {
-    "name": "org.trex.TrexSQLDriver",
-    "allDeclaredConstructors": true,
-    "allPublicConstructors": true
-  },
-  {
     "name": "org.ohdsi.webapi.source.SourceRepository"
   }
 ]

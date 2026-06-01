@@ -9,6 +9,7 @@
 #   id=$(docker create webapi-native-lib); docker cp $id:/out/libwebapi-native.so .; docker rm $id
 #
 # native-image needs ~12-16 GB RAM; build on a host/runner with >= 16 GB.
+# Supports both linux/amd64 and linux/arm64 (GraalVM tarball selected per arch).
 
 FROM ubuntu:22.04 AS build
 
@@ -18,8 +19,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         maven postgresql postgresql-contrib unzip git \
     && rm -rf /var/lib/apt/lists/*
 
-# Oracle GraalVM for JDK 21 (includes native-image)
-RUN curl -fsSL https://download.oracle.com/graalvm/21/latest/graalvm-jdk-21_linux-x64_bin.tar.gz \
+# Oracle GraalVM for JDK 21 (includes native-image). TARGETARCH is provided by
+# BuildKit (amd64/arm64); map it to Oracle's tarball arch (x64/aarch64). Falls
+# back to the build host's dpkg arch when TARGETARCH is unset (legacy builder).
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) GRAAL_ARCH=x64 ;; \
+      arm64) GRAAL_ARCH=aarch64 ;; \
+      *) echo "unsupported architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://download.oracle.com/graalvm/21/latest/graalvm-jdk-21_linux-${GRAAL_ARCH}_bin.tar.gz" \
       | tar -xz -C /opt \
     && mv /opt/graalvm-jdk-21* /opt/graalvm
 ENV JAVA_HOME=/opt/graalvm

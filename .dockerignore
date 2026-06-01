@@ -17,6 +17,10 @@ plugins/
 !plugins/studio/build/
 !plugins/pg-meta/
 !plugins/devx-ext/build/release/devx_ext.trex
+# webapi native-lib build (Dockerfile.native-lib) needs these plugin trees +
+# the webapi-be submodule in context; build dirs are still trimmed by **/target/ etc.
+!plugins/webapi/
+!plugins/bao/
 
 # Misc
 .claude/
