@@ -3,6 +3,10 @@ name: Release CLI
 on:
   push:
     tags: ['v*']
+  # Allow dry-runs without cutting a tag. goreleaser only uploads release
+  # assets on tag pushes (release is skipped otherwise), so manual runs just
+  # exercise checkout + build.
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -14,9 +18,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: ./.github/actions/checkout-trex
-        with:
-          paths: plugins/cli
+      # Init ONLY the cli submodule, keeping the credentials actions/checkout
+      # persisted. The shared `checkout-trex` action strips the github.com auth
+      # header (so unrelated public submodules clone anonymously) — that broke
+      # the v0.2.3 CLI release with "could not read Username for github.com".
+      # plugins/cli is public and the only submodule goreleaser needs, so a
+      # targeted credentialed init is both correct and sufficient.
+      - name: Checkout cli submodule
+        run: git submodule update --init --depth=1 plugins/cli
 
       - uses: actions/setup-go@v5
         with:
