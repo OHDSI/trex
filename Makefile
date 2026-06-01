@@ -1,7 +1,7 @@
 # trex top-level Makefile — convenience entry points for tests and coverage.
 # Per-plugin builds live in plugins/*/Makefile; this file fans out.
 
-RUST_PLUGINS := chdb db etl fhir hades hana migration pgt pgwire pool pool-client runtime tpm transform
+RUST_PLUGINS := cache chdb db etl fhir hades hana migration pgt pgwire pool pool-client runtime tpm transform
 TS_PACKAGES  := plugins/notebook plugins/web plugins/studio
 DENO_PACKAGES := core/server core/event
 
