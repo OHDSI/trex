@@ -709,7 +709,11 @@ pub fn orchestrate_swarm_impl(swarm_json: &str, node_id: &str) -> String {
         Some(n) => n,
         None => return format!("node '{}' not found in SWARM_CONFIG", node_id),
     };
-    let statuses = crate::orchestrator::orchestrate_extensions(&node.extensions);
+    let advertise_host = crate::config::parse_host_port(&node.gossip_addr)
+        .map(|(h, _)| h)
+        .unwrap_or_default();
+    let statuses =
+        crate::orchestrator::orchestrate_extensions(&node.extensions, &advertise_host);
     statuses.join("\n")
 }
 

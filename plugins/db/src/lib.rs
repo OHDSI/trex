@@ -1659,7 +1659,11 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
             );
 
             if !node_cfg.extensions.is_empty() {
-                let _statuses = orchestrator::orchestrate_extensions(&node_cfg.extensions);
+                // `host` is this node's gossip host (parsed from gossip_addr) —
+                // the address peers reach it on. Services that bind 0.0.0.0 are
+                // advertised under this host so remote nodes can dial them.
+                let _statuses =
+                    orchestrator::orchestrate_extensions(&node_cfg.extensions, &host);
             }
 
             if node_cfg.data_node {

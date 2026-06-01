@@ -42,7 +42,14 @@ fn start_service_local(ext_name: &str, start_sql: &str) -> Result<(), String> {
 }
 
 /// Load extensions, start their services, and publish endpoints to gossip.
-pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
+///
+/// `advertise_host` is this node's reachable address (its gossip host). Services
+/// bound to `0.0.0.0` are published to gossip under this host instead, since
+/// `0.0.0.0` is a valid *bind* address but not a *connect* target for peers.
+pub fn orchestrate_extensions(
+    extensions: &[ExtensionConfig],
+    advertise_host: &str,
+) -> Vec<String> {
     // Probe a local connection — services for this node are started locally.
     if let Err(e) = run_local("SELECT 1") {
         SwarmLogger::error("orchestrator", &format!("Local connection not available: {e}"));
@@ -124,8 +131,17 @@ pub fn orchestrate_extensions(extensions: &[ExtensionConfig]) -> Vec<String> {
         let registry = GossipRegistry::instance();
         if registry.is_running() {
             let gossip_key = format!("service:{}", ext.name);
+            // Publish a host peers can actually dial. A service bound to 0.0.0.0
+            // listens on every interface, but advertising "0.0.0.0" would make
+            // remote nodes connect to themselves — so substitute this node's
+            // reachable gossip host. A concrete bind host is advertised as-is.
+            let advertised_host = if crate::remote_endpoint::is_unroutable_host(host) {
+                advertise_host
+            } else {
+                host
+            };
             let gossip_value = serde_json::json!({
-                "host": host,
+                "host": advertised_host,
                 "port": port,
                 "status": "running",
                 "config": cfg_val
@@ -367,7 +383,7 @@ mod tests {
             },
         ];
 
-        let statuses = orchestrate_extensions(&extensions);
+        let statuses = orchestrate_extensions(&extensions, "10.0.0.9");
 
         assert_eq!(statuses.len(), 2);
         for status in &statuses {
@@ -381,7 +397,7 @@ mod tests {
     #[test]
     fn orchestrate_empty_extensions_without_connection_returns_empty() {
         // No extensions -> early return with empty vec (pool probe still runs).
-        let statuses = orchestrate_extensions(&[]);
+        let statuses = orchestrate_extensions(&[], "10.0.0.9");
         assert!(statuses.is_empty());
     }
 
@@ -394,7 +410,7 @@ mod tests {
             })
             .collect();
 
-        let statuses = orchestrate_extensions(&extensions);
+        let statuses = orchestrate_extensions(&extensions, "10.0.0.9");
         assert_eq!(statuses.len(), 5);
         for (i, status) in statuses.iter().enumerate() {
             assert!(status.starts_with(&format!("ext_{i}")), "got: {status}");
@@ -598,7 +614,7 @@ mod tests {
             name: "name with spaces".to_string(),
             config: None,
         }];
-        let statuses = orchestrate_extensions(&extensions);
+        let statuses = orchestrate_extensions(&extensions, "10.0.0.9");
         // Returns one status per extension regardless.
         assert_eq!(statuses.len(), 1);
     }
