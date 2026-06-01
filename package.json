@@ -5,7 +5,6 @@
   "dependencies": {
     "@trex/ai": "latest",
     "@trex/as": "latest",
-    "@trex/cache": "latest",
     "@trex/chdb": "latest",
     "@trex/circe": "latest",
     "@trex/cql2elm": "latest",

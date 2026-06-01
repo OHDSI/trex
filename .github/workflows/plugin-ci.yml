@@ -98,6 +98,7 @@ jobs:
             RUNNER: ubuntu-24.04
           - PKGPATH: ./plugins/pgwire
           - PKGPATH: ./plugins/hades
+          - PKGPATH: ./plugins/cache
           - PKGPATH: ./plugins/tpm
           - PKGPATH: ./plugins/migration
           - PKGPATH: ./plugins/db
@@ -329,6 +330,7 @@ jobs:
           - PKGPATH: ./plugins/hana
           - PKGPATH: ./plugins/pgwire
           - PKGPATH: ./plugins/hades
+          - PKGPATH: ./plugins/cache
           - PKGPATH: ./plugins/tpm
           - PKGPATH: ./plugins/migration
           - PKGPATH: ./plugins/db
