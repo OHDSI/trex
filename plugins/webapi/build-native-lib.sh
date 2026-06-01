@@ -31,8 +31,11 @@ echo "[webapi-native] lein install trexsql"
 ( cd "$BAO_JAVA_DIR" && lein install )
 
 # --- 3. Install the WebAPI jar to local .m2 (org.ohdsi:WebAPI:3.0.0-SNAPSHOT) ---
+# WebAPI binds surefire's skipTests to ${skipUnitTests} (and failsafe to
+# ${skipITtests}), so the standard -DskipTests is ignored — use WebAPI's own
+# skip properties, otherwise its tests run and fail (no embedded Postgres on arm).
 echo "[webapi-native] mvn install WebAPI jar"
-( cd "$WEBAPI_BE_DIR" && mvn -B -q -DskipTests -Dpackaging.type=jar install )
+( cd "$WEBAPI_BE_DIR" && mvn -B -q -DskipUnitTests=true -DskipITtests=true -Dpackaging.type=jar install )
 
 # --- 4. Ephemeral PostgreSQL for Spring AOT context refresh ---
 echo "[webapi-native] starting ephemeral PostgreSQL"
