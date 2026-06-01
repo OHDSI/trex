@@ -31,3 +31,7 @@
 [submodule "plugins/bao/book-of-ohdsi"]
 	path = plugins/bao/book-of-ohdsi
 	url = https://github.com/OHDSI/BookOfOHDSI-2ndEdition.git
+[submodule "plugins/webapi/webapi-be"]
+	path = plugins/webapi/webapi-be
+	url = https://github.com/OHDSI/WebAPI.git
+	branch = p-hoffmann/gvm

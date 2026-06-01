@@ -19,16 +19,19 @@ RUN mkdir -p /opt/trexsql && \
 ENV TREXSQL_LIB_DIR=/opt/trexsql
 ENV TREXSQL_INCLUDE_DIR=/opt/trexsql
 
-# Download libchdb from GitHub release (amd64 only — no ARM build available)
+# Download libchdb from GitHub release (arch-specific: x86_64 / aarch64)
 RUN mkdir -p /opt/chdb && \
-    if [ "$TARGETARCH" = "amd64" ]; then \
-      cd /tmp && \
-      wget -O libchdb.tar.gz \
-        https://github.com/chdb-io/chdb/releases/download/${CHDB_VERSION}/linux-x86_64-libchdb.tar.gz && \
-      tar -xzf libchdb.tar.gz && \
-      mv libchdb.so /opt/chdb/ && \
-      rm -f libchdb.tar.gz chdb.h; \
-    fi
+    case "$TARGETARCH" in \
+      amd64) CHDB_ARCH=x86_64 ;; \
+      arm64) CHDB_ARCH=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    cd /tmp && \
+    wget -O libchdb.tar.gz \
+      https://github.com/chdb-io/chdb/releases/download/${CHDB_VERSION}/linux-${CHDB_ARCH}-libchdb.tar.gz && \
+    tar -xzf libchdb.tar.gz && \
+    mv libchdb.so /opt/chdb/ && \
+    rm -f libchdb.tar.gz chdb.h
 
 # Cache dependency build: copy manifests first, build with dummy src, then replace
 COPY Cargo.toml Cargo.lock /usr/src/trexsql/

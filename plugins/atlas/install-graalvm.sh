@@ -10,7 +10,15 @@ fi
 
 echo "Installing GraalVM ${GRAAL_VERSION} to ${GRAAL_HOME}"
 
-curl -fsSL -o /tmp/graal.tar.gz "https://download.oracle.com/graalvm/${GRAAL_VERSION}/latest/graalvm-jdk-${GRAAL_VERSION}_linux-x64_bin.tar.gz"
+# Oracle GraalVM ships per-arch tarballs (linux-x64 / linux-aarch64). Pick the
+# one matching the build host so this works on both amd64 and arm64 runners.
+case "$(uname -m)" in
+    x86_64|amd64) GRAAL_ARCH=x64 ;;
+    aarch64|arm64) GRAAL_ARCH=aarch64 ;;
+    *) echo "Error: unsupported architecture $(uname -m)"; exit 1 ;;
+esac
+
+curl -fsSL -o /tmp/graal.tar.gz "https://download.oracle.com/graalvm/${GRAAL_VERSION}/latest/graalvm-jdk-${GRAAL_VERSION}_linux-${GRAAL_ARCH}_bin.tar.gz"
 
 mkdir -p /opt
 tar -xzf /tmp/graal.tar.gz -C /opt
