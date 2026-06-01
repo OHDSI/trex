@@ -337,6 +337,36 @@ jobs:
           - PKGPATH: ./plugins/etl
           - PKGPATH: ./plugins/fhir
           - PKGPATH: ./plugins/transform
+          - PKGPATH: ./plugins/pool
+          - PKGPATH: ./plugins/chdb
+            SWAP: true
+            CARGO_BUILD_JOBS: 2
+            # chdb links a prebuilt libchdb; install_chdb.sh (which already
+            # selects linux-aarch64) runs in prepack on amd64, but build-arm
+            # calls make directly, so install it here first.
+            PREBUILD: "sudo apt-get update && sudo apt-get install -y libc6-dev clang && sudo bash ./install_chdb.sh"
+          - PKGPATH: ./plugins/devx-ext
+            EXCLUDE_FROM_IMAGE: true
+          # CMake/native plugins — build.sh installs their toolchains
+          # (vcpkg/vulkan for ai, GraalVM + maven for atlas/cql2elm).
+          - PKGPATH: ./plugins/ai
+            BUILD_SCRIPT: "bash ./build.sh"
+            SWAP: true
+          - PKGPATH: ./plugins/atlas
+            BUILD_SCRIPT: "bash ./build.sh"
+            SWAP: true
+          - PKGPATH: ./plugins/cql2elm
+            BUILD_SCRIPT: "bash ./build.sh"
+            SWAP: true
+          # runtime/trexas links a prebuilt libtrexsql and embeds V8 (rusty_v8
+          # downloads the prebuilt arm64 lib via RUSTY_V8_MIRROR). Its prepack
+          # fetches the amd64 zip; build-arm calls make directly, so install the
+          # arm64 libtrexsql here. CARGO_NET_GIT_FETCH_WITH_CLI helps the large
+          # rusty_v8 chromium submodule fetch succeed.
+          - PKGPATH: ./plugins/runtime
+            SWAP: true
+            CARGO_BUILD_JOBS: 2
+            PREBUILD: "sudo apt-get update && sudo apt-get install -y curl unzip clang libclang-dev libopenblas-dev libglib2.0-dev && curl -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-arm64.zip && unzip -o libtrexsql-linux-arm64.zip && sudo cp duckdb.h /usr/local/include/ && sudo cp libtrexsql.so /usr/local/lib/ && sudo ldconfig"
 
     runs-on: ubuntu-24.04-arm
 
@@ -397,13 +427,32 @@ jobs:
           sudo swapon /mnt/swapfile
 
       - name: Build
+        env:
+          # Use the git CLI for fetches: libgit2 chokes on the large rusty_v8
+          # chromium submodules (runtime/trexas). Harmless for the other plugins.
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
         run: |
           if [ -n "${{ matrix.CARGO_BUILD_JOBS }}" ]; then
             export CARGO_BUILD_JOBS=${{ matrix.CARGO_BUILD_JOBS }}
           fi
           cd ${{ matrix.PKGPATH }}
-          make configure
-          make release
+          # Some plugins need a native lib installed before the make build
+          # (e.g. chdb's libchdb). build-arm calls make directly rather than
+          # via npm prepack, so run that prep step here.
+          if [ -n "${{ matrix.PREBUILD }}" ]; then
+            echo "Running prebuild: ${{ matrix.PREBUILD }}"
+            eval "${{ matrix.PREBUILD }}"
+          fi
+          # CMake plugins (ai/atlas/cql2elm) drive their own toolchain setup
+          # (vcpkg/vulkan, GraalVM, maven) from build.sh; the Rust plugins use
+          # the plain make flow.
+          if [ -n "${{ matrix.BUILD_SCRIPT }}" ]; then
+            echo "Running build script: ${{ matrix.BUILD_SCRIPT }}"
+            eval "${{ matrix.BUILD_SCRIPT }}"
+          else
+            make configure
+            make release
+          fi
           mv build/release/extension/*/*.trex . 2>/dev/null || true
 
       - name: Extract extension name
@@ -414,7 +463,9 @@ jobs:
         if: hashFiles(format('{0}/*.trex', matrix.PKGPATH)) != ''
         uses: actions/upload-artifact@v4
         with:
-          name: ext-${{ steps.extname.outputs.name }}-arm64
+          # Mirror the amd64 job: EXCLUDE_FROM_IMAGE plugins upload as dx-* so
+          # the create-release / build-docker `ext-*-arm64` pattern skips them.
+          name: ${{ matrix.EXCLUDE_FROM_IMAGE && format('dx-{0}-arm64', steps.extname.outputs.name) || format('ext-{0}-arm64', steps.extname.outputs.name) }}
           path: ${{ matrix.PKGPATH }}/*.trex
           retention-days: 7
 
@@ -494,10 +545,34 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  build-docker:
+  # Decide the docker build matrix. Multi-arch (amd64 + arm64) only when build-arm
+  # ran (develop/main/release/dispatch/tags) — an arm64 image needs the arm64
+  # extensions build-arm produces. Otherwise (e.g. PRs) build amd64 only.
+  docker-matrix:
     needs: [build, build-arm]
     if: always() && needs.build.result == 'success' && (needs.build-arm.result == 'success' || needs.build-arm.result == 'skipped')
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+      multiarch: ${{ steps.set.outputs.multiarch }}
+    steps:
+      - id: set
+        run: |
+          if [ "${{ needs.build-arm.result }}" = "success" ]; then
+            echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-24.04"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]}' >> "$GITHUB_OUTPUT"
+            echo "multiarch=true" >> "$GITHUB_OUTPUT"
+          else
+            echo 'matrix={"include":[{"arch":"amd64","runner":"ubuntu-24.04"}]}' >> "$GITHUB_OUTPUT"
+            echo "multiarch=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-docker:
+    needs: [build, build-arm, docker-matrix]
+    if: always() && needs.build.result == 'success' && (needs.build-arm.result == 'success' || needs.build-arm.result == 'skipped')
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.docker-matrix.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
@@ -530,69 +605,43 @@ jobs:
           echo "::error::Submodule init failed after 3 attempts"
           exit 1
 
-      - name: Download amd64 extension artifacts
+      - name: Download ${{ matrix.arch }} extension artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: ext-*-amd64
-          path: extensions/amd64/
+          pattern: ext-*-${{ matrix.arch }}
+          path: extensions/${{ matrix.arch }}/
           merge-multiple: true
-
-      - name: Download arm64 extension artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: ext-*-arm64
-          path: extensions/arm64/
-          merge-multiple: true
-        continue-on-error: true
 
       - name: List extensions
-        run: |
-          echo "=== amd64 ==="
-          ls -la extensions/amd64/ 2>/dev/null || echo "none"
-          echo "=== arm64 ==="
-          ls -la extensions/arm64/ 2>/dev/null || echo "none"
+        run: ls -la extensions/${{ matrix.arch }}/ 2>/dev/null || echo "none"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
+      # Native build on a matching-arch runner — no QEMU needed.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
         with:
           driver: docker
 
-      - name: Build amd64 prod image for testing
+      - name: Build prod image for testing
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           tags: trexsql-test:prod
 
-      - name: Build amd64 dev image for testing
+      - name: Build dev image for testing
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.dev
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           load: true
           tags: trexsql-test:dev
           build-args: |
             BASE_IMAGE=trexsql-test:prod
 
-      - name: Build amd64 studio image for testing
-        uses: docker/build-push-action@v6
-        with:
-          context: plugins/studio/supabase-studio
-          file: plugins/studio/supabase-studio/apps/studio/Dockerfile
-          target: production
-          platforms: linux/amd64
-          load: true
-          tags: trex-studio-test:prod
-          build-args: |
-            NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio
-
-      - name: Test extensions load (amd64 only)
+      - name: Test extensions load (${{ matrix.arch }})
         run: |
           OUTPUT=$(docker run --rm trexsql-test:prod --check 2>&1) || true
           echo "$OUTPUT"
@@ -622,33 +671,31 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push prod image
+      # Each arch pushes an -<arch>-suffixed tag; merge-docker assembles these
+      # into the multi-arch manifests (:latest, :sha-<sha>, :dev, ...).
+      - name: Build and push prod image (per-arch)
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: |
-            ghcr.io/${{ env.IMAGE_NS }}/trexsql:latest
-            ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
 
-      - name: Build and push dev image
+      - name: Build and push dev image (per-arch)
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.dev
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           push: true
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}
-          tags: |
-            ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev
-            ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev-sha-${{ github.sha }}
+            BASE_IMAGE=ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev-sha-${{ github.sha }}-${{ matrix.arch }}
 
-      - name: Build and push studio sidecar image
+      - name: Build and push studio sidecar image (per-arch)
         # The studio sidecar (referenced by docker-compose.yml) ships as its own
         # image so the compose stack runs mount/build-free from ghcr.
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
@@ -657,13 +704,51 @@ jobs:
           context: plugins/studio/supabase-studio
           file: plugins/studio/supabase-studio/apps/studio/Dockerfile
           target: production
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.arch }}
           push: true
           build-args: |
             NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio
-          tags: |
-            ghcr.io/${{ env.IMAGE_NS }}/trex-studio:latest
-            ghcr.io/${{ env.IMAGE_NS }}/trex-studio:sha-${{ github.sha }}
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trex-studio:sha-${{ github.sha }}-${{ matrix.arch }}
+
+  # Assemble the per-arch images pushed by build-docker into multi-arch manifests
+  # under the final tags. Runs only when images were actually pushed.
+  merge-docker:
+    needs: [build, build-arm, docker-matrix, build-docker]
+    if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main') && needs.build-docker.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Compute lowercase image namespace
+        run: echo "IMAGE_NS=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Create multi-arch manifests
+        env:
+          MULTIARCH: ${{ needs.docker-matrix.outputs.multiarch }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          NS="ghcr.io/${IMAGE_NS}"
+          if [ "$MULTIARCH" = "true" ]; then ARCHES="amd64 arm64"; else ARCHES="amd64"; fi
+          echo "Merging arches: $ARCHES"
+          srcs() { local ref=$1 a; for a in $ARCHES; do printf ' %s-%s' "$ref" "$a"; done; }
+          docker buildx imagetools create \
+            -t "${NS}/trexsql:latest" -t "${NS}/trexsql:sha-${SHA}" \
+            $(srcs "${NS}/trexsql:sha-${SHA}")
+          docker buildx imagetools create \
+            -t "${NS}/trexsql:dev" -t "${NS}/trexsql:dev-sha-${SHA}" \
+            $(srcs "${NS}/trexsql:dev-sha-${SHA}")
+          docker buildx imagetools create \
+            -t "${NS}/trex-studio:latest" -t "${NS}/trex-studio:sha-${SHA}" \
+            $(srcs "${NS}/trex-studio:sha-${SHA}")
+          echo "=== resulting manifests ==="
+          docker buildx imagetools inspect "${NS}/trexsql:sha-${SHA}" | grep -A2 -i platform || true
 
   e2e-d2e:
     name: "E2E (D2E)"
@@ -1008,13 +1093,13 @@ jobs:
         run: docker system prune -af
 
   success:
-    needs: [build, build-arm, build-docker, create-release, e2e-d2e]
+    needs: [build, build-arm, build-docker, merge-docker, create-release, e2e-d2e]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check
         run: |
-          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-arm.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" || "${{ needs.e2e-d2e.result }}" == "failure" ]]; then
+          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-arm.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.merge-docker.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" || "${{ needs.e2e-d2e.result }}" == "failure" ]]; then
             echo "::error::One or more jobs failed"
             exit 1
           fi
