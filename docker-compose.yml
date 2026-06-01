@@ -8,6 +8,13 @@
 # and every issued JWT.
 # ---------------------------------------------------------------------------
 
+# Two-node cluster: trex-data (data node, holds the pool + Flight) + trex-server
+# (non-data node, serves the UI/API and opens remote sessions to trex-data).
+# Gossip seeds are auto-derived from the `nodes` map below, so the two converge
+# automatically. Flight binds 0.0.0.0 but the db extension advertises it to
+# gossip under each node's gossip host (trex-data / trex-server) so peers get a
+# routable endpoint — advertising 0.0.0.0 made the server dial itself, so every
+# data-backed resolver failed with "create_session failed" and the UI hung.
 x-swarm-config: &swarm-config
   SWARM_CONFIG: >-
     {"cluster_id":"local","nodes":{
@@ -34,7 +41,6 @@ volumes:
 services:
   trex-init:
     image: ghcr.io/ohdsi/trexsql:latest
-    platform: linux/amd64
     entrypoint: /usr/local/bin/trex-init
     environment:
       TREX_SECRETS_DIR: /shared
@@ -69,7 +75,6 @@ services:
 
   trex-data:
     image: ghcr.io/ohdsi/trexsql:latest
-    platform: linux/amd64
     volumes:
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
@@ -110,7 +115,6 @@ services:
 
   trex-server:
     image: ghcr.io/ohdsi/trexsql:latest
-    platform: linux/amd64
     ports:
       - 8000:8000
       - 8001:8001
@@ -164,10 +168,19 @@ services:
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
+    # postgrest connects as the `authenticator` role, which is created by
+    # trex-data's schema migrations — not by postgres or trex-init. Waiting only
+    # on postgres raced ahead of the migrations and crashed with "password
+    # authentication failed for user authenticator" (postgrest has no internal
+    # retry budget for a missing role, so it exited 1). Gate on trex-data being
+    # healthy (migrations done) and restart as a safety net for any remaining race.
+    restart: unless-stopped
     depends_on:
       trex-init:
         condition: service_completed_successfully
       postgres:
+        condition: service_healthy
+      trex-data:
         condition: service_healthy
     env_file:
       - path: ./secrets/derived.env
@@ -191,7 +204,6 @@ services:
   #     -t ghcr.io/ohdsi/trex-studio:latest
   studio:
     image: ghcr.io/ohdsi/trex-studio:latest
-    platform: linux/amd64
     container_name: trex-studio
     restart: unless-stopped
     # NOT exposing a host port: direct access would bypass trex's admin-only gate.
