@@ -2,6 +2,7 @@ import type { Request, Response, NextFunction } from "express";
 import { Pool } from "pg";
 import { verifyAccessToken } from "../auth/jwt.ts";
 import { poolSsl } from "../lib/db-ssl.ts";
+import { pgRoleForUserRole } from "../lib/pg-role.ts";
 
 let pool: InstanceType<typeof Pool> | null = null;
 
@@ -50,6 +51,7 @@ export async function authContext(
       if (claims && claims.role !== "service_role" && claims.role !== "anon") {
         const trexRole = claims.app_metadata?.trex_role || "user";
         (req as any).pgSettings = {
+          role: pgRoleForUserRole(trexRole),
           "app.user_id": claims.sub,
           "app.user_role": trexRole,
           "request.jwt.claims": JSON.stringify(claims),
@@ -85,6 +87,7 @@ export async function authContext(
       const claims = await verifyAccessToken(apikey);
       if (claims?.role === "anon") {
         (req as any).pgSettings = {
+          role: "anon",
           "request.jwt.claims": JSON.stringify(claims),
         };
         (req as any).applicationRoles = [];
@@ -92,6 +95,7 @@ export async function authContext(
       }
       if (claims?.role === "service_role") {
         (req as any).pgSettings = {
+          role: "service_role",
           "app.user_role": "admin",
           "request.jwt.claims": JSON.stringify(claims),
         };
@@ -101,10 +105,10 @@ export async function authContext(
     }
 
     // 3. No valid auth — set empty context
-    (req as any).pgSettings = {};
+    (req as any).pgSettings = { role: "anon" };
     (req as any).applicationRoles = [];
   } catch {
-    (req as any).pgSettings = {};
+    (req as any).pgSettings = { role: "anon" };
     (req as any).applicationRoles = [];
   }
 

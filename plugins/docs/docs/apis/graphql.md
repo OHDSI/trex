@@ -22,20 +22,27 @@ subscription transport (Postgres `LISTEN`/`NOTIFY`).
 
 GraphQL requests share session-based auth with the rest of the server. The
 `authContext` middleware extracts the access token, validates it, and sets the
-following Postgres GUCs on the request:
+following on the request, which propagate into every Postgraphile-issued query:
 
+- a Postgres **role** — `anon` (no/invalid auth), `authenticated` (normal user),
+  or `service_role` (admin user or `service_role` apikey)
 - `app.user_id` — current user ID
 - `app.user_role` — current user role (`admin` or `user`)
+- `request.jwt.claims` — the full JWT claims
 
-These propagate into every Postgraphile-issued query as `current_setting('app.user_id')`.
+PostGraphile connects as the unprivileged `authenticator` role and issues
+`SET LOCAL ROLE` to the resolved role for each request (the same model PostgREST
+and Supabase use). The `trexdb` RLS policies — keyed on
+`current_setting('app.user_id')` / `app.user_role` — are therefore enforced:
 
-:::caution
-The PostGraphile pool currently runs as the database **owner** role, so Postgres
-RLS policies are effectively bypassed for now. Authorization is enforced at the
-application layer (admin-only mutations, scoped MCP tools). Treat the GraphQL
-endpoint as admin-equivalent for tables that don't have an explicit `@omit` smart
-tag, and keep secret-bearing tables out of `PG_SCHEMA`.
-:::
+- `authenticated` users see only rows their RLS policies allow (e.g. their own
+  `user` / `session` / `account` rows).
+- `service_role` (admins, service-role apikey) has `BYPASSRLS` and sees all rows.
+- `anon` has schema usage but no table privileges, so unauthenticated requests
+  reach the endpoint but read no data.
+
+Custom management operations (below) additionally assert `app.user_role = 'admin'`
+at the resolver layer.
 
 ## Schema
 
