@@ -109,6 +109,8 @@ jobs:
             RUNNER: ubuntu-24.04
           - PKGPATH: ./plugins/bao
             RUNNER: ubuntu-24.04
+          - PKGPATH: ./plugins/webapi
+            RUNNER: ubuntu-24.04
           - PKGPATH: ./plugins/docs
           - PKGPATH: ./plugins/web
           - PKGPATH: ./plugins/notebook
@@ -340,6 +342,7 @@ jobs:
           - PKGPATH: ./plugins/fhir
           - PKGPATH: ./plugins/transform
           - PKGPATH: ./plugins/pool
+          - PKGPATH: ./plugins/webapi
           - PKGPATH: ./plugins/chdb
             SWAP: true
             CARGO_BUILD_JOBS: 2
