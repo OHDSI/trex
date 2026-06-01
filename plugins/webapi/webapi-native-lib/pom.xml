@@ -20,6 +20,22 @@
     <skipTests>true</skipTests>
   </properties>
 
+  <!-- Align all managed versions (slf4j, logback, jackson, ...) with WebAPI's
+       Spring Boot. dependencyManagement is NOT transitive, so without this the
+       wrapper's transitive resolution can drag in stale versions (e.g. an old
+       slf4j-api that shadows Logback and breaks Spring AOT). -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-dependencies</artifactId>
+        <version>${spring.boot.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
   <dependencies>
     <!-- WebAPI app (installed to local .m2 as a jar by build-native-lib.sh). Brings
          its own transitive Spring Boot / Hibernate / Flyway deps. -->
