@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.trex</groupId>
+  <artifactId>webapi-native-lib</artifactId>
+  <version>3.0.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <name>WebAPI Native Shared Library (with trexsql)</name>
+  <description>Builds libwebapi-native.so embedding OHDSI WebAPI + the trexsql/bao integration via GraalVM native-image.</description>
+
+  <properties>
+    <java.version>21</java.version>
+    <maven.compiler.release>21</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <spring.boot.version>3.5.6</spring.boot.version>
+    <skipTests>true</skipTests>
+  </properties>
+
+  <dependencies>
+    <!-- WebAPI app (installed to local .m2 as a jar by build-native-lib.sh). Brings
+         its own transitive Spring Boot / Hibernate / Flyway deps. -->
+    <dependency>
+      <groupId>org.ohdsi</groupId>
+      <artifactId>WebAPI</artifactId>
+      <version>3.0.0-SNAPSHOT</version>
+    </dependency>
+
+    <!-- trexsql/bao integration (installed to local .m2 by `lein install`).
+         Its META-INF AutoConfiguration.imports is what Spring AOT discovers. -->
+    <dependency>
+      <groupId>org.trex</groupId>
+      <artifactId>trexsql</artifactId>
+      <version>0.1.23</version>
+    </dependency>
+
+    <!-- @CEntryPoint compile visibility (provided; comes from WebAPI jar at runtime). -->
+    <dependency>
+      <groupId>org.graalvm.sdk</groupId>
+      <artifactId>nativeimage</artifactId>
+      <version>24.1.1</version>
+      <scope>provided</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <!-- Spring Boot AOT: refreshes the WebApi context at build time and generates
+           the AOT sources/classes native-image consumes. Discovers trexsql's
+           AutoConfiguration from the classpath. -->
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <version>${spring.boot.version}</version>
+        <configuration>
+          <mainClass>org.ohdsi.webapi.WebApi</mainClass>
+        </configuration>
+        <executions>
+          <execution>
+            <id>process-aot</id>
+            <goals>
+              <goal>process-aot</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!-- GraalVM native-image: build a shared library exporting the @CEntryPoint
+           symbols (mirrors webapi-be's native-lib profile, plus our graalvm-config). -->
+      <plugin>
+        <groupId>org.graalvm.buildtools</groupId>
+        <artifactId>native-maven-plugin</artifactId>
+        <version>0.10.6</version>
+        <extensions>true</extensions>
+        <configuration>
+          <sharedLibrary>true</sharedLibrary>
+          <imageName>libwebapi-native</imageName>
+          <mainClass>org.ohdsi.webapi.WebApi</mainClass>
+          <buildArgs>
+            <buildArg>--no-fallback</buildArg>
+            <buildArg>-H:+ReportExceptionStackTraces</buildArg>
+            <buildArg>-J-Xmx12g</buildArg>
+            <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
+          </buildArgs>
+        </configuration>
+        <executions>
+          <execution>
+            <id>add-reachability-metadata</id>
+            <goals>
+              <goal>add-reachability-metadata</goal>
+            </goals>
+          </execution>
+          <execution>
+            <id>build-native-lib</id>
+            <phase>package</phase>
+            <goals>
+              <goal>compile-no-fork</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
