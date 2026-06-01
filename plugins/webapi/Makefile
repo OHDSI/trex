@@ -45,3 +45,10 @@ coverage_html:
 
 debug_coverage:
 	RUSTFLAGS="-C instrument-coverage" $(MAKE) debug
+
+# ---- WebAPI GraalVM native shared library (libwebapi-native.so, embeds trexsql) ----
+# Heavy build (GraalVM + ephemeral Postgres + ~16 GB RAM); intended for Docker/CI.
+.PHONY: webapi-native-lib
+
+webapi-native-lib:
+	bash $(PROJ_DIR)build-native-lib.sh
