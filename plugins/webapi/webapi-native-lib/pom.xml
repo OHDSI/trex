@@ -142,10 +142,10 @@
             <!-- Initialize all Clojure-compiled classes at build time (trexsql is Clojure). -->
             <buildArg>--features=clj_easy.graal_build_time.InitClojureClasses</buildArg>
             <!-- ...except namespaces whose class-init touches runtime-only state and must
-                 initialize at run time: the Bedrock cohort agent; data.json; and
-                 clojure.tools.logging, whose load-time factory detection binds slf4j->logback
-                 and would otherwise persist a logback LoggerContext/InfoStatus in the image heap. -->
-            <buildArg>--initialize-at-run-time=clojure.data.json__init,trexsql.agent.prompt__init,trexsql.agent.routes__init,clojure.tools.logging__init,clojure.tools.logging.impl__init</buildArg>
+                 initialize at run time: the Bedrock cohort agent; data.json; clojure.tools.logging;
+                 and clj-http, whose conn-mgr init builds Apache HttpClient's SSL socket factory
+                 (AllowAllHostnameVerifier), pulling a logback InfoStatus into the image heap. -->
+            <buildArg>--initialize-at-run-time=clojure.data.json__init,trexsql.agent.prompt__init,trexsql.agent.routes__init,clojure.tools.logging__init,clojure.tools.logging.impl__init,clj_http.client__init,clj_http.conn_mgr__init</buildArg>
           </buildArgs>
         </configuration>
         <executions>
