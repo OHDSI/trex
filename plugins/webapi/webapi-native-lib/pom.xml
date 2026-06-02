@@ -145,7 +145,7 @@
                  initialize at run time: the Bedrock cohort agent; data.json; clojure.tools.logging;
                  and clj-http, whose conn-mgr init builds Apache HttpClient's SSL socket factory
                  (AllowAllHostnameVerifier), pulling a logback InfoStatus into the image heap. -->
-            <buildArg>--initialize-at-run-time=clojure.data.json__init,trexsql.agent.prompt__init,trexsql.agent.routes__init,clojure.tools.logging__init,clojure.tools.logging.impl__init,clojure.stacktrace__init,clj_http.client__init,clj_http.conn_mgr__init,clj_http.core__init,clj_http.cookies__init,clj_http.headers__init,clj_http.links__init,clj_http.multipart__init,clj_http.util__init</buildArg>
+            <buildArg>--initialize-at-run-time=clojure.data.json__init,trexsql.agent.prompt__init,trexsql.agent.routes__init,clojure.tools.logging__init,clojure.tools.logging.impl__init,clojure.stacktrace__init,clj_http.client__init,clj_http.conn_mgr__init,clj_http.core__init,clj_http.cookies__init,clj_http.headers__init,clj_http.links__init,clj_http.multipart__init,clj_http.util__init,clojure.pprint__init</buildArg>
           </buildArgs>
         </configuration>
         <executions>
