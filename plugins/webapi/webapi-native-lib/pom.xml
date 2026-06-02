@@ -141,11 +141,13 @@
             <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
             <!-- Initialize all Clojure-compiled classes at build time (trexsql is Clojure). -->
             <buildArg>--features=clj_easy.graal_build_time.InitClojureClasses</buildArg>
-            <!-- ...except namespaces whose class-init touches runtime-only state and must
-                 initialize at run time: the Bedrock cohort agent; data.json; clojure.tools.logging;
-                 and clj-http, whose conn-mgr init builds Apache HttpClient's SSL socket factory
-                 (AllowAllHostnameVerifier), pulling a logback InfoStatus into the image heap. -->
-            <buildArg>--initialize-at-run-time=clojure.data.json__init,trexsql.agent.prompt__init,trexsql.agent.routes__init,clojure.tools.logging__init,clojure.tools.logging.impl__init,clojure.stacktrace__init,clj_http.client__init,clj_http.conn_mgr__init,clj_http.core__init,clj_http.cookies__init,clj_http.headers__init,clj_http.links__init,clj_http.multipart__init,clj_http.util__init,clojure.pprint__init,clojure.pprint.dispatch__init</buildArg>
+            <!-- ...except classes/namespaces whose class-init touches runtime-only state and
+                 must initialize at run time: some clojure stdlib (data.json, tools.logging,
+                 stacktrace, pprint); the HTTP-using trexsql namespaces (proxy + the whole
+                 Bedrock agent tree) and clj-http; and — at the root — Apache HttpClient's
+                 hostname verifiers / SSL socket factory, whose static INSTANCEs construct a
+                 logback InfoStatus that otherwise gets pinned into the image heap. -->
+            <buildArg>--initialize-at-run-time=clojure.data.json__init,clojure.tools.logging__init,clojure.tools.logging.impl__init,clojure.stacktrace__init,clojure.pprint__init,clojure.pprint.dispatch__init,clj_http.client__init,clj_http.conn_mgr__init,clj_http.core__init,clj_http.cookies__init,clj_http.headers__init,clj_http.links__init,clj_http.multipart__init,clj_http.util__init,trexsql.proxy__init,trexsql.agent,org.apache.http.conn.ssl.SSLConnectionSocketFactory,org.apache.http.conn.ssl.AbstractVerifier,org.apache.http.conn.ssl.AllowAllHostnameVerifier,org.apache.http.conn.ssl.BrowserCompatHostnameVerifier,org.apache.http.conn.ssl.StrictHostnameVerifier</buildArg>
           </buildArgs>
         </configuration>
         <executions>
