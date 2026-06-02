@@ -141,6 +141,9 @@
             <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
             <!-- Initialize all Clojure-compiled classes at build time (trexsql is Clojure). -->
             <buildArg>--features=clj_easy.graal_build_time.InitClojureClasses</buildArg>
+            <!-- ...except namespaces whose class-init touches runtime-only state (the
+                 Bedrock cohort agent; data.json), which must initialize at run time. -->
+            <buildArg>--initialize-at-run-time=clojure.data.json__init,trexsql.agent.prompt__init,trexsql.agent.routes__init</buildArg>
           </buildArgs>
         </configuration>
         <executions>
