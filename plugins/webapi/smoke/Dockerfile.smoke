@@ -3,25 +3,45 @@
 # native-lib build on the host). Build context = repo root:
 #   DOCKER_BUILDKIT=1 docker build -f plugins/webapi/smoke/Dockerfile.smoke -t webapi-smoke .
 #   docker run --rm webapi-smoke
-FROM ubuntu:22.04
+# 24.04 throughout: the prebuilt libtrexsql.so needs GLIBC_2.38 / GLIBCXX_3.4.32.
+
+############################
+# Stage 1 - build libtrexsql_engine.so (the trexsql JNA engine the servlet loads)
+############################
+FROM ubuntu:24.04 AS engine
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl unzip gcc libc6-dev \
+        curl ca-certificates build-essential clang pkg-config libssl-dev git unzip \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH=/root/.cargo/bin:$PATH
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=amd64 ;; arm64) A=arm64 ;; esac \
+    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-${A}.zip" \
+    && mkdir -p /opt/trexsql && unzip -o /tmp/t.zip -d /opt/trexsql
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/src/target \
+    TREXSQL_LIB_DIR=/opt/trexsql cargo build --release --lib \
+    && cp target/release/libtrexsql_engine.so /opt/trexsql/libtrexsql_engine.so
+
+############################
+# Stage 2 - runtime smoke
+############################
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl gcc libc6-dev \
         postgresql postgresql-contrib \
         libfreetype6 fontconfig zlib1g \
     && rm -rf /var/lib/apt/lists/*
 
-# arm64 trexsql native lib (the DuckDB fork) for the trexsql JNA engine at runtime.
-ARG TARGETARCH
-RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-      amd64) TREX_ARCH=amd64 ;; arm64) TREX_ARCH=arm64 ;; \
-      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
-    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-${TREX_ARCH}.zip" \
-    && unzip -o /tmp/t.zip -d /tmp/t \
-    && cp /tmp/t/libtrexsql.so /usr/local/lib/ \
-    && ldconfig \
-    && rm -rf /tmp/t /tmp/t.zip
+# Both native libs the trexsql engine needs at runtime (engine NEEDs libtrexsql).
+COPY --from=engine /opt/trexsql/libtrexsql.so /usr/local/lib/
+COPY --from=engine /opt/trexsql/libtrexsql_engine.so /usr/local/lib/
+RUN ldconfig
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
 WORKDIR /app
 COPY out/out/libwebapi-native.so /app/libwebapi-native.so

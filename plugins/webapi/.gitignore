@@ -9,4 +9,4 @@ venv
 # WebAPI native shared library build outputs
 /libwebapi-native.so
 /libwebapi-native.dylib
-/webapi-native-lib/target/
+/webapi-native-lib/target//out/

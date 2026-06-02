@@ -27,8 +27,10 @@ done
 
 echo "=== webapi_start result ==="
 grep -E "ISOLATE_OK|WEBAPI_START=" /tmp/harness.log | head -3
-echo "=== harness.log boot output (head) ==="
-grep -vE "WEBAPI_STATUS=" /tmp/harness.log | head -80
+echo "=== deepest cause (reflection frames) ==="
+grep -nE "Caused by|NoSuchField|NoSuchMethod|ClassNotFound|getField|getDeclaredField|getMethod|at org.trex|at trexsql|at clojure|at reitit|at muuntaja|at jsonista|at honeysql" /tmp/harness.log | tail -30
+echo "=== harness.log boot output (full) ==="
+grep -vE "WEBAPI_STATUS=" /tmp/harness.log | head -300
 
 echo "=== endpoint probes (http code) ==="
 for url in \
