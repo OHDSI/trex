@@ -80,7 +80,26 @@
       <version>24.1.1</version>
       <scope>provided</scope>
     </dependency>
+
+    <!-- Clojure native-image support: a native-image Feature that initializes every
+         Clojure-compiled class at BUILD time. Without it, clojure.lang.RT bootstraps
+         at runtime and compiles clojure/core.clj from source inside the image, which
+         fails (NoSuchFieldException: creator at clojure/core.clj:20). Activated by the
+         features build arg below. -->
+    <dependency>
+      <groupId>com.github.clj-easy</groupId>
+      <artifactId>graal-build-time</artifactId>
+      <version>1.0.5</version>
+    </dependency>
   </dependencies>
+
+  <!-- graal-build-time is published to Clojars, not Maven Central. -->
+  <repositories>
+    <repository>
+      <id>clojars</id>
+      <url>https://repo.clojars.org</url>
+    </repository>
+  </repositories>
 
   <build>
     <plugins>
@@ -120,6 +139,8 @@
             <buildArg>-H:+ReportExceptionStackTraces</buildArg>
             <buildArg>-J-Xmx12g</buildArg>
             <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
+            <!-- Initialize all Clojure-compiled classes at build time (trexsql is Clojure). -->
+            <buildArg>--features=clj_easy.graal_build_time.InitClojureClasses</buildArg>
           </buildArgs>
         </configuration>
         <executions>

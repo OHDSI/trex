@@ -1,0 +1,32 @@
+# syntax=docker/dockerfile:1.4
+# Runtime smoke test for a prebuilt libwebapi-native.so (expects ./out/out/ from the
+# native-lib build on the host). Build context = repo root:
+#   DOCKER_BUILDKIT=1 docker build -f plugins/webapi/smoke/Dockerfile.smoke -t webapi-smoke .
+#   docker run --rm webapi-smoke
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip gcc libc6-dev \
+        postgresql postgresql-contrib \
+        libfreetype6 fontconfig zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+# arm64 trexsql native lib (the DuckDB fork) for the trexsql JNA engine at runtime.
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) TREX_ARCH=amd64 ;; arm64) TREX_ARCH=arm64 ;; \
+      *) echo "unsupported arch ${TARGETARCH}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-${TREX_ARCH}.zip" \
+    && unzip -o /tmp/t.zip -d /tmp/t \
+    && cp /tmp/t/libtrexsql.so /usr/local/lib/ \
+    && ldconfig \
+    && rm -rf /tmp/t /tmp/t.zip
+
+WORKDIR /app
+COPY out/out/libwebapi-native.so /app/libwebapi-native.so
+COPY plugins/webapi/smoke/harness.c /app/harness.c
+COPY plugins/webapi/smoke/smoke.sh /app/smoke.sh
+RUN gcc -O2 -o /app/harness /app/harness.c -ldl && chmod +x /app/smoke.sh
+
+CMD ["bash", "/app/smoke.sh"]
