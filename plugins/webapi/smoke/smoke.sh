@@ -36,9 +36,10 @@ echo "=== endpoint probes (http code) ==="
 for url in \
   http://localhost:8080/WebAPI/info \
   http://localhost:8080/WebAPI/source/sources \
-  http://localhost:8080/trexsql/ \
-  http://localhost:8080/WebAPI/trexsql/ \
-  http://localhost:8080/info ; do
+  http://localhost:8080/WebAPI/trexsql/study/envs \
+  http://localhost:8080/WebAPI/trexsql/cache/jobs \
+  http://localhost:8080/trexsql/study/envs \
+  http://localhost:8080/WebAPI/trexsql/ ; do
   code=$(curl -s -m 10 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "ERR")
   echo "  $code  $url"
 done
