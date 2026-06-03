@@ -150,7 +150,12 @@
                  trexsql.json. The trexsql Clojure stack drags these non-Clojure libs into
                  build-time init too, so initialize them at build time as well. -->
             <buildArg>--features=clj_easy.graal_build_time.InitClojureClasses</buildArg>
-            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.http,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector</buildArg>
+            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector</buildArg>
+            <!-- clj-http (and the Apache HttpClient SSL stack it loads, whose SSLContext
+                 holds a SecureRandom that can't live in the image heap) initializes at run
+                 time. trexsql only touches clj-http through lazy wrappers (trexsql.http-client),
+                 so no build-time-initialized namespace forces it to load at build time. -->
+            <buildArg>--initialize-at-run-time=clj_http</buildArg>
           </buildArgs>
         </configuration>
         <executions>
