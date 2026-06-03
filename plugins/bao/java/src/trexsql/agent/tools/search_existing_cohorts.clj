@@ -3,7 +3,7 @@
    the user's cohort definitions, scores each against the query (name +
    description match), and returns the top hits. Lets the agent suggest
    reusing an existing cohort instead of building one from scratch."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))

@@ -13,8 +13,8 @@
   (:require [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [clj-http.client :as http]
-            [clj-http.conn-mgr :as conn-mgr])
+            [trexsql.http-client :as http]
+            [trexsql.http-client :as conn-mgr])
   (:import [java.io InputStream]
            [java.nio ByteBuffer]
            [java.util.function Consumer]
@@ -24,11 +24,15 @@
 ;; turns don't pay a fresh handshake to bedrock-runtime each time. With
 ;; ~250 ms RTT to us-east-1 and 5-10 turns per "build a cohort" session,
 ;; this saves 1-2 s per session of pure TLS-handshake overhead.
+;; delay: building the Apache connection manager loads clj-http's SSL stack, which
+;; must not initialize at GraalVM build time (see trexsql.http-client). Realized on
+;; first request at runtime.
 (defonce ^:private conn-pool
-  (conn-mgr/make-reusable-conn-manager
-    {:timeout 30           ; idle keep-alive in seconds
-     :threads 8            ; max concurrent connections
-     :default-per-route 4}))
+  (delay
+    (conn-mgr/make-reusable-conn-manager
+      {:timeout 30           ; idle keep-alive in seconds
+       :threads 8            ; max concurrent connections
+       :default-per-route 4})))
 
 (def model-id
   (or (System/getenv "BAO_AGENT_MODEL")
@@ -279,7 +283,7 @@
                              :throw-exceptions false
                              :socket-timeout 120000
                              :connection-timeout 30000
-                             :connection-manager conn-pool})
+                             :connection-manager @conn-pool})
             status (:status resp)]
         (when-not (= 200 status)
           (let [err-body (when (instance? InputStream (:body resp))

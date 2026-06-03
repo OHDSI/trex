@@ -8,7 +8,7 @@
    submodule. Each hit carries a `:circe-summary` (entry domains, criteria
    counts, concept-set list, exit strategy) so Pythia can mimic canonical
    patterns without a follow-up `get_reference_phenotype` fetch."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]

@@ -11,7 +11,7 @@
    When WebAPI is unreachable, falls back to the in-process
    trexsql.circe renderer (which goes through libtrexsql_engine, NOT
    libduckdb — TrexEngine.java preloads libtrexsql)."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))

@@ -6,7 +6,7 @@
    search_concepts returns a hit with :confidence :low or any :flags,
    Pythia calls this to confirm the chosen ID actually does what it
    claims before committing it to a proposal."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

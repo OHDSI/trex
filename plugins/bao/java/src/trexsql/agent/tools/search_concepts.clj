@@ -6,7 +6,7 @@
 
    Falls back to a local trexsql.vocab search only if WebAPI is unreachable
    or the JWT is missing — that path is intentionally a tight failsafe."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

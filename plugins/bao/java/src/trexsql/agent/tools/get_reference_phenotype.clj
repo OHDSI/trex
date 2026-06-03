@@ -11,7 +11,7 @@
    The body is returned as a parsed JSON object (Clojure data) plus the
    index summary, so Pythia gets both the structural overview and the
    fully-elaborated source it can mimic."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [trexsql.json :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
