@@ -81,6 +81,7 @@
       <scope>provided</scope>
     </dependency>
 
+
     <!-- Clojure native-image support: a native-image Feature that initializes every
          Clojure-compiled class at BUILD time. Without it, clojure.lang.RT bootstraps
          at runtime and compiles clojure/core.clj from source inside the image, which
@@ -89,7 +90,7 @@
     <dependency>
       <groupId>com.github.clj-easy</groupId>
       <artifactId>graal-build-time</artifactId>
-      <version>1.0.5</version>
+      <version>1.0.6</version>
     </dependency>
   </dependencies>
 
@@ -103,6 +104,17 @@
 
   <build>
     <plugins>
+      <!-- Compile the Java substitution (VarSubstitutions) with JDK 21; the default
+           compiler plugin from the super-pom defaults to source/target 5. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.13.0</version>
+        <configuration>
+          <release>21</release>
+        </configuration>
+      </plugin>
+
       <!-- Spring Boot AOT: refreshes the WebApi context at build time and generates
            the AOT sources/classes native-image consumes. Discovers trexsql's
            AutoConfiguration from the classpath. -->
@@ -150,11 +162,17 @@
                  trexsql.json. The trexsql Clojure stack drags these non-Clojure libs into
                  build-time init too, so initialize them at build time as well. -->
             <buildArg>--features=clj_easy.graal_build_time.InitClojureClasses</buildArg>
+            <!-- Build-time-init clojure.pprint/stacktrace within a *warn-on-reflection*
+                 binding (they (set! *warn-on-reflection*) at load, which otherwise throws
+                 during build-time init). -->
+            <buildArg>--features=org.trex.webapi.nativelib.ClojureInitFeature</buildArg>
             <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector</buildArg>
             <!-- clj-http (and the Apache HttpClient SSL stack it loads, whose SSLContext
                  holds a SecureRandom that can't live in the image heap) initializes at run
                  time. trexsql only touches clj-http through lazy wrappers (trexsql.http-client),
                  so no build-time-initialized namespace forces it to load at build time. -->
+            <!-- (clojure.pprint/stacktrace, which (set! *warn-on-reflection*) at load, now
+                 build-time-init fine thanks to the clojure.lang.Var substitution.) -->
             <buildArg>--initialize-at-run-time=clj_http</buildArg>
           </buildArgs>
         </configuration>
