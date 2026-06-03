@@ -106,7 +106,7 @@
         headers (cond-> {"Content-Type" "application/json"}
                   auth (assoc "Authorization" auth))
         resp (http/post url
-                        {:body (clojure.data.json/write-str body)
+                        {:body (trexsql.json/write-str body)
                          :headers headers
                          :as :json
                          :throw-exceptions false

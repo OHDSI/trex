@@ -16,7 +16,10 @@
   :dependencies [[org.clojure/clojure "1.11.1"]
                  [net.java.dev.jna/jna "5.15.0"]
                  [org.clojure/tools.cli "1.1.230"]
-                 [org.clojure/data.json "2.5.0"]
+                 ;; cheshire (not clojure.data.json) for JSON: data.json calls
+                 ;; (set! *warn-on-reflection*) at load, which breaks GraalVM
+                 ;; native-image build-time init (see trexsql.json).
+                 [cheshire "5.13.0"]
                  ;; HoneySQL for SQL generation (005-jdbc-batch-cache)
                  [com.github.seancorfield/honeysql "2.6.1196"]
                  ;; HikariCP for connection pooling (005-jdbc-batch-cache)

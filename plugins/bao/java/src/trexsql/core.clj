@@ -7,7 +7,7 @@
             [trexsql.swarm :as sw]
             [trexsql.native :as native]
             [trexsql.util :as u]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log])
   (:gen-class))

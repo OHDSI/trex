@@ -12,7 +12,7 @@
    trexsql.circe renderer (which goes through libtrexsql_engine, NOT
    libduckdb — TrexEngine.java preloads libtrexsql)."
   (:require [clj-http.client :as http]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

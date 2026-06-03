@@ -2,7 +2,7 @@
   "Loads the route manifest emitted by Atlas3's emit-route-manifest script.
    The JSON lives at resources/routes.manifest.json. Single source of
    truth for navigate_to enum + param keys."
-  (:require [clojure.data.json :as json]
+  (:require [trexsql.json :as json]
             [clojure.java.io :as io]))
 
 (def ^:private manifest

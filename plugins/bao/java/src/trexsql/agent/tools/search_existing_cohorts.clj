@@ -4,7 +4,7 @@
    description match), and returns the top hits. Lets the agent suggest
    reusing an existing cohort instead of building one from scratch."
   (:require [clj-http.client :as http]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

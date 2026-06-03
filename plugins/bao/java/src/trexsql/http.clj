@@ -2,7 +2,7 @@
   "HTTP request functions for trex_http_request TrexSQL scalar."
   (:require [trexsql.db :as db]
             [trexsql.errors :as errors]
-            [clojure.data.json :as json])
+            [trexsql.json :as json])
   (:import [java.util Map HashMap ArrayList]))
 
 (def ^:const default-timeout-ms 30000)

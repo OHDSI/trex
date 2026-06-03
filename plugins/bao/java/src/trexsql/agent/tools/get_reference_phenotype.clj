@@ -12,7 +12,7 @@
    index summary, so Pythia gets both the structural overview and the
    fully-elaborated source it can mimic."
   (:require [clj-http.client :as http]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [clojure.edn :as edn]
             [clojure.java.io :as io]
             [clojure.string :as str]

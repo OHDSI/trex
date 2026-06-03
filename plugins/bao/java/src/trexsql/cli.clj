@@ -6,7 +6,7 @@
             [trexsql.batch :as batch]
             [clojure.tools.cli :refer [parse-opts]]
             [clojure.string :as str]
-            [clojure.data.json :as json]))
+            [trexsql.json :as json]))
 
 ;; Cache Create Command
 

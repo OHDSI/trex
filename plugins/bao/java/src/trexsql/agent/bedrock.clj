@@ -10,7 +10,7 @@
    (`tokenProvider(...)` on the client builder + `AWS_BEARER_TOKEN_BEDROCK`
    auto-detection landed in 2.31). MessageDecoder itself is decoupled from
    the service clients and works fine on 2.28."
-  (:require [clojure.data.json :as json]
+  (:require [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [clj-http.client :as http]
