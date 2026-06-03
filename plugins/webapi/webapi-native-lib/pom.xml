@@ -166,7 +166,11 @@
                  binding (they (set! *warn-on-reflection*) at load, which otherwise throws
                  during build-time init). -->
             <buildArg>--features=org.trex.webapi.nativelib.ClojureInitFeature</buildArg>
-            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector</buildArg>
+            <!-- org.trex.* are Clojure gen-classes; graal-build-time doesn't recognize them
+                 as Clojure, so build-time-init them explicitly. Otherwise their <clinit> runs
+                 at runtime and recompiles trexsql/api.clj from source (which a closed-world
+                 native image can't do). -->
+            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector,org.trex.Trexsql,org.trex.TrexServlet,org.trex.webapi.TrexSQLPlugin,org.trex.webapi.TrexSQLSearchProvider</buildArg>
             <!-- clj-http (and the Apache HttpClient SSL stack it loads, whose SSLContext
                  holds a SecureRandom that can't live in the image heap) initializes at run
                  time. trexsql only touches clj-http through lazy wrappers (trexsql.http-client),
