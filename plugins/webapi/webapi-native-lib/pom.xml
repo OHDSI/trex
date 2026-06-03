@@ -142,22 +142,15 @@
                  disable the deadlock watchdog so a slow phase isn't mistaken for a hang. -->
             <buildArg>-H:DeadlockWatchdogInterval=0</buildArg>
             <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
-            <!-- Initialize all Clojure-compiled classes at build time (trexsql is Clojure). -->
+            <!-- Build-time-init ALL Clojure classes (trexsql is AOT-compiled Clojure; this
+                 keeps clojure.lang.RT from recompiling core from source at runtime AND lets
+                 trexsql's own AOT classes load from bytecode at runtime instead of being
+                 recompiled). Works because trexsql no longer pulls clojure.data.json (whose
+                 load-time (set! *warn-on-reflection*) cannot run at build time) — see
+                 trexsql.json. The trexsql Clojure stack drags these non-Clojure libs into
+                 build-time init too, so initialize them at build time as well. -->
             <buildArg>--features=clj_easy.graal_build_time.InitClojureClasses</buildArg>
-            <!-- Keep cheshire (and its Jackson) build-time-initialized so its serialization
-                 fns are allowed in the image heap; build-time classes capture them and chasing
-                 every holder doesn't converge. cheshire is a pure serialization lib, safe at
-                 build time, and shares WebAPI's Jackson 2.18.2. -->
-            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector</buildArg>
-            <!-- graal-build-time build-time-inits ALL Clojure classes, which fixes the core
-                 runtime (clojure.lang.RT/core) but also drags trexsql's app + HTTP/JSON stack
-                 (and their jackson/apache-http/logback/slf4j transitive deps) into build-time
-                 init, colliding with Spring's run-time init of those same libraries. Push the
-                 trexsql application namespaces and their HTTP/JSON Clojure libs back to run-time
-                 init (package prefixes are recursive) so they initialize like a normal Clojure
-                 app at runtime, leaving only core Clojure build-time-initialized. Plus a few
-                 clojure stdlib namespaces whose build-time class-init is rejected. -->
-            <buildArg>--initialize-at-run-time=trexsql,clj_http,ring,reitit,muuntaja,jsonista,clojure.data.json__init,clojure.pprint__init,clojure.pprint.dispatch__init,clojure.stacktrace__init,clojure.tools.logging__init,clojure.tools.logging.impl__init,org.trex.Trexsql,org.trex.TrexServlet,org.trex.webapi.TrexSQLPlugin,org.trex.webapi.TrexSQLSearchProvider</buildArg>
+            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.http,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector</buildArg>
           </buildArgs>
         </configuration>
         <executions>
