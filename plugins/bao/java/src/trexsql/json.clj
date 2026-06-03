@@ -23,9 +23,13 @@
     (cheshire/parse-string s (keywordize? opts))))
 
 (defn read
-  "Like clojure.data.json/read. Supports the :key-fn keyword option."
+  "Like clojure.data.json/read. Supports the :key-fn keyword option.
+
+   Reads the whole stream eagerly (via slurp): clojure.data.json/read is eager,
+   whereas cheshire/parse-stream can be lazy — which throws if the caller parses
+   inside a with-open (the reader closes before the value is realized)."
   [^Reader reader & opts]
-  (cheshire/parse-stream reader (keywordize? opts)))
+  (apply read-str (slurp reader) opts))
 
 (defn write-str
   "Like clojure.data.json/write-str (serialize to a JSON string)."
