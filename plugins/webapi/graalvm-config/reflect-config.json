@@ -1866,7 +1866,9 @@
         "name": "<init>",
         "parameterTypes": []
       }
-    ]
+    ],
+    "allDeclaredFields": true,
+    "allPublicFields": true
   },
   {
     "name": "org.trex.Trexsql",
@@ -1919,7 +1921,9 @@
         "name": "shutdown",
         "parameterTypes": []
       }
-    ]
+    ],
+    "allDeclaredFields": true,
+    "allPublicFields": true
   },
   {
     "name": "org.trex.webapi.TrexSQLPlugin",
@@ -1928,10 +1932,14 @@
         "name": "<init>",
         "parameterTypes": []
       }
-    ]
+    ],
+    "allDeclaredFields": true,
+    "allPublicFields": true
   },
   {
-    "name": "org.trex.webapi.TrexSQLSearchProvider"
+    "name": "org.trex.webapi.TrexSQLSearchProvider",
+    "allDeclaredFields": true,
+    "allPublicFields": true
   },
   {
     "name": "potemkin.collections.PotemkinMap"
