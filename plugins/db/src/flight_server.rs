@@ -85,6 +85,35 @@ impl DuckDBFlightService {
             })
     }
 
+    /// Extract optional positional bind parameters from a JSON-encoded ticket.
+    /// Expected format: `{"query": "...", "params": ["a", "2"]}`. Params are
+    /// transported as strings (matching the local pool path, which binds every
+    /// param as a string via ToSql) and bound positionally on the data node.
+    /// A missing or null `params` field yields an empty vec (no binding).
+    fn parse_ticket_params(ticket: &Ticket) -> Result<Vec<String>, Status> {
+        let value: serde_json::Value = serde_json::from_slice(ticket.ticket.as_ref())
+            .map_err(|e| {
+                Status::invalid_argument(format!("Invalid ticket format, expected JSON: {}", e))
+            })?;
+
+        match value.get("params") {
+            None | Some(serde_json::Value::Null) => Ok(Vec::new()),
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .map(|v| {
+                    v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                        Status::invalid_argument(
+                            "Ticket \"params\" must be an array of strings",
+                        )
+                    })
+                })
+                .collect(),
+            Some(_) => Err(Status::invalid_argument(
+                "Ticket \"params\" must be an array of strings",
+            )),
+        }
+    }
+
     fn execute_query_pooled(
         sql: &str,
     ) -> Result<(arrow::datatypes::SchemaRef, Vec<arrow::array::RecordBatch>), Status> {
@@ -106,11 +135,20 @@ impl DuckDBFlightService {
     fn execute_with_session(
         token: Option<&str>,
         sql: &str,
+        params: &[String],
     ) -> Result<(arrow::datatypes::SchemaRef, Vec<arrow::array::RecordBatch>), Status> {
         use crate::flight_sessions::SessionRegistry;
 
         match token {
-            None => Self::execute_query_pooled(sql),
+            None => {
+                if params.is_empty() {
+                    Self::execute_query_pooled(sql)
+                } else {
+                    Err(Status::invalid_argument(
+                        "parameterised queries require a session token",
+                    ))
+                }
+            }
             Some(tok) => {
                 let registry = SessionRegistry::instance();
                 let sid = match registry.resolve(tok) {
@@ -129,8 +167,15 @@ impl DuckDBFlightService {
                         }
                     }
                 };
-                trex_pool_client::session_execute(sid, sql)
-                    .map_err(|e| Status::internal(format!("session_execute: {e}")))
+                // On the data node the session is local, so both the plain and
+                // parameterised pool paths bind here directly.
+                if params.is_empty() {
+                    trex_pool_client::session_execute(sid, sql)
+                        .map_err(|e| Status::internal(format!("session_execute: {e}")))
+                } else {
+                    trex_pool_client::session_execute_params(sid, sql, params)
+                        .map_err(|e| Status::internal(format!("session_execute_params: {e}")))
+                }
             }
         }
     }
@@ -377,13 +422,15 @@ impl FlightService for DuckDBFlightService {
         let token = extract_session_token(&request);
         let ticket = request.into_inner();
         let sql = Self::parse_ticket_query(&ticket)?;
+        let params = Self::parse_ticket_params(&ticket)?;
         SwarmLogger::info("do_get", &format!("Executing query on {}:{}", self.host, self.port));
-        SwarmLogger::debug("do_get", &format!("SQL: {sql} session={:?}", token));
+        SwarmLogger::debug("do_get", &format!("SQL: {sql} params={} session={:?}", params.len(), token));
 
-        let (schema, batches) =
-            tokio::task::spawn_blocking(move || Self::execute_with_session(token.as_deref(), &sql))
-                .await
-                .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
+        let (schema, batches) = tokio::task::spawn_blocking(move || {
+            Self::execute_with_session(token.as_deref(), &sql, &params)
+        })
+        .await
+        .map_err(|e| Status::internal(format!("Task join error: {}", e)))??;
 
         SwarmLogger::debug(
             "do_get",
@@ -429,10 +476,26 @@ impl FlightService for DuckDBFlightService {
                     .get("query").and_then(|v| v.as_str())
                     .ok_or_else(|| Status::invalid_argument("Action body must contain a \"query\" field"))?
                     .to_string();
+                let params: Vec<String> = match body.get("params") {
+                    None | Some(serde_json::Value::Null) => Vec::new(),
+                    Some(serde_json::Value::Array(items)) => items
+                        .iter()
+                        .map(|v| {
+                            v.as_str().map(|s| s.to_string()).ok_or_else(|| {
+                                Status::invalid_argument("Action \"params\" must be an array of strings")
+                            })
+                        })
+                        .collect::<Result<_, _>>()?,
+                    Some(_) => {
+                        return Err(Status::invalid_argument(
+                            "Action \"params\" must be an array of strings",
+                        ))
+                    }
+                };
 
                 let token_owned = token.clone();
                 tokio::task::spawn_blocking(move || -> Result<(), Status> {
-                    let _ = Self::execute_with_session(token_owned.as_deref(), &sql)?;
+                    let _ = Self::execute_with_session(token_owned.as_deref(), &sql, &params)?;
                     Ok(())
                 })
                 .await
@@ -974,6 +1037,60 @@ mod tests {
             serde_json::json!({"query": 42}).to_string().into_bytes(),
         );
         let err = DuckDBFlightService::parse_ticket_query(&ticket).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn parse_ticket_params_present() {
+        let ticket = Ticket::new(
+            serde_json::json!({"query": "SELECT ?", "params": ["a", "2"]})
+                .to_string()
+                .into_bytes(),
+        );
+        let params = DuckDBFlightService::parse_ticket_params(&ticket).unwrap();
+        assert_eq!(params, vec!["a".to_string(), "2".to_string()]);
+    }
+
+    #[test]
+    fn parse_ticket_params_absent_is_empty() {
+        let ticket = Ticket::new(
+            serde_json::json!({"query": "SELECT 1"}).to_string().into_bytes(),
+        );
+        let params = DuckDBFlightService::parse_ticket_params(&ticket).unwrap();
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn parse_ticket_params_null_is_empty() {
+        let ticket = Ticket::new(
+            serde_json::json!({"query": "SELECT 1", "params": null})
+                .to_string()
+                .into_bytes(),
+        );
+        let params = DuckDBFlightService::parse_ticket_params(&ticket).unwrap();
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn parse_ticket_params_non_string_element_errors() {
+        let ticket = Ticket::new(
+            serde_json::json!({"query": "SELECT ?", "params": [1, 2]})
+                .to_string()
+                .into_bytes(),
+        );
+        let err = DuckDBFlightService::parse_ticket_params(&ticket).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("params"));
+    }
+
+    #[test]
+    fn parse_ticket_params_non_array_errors() {
+        let ticket = Ticket::new(
+            serde_json::json!({"query": "SELECT 1", "params": "nope"})
+                .to_string()
+                .into_bytes(),
+        );
+        let err = DuckDBFlightService::parse_ticket_params(&ticket).unwrap_err();
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
 

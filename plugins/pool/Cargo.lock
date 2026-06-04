@@ -2077,6 +2077,7 @@ dependencies = [
  "arrow-ipc",
  "arrow-schema",
  "libc",
+ "serde_json",
 ]
 
 [[package]]

@@ -1032,6 +1032,13 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
               targets.push({ name: "core", path: schemaDir, schema: "trexdb", database: "_config" });
             }
 
+            // Include migrations declared by registered plugins (e.g. devx),
+            // optionally filtered to a single plugin by name.
+            for (const t of Plugins.migrationTargets) {
+              if (args.pluginName && t.name !== args.pluginName) continue;
+              targets.push({ name: t.name, path: t.path, schema: t.schema, database: t.database });
+            }
+
             for (const target of targets) {
               const sql = `SELECT version, name, status FROM trex_migration_run_schema('${escapeSql(target.path)}', '${escapeSql(target.schema)}', '${escapeSql(target.database)}')`;
               const result = await conn.execute(sql, []);

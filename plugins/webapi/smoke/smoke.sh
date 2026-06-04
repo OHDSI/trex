@@ -42,7 +42,7 @@ for path in \
   /estimation /prediction /reusable /tag /notifications /job/execution \
   /user /role /permission /me /saved-analysis /cdmresults /featureextraction \
   /evidence /vocabulary /penelope /sqlrender/translate /ddl/results \
-  /trexsql/study/envs ; do
+  /trexsql/study/envs /trexsql/cache/jobs ; do
   code=$(curl -s -m 12 -o /dev/null -w "%{http_code}" "$BASE$path" 2>/dev/null || echo "ERR")
   echo "  $code  $path"
 done
