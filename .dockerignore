@@ -21,6 +21,7 @@ plugins/
 # the webapi-be submodule in context; build dirs are still trimmed by **/target/ etc.
 !plugins/webapi/
 !plugins/bao/
+!plugins/extension-ci-tools/
 # ...but never the nested submodule .git pointer files re-included above: WebAPI's
 # git-commit-id-plugin chokes on a .git that points outside the build context. With
 # no .git present it skips cleanly (failOnNoGitDirectory=false). This must come AFTER

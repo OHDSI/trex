@@ -33,15 +33,27 @@ echo "=== harness.log boot output (full) ==="
 grep -vE "WEBAPI_STATUS=" /tmp/harness.log | head -300
 
 echo "=== endpoint probes (http code) ==="
-for url in \
-  http://localhost:8080/WebAPI/info \
-  http://localhost:8080/WebAPI/source/sources \
-  http://localhost:8080/WebAPI/trexsql/study/envs \
-  http://localhost:8080/WebAPI/trexsql/cache/jobs \
-  http://localhost:8080/trexsql/study/envs \
-  http://localhost:8080/WebAPI/trexsql/ ; do
-  code=$(curl -s -m 10 -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "ERR")
-  echo "  $code  $url"
+BASE=http://localhost:8080/WebAPI
+echo "=== WebAPI endpoint sweep (code  path) ==="
+for path in \
+  /info /source/sources /source/priorityVocabulary \
+  /cohortdefinition /conceptset /cohortcharacterization /cohort-characterization \
+  /featureanalysis /feature-analysis /pathway-analysis /ir /cohort-sample \
+  /estimation /prediction /reusable /tag /notifications /job/execution \
+  /user /role /permission /me /saved-analysis /cdmresults /featureextraction \
+  /evidence /vocabulary /penelope /sqlrender/translate /ddl/results \
+  /trexsql/study/envs ; do
+  code=$(curl -s -m 12 -o /dev/null -w "%{http_code}" "$BASE$path" 2>/dev/null || echo "ERR")
+  echo "  $code  $path"
 done
+
+echo "=== native-image reachability errors during the sweep (server log) ==="
+grep -iE "UnsupportedFeatureError|ClassNotFoundException|NoClassDefFoundError|not registered for reflection|NoSuchMethodError|InaccessibleObjectException|No such (field|method) found|registered for reflection" /tmp/harness.log \
+  | grep -viE "error loading .* driver|WEBAPI_STATUS" | sort -u | head -25
+echo "(empty above = no native-image reachability gaps hit on the swept endpoints)"
+
+echo "=== server-side errors/exceptions during the sweep (root causes of 500s) ==="
+grep -nE "ERROR|Exception|Caused by|Servlet.service|nested exception" /tmp/harness.log \
+  | grep -viE "error loading .* driver|WEBAPI_STATUS=" | tail -60
 
 echo "[smoke] done"
