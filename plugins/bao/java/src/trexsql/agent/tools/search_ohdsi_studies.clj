@@ -8,7 +8,7 @@
 
    Auth: optional `GITHUB_TOKEN` env var raises the rate limit from 10
    to 30 req/min for unauthenticated callers."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

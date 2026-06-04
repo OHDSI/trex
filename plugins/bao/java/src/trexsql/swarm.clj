@@ -1,6 +1,6 @@
 (ns trexsql.swarm
   "SWARM_CONFIG synthesis and JSON helpers for bao's orchestrated mode."
-  (:require [clojure.data.json :as json]))
+  (:require [trexsql.json :as json]))
 
 (defn build-swarm-config
   "Build a single-node ClusterConfig map from bao's scalar CLI options.

@@ -4,7 +4,7 @@
    progress into local jobs DB + Spring Batch tables."
   (:require [trexsql.db :as db]
             [trexsql.jobs :as jobs]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [clojure.string :as str]
             [clojure.tools.logging :as log])
   (:import [java.util HashMap]))

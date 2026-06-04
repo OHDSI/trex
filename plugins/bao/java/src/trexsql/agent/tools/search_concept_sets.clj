@@ -3,7 +3,7 @@
    the user's concept sets, scores each against the query (name +
    description match), and returns the top hits. Lets the agent suggest
    reusing an existing concept set instead of creating a duplicate."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

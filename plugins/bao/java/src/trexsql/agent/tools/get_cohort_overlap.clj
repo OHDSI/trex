@@ -6,7 +6,7 @@
 
    WebAPI endpoint: GET /cohortdefinition/{id}/report/{sourceKey}
    (overlap data ships in cohort report bodies on most WebAPI versions)"
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

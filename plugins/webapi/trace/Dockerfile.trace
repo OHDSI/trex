@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1.4
+# Capture GraalVM reachability metadata for the trexsql Clojure/JNA stack by running
+# it on a JVM under the native-image tracing agent. Build context = repo root:
+#   DOCKER_BUILDKIT=1 docker build -f plugins/webapi/trace/Dockerfile.trace \
+#     --target export -o type=local,dest=./agent-out .
+# Output: ./agent-out/agent-config/*.json
+# 24.04: the prebuilt libtrexsql.so needs GLIBC_2.38 / GLIBCXX_3.4.32 (absent on 22.04).
+FROM ubuntu:24.04 AS trace
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates build-essential clang pkg-config libssl-dev git unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust (builds libtrexsql_engine.so — links the prebuilt libtrexsql, not a full DuckDB compile)
+RUN curl -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH=/root/.cargo/bin:$PATH
+
+# GraalVM JDK 21 (provides java + the native-image tracing agent)
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=x64 ;; arm64) A=aarch64 ;; *) exit 1 ;; esac \
+    && curl -fsSL "https://download.oracle.com/graalvm/21/latest/graalvm-jdk-21_linux-${A}_bin.tar.gz" | tar -xz -C /opt \
+    && mv /opt/graalvm-jdk-21* /opt/graalvm
+ENV JAVA_HOME=/opt/graalvm
+ENV PATH=$JAVA_HOME/bin:$PATH
+
+RUN curl -fsSL https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein -o /usr/local/bin/lein \
+    && chmod +x /usr/local/bin/lein && lein version
+
+# libtrexsql (the DuckDB fork) — headers for the cargo build, .so for runtime linking.
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=amd64 ;; arm64) A=arm64 ;; esac \
+    && curl -fsSL -o /tmp/t.zip "https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-${A}.zip" \
+    && mkdir -p /opt/trexsql && unzip -o /tmp/t.zip -d /opt/trexsql \
+    && cp /opt/trexsql/libtrexsql.so /usr/local/lib/ \
+    && cp /opt/trexsql/duckdb.h /usr/local/include/ 2>/dev/null || true \
+    && ldconfig
+
+WORKDIR /src
+# Build the trexsql engine native lib.
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+# --lib only: build the libtrexsql_engine.so cdylib; the `trex` bin isn't needed.
+RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/src/target \
+    TREXSQL_LIB_DIR=/opt/trexsql cargo build --release --lib \
+    && cp target/release/libtrexsql_engine.so /usr/local/lib/ && ldconfig
+
+# Build the trexsql jar + resolve its runtime classpath.
+COPY plugins/bao/java ./bao
+RUN --mount=type=cache,target=/root/.m2 \
+    cd bao && lein install && lein classpath > /tmp/cp.txt
+
+# Compile + run the trace driver under the native-image agent.
+COPY plugins/webapi/trace/TraceMain.java /trace/TraceMain.java
+ENV LD_LIBRARY_PATH=/usr/local/lib
+RUN --mount=type=cache,target=/root/.m2 \
+    CP="$(cat /tmp/cp.txt)" \
+    && javac -cp "$CP" -d /trace /trace/TraceMain.java \
+    && mkdir -p /agent-config \
+    && java -agentlib:native-image-agent=config-output-dir=/agent-config \
+         -cp "$CP:/trace" TraceMain || echo "[trace] driver rc=$?" \
+    && echo "=== captured config ===" && ls -la /agent-config \
+    && wc -l /agent-config/*.json 2>/dev/null || true
+
+FROM scratch AS export
+COPY --from=trace /agent-config/ /agent-config/

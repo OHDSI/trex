@@ -5,7 +5,7 @@
    POST `q=<query>` to https://lite.duckduckgo.com/lite/, regex out the
    anchor + snippet pairs, return the top N as a clojure map suitable for
    serialisation as a Bedrock tool result."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str])
   (:import [java.net URLEncoder]))
 

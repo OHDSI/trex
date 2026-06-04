@@ -5,7 +5,7 @@
             [trexsql.errors :as errors]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [honey.sql :as sql]
             [honey.sql.helpers :as h])
   (:import [java.sql Connection DriverManager PreparedStatement ResultSet SQLException]

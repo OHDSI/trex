@@ -2,7 +2,7 @@
   "Configuration management for Trexsql - CLI parsing and environment variables."
   (:require [clojure.tools.cli :refer [parse-opts]]
             [clojure.string :as str]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [clojure.tools.logging :as log]))
 
 (def default-config
