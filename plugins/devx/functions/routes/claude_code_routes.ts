@@ -17,6 +17,67 @@ const SCOPES = "org:create_api_key user:profile user:inference user:sessions:cla
 // Store PKCE verifier in a temp file (edge function workers are ephemeral)
 const PENDING_FILE = "/tmp/.claude-pkce-pending.json";
 
+// Persisted OAuth token (written by the login-code flow, read by the agent).
+const TOKEN_PATH = "/home/node/.claude/oauth-token.json";
+
+/**
+ * Return a non-expired Claude Code OAuth access token, refreshing it via the
+ * stored refresh_token when it is within `skewMs` of expiry. The refreshed
+ * token is written back to disk so subsequent reads stay valid. Returns null
+ * when no token is stored. On refresh failure, falls back to the stored token
+ * (which will surface as a 401, prompting the user to re-login).
+ *
+ * The Claude OAuth access token lives ~1h; without this the agent would send a
+ * stale token and every request after the first hour would 401.
+ */
+export async function getValidOAuthToken(skewMs = 60_000): Promise<string | null> {
+  let tokenData: any;
+  try {
+    tokenData = JSON.parse(await Deno.readTextFile(TOKEN_PATH));
+  } catch {
+    return null;
+  }
+  if (!tokenData?.accessToken) return null;
+
+  const expiresAt = typeof tokenData.expiresAt === "number" ? tokenData.expiresAt : 0;
+  if (expiresAt - skewMs > Date.now()) {
+    return tokenData.accessToken; // still valid
+  }
+  if (!tokenData.refreshToken) {
+    return tokenData.accessToken; // nothing to refresh with; may 401
+  }
+
+  try {
+    const resp = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        grant_type: "refresh_token",
+        client_id: CLIENT_ID,
+        refresh_token: tokenData.refreshToken,
+      }),
+    });
+    if (!resp.ok) {
+      console.error("[claude-code] Token refresh failed:", resp.status, (await resp.text()).slice(0, 300));
+      return tokenData.accessToken;
+    }
+    const tokens = await resp.json();
+    const refreshed = {
+      accessToken: tokens.access_token,
+      // Refresh responses don't always include a new refresh_token — keep the old one.
+      refreshToken: tokens.refresh_token || tokenData.refreshToken,
+      expiresAt: Date.now() + (tokens.expires_in || 3600) * 1000,
+      apiKey: tokenData.apiKey ?? null,
+    };
+    await Deno.writeTextFile(TOKEN_PATH, JSON.stringify(refreshed));
+    console.log("[claude-code] OAuth token refreshed; expires in", tokens.expires_in || 3600, "s");
+    return refreshed.accessToken;
+  } catch (err) {
+    console.error("[claude-code] Token refresh error:", err?.message || String(err));
+    return tokenData.accessToken;
+  }
+}
+
 async function savePending(userId: string, data: { verifier: string; state: string }) {
   let all: Record<string, any> = {};
   try { all = JSON.parse(await Deno.readTextFile(PENDING_FILE)); } catch {}

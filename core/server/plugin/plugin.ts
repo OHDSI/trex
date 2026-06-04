@@ -4,6 +4,9 @@ import { addPlugin as addFunctionPlugin } from "./function.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { scanPluginDirectory } from "./utils.ts";
+import { escapeSql } from "../lib/sql.ts";
+
+declare const Trex: any;
 
 interface ActivePluginEntry {
   name: string;
@@ -12,8 +15,19 @@ interface ActivePluginEntry {
   registeredAt: Date;
 }
 
+interface MigrationTarget {
+  name: string;
+  path: string;
+  schema: string;
+  database: string;
+}
+
 export class Plugins {
   static activeRegistry: Map<string, ActivePluginEntry> = new Map();
+  // Migration targets collected from plugins that declare a `migrations` config.
+  // Applied at boot by applyMigrations(); also consumed by the runPluginMigrations
+  // GraphQL mutation so the admin "run migrations" action covers plugins too.
+  static migrationTargets: MigrationTarget[] = [];
 
   private static addPlugin(
     app: Express,
@@ -65,6 +79,9 @@ export class Plugins {
           case "transform":
             addTransformPlugin(app, value, dir, shortName);
             break;
+          case "migrations":
+            Plugins.registerMigrations(dir, shortName, value);
+            break;
           default:
             console.log(`Unknown plugin type: ${key}`);
         }
@@ -115,6 +132,61 @@ export class Plugins {
     console.log(
       `Plugin registration complete: ${Plugins.activeRegistry.size} plugins active`
     );
+
+    // Apply any schema migrations declared by registered plugins. Without this,
+    // a plugin's `migrations` config is silently ignored and its tables never
+    // get created — surfacing later as "relation <schema>.<table> does not exist".
+    await Plugins.applyMigrations();
+  }
+
+  /**
+   * Record a plugin's `migrations` config for later application. The config
+   * shape is `{ schema: string, database?: string }`; SQL files live in the
+   * plugin's `migrations/` subdirectory.
+   */
+  private static registerMigrations(dir: string, shortName: string, value: any) {
+    const schema = value?.schema;
+    if (!schema) {
+      console.warn(`Plugin ${shortName}: migrations config missing "schema" — ignoring`);
+      return;
+    }
+    Plugins.migrationTargets.push({
+      name: shortName,
+      path: `${dir}/migrations`,
+      schema,
+      database: value?.database || "_config",
+    });
+  }
+
+  /**
+   * Run pending migrations for every registered plugin migration target.
+   * Idempotent — trex_migration_run_schema tracks applied versions — so it is
+   * safe to call on every boot. Failures are logged but never crash startup.
+   */
+  static async applyMigrations(): Promise<void> {
+    if (Plugins.migrationTargets.length === 0) return;
+    let conn: any;
+    try {
+      conn = new Trex.TrexDB("memory");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error(`Plugin migrations skipped — TrexDB unavailable: ${msg}`);
+      return;
+    }
+    for (const t of Plugins.migrationTargets) {
+      try {
+        const sql = `SELECT version, name, status FROM trex_migration_run_schema('${escapeSql(t.path)}', '${escapeSql(t.schema)}', '${escapeSql(t.database)}')`;
+        const result = await conn.execute(sql, []);
+        const rows = result?.rows || result || [];
+        const applied = rows.filter((r: any) => (r.status ?? r[2]) === "applied").length;
+        console.log(
+          `Plugin ${t.name}: ${applied} migration(s) applied to schema "${t.schema}" (${rows.length} total)`
+        );
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error(`Plugin ${t.name}: migration failed for schema "${t.schema}": ${msg}`);
+      }
+    }
   }
 
   /**

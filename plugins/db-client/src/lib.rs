@@ -17,6 +17,8 @@ pub struct Opaque {
 
 type FnCreate = unsafe extern "C" fn() -> u64;
 type FnExecute = unsafe extern "C" fn(u64, *const u8, usize) -> *mut Opaque;
+type FnExecuteParams =
+    unsafe extern "C" fn(u64, *const u8, usize, *const u8, usize) -> *mut Opaque;
 type FnDestroy = unsafe extern "C" fn(u64);
 type FnIsError = unsafe extern "C" fn(*const Opaque) -> i32;
 type FnData = unsafe extern "C" fn(*const Opaque, *mut *const u8, *mut usize);
@@ -26,6 +28,8 @@ type FnFree = unsafe extern "C" fn(*mut Opaque);
 struct DbFns {
     create: FnCreate,
     execute: FnExecute,
+    // Optional: absent on db.trex builds predating parameterised remote support.
+    execute_params: Option<FnExecuteParams>,
     destroy: FnDestroy,
     is_error: FnIsError,
     data: FnData,
@@ -98,9 +102,22 @@ unsafe fn discover_db_fns() -> Option<DbFns> {
         }};
     }
 
+    // Optional symbol: returns None (rather than aborting discovery) when the
+    // loaded db.trex predates parameterised remote-session support.
+    let execute_params: Option<FnExecuteParams> = {
+        let name = "trex_db_remote_session_execute_params\0";
+        let ptr = libc::dlsym(handle, name.as_ptr() as *const _);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute(ptr))
+        }
+    };
+
     Some(DbFns {
         create: sym!("trex_db_remote_session_create"),
         execute: sym!("trex_db_remote_session_execute"),
+        execute_params,
         destroy: sym!("trex_db_remote_session_destroy"),
         is_error: sym!("trex_db_remote_session_result_is_error"),
         data: sym!("trex_db_remote_session_result_data"),
@@ -182,6 +199,32 @@ pub fn remote_session_execute(
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
     let fns = get_fns()?;
     let result = unsafe { (fns.execute)(session_id, sql.as_ptr(), sql.len()) };
+    arrow_result_to_batches(fns, result)
+}
+
+/// Execute parameterised SQL on the remote session, returning Arrow record
+/// batches. `params` are positional, string-encoded values. Returns `Err` if
+/// the loaded db.trex predates parameterised remote-session support.
+pub fn remote_session_execute_params(
+    session_id: u64,
+    sql: &str,
+    params: &[String],
+) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
+    let fns = get_fns()?;
+    let execute_params = fns.execute_params.ok_or_else(|| {
+        "remote parameterised execution unavailable (db.trex too old)".to_string()
+    })?;
+    let params_json = serde_json::to_vec(params)
+        .map_err(|e| format!("serialize remote params: {e}"))?;
+    let result = unsafe {
+        execute_params(
+            session_id,
+            sql.as_ptr(),
+            sql.len(),
+            params_json.as_ptr(),
+            params_json.len(),
+        )
+    };
     arrow_result_to_batches(fns, result)
 }
 

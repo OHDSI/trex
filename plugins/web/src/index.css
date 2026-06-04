@@ -43,6 +43,7 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-trex-brand: var(--trex-brand);
 }
 
 :root {
@@ -80,6 +81,7 @@
   --sidebar-ring: oklch(0.6739 0.1675 38.21);
 
   /* trex-specific extras (not shadcn) */
+  --trex-brand: oklch(0.6739 0.1675 38.21);     /* #eb6622 — fixed brand orange for the wordmark; independent of the swappable --primary so plugin stylesheets can't recolor it */
   --trex-accent-bg: rgba(235, 102, 34, 0.10);   /* reserved, currently unused per minimal-orange policy */
   --trex-accent-fg: #c2410c;
   --trex-success: #22c55e;
@@ -119,6 +121,7 @@
   --sidebar-border: oklch(1 0 0 / 6%);
   --sidebar-ring: oklch(0.7547 0.1675 38.21);
 
+  --trex-brand: oklch(0.6739 0.1675 38.21);     /* #eb6622 — same brand orange in dark */
   --trex-accent-bg: rgba(235, 102, 34, 0.10);
   --trex-accent-fg: #fb923c;            /* lifted orange for text on dark */
   --trex-success: #22c55e;

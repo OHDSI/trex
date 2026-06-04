@@ -332,17 +332,17 @@ pub fn session_execute(
     }
 }
 
-/// Execute parameterised SQL. Remote backend does not currently support
-/// parameter binding — returns Err with a clear message.
+/// Execute parameterised SQL — routes to the local pool or, for a remote
+/// session, ships the SQL + positional string params to the data node where
+/// they bind against the local pool there.
 pub fn session_execute_params(
     session_id: u64,
     sql: &str,
     params: &[String],
 ) -> Result<(Arc<Schema>, Vec<RecordBatch>), String> {
     if is_remote_id(session_id) {
-        return Err(
-            "parameterised execution not supported on remote pool backend".to_string(),
-        );
+        let remote = pool_id_to_remote_id(session_id);
+        return trex_db_client::remote_session_execute_params(remote, sql, params);
     }
     session_execute_params_local(session_id, sql, params)
 }
