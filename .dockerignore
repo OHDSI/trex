@@ -29,7 +29,8 @@ plugins/
 
 # Dockerfile.dx builds the devx_ext extension from source (not in the base image),
 # so its source + the shared extension-ci-tools must be in the build context.
-# Their heavy build outputs are re-excluded (rebuilt inside the image).
+# Their heavy build outputs are re-excluded (rebuilt inside the image). The webapi
+# native-lib / .trex builds also need extension-ci-tools in context.
 !plugins/devx-ext/
 !plugins/extension-ci-tools/
 plugins/devx-ext/build/

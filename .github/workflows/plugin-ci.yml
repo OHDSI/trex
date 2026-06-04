@@ -474,11 +474,118 @@ jobs:
           path: ${{ matrix.PKGPATH }}/*.trex
           retention-days: 7
 
+  # Build the heavy GraalVM native shared library libwebapi-native.so (embeds
+  # OHDSI WebAPI + the trexsql/bao integration). The webapi.trex extension is a
+  # thin shim that dlopens this lib at runtime, so without it the bundled
+  # extension can't boot. Built per-arch via Dockerfile.native-lib, boot-smoked
+  # (dlopen + webapi_start -> running), and uploaded as webapi-native-<arch> for
+  # create-release (release asset) and build-docker (baked into /usr/lib).
+  build-webapi-native:
+    # Same contexts as the plugin build matrix: develop/main/release/dispatch/tags
+    # and non-draft same-repo PRs.
+    if: |
+      (github.ref_name == 'develop' || github.ref_name == 'main' || contains('release', github.ref_name) || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout_wn
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - if: steps.checkout_wn.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      # The native lib build needs the webapi-be submodule (WebAPI source +
+      # native-image reachability config under WebAPI-extra) checked out.
+      - name: Init webapi-be submodule
+        shell: bash
+        run: |
+          git config --local --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          git config --global --unset-all http.https://github.com/.extraheader 2>/dev/null || true
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 --force plugins/webapi/webapi-be; then
+              echo "submodule init succeeded on attempt $attempt"; exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::webapi-be submodule init failed after 3 attempts"; exit 1
+      # native-image needs ~12-16 GB RAM; hosted runners have 16 GB. Free disk and
+      # add a large swap file so the linker doesn't get OOM-killed.
+      - name: Free disk space
+        continue-on-error: true
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+      - name: Increase swap to 15G
+        continue-on-error: true
+        run: |
+          sudo swapoff -a || true
+          sudo fallocate -l 15G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build libwebapi-native.so (${{ matrix.arch }})
+        run: |
+          DOCKER_BUILDKIT=1 docker build \
+            --target export -o type=local,dest=./out \
+            -f plugins/webapi/Dockerfile.native-lib .
+          ls -lh out/out/libwebapi-native.so
+      # Boot the native lib end-to-end (ephemeral Postgres + dlopen + webapi_start).
+      # smoke.sh prints results but always exits 0, so assert on its output here.
+      - name: Boot smoke test (${{ matrix.arch }})
+        run: |
+          DOCKER_BUILDKIT=1 docker build -f plugins/webapi/smoke/Dockerfile.smoke -t webapi-smoke .
+          docker run --rm webapi-smoke | tee smoke.out
+          if ! grep -q "status=running" smoke.out; then
+            echo "::error::webapi_start did not reach running state"; exit 1
+          fi
+          if grep -iqE "not registered for reflection|UnsupportedFeatureError|MissingReflectionRegistrationError|NoClassDefFoundError" smoke.out; then
+            echo "::error::native-image reachability gap hit during boot smoke"; exit 1
+          fi
+      - name: Stage native lib artifact
+        run: cp out/out/libwebapi-native.so "libwebapi-native-${{ matrix.arch }}.so"
+      - name: Upload native lib artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: webapi-native-${{ matrix.arch }}
+          path: libwebapi-native-${{ matrix.arch }}.so
+          if-no-files-found: error
+          retention-days: 7
+
   create-release:
-    needs: [build, build-arm]
+    # build-webapi-native is a need for ordering (so its .so artifact exists), but
+    # the release is best-effort on it: a flaky heavy GraalVM build must not block
+    # publishing the other ~20 plugins. always() + explicit build/build-arm success
+    # gates preserve the original "release only if the plugin builds passed" rule.
+    needs: [build, build-arm, build-webapi-native]
     # Releases only from canonical repo: workflow_dispatch on develop/main, or any pushed v* tag.
     if: |
-      github.repository == 'OHDSI/trex'
+      always()
+      && needs.build.result == 'success'
+      && needs.build-arm.result == 'success'
+      && github.repository == 'OHDSI/trex'
       && (
         (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '' && (github.ref_name == 'develop' || github.ref_name == 'main'))
         || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
@@ -511,6 +618,13 @@ jobs:
           path: release-assets/arm64/
           merge-multiple: true
         continue-on-error: true
+      - name: Download webapi native lib artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: webapi-native-*
+          path: release-assets/native/
+          merge-multiple: true
+        continue-on-error: true
       - name: Prepare release assets
         run: |
           mkdir -p release-assets/final
@@ -519,6 +633,10 @@ jobs:
           done
           for f in release-assets/arm64/*.trex; do
             [ -f "$f" ] && cp "$f" "release-assets/final/$(basename "${f%.trex}")-linux-arm64.trex"
+          done
+          # libwebapi-native-<arch>.so — companion lib the webapi.trex shim dlopens.
+          for f in release-assets/native/libwebapi-native-*.so; do
+            [ -f "$f" ] && cp "$f" "release-assets/final/$(basename "$f")"
           done
           ls -la release-assets/final/
       - name: Resolve release metadata
@@ -545,7 +663,9 @@ jobs:
           tag_name: ${{ steps.relmeta.outputs.tag }}
           name: ${{ steps.relmeta.outputs.name }}
           prerelease: ${{ steps.relmeta.outputs.prerelease }}
-          files: release-assets/final/*.trex
+          files: |
+            release-assets/final/*.trex
+            release-assets/final/*.so
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -572,7 +692,7 @@ jobs:
           fi
 
   build-docker:
-    needs: [build, build-arm, docker-matrix]
+    needs: [build, build-arm, build-webapi-native, docker-matrix]
     if: always() && needs.build.result == 'success' && (needs.build-arm.result == 'success' || needs.build-arm.result == 'skipped')
     strategy:
       fail-fast: false
@@ -616,6 +736,28 @@ jobs:
           pattern: ext-*-${{ matrix.arch }}
           path: extensions/${{ matrix.arch }}/
           merge-multiple: true
+
+      # The webapi.trex shim dlopens libwebapi-native.so at runtime. Stage the
+      # per-arch native lib into the same extensions/<arch>/ dir the Dockerfile
+      # already COPYs; the Dockerfile copies *.so from there into /usr/lib.
+      # continue-on-error: if the native build failed/skipped, the image just
+      # ships without it (the Dockerfile copy tolerates its absence).
+      - name: Download ${{ matrix.arch }} webapi native lib
+        uses: actions/download-artifact@v4
+        with:
+          name: webapi-native-${{ matrix.arch }}
+          path: webapi-native/
+        continue-on-error: true
+      - name: Stage webapi native lib into extensions dir
+        run: |
+          mkdir -p extensions/${{ matrix.arch }}/
+          if [ -f "webapi-native/libwebapi-native-${{ matrix.arch }}.so" ]; then
+            cp "webapi-native/libwebapi-native-${{ matrix.arch }}.so" \
+               "extensions/${{ matrix.arch }}/libwebapi-native.so"
+            echo "staged libwebapi-native.so for ${{ matrix.arch }}"
+          else
+            echo "no webapi native lib for ${{ matrix.arch }} — image will ship without it"
+          fi
 
       - name: List extensions
         run: ls -la extensions/${{ matrix.arch }}/ 2>/dev/null || echo "none"
