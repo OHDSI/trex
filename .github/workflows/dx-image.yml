@@ -1,0 +1,125 @@
+# Builds and publishes the self-contained DevX image (ghcr.io/<owner>/trexsql-dx)
+# that docker-compose.dx.yml runs with no local builds or mounts.
+#
+# It layers the devx plugin + the devx_ext extension (both built here) onto the
+# trex *dev* image published by plugin-ci.yml. Per-arch images are pushed and
+# then assembled into a multi-arch manifest, mirroring plugin-ci's docker jobs.
+name: DevX image
+
+on:
+  push:
+    branches: [develop, main]
+    paths:
+      - "plugins/devx/**"
+      - "plugins/devx-ext/**"
+      - "docker/runtime-deno.json"
+      - "Dockerfile.dx"
+      - ".github/workflows/dx-image.yml"
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: "Base trex dev image to layer devx onto"
+        required: false
+        default: ""
+
+concurrency:
+  group: dx-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Publish only from the canonical repo on develop/main.
+    if: github.repository == 'OHDSI/trex'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      # devx_ext's Makefile includes ../extension-ci-tools.
+      - name: Init extension-ci-tools submodule
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if git submodule update --init --depth=1 plugins/extension-ci-tools; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "::error::extension-ci-tools submodule init failed"
+          exit 1
+
+      # GHCR rejects uppercase repo names; lowercase the owner (OHDSI -> ohdsi).
+      - name: Compute lowercase image namespace
+        run: echo "IMAGE_NS=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Resolve base image
+        run: |
+          BASE="${{ github.event.inputs.base_image }}"
+          [ -n "$BASE" ] || BASE="ghcr.io/${IMAGE_NS}/trexsql:dev"
+          echo "BASE_IMAGE=${BASE}" >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push dx image (per-arch)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.dx
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE }}
+            DEVX_EXT_VERSION=${{ github.sha }}
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql-dx:sha-${{ github.sha }}-${{ matrix.arch }}
+
+  # Assemble the per-arch images into multi-arch manifests under the final tags.
+  merge:
+    needs: build
+    if: github.repository == 'OHDSI/trex'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Compute lowercase image namespace
+        run: echo "IMAGE_NS=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          NS="ghcr.io/${IMAGE_NS}"
+          docker buildx imagetools create \
+            -t "${NS}/trexsql-dx:latest" -t "${NS}/trexsql-dx:sha-${SHA}" \
+            "${NS}/trexsql-dx:sha-${SHA}-amd64" \
+            "${NS}/trexsql-dx:sha-${SHA}-arm64"
+          docker buildx imagetools inspect "${NS}/trexsql-dx:sha-${SHA}" | grep -A2 -i platform || true

@@ -8,6 +8,7 @@ import { duckdb, escapeSql } from "./duckdb.ts";
 import { constructSystemPrompt } from "./prompts.ts";
 import { ensureWorkspace, ensureAppWorkspace } from "./tools/workspace.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
+import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 
 const CLAUDE_PORT = 4322;
 const CLAUDE_PROCESS = "claude-code-node-server";
@@ -92,11 +93,9 @@ export async function streamClaudeCodeChat({
   const lastUserMsg = messages.length > 0 ? messages[messages.length - 1] : null;
   const prompt = lastUserMsg?.role === "user" ? lastUserMsg.content : "";
 
-  let oauthToken = null;
-  try {
-    const tokenData = JSON.parse(await Deno.readTextFile("/home/node/.claude/oauth-token.json"));
-    oauthToken = tokenData.accessToken;
-  } catch {}
+  // Refreshes the token in-place when expired (it lives ~1h) so long-lived
+  // sessions don't start sending a stale token and 401-ing.
+  const oauthToken = await getValidOAuthToken();
 
   let fullContent = "";
   const collectedToolCalls = [];

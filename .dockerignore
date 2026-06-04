@@ -18,6 +18,16 @@ plugins/
 !plugins/pg-meta/
 !plugins/devx-ext/build/release/devx_ext.trex
 
+# Dockerfile.dx builds the devx_ext extension from source (not in the base image),
+# so its source + the shared extension-ci-tools must be in the build context.
+# Their heavy build outputs are re-excluded (rebuilt inside the image).
+!plugins/devx-ext/
+!plugins/extension-ci-tools/
+plugins/devx-ext/build/
+plugins/devx-ext/target/
+plugins/extension-ci-tools/build/
+plugins/extension-ci-tools/target/
+
 # Misc
 .claude/
 .specify/

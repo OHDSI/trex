@@ -52,7 +52,7 @@ export function Layout() {
       <header className="sticky top-0 z-50 border-b border-border/70 bg-background/72 backdrop-blur-md backdrop-saturate-150">
         <div className="container mx-auto flex h-14 items-center justify-between px-4">
           <Link to="/" className="font-semibold text-lg tracking-tight">
-            TREX<span aria-hidden="true" className="text-primary">.</span>
+            TREX<span aria-hidden="true" className="text-trex-brand">.</span>
           </Link>
           <div className="flex items-center gap-4">
             <NavLink to="/docs"

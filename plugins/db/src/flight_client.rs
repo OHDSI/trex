@@ -136,12 +136,27 @@ impl FlightClient {
         &mut self,
         sql: &str,
     ) -> Result<(SchemaRef, Vec<RecordBatch>), String> {
+        self.execute_query_params(sql, &[]).await
+    }
+
+    /// Execute parameterised SQL via DoGet with a JSON ticket
+    /// `{"query": "<sql>", "params": ["<p1>", ...]}`. Params are positional and
+    /// transported as strings, mirroring the local pool's string binding.
+    pub async fn execute_query_params(
+        &mut self,
+        sql: &str,
+        params: &[String],
+    ) -> Result<(SchemaRef, Vec<RecordBatch>), String> {
         SwarmLogger::debug(
             "flight-client",
-            &format!("Executing query on {}: {sql}", self.endpoint),
+            &format!("Executing query on {} ({} param(s)): {sql}", self.endpoint, params.len()),
         );
 
-        let ticket_payload = serde_json::json!({ "query": sql }).to_string();
+        let ticket_payload = if params.is_empty() {
+            serde_json::json!({ "query": sql }).to_string()
+        } else {
+            serde_json::json!({ "query": sql, "params": params }).to_string()
+        };
         let ticket = Ticket::new(ticket_payload.into_bytes());
 
         let mut request = tonic::Request::new(ticket);
@@ -288,6 +303,17 @@ pub async fn query_node_with_session(
 ) -> Result<(SchemaRef, Vec<RecordBatch>), String> {
     let mut client = FlightClient::connect(endpoint).await?.with_session(token.to_string());
     client.execute_query(sql).await
+}
+
+/// Session-bound, parameterised version of `query_node_with_schema`.
+pub async fn query_node_with_session_params(
+    endpoint: &str,
+    token: &str,
+    sql: &str,
+    params: &[String],
+) -> Result<(SchemaRef, Vec<RecordBatch>), String> {
+    let mut client = FlightClient::connect(endpoint).await?.with_session(token.to_string());
+    client.execute_query_params(sql, params).await
 }
 
 /// Session-bound DDL/DML — mirrors execute_remote_sql but pins to a session.
