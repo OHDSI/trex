@@ -44,6 +44,9 @@ fn is_data_node() -> bool {
 fn main() {
     let args: Vec<String> = env::args().collect();
     let check_mode = args.iter().any(|a| a == "--check");
+    // `trex bundle <entrypoint> <output>`: compile a Deno worker to an eszip via
+    // trexas trex_create_bundle(), then exit. Used at image-build time.
+    let bundle_mode = args.get(1).map(|s| s == "bundle").unwrap_or(false);
 
     let db_path = env::var("DATABASE_PATH").unwrap_or_else(|_| ":memory:".to_string());
     let ext_dir = env::var("EXTENSION_DIR")
@@ -122,6 +125,36 @@ fn main() {
         }
     } else {
         println!("Warning: extension dir {ext_dir} does not exist");
+    }
+
+    // Runs after extensions load (trexas provides trex_create_bundle) and before
+    // the postgres attach, which bundling does not need.
+    if bundle_mode {
+        let entrypoint = args.get(2).cloned().unwrap_or_default();
+        let output = args.get(3).cloned().unwrap_or_default();
+        if entrypoint.is_empty() || output.is_empty() {
+            eprintln!("usage: trex bundle <entrypoint> <output>");
+            process::exit(2);
+        }
+        let safe_entry = entrypoint.replace('\'', "''");
+        let safe_output = output.replace('\'', "''");
+        println!("Bundling {entrypoint} -> {output}");
+        let sql =
+            format!("SELECT trex_create_bundle('{safe_entry}', '{safe_output}')");
+        match conn.query_row(&sql, [], |row| row.get::<usize, String>(0)) {
+            // Returns a status VARCHAR; "Error ..." means the bundle failed.
+            Ok(msg) => {
+                println!("{msg}");
+                if msg.contains("Error") {
+                    process::exit(1);
+                }
+                return;
+            }
+            Err(e) => {
+                eprintln!("Bundle failed: {e}");
+                process::exit(1);
+            }
+        }
     }
 
     // Attach PostgreSQL as _config so extensions can access the configuration database

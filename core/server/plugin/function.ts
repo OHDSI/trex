@@ -203,7 +203,12 @@ async function _callWorker(
   };
 
   if (fncfg.eszip) {
-    options.maybeEszip = await Deno.readFile(`${dir}${fncfg.eszip}`);
+    // Prebuilt eszip; fall back to source if absent (e.g. unbundled dev plugin).
+    try {
+      options.maybeEszip = await Deno.readFile(`${dir}${fncfg.eszip}`);
+    } catch {
+      /* no bundle on disk — use servicePath source */
+    }
   }
 
   try {
@@ -263,7 +268,12 @@ async function _callInit(
   };
 
   if (eszip) {
-    options.maybeEszip = await Deno.readFile(`${dir}${eszip}`);
+    // Prebuilt eszip; fall back to source if absent.
+    try {
+      options.maybeEszip = await Deno.readFile(`${dir}${eszip}`);
+    } catch {
+      /* no bundle on disk — use servicePath source */
+    }
   }
 
   try {

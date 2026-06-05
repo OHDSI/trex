@@ -114,11 +114,15 @@ Deno.serve(async (req: Request) => {
     }
 
 
-    // Ensure built-in skills/commands/agents are synced (runs once per worker lifecycle)
-    // TREX_FUNCTION_PATH points to the actual function dir; go up one level to get the plugin root
+    // Built-in skills/commands/agents sync (once per worker, module-guarded).
+    // Not awaited on the hot path — only skill/command/agent routes block on it;
+    // apps/chats/files must not pay it on a cold worker.
     const fnPath = Deno.env.get("TREX_FUNCTION_PATH") || new URL("../", import.meta.url).pathname;
     const pluginBase = fnPath.replace(/\/functions\/?$/, "").replace(/\/$/, "");
-    await syncBuiltins(pluginBase, sql);
+    const builtinSync = syncBuiltins(pluginBase, sql);
+    if (/\/(skills|commands|agents)(\/|$|\?)/.test(path)) {
+      await builtinSync;
+    }
 
     // Phase 6: Dispatch to extracted route handlers
     const routeResult =
