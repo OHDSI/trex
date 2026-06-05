@@ -162,6 +162,12 @@ RUN cd /usr/src/core/server && npm install --omit=dev && \
 # Copy remaining core source
 COPY core/ ./core/
 
+# Pre-bundle the core Deno workers into eszips so cold starts skip TS transpile.
+# Runs in-image via trexas; needs network for remote imports. Loaded through
+# main_service_path/event_worker_path in docker-compose.yml.
+RUN trex bundle ./core/server/index.ts ./core/server/index.eszip \
+ && trex bundle ./core/event/index.ts  ./core/event/index.eszip
+
 # Copy functions
 COPY functions/ ./functions/
 

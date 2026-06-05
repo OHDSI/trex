@@ -4,6 +4,15 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>DevX</title>
+    <script>
+      // Warm the devx-api worker early so its cold start overlaps the app bundle
+      // download. Best-effort; credentials send the session cookie.
+      try {
+        var m = location.pathname.match(/^(.*)\/devx(?:\/|$)/);
+        var base = m ? m[1] : "/plugins/trex";
+        fetch(base + "/devx-api/health", { credentials: "include" }).catch(function () {});
+      } catch (e) {}
+    </script>
   </head>
   <body>
     <div id="root"></div>

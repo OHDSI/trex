@@ -11,6 +11,9 @@ dist/
 dist-ssr/
 *.local
 
+# Prebuilt eszip bundles (produced by `make bundle` / scripts/bundle-eszip.sh)
+*.eszip
+
 # Editor
 .vscode/*
 !.vscode/extensions.json
