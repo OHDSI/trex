@@ -1,0 +1,8 @@
+[
+  {
+    "interfaces":["com.sun.jna.Library"]
+  },
+  {
+    "interfaces":["org.trex.TrexEngine"]
+  }
+]

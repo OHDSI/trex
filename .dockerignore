@@ -17,6 +17,26 @@ plugins/
 !plugins/studio/build/
 !plugins/pg-meta/
 !plugins/devx-ext/build/release/devx_ext.trex
+# webapi native-lib build (Dockerfile.native-lib) needs these plugin trees +
+# the webapi-be submodule in context; build dirs are still trimmed by **/target/ etc.
+!plugins/webapi/
+!plugins/bao/
+# ...but never the nested submodule .git pointer files re-included above: WebAPI's
+# git-commit-id-plugin chokes on a .git that points outside the build context. With
+# no .git present it skips cleanly (failOnNoGitDirectory=false). This must come AFTER
+# the !plugins/... rules so it wins (last matching pattern decides).
+**/.git
+
+# Dockerfile.dx builds the devx_ext extension from source (not in the base image),
+# so its source + the shared extension-ci-tools must be in the build context.
+# Their heavy build outputs are re-excluded (rebuilt inside the image). The webapi
+# native-lib / .trex builds also need extension-ci-tools in context.
+!plugins/devx-ext/
+!plugins/extension-ci-tools/
+plugins/devx-ext/build/
+plugins/devx-ext/target/
+plugins/extension-ci-tools/build/
+plugins/extension-ci-tools/target/
 
 # Misc
 .claude/

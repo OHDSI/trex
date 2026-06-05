@@ -1,5 +1,5 @@
 (ns trexsql.proxy
-  (:require [clj-http.client :as client]
+  (:require [trexsql.http-client :as client]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

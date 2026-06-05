@@ -1,0 +1,55 @@
+# syntax=docker/dockerfile:1.4
+#
+# Builds libwebapi-native.so embedding OHDSI WebAPI + the trexsql/bao integration.
+#
+# Context must be the repo ROOT so plugins/bao/java and plugins/webapi/webapi-be
+# (submodule, must be checked out) are available:
+#   DOCKER_BUILDKIT=1 docker build -f plugins/webapi/Dockerfile.native-lib -t webapi-native-lib .
+# The resulting library is at /out/libwebapi-native.so inside the image:
+#   id=$(docker create webapi-native-lib); docker cp $id:/out/libwebapi-native.so .; docker rm $id
+#
+# native-image needs ~12-16 GB RAM; build on a host/runner with >= 16 GB.
+# Supports both linux/amd64 and linux/arm64 (GraalVM tarball selected per arch).
+
+FROM ubuntu:22.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates build-essential zlib1g-dev \
+        maven postgresql postgresql-contrib unzip git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Oracle GraalVM for JDK 21 (includes native-image). TARGETARCH is provided by
+# BuildKit (amd64/arm64); map it to Oracle's tarball arch (x64/aarch64). Falls
+# back to the build host's dpkg arch when TARGETARCH is unset (legacy builder).
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) GRAAL_ARCH=x64 ;; \
+      arm64) GRAAL_ARCH=aarch64 ;; \
+      *) echo "unsupported architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://download.oracle.com/graalvm/21/latest/graalvm-jdk-21_linux-${GRAAL_ARCH}_bin.tar.gz" \
+      | tar -xz -C /opt \
+    && mv /opt/graalvm-jdk-21* /opt/graalvm
+ENV JAVA_HOME=/opt/graalvm
+ENV GRAAL_HOME=/opt/graalvm
+ENV PATH=$JAVA_HOME/bin:$PATH
+
+# Leiningen (builds the bao trexsql jar)
+RUN curl -fsSL https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein \
+      -o /usr/local/bin/lein \
+    && chmod +x /usr/local/bin/lein \
+    && lein version
+
+WORKDIR /src
+# Bring in the pieces the build touches.
+COPY plugins/bao/java ./plugins/bao/java
+COPY plugins/webapi ./plugins/webapi
+
+# The build script starts an ephemeral PostgreSQL (Spring AOT refreshes the full
+# WebAPI context at build time) and then runs the native-image shared-lib build.
+RUN --mount=type=cache,target=/root/.m2 \
+    bash plugins/webapi/build-native-lib.sh
+
+FROM scratch AS export
+COPY --from=build /src/plugins/webapi/libwebapi-native.so /out/libwebapi-native.so

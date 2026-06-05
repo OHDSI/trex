@@ -6,7 +6,7 @@
    with `data: [DONE]\\n\\n`. The chunk JSON must include a `type` field;
    see https://ai-sdk.dev/docs for the full type catalog. Required response
    header: `x-vercel-ai-ui-message-stream: v1`."
-  (:require [clojure.data.json :as json]
+  (:require [trexsql.json :as json]
             [clojure.tools.logging :as log])
   (:import [java.io PipedInputStream PipedOutputStream OutputStream IOException]
            [java.nio.charset StandardCharsets]

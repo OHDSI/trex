@@ -1,42 +1,33 @@
-# Standalone compose stack that runs trex with the devx plugin and the
-# devx_ext DuckDB extension mounted in. Runs alongside the default
-# docker-compose.yml — ports are offset by +1000 on HTTP / +20 on pg.
+# Standalone compose stack that runs trex + the devx plugin from a single
+# pre-built image (ghcr.io/ohdsi/trexsql-dx) with the devx plugin and the
+# devx_ext DuckDB extension baked in — NO local builds, bind-mounts, or
+# submodule checkouts required. Runs alongside the default docker-compose.yml
+# (ports offset by +1000 on HTTP / +20 on pg).
 #
-# This mirrors the default docker-compose.yml's runtime contract (same
-# ghcr.io/ohdsi/trexsql image, the trex-init/secrets scheme, and the
-# two-node data+server cluster topology), then layers the devx plugin,
-# the locally-built devx_ext extension, and offset host ports on top.
+# The image is a single-node trex (Local DuckDB pool) so devx_ext command
+# execution, the workspaces, and the function runtime are co-located.
 #
-# Prerequisites:
-#   git submodule update --init plugins/extension-ci-tools
-#
-# First-run setup is handled by build/init containers:
-#   - trex-init       — generates ./secrets/{root,derived}.env (shared with
-#                       the default stack; the cryptographic keys trex needs)
-#   - devx-build      — npm ci + npm run build in plugins/devx, plus
-#                       npm install for fn-claude-code and fn-copilot
-#   - devx-ext-build  — make configure && make release for the Rust
-#                       extension (slow on first build; arm64-native)
-# Both devx builds short-circuit on subsequent boots if their artifact exists.
-#
-# Run:
+# Run (pulls the published image):
 #   docker compose -f docker-compose.dx.yml up -d
 # UI: http://localhost:9001/plugins/trex/devx/
 #
+# Build the image locally instead of pulling (see Dockerfile.dx):
+#   git submodule update --init plugins/extension-ci-tools
+#   docker build -f Dockerfile.dx -t trexsql-dx:dev .
+#   TREX_IMAGE=trexsql-dx:dev docker compose -f docker-compose.dx.yml up -d
+#
+# Init containers (one-shots, not builds):
+#   - trex-init             — generates ./secrets/{root,derived}.env (the
+#                             cryptographic keys trex needs; shared with the
+#                             default stack so trex ↔ postgrest JWTs validate).
+#   - devx-workspaces-init  — chowns the root-owned devx-workspaces volume to
+#                             uid 1000 (`node`) so devx-api routes can write.
+#
 # Notes:
-# - The trex image is multi-arch (arm64-native), so it runs natively rather
-#   than under amd64 emulation — which also matches the natively-built
-#   devx_ext.trex (a linux/amd64 trex could not load an arm64-built extension).
-# - devx-build runs as uid 1000 so node_modules/dist end up owned by the
-#   host user on Linux.
-# - devx-ext-build runs as root because it apt-installs python3-venv;
-#   build artifacts (plugins/devx-ext/build/, target/) will be root-owned.
-#   To clean: `docker compose -f docker-compose.dx.yml run --rm clean`.
-# - Secrets: trex-init writes ./secrets/{root,derived}.env on first boot and
-#   every trex service loads them via env_file. This is the SAME ./secrets
-#   directory the default stack uses, so trex ↔ postgrest JWTs validate
-#   consistently across both stacks. Back up root.env — losing it invalidates
-#   every encrypted secret and issued JWT.
+# - The dx image is multi-arch (arm64-native), so it runs natively rather than
+#   under amd64 emulation.
+# - Back up secrets/root.env — losing it invalidates every encrypted secret and
+#   issued JWT.
 
 # Distinct project name so this stack never collides with the default
 # docker-compose.yml (which uses the directory-derived `trex` project).
@@ -44,22 +35,19 @@
 # stacks run side by side without `-p` on the command line.
 name: trex-dx
 
-# Two-node cluster: trex-data (data node, holds the pool + Flight) + trex-server
-# (non-data node, serves the UI/API and opens remote sessions to trex-data).
-# Both nodes receive the full cluster config; SWARM_NODE selects their role.
-# Gossip seeds resolve via compose service-name DNS, scoped to this stack's
-# network, so they never cross-talk with the default stack's same-named nodes.
+# Single-node setup: one `trex` node that is a data node (Local DuckDB pool) AND
+# runs trexas (UI/API) + pgwire. Collapsing the former two-node data+server split
+# keeps devx_ext command execution (npm, dev server, git, claude-code) on the same
+# node as the workspace files, and makes every pool session Local — so there is no
+# remote-session routing, no cross-node Flight dependency, and no create_session
+# convergence window. `data_node:true` is what selects the Local pool backend.
 x-swarm-config: &swarm-config
   SWARM_CONFIG: >-
     {"cluster_id":"local","nodes":{
-      "data":{
-        "gossip_addr":"trex-data:4200","data_node":true,
+      "trex":{
+        "gossip_addr":"trex:4200","data_node":true,
         "extensions":[
-          {"name":"flight","config":{"host":"0.0.0.0","port":50051}}
-        ]},
-      "server":{
-        "gossip_addr":"trex-server:4200","data_node":false,
-        "extensions":[
+          {"name":"flight","config":{"host":"0.0.0.0","port":50051}},
           {"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server","event_worker_path":"/usr/src/core/event","tls_port":8000,"tls_cert_path":"/usr/src/server.crt","tls_key_path":"/usr/src/server.key"}},
           {"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}
         ]}
@@ -75,7 +63,7 @@ services:
   # Generates ./secrets/{root,derived}.env on first boot (TREX_ROOT_KEY and the
   # derived JWT/crypto keys). Short-circuits if the files already exist.
   trex-init:
-    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql:latest}
+    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql-dx:latest}
     entrypoint: /usr/local/bin/trex-init
     environment:
       TREX_SECRETS_DIR: /shared
@@ -108,54 +96,6 @@ services:
       timeout: 5s
       retries: 10
 
-  devx-build:
-    image: node:22-trixie-slim
-    user: "node"
-    working_dir: /work
-    volumes:
-      - ./plugins/devx:/work
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        if [ -d dist ] && [ -d fn-claude-code/node_modules ] && [ -d fn-copilot/node_modules ]; then
-          echo '[devx-build] artifacts present, skipping'
-          exit 0
-        fi
-        echo '[devx-build] preparing devx (first-run setup)'
-        [ -d node_modules ] || npm ci
-        [ -d dist ] || npm run build
-        [ -d fn-claude-code/node_modules ] || (cd fn-claude-code && npm install --omit=dev)
-        [ -d fn-copilot/node_modules ] || (cd fn-copilot && npm install --omit=dev)
-        echo '[devx-build] done'
-    restart: "no"
-
-  devx-ext-build:
-    image: rust:1.88-bookworm
-    working_dir: /work/plugins/devx-ext
-    volumes:
-      - ./plugins/devx-ext:/work/plugins/devx-ext
-      - ./plugins/extension-ci-tools:/work/plugins/extension-ci-tools
-    command:
-      - sh
-      - -c
-      - |
-        set -e
-        if [ -f build/release/devx_ext.trex ]; then
-          echo '[devx-ext-build] artifact present, skipping'
-          exit 0
-        fi
-        echo '[devx-ext-build] installing system deps'
-        apt-get update >/dev/null
-        apt-get install -y --no-install-recommends \
-          python3 python3-venv make pkg-config libssl-dev >/dev/null
-        echo '[devx-ext-build] running make configure && make release (slow first time)'
-        make configure
-        make release
-        echo '[devx-ext-build] done'
-    restart: "no"
-
   # devx-workspaces is created root-owned by Docker; trex runs as uid 1000
   # (`node`) and would hit EACCES on first mkdir inside it, surfacing as a
   # 500 from devx-api routes. This one-shot chowns the volume.
@@ -166,48 +106,11 @@ services:
     command: ["sh", "-c", "chown 1000:1000 /work && echo '[devx-workspaces-init] done'"]
     restart: "no"
 
-  # Data node — holds the DuckDB pool and serves it over Flight (50051). The
-  # devx_ext extension is mounted here because that is where queries execute.
-  trex-data:
-    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql:latest}
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      devx-ext-build:
-        condition: service_completed_successfully
-    env_file:
-      - path: ./secrets/root.env
-        required: false
-      - path: ./secrets/derived.env
-        required: false
-    volumes:
-      - dx-claude-config:/home/node/.claude
-      - dx-gh-config:/home/node/.config/gh
-      # Locally-built extension; mounted read-only into trex's extension dir.
-      - ./plugins/devx-ext/build/release/devx_ext.trex:/usr/lib/trexsql/extensions/devx_ext.trex:ro
-    environment:
-      <<: *swarm-config
-      SWARM_NODE: data
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
-      SCHEMA_DIR: /usr/src/core/schema
-      PLUGINS_PATH: /usr/src/plugins
-      PLUGINS_DEV_PATH: /usr/src/plugins-dev
-    healthcheck:
-      # Probe the flight gRPC port with node (the image ships node, not nc).
-      test:
-        - CMD-SHELL
-        - "node -e \"require('net').connect(50051,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""
-      interval: 5s
-      timeout: 3s
-      retries: 30
-      start_period: 30s
-
-  # Server node — serves the UI/API (trexas on 8001, pgwire on 5432) and hosts
-  # the devx plugin. Opens remote sessions to trex-data over Flight.
-  trex-server:
-    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql:latest}
+  # Single node — the DuckDB pool (Local), trexas (UI/API on 8001), pgwire, and
+  # the devx plugin all live here. devx_ext command execution, the workspaces,
+  # and the function runtime are co-located, so no remote sessions are involved.
+  trex:
+    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql-dx:latest}
     # Override with a local image for development:
     #   TREX_IMAGE=trexsql-test:dev docker compose -f docker-compose.dx.yml up -d
     # Ports offset by +1000 (HTTP) / +20 (pg) so this runs alongside the default
@@ -220,12 +123,8 @@ services:
     depends_on:
       trex-init:
         condition: service_completed_successfully
-      trex-data:
+      postgres:
         condition: service_healthy
-      devx-build:
-        condition: service_completed_successfully
-      devx-ext-build:
-        condition: service_completed_successfully
       devx-workspaces-init:
         condition: service_completed_successfully
     env_file:
@@ -236,19 +135,15 @@ services:
     volumes:
       - dx-claude-config:/home/node/.claude
       - dx-gh-config:/home/node/.config/gh
-      # Whole devx plugin dir; trex's plugin scanner picks it up via package.json.
-      - ./plugins/devx:/usr/src/plugins-dev/devx
-      # Same extension as the data node, so server-side queries can load it too.
-      - ./plugins/devx-ext/build/release/devx_ext.trex:/usr/lib/trexsql/extensions/devx_ext.trex:ro
-      # Workspace-less Deno config — the image's /usr/src/deno.json declares a
-      # `workspace` that excludes plugins-dev/**, so Deno ≥2.7 refuses to load
-      # plugin function configs like plugins-dev/devx/functions/deno.json.
-      - ./docker/runtime-deno.json:/usr/src/deno.json:ro
+      # The devx plugin and devx_ext extension are baked into the dx image, so
+      # nothing source-related is mounted here — only persistent data volumes.
       - devx-workspaces:/tmp/devx-workspaces
     environment:
       <<: *swarm-config
-      SWARM_NODE: server
+      SWARM_NODE: trex
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
+      # data_node runs the schema migrations (creates the `authenticator` role etc.)
+      SCHEMA_DIR: /usr/src/core/schema
       TREX_PRODUCTION_MODE: ${TREX_PRODUCTION_MODE:-0}
       BASE_PATH: /trex
       BETTER_AUTH_URL: http://localhost:9001/trex
@@ -273,16 +168,16 @@ services:
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
-    # The `authenticator` role is created by trex-data's schema migrations, not
-    # by postgres or trex-init. Gate on trex-data healthy (migrations done) and
-    # restart as a safety net — postgrest exits 1 if the role isn't there yet.
+    # The `authenticator` role is created by trex's schema migrations, not by
+    # postgres or trex-init. Gate on trex healthy (migrations done) and restart
+    # as a safety net — postgrest exits 1 if the role isn't there yet.
     restart: unless-stopped
     depends_on:
       trex-init:
         condition: service_completed_successfully
       postgres:
         condition: service_healthy
-      trex-data:
+      trex:
         condition: service_healthy
     env_file:
       - path: ./secrets/derived.env
@@ -295,22 +190,3 @@ services:
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
       PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
-
-  # On-demand cleanup helper — wipes build artifacts that may be root-owned.
-  # Run with: docker compose -f docker-compose.dx.yml run --rm clean
-  clean:
-    image: alpine
-    profiles: ["tools"]
-    working_dir: /work
-    volumes:
-      - .:/work
-    command:
-      - sh
-      - -c
-      - |
-        echo 'wiping build artifacts'
-        rm -rf plugins/devx/node_modules plugins/devx/dist \
-               plugins/devx/fn-claude-code/node_modules \
-               plugins/devx/fn-copilot/node_modules \
-               plugins/devx-ext/build plugins/devx-ext/target
-        echo 'done'

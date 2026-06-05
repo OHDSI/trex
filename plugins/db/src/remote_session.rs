@@ -64,6 +64,25 @@ pub fn remote_session_execute_ipc(session_id: u64, sql: &str) -> Result<Vec<u8>,
     serialize_ipc(&schema, &batches)
 }
 
+/// Execute parameterised SQL on the remote session. `params` are positional
+/// string-encoded values (matching the local pool's binding); they are sent to
+/// the data node and bound there. Returns Arrow IPC stream bytes.
+pub fn remote_session_execute_params_ipc(
+    session_id: u64,
+    sql: &str,
+    params: &[String],
+) -> Result<Vec<u8>, String> {
+    let (endpoint, token) = {
+        let map = sessions().lock().expect("remote sessions poisoned");
+        let e = map.get(&session_id).ok_or_else(|| format!("session {session_id} not found"))?;
+        (e.endpoint.clone(), e.token.clone())
+    };
+    let (schema, batches) = runtime().block_on(
+        flight_client::query_node_with_session_params(&endpoint, &token, sql, params),
+    )?;
+    serialize_ipc(&schema, &batches)
+}
+
 /// Destroy the remote session. Errors during destroy_session are logged but
 /// not propagated — local cleanup proceeds regardless.
 pub fn destroy_remote_session(session_id: u64) {
@@ -125,6 +144,57 @@ pub unsafe extern "C" fn trex_db_remote_session_execute(
         Err(e) => return box_error(format!("sql utf8: {e}")),
     };
     match remote_session_execute_ipc(session_id, sql) {
+        Ok(mut buf) => {
+            buf.shrink_to_fit();
+            let data = buf.as_mut_ptr();
+            let len = buf.len();
+            std::mem::forget(buf);
+            Box::into_raw(Box::new(CRemoteResult {
+                is_error: 0,
+                data,
+                data_len: len,
+                error: std::ptr::null_mut(),
+                error_len: 0,
+            }))
+        }
+        Err(e) => box_error(e),
+    }
+}
+
+/// Parameterised variant. `params_ptr`/`params_len` point at a UTF-8 JSON array
+/// of strings (e.g. `["a","2"]`); an empty/zero buffer means no params.
+#[no_mangle]
+pub unsafe extern "C" fn trex_db_remote_session_execute_params(
+    session_id: u64,
+    sql_ptr: *const u8,
+    sql_len: usize,
+    params_ptr: *const u8,
+    params_len: usize,
+) -> *mut CRemoteResult {
+    if sql_ptr.is_null() && sql_len != 0 {
+        return box_error("sql_ptr is null with non-zero len".to_string());
+    }
+    let sql_bytes = if sql_len == 0 {
+        &[][..]
+    } else {
+        std::slice::from_raw_parts(sql_ptr, sql_len)
+    };
+    let sql = match std::str::from_utf8(sql_bytes) {
+        Ok(s) => s,
+        Err(e) => return box_error(format!("sql utf8: {e}")),
+    };
+
+    let params: Vec<String> = if params_len == 0 || params_ptr.is_null() {
+        Vec::new()
+    } else {
+        let pbytes = std::slice::from_raw_parts(params_ptr, params_len);
+        match serde_json::from_slice(pbytes) {
+            Ok(v) => v,
+            Err(e) => return box_error(format!("params json: {e}")),
+        }
+    };
+
+    match remote_session_execute_params_ipc(session_id, sql, &params) {
         Ok(mut buf) => {
             buf.shrink_to_fit();
             let data = buf.as_mut_ptr();

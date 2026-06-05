@@ -3,7 +3,7 @@
    by kind + id. Pythia must call this BEFORE proposing edits to an
    existing artifact, so it reasons about the artifact's current state
    rather than overwriting blindly."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [trexsql.agent.tools._search-util :as su]))
 
 (def ^:private kind->path

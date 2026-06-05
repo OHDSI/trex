@@ -7,7 +7,7 @@
    WebAPI endpoints used:
      GET /WebAPI/cohortdefinition/{id}/info
      GET /WebAPI/cohortdefinition/{id}/report/{sourceKey}  (best-effort)"
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

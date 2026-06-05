@@ -4,7 +4,7 @@
    and call out suspicious drops (PhenotypeR-style heuristic).
 
    WebAPI endpoint: GET /cohortdefinition/{id}/report/{sourceKey}"
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]
             [clojure.tools.logging :as log]))
 

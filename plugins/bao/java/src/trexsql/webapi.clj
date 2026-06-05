@@ -9,7 +9,7 @@
             [trexsql.proxy :as proxy]
             [trexsql.config :as config]
             [clojure.string :as str]
-            [clojure.data.json :as json]
+            [trexsql.json :as json]
             [clojure.tools.logging :as log]
             [reitit.ring :as ring]
             [trexsql.agent.routes :as agent-routes])

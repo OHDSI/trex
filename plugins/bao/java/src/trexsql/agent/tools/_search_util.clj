@@ -1,7 +1,7 @@
 (ns trexsql.agent.tools._search-util
   "Shared helpers for search_existing_* tools that list a WebAPI collection
    and score by query-token overlap with name + description."
-  (:require [clj-http.client :as http]
+  (:require [trexsql.http-client :as http]
             [clojure.string :as str]))
 
 (def webapi-base

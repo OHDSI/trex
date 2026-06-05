@@ -141,13 +141,18 @@ RUN DUCKDB_PLATFORM="linux_${TARGETARCH}" && \
 # Override npm extensions with CI-built ones
 # Supports both flat layout (local builds) and arch-specific layout (CI multi-arch builds)
 COPY extensions/ /tmp/all-extensions/
+# CI stages libwebapi-native.so (the GraalVM lib the webapi.trex shim dlopens)
+# into extensions/<arch>/ alongside the .trex files; copy any *.so into /usr/lib
+# so the bundled webapi.trex can load it. Tolerant of its absence (local builds).
 RUN if [ -d "/tmp/all-extensions/${TARGETARCH}" ]; then \
       cp -f /tmp/all-extensions/${TARGETARCH}/*.trex /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
       cp -f /tmp/all-extensions/${TARGETARCH}/*.duckdb_extension /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
+      cp -f /tmp/all-extensions/${TARGETARCH}/*.so /usr/lib/ 2>/dev/null || true; \
     else \
       cp -f /tmp/all-extensions/*.trex /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
       cp -f /tmp/all-extensions/*.duckdb_extension /usr/lib/trexsql/extensions/ 2>/dev/null || true; \
-    fi && rm -rf /tmp/all-extensions
+      cp -f /tmp/all-extensions/*.so /usr/lib/ 2>/dev/null || true; \
+    fi && rm -rf /tmp/all-extensions && ldconfig
 
 # Create plugins directory and symlink @trex npm packages for plugin scanner
 RUN mkdir -p ./plugins && \
