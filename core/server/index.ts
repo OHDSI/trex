@@ -797,7 +797,15 @@ try {
   console.log("[boot] DEK initialized");
 } catch (err) {
   console.error("[boot] FATAL: DEK init failed:", err);
-  Deno.exit(1);
+  // This service runs inside the trex host's embedded edge runtime, which does
+  // not implement Deno.exit — calling it threw "Deno.exit is not a function",
+  // masking the real DEK error above. A worker can't kill the host process
+  // anyway, so re-throw to abort the rest of boot: every top-level statement
+  // below (including the final server.listen) is skipped, leaving the node down
+  // and its /trex/api/ready healthcheck failing loudly rather than serving with
+  // an uninitialized DEK. Still honour a real Deno.exit where the runtime has one.
+  if (typeof Deno.exit === "function") Deno.exit(1);
+  throw err;
 }
 
 // One-shot bootstrap: encrypt any database_credential rows that still hold a
