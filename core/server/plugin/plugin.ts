@@ -5,6 +5,7 @@ import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { scanPluginDirectory } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
+import { waitForAttachedDatabase } from "../lib/db-wait.ts";
 
 declare const Trex: any;
 
@@ -172,6 +173,29 @@ export class Plugins {
       const msg = e instanceof Error ? e.message : String(e);
       console.error(`Plugin migrations skipped — TrexDB unavailable: ${msg}`);
       return;
+    }
+    // core/server is spawned by the trexas extension *before* the host attaches
+    // the _config (Postgres) catalog and runs core migrations (src/main.rs loads
+    // extensions, then ATTACHes _config). A plugin migration targeting an attached
+    // catalog like _config can therefore run before that ATTACH lands and fail with
+    // `Catalog "_config" does not exist` — and since applyMigrations runs once at
+    // registration with no retry, the plugin's tables are then never created.
+    // Wait for each non-memory target catalog to appear first. Bounded so a
+    // genuinely missing catalog still surfaces as the per-target error below.
+    const neededDatabases = [
+      ...new Set(
+        Plugins.migrationTargets
+          .map((t) => t.database)
+          .filter((d) => d && d !== "memory"),
+      ),
+    ];
+    for (const db of neededDatabases) {
+      const ready = await waitForAttachedDatabase(conn, db);
+      if (!ready) {
+        console.error(
+          `Plugin migrations: catalog "${db}" not attached after timeout; dependent migrations may fail`,
+        );
+      }
     }
     for (const t of Plugins.migrationTargets) {
       try {
