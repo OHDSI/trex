@@ -23,13 +23,25 @@ databaseName <- "{db_name}"
 minCellCount <- {min_cell_count}
 cohortTableName <- "{cohort_table}"
 
-connectionDetails <- DatabaseConnector::createConnectionDetails(
-  dbms = "postgresql",
-  server = "localhost/trex",
-  port = {port},
-  user = "trex",
-  password = "{password}"
-)
+.cdmUrl <- Sys.getenv("HADES_CDM_URL", unset = Sys.getenv("DATABASE_URL", unset = ""))
+if (nzchar(.cdmUrl)) {{
+  .m <- regmatches(.cdmUrl, regexec("^postgres(?:ql)?://([^:/?#]+)(?::([^@]*))?@([^:/?#]+):([0-9]+)/([^?#]+)", .cdmUrl))[[1]]
+  connectionDetails <- DatabaseConnector::createConnectionDetails(
+    dbms = "postgresql",
+    server = paste0(.m[4], "/", .m[6]),
+    port = as.integer(.m[5]),
+    user = .m[2],
+    password = .m[3]
+  )
+}} else {{
+  connectionDetails <- DatabaseConnector::createConnectionDetails(
+    dbms = "postgresql",
+    server = "localhost/trex",
+    port = {port},
+    user = "trex",
+    password = "{password}"
+  )
+}}
 
 analysisSpecifications <- ParallelLogger::loadSettingsFromJson(
   fileName = "{spec_path}"
