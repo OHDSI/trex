@@ -846,8 +846,11 @@ impl SimpleQueryHandler for TrexQueryHandler {
         let mut responses = Vec::new();
 
         for sql in queries {
-            // Apply PostgreSQL compatibility transformations
-            let sql = sql.replace("::regclass", "::string")
+            // Apply PostgreSQL compatibility transformations.
+            // Note: `::regclass` is handled natively now — the pool extension
+            // registers a `regclass` VARCHAR type stub on the base connection at
+            // init, so casts resolve everywhere without a string rewrite here.
+            let sql = sql
                 .replace("AND datallowconn AND NOT datistemplate", "AND NOT db.datname =('system') AND NOT db.datname =('temp')")
                 .replace("pg_get_expr(ad.adbin, ad.adrelid, true)","pg_get_expr(ad.adbin, ad.adrelid)")
                 .replace("pg_catalog.pg_relation_size(i.indexrelid)","''")
@@ -1233,7 +1236,12 @@ pub fn start_pgwire_server_capi(
                                         let session_id = match trex_pool_client::create_session() {
                                             Ok(id) => id,
                                             Err(e) => {
-                                                log_debug(&format!("create_session: {e}"));
+                                                // Surface WHY the session could not be opened (e.g.
+                                                // "no service:flight entry from a data node yet")
+                                                // rather than silently dropping the connection — the
+                                                // client only sees "server closed the connection",
+                                                // so this log is the operator's only diagnostic.
+                                                eprintln!("pgwire: refusing connection — {e}");
                                                 continue;
                                             }
                                         };
@@ -1266,7 +1274,12 @@ pub fn start_pgwire_server_capi(
                                         let session_id = match trex_pool_client::create_session() {
                                             Ok(id) => id,
                                             Err(e) => {
-                                                log_debug(&format!("create_session: {e}"));
+                                                // Surface WHY the session could not be opened (e.g.
+                                                // "no service:flight entry from a data node yet")
+                                                // rather than silently dropping the connection — the
+                                                // client only sees "server closed the connection",
+                                                // so this log is the operator's only diagnostic.
+                                                eprintln!("pgwire: refusing connection — {e}");
                                                 continue;
                                             }
                                         };

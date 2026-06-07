@@ -21,6 +21,14 @@ struct RemoteEntry {
 static SESSIONS: OnceLock<Mutex<HashMap<u64, RemoteEntry>>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
+thread_local! {
+    /// Reason the most recent `trex_db_remote_session_create` on THIS thread
+    /// returned 0. The C ABI can only signal failure via a 0 id, so the
+    /// descriptive error (gossip discovery / Flight RPC) is stashed here for
+    /// `trex_db_remote_session_create_last_error` to hand back to the client.
+    static LAST_CREATE_ERR: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn sessions() -> &'static Mutex<HashMap<u64, RemoteEntry>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -120,9 +128,30 @@ pub struct CRemoteResult {
 #[no_mangle]
 pub extern "C" fn trex_db_remote_session_create() -> u64 {
     match create_remote_session() {
-        Ok(id) => id,
-        Err(_) => 0,
+        Ok(id) => {
+            LAST_CREATE_ERR.with(|c| c.borrow_mut().clear());
+            id
+        }
+        Err(e) => {
+            LAST_CREATE_ERR.with(|c| *c.borrow_mut() = e.into_bytes());
+            0
+        }
     }
+}
+
+/// Borrow the reason the last `trex_db_remote_session_create` on this thread
+/// failed. The pointer is valid until the next create call on the same thread;
+/// callers copy it immediately. Empty when the last create succeeded.
+#[no_mangle]
+pub unsafe extern "C" fn trex_db_remote_session_create_last_error(
+    out_ptr: *mut *const u8,
+    out_len: *mut usize,
+) {
+    LAST_CREATE_ERR.with(|c| {
+        let b = c.borrow();
+        *out_ptr = b.as_ptr();
+        *out_len = b.len();
+    });
 }
 
 #[no_mangle]

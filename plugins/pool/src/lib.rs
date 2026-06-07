@@ -100,6 +100,14 @@ struct SessionEntry {
 static SESSIONS: OnceLock<Mutex<HashMap<u64, SessionEntry>>> = OnceLock::new();
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
+thread_local! {
+    /// Reason the most recent `trex_pool_session_create` on THIS thread returned
+    /// 0. The C ABI signals failure only via a 0 id, so the descriptive error
+    /// (e.g. the remote backend's "no service:flight entry from a data node yet")
+    /// is stashed here for `trex_pool_session_create_last_error` to surface.
+    static LAST_CREATE_ERR: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
 fn sessions() -> &'static Mutex<HashMap<u64, SessionEntry>> {
     SESSIONS.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -436,6 +444,17 @@ pub unsafe fn extension_entrypoint(con: Connection) -> std::result::Result<(), B
         .unwrap_or(DEFAULT_POOL_SIZE)
         .max(1);
 
+    // pg-compat shim: `regclass` is not a DuckDB type, so `'schema.tbl'::regclass`
+    // casts error with a catalog lookup failure. Stub it as a VARCHAR alias so the
+    // cast parses and round-trips the relation name instead of erroring. Registered
+    // on the base connection before cloning, so the shared catalog makes it visible
+    // to every pooled clone and every other consumer (pgwire, db/flight, direct
+    // callers). IF NOT EXISTS keeps it idempotent across reboots on an on-disk DB.
+    // This is a stub, not real regclass: there is no name<->OID resolution.
+    if let Err(e) = con.execute_batch("CREATE TYPE IF NOT EXISTS regclass AS VARCHAR") {
+        warn!(error = %e, "failed to register regclass pg-compat stub");
+    }
+
     init_from_connection(&con, pool_size)
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
@@ -507,10 +526,36 @@ pub extern "C" fn trex_pool_arrow_result_free(result: *mut CArrowResult) {
 }
 
 /// Lease a Connection and register a session for it. Returns 0 on failure
-/// (pool not initialised or sender closed).
+/// (pool not initialised, sender closed, or — on a server-only node — the remote
+/// data node unreachable). The failure reason is stashed for
+/// `trex_pool_session_create_last_error`.
 #[no_mangle]
 pub extern "C" fn trex_pool_session_create() -> u64 {
-    create_session().unwrap_or(0)
+    match create_session() {
+        Ok(id) => {
+            LAST_CREATE_ERR.with(|c| c.borrow_mut().clear());
+            id
+        }
+        Err(e) => {
+            LAST_CREATE_ERR.with(|c| *c.borrow_mut() = e.into_bytes());
+            0
+        }
+    }
+}
+
+/// Borrow the reason the last `trex_pool_session_create` on this thread failed.
+/// The pointer is valid until the next create call on the same thread; callers
+/// copy it immediately. Empty when the last create succeeded.
+#[no_mangle]
+pub unsafe extern "C" fn trex_pool_session_create_last_error(
+    out_ptr: *mut *const u8,
+    out_len: *mut usize,
+) {
+    LAST_CREATE_ERR.with(|c| {
+        let b = c.borrow();
+        *out_ptr = b.as_ptr();
+        *out_len = b.len();
+    });
 }
 
 /// Execute SQL within a session, returning Arrow IPC bytes.

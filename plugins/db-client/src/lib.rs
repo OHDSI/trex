@@ -24,6 +24,7 @@ type FnIsError = unsafe extern "C" fn(*const Opaque) -> i32;
 type FnData = unsafe extern "C" fn(*const Opaque, *mut *const u8, *mut usize);
 type FnError = unsafe extern "C" fn(*const Opaque, *mut *const u8, *mut usize);
 type FnFree = unsafe extern "C" fn(*mut Opaque);
+type FnLastError = unsafe extern "C" fn(*mut *const u8, *mut usize);
 
 struct DbFns {
     create: FnCreate,
@@ -35,6 +36,8 @@ struct DbFns {
     data: FnData,
     error: FnError,
     free: FnFree,
+    // Optional: absent on db.trex builds predating create-error reporting.
+    create_last_error: Option<FnLastError>,
 }
 
 static DB_FNS: OnceLock<Option<DbFns>> = OnceLock::new();
@@ -114,6 +117,17 @@ unsafe fn discover_db_fns() -> Option<DbFns> {
         }
     };
 
+    // Optional: absent on db.trex builds predating create-error reporting.
+    let create_last_error: Option<FnLastError> = {
+        let name = "trex_db_remote_session_create_last_error\0";
+        let ptr = libc::dlsym(handle, name.as_ptr() as *const _);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute(ptr))
+        }
+    };
+
     Some(DbFns {
         create: sym!("trex_db_remote_session_create"),
         execute: sym!("trex_db_remote_session_execute"),
@@ -123,6 +137,7 @@ unsafe fn discover_db_fns() -> Option<DbFns> {
         data: sym!("trex_db_remote_session_result_data"),
         error: sym!("trex_db_remote_session_result_error"),
         free: sym!("trex_db_remote_session_result_free"),
+        create_last_error,
     })
 }
 
@@ -186,7 +201,18 @@ pub fn create_remote_session() -> Result<u64, String> {
     let fns = get_fns()?;
     let id = unsafe { (fns.create)() };
     if id == 0 {
-        Err("create_remote_session failed (likely no data node available yet)".to_string())
+        // Recover the real reason db.trex stashed (gossip discovery / Flight RPC)
+        // rather than guessing. Falls back to the generic hint on older db.trex.
+        let detail = fns
+            .create_last_error
+            .map(|f| unsafe { read_error_str(|p, l| f(p, l)) })
+            .filter(|s| !s.is_empty() && s != "unknown db error");
+        match detail {
+            Some(reason) => Err(reason),
+            None => {
+                Err("create_remote_session failed (likely no data node available yet)".to_string())
+            }
+        }
     } else {
         Ok(id)
     }

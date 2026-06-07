@@ -22,6 +22,7 @@ type FnArrowIsError = unsafe extern "C" fn(*const Opaque) -> i32;
 type FnArrowData = unsafe extern "C" fn(*const Opaque, *mut *const u8, *mut usize) -> i32;
 type FnArrowError = unsafe extern "C" fn(*const Opaque, *mut *const u8, *mut usize);
 type FnArrowFree = unsafe extern "C" fn(*mut Opaque);
+type FnLastError = unsafe extern "C" fn(*mut *const u8, *mut usize);
 
 /// Opaque pointer for C ABI result handles.
 #[repr(C)]
@@ -38,6 +39,8 @@ struct PoolFns {
     arrow_data: FnArrowData,
     arrow_error: FnArrowError,
     arrow_free: FnArrowFree,
+    // Optional: absent on pool.trex builds predating create-error reporting.
+    session_create_last_error: Option<FnLastError>,
 }
 
 static POOL_FNS: OnceLock<Option<PoolFns>> = OnceLock::new();
@@ -107,6 +110,17 @@ unsafe fn discover_pool_fns() -> Option<PoolFns> {
         }};
     }
 
+    // Optional: absent on pool.trex builds predating create-error reporting.
+    let session_create_last_error: Option<FnLastError> = {
+        let name = "trex_pool_session_create_last_error\0";
+        let ptr = libc::dlsym(handle, name.as_ptr() as *const _);
+        if ptr.is_null() {
+            None
+        } else {
+            Some(std::mem::transmute(ptr))
+        }
+    };
+
     Some(PoolFns {
         session_create: sym!("trex_pool_session_create"),
         session_execute_arrow: sym!("trex_pool_session_execute_arrow"),
@@ -116,6 +130,7 @@ unsafe fn discover_pool_fns() -> Option<PoolFns> {
         arrow_data: sym!("trex_pool_arrow_result_data"),
         arrow_error: sym!("trex_pool_arrow_result_error"),
         arrow_free: sym!("trex_pool_arrow_result_free"),
+        session_create_last_error,
     })
 }
 
@@ -184,7 +199,17 @@ pub fn create_session() -> Result<u64, String> {
     let fns = get_fns()?;
     let id = unsafe { (fns.session_create)() };
     if id == 0 {
-        Err("create_session failed".to_string())
+        // Surface the real reason the pool stashed (e.g. the remote backend's
+        // "no service:flight entry from a data node yet") instead of a bare
+        // "create_session failed". Falls back on older pool.trex.
+        let detail = fns
+            .session_create_last_error
+            .map(|f| unsafe { read_error_str(|p, l| f(p, l)) })
+            .filter(|s| !s.is_empty() && s != "unknown pool error");
+        match detail {
+            Some(reason) => Err(format!("create_session failed: {reason}")),
+            None => Err("create_session failed".to_string()),
+        }
     } else {
         Ok(id)
     }
