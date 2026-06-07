@@ -5,7 +5,10 @@ import { verifyAccessToken } from "../auth/jwt.ts";
 import { generateApiKey } from "../mcp/auth.ts";
 
 const router = Router();
-router.use(express.json());
+// Mounted globally (see core/server/index.ts), so this json parser gates the body
+// size of EVERY request including plugin-function POSTs (e.g. hades-api /jobs with
+// a full Strategus analysis spec). Default is ~100kb; raise it so large specs pass.
+router.use(express.json({ limit: "50mb" }));
 
 // ── In-memory session store with 5-minute TTL ───────────────────────────────
 

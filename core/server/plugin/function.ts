@@ -314,9 +314,13 @@ function _addFunction(
       for (const [key, val] of Object.entries(req.headers)) {
         if (val) {
           // Strip encoding headers — the outer proxy handles compression;
-          // letting the worker compress causes double-encoding (ERR_CONTENT_DECODING_FAILED)
+          // letting the worker compress causes double-encoding (ERR_CONTENT_DECODING_FAILED).
+          // Also strip content-length/transfer-encoding: the body below is rebuilt
+          // (re-serialized from req.body, or re-read), so the client's original
+          // content-length no longer matches and would truncate the worker's body
+          // stream ("user body write aborted: early end"). Let fetch recompute it.
           const lower = key.toLowerCase();
-          if (lower === "accept-encoding") continue;
+          if (lower === "accept-encoding" || lower === "content-length" || lower === "transfer-encoding") continue;
           headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
         }
       }
