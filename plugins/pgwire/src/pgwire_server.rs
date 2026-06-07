@@ -188,8 +188,9 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> 
     let escaped_name = hana_creds.name.replace("'", "''");
 
     if query.to_uppercase().starts_with("SELECT") || query.to_uppercase().starts_with("WITH") {
+        // Read path: trex_hana_scan(query, url) returns a result set.
         format!(
-            "SELECT * FROM hana_scan('{}', 'hdbsql://{}:{}@{}:{}/{}')",
+            "SELECT * FROM trex_hana_scan('{}', 'hdbsql://{}:{}@{}:{}/{}')",
             escaped_query,
             escaped_username,
             escaped_password,
@@ -198,14 +199,15 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> 
             escaped_name
         )
     } else {
+        // Write path: trex_hana_execute(connection_url, sql) -- URL first, runs DML/DDL.
         format!(
-            "SELECT hana_execute('{}', 'hdbsql://{}:{}@{}:{}/{}')",
-            escaped_query,
+            "SELECT trex_hana_execute('hdbsql://{}:{}@{}:{}/{}', '{}')",
             escaped_username,
             escaped_password,
             escaped_host,
             hana_creds.port,
-            escaped_name
+            escaped_name,
+            escaped_query
         )
     }
 }

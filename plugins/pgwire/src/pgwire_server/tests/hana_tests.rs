@@ -203,7 +203,7 @@ fn sample_creds() -> HanaCredentials {
 fn wrap_query_select_uses_hana_scan() {
     let q = "SELECT 1";
     let out = wrap_query_for_hana(q, &sample_creds());
-    assert!(out.starts_with("SELECT * FROM hana_scan("), "got {out:?}");
+    assert!(out.starts_with("SELECT * FROM trex_hana_scan("), "got {out:?}");
     assert!(out.contains("'SELECT 1'"));
     assert!(out.contains("hdbsql://u:p@host:30015/DB"));
 }
@@ -212,30 +212,45 @@ fn wrap_query_select_uses_hana_scan() {
 fn wrap_query_with_cte_uses_hana_scan() {
     let q = "WITH cte AS (SELECT 1) SELECT * FROM cte";
     let out = wrap_query_for_hana(q, &sample_creds());
-    assert!(out.starts_with("SELECT * FROM hana_scan("), "got {out:?}");
+    assert!(out.starts_with("SELECT * FROM trex_hana_scan("), "got {out:?}");
 }
 
 #[test]
 fn wrap_query_lowercase_select_with_case_insensitive() {
     let q = "select 1";
     let out = wrap_query_for_hana(q, &sample_creds());
-    assert!(out.starts_with("SELECT * FROM hana_scan("));
+    assert!(out.starts_with("SELECT * FROM trex_hana_scan("));
     let q2 = "with cte as (select 1) select * from cte";
     let out2 = wrap_query_for_hana(q2, &sample_creds());
-    assert!(out2.starts_with("SELECT * FROM hana_scan("));
+    assert!(out2.starts_with("SELECT * FROM trex_hana_scan("));
 }
 
 #[test]
 fn wrap_query_dml_uses_hana_execute() {
     let q = "INSERT INTO t VALUES (1)";
     let out = wrap_query_for_hana(q, &sample_creds());
-    assert!(out.starts_with("SELECT hana_execute("), "got {out:?}");
+    assert!(out.starts_with("SELECT trex_hana_execute("), "got {out:?}");
     let q2 = "UPDATE t SET a = 1";
     let out2 = wrap_query_for_hana(q2, &sample_creds());
-    assert!(out2.starts_with("SELECT hana_execute("));
+    assert!(out2.starts_with("SELECT trex_hana_execute("));
     let q3 = "DELETE FROM t";
     let out3 = wrap_query_for_hana(q3, &sample_creds());
-    assert!(out3.starts_with("SELECT hana_execute("));
+    assert!(out3.starts_with("SELECT trex_hana_execute("));
+}
+
+#[test]
+fn wrap_query_dml_passes_url_before_sql() {
+    // trex_hana_execute(connection_url, sql): the URL argument must come
+    // first, the statement second. Regression guard for the arg-order bug.
+    let q = "INSERT INTO t VALUES (1)";
+    let out = wrap_query_for_hana(q, &sample_creds());
+    let url_pos = out.find("hdbsql://").expect("url present");
+    let sql_pos = out.find("INSERT INTO t").expect("sql present");
+    assert!(url_pos < sql_pos, "url must precede sql, got {out:?}");
+    assert!(
+        out.starts_with("SELECT trex_hana_execute('hdbsql://"),
+        "got {out:?}"
+    );
 }
 
 #[test]

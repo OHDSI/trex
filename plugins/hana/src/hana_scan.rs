@@ -298,6 +298,9 @@ pub struct HanaScanBindData {
     pub query: String,
     pub column_names: Vec<String>,
     pub column_types: Vec<LogicalTypeId>,
+    /// Per-column flag: true when the source HANA type is a date/time type
+    /// (serialised as a string) and the value should be normalised.
+    pub temporal_cols: Vec<bool>,
     pub batch_size: usize,
     pub max_retries: u32,
 }
@@ -329,6 +332,7 @@ impl Clone for HanaScanBindData {
             query: self.query.clone(),
             column_names: self.column_names.clone(),
             column_types: cloned_types,
+            temporal_cols: self.temporal_cols.clone(),
             batch_size: self.batch_size,
             max_retries: self.max_retries,
         }
@@ -353,7 +357,14 @@ fn map_hana_type(hana_type: hdbconnect::TypeId) -> LogicalTypeId {
         hdbconnect::TypeId::BIGINT => LogicalTypeId::Bigint,
         hdbconnect::TypeId::REAL => LogicalTypeId::Float,
         hdbconnect::TypeId::DOUBLE => LogicalTypeId::Double,
-        hdbconnect::TypeId::DECIMAL => LogicalTypeId::Decimal,
+        // HANA delivers DECIMAL columns via the FIXED* transport type ids.
+        // Map the whole decimal family to DOUBLE so values arrive as a numeric
+        // type (comparable / sortable / aggregatable) instead of opaque varchar.
+        // Trade-off: precision beyond ~15 significant digits is not preserved.
+        hdbconnect::TypeId::DECIMAL
+        | hdbconnect::TypeId::FIXED8
+        | hdbconnect::TypeId::FIXED12
+        | hdbconnect::TypeId::FIXED16 => LogicalTypeId::Double,
         hdbconnect::TypeId::CHAR | hdbconnect::TypeId::VARCHAR | 
         hdbconnect::TypeId::NCHAR | hdbconnect::TypeId::NVARCHAR | 
         hdbconnect::TypeId::STRING | hdbconnect::TypeId::NSTRING |
@@ -369,6 +380,40 @@ fn map_hana_type(hana_type: hdbconnect::TypeId) -> LogicalTypeId {
         hdbconnect::TypeId::GEOMETRY | hdbconnect::TypeId::POINT => LogicalTypeId::Varchar,
         _ => LogicalTypeId::Varchar,
     }
+}
+
+/// True for HANA date/time transport types, which `map_hana_type` serialises
+/// to VARCHAR strings and which need timestamp normalisation on extraction.
+fn is_temporal_type(t: hdbconnect::TypeId) -> bool {
+    matches!(
+        t,
+        hdbconnect::TypeId::DAYDATE
+            | hdbconnect::TypeId::SECONDTIME
+            | hdbconnect::TypeId::LONGDATE
+            | hdbconnect::TypeId::SECONDDATE
+    )
+}
+
+/// Normalise HANA's ISO timestamp string to a SQL-friendly form:
+/// `2024-01-15T12:34:56.7890000` -> `2024-01-15 12:34:56.789`
+/// (space separator, trailing fractional zeros trimmed). DATE/TIME strings,
+/// which contain no `T` and no `.`, pass through unchanged.
+fn normalize_hana_timestamp(s: &str) -> String {
+    let mut out = if s.len() > 10 && s.as_bytes()[10] == b'T' {
+        let mut t = s.to_string();
+        t.replace_range(10..11, " ");
+        t
+    } else {
+        s.to_string()
+    };
+    if let Some(dot) = out.find('.') {
+        let trimmed_len = out[dot + 1..].trim_end_matches('0').len();
+        out.truncate(dot + 1 + trimmed_len);
+        if out.ends_with('.') {
+            out.truncate(dot);
+        }
+    }
+    out
 }
 
 pub fn redact_url_password(url: &str) -> String {
@@ -468,7 +513,7 @@ pub fn safe_hana_connect(url: String) -> Result<HanaConnection, Box<dyn Error>> 
     match result {
         Ok(conn_result) => conn_result.map_err(|e| {
             HanaError::connection(
-                &format!("Connection failed: {}", e),
+                &format!("Connection failed: {:?}", e),
                 None,
                 None,
                 "safe_hana_connect"
@@ -500,6 +545,10 @@ impl VTab for HanaScanVTab {
     type BindData = HanaScanBindData;
     fn bind(bind: &BindInfo) -> Result<Self::BindData, Box<dyn Error>> {
         let query = bind.get_parameter(0).to_string();
+        // Strip trailing semicolons/whitespace. A trailing ';' breaks the
+        // schema-detection wrap `SELECT * FROM (<query>) AS subquery LIMIT 1`,
+        // which would silently collapse the result to one varchar column.
+        let query = query.trim_end().trim_end_matches(';').trim_end().to_string();
         let url = bind.get_parameter(1).to_string();
         validate_hana_connection(&url)?;
         let (user, password, host, port, database) = parse_hana_url(&url)?;
@@ -514,7 +563,7 @@ impl VTab for HanaScanVTab {
         if batch_size == 0 || batch_size > 10000 {
             return Err(HanaError::new("Batch size must be between 1 and 10000"));
         }
-        let (column_names, column_types) = match safe_hana_connect(url.clone()) {
+        let (column_names, column_types, temporal_cols) = match safe_hana_connect(url.clone()) {
             Ok(connection) => {
                 let schema_result = match connection.prepare(&query) {
                     Ok(_prepared) => {
@@ -523,39 +572,44 @@ impl VTab for HanaScanVTab {
                                 let metadata = result_set.metadata();
                                 let mut names = Vec::new();
                                 let mut types = Vec::new();
+                                let mut temporal = Vec::new();
                                 for field_metadata in metadata.iter() {
                                     let column_name = if field_metadata.displayname().is_empty() {
                                         field_metadata.columnname().to_string()
                                     } else {
                                         field_metadata.displayname().to_string()
                                     };
-                                    let logical_type = map_hana_type(field_metadata.type_id());
+                                    let hana_type = field_metadata.type_id();
                                     names.push(column_name);
-                                    types.push(logical_type);
+                                    types.push(map_hana_type(hana_type));
+                                    temporal.push(is_temporal_type(hana_type));
                                 }
                                 if names.is_empty() {
                                     (
                                         vec!["result".to_string()],
                                         vec![LogicalTypeId::Varchar],
+                                        vec![false],
                                     )
                                 } else {
-                                    (names, types)
+                                    (names, types, temporal)
                                 }
                             }
                             Err(e) => {
-                                hana_warn!("SCHEMA", "Schema detection failed: {}", e);
+                                hana_warn!("SCHEMA", "Schema detection failed: {:?}", e);
                                 (
                                     vec!["result".to_string()],
                                     vec![LogicalTypeId::Varchar],
+                                    vec![false],
                                 )
                             }
                         }
                     }
                     Err(e) => {
-                        hana_warn!("SCHEMA", "Query prepare failed: {}", e);
+                        hana_warn!("SCHEMA", "Query prepare failed: {:?}", e);
                         (
                             vec!["result".to_string()],
                             vec![LogicalTypeId::Varchar],
+                            vec![false],
                         )
                     }
                 };
@@ -566,9 +620,14 @@ impl VTab for HanaScanVTab {
                 (
                     vec!["result".to_string()],
                     vec![LogicalTypeId::Varchar],
+                    vec![false],
                 )
             }
         };
+        // Track emitted names so we can de-duplicate: duckdb's binder rejects
+        // duplicate result column names, which would otherwise hard-fail any
+        // query (e.g. a join) that projects two same-named columns.
+        let mut name_counts: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
         for (name, type_id) in column_names.iter().zip(column_types.iter()) {
             let logical_type = match type_id {
                 LogicalTypeId::Tinyint => LogicalTypeId::Tinyint,
@@ -584,7 +643,10 @@ impl VTab for HanaScanVTab {
                 _ => LogicalTypeId::Varchar,
             };
             let type_handle = duckdb::core::LogicalTypeHandle::from(logical_type);
-            bind.add_result_column(name, type_handle);
+            let count = name_counts.entry(name.clone()).or_insert(0);
+            let unique_name = if *count == 0 { name.clone() } else { format!("{}_{}", name, count) };
+            *count += 1;
+            bind.add_result_column(&unique_name, type_handle);
         }
         Ok(HanaScanBindData {
             url,
@@ -596,6 +658,7 @@ impl VTab for HanaScanVTab {
             query,
             column_names,
             column_types,
+            temporal_cols,
             batch_size,
             max_retries,
         })
@@ -656,7 +719,7 @@ impl VTab for HanaScanVTab {
                         })
                     }
                     Err(e) => {
-                        Err(HanaError::new(&format!("Query execution failed: {}", e)))
+                        Err(HanaError::new(&format!("Query execution failed: {:?}", e)))
                     }
                 }
             }
@@ -716,7 +779,17 @@ impl VTab for HanaScanVTab {
                         match column_type {
                             LogicalTypeId::Varchar | LogicalTypeId::Decimal => {
                                 if let Ok(Some(s)) = hdb_value.clone().try_into::<Option<String>>() {
-                                    flat_vector.insert(row_idx, s.as_str());
+                                    let is_temporal = init_data
+                                        .bind_data
+                                        .temporal_cols
+                                        .get(col_idx)
+                                        .copied()
+                                        .unwrap_or(false);
+                                    if is_temporal {
+                                        flat_vector.insert(row_idx, normalize_hana_timestamp(&s).as_str());
+                                    } else {
+                                        flat_vector.insert(row_idx, s.as_str());
+                                    }
                                 } else {
                                     flat_vector.set_null(row_idx);
                                 }
@@ -767,6 +840,20 @@ impl VTab for HanaScanVTab {
                                     slice[row_idx] = b;
                                 } else {
                                     flat_vector.set_null(row_idx);
+                                }
+                            }
+                            LogicalTypeId::Blob => {
+                                // HdbValue::try_into uses serde, which deserialises Vec<u8>
+                                // as a sequence (not a byte buffer) and fails for binary.
+                                // Match the in-memory byte variants directly instead.
+                                match hdb_value {
+                                    hdbconnect::HdbValue::BINARY(bytes)
+                                    | hdbconnect::HdbValue::GEOMETRY(bytes)
+                                    | hdbconnect::HdbValue::POINT(bytes)
+                                    | hdbconnect::HdbValue::DBSTRING(bytes) => {
+                                        flat_vector.insert(row_idx, bytes.as_slice());
+                                    }
+                                    _ => flat_vector.set_null(row_idx),
                                 }
                             }
                             _ => {
@@ -924,7 +1011,20 @@ mod tests {
     fn test_map_hana_type_floats() {
         assert_eq!(map_hana_type(hdbconnect::TypeId::REAL), LogicalTypeId::Float);
         assert_eq!(map_hana_type(hdbconnect::TypeId::DOUBLE), LogicalTypeId::Double);
-        assert_eq!(map_hana_type(hdbconnect::TypeId::DECIMAL), LogicalTypeId::Decimal);
+        // HANA delivers DECIMAL via the FIXED* transport ids; the whole
+        // decimal family maps to DOUBLE so values arrive numeric.
+        assert_eq!(map_hana_type(hdbconnect::TypeId::DECIMAL), LogicalTypeId::Double);
+        assert_eq!(map_hana_type(hdbconnect::TypeId::FIXED8), LogicalTypeId::Double);
+        assert_eq!(map_hana_type(hdbconnect::TypeId::FIXED12), LogicalTypeId::Double);
+        assert_eq!(map_hana_type(hdbconnect::TypeId::FIXED16), LogicalTypeId::Double);
+    }
+
+    #[test]
+    fn test_normalize_hana_timestamp() {
+        assert_eq!(normalize_hana_timestamp("2024-01-15T12:34:56.7890000"), "2024-01-15 12:34:56.789");
+        assert_eq!(normalize_hana_timestamp("2024-01-15T12:34:56.0000000"), "2024-01-15 12:34:56");
+        assert_eq!(normalize_hana_timestamp("2024-01-15"), "2024-01-15");
+        assert_eq!(normalize_hana_timestamp("12:34:56"), "12:34:56");
     }
     #[test]
     fn test_map_hana_type_strings() {
@@ -978,6 +1078,7 @@ mod tests {
             query: "SELECT * FROM test".to_string(),
             column_names: vec!["col1".to_string(), "col2".to_string()],
             column_types: vec![LogicalTypeId::Integer, LogicalTypeId::Varchar],
+            temporal_cols: vec![false, false],
             batch_size: 1024,
             max_retries: 3,
         };

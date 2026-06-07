@@ -318,8 +318,18 @@ export class HanaDB extends TrexDB {
 	constructor(database, worker_id) {
 		super(database, worker_id);
 	}
-	executeWrite(sql, params) {
-		return this.execute(sql, params);
+	#resolveConnectionUrl() {
+		const dbm = DatabaseManager.getDatabaseManager();
+		const credentialsList = dbm.getCredentials() || [];
+		const c = credentialsList.find(c => c.id === super.getdatabase());
+		if (!c || !Array.isArray(c.credentials)) {
+			throw new Error(`No credentials found for database '${super.getdatabase()}'`);
+		}
+		const adminCredentials = c.credentials.find(cred => cred.userScope === 'Admin');
+		if (!adminCredentials) {
+			throw new Error(`No admin credentials found for database '${super.getdatabase()}'`);
+		}
+		return this.#buildHanaConnectionUrl(c, adminCredentials);
 	}
 
 	#buildHanaConnectionUrl(credentials, adminCredentials) {
@@ -360,23 +370,30 @@ export class HanaDB extends TrexDB {
 			try {
 				const nparams = map_params(params);
 				console.log(`DB: ${super.getdatabase()} SQL: ${sql}`);
-				const dbm = DatabaseManager.getDatabaseManager();
-				const credentialsList = dbm.getCredentials() || [];
-				const c = credentialsList.find(c => c.id === super.getdatabase());
-				if (!c || !Array.isArray(c.credentials)) {
-					reject(new Error(`No credentials found for database '${super.getdatabase()}'`));
-					return;
-				}
-				const adminCredentials = c.credentials.find(cred => cred.userScope === 'Admin');
-				if (!adminCredentials) {
-					reject(new Error(`No admin credentials found for database '${super.getdatabase()}'`));
-					return;
-				}
-				const connectionUrl = this.#buildHanaConnectionUrl(c, adminCredentials);
+				const connectionUrl = this.#resolveConnectionUrl();
 				// Escape single quotes in SQL and connection URL to prevent SQL injection
 				const escapedSql = String(sql).replace(/'/g, "''");
 				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from hana_scan('${escapedSql}', '${escapedConnectionUrl}')`, nparams)));
+				// Read path: trex_hana_scan(query, url) returns a result set.
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from trex_hana_scan('${escapedSql}', '${escapedConnectionUrl}')`, nparams)));
+			} catch(e) {
+				reject(e);
+			}
+		});
+	}
+
+	executeWrite(sql, params) {
+
+		return new Promise((resolve, reject) => {
+			try {
+				const nparams = map_params(params);
+				console.log(`DB(write): ${super.getdatabase()} SQL: ${sql}`);
+				const connectionUrl = this.#resolveConnectionUrl();
+				// Escape single quotes in SQL and connection URL to prevent SQL injection
+				const escapedSql = String(sql).replace(/'/g, "''");
+				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
+				// Write path: trex_hana_execute(connection_url, sql) -- URL first, runs DML/DDL.
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select trex_hana_execute('${escapedConnectionUrl}', '${escapedSql}')`, nparams)));
 			} catch(e) {
 				reject(e);
 			}
