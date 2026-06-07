@@ -51,7 +51,16 @@ su postgres -c "psql -d webapi -c 'CREATE SCHEMA IF NOT EXISTS webapi AUTHORIZAT
 # trexsql.enabled=true so TrexSQLAutoConfiguration's @ConditionalOnProperty passes
 # during Spring AOT — conditions are frozen at build time in a closed-world native
 # image, so the trexsql beans must be present at AOT to exist at runtime.
-export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_"}'
+#
+# security.auth.db.enabled=true for the same reason: DatabaseAuthConfig,
+# LoginController.Database (the POST /user/login/db endpoint) and AuthDataSource
+# are all @ConditionalOnProperty(security.auth.db.enabled=true). Without this at
+# AOT they are pruned and DB login 404s at runtime regardless of env. The
+# security.auth.db.datasource.* values point at the ephemeral build DB so the
+# AuthDataSource bean initialises during the AOT context refresh; the real
+# values are supplied by env at runtime. JWT (HS256) beans are matchIfMissing
+# so they are already included.
+export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_","security.auth.db.enabled":"true","security.auth.db.datasource.driverClassName":"org.postgresql.Driver","security.auth.db.datasource.url":"jdbc:postgresql://localhost:5432/webapi","security.auth.db.datasource.username":"ohdsi_app_user","security.auth.db.datasource.password":"app1","security.auth.db.datasource.schema":"webapi"}'
 
 # --- 5. Native build (Spring AOT + native-image shared library) ---
 echo "[webapi-native] building native shared library"

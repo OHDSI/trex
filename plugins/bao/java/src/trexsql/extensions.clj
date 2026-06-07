@@ -79,11 +79,15 @@
    sorted with 'pool' first (load-order requirement of dependent extensions)
    then alphabetic by name for determinism."
   [extensions-path]
-  (let [base-dir (io/file extensions-path)]
+  ;; ^File hints keep .isDirectory/.listFiles/.getAbsolutePath as direct method
+  ;; calls. Without them Clojure emits reflective calls, which fail under the
+  ;; GraalVM native image (libwebapi-native.so) with "No matching field found:
+  ;; isDirectory for class java.io.File" and abort webapi_start().
+  (let [^File base-dir (io/file extensions-path)]
     (when (.isDirectory base-dir)
-      (->> (for [subdir (.listFiles base-dir)
+      (->> (for [^File subdir (.listFiles base-dir)
                  :when (.isDirectory subdir)
-                 ext-file (.listFiles subdir)
+                 ^File ext-file (.listFiles subdir)
                  :when (extension-file? ext-file)
                  :let [ext-name (extension-name ext-file)]]
              {:name ext-name

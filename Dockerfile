@@ -154,6 +154,18 @@ RUN if [ -d "/tmp/all-extensions/${TARGETARCH}" ]; then \
       cp -f /tmp/all-extensions/*.so /usr/lib/ 2>/dev/null || true; \
     fi && rm -rf /tmp/all-extensions && ldconfig
 
+# Sync node_modules/@trex/*.trex with the CI-built, arch-correct extensions now
+# in /usr/lib/trexsql/extensions. The published @trex npm packages bundle amd64
+# .trex; the embedded WebAPI engine (libwebapi-native.so) loads extensions from
+# node_modules/@trex, so on an arm64 image those stale amd64 binaries make
+# webapi_start() fail with "Failed to load '…/pool.trex' … built for platform
+# 'linux_amd64', but we can only load extensions built for platform 'linux_arm64'".
+# Overlaying by basename keeps node_modules consistent with the image's arch.
+RUN for src in /usr/lib/trexsql/extensions/*.trex; do \
+      base=$(basename "$src"); \
+      find /usr/src/node_modules/@trex -name "$base" -exec cp -f "$src" {} \; ; \
+    done
+
 # Create plugins directory and symlink @trex npm packages for plugin scanner
 RUN mkdir -p ./plugins && \
     ln -sf $(pwd)/node_modules/@trex ./plugins/@trex
