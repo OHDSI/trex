@@ -202,6 +202,110 @@ def test_hana_scan_error_handling(node_factory):
 
 
 # ---------------------------------------------------------------------------
+# Type / edge-case regression tests
+#
+# Each guards a bug found in the 2026-06 scenario sweep against live HANA.
+# ---------------------------------------------------------------------------
+
+
+def test_hana_scan_binary_not_null(node_factory):
+    """Regression: BLOB/VARBINARY columns return their bytes, not NULL.
+
+    HdbValue::try_into is serde-based and deserialises Vec<u8> as a sequence,
+    so binary used to silently come back NULL.
+    """
+    node = node_factory(load_hana=True, load_db=False)
+    result = node.execute(
+        f"SELECT octet_length(vb) FROM trex_hana_scan("
+        f"'SELECT CAST(''ABC'' AS VARBINARY) AS vb FROM DUMMY', "
+        f"'{HANA_TEST_URL}')"
+    )
+    assert len(result) == 1
+    assert result[0][0] == 3, f"expected 3 bytes (not NULL), got {result[0]}"
+
+
+def test_hana_scan_trailing_semicolon(node_factory):
+    """Regression: a trailing ';' must not collapse the result to one column.
+
+    The schema-detection wrap `SELECT * FROM (<query>) AS subquery LIMIT 1`
+    is a syntax error when <query> ends in ';', which used to drop all but
+    the first column.
+    """
+    node = node_factory(load_hana=True, load_db=False)
+    result = node.execute(
+        f"SELECT * FROM trex_hana_scan("
+        f"'SELECT 1 AS a, 2 AS b, ''x'' AS c FROM DUMMY;', "
+        f"'{HANA_TEST_URL}')"
+    )
+    assert len(result) == 1
+    row = result[0]
+    assert len(row) == 3, f"Expected 3 columns, got {len(row)}: {row}"
+    assert row[0] == 1
+    assert row[1] == 2
+    assert row[2] == "x"
+
+
+def test_hana_scan_duplicate_column_names(node_factory):
+    """Regression: duplicate column names are de-duplicated, not a binder error.
+
+    duckdb rejects duplicate result column names, which used to hard-fail any
+    join projecting two same-named columns (common in CDM).
+    """
+    node = node_factory(load_hana=True, load_db=False)
+    result = node.execute(
+        f"SELECT * FROM trex_hana_scan("
+        f"'SELECT 1 AS dup, 2 AS dup, 3 AS dup FROM DUMMY', "
+        f"'{HANA_TEST_URL}')"
+    )
+    assert len(result) == 1
+    row = result[0]
+    assert len(row) == 3, f"Expected 3 columns, got {len(row)}: {row}"
+    assert row[0] == 1
+    assert row[1] == 2
+    assert row[2] == 3
+
+
+def test_hana_scan_decimal_is_numeric(node_factory):
+    """Regression: DECIMAL columns arrive as a numeric type, not varchar.
+
+    HANA delivers decimals via FIXED8/12/16 transport ids, which were
+    unmapped and fell back to varchar; they now map to DOUBLE.
+    """
+    node = node_factory(load_hana=True, load_db=False)
+    typ = node.execute(
+        f"SELECT typeof(amt) FROM trex_hana_scan("
+        f"'SELECT CAST(10.50 AS DECIMAL(10,2)) AS amt FROM DUMMY', "
+        f"'{HANA_TEST_URL}')"
+    )
+    assert typ[0][0] == "DOUBLE", f"expected numeric DOUBLE, got {typ[0]}"
+    total = node.execute(
+        f"SELECT sum(amt) FROM trex_hana_scan("
+        f"'SELECT CAST(10.50 AS DECIMAL(10,2)) AS amt FROM DUMMY "
+        f"UNION ALL SELECT CAST(20.25 AS DECIMAL(10,2)) AS amt FROM DUMMY', "
+        f"'{HANA_TEST_URL}')"
+    )
+    assert abs(total[0][0] - 30.75) < 1e-9, f"expected 30.75, got {total[0]}"
+
+
+def test_hana_scan_timestamp_normalized(node_factory):
+    """Regression: TIMESTAMP uses a space separator with trimmed fraction.
+
+    HANA serialises `2024-01-15T12:34:56.7890000`; it is normalised to
+    `2024-01-15 12:34:56.789` for clean downstream parsing.
+    """
+    node = node_factory(load_hana=True, load_db=False)
+    result = node.execute(
+        f"SELECT * FROM trex_hana_scan("
+        f"'SELECT TIMESTAMP''2024-01-15 12:34:56.789'' AS ts FROM DUMMY', "
+        f"'{HANA_TEST_URL}')"
+    )
+    assert len(result) == 1
+    ts = result[0][0]
+    assert ts == "2024-01-15 12:34:56.789", f"got {ts!r}"
+    assert "T" not in ts
+
+
+# ---------------------------------------------------------------------------
 # hana_attach / hana_detach / hana_tables tests
 #
 # Uses a small dedicated test schema (TREX_TEST_ATTACH) with 1 table
