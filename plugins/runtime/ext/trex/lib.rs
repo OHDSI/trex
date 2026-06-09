@@ -940,27 +940,38 @@ fn op_acquire_worker() -> u32 {
 
 /// Persistent so connection-local state (temp tables, prepared statements)
 /// survives across queries within one TrexConnection.
-#[op2(fast)]
-#[number]
-fn op_create_session() -> Result<u64, TrexError> {
-  trex_pool_client::create_session().map_err(TrexError::Generic)
+// Session ids are passed to/from JS as STRINGS, not numbers. Remote pool
+// sessions are tagged with REMOTE_BIT (1<<63), so their u64 ids are ~2^63 —
+// far beyond JS's safe-integer range (2^53). Marshalling them as JS numbers
+// (f64) silently rounds e.g. REMOTE_BIT|1 down to 2^63 (= REMOTE_BIT|0), so the
+// data node is asked for session 0 → "session 0 not found" on every server-only
+// (non-data) node. Strings preserve the exact id.
+#[op2]
+#[string]
+fn op_create_session() -> Result<String, TrexError> {
+  trex_pool_client::create_session()
+    .map(|id| id.to_string())
+    .map_err(TrexError::Generic)
 }
 
 /// Destroy a pool session. Auto-rollback if a transaction is still active.
 #[op2(fast)]
-fn op_destroy_session(#[number] session_id: u64) {
-  let _ = trex_pool_client::destroy_session(session_id);
+fn op_destroy_session(#[string] session_id: String) {
+  if let Ok(id) = session_id.parse::<u64>() {
+    let _ = trex_pool_client::destroy_session(id);
+  }
 }
 
 /// Execute a query using a pool session for transaction isolation.
 #[op2]
 #[string]
 fn op_execute_query_session(
-  #[number] session_id: u64,
+  #[string] session_id: String,
   #[string] database: String,
   #[string] sql: String,
   #[serde] params: Vec<TrexType>,
 ) -> Result<String, TrexError> {
+  let session_id = session_id.parse::<u64>().unwrap_or(0);
   execute_query(database, sql, params, -1, session_id)
 }
 

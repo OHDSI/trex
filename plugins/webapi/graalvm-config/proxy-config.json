@@ -1,8 +1,25 @@
 [
   {
-    "interfaces":["com.sun.jna.Library"]
+    "interfaces": [
+      "com.sun.jna.Library"
+    ]
   },
   {
-    "interfaces":["org.trex.TrexEngine"]
+    "interfaces": [
+      "org.trex.TrexEngine"
+    ]
+  },
+  {
+    "interfaces": [
+      "org.hibernate.query.hql.spi.SqmQueryImplementor",
+      "org.hibernate.query.sqm.internal.SqmInterpretationsKey$InterpretationsKeySource",
+      "org.hibernate.query.spi.DomainQueryExecutionContext",
+      "org.hibernate.query.SelectionQuery",
+      "org.hibernate.query.CommonQueryContract",
+      "java.io.Serializable",
+      "org.springframework.aop.SpringProxy",
+      "org.springframework.aop.framework.Advised",
+      "org.springframework.core.DecoratingProxy"
+    ]
   }
 ]

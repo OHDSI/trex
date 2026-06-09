@@ -48,7 +48,12 @@ debug_coverage:
 
 # ---- WebAPI GraalVM native shared library (libwebapi-native.so, embeds trexsql) ----
 # Heavy build (GraalVM + ephemeral Postgres + ~16 GB RAM); intended for Docker/CI.
-.PHONY: webapi-native-lib
+.PHONY: webapi-native-lib gen-graalvm-config
 
 webapi-native-lib:
 	bash $(PROJ_DIR)build-native-lib.sh
+
+# Capture runtime-only native-image config (dynamic proxies etc.) by running
+# WebAPI on a JVM under the tracing agent; merges into graalvm-config/ for review.
+gen-graalvm-config:
+	bash $(PROJ_DIR)gen-graalvm-config.sh

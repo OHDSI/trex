@@ -1,0 +1,42 @@
+# Capture GraalVM native-image config (dynamic proxies etc.) by running WebAPI on
+# a JVM under the tracing agent. Unlike Dockerfile.native-lib this does NOT run
+# native-image — it only needs GraalVM (for the agent), Maven and Postgres, and is
+# much lighter. The merged graalvm-config/ is exported for review.
+#
+#   DOCKER_BUILDKIT=1 docker build -f plugins/webapi/Dockerfile.gen-config \
+#     --target export -o type=local,dest=gen-out .
+#   # then diff gen-out/graalvm-config against plugins/webapi/graalvm-config
+#
+# Context must be the repo ROOT (webapi-be submodule must be checked out).
+
+FROM ubuntu:22.04 AS build
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates build-essential zlib1g-dev \
+        maven postgresql postgresql-contrib unzip git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Oracle GraalVM for JDK 21 (ships the native-image tracing agent).
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) GRAAL_ARCH=x64 ;; \
+      arm64) GRAAL_ARCH=aarch64 ;; \
+      *) echo "unsupported architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://download.oracle.com/graalvm/21/latest/graalvm-jdk-21_linux-${GRAAL_ARCH}_bin.tar.gz" \
+      | tar -xz -C /opt \
+    && mv /opt/graalvm-jdk-21* /opt/graalvm
+ENV JAVA_HOME=/opt/graalvm
+ENV GRAAL_HOME=/opt/graalvm
+ENV PATH=$JAVA_HOME/bin:$PATH
+
+WORKDIR /src
+COPY plugins/webapi ./plugins/webapi
+
+# Builds the WebAPI boot jar, boots it under the agent, captures proxies, and
+# merges them into plugins/webapi/graalvm-config/.
+RUN bash plugins/webapi/gen-graalvm-config.sh
+
+FROM scratch AS export
+COPY --from=build /src/plugins/webapi/graalvm-config /graalvm-config

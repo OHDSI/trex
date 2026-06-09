@@ -2444,5 +2444,5524 @@
   },
   {
     "name": "org.ohdsi.webapi.source.SourceRepository"
+  },
+  {
+    "name": "org.ohdsi.webapi.CommonDTO",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.achilles.domain.AchillesCacheEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCache",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setCacheName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setSource",
+        "parameterTypes": [
+          "org.ohdsi.webapi.source.Source"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.achilles.domain.AchillesCacheEntity$HibernateAccessOptimizer$6QJCaOr1",
+    "fields": [
+      {
+        "name": "invocationTarget$pef9fl1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.achilles.domain.AchillesCacheEntity$HibernateInstantiator$8XuZ7ZbC",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.achilles.domain.AchillesCacheEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.achilles.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.datasource.dto.DataSourceUnsecuredDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.datasource.dto.KerberosAuthMechanism",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.scheduler.api.v1.dto.ArachneJobDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.scheduler.model.ArachneJob",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "setCron",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setEnabled",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setExecutedTimes",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setFrequency",
+        "parameterTypes": [
+          "org.ohdsi.webapi.arachne.scheduler.model.JobExecutingType"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setIsClosed",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setLastExecutedAt",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setRecurringTimes",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setRecurringUntilDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setStartDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.scheduler.model.ArachneJob$HibernateAccessOptimizer$elfy0Xlr",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.scheduler.model.ArachneJob_"
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.scheduler.model.JobExecutingType"
+  },
+  {
+    "name": "org.ohdsi.webapi.cdmresults.domain.CDMCacheEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setConceptId",
+        "parameterTypes": [
+          "int"
+        ]
+      },
+      {
+        "name": "setDescendantPersonCount",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setDescendantRecordCount",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setPersonCount",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRecordCount",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setSourceId",
+        "parameterTypes": [
+          "int"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cdmresults.domain.CDMCacheEntity$HibernateAccessOptimizer$v8ll3jP4",
+    "fields": [
+      {
+        "name": "invocationTarget$2doc111"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cdmresults.domain.CDMCacheEntity$HibernateInstantiator$IPYrlP9L",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cdmresults.domain.CDMCacheEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.cdmresults.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcFeAnalysisEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCohortCharacterization",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity"
+        ]
+      },
+      {
+        "name": "setFeatureAnalysis",
+        "parameterTypes": [
+          "org.ohdsi.webapi.feanalysis.domain.FeAnalysisEntity"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setIncludeAnnual",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setIncludeTemporal",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcFeAnalysisEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcGenerationEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCohortCharacterization",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity"
+        ]
+      },
+      {
+        "name": "setEndTime",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setExitMessage",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setInfo",
+        "parameterTypes": [
+          "org.ohdsi.webapi.common.generation.AnalysisGenerationBaseInfo"
+        ]
+      },
+      {
+        "name": "setSource",
+        "parameterTypes": [
+          "org.ohdsi.webapi.source.Source"
+        ]
+      },
+      {
+        "name": "setStartTime",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setStatus",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcGenerationEntity$HibernateAccessOptimizer$m1w0t3cM",
+    "fields": [
+      {
+        "name": "invocationTarget$2vcqln0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcGenerationEntity$HibernateInstantiator$p9SeKCQ3",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcGenerationEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcParamEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCohortCharacterization",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setValue",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcParamEntity$HibernateAccessOptimizer$e8yvkRQM",
+    "fields": [
+      {
+        "name": "invocationTarget$glgs1t0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcParamEntity$HibernateInstantiator$Q9IfOJKN",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcParamEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataConceptSetEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCohortCharacterization",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataConceptSetEntity$HibernateAccessOptimizer$hR752rTC",
+    "fields": [
+      {
+        "name": "invocationTarget$sv277c0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataConceptSetEntity$HibernateInstantiator$fwSqzy1j",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataConceptSetEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCohortCharacterization",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity"
+        ]
+      },
+      {
+        "name": "setExpressionString",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataEntity$HibernateAccessOptimizer$hl6hy1Pf",
+    "fields": [
+      {
+        "name": "invocationTarget$3p10oh0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataEntity$HibernateInstantiator$YHAUueTL",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCohortDefinitions",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setConceptSetEntity",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortcharacterization.domain.CcStrataConceptSetEntity"
+        ]
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setFeatureAnalyses",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setHashCode",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setParameters",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setStrataOnly",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setStratas",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setStratifiedBy",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setTags",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity$HibernateAccessOptimizer$R7fUKnsr",
+    "fields": [
+      {
+        "name": "invocationTarget$pfuuqv1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity$HibernateInstantiator$gaCaqhBE",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.CohortCharacterizationEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.AbstractTemporalResult",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.BaseCcDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcDistributionStat",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcExportDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcParameterDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcPrevalenceStat",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcResult",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcShortDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcStrataDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcTemporalAnnualResult",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcTemporalResult",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CcVersionFullDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.CohortCharacterizationDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.ExecutionResultRequest",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.ExportExecutionResultRequest",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.GenerationResults",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.CohortDefinitionDetailsEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setDefinition",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortdefinition.CohortDefinitionEntity"
+        ]
+      },
+      {
+        "name": "setExpression",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setHashCode",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "updateHashCode",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.CohortDefinitionEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setDetails",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortdefinition.CohortDefinitionDetailsEntity"
+        ]
+      },
+      {
+        "name": "setExpressionType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortdefinition.ExpressionType"
+        ]
+      },
+      {
+        "name": "setGenerationInfoList",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setTags",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.dto.CohortDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "getExpression",
+        "parameterTypes": []
+      },
+      {
+        "name": "getExpressionType",
+        "parameterTypes": []
+      },
+      {
+        "name": "setExpression",
+        "parameterTypes": [
+          "org.ohdsi.circe.cohortdefinition.CohortExpression"
+        ]
+      },
+      {
+        "name": "setExpressionType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortdefinition.ExpressionType"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.dto.CohortDTOSerializer",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "queryAllPublicConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "serialize",
+        "parameterTypes": [
+          "java.lang.Object",
+          "com.fasterxml.jackson.core.JsonGenerator",
+          "com.fasterxml.jackson.databind.SerializerProvider"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.dto.CohortGenerationInfoDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.dto.CohortMetadataDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "methods": [
+      {
+        "name": "getDescription",
+        "parameterTypes": []
+      },
+      {
+        "name": "getId",
+        "parameterTypes": []
+      },
+      {
+        "name": "getName",
+        "parameterTypes": []
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.dto.CohortMetadataImplDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.dto.CohortRawDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "getExpression",
+        "parameterTypes": []
+      },
+      {
+        "name": "getExpressionType",
+        "parameterTypes": []
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.dto.CohortVersionFullDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortsample.dto.CohortSampleDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortsample.dto.SampleElementDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortsample.dto.SampleParametersDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.common.CommonConceptSetEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "setRawExpression",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.common.generation.AnalysisGenerationInfoEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setInfo",
+        "parameterTypes": [
+          "org.ohdsi.webapi.common.generation.AnalysisGenerationInfo"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.common.generation.CommonGenerationDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.conceptset.dto.ConceptSetVersionFullDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisAggregateEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setColumns",
+        "parameterTypes": [
+          "java.util.List"
+        ]
+      },
+      {
+        "name": "setDomain",
+        "parameterTypes": [
+          "org.ohdsi.analysis.cohortcharacterization.design.StandardFeatureAnalysisDomain"
+        ]
+      },
+      {
+        "name": "setExpression",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setFunction",
+        "parameterTypes": [
+          "org.ohdsi.analysis.cohortcharacterization.design.AggregateFunction"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setIsDefault",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setIsMissingMeansZero",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setJoinCondition",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setJoinTable",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setJoinType",
+        "parameterTypes": [
+          "org.ohdsi.analysis.TableJoin"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisAggregateEntity$HibernateAccessOptimizer$3ojxTLOl",
+    "fields": [
+      {
+        "name": "invocationTarget$86t5fa0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisAggregateEntity$HibernateInstantiator$44HORPZj",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisAggregateEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisConcepsetEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setFeatureAnalysis",
+        "parameterTypes": [
+          "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithCriteriaEntity"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisConcepsetEntity$HibernateAccessOptimizer$wSOlwgKt",
+    "fields": [
+      {
+        "name": "invocationTarget$1r6qj21"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisConcepsetEntity$HibernateInstantiator$psv1wccm",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisConcepsetEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisCriteriaEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "getId",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAggregate",
+        "parameterTypes": [
+          "org.ohdsi.webapi.feanalysis.domain.FeAnalysisAggregateEntity"
+        ]
+      },
+      {
+        "name": "setExpressionString",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setFeatureAnalysis",
+        "parameterTypes": [
+          "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithCriteriaEntity"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisCriteriaEntity$HibernateAccessOptimizer$3uK5WisY",
+    "fields": [
+      {
+        "name": "invocationTarget$8g16770"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisCriteriaEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisCriteriaGroupEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisCriteriaGroupEntity$HibernateAccessOptimizer$TcU4XFtZ",
+    "fields": [
+      {
+        "name": "invocationTarget$aldrib0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisCriteriaGroupEntity$HibernateInstantiator$Uz8VRKnT",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisCriteriaGroupEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisDemographicCriteriaEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisDemographicCriteriaEntity$HibernateAccessOptimizer$m3RecI3P",
+    "fields": [
+      {
+        "name": "invocationTarget$b2n7qs0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisDemographicCriteriaEntity$HibernateInstantiator$3Chz9jSI",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisDemographicCriteriaEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisDistributionCriteriaEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisDistributionCriteriaEntity$HibernateAccessOptimizer$neqjw8qw",
+    "fields": [
+      {
+        "name": "invocationTarget$ja1m1g1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisDistributionCriteriaEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "getId",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCohortCharacterizations",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setDescr",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setDesign",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "setDomain",
+        "parameterTypes": [
+          "org.ohdsi.analysis.cohortcharacterization.design.StandardFeatureAnalysisDomain"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setIsLocked",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setRawDesign",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setStatType",
+        "parameterTypes": [
+          "org.ohdsi.analysis.cohortcharacterization.design.CcResultType"
+        ]
+      },
+      {
+        "name": "setSupportsAnnual",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setSupportsTemporal",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setType",
+        "parameterTypes": [
+          "org.ohdsi.analysis.cohortcharacterization.design.StandardFeatureAnalysisType"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisEntity$HibernateAccessOptimizer$0qnmt4fc",
+    "fields": [
+      {
+        "name": "invocationTarget$s90udp1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWindowedCriteriaEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWindowedCriteriaEntity$HibernateAccessOptimizer$DvZv7YRF",
+    "fields": [
+      {
+        "name": "invocationTarget$ibmrtg1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWindowedCriteriaEntity$HibernateInstantiator$Z0hoPps5",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWindowedCriteriaEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithCriteriaEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "setConceptSetEntity",
+        "parameterTypes": [
+          "org.ohdsi.webapi.feanalysis.domain.FeAnalysisConcepsetEntity"
+        ]
+      },
+      {
+        "name": "setDesign",
+        "parameterTypes": [
+          "java.util.List"
+        ]
+      },
+      {
+        "name": "setIsLocked",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setRawDesign",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithCriteriaEntity$HibernateAccessOptimizer$7y2uWnRF",
+    "fields": [
+      {
+        "name": "invocationTarget$1gldnl1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithCriteriaEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithDistributionCriteriaEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setIsLocked",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setRawDesign",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithDistributionCriteriaEntity$HibernateAccessOptimizer$F7Z8ZRS5",
+    "fields": [
+      {
+        "name": "invocationTarget$grugsh1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithDistributionCriteriaEntity$HibernateInstantiator$bXpYjVPS",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithDistributionCriteriaEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithPrevalenceCriteriaEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setIsLocked",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setRawDesign",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithPrevalenceCriteriaEntity$HibernateAccessOptimizer$Sw5gpgH0",
+    "fields": [
+      {
+        "name": "invocationTarget$mfke6p0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithPrevalenceCriteriaEntity$HibernateInstantiator$oqdjCYQM",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithPrevalenceCriteriaEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithStringEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setDesign",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setIsLocked",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setRawDesign",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithStringEntity$HibernateAccessOptimizer$xiKmrfet",
+    "fields": [
+      {
+        "name": "invocationTarget$otbv371"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithStringEntity$HibernateInstantiator$dDoJE4qz",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.FeAnalysisWithStringEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.BaseFeAnalysisCriteriaDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.FeAnalysisAggregateDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.FeAnalysisDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.FeAnalysisShortDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "getDescription",
+        "parameterTypes": []
+      },
+      {
+        "name": "getDomain",
+        "parameterTypes": []
+      },
+      {
+        "name": "getId",
+        "parameterTypes": []
+      },
+      {
+        "name": "getIncludeAnnual",
+        "parameterTypes": []
+      },
+      {
+        "name": "getIncludeTemporal",
+        "parameterTypes": []
+      },
+      {
+        "name": "getName",
+        "parameterTypes": []
+      },
+      {
+        "name": "getStatType",
+        "parameterTypes": []
+      },
+      {
+        "name": "getSupportsAnnual",
+        "parameterTypes": []
+      },
+      {
+        "name": "getSupportsTemporal",
+        "parameterTypes": []
+      },
+      {
+        "name": "getType",
+        "parameterTypes": []
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.FeAnalysisWithConceptSetDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.i18n.LocaleDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": [
+          "java.lang.String",
+          "java.lang.String",
+          "boolean"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.ircalc.AnalysisInfoDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.ircalc.dto.IRAnalysisDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "getExpression",
+        "parameterTypes": []
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.ircalc.dto.IRAnalysisShortDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "getDescription",
+        "parameterTypes": []
+      },
+      {
+        "name": "getId",
+        "parameterTypes": []
+      },
+      {
+        "name": "getName",
+        "parameterTypes": []
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.ircalc.dto.IRVersionFullDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "setCreatedBy",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.UserEntity"
+        ]
+      },
+      {
+        "name": "setCreatedDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setDeletedDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setIsLocked",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setModifiedBy",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.UserEntity"
+        ]
+      },
+      {
+        "name": "setModifiedDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setRawDesign",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$2nqCEsSJ",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$38Q6pbmD",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$CWHF82QZ",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$FBRz1tan",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$GvrzNJTU",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$ILyz60od",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$YtHTKX9X",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$brrUJwng",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$bx5h4y3W",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$gQA6H46a",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$mLIozOeV",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$muyEH7Tc",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$sBzCy34P",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$wfT8xlo2",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity$HibernateAccessOptimizer$wn3IEzPW",
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntityExt",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntityExt_"
+  },
+  {
+    "name": "org.ohdsi.webapi.model.CommonEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.model.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.model.results.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAllowRepeats",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setCombinationWindow",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setEventCohorts",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setHashCode",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setMaxDepth",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setMinCellCount",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setMinSegmentLength",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setTags",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setTargetCohorts",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisEntity$HibernateAccessOptimizer$Lhm9G4Vz",
+    "fields": [
+      {
+        "name": "invocationTarget$uhb11p1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisEntity$HibernateInstantiator$xHON6LRE",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisGenerationEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setEndTime",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setExitMessage",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setInfo",
+        "parameterTypes": [
+          "org.ohdsi.webapi.common.generation.AnalysisGenerationBaseInfo"
+        ]
+      },
+      {
+        "name": "setPathwayAnalysis",
+        "parameterTypes": [
+          "org.ohdsi.webapi.pathway.domain.PathwayAnalysisEntity"
+        ]
+      },
+      {
+        "name": "setSource",
+        "parameterTypes": [
+          "org.ohdsi.webapi.source.Source"
+        ]
+      },
+      {
+        "name": "setStartTime",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setStatus",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisGenerationEntity$HibernateAccessOptimizer$gnD3xd0m",
+    "fields": [
+      {
+        "name": "invocationTarget$2i8vvk1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisGenerationEntity$HibernateInstantiator$uqUYhWSs",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayAnalysisGenerationEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayCohort",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "setCohortDefinition",
+        "parameterTypes": [
+          "org.ohdsi.webapi.cohortdefinition.CohortDefinitionEntity"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setPathwayAnalysis",
+        "parameterTypes": [
+          "org.ohdsi.webapi.pathway.domain.PathwayAnalysisEntity"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayCohort_"
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayEventCohort",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayEventCohort$HibernateAccessOptimizer$DDd8RYKD",
+    "fields": [
+      {
+        "name": "invocationTarget$nvfetk0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayEventCohort$HibernateInstantiator$OruxkF9J",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayEventCohort_"
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayTargetCohort",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayTargetCohort$HibernateAccessOptimizer$4xXfnbcK",
+    "fields": [
+      {
+        "name": "invocationTarget$5opnqn1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayTargetCohort$HibernateInstantiator$B4nVORro",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.PathwayTargetCohort_"
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.BasePathwayAnalysisDTO",
+    "queryAllDeclaredMethods": true,
+    "methods": [
+      {
+        "name": "getCombinationWindow",
+        "parameterTypes": []
+      },
+      {
+        "name": "getDescription",
+        "parameterTypes": []
+      },
+      {
+        "name": "getHashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "getId",
+        "parameterTypes": []
+      },
+      {
+        "name": "getMaxDepth",
+        "parameterTypes": []
+      },
+      {
+        "name": "getMinCellCount",
+        "parameterTypes": []
+      },
+      {
+        "name": "getMinSegmentLength",
+        "parameterTypes": []
+      },
+      {
+        "name": "getName",
+        "parameterTypes": []
+      },
+      {
+        "name": "isAllowRepeats",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAllowRepeats",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setCombinationWindow",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setEventCohorts",
+        "parameterTypes": [
+          "java.util.List"
+        ]
+      },
+      {
+        "name": "setHashCode",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setMaxDepth",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setMinCellCount",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setMinSegmentLength",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setTargetCohorts",
+        "parameterTypes": [
+          "java.util.List"
+        ]
+      }
+    ],
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayAnalysisDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayAnalysisExportDTO",
+    "queryAllDeclaredMethods": true,
+    "methods": [
+      {
+        "name": "getEventCohorts",
+        "parameterTypes": []
+      },
+      {
+        "name": "getTargetCohorts",
+        "parameterTypes": []
+      }
+    ],
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayCodeDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayCohortDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayCohortExportDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayPopulationEventDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayPopulationResultsDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.PathwayVersionFullDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.TargetCohortPathwaysDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.internal.CohortPathways",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.internal.PathwayAnalysisResult",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.internal.PathwayCode",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.reusable.domain.Reusable",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setData",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setTags",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.reusable.domain.Reusable$HibernateAccessOptimizer$zRdtIjl6",
+    "fields": [
+      {
+        "name": "invocationTarget$lijgn30"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.reusable.domain.Reusable$HibernateInstantiator$5HzdonK0",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.reusable.domain.Reusable_"
+  },
+  {
+    "name": "org.ohdsi.webapi.reusable.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.reusable.dto.ReusableDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.reusable.dto.ReusableVersionFullDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.PermissionEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRolePermissions",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setValue",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.RoleEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setRolePermissions",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setSystemRole",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setUserRoles",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.RolePermissionEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setPermission",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.PermissionEntity"
+        ]
+      },
+      {
+        "name": "setRole",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.RoleEntity"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.UserEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setLastViewedNotificationsTime",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setLogin",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setOrigin",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authc.UserOrigin"
+        ]
+      },
+      {
+        "name": "setUserRoles",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.UserRoleEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setOrigin",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authc.UserOrigin"
+        ]
+      },
+      {
+        "name": "setRole",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.RoleEntity"
+        ]
+      },
+      {
+        "name": "setUser",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.UserEntity"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.AccessRequestDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.AccessType",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.AccessType.READ"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.AccessType.WRITE"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setCohortCharacterizationId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessEntity$CohortCharacterizationAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setCohortCharacterizationId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessEntity$CohortCharacterizationAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessEntity$HibernateAccessOptimizer$zSolwv1Z",
+    "fields": [
+      {
+        "name": "invocationTarget$ict20j1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessEntity$HibernateInstantiator$1NY7xxxw",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setCohortDefinitionId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessEntity$CohortDefinitionAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setCohortDefinitionId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessEntity$CohortDefinitionAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessEntity$HibernateAccessOptimizer$m3lAMtiH",
+    "fields": [
+      {
+        "name": "invocationTarget$mm6spj0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessEntity$HibernateInstantiator$T4wWJCBC",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ConceptSetAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setConceptSetId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ConceptSetAccessEntity$ConceptSetAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setConceptSetId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ConceptSetAccessEntity$ConceptSetAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ConceptSetAccessEntity$HibernateAccessOptimizer$IGdqkNvU",
+    "fields": [
+      {
+        "name": "invocationTarget$1nh9hm0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ConceptSetAccessEntity$HibernateInstantiator$Pbzs6BcI",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ConceptSetAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ConceptSetAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.EntityAccessProjection",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.EntityAccessService",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.CohortDefinitionAccessRepository",
+          "org.ohdsi.webapi.security.authz.access.ConceptSetAccessRepository",
+          "org.ohdsi.webapi.security.authz.access.CohortCharacterizationAccessRepository",
+          "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessRepository",
+          "org.ohdsi.webapi.security.authz.access.SourceAccessRepository",
+          "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessRepository",
+          "org.ohdsi.webapi.security.authz.access.PathwayAccessRepository",
+          "org.ohdsi.webapi.security.authz.access.ReusableAccessRepository",
+          "org.ohdsi.webapi.security.authz.PermissionRepository"
+        ]
+      },
+      {
+        "name": "buildUserAuthorizations",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.EntityGrant",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "accessTypes",
+        "parameterTypes": []
+      },
+      {
+        "name": "isOwner",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.EntityType",
+    "queryAllDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setFeAnalysisId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessEntity$FeAnalysisAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setFeAnalysisId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessEntity$FeAnalysisAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessEntity$HibernateAccessOptimizer$yqPqg3JW",
+    "fields": [
+      {
+        "name": "invocationTarget$ekggi50"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessEntity$HibernateInstantiator$HYdTMnhj",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.FeAnalysisAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setIrId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessEntity$HibernateAccessOptimizer$6sdgg2Up",
+    "fields": [
+      {
+        "name": "invocationTarget$7treav1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessEntity$HibernateInstantiator$du7XFclP",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessEntity$IncidenceRateAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setIrId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessEntity$IncidenceRateAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.IncidenceRateAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.PathwayAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setPathwayAnalysisId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.PathwayAccessEntity$HibernateAccessOptimizer$xKeZoErq",
+    "fields": [
+      {
+        "name": "invocationTarget$ldn5ul1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.PathwayAccessEntity$HibernateInstantiator$q92Oup6i",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.PathwayAccessEntity$PathwayAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setPathwayAnalysisId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.PathwayAccessEntity$PathwayAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.PathwayAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.PathwayAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ReusableAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setReusableId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ReusableAccessEntity$HibernateAccessOptimizer$WkSre03c",
+    "fields": [
+      {
+        "name": "invocationTarget$a8jo8j0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ReusableAccessEntity$HibernateInstantiator$BpbyBIZR",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ReusableAccessEntity$ReusableAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setReusableId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ReusableAccessEntity$ReusableAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ReusableAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.ReusableAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.SourceAccessEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setSourceId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.SourceAccessEntity$HibernateAccessOptimizer$u7JbK0He",
+    "fields": [
+      {
+        "name": "invocationTarget$oamt151"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.SourceAccessEntity$HibernateInstantiator$SwUErAdV",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.SourceAccessEntity$SourceAccessId",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAccessType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.access.AccessType"
+        ]
+      },
+      {
+        "name": "setRoleId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setSourceId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.SourceAccessEntity$SourceAccessId_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.SourceAccessEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.SourceAccessRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.UserAuthorizations",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.authz.access.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.JobHistoryItemDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.LdapProviderType"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.RoleGroupEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setGroupDn",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setGroupName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "int"
+        ]
+      },
+      {
+        "name": "setProvider",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.provisioning.model.LdapProviderType"
+        ]
+      },
+      {
+        "name": "setRole",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.RoleEntity"
+        ]
+      },
+      {
+        "name": "setUserImportJob",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.provisioning.model.UserImportJob"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.RoleGroupEntity$HibernateAccessOptimizer$1ImXvzG8",
+    "fields": [
+      {
+        "name": "invocationTarget$na30m31"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.RoleGroupEntity$HibernateInstantiator$N7MU6qei",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.RoleGroupEntity_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.RoleGroupRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJob",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setIsClosed",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setPreserveRoles",
+        "parameterTypes": [
+          "java.lang.Boolean"
+        ]
+      },
+      {
+        "name": "setProviderType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.provisioning.model.LdapProviderType"
+        ]
+      },
+      {
+        "name": "setRoleGroupMapping",
+        "parameterTypes": [
+          "java.util.List"
+        ]
+      },
+      {
+        "name": "setUserRoles",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setWeekDays",
+        "parameterTypes": [
+          "java.util.List"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJob$HibernateAccessOptimizer$lnAbYszy",
+    "fields": [
+      {
+        "name": "invocationTarget$7im8q10"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJob$HibernateInstantiator$hKlO36A5",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJobDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJobHistoryItem",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAuthor",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setEndTime",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setExitCode",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setExitMessage",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Long"
+        ]
+      },
+      {
+        "name": "setJobName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setStartTime",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setStatus",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setUserImport",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.provisioning.model.UserImportJob"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJobHistoryItem$HibernateAccessOptimizer$HFDoqazH",
+    "fields": [
+      {
+        "name": "invocationTarget$sgv7640"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJobHistoryItem$HibernateInstantiator$ffaIvTNn",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJobHistoryItemRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJobHistoryItem_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJobRepository",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.UserImportJob_"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.provisioning.model.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.security.session.SessionEntity",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCreatedAt",
+        "parameterTypes": [
+          "java.time.Instant"
+        ]
+      },
+      {
+        "name": "setExpiresAt",
+        "parameterTypes": [
+          "java.time.Instant"
+        ]
+      },
+      {
+        "name": "setLogin",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setRevoked",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setSessionId",
+        "parameterTypes": [
+          "java.util.UUID"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.AnnotationDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.CheckResultDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.CommonEntityDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "methods": [
+      {
+        "name": "getCreatedBy",
+        "parameterTypes": []
+      },
+      {
+        "name": "getCreatedDate",
+        "parameterTypes": []
+      },
+      {
+        "name": "getModifiedBy",
+        "parameterTypes": []
+      },
+      {
+        "name": "getModifiedDate",
+        "parameterTypes": []
+      },
+      {
+        "name": "isReadAccess",
+        "parameterTypes": []
+      },
+      {
+        "name": "isWriteAccess",
+        "parameterTypes": []
+      },
+      {
+        "name": "setCreatedBy",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.User"
+        ]
+      },
+      {
+        "name": "setCreatedDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setModifiedBy",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.User"
+        ]
+      },
+      {
+        "name": "setModifiedDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setReadAccess",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setWriteAccess",
+        "parameterTypes": [
+          "boolean"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.CommonEntityExtDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "methods": [
+      {
+        "name": "getTags",
+        "parameterTypes": []
+      },
+      {
+        "name": "setTags",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.ConceptSetDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "getDescription",
+        "parameterTypes": []
+      },
+      {
+        "name": "getId",
+        "parameterTypes": []
+      },
+      {
+        "name": "getName",
+        "parameterTypes": []
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ],
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.CopyAnnotationsRequest",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.SaveConceptSetAnnotationsRequest",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.AssetTagPK",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "int"
+        ]
+      },
+      {
+        "name": "setTagId",
+        "parameterTypes": [
+          "int"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.AssetTagPK_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortCharacterizationTag",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.AssetTagPK"
+        ]
+      },
+      {
+        "name": "setTag",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.Tag"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortCharacterizationTag$HibernateAccessOptimizer$kkAKbCjC",
+    "fields": [
+      {
+        "name": "invocationTarget$189kit1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortCharacterizationTag$HibernateInstantiator$Xylp6MDk",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortCharacterizationTag_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortTag",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.AssetTagPK"
+        ]
+      },
+      {
+        "name": "setTag",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.Tag"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortTag$HibernateAccessOptimizer$e6YW9H9l",
+    "fields": [
+      {
+        "name": "invocationTarget$lu9fgk0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortTag$HibernateInstantiator$7W0jkgzy",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.CohortTag_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ConceptSetTag",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.AssetTagPK"
+        ]
+      },
+      {
+        "name": "setTag",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.Tag"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ConceptSetTag$HibernateAccessOptimizer$d9z2PzhI",
+    "fields": [
+      {
+        "name": "invocationTarget$gdaf9f0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ConceptSetTag$HibernateInstantiator$YOuv2acE",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ConceptSetTag_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.HasTags",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "methods": [
+      {
+        "name": "assignTag",
+        "parameterTypes": [
+          "java.lang.Number",
+          "int"
+        ]
+      },
+      {
+        "name": "unassignTag",
+        "parameterTypes": [
+          "java.lang.Number",
+          "int"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.IrTag",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.AssetTagPK"
+        ]
+      },
+      {
+        "name": "setTag",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.Tag"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.IrTag$HibernateAccessOptimizer$tfAkMdAM",
+    "fields": [
+      {
+        "name": "invocationTarget$75ntka1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.IrTag$HibernateInstantiator$BCSojSwo",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.IrTag_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.PathwayTag",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.AssetTagPK"
+        ]
+      },
+      {
+        "name": "setTag",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.Tag"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.PathwayTag$HibernateAccessOptimizer$dnfdZKPz",
+    "fields": [
+      {
+        "name": "invocationTarget$60akd51"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.PathwayTag$HibernateInstantiator$Au5sPgyr",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.PathwayTag_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ReusableTag",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.AssetTagPK"
+        ]
+      },
+      {
+        "name": "setTag",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.Tag"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ReusableTag$HibernateAccessOptimizer$GQHvf42H",
+    "fields": [
+      {
+        "name": "invocationTarget$ig7m2c0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ReusableTag$HibernateInstantiator$ORAgYJb3",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.ReusableTag_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.Tag",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAllowCustom",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setColor",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setCount",
+        "parameterTypes": [
+          "int"
+        ]
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setGroups",
+        "parameterTypes": [
+          "java.util.Set"
+        ]
+      },
+      {
+        "name": "setIcon",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setId",
+        "parameterTypes": [
+          "java.lang.Integer"
+        ]
+      },
+      {
+        "name": "setMandatory",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setMultiSelection",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setName",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setPermissionProtected",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setShowGroup",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setType",
+        "parameterTypes": [
+          "org.ohdsi.webapi.tag.domain.TagType"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.Tag$HibernateAccessOptimizer$gilObYbf",
+    "fields": [
+      {
+        "name": "invocationTarget$44i8fn1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.Tag$HibernateInstantiator$VDClmPIZ",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.TagInfo",
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.TagType",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.Tag_"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.dto.AssignmentPermissionsDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.dto.TagDTO",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.dto.TagGroupSubscriptionDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.dto.TagNameListRequestDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CharacterizationVersion",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CharacterizationVersion$HibernateAccessOptimizer$T1fqy6ni",
+    "fields": [
+      {
+        "name": "invocationTarget$e38pmd0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CharacterizationVersion$HibernateInstantiator$DDOiWh3O",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CharacterizationVersion_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CohortVersion",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CohortVersion$HibernateAccessOptimizer$c98oBWcM",
+    "fields": [
+      {
+        "name": "invocationTarget$mrofuf1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CohortVersion$HibernateInstantiator$O5oCqELN",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.CohortVersion_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ConceptSetVersion",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ConceptSetVersion$HibernateAccessOptimizer$Sg3fXyUQ",
+    "fields": [
+      {
+        "name": "invocationTarget$ph48d70"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ConceptSetVersion$HibernateInstantiator$WjQAd3cm",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ConceptSetVersion_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.IRVersion",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.IRVersion$HibernateAccessOptimizer$4ShPMz7X",
+    "fields": [
+      {
+        "name": "invocationTarget$kmiq5u1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.IRVersion$HibernateInstantiator$0sBSDYMZ",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.IRVersion_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.PathwayVersion",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.PathwayVersion$HibernateAccessOptimizer$g8iiCOsY",
+    "fields": [
+      {
+        "name": "invocationTarget$0eo4eh1"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.PathwayVersion$HibernateInstantiator$lpaAYFbJ",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.PathwayVersion_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ReusableVersion",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "setDescription",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ReusableVersion$HibernateAccessOptimizer$GYVhYgW0",
+    "fields": [
+      {
+        "name": "invocationTarget$5s2fqc0"
+      }
+    ],
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ReusableVersion$HibernateInstantiator$Wk07fWXe",
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.ReusableVersion_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.Version",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "setArchived",
+        "parameterTypes": [
+          "boolean"
+        ]
+      },
+      {
+        "name": "setAssetJson",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setComment",
+        "parameterTypes": [
+          "java.lang.String"
+        ]
+      },
+      {
+        "name": "setCreatedBy",
+        "parameterTypes": [
+          "org.ohdsi.webapi.security.authz.UserEntity"
+        ]
+      },
+      {
+        "name": "setCreatedDate",
+        "parameterTypes": [
+          "java.util.Date"
+        ]
+      },
+      {
+        "name": "setPk",
+        "parameterTypes": [
+          "org.ohdsi.webapi.versioning.domain.VersionPK"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.VersionBase",
+    "queryAllDeclaredConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.VersionPK",
+    "allDeclaredFields": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "queryAllDeclaredConstructors": true,
+    "methods": [
+      {
+        "name": "<init>",
+        "parameterTypes": []
+      },
+      {
+        "name": "equals",
+        "parameterTypes": [
+          "java.lang.Object"
+        ]
+      },
+      {
+        "name": "hashCode",
+        "parameterTypes": []
+      },
+      {
+        "name": "setAssetId",
+        "parameterTypes": [
+          "long"
+        ]
+      },
+      {
+        "name": "setVersion",
+        "parameterTypes": [
+          "int"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.VersionPK_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.VersionType"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.Version_"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.domain.package-info"
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.dto.VersionDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.dto.VersionUpdateDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.security.spring.WebApiSecurityExpressionRoot",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.commons.types.CommonCDMVersionDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.arachne.datasource.dto.AuthMethod",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortcharacterization.dto.UserDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortsample.dto.CohortSampleListDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.common.analyses.CommonAnalysisDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.common.generation.ExecutionBasedGenerationDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.common.OptionDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.evidence.negativecontrols.NegativeControlDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.FeAnalysisCriteriaDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.FeAnalysisDemographicCriteriaDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.feanalysis.dto.FeAnalysisWindowedCriteriaDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.internal.PathwayGenerationStats",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.pathway.dto.internal.PersonPathwayEvent",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.AnnotationDetailsDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.ComparativeCohortAnalysisDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.service.dto.PatientLevelPredictionAnalysisDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.statistic.dto.AccessTrendDto",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.statistic.dto.AccessTrendsDto",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.statistic.dto.EndpointDto",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.statistic.dto.SourceExecutionDto",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.statistic.dto.SourceExecutionsDto",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tag.dto.AssetGroup",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.tool.dto.ToolDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.versioning.dto.VersionFullDTO",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
   }
 ]
