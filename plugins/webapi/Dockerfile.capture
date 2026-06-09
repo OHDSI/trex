@@ -1,0 +1,26 @@
+# Runnable image for comprehensive native-image metadata capture (see capture-run.sh).
+# Builds the WebAPI boot jar and ships it + GraalVM (for the tracing agent). Run it
+# on the compose network against the live atlas3-postgres, mounting a config dir:
+#   docker build -f plugins/webapi/Dockerfile.capture -t webapi-capture .
+#   docker run --rm --network atlas3-trex_default -v $PWD/capout:/config \
+#     -e POSTGRES_PASSWORD=mypass webapi-capture
+FROM ubuntu:22.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates maven unzip git \
+    && rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
+      amd64) A=x64 ;; arm64) A=aarch64 ;; *) echo "bad arch" >&2; exit 1 ;; esac \
+    && curl -fsSL "https://download.oracle.com/graalvm/21/latest/graalvm-jdk-21_linux-${A}_bin.tar.gz" \
+      | tar -xz -C /opt \
+    && mv /opt/graalvm-jdk-21* /opt/graalvm
+ENV JAVA_HOME=/opt/graalvm
+ENV PATH=$JAVA_HOME/bin:$PATH
+WORKDIR /src
+COPY plugins/webapi ./plugins/webapi
+RUN cd plugins/webapi/webapi-be \
+    && mvn -B -q -DskipUnitTests=true -DskipITtests=true -Dpackaging.type=jar package \
+    && cp "$(find target -maxdepth 1 -name 'WebAPI*.jar' ! -name '*-sources.jar' ! -name '*-javadoc.jar' ! -name '*-thin.jar' | head -1)" /app-webapi.jar
+COPY plugins/webapi/smoke/capture-run.sh /capture-run.sh
+ENTRYPOINT ["bash","/capture-run.sh"]

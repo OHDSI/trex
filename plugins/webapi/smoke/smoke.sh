@@ -10,7 +10,11 @@ su postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='ohdsi_app_user'
 su postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='webapi'\" | grep -q 1 || createdb -O ohdsi_app_user webapi"
 su postgres -c "psql -d webapi -c 'CREATE SCHEMA IF NOT EXISTS webapi AUTHORIZATION ohdsi_app_user;'"
 
-export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","trexsql.cache-path":"/tmp/trexcache","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_"}'
+# cache.generation.cleanupInterval is shrunk so CleanupScheduler.removeOldCache
+# fires within seconds. It runs an entity-graph (Cosium) derived query, which
+# exercises a dynamic JDK proxy that static analysis can't see — without this the
+# smoke never hits that path and a missing proxy registration slips through.
+export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","trexsql.cache-path":"/tmp/trexcache","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_","cache.generation.cleanupInterval":"3000","cache.generation.invalidAfterDays":"1","logging.level.org.hibernate.SQL":"DEBUG"}'
 
 echo "[smoke] launching native WebAPI host"
 /app/harness > /tmp/harness.log 2>&1 &
@@ -24,6 +28,23 @@ for i in $(seq 1 90); do
   if ! kill -0 "$HPID" 2>/dev/null; then echo "[smoke] harness exited early"; break; fi
   sleep 2
 done
+
+# Let CleanupScheduler.removeOldCache (3s interval) fire its entity-graph query a
+# few times so a missing dynamic-proxy registration surfaces in the log.
+echo "[smoke] waiting 12s for the cleanup scheduler to exercise the entity-graph query"
+sleep 12
+echo "=== entity-graph cleanup proxy check ==="
+if grep -qiE "generation_cache" /tmp/harness.log; then
+  echo "ran: cleanup entity-graph query executed (generation_cache select seen)"
+else
+  echo "WARN: did not observe the cleanup query in the log"
+fi
+if grep -qiE "MissingReflectionRegistration|forProxy|Proxy class.*not registered|dynamic proxy" /tmp/harness.log; then
+  echo "FAIL: dynamic-proxy registration gap during the entity-graph query"
+  grep -niE "MissingReflectionRegistration|forProxy" /tmp/harness.log | head
+else
+  echo "OK: no dynamic-proxy registration gap"
+fi
 
 echo "=== webapi_start result ==="
 grep -E "ISOLATE_OK|WEBAPI_START=" /tmp/harness.log | head -3
