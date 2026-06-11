@@ -7,10 +7,13 @@ const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_API = "https://api.github.com";
 
+// Public client id of the "TREX" GitHub OAuth App (device flow → public client,
+// no secret involved, so this is safe to ship in source). Override per-deployment
+// with the GITHUB_CLIENT_ID env var to point at your own OAuth App.
+const DEFAULT_GITHUB_CLIENT_ID = "Ov23liIuZqILnwdyKSfM";
+
 function getClientId(): string {
-  const id = Deno.env.get("GITHUB_CLIENT_ID");
-  if (!id) throw new Error("GITHUB_CLIENT_ID not configured");
-  return id;
+  return Deno.env.get("GITHUB_CLIENT_ID") || DEFAULT_GITHUB_CLIENT_ID;
 }
 
 export async function handleGithubRoutes(path, method, req, userId, sql, corsHeaders) {

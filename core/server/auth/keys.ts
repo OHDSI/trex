@@ -6,6 +6,7 @@ export const LABELS = {
   pgmetaAes: "trex.pgmeta.aes.v1",
   realtimeInternal: "trex.realtime.internal.v1",
   dekWrap: "trex.dek.wrap.v1",
+  devxTokenAes: "trex.devx.token.aes.v1",
 } as const;
 
 export type SubkeyLabel = typeof LABELS[keyof typeof LABELS];

@@ -7,7 +7,7 @@ import { safeJoin, EXCLUDED_DIRS, EXCLUDED_FILES } from "./tools/path_safety.ts"
 import { parseBuildTags, stripBuildTags } from "./build_tag_parser.ts";
 import { executeBuildTags } from "./build_tag_executor.ts";
 import { devServerManager } from "./dev_server.ts";
-import { duckdb, escapeSql } from "./duckdb.ts";
+import { duckdb, openMemoryConnection, escapeSql } from "./duckdb.ts";
 import { parseCodeReviewFindings } from "./code_review_prompt.ts";
 import { parseSecurityFindings } from "./security_review_prompt.ts";
 import { parseQaFindings } from "./qa_review_prompt.ts";
@@ -50,6 +50,17 @@ let rpcBridgeScript = "";
 let selectorClientScript = "";
 let visualEditorClientScript = "";
 let _visualEditingScriptsLoaded = false;
+
+// Active dev-server output SSE poll loops, keyed by `${userId}:${appId}`.
+// This runtime does not deliver client-disconnect to the worker (neither
+// req.signal abort, controller.desiredSize, nor stream cancel() fire), so the
+// 500ms poll loop cannot detect a gone client on its own and would orphan —
+// each orphan keeps leasing DuckDB pool sessions until the shared pool drains
+// and the node wedges. The frontend opens a fresh stream on every mount/app
+// switch (useDevServer.ts), so when a new loop starts we proactively stop any
+// prior loop for the same key (supersession). A lifetime cap in the loop
+// bounds the remaining cases (app switch to a different key, abandoned tab).
+const devOutputStreamStops = new Map<string, () => void>();
 
 function loadVisualEditingScripts() {
   if (_visualEditingScriptsLoaded) return;
@@ -1571,11 +1582,46 @@ Deno.serve(async (req: Request) => {
         return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
       }
       const k = `${userId}:${appId}`;
+      // Supersede any prior output loop for this app: the client only ever
+      // consumes the newest stream (it reopens on every mount/app switch), so
+      // an earlier loop for the same key is already abandoned and must be
+      // stopped or it orphans (see devOutputStreamStops above).
+      const prevStop = devOutputStreamStops.get(k);
+      if (prevStop) { try { prevStop(); } catch { /* already gone */ } }
+
+      // `stop` is hoisted so it can be reached from outside start().
+      let stop = () => {};
       const stream = new ReadableStream({
         start(controller) {
           const encoder = new TextEncoder();
+          let aborted = false;
+          let unsubscribe = () => {};
+          // One reused DuckDB connection for the whole stream — leases a single
+          // pool session instead of one per 500ms poll (see openMemoryConnection).
+          let memConn: ReturnType<typeof openMemoryConnection> | null = null;
+          // Single idempotent teardown. Every termination path routes here.
+          stop = () => {
+            if (aborted) return;
+            aborted = true;
+            if (devOutputStreamStops.get(k) === stop) devOutputStreamStops.delete(k);
+            try { memConn?.close(); } catch { /* already gone */ }
+            try { unsubscribe(); } catch { /* already gone */ }
+            try { controller.close(); } catch { /* already closed */ }
+          };
+          devOutputStreamStops.set(k, stop);
+
+          // Returns false once the stream can no longer accept data
+          // (controller closed → desiredSize is null): our signal that the
+          // client disconnected even if `req.signal` never fired (e.g. the
+          // connection was severed without a clean close).
           const send = (event) => {
-            try { controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); } catch { /* closed */ }
+            if (aborted) return false;
+            try {
+              controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+              return controller.desiredSize !== null;
+            } catch {
+              return false;
+            }
           };
 
           // Send buffered output first
@@ -1587,31 +1633,41 @@ Deno.serve(async (req: Request) => {
           }
 
           // Subscribe to new output from in-memory events
-          const unsubscribe = devServerManager.subscribe(userId, appId, send);
+          unsubscribe = devServerManager.subscribe(userId, appId, send);
 
           // Poll Rust process manager for output and status
           // (background setTimeout polling doesn't work in edge workers)
           let lastLineId = 0;
           let lastStatus = "";
-          let aborted = false;
+          let consecutiveErrors = 0;
+          // Hard lifetime cap: final backstop for orphans this runtime can't
+          // signal (app switch to a different key, abandoned tab). 30 min is
+          // far longer than any interactive log-watching session; the frontend
+          // reopens the stream on its next mount, so a capped loop is invisible
+          // in normal use and simply bounds the worst case.
+          const deadline = Date.now() + 30 * 60 * 1000;
+          try { memConn = openMemoryConnection(); } catch { /* falls back to stop on first poll */ }
           const poll = async () => {
             if (aborted) return;
+            // Stream closed (rare in this runtime) or lifetime exceeded — stop
+            // and return the pooled session.
+            if (!memConn || controller.desiredSize === null || Date.now() > deadline) { stop(); return; }
             try {
-              // Get new output lines
-              const outputResult = JSON.parse(await duckdb(
+              // Get new output lines (reuses the one leased session)
+              const outputResult = JSON.parse(await memConn.query(
                 `SELECT * FROM trex_devx_process_output('${escapeSql(k)}', '${lastLineId}')`
               ));
               if (outputResult.lines && outputResult.lines.length > 0) {
                 for (const line of outputResult.lines) {
                   const clean = line.text.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "");
                   if (!clean.trim()) continue;
-                  send({ type: line.stream === "stderr" ? "stderr" : "stdout", data: clean, timestamp: line.timestamp_ms || Date.now() });
+                  if (send({ type: line.stream === "stderr" ? "stderr" : "stdout", data: clean, timestamp: line.timestamp_ms || Date.now() }) === false) { stop(); return; }
                 }
                 lastLineId = outputResult.last_id;
               }
 
               // Check status
-              const statusResult = JSON.parse(await duckdb(
+              const statusResult = JSON.parse(await memConn.query(
                 `SELECT * FROM trex_devx_process_status('${escapeSql(k)}', '')`
               ));
               if (statusResult.status !== lastStatus) {
@@ -1624,18 +1680,24 @@ Deno.serve(async (req: Request) => {
                   if (statusResult.url) entry.detectedUrl = statusResult.url;
                 }
               }
-            } catch { /* query error */ }
+              consecutiveErrors = 0;
+            } catch {
+              // A persistent failure (e.g. pool pressure) must not spin
+              // forever — retrying a lease every 500ms perpetuates the
+              // exhaustion and blocks recovery. Give up after a short streak
+              // so the pool can drain and the node self-heals.
+              if (++consecutiveErrors >= 10) { stop(); return; }
+            }
             if (!aborted) setTimeout(poll, 500);
           };
           poll();
 
-          // Clean up on abort
-          req.signal.addEventListener("abort", () => {
-            aborted = true;
-            unsubscribe();
-            try { controller.close(); } catch { /* already closed */ }
-          });
+          // Belt-and-suspenders: also stop on abort if the runtime ever fires it.
+          req.signal.addEventListener("abort", stop);
         },
+        // Fired when the consumer (the HTTP response) cancels the body —
+        // i.e. the client disconnected. The reliable teardown trigger here.
+        cancel() { stop(); },
       });
       return new Response(stream, {
         headers: {

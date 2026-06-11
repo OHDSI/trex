@@ -81,7 +81,9 @@ export async function streamClaudeCodeChat({
   const superpowersPreamble = await loadSuperpowersPreamble();
   if (superpowersPreamble) {
     const namingRule = `<naming>\nDo NOT use the word "Superpowers" in user-facing text — not in chat replies, not in commit messages, not in titles, not in code comments you author for the user, not on visual companion screens. Refer to the skill system generically as "skills" and to specific skills by their slug (e.g., "the brainstorming skill", "the writing-plans skill"). When citing a doc path that contains the word, just give the path — do not narrate the brand name. This applies even though the system prompt below uses the term internally.\n</naming>`;
-    systemPrompt = `${namingRule}\n\n<skills-protocol>\n${superpowersPreamble}\n</skills-protocol>\n\n${systemPrompt}`;
+    const skillUsageRule = `<skill-usage>\nThe skills above are real and invocable via the Skill tool. When the user asks you to build a feature, component, app, or mockups, FIRST invoke the appropriate skill (e.g. the brainstorming skill to explore the idea and present design options) BEFORE writing app code. Do not jump straight to implementation, and do not write throwaway mockups into the user's app.\n</skill-usage>`;
+    const askQuestionRule = `<asking-questions>\nWhenever you need to ask the user ANYTHING — a clarifying question, a choice between options, or a confirmation — you MUST use the \`mcp__ask__ask_question\` tool. Pass \`options\` for a single choice, add \`multiSelect: true\` for multiple, or omit \`options\` for free text. This applies everywhere, not only during brainstorming. NEVER write a question as plain text in your reply: plain-text questions do NOT render as an interactive prompt and the user may not answer them.\n</asking-questions>`;
+    systemPrompt = `${namingRule}\n\n<skills-protocol>\n${superpowersPreamble}\n</skills-protocol>\n\n${skillUsageRule}\n\n${askQuestionRule}\n\n${systemPrompt}`;
   }
   if (hasComponentSelection) {
     systemPrompt += "\nThe user has selected specific components for editing. Focus your modifications on those components.";
@@ -113,6 +115,9 @@ export async function streamClaudeCodeChat({
         maxTurns: maxSteps,
         oauthToken,
         cwd: workspacePath,
+        // Resume each chat's OWN claude session — a single global session would
+        // bleed context across chats and let one bad session break all of them.
+        chatId,
       }),
     });
 
@@ -166,16 +171,23 @@ export async function streamClaudeCodeChat({
                 // Use the existing questionnaire UI to ask the user
                 const requestId = data.id;
 
-                // Send questionnaire event with a single text question
-                send({
-                  type: "questionnaire",
-                  requestId,
-                  questions: [{
-                    id: "response",
-                    type: "text",
-                    label: data.question || "The agent has a question",
-                  }],
-                });
+                // Render structured questions (from the ask_question tool) as
+                // radio/checkbox/text; fall back to a single text question for
+                // plain MCP elicitations.
+                const structured = Array.isArray(data.questions) ? data.questions : null;
+                const questions = structured
+                  ? structured.map((q, i) => ({
+                      id: String(i),
+                      type: q.options?.length ? (q.multiSelect ? "checkbox" : "radio") : "text",
+                      label: q.question || "The agent has a question",
+                      options: q.options?.length ? q.options : undefined,
+                    }))
+                  : [{
+                      id: "response",
+                      type: "text",
+                      label: data.question || "The agent has a question",
+                    }];
+                send({ type: "questionnaire", requestId, questions });
 
                 // Insert pending response and poll (same mechanism as plan_tools)
                 await sqlFn(

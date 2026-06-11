@@ -34,9 +34,12 @@
        :threads 8            ; max concurrent connections
        :default-per-route 4})))
 
+;; delay: read at first use (runtime), not at namespace load — otherwise getenv
+;; is frozen at native-image build time (env unset there). Default is an
+;; inference-profile id (Sonnet on Bedrock is profile-only, hence the us. prefix).
 (def model-id
-  (or (System/getenv "BAO_AGENT_MODEL")
-      "anthropic.claude-sonnet-4-6-20250514-v1:0"))
+  (delay (or (System/getenv "BAO_AGENT_MODEL")
+             "us.anthropic.claude-sonnet-4-6")))
 
 (def aws-region
   (or (System/getenv "AWS_REGION") "us-east-1"))
@@ -62,7 +65,7 @@
 
 (defn- endpoint ^String []
   (str "https://bedrock-runtime." aws-region ".amazonaws.com"
-       "/model/" model-id "/converse-stream"))
+       "/model/" @model-id "/converse-stream"))
 
 ;; ---- Request-body construction ------------------------------------------
 

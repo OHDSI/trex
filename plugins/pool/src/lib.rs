@@ -150,14 +150,45 @@ pub unsafe fn init(db_ptr: *mut c_void, pool_size: usize) -> Result<(), String> 
     Ok(())
 }
 
-/// Lease a Connection from the pool and register a session for it. Blocks
-/// until a Connection is available (channel backpressure when exhausted).
+/// Maximum time `create_local_session` waits for a free pooled Connection
+/// before giving up. Override with `TREX_POOL_LEASE_TIMEOUT_MS`.
+///
+/// Without a bound, an exhausted pool (leaked or long-parked sessions — e.g. a
+/// devx generation request that never completes) makes every subsequent lease
+/// block forever: pgwire connections and the function runtime alike hang, and
+/// the only recovery is a node restart. A bounded wait turns that unrecoverable
+/// hard freeze into a per-request error the caller can surface and retry.
+fn lease_timeout() -> std::time::Duration {
+    parse_lease_timeout(std::env::var("TREX_POOL_LEASE_TIMEOUT_MS").ok())
+}
+
+/// Pure parser for `lease_timeout` — falls back to the default for a missing,
+/// empty, non-numeric, or zero value (a zero or negative wait would defeat the
+/// purpose, reintroducing the indefinite block / immediate spurious failures).
+fn parse_lease_timeout(raw: Option<String>) -> std::time::Duration {
+    const DEFAULT_LEASE_TIMEOUT_MS: u64 = 30_000;
+    let ms = raw
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_LEASE_TIMEOUT_MS);
+    std::time::Duration::from_millis(ms)
+}
+
+/// Lease a Connection from the pool and register a session for it. Waits up to
+/// `lease_timeout()` for a Connection (channel backpressure when exhausted),
+/// then returns an error rather than blocking forever.
 pub fn create_local_session() -> Result<u64, String> {
     let pool = get_pool()?;
-    let conn = pool
-        .receiver
-        .recv()
-        .map_err(|e| format!("pool receiver closed: {e}"))?;
+    let timeout = lease_timeout();
+    let conn = pool.receiver.recv_timeout(timeout).map_err(|e| match e {
+        crossbeam_channel::RecvTimeoutError::Timeout => format!(
+            "pool exhausted: no DuckDB connection available within {timeout:?}; \
+             raise TREX_POOL_SIZE or investigate leaked/long-held sessions"
+        ),
+        crossbeam_channel::RecvTimeoutError::Disconnected => {
+            "pool receiver closed".to_string()
+        }
+    })?;
     let id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     sessions()
         .lock()
@@ -675,6 +706,31 @@ mod tests {
     use super::*;
     use arrow_array::{Int32Array, StringArray};
     use arrow_schema::{DataType, Field};
+
+    // --- parse_lease_timeout: bounds the pool lease wait ---
+
+    #[test]
+    fn parse_lease_timeout_uses_default_for_absent_or_invalid() {
+        let default = std::time::Duration::from_millis(30_000);
+        assert_eq!(parse_lease_timeout(None), default);
+        assert_eq!(parse_lease_timeout(Some(String::new())), default);
+        assert_eq!(parse_lease_timeout(Some("abc".into())), default);
+        // Zero would reintroduce an unbounded/immediate-fail wait — reject it.
+        assert_eq!(parse_lease_timeout(Some("0".into())), default);
+    }
+
+    #[test]
+    fn parse_lease_timeout_honours_valid_override() {
+        assert_eq!(
+            parse_lease_timeout(Some("5000".into())),
+            std::time::Duration::from_millis(5000)
+        );
+        // Surrounding whitespace is tolerated.
+        assert_eq!(
+            parse_lease_timeout(Some("  1500  ".into())),
+            std::time::Duration::from_millis(1500)
+        );
+    }
 
     // --- sql_may_dirty_session: substring dispatcher for cleanup branch ---
 

@@ -20,7 +20,9 @@
     "functions": {
       "env": {
         "_shared": {
-          "DATABASE_URL": "${DATABASE_URL}"
+          "DATABASE_URL": "${DATABASE_URL}",
+          "GITHUB_CLIENT_ID": "${GITHUB_CLIENT_ID}",
+          "DEVX_ENCRYPTION_KEY": "${DEVX_ENCRYPTION_KEY}"
         }
       },
       "api": [

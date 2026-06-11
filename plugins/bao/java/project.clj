@@ -61,8 +61,13 @@
 
   :main trexsql.core
 
+  ;; clj-http is reached only via runtime requiring-resolve (trexsql.http-client),
+  ;; so AOT it here to put its classes in the closed-world native image. Without
+  ;; this the runtime require recompiles clj_http/*.clj from source, which a native
+  ;; image can't do. Init stays deferred via --initialize-at-run-time=clj_http.
   :aot [trexsql.api trexsql.core trexsql.servlet
-        trexsql.webapi.plugin trexsql.webapi.search-provider]
+        trexsql.webapi.plugin trexsql.webapi.search-provider
+        clj-http.client clj-http.conn-mgr]
 
   :profiles {:dev {:dependencies [[org.clojure/test.check "1.1.1"]]}
              :uberjar {:aot :all

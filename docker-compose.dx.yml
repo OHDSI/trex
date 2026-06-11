@@ -145,8 +145,28 @@ services:
       # data_node runs the schema migrations (creates the `authenticator` role etc.)
       SCHEMA_DIR: /usr/src/core/schema
       TREX_PRODUCTION_MODE: ${TREX_PRODUCTION_MODE:-0}
+      # Shared DuckDB session pool (pgwire + the function runtime's sql()).
+      # MUST NOT exceed the DuckDB postgres extension's connection limit (64),
+      # which caps real connections to the `_config` Postgres: each session that
+      # touches `_config.*` (devx.* tables, catalog refresh) pins one. Oversizing
+      # this (e.g. 256) lets >64 sessions race for 64 Postgres slots →
+      # "PostgresConnectionPool maximum connection count exceeded (64/64)" and
+      # devx chat/persist fail. Keep at 64 unless you also raise the pg limit
+      # AND Postgres max_connections (currently 100).
+      TREX_POOL_SIZE: ${TREX_POOL_SIZE:-64}
+      # Bound the lease wait so an exhausted pool fails the request instead of
+      # blocking forever (requires the @trex/pool recv_timeout build to take effect).
+      TREX_POOL_LEASE_TIMEOUT_MS: ${TREX_POOL_LEASE_TIMEOUT_MS:-30000}
       BASE_PATH: /trex
       BETTER_AUTH_URL: http://localhost:9001/trex
+      # GitHub integration (devx → Connect GitHub) uses the OAuth Device Flow.
+      # It defaults to the bundled "TREX" OAuth App client id (public; device
+      # flow uses no secret), so Connect GitHub works with no setup. To point at
+      # your own OAuth App instead — register one at
+      # https://github.com/settings/developers with "Enable Device Flow" checked
+      # — put GITHUB_CLIENT_ID=<id> in ./.env (compose auto-loads it). Unset
+      # falls back to the bundled default in github_routes.ts.
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
