@@ -171,12 +171,16 @@
                  at runtime and recompiles trexsql/api.clj from source (which a closed-world
                  native image can't do). -->
             <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector,org.trex.Trexsql,org.trex.TrexServlet,org.trex.webapi.TrexSQLPlugin,org.trex.webapi.TrexSQLSearchProvider</buildArg>
-            <!-- clj-http (and the Apache HttpClient SSL stack it loads, whose SSLContext
-                 holds a SecureRandom that can't live in the image heap) initializes at run
-                 time. trexsql only touches clj-http through lazy wrappers (trexsql.http-client),
-                 so no build-time-initialized namespace forces it to load at build time. -->
-            <!-- (clojure.pprint/stacktrace, which (set! *warn-on-reflection*) at load, now
-                 build-time-init fine thanks to the clojure.lang.Var substitution.) -->
+            <!-- clj-http stays run-time-init: it builds Apache HttpClient's SSL stack (whose
+                 SSLConnectionSocketFactory + HostnameVerifiers are pinned run-time by the
+                 httpclient reachability metadata), so it must not initialize at build time.
+                 It's reached only via runtime requiring-resolve (trexsql.http-client). For that
+                 runtime require to load the AOT'd classes instead of recompiling clj_http/*.clj
+                 from source (which a closed-world image can't do -> "Syntax error compiling fn*
+                 at clj_http/conn_mgr.clj"), two things are needed: (1) AOT clj-http so the
+                 clj_http.*__init classes exist (plugins/bao/java project.clj :aot), and (2) drop
+                 the clj_http/*.clj source resources from graalvm-config/resource-config.json so
+                 RT.load falls through to Class.forName on the compiled __init class. -->
             <buildArg>--initialize-at-run-time=clj_http</buildArg>
           </buildArgs>
         </configuration>

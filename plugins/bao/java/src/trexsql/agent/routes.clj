@@ -10,6 +10,10 @@
             [trexsql.agent.route-context-format :as rcf]
             [trexsql.agent.sse :as sse]
             [trexsql.agent.tools :as tools]
+            ;; Reachability for the native image: forces every tool namespace to be
+            ;; AOT-compiled + build-time-loaded so tools.clj's runtime requiring-resolve
+            ;; of '...tools.X/run resolves instead of failing (FileNotFoundException).
+            [trexsql.agent.tools.all]
             [clojure.string :as str]
             [clojure.tools.logging :as log])
   (:import [java.util UUID]))
@@ -18,7 +22,7 @@
   {:status 200
    :headers {"Content-Type" "application/json"}
    :body {:status "ok"
-          :model bedrock/model-id
+          :model @bedrock/model-id
           :region bedrock/aws-region
           :max-steps bedrock/max-steps
           :sdk-loaded (bedrock/sdk-available?)}})

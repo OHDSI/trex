@@ -68,6 +68,10 @@ const realtimeBase = (realtimeInternal + realtimeExtra).slice(0, 64);
 // bits of entropy across 16 chars (6 bits per char).
 const realtimeDbEncBytes = (await deriveSubkey(LABELS.realtimeInternal)).slice(0, 8);
 const realtimeDbEnc = Array.from(realtimeDbEncBytes, (b) => b.toString(16).padStart(2, "0")).join("");
+// devx integrations token encryption (functions/crypto.ts, AES-256-GCM).
+// crypto.ts accepts 64 hex chars, so emit the full 32-byte HKDF output as hex.
+const devxTokenBytes = await deriveSubkey(LABELS.devxTokenAes);
+const devxTokenKey = Array.from(devxTokenBytes, (b) => b.toString(16).padStart(2, "0")).join("");
 
 const lines = [
   `PGRST_JWT_SECRET=${jwtKey}`,          // postgrest
@@ -77,6 +81,7 @@ const lines = [
   `METRICS_JWT_SECRET=${jwtKey}`,         // realtime
   `SECRET_KEY_BASE=${realtimeBase}`,      // realtime (Erlang-internal)
   `DB_ENC_KEY=${realtimeDbEnc}`,          // realtime (internal AES-128)
+  `DEVX_ENCRYPTION_KEY=${devxTokenKey}`,  // devx integrations token crypto
 ];
 
 const derivedPath = `${dir}/derived.env`;

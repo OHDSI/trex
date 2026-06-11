@@ -1,547 +1,800 @@
 {
-  "resources":{
-  "includes":[{
-    "pattern":"\\QMETA-INF/services/java.lang.System$LoggerFinder\\E"
-  }, {
-    "pattern":"\\QMETA-INF/services/java.net.spi.URLStreamHandlerProvider\\E"
-  }, {
-    "pattern":"\\QMETA-INF/services/java.util.spi.ResourceBundleControlProvider\\E"
-  }, {
-    "pattern":"\\QMETA-INF/services/org.slf4j.spi.SLF4JServiceProvider\\E"
-  }, {
-    "pattern":"\\Qcheshire/core.clj\\E"
-  }, {
-    "pattern":"\\Qcheshire/core__init.class\\E"
-  }, {
-    "pattern":"\\Qcheshire/factory.clj\\E"
-  }, {
-    "pattern":"\\Qcheshire/factory__init.class\\E"
-  }, {
-    "pattern":"\\Qcheshire/generate.clj\\E"
-  }, {
-    "pattern":"\\Qcheshire/generate__init.class\\E"
-  }, {
-    "pattern":"\\Qcheshire/generate_seq.clj\\E"
-  }, {
-    "pattern":"\\Qcheshire/generate_seq__init.class\\E"
-  }, {
-    "pattern":"\\Qcheshire/parse.clj\\E"
-  }, {
-    "pattern":"\\Qcheshire/parse__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/client.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/client__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/conn_mgr.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/conn_mgr__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/cookies.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/cookies__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/core.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/core__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/headers.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/headers__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/links.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/links__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/multipart.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/multipart__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_http/util.clj\\E"
-  }, {
-    "pattern":"\\Qclj_http/util__init.class\\E"
-  }, {
-    "pattern":"\\Qclj_tuple.clj\\E"
-  }, {
-    "pattern":"\\Qclj_tuple__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core/cache/wrapped.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core/cache/wrapped.cljc\\E"
-  }, {
-    "pattern":"\\Qclojure/core/cache/wrapped__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core/protocols.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core/protocols__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core/server.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core/server__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core/specs/alpha.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core/specs/alpha__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core_deftype.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core_deftype__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core_print.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core_print__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/core_proxy.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/core_proxy__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/data/json.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/data/json__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/edn.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/edn__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/genclass.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/genclass__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/gvec.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/gvec__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/instant.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/instant__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/java/io.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/java/io__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/main.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/main__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/cl_format.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/cl_format__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/column_writer.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/column_writer__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/dispatch.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/dispatch__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/pprint_base.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/pprint_base__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/pretty_writer.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/pretty_writer__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/print_table.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/print_table__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/utilities.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint/utilities__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/pprint__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/set.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/set__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/spec/alpha.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/spec/alpha__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/spec/gen/alpha.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/spec/gen/alpha__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/stacktrace.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/stacktrace__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/string.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/string__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/template.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/template__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/cli.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/cli.cljc\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/cli__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/logging.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/logging/impl.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/logging/impl__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/logging__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/reader/edn.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/reader/edn.cljc\\E"
-  }, {
-    "pattern":"\\Qclojure/tools/reader/edn__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/uuid.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/uuid__init.class\\E"
-  }, {
-    "pattern":"\\Qclojure/version.properties\\E"
-  }, {
-    "pattern":"\\Qclojure/walk.clj\\E"
-  }, {
-    "pattern":"\\Qclojure/walk__init.class\\E"
-  }, {
-    "pattern":"\\Qcognitect/transit.clj\\E"
-  }, {
-    "pattern":"\\Qcognitect/transit.cljc\\E"
-  }, {
-    "pattern":"\\Qcognitect/transit__init.class\\E"
-  }, {
-    "pattern":"\\Qcom/sun/jna/linux-aarch64/libjnidispatch.so\\E"
-  }, {
-    "pattern":"\\Qcrouton/html.clj\\E"
-  }, {
-    "pattern":"\\Qcrouton/html.cljc\\E"
-  }, {
-    "pattern":"\\Qcrouton/html__init.class\\E"
-  }, {
-    "pattern":"\\Qdata_readers.clj\\E"
-  }, {
-    "pattern":"\\Qdata_readers.cljc\\E"
-  }, {
-    "pattern":"\\Qextensions/circe.trex\\E"
-  }, {
-    "pattern":"\\Qextensions/llama.trex\\E"
-  }, {
-    "pattern":"\\Qextensions/pgwire.trex\\E"
-  }, {
-    "pattern":"\\Qextensions/tpm.trex\\E"
-  }, {
-    "pattern":"\\Qhoney/sql.clj\\E"
-  }, {
-    "pattern":"\\Qhoney/sql.cljc\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/helpers.clj\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/helpers.cljc\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/helpers__init.class\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/protocols.clj\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/protocols.cljc\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/protocols__init.class\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/util.clj\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/util.cljc\\E"
-  }, {
-    "pattern":"\\Qhoney/sql/util__init.class\\E"
-  }, {
-    "pattern":"\\Qhoney/sql__init.class\\E"
-  }, {
-    "pattern":"\\Qjdbc-type-mappings.edn\\E"
-  }, {
-    "pattern":"\\Qmeta_merge/core.clj\\E"
-  }, {
-    "pattern":"\\Qmeta_merge/core.cljc\\E"
-  }, {
-    "pattern":"\\Qmeta_merge/core__init.class\\E"
-  }, {
-    "pattern":"\\Qorg/slf4j/impl/StaticLoggerBinder.class\\E"
-  }, {
-    "pattern":"\\Qpotemkin.clj\\E"
-  }, {
-    "pattern":"\\Qpotemkin/collections.clj\\E"
-  }, {
-    "pattern":"\\Qpotemkin/collections__init.class\\E"
-  }, {
-    "pattern":"\\Qpotemkin/macros.clj\\E"
-  }, {
-    "pattern":"\\Qpotemkin/macros__init.class\\E"
-  }, {
-    "pattern":"\\Qpotemkin/namespaces.clj\\E"
-  }, {
-    "pattern":"\\Qpotemkin/namespaces__init.class\\E"
-  }, {
-    "pattern":"\\Qpotemkin/types.clj\\E"
-  }, {
-    "pattern":"\\Qpotemkin/types__init.class\\E"
-  }, {
-    "pattern":"\\Qpotemkin/utils.clj\\E"
-  }, {
-    "pattern":"\\Qpotemkin/utils__init.class\\E"
-  }, {
-    "pattern":"\\Qpotemkin/walk.clj\\E"
-  }, {
-    "pattern":"\\Qpotemkin/walk__init.class\\E"
-  }, {
-    "pattern":"\\Qpotemkin__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/coercion.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/coercion.cljc\\E"
-  }, {
-    "pattern":"\\Qreitit/coercion__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/core.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/core.cljc\\E"
-  }, {
-    "pattern":"\\Qreitit/core__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/exception.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/exception.cljc\\E"
-  }, {
-    "pattern":"\\Qreitit/exception__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/impl.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/impl.cljc\\E"
-  }, {
-    "pattern":"\\Qreitit/impl__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/middleware.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/middleware.cljc\\E"
-  }, {
-    "pattern":"\\Qreitit/middleware__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/ring.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/ring.cljc\\E"
-  }, {
-    "pattern":"\\Qreitit/ring__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/trie.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/trie.cljc\\E"
-  }, {
-    "pattern":"\\Qreitit/trie__init.class\\E"
-  }, {
-    "pattern":"\\Qreitit/walk.clj\\E"
-  }, {
-    "pattern":"\\Qreitit/walk__init.class\\E"
-  }, {
-    "pattern":"\\Qriddley/compiler.clj\\E"
-  }, {
-    "pattern":"\\Qriddley/compiler__init.class\\E"
-  }, {
-    "pattern":"\\Qriddley/walk.clj\\E"
-  }, {
-    "pattern":"\\Qriddley/walk__init.class\\E"
-  }, {
-    "pattern":"\\Qring/core/protocols.clj\\E"
-  }, {
-    "pattern":"\\Qring/core/protocols__init.class\\E"
-  }, {
-    "pattern":"\\Qring/middleware/json.clj\\E"
-  }, {
-    "pattern":"\\Qring/middleware/json__init.class\\E"
-  }, {
-    "pattern":"\\Qring/middleware/keyword_params.clj\\E"
-  }, {
-    "pattern":"\\Qring/middleware/keyword_params__init.class\\E"
-  }, {
-    "pattern":"\\Qring/middleware/params.clj\\E"
-  }, {
-    "pattern":"\\Qring/middleware/params__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/codec.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/codec__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/io.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/io__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/jakarta/servlet.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/jakarta/servlet__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/mime_type.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/mime_type__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/parsing.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/parsing__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/request.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/request__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/response.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/response__init.class\\E"
-  }, {
-    "pattern":"\\Qring/util/time.clj\\E"
-  }, {
-    "pattern":"\\Qring/util/time__init.class\\E"
-  }, {
-    "pattern":"\\Qroutes.manifest.json\\E"
-  }, {
-    "pattern":"\\Qslingshot/slingshot.clj\\E"
-  }, {
-    "pattern":"\\Qslingshot/slingshot__init.class\\E"
-  }, {
-    "pattern":"\\Qslingshot/support.clj\\E"
-  }, {
-    "pattern":"\\Qslingshot/support__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/bedrock.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/bedrock__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/prompt.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/prompt__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/route_context_format.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/route_context_format__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/routes.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/routes__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/routes_manifest.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/routes_manifest__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/sse.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/sse__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/tools.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/agent/tools__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/api.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/api__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/batch.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/batch__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/circe.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/circe__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/config.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/config__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/core.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/core__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/datamart.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/datamart__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/db.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/db__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/errors.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/errors__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/extensions.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/extensions__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/http.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/http__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/jdbc_types.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/jdbc_types__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/jobs.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/jobs__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/native.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/native__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/proxy.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/proxy__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/servers.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/servers__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/servlet.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/servlet__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/study.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/study__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/swarm.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/swarm__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/util.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/util__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/vocab.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/vocab__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/webapi.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/webapi/plugin.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/webapi/plugin__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/webapi/search_provider.clj\\E"
-  }, {
-    "pattern":"\\Qtrexsql/webapi/search_provider__init.class\\E"
-  }, {
-    "pattern":"\\Qtrexsql/webapi__init.class\\E"
-  }, {
-    "pattern":"\\Quser.clj\\E"
-  }, {
-    "pattern":"java.base:\\Qsun/net/www/content-types.properties\\E"
-  }]},
-  "bundles":[{
-    "name":"jakarta.servlet.LocalStrings",
-    "locales":[""]
-  }, {
-    "name":"jakarta.servlet.http.LocalStrings",
-    "locales":[""]
-  }]
+  "resources": {
+    "includes": [
+      {
+        "pattern": "\\QMETA-INF/services/java.lang.System$LoggerFinder\\E"
+      },
+      {
+        "pattern": "\\QMETA-INF/services/java.net.spi.URLStreamHandlerProvider\\E"
+      },
+      {
+        "pattern": "\\QMETA-INF/services/java.util.spi.ResourceBundleControlProvider\\E"
+      },
+      {
+        "pattern": "\\QMETA-INF/services/org.slf4j.spi.SLF4JServiceProvider\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/core.clj\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/core__init.class\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/factory.clj\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/factory__init.class\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/generate.clj\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/generate__init.class\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/generate_seq.clj\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/generate_seq__init.class\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/parse.clj\\E"
+      },
+      {
+        "pattern": "\\Qcheshire/parse__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/client__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/conn_mgr__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/cookies__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/core__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/headers__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/links__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/multipart__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_http/util__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclj_tuple.clj\\E"
+      },
+      {
+        "pattern": "\\Qclj_tuple__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/cache/wrapped.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/cache/wrapped.cljc\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/cache/wrapped__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/protocols.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/protocols__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/server.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/server__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/specs/alpha.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core/specs/alpha__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core_deftype.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core_deftype__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core_print.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core_print__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core_proxy.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/core_proxy__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/data/json.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/data/json__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/edn.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/edn__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/genclass.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/genclass__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/gvec.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/gvec__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/instant.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/instant__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/java/io.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/java/io__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/main.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/main__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/cl_format.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/cl_format__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/column_writer.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/column_writer__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/dispatch.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/dispatch__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/pprint_base.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/pprint_base__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/pretty_writer.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/pretty_writer__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/print_table.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/print_table__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/utilities.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint/utilities__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/pprint__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/set.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/set__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/spec/alpha.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/spec/alpha__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/spec/gen/alpha.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/spec/gen/alpha__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/stacktrace.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/stacktrace__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/string.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/string__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/template.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/template__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/cli.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/cli.cljc\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/cli__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/logging.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/logging/impl.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/logging/impl__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/logging__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/reader/edn.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/reader/edn.cljc\\E"
+      },
+      {
+        "pattern": "\\Qclojure/tools/reader/edn__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/uuid.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/uuid__init.class\\E"
+      },
+      {
+        "pattern": "\\Qclojure/version.properties\\E"
+      },
+      {
+        "pattern": "\\Qclojure/walk.clj\\E"
+      },
+      {
+        "pattern": "\\Qclojure/walk__init.class\\E"
+      },
+      {
+        "pattern": "\\Qcognitect/transit.clj\\E"
+      },
+      {
+        "pattern": "\\Qcognitect/transit.cljc\\E"
+      },
+      {
+        "pattern": "\\Qcognitect/transit__init.class\\E"
+      },
+      {
+        "pattern": "\\Qcom/sun/jna/linux-aarch64/libjnidispatch.so\\E"
+      },
+      {
+        "pattern": "\\Qcrouton/html.clj\\E"
+      },
+      {
+        "pattern": "\\Qcrouton/html.cljc\\E"
+      },
+      {
+        "pattern": "\\Qcrouton/html__init.class\\E"
+      },
+      {
+        "pattern": "\\Qdata_readers.clj\\E"
+      },
+      {
+        "pattern": "\\Qdata_readers.cljc\\E"
+      },
+      {
+        "pattern": "\\Qextensions/circe.trex\\E"
+      },
+      {
+        "pattern": "\\Qextensions/llama.trex\\E"
+      },
+      {
+        "pattern": "\\Qextensions/pgwire.trex\\E"
+      },
+      {
+        "pattern": "\\Qextensions/tpm.trex\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql.clj\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql.cljc\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/helpers.clj\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/helpers.cljc\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/helpers__init.class\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/protocols.clj\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/protocols.cljc\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/protocols__init.class\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/util.clj\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/util.cljc\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql/util__init.class\\E"
+      },
+      {
+        "pattern": "\\Qhoney/sql__init.class\\E"
+      },
+      {
+        "pattern": "\\Qjdbc-type-mappings.edn\\E"
+      },
+      {
+        "pattern": "\\Qmeta_merge/core.clj\\E"
+      },
+      {
+        "pattern": "\\Qmeta_merge/core.cljc\\E"
+      },
+      {
+        "pattern": "\\Qmeta_merge/core__init.class\\E"
+      },
+      {
+        "pattern": "\\Qorg/slf4j/impl/StaticLoggerBinder.class\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin.clj\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/collections.clj\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/collections__init.class\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/macros.clj\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/macros__init.class\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/namespaces.clj\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/namespaces__init.class\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/types.clj\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/types__init.class\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/utils.clj\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/utils__init.class\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/walk.clj\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin/walk__init.class\\E"
+      },
+      {
+        "pattern": "\\Qpotemkin__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/coercion.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/coercion.cljc\\E"
+      },
+      {
+        "pattern": "\\Qreitit/coercion__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/core.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/core.cljc\\E"
+      },
+      {
+        "pattern": "\\Qreitit/core__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/exception.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/exception.cljc\\E"
+      },
+      {
+        "pattern": "\\Qreitit/exception__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/impl.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/impl.cljc\\E"
+      },
+      {
+        "pattern": "\\Qreitit/impl__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/middleware.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/middleware.cljc\\E"
+      },
+      {
+        "pattern": "\\Qreitit/middleware__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/ring.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/ring.cljc\\E"
+      },
+      {
+        "pattern": "\\Qreitit/ring__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/trie.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/trie.cljc\\E"
+      },
+      {
+        "pattern": "\\Qreitit/trie__init.class\\E"
+      },
+      {
+        "pattern": "\\Qreitit/walk.clj\\E"
+      },
+      {
+        "pattern": "\\Qreitit/walk__init.class\\E"
+      },
+      {
+        "pattern": "\\Qriddley/compiler.clj\\E"
+      },
+      {
+        "pattern": "\\Qriddley/compiler__init.class\\E"
+      },
+      {
+        "pattern": "\\Qriddley/walk.clj\\E"
+      },
+      {
+        "pattern": "\\Qriddley/walk__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/core/protocols.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/core/protocols__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/middleware/json.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/middleware/json__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/middleware/keyword_params.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/middleware/keyword_params__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/middleware/params.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/middleware/params__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/codec.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/codec__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/io.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/io__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/jakarta/servlet.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/jakarta/servlet__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/mime_type.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/mime_type__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/parsing.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/parsing__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/request.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/request__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/response.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/response__init.class\\E"
+      },
+      {
+        "pattern": "\\Qring/util/time.clj\\E"
+      },
+      {
+        "pattern": "\\Qring/util/time__init.class\\E"
+      },
+      {
+        "pattern": "\\Qroutes.manifest.json\\E"
+      },
+      {
+        "pattern": "\\Qslingshot/slingshot.clj\\E"
+      },
+      {
+        "pattern": "\\Qslingshot/slingshot__init.class\\E"
+      },
+      {
+        "pattern": "\\Qslingshot/support.clj\\E"
+      },
+      {
+        "pattern": "\\Qslingshot/support__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/bedrock.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/bedrock__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/prompt.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/prompt__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/route_context_format.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/route_context_format__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/routes.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/routes__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/routes_manifest.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/routes_manifest__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/sse.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/sse__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/tools.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/agent/tools__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/api.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/api__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/batch.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/batch__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/circe.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/circe__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/config.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/config__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/core.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/core__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/datamart.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/datamart__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/db.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/db__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/errors.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/errors__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/extensions.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/extensions__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/http.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/http__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/jdbc_types.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/jdbc_types__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/jobs.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/jobs__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/native.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/native__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/proxy.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/proxy__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/servers.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/servers__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/servlet.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/servlet__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/study.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/study__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/swarm.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/swarm__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/util.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/util__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/vocab.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/vocab__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/webapi.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/webapi/plugin.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/webapi/plugin__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/webapi/search_provider.clj\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/webapi/search_provider__init.class\\E"
+      },
+      {
+        "pattern": "\\Qtrexsql/webapi__init.class\\E"
+      },
+      {
+        "pattern": "\\Quser.clj\\E"
+      },
+      {
+        "pattern": "java.base:\\Qsun/net/www/content-types.properties\\E"
+      }
+    ]
+  },
+  "bundles": [
+    {
+      "name": "jakarta.servlet.LocalStrings",
+      "locales": [
+        ""
+      ]
+    },
+    {
+      "name": "jakarta.servlet.http.LocalStrings",
+      "locales": [
+        ""
+      ]
+    }
+  ]
 }
