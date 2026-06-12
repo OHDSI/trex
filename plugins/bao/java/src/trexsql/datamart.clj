@@ -311,8 +311,14 @@
   "Copy all (filtered) tables from the source schema into the cache catalog.
    Returns {:tables-copied [...] :tables-failed [...]}."
   [db source-alias cache-alias config]
-  (let [{:keys [schema-name target-schema-name table-filter parallel-copy]} config
-        target-schema (or target-schema-name schema-name)
+  ;; The cache mirrors the SOURCE schema: tables land at
+  ;; <cache-alias>.<schema-name>.<table>, the same coordinates the JDBC path
+  ;; uses (convert-config-for-jdbc drops target-schema-name) and the same the
+  ;; shared FTS step + downstream cache queries resolve. target-schema-name is
+  ;; therefore intentionally NOT honored here, so both read paths produce
+  ;; identically-addressed caches.
+  (let [{:keys [schema-name table-filter parallel-copy]} config
+        target-schema schema-name
         _ (db/validate-identifier! source-alias "source-alias")
         _ (db/validate-identifier! schema-name "schema-name")
         _ (db/validate-identifier! cache-alias "cache-alias")
