@@ -1,33 +1,20 @@
 (ns trexsql.source-dsn
-  "Pure translation of a WebAPI JDBC URL into a DuckDB ATTACH DSN.
-
-   WebAPI Sources hand us a JDBC URL (e.g. jdbc:postgresql://host:5432/db).
-   DuckDB's native scanners want their own connection strings:
-     - postgres: libpq keyword string  host=.. port=.. dbname=.. user=.. password=..
-     - mysql:    key/value string      host=.. port=.. database=.. user=.. password=..
-     - bigquery: project=<id>          (dataset is the source schema, supplied separately)
-   Each value is single-quoted with internal single quotes doubled, per libpq /
-   DuckDB connection-string rules, so values containing spaces or '=' cannot
-   break the DSN or inject extra keys. SQL-literal escaping for embedding the
-   DSN inside ATTACH '...' is the caller's job (see trexsql.db). Limitations:
-   credentials embedded in the URL (user:pass@host) and IPv6 literal hosts are
-   not supported — supply credentials via :user/:password. These functions do
-   no I/O and are fully unit-testable."
+  "Translate a WebAPI JDBC URL into a DuckDB ATTACH DSN (postgres/mysql keyword
+   string, or BigQuery project id). Values are single-quoted so spaces or '='
+   can't break the DSN; SQL-literal escaping for ATTACH '...' is the caller's job
+   (trexsql.db). Credentials-in-URL (user:pass@host) and IPv6 hosts are not
+   supported — pass credentials via :user/:password. Pure, no I/O."
   (:require [clojure.string :as str]
             [trexsql.errors :as errors]))
 
 (defn- libpq-quote
-  "Single-quote a connection-string value, doubling internal single quotes, so
-   it is safe inside a libpq/DuckDB key=value DSN even with spaces or '='."
+  "Single-quote a DSN value (doubling internal quotes) so spaces/'=' are safe."
   [v]
   (str "'" (str/replace (str v) "'" "''") "'"))
 
 (defn- parse-host-port-db
-  "Parse jdbc:<proto>://host[:port]/db[?query] → {:host :port :db}.
-   `expected-protos` is a set of acceptable sub-protocols (e.g. #{\"postgresql\"}).
-   `default-port` is used when the URL omits the port.
-   Throws config-error if the URL does not match `expected-protos`.
-   Does not support `user:pass@host` credential-in-URL or IPv6 literal hosts."
+  "Parse jdbc:<proto>://host[:port]/db[?query] → {:host :port :db}; throws
+   config-error if the sub-protocol isn't in `expected-protos`."
   [jdbc-url expected-protos default-port label]
   (let [m (re-matches #"(?i)jdbc:([a-z]+)://([^:/?]+)(?::(\d+))?/([^/?]+).*" (str jdbc-url))]
     (when-not m
@@ -40,8 +27,7 @@
       {:host host :port (or port (str default-port)) :db db})))
 
 (defn postgres-dsn
-  "Build a libpq keyword DSN for DuckDB's postgres scanner from credentials.
-   Values are single-quoted; embed the result in ATTACH via a SQL string literal."
+  "libpq keyword DSN for DuckDB's postgres scanner."
   [{:keys [jdbc-url user password]}]
   (let [{:keys [host port db]} (parse-host-port-db jdbc-url #{"postgresql" "postgres"} 5432 "postgres")]
     (format "host=%s port=%s dbname=%s user=%s password=%s"
@@ -49,8 +35,7 @@
             (libpq-quote user) (libpq-quote password))))
 
 (defn mysql-dsn
-  "Build a key/value DSN for DuckDB's mysql scanner from credentials.
-   Values are single-quoted; embed the result in ATTACH via a SQL string literal."
+  "Key/value DSN for DuckDB's mysql scanner."
   [{:keys [jdbc-url user password]}]
   (let [{:keys [host port db]} (parse-host-port-db jdbc-url #{"mysql" "mariadb"} 3306 "mysql")]
     (format "host=%s port=%s database=%s user=%s password=%s"

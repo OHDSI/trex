@@ -294,12 +294,8 @@
             (recur (rest remaining) (inc idx) copied (conj failed result))))))))
 
 (defn- copy-tables-parallel
-  ;; CONCURRENCY HAZARD: every copy runs against the same `db` handle. Each
-  ;; copy-table issues CREATE/INSERT/COUNT sequentially, but pmap interleaves
-  ;; those statements across tables on one native (JNA) connection. This is only
-  ;; safe if the trexsql native layer serializes per-handle calls; it is opt-in
-  ;; via config :parallel-copy (default off). If the native layer does not
-  ;; serialize, give each copy its own connection instead of sharing `db`.
+  ;; Opt-in (:parallel-copy). pmap interleaves statements across tables on one
+  ;; shared `db` handle — only safe if the native layer serializes per-handle.
   [db source-alias cache-alias schema-name target-schema tables-to-copy config]
   (let [results (doall
                  (pmap #(copy-table db source-alias cache-alias schema-name target-schema % config)
@@ -311,12 +307,8 @@
   "Copy all (filtered) tables from the source schema into the cache catalog.
    Returns {:tables-copied [...] :tables-failed [...]}."
   [db source-alias cache-alias config]
-  ;; The cache mirrors the SOURCE schema: tables land at
-  ;; <cache-alias>.<schema-name>.<table>, the same coordinates the JDBC path
-  ;; uses (convert-config-for-jdbc drops target-schema-name) and the same the
-  ;; shared FTS step + downstream cache queries resolve. target-schema-name is
-  ;; therefore intentionally NOT honored here, so both read paths produce
-  ;; identically-addressed caches.
+  ;; Cache mirrors the source schema (target-schema-name is not honored, matching
+  ;; the JDBC path) so both read paths and the FTS step resolve the same tables.
   (let [{:keys [schema-name table-filter parallel-copy]} config
         target-schema schema-name
         _ (db/validate-identifier! source-alias "source-alias")
@@ -506,9 +498,7 @@
      :batch-size (or (:batch-size config) 10000)}))
 
 (defn- attach-source!
-  "Attach the source via the matching DuckDB scanner. Returns the alias.
-   Private: only reached through create-cache after the native-scanner-dialect?
-   guard, so the default branch is a defensive fallback."
+  "Attach the source via the matching DuckDB scanner. Returns the alias."
   [db database-code credentials]
   (case (str/lower-case (or (:dialect credentials) ""))
     ("postgres" "postgresql") (db/attach-source-postgres! db database-code credentials)
@@ -519,17 +509,11 @@
             :dialect))))
 
 (defn- create-cache-native
-  "Native-scanner cache read. Attaches the cache file and the source on the
-   same handle, copies the schema with DuckDB doing all type conversion, then
-   detaches the source. Returns the SAME map shape as batch/create-cache-jdbc
-   (no FTS, no ->CacheResult — create-cache adds those), so the shared FTS
-   step in create-cache works identically for both paths.
-
-   On any failure during source-attach or copy, the cache catalog we attached
-   is detached again (so a retry with the same database-code isn't blocked) and
-   a structured {:success? false ... :error msg} map is returned rather than
-   letting the exception escape unstructured. On success the cache stays
-   attached because create-cache's FTS step queries it."
+  "Native-scanner cache read: attach cache + source on one handle, copy the
+   schema (DuckDB handles type conversion), detach source. Returns the same map
+   shape as batch/create-cache-jdbc so create-cache's shared FTS/result code is
+   path-agnostic. On failure the cache catalog is detached and a structured
+   failure map is returned; on success the cache stays attached for the FTS step."
   [db config]
   (let [start (System/currentTimeMillis)
         {:keys [database-code schema-name source-credentials cache-path]} config]
@@ -555,9 +539,7 @@
                    (log/warn (format "Failed to detach source %s: %s"
                                      source-alias (.getMessage e))))))))
       (catch Exception e
-        ;; attach-source! or copy-schema threw — detach the cache catalog we
-        ;; attached above so the next attempt with the same database-code can
-        ;; re-attach a fresh file, and surface a structured failure.
+        ;; Detach the cache so a retry with the same database-code isn't blocked.
         (try (db/detach-database! db database-code) (catch Exception _ nil))
         {:success? false
          :database-code database-code
@@ -582,13 +564,8 @@
                   (create-cache-native db config)
                   (batch/create-cache-jdbc db (convert-config-for-jdbc config) progress-fn))
          tables-copied (:tables-copied result)
-         ;; Only attempt FTS when the copy itself succeeded — pointless to
-         ;; build indexes on a half-populated cache.
-         ;; The JDBC batch path creates tables at
-         ;; `<cache-alias>.<source-schema>.<table>` — the schema mirrors the
-         ;; source's CDM schema so the cache count + circe SQL handlers can
-         ;; query `<cache-alias>.<cdm-schema>.<table>` directly. The FTS
-         ;; indexer needs the same coordinates.
+         ;; FTS only on success; both paths write at <cache>.<source-schema>.<table>,
+         ;; the coordinates the FTS indexer and downstream cache queries resolve.
          fts-created (when (and (:success? result) (seq tables-copied))
                        (try
                          (create-fts-indexes db

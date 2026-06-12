@@ -204,22 +204,19 @@
           (throw e))))))
 
 ;; === Native source attach (DuckDB scanners) ===
-;; The per-run source alias is "<database-code>__srcdb". It is attached on the
-;; same in-memory handle that already holds the cache file as catalog
-;; <database-code>, so a cross-catalog CREATE TABLE AS SELECT copies the data.
+;; Source attached as alias "<database-code>__srcdb" on the same handle that
+;; holds the cache, so a cross-catalog CREATE TABLE AS SELECT copies the data.
 
 (defn- source-alias-for [database-code]
   (str database-code "__srcdb"))
 
 (defn- sql-literal
-  "Wrap s as a single-quoted SQL string literal, doubling internal single quotes.
-   The DSN from source-dsn already single-quotes its values (libpq layer); this
-   adds the SQL-literal layer for embedding the whole DSN inside ATTACH '...'."
+  "Single-quoted SQL string literal (doubling internal quotes) for the ATTACH DSN."
   [s]
   (str "'" (str/replace s "'" "''") "'"))
 
 (defn postgres-attach-sql
-  "Pure: the READ_ONLY postgres ATTACH statement for a source. No I/O."
+  "READ_ONLY postgres ATTACH statement for a source. Pure."
   [database-code credentials]
   (validate-identifier! database-code "database-code")
   (format "ATTACH IF NOT EXISTS %s AS %s (TYPE postgres, READ_ONLY)"
@@ -227,7 +224,7 @@
           (escape-identifier (source-alias-for database-code) "source-alias")))
 
 (defn mysql-attach-sql
-  "Pure: the READ_ONLY mysql ATTACH statement for a source. No I/O."
+  "READ_ONLY mysql ATTACH statement for a source. Pure."
   [database-code credentials]
   (validate-identifier! database-code "database-code")
   (format "ATTACH IF NOT EXISTS %s AS %s (TYPE mysql, READ_ONLY)"
@@ -235,9 +232,7 @@
           (escape-identifier (source-alias-for database-code) "source-alias")))
 
 (defn bigquery-attach-sql
-  "Pure: the bigquery ATTACH statement (inherently read-only). No I/O.
-   BigQuery project ids are a restricted charset (lowercase letters, digits,
-   hyphens), so the project value needs no extra escaping."
+  "BigQuery ATTACH statement (inherently read-only). Pure."
   [database-code credentials]
   (validate-identifier! database-code "database-code")
   (format "ATTACH IF NOT EXISTS 'project=%s' AS %s (TYPE bigquery)"
@@ -245,23 +240,17 @@
           (escape-identifier (source-alias-for database-code) "source-alias")))
 
 (defn- redact-credentials
-  "Replace the literal user/password values with *** wherever they appear, so a
-   failed-ATTACH error message cannot leak credentials into logs or API
-   responses — robust to how the value was quoted in the statement DuckDB echoes
-   back (bare, single-quoted, or SQL-doubled). Blank values are skipped so we
-   never replace the empty string everywhere."
+  "Replace literal user/password values with *** so a failed-ATTACH error can't
+   leak them (robust to quoting). Blank values are skipped."
   [^String s {:keys [user password]}]
   (cond-> (str s)
     (not (str/blank? password)) (str/replace (str password) "***")
     (not (str/blank? user))     (str/replace (str user) "***")))
 
 (defn- execute-attach!
-  "Run an ATTACH statement, redacting credentials from any thrown error.
-   We intentionally do NOT thread the original exception as the cause: the
-   DuckDB error message can echo the credential-bearing connection string, and
-   errors/format-error surfaces a cause's message into JSON responses — which
-   would re-leak the values we just redacted. The redacted message preserves the
-   diagnostic content (host, port, failure reason)."
+  "Run an ATTACH, redacting credentials from any thrown error. The original
+   cause is dropped on purpose — errors/format-error would surface its message
+   (which can echo the connection string) into JSON responses."
   [^TrexsqlDatabase db ^String attach-sql credentials]
   (try
     (execute! db attach-sql)
