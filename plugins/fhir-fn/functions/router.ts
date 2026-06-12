@@ -11,6 +11,12 @@ import {
   updateDataset,
   deleteDataset,
 } from "./handlers/dataset.ts";
+import {
+  createResource,
+  readResource,
+  updateResource,
+  deleteResource,
+} from "./handlers/crud.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -369,6 +375,23 @@ async function dispatch(
 
     case "deleteDataset":
       return await withConnection((conn) => deleteDataset(parsed.datasetId, conn, state));
+
+    case "create": {
+      const body = await req.json().catch(() => ({}));
+      return await withConnection((conn) => createResource(parsed.datasetId, parsed.resourceType, body, conn, state));
+    }
+
+    case "read":
+      return await withConnection((conn) => readResource(parsed.datasetId, parsed.resourceType, parsed.id, conn, state));
+
+    case "update": {
+      const body = await req.json().catch(() => ({}));
+      const ifMatch = req.headers.get("if-match");
+      return await withConnection((conn) => updateResource(parsed.datasetId, parsed.resourceType, parsed.id, body, ifMatch, conn, state));
+    }
+
+    case "delete":
+      return await withConnection((conn) => deleteResource(parsed.datasetId, parsed.resourceType, parsed.id, conn, state));
 
     default:
       return FhirError.internal("handler not implemented").toResponse();
