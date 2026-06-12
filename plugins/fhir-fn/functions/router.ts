@@ -19,6 +19,7 @@ import {
 } from "./handlers/crud.ts";
 import { searchResources } from "./handlers/search.ts";
 import { resourceHistory, readResourceVersion } from "./handlers/history.ts";
+import { processBundle } from "./handlers/bundle.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -406,6 +407,11 @@ async function dispatch(
 
     case "vread":
       return await withConnection((conn) => readResourceVersion(parsed.datasetId, parsed.resourceType, parsed.id, parsed.versionId, conn, state));
+
+    case "bundle": {
+      const body = await req.json().catch(() => ({}));
+      return await withConnection((conn) => processBundle(parsed.datasetId, body, conn, state));
+    }
 
     default:
       return FhirError.internal("handler not implemented").toResponse();
