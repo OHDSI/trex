@@ -344,9 +344,9 @@ Deno.test("createDataset happy path returns 201 with id and resource_types", asy
   assertEquals(hasInsert, true, `Expected INSERT INTO _datasets in: ${sqlLog.join(", ")}`);
 });
 
-// --- createDataset duplicate → 409 ---
+// --- createDataset duplicate → 400 (matches native server) ---
 
-Deno.test("createDataset duplicate id returns 409 conflict", async () => {
+Deno.test("createDataset duplicate id returns 400 badRequest", async () => {
   const stubRegistry = {
     resourceTypeNames() { return ["Patient"]; },
     generateAllDdl() {
@@ -373,12 +373,12 @@ Deno.test("createDataset duplicate id returns 409 conflict", async () => {
   );
   assertEquals(insertSeen, true);
 
-  // Verify the thrown FhirError has status 409
+  // Verify the thrown FhirError has status 400 (matches native server)
   try {
     await createDataset({ id: "dup-ds2", name: "Dup" }, conn, state);
   } catch (e) {
     assertEquals(e instanceof FhirError, true);
-    assertEquals((e as FhirError).status, 409);
+    assertEquals((e as FhirError).status, 400);
   }
 });
 

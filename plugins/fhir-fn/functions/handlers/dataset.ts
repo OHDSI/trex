@@ -363,7 +363,9 @@ export async function createDataset(
   } catch (e) {
     const msg = String(e);
     if (isDuplicateDatasetError(msg)) {
-      throw FhirError.conflict(`Dataset '${id}' already exists`);
+      // Match the native server: duplicate create is a 400 BadRequest
+      // (AppError::BadRequest in handlers/dataset.rs), not 409.
+      throw FhirError.badRequest(`Dataset '${id}' already exists`);
     }
     console.error("[fhir] Failed to register dataset:", e);
     throw FhirError.internal("Failed to register dataset");
