@@ -282,6 +282,12 @@
             (recur (rest remaining) (inc idx) copied (conj failed result))))))))
 
 (defn- copy-tables-parallel
+  ;; CONCURRENCY HAZARD: every copy runs against the same `db` handle. Each
+  ;; copy-table issues CREATE/INSERT/COUNT sequentially, but pmap interleaves
+  ;; those statements across tables on one native (JNA) connection. This is only
+  ;; safe if the trexsql native layer serializes per-handle calls; it is opt-in
+  ;; via config :parallel-copy (default off). If the native layer does not
+  ;; serialize, give each copy its own connection instead of sharing `db`.
   [db source-alias cache-alias schema-name target-schema tables-to-copy config]
   (let [results (doall
                  (pmap #(copy-table db source-alias cache-alias schema-name target-schema % config)
@@ -295,6 +301,8 @@
   [db source-alias cache-alias config]
   (let [{:keys [schema-name target-schema-name table-filter parallel-copy]} config
         target-schema (or target-schema-name schema-name)
+        _ (db/validate-identifier! source-alias "source-alias")
+        _ (db/validate-identifier! schema-name "schema-name")
         _ (db/validate-identifier! cache-alias "cache-alias")
         _ (db/validate-identifier! target-schema "target-schema")
         all-tables (get-source-tables db source-alias schema-name)
