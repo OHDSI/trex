@@ -986,9 +986,9 @@
   "Execute a SQL query against PostgreSQL and return results as a vector of maps.
    Each map has string keys matching column names."
   [^Connection conn ^String sql]
-  (with-open [stmt (.createStatement conn)
-              rs (.executeQuery stmt sql)]
-    (let [meta (.getMetaData rs)
+  (with-open [^java.sql.Statement stmt (.createStatement conn)
+              ^ResultSet rs (.executeQuery stmt sql)]
+    (let [^java.sql.ResultSetMetaData meta (.getMetaData rs)
           col-count (.getColumnCount meta)
           col-names (mapv #(.getColumnLabel meta (inc %)) (range col-count))]
       (loop [rows []]
@@ -1211,7 +1211,7 @@
     (when-let [{:keys [jdbc-url user password]}
                (jdbc-url-from-database-url (System/getenv "DATABASE_URL"))]
       (try
-        (with-open [conn (DriverManager/getConnection jdbc-url user password)]
+        (with-open [^Connection conn (DriverManager/getConnection jdbc-url user password)]
           (.setReadOnly conn true)
           (let [rows (pg-query conn "SELECT value FROM trexdb.setting WHERE key='auth.serviceRoleKey'")
                 raw (some-> rows first (get "value") str)]

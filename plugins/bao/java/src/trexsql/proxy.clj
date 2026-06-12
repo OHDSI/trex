@@ -4,8 +4,11 @@
             [clojure.tools.logging :as log]))
 
 (def ^:private hop-by-hop-headers
+  ;; content-length is stripped so the HTTP client recomputes it from the body
+  ;; (forwarding the original alongside clj-http's own → "Content-Length header
+  ;; already present"); on responses it lets the SSE stream go chunked.
   #{"connection" "keep-alive" "proxy-authenticate" "proxy-authorization"
-    "te" "trailers" "transfer-encoding" "upgrade" "host"})
+    "te" "trailers" "transfer-encoding" "upgrade" "host" "content-length"})
 
 (defn- filter-headers [headers]
   (when headers
