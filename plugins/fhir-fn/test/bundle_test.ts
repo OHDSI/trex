@@ -451,3 +451,86 @@ Deno.test("non-bundle body throws 400", async () => {
   }
   assertEquals(threw, true);
 });
+
+// ---------------------------------------------------------------------------
+// resourceType injection-prevention tests
+// ---------------------------------------------------------------------------
+
+Deno.test("transaction: malformed resourceType triggers ROLLBACK and error (no COMMIT)", async () => {
+  const state = makeState(["Patient"]);
+
+  // The entry has a resourceType that contains a double-quote, which would
+  // allow SQL identifier injection if not validated.
+  const bundle = {
+    resourceType: "Bundle",
+    type: "transaction",
+    entry: [
+      {
+        resource: { resourceType: 'Patient"; DROP TABLE patients; --', name: [] },
+        request: { method: "POST", url: "Patient" },
+      },
+    ],
+  };
+
+  const { conn, calls } = makeFakeConn();
+  let threw = false;
+  let caughtErr: any;
+  try {
+    await processBundle("ds1", bundle, conn, state);
+  } catch (e) {
+    threw = true;
+    caughtErr = e;
+  }
+
+  // Must throw a FhirError 400
+  assertEquals(threw, true);
+  assertEquals(caughtErr instanceof FhirError, true);
+  assertEquals(caughtErr.status, 400);
+
+  // ROLLBACK must have been issued
+  const sqlList = calls.map((c) => c.sql);
+  assertEquals(sqlList.includes("ROLLBACK"), true);
+
+  // COMMIT must NOT have been issued
+  assertEquals(sqlList.includes("COMMIT"), false);
+});
+
+Deno.test("batch: malformed-resourceType entry becomes batch-error; valid sibling succeeds", async () => {
+  const state = makeState(["Patient"]);
+
+  const bundle = {
+    resourceType: "Bundle",
+    type: "batch",
+    entry: [
+      {
+        // Malformed resourceType — contains a double-quote
+        resource: { resourceType: 'Patient"--', name: [] },
+        request: { method: "POST", url: "Patient" },
+      },
+      {
+        // Valid entry that should succeed
+        resource: { resourceType: "Patient", name: [{ family: "Good" }] },
+        request: { method: "POST", url: "Patient" },
+      },
+    ],
+  };
+
+  const { conn } = makeFakeConn();
+  const res = await processBundle("ds1", bundle, conn, state);
+
+  // Batch always returns 200
+  assertEquals(res.status, 200);
+
+  const body = await res.json();
+  assertEquals(body.resourceType, "Bundle");
+  assertEquals(body.type, "batch-response");
+  assertEquals(body.entry.length, 2);
+
+  // First entry is a batch-error wrapping the validation failure
+  assertEquals(body.entry[0].response.status, "400 Bad Request");
+  assertEquals(body.entry[0].response.outcome.resourceType, "OperationOutcome");
+  assertStringIncludes(body.entry[0].response.outcome.issue[0].diagnostics, "Invalid resourceType");
+
+  // Second entry succeeded (201 Created)
+  assertEquals(body.entry[1].response.status, "201 Created");
+});

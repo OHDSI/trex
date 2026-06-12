@@ -180,6 +180,10 @@ async function processSingleEntry(
   entry: ProcessedEntry,
   conn: Conn,
 ): Promise<any> {
+  if (entry.resourceType !== undefined && !/^[A-Za-z0-9]+$/.test(entry.resourceType)) {
+    throw FhirError.badRequest(`Invalid resourceType '${entry.resourceType}'`);
+  }
+
   const tableName = ResourceRegistry.tableName(entry.resourceType);
 
   switch (entry.method) {
