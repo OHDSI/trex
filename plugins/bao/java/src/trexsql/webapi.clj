@@ -993,14 +993,16 @@
           ;; Hint at the call site: a ^ResultSet/^ResultSetMetaData binding hint
           ;; does NOT propagate into these closures, so without it Clojure reflects
           ;; (fatal in a native image — "No matching method ... for PgResultSet").
-          col-names (mapv (fn [i] (.getColumnLabel ^java.sql.ResultSetMetaData meta (inc i)))
+          col-names (mapv (fn [i] (.getColumnLabel ^java.sql.ResultSetMetaData meta (int (inc i))))
                           (range col-count))]
       (loop [rows []]
         (if (.next rs)
           (recur (conj rows
                    (into {}
                      (map (fn [i]
-                            [(nth col-names i) (.getObject ^ResultSet rs (inc i))])
+                            ;; (int ...): (inc i) is a long; getObject takes int, so
+                            ;; without the cast Clojure reflects even with the hint.
+                            [(nth col-names i) (.getObject ^ResultSet rs (int (inc i)))])
                        (range col-count)))))
           rows)))))
 
