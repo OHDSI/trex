@@ -68,11 +68,16 @@ su postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='ohdsi_app_user'
 su postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='webapi'\" | grep -q 1 || createdb -O ohdsi_app_user webapi"
 su postgres -c "psql -d webapi -c 'CREATE SCHEMA IF NOT EXISTS webapi AUTHORIZATION ohdsi_app_user;'"
 
-# trexsql.enabled=false: the entity-graph proxy lives in WebAPI core (Cosium), so
-# the trexsql/DuckDB native stack isn't needed to capture it. cleanupInterval is
-# shrunk so CleanupScheduler.removeOldCache runs every few seconds.
+# trexsql.enabled=true: the entity-graph proxy lives in WebAPI core (Cosium) so it
+# is captured regardless of trexsql; enabling trexsql here additionally exercises the
+# JDBC cache path so the tracing agent records the JDBC *driver* reflection and the
+# java.sql.Driver service load that the cache fallback path needs.  (The cache query
+# builder is HoneySQL, not Java SqlRender, so there are no SqlRender resources to
+# capture — only the JDBC driver metadata.)  cleanupInterval is shrunk so
+# CleanupScheduler.removeOldCache runs every few seconds.
 export SPRING_APPLICATION_JSON='{
-  "trexsql.enabled":"false",
+  "trexsql.enabled":"true",
+  "trexsql.cache-path":"/tmp/trexcache",
   "datasource.url":"jdbc:postgresql://localhost:5432/webapi",
   "datasource.username":"ohdsi_app_user",
   "datasource.password":"app1",
@@ -118,6 +123,27 @@ done
 # Let the cleanup scheduler fire several times so the entity-graph proxy is recorded.
 echo "[gen-config] capturing for ${CAPTURE_SECONDS}s (CleanupScheduler tick = 4s)"
 sleep "$CAPTURE_SECONDS"
+
+# --- Capture the JDBC cache path (trexsql enabled) ---
+# The native-image tracing agent is attached for the whole JVM run; exercising
+# cache creation here makes it record the JDBC *driver* reflection and the
+# java.sql.Driver service load that the cache fallback path needs. (The cache
+# query builder is HoneySQL, not Java SqlRender, so there are no SqlRender
+# resources to capture — only the JDBC driver metadata.)
+echo "[gen-config] registering a self-referential Postgres source + exercising cache creation"
+BASE="http://localhost:8080/WebAPI"
+curl -fsS -X POST "$BASE/source" -H 'Content-Type: application/json' -d '{
+  "sourceName":"gen-config-pg","sourceKey":"gen_config_pg","sourceDialect":"postgresql",
+  "sourceConnection":"jdbc:postgresql://localhost:5432/webapi",
+  "username":"ohdsi_app_user","password":"app1",
+  "daimons":[{"daimonType":"CDM","tableQualifier":"webapi","priority":0}]
+}' -o /tmp/gen-config-source.json -w "[gen-config] source-register: %{http_code}\n" || \
+  echo "[gen-config] WARN: source registration returned non-zero (cache trace may be incomplete)"
+curl -fsS -X POST "$BASE/source/gen_config_pg/cache" -H 'Content-Type: application/json' \
+  -d '{"schemaName":"webapi"}' -o /tmp/gen-config-cache.json \
+  -w "[gen-config] cache-create: %{http_code}\n" || \
+  echo "[gen-config] WARN: cache creation returned non-zero (cache trace may be incomplete)"
+sleep 5
 
 # cleanup() (EXIT trap) stops the app gracefully so the agent writes the merged config.
 echo "[gen-config] done — review changes:"
