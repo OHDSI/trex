@@ -2,8 +2,8 @@
   "Datamart (cache) creation for source database schemas in TrexSQL.
    postgres/mysql/bigquery use DuckDB's native scanners (ATTACH + CREATE TABLE
    AS SELECT over the TrexEngine FFI handle); all other dialects use the JDBC
-   batch transfer path (HikariCP + SqlRender). FTS indexing and progress
-   reporting run on the cache file after the copy completes."
+   batch transfer path (HikariCP + HoneySQL-built standard SQL). FTS indexing
+   and progress reporting run on the cache file after the copy completes."
   (:require [trexsql.db :as db]
             [trexsql.util :as util]
             [trexsql.batch :as batch]
@@ -31,8 +31,9 @@
 ;; Mirrors WebAPI's DBMSType enum (org.ohdsi.webapi.arachne.commons.types.DBMSType)
 ;; so any source the WebAPI accepts can also be cached. postgres/mysql/bigquery
 ;; read via DuckDB's bundled scanners (see native-scanner-dialects); the rest
-;; read via JDBC + HikariCP + SqlRender, whose drivers are bundled with WebAPI
-;; and reachable from bao via java.sql.DriverManager when running in-process.
+;; read via JDBC (HikariCP + HoneySQL-built standard SQL), whose drivers are
+;; bundled with WebAPI and reachable from bao via java.sql.DriverManager when
+;; running in-process.
 ;;
 ;; "postgres" is kept alongside "postgresql" (and "mariadb" alongside "mysql")
 ;; as a forgiving alias because older Source rows may still carry the short form.
