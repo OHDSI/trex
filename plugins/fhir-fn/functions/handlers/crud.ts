@@ -11,6 +11,7 @@ import {
   toQualifiedSchema,
 } from "../sql_safety.ts";
 import { ResourceRegistry } from "../fhir/resource_registry.ts";
+import { validateResource, validateResourceUpdate } from "../fhir/validation.ts";
 import {
   buildInsertSql,
   buildUpdateSql,
@@ -159,6 +160,14 @@ export async function createResource(
   validateDatasetId(datasetId);
   validateResourceType(resourceType, state.registry);
 
+  const validationResult = validateResource(body, resourceType, state.registry);
+  if (!validationResult.isValid()) {
+    return new Response(JSON.stringify(validationResult.toOperationOutcome()), {
+      status: 400,
+      headers: { "content-type": "application/fhir+json" },
+    });
+  }
+
   const id = crypto.randomUUID();
   const schemaName = toQualifiedSchema(state.dbName, datasetId);
   const tableName = ResourceRegistry.tableName(resourceType);
@@ -283,6 +292,14 @@ export async function updateResource(
   validateDatasetId(datasetId);
   validateResourceType(resourceType, state.registry);
   validateFhirId(id);
+
+  const updateValidationResult = validateResourceUpdate(body, resourceType, id, state.registry);
+  if (!updateValidationResult.isValid()) {
+    return new Response(JSON.stringify(updateValidationResult.toOperationOutcome()), {
+      status: 400,
+      headers: { "content-type": "application/fhir+json" },
+    });
+  }
 
   const schemaName = toQualifiedSchema(state.dbName, datasetId);
   const tableName = ResourceRegistry.tableName(resourceType);

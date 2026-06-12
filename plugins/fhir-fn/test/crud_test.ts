@@ -666,6 +666,54 @@ Deno.test("deleteResource_throws_400_on_invalid_resource_type", async () => {
   );
 });
 
+// ---------------------------------------------------------------------------
+// createResource + updateResource — validation failure tests
+// ---------------------------------------------------------------------------
+
+Deno.test("createResource_returns_400_with_operation_outcome_on_resourceType_mismatch", async () => {
+  const state = makeState();
+  const conn = { async query() { return []; } };
+
+  // Body has resourceType "Observation" but endpoint is "Patient" → validation error
+  const res = await createResource("ds1", "Patient", { resourceType: "Observation" }, conn, state);
+  assertEquals(res.status, 400);
+  assertEquals(res.headers.get("content-type"), "application/fhir+json");
+
+  const body = await res.json();
+  assertEquals(body.resourceType, "OperationOutcome");
+  assertEquals(Array.isArray(body.issue), true);
+  assertEquals(body.issue.length > 0, true);
+  assertEquals(body.issue[0].severity, "error");
+  assertEquals(body.issue[0].code, "value");
+});
+
+Deno.test("updateResource_returns_400_with_operation_outcome_on_id_mismatch", async () => {
+  const state = makeState();
+  const conn = { async query() { return []; } };
+
+  // Body has id "other-id" but URL id is "p1" → validation error
+  const res = await updateResource(
+    "ds1",
+    "Patient",
+    "p1",
+    { resourceType: "Patient", id: "other-id" },
+    null,
+    conn,
+    state,
+  );
+  assertEquals(res.status, 400);
+  assertEquals(res.headers.get("content-type"), "application/fhir+json");
+
+  const body = await res.json();
+  assertEquals(body.resourceType, "OperationOutcome");
+  assertEquals(Array.isArray(body.issue), true);
+  // Should have an error about the id mismatch
+  assertEquals(
+    body.issue.some((i: any) => i.code === "value" && i.severity === "error"),
+    true,
+  );
+});
+
 Deno.test("deleteResource_issues_begin_before_check", async () => {
   const state = makeState();
   const sqls: string[] = [];
