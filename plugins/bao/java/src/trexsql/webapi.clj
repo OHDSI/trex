@@ -11,8 +11,7 @@
             [clojure.string :as str]
             [trexsql.json :as json]
             [clojure.tools.logging :as log]
-            [reitit.ring :as ring]
-            [trexsql.agent.routes :as agent-routes])
+            [reitit.ring :as ring])
   (:import [java.util HashMap ArrayList Map]
            [java.io File]
            [java.sql DriverManager Connection PreparedStatement ResultSet]))
@@ -1171,6 +1170,87 @@
               (log/error e "Failed to compute Table 1")
               (internal-error (.getMessage e)))))))))
 
+;; Agent reverse-proxy
+;;
+;; The Pythia agent now runs as a Deno function in the trex node, served at
+;; :8001/plugins/trexsql/agent (gated by pluginAuthz, which requires
+;; `apikey: <service_role>`). The browser still POSTs to
+;; /WebAPI/trexsql/agent/* on :8080. We forward those here, injecting the
+;; service_role key and relaying the user's Authorization bearer. The native
+;; in-lib agent handler (trexsql.agent.routes) is no longer mounted.
+
+(def ^:private agent-upstream-base
+  "http://localhost:8001/plugins/trexsql")
+
+(defn- jdbc-url-from-database-url
+  "Convert a postgres:// connection URL (DATABASE_URL) into a jdbc:postgresql
+   URL plus user/password, so the trex metadata DB can be read via
+   DriverManager. Returns {:jdbc-url :user :password} or nil."
+  [database-url]
+  (when-not (str/blank? database-url)
+    (try
+      (let [u (java.net.URI. database-url)
+            user-info (.getUserInfo u)
+            [user password] (when user-info (str/split user-info #":" 2))
+            host (.getHost u)
+            port (let [p (.getPort u)] (if (pos? p) p 5432))
+            db-path (.getPath u)]
+        {:jdbc-url (str "jdbc:postgresql://" host ":" port db-path)
+         :user user
+         :password password})
+      (catch Exception e
+        (log/warn (format "Failed to parse DATABASE_URL: %s" (.getMessage e)))
+        nil))))
+
+(defn- read-service-role-key
+  "Read auth.serviceRoleKey from the trex metadata DB (trexdb.setting). The
+   value is a JSON-quoted string; strip the surrounding quotes. Falls back to
+   the BAO_AGENT_SERVICE_ROLE_KEY env var if the DB read is unavailable."
+  []
+  (or
+    (when-let [{:keys [jdbc-url user password]}
+               (jdbc-url-from-database-url (System/getenv "DATABASE_URL"))]
+      (try
+        (with-open [conn (DriverManager/getConnection jdbc-url user password)]
+          (.setReadOnly conn true)
+          (let [rows (pg-query conn "SELECT value FROM trexdb.setting WHERE key='auth.serviceRoleKey'")
+                raw (some-> rows first (get "value") str)]
+            (when-not (str/blank? raw)
+              ;; jsonb value comes back JSON-quoted, e.g. "\"eyJ...\"" — strip.
+              (let [trimmed (str/trim raw)]
+                (if (and (str/starts-with? trimmed "\"") (str/ends-with? trimmed "\""))
+                  (subs trimmed 1 (dec (count trimmed)))
+                  trimmed)))))
+        (catch Exception e
+          (log/warn (format "Failed to read serviceRoleKey from DB: %s" (.getMessage e)))
+          nil)))
+    (let [env-key (System/getenv "BAO_AGENT_SERVICE_ROLE_KEY")]
+      (when-not (str/blank? env-key)
+        (log/info "Using BAO_AGENT_SERVICE_ROLE_KEY env fallback for agent proxy")
+        env-key))))
+
+(def ^:private service-role-key
+  "Cached service_role key — read once on first agent request."
+  (delay (read-service-role-key)))
+
+(defn- agent-proxy-handler
+  "Reverse-proxy /trexsql/agent/* → the :8001 Pythia function. Injects the
+   service_role apikey, relays the incoming Authorization bearer, and streams
+   the SSE response back unbuffered."
+  [request]
+  (let [key @service-role-key]
+    (if (str/blank? key)
+      (service-unavailable "Agent service_role key unavailable")
+      (let [auth (get-in request [:headers "authorization"])
+            extra (cond-> {"apikey" key}
+                    (not (str/blank? auth)) (assoc "authorization" auth))]
+        ;; Long socket timeout: a single agent turn can stream over many
+        ;; seconds (tool execution between deltas). :as :stream keeps the
+        ;; body unbuffered so SSE chunks flow through as they arrive.
+        (proxy/proxy-request request agent-upstream-base extra
+                             {:socket-timeout 300000
+                              :connection-timeout 10000})))))
+
 ;; Router
 
 (def routes
@@ -1194,8 +1274,11 @@
         ["/study/cancel" {:delete {:handler cancel-study-handler}}]
         ["/circe/execute" {:post {:handler execute-circe-handler}}]
         ["/circe/render" {:post {:handler render-circe-handler}}]
-        ["/vocab/search" {:get {:handler search-vocab-handler}}]]]
-      agent-routes/routes)))
+        ["/vocab/search" {:get {:handler search-vocab-handler}}]]
+       ;; Agent endpoints are reverse-proxied to the :8001 Pythia function
+       ;; (see agent-proxy-handler). The catch-all "/agent/*path" covers
+       ;; /agent/chat and /agent/chat/health.
+       ["/agent/*path" {:handler agent-proxy-handler :no-doc true}]])))
 
 (defn- create-proxy-handler [target-url]
   (fn [request]

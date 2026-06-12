@@ -28,11 +28,17 @@
     (instance? java.io.InputStream body) (slurp body)
     :else (str body)))
 
-(defn proxy-request [{:keys [request-method uri headers body query-string]} base-url]
+(defn proxy-request
+  ([request base-url]
+   (proxy-request request base-url nil nil))
+  ([request base-url extra-headers]
+   (proxy-request request base-url extra-headers nil))
+  ([{:keys [request-method uri headers body query-string]} base-url extra-headers opts]
   (let [target-url (build-target-url base-url uri query-string)
         forwarded-headers (-> headers
                               filter-headers
-                              (assoc "X-Forwarded-Host" (get headers "host")))
+                              (assoc "X-Forwarded-Host" (get headers "host"))
+                              (merge extra-headers))
         method-kw (if (keyword? request-method)
                     request-method
                     (keyword (str/lower-case (name request-method))))
@@ -40,14 +46,15 @@
     (log/debug (str "Proxying " (str/upper-case (name method-kw)) " " target-url))
     (try
       (let [response (client/request
-                       {:method method-kw
-                        :url target-url
-                        :headers forwarded-headers
-                        :body body-str
-                        :throw-exceptions false
-                        :as :stream
-                        :socket-timeout 30000
-                        :connection-timeout 10000})]
+                       (merge {:method method-kw
+                               :url target-url
+                               :headers forwarded-headers
+                               :body body-str
+                               :throw-exceptions false
+                               :as :stream
+                               :socket-timeout 30000
+                               :connection-timeout 10000}
+                              opts))]
         {:status (:status response)
          :headers (filter-headers (:headers response))
          :body (:body response)})
@@ -68,4 +75,4 @@
         {:status 502
          :headers {"Content-Type" "application/json"}
          :body {:error "BAD_GATEWAY"
-                :message (str "Proxy error: " (.getMessage e))}}))))
+                :message (str "Proxy error: " (.getMessage e))}})))))
