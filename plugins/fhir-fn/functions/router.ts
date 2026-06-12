@@ -1,7 +1,7 @@
 // @ts-nocheck - Deno edge function
 
 import { FhirError } from "./error.ts";
-import { AppState, externalBase, getState } from "./state.ts";
+import { AppState, externalBase, getState, stripMount } from "./state.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -295,13 +295,9 @@ export async function postProcess(
 // route — main dispatcher
 // ---------------------------------------------------------------------------
 
-const BASE_PATH_DEFAULT = "/trex/fhir";
-
 export async function route(req: Request, state: AppState): Promise<Response> {
-  const basePath = Deno.env.get("FHIR_BASE_PATH") ?? BASE_PATH_DEFAULT;
   const url = new URL(req.url);
-  const raw = url.pathname;
-  const stripped = (raw.startsWith(basePath) ? raw.slice(basePath.length) : raw) || "/";
+  const stripped = stripMount(url.pathname);
 
   const parsed = parseRoute(req.method, stripped);
 
