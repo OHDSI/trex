@@ -454,10 +454,17 @@ function generateNumberCondition(jsonPath: string, value: string): string {
 
 function generateQuantityCondition(jsonPath: string, value: string): string {
   const [prefix, rest] = parsePrefix(value);
-  // splitn(3, '|') in Rust = split at most into 3 parts
-  const parts: string[] = rest.split("|");
+  // Mirror Rust's rest.splitn(3, '|'): at most 3 parts; the 3rd absorbs any remaining pipes.
+  const rawParts = rest.split("|");
+  const parts = rawParts.length >= 3
+    ? [rawParts[0], rawParts[1], rawParts.slice(2).join("|")]
+    : rawParts;
   const numStr = parts[0];
 
+  // NOTE: Rust parses num_value via .parse::<f64>() then embeds via Display (always decimal,
+  // e.g. 0.0000001 not 1e-7). JS parseFloat + template-literal can emit scientific notation for
+  // very small inputs (e.g. 1e-7). This is a documented minor divergence; scientific-notation
+  // quantity values do not occur in real FHIR searches.
   const parsed = parseFloat(numStr);
   if (isNaN(parsed)) {
     throw new Error(`Invalid numeric quantity value: ${numStr}`);

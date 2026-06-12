@@ -576,6 +576,109 @@ Deno.test("generateSearchSql: composite and special param types are skipped", ()
 });
 
 // ---------------------------------------------------------------------------
+// Token: |code (pipe-code-only) — system empty, code non-empty
+// Rust generate_token_condition: system.is_empty() branch →
+//   "json_extract_string(_raw, '{path}.code') = '{code}' OR
+//    EXISTS (SELECT 1 FROM json_each(json_extract(_raw, '{path}.coding')) AS c
+//            WHERE json_extract_string(c.value, '$.code') = '{code}')"
+// ---------------------------------------------------------------------------
+
+Deno.test("token_condition: |code (pipe-code-only) — matches Rust system-empty branch", () => {
+  const sp = SearchParamRegistry.loadFromJson(JSON.stringify({
+    resourceType: "Bundle",
+    entry: [{
+      resource: {
+        resourceType: "SearchParameter",
+        code: "identifier",
+        type: "token",
+        expression: "Patient.identifier",
+        base: ["Patient"],
+      },
+    }],
+  }));
+  const rr = ResourceRegistry.empty();
+  const sql = generateSearchSql(sp, rr, "Patient", { identifier: "|ABC" });
+  // Must reference .code with value 'ABC' and NOT mention .system
+  assertEquals(
+    sql,
+    "json_extract_string(_raw, '$.identifier.code') = 'ABC' OR " +
+    "EXISTS (SELECT 1 FROM json_each(json_extract(_raw, '$.identifier.coding')) AS c " +
+    "WHERE json_extract_string(c.value, '$.code') = 'ABC')",
+    `Unexpected SQL: ${sql}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Token: system| (system-only) — system non-empty, code empty
+// Rust generate_token_condition: code.is_empty() branch →
+//   "json_extract_string(_raw, '{path}.system') = '{system}' OR
+//    EXISTS (SELECT 1 FROM json_each(json_extract(_raw, '{path}.coding')) AS c
+//            WHERE json_extract_string(c.value, '$.system') = '{system}')"
+// ---------------------------------------------------------------------------
+
+Deno.test("token_condition: system| (system-only) — matches Rust code-empty branch", () => {
+  const sp = SearchParamRegistry.loadFromJson(JSON.stringify({
+    resourceType: "Bundle",
+    entry: [{
+      resource: {
+        resourceType: "SearchParameter",
+        code: "identifier",
+        type: "token",
+        expression: "Patient.identifier",
+        base: ["Patient"],
+      },
+    }],
+  }));
+  const rr = ResourceRegistry.empty();
+  const sql = generateSearchSql(sp, rr, "Patient", { identifier: "http://example.com|" });
+  // Must reference .system with value 'http://example.com' and NOT mention .code
+  assertEquals(
+    sql,
+    "json_extract_string(_raw, '$.identifier.system') = 'http://example.com' OR " +
+    "EXISTS (SELECT 1 FROM json_each(json_extract(_raw, '$.identifier.coding')) AS c " +
+    "WHERE json_extract_string(c.value, '$.system') = 'http://example.com')",
+    `Unexpected SQL: ${sql}`,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Quantity: splitn(3) — value with 4+ pipe segments; 3rd part absorbs remainder
+// Rust splitn(3, '|') on "100|http://unitsofmeasure.org|mg/dL|extra" →
+//   parts = ["100", "http://unitsofmeasure.org", "mg/dL|extra"]
+// The code segment embedded in SQL must be "mg/dL|extra", not just "mg/dL".
+// ---------------------------------------------------------------------------
+
+Deno.test("quantity_condition: splitn(3) — 4-pipe value produces code = 'mg/dL|extra'", () => {
+  const sp = SearchParamRegistry.loadFromJson(JSON.stringify({
+    resourceType: "Bundle",
+    entry: [{
+      resource: {
+        resourceType: "SearchParameter",
+        code: "value-quantity",
+        type: "quantity",
+        expression: "Observation.valueQuantity",
+        base: ["Observation"],
+      },
+    }],
+  }));
+  const rr = ResourceRegistry.empty();
+  const sql = generateSearchSql(
+    sp, rr, "Observation",
+    { "value-quantity": "100|http://unitsofmeasure.org|mg/dL|extra" },
+  );
+  // The third part must be "mg/dL|extra" (pipe joined), not "mg/dL"
+  assert(
+    sql.includes("= 'mg/dL|extra'"),
+    `Expected code = 'mg/dL|extra' but got: ${sql}`,
+  );
+  assert(
+    !sql.includes("= 'mg/dL'") || sql.includes("= 'mg/dL|extra'"),
+    `Code segment must not be plain 'mg/dL': ${sql}`,
+  );
+  assert(sql.includes("= 'http://unitsofmeasure.org'"), `Missing system: ${sql}`);
+});
+
+// ---------------------------------------------------------------------------
 // Integration test: loadDefault has Patient.name as string param
 // ---------------------------------------------------------------------------
 
