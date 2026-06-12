@@ -16,7 +16,7 @@ FROM ubuntu:22.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates build-essential zlib1g-dev \
-        maven postgresql postgresql-contrib unzip git \
+        maven postgresql postgresql-contrib unzip git python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Oracle GraalVM for JDK 21 (includes native-image). TARGETARCH is provided by
