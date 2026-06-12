@@ -498,10 +498,12 @@
      :cache-path (or cache-path "./data/cache")
      :batch-size (or (:batch-size config) 10000)}))
 
-(defn attach-source!
-  "Attach the source via the matching DuckDB scanner. Returns the alias."
+(defn- attach-source!
+  "Attach the source via the matching DuckDB scanner. Returns the alias.
+   Private: only reached through create-cache after the native-scanner-dialect?
+   guard, so the default branch is a defensive fallback."
   [db database-code credentials]
-  (case (str/lower-case (:dialect credentials))
+  (case (str/lower-case (or (:dialect credentials) ""))
     ("postgres" "postgresql") (db/attach-source-postgres! db database-code credentials)
     ("mysql" "mariadb")       (db/attach-source-mysql! db database-code credentials)
     "bigquery"                (db/attach-source-bigquery! db database-code credentials)
@@ -509,35 +511,54 @@
             (str "Dialect is not a native-scanner dialect: " (:dialect credentials))
             :dialect))))
 
-(defn create-cache-native
+(defn- create-cache-native
   "Native-scanner cache read. Attaches the cache file and the source on the
    same handle, copies the schema with DuckDB doing all type conversion, then
    detaches the source. Returns the SAME map shape as batch/create-cache-jdbc
    (no FTS, no ->CacheResult — create-cache adds those), so the shared FTS
-   step in create-cache works identically for both paths."
+   step in create-cache works identically for both paths.
+
+   On any failure during source-attach or copy, the cache catalog we attached
+   is detached again (so a retry with the same database-code isn't blocked) and
+   a structured {:success? false ... :error msg} map is returned rather than
+   letting the exception escape unstructured. On success the cache stays
+   attached because create-cache's FTS step queries it."
   [db config]
   (let [start (System/currentTimeMillis)
         {:keys [database-code schema-name source-credentials cache-path]} config]
     (db/attach-cache-file! db database-code (or cache-path "./data/cache"))
-    (let [source-alias (attach-source! db database-code source-credentials)]
-      (try
-        (let [{:keys [tables-copied tables-failed]}
-              (copy-schema db source-alias database-code config)]
-          {:success? (empty? tables-failed)
-           :database-code database-code
-           :schema-name schema-name
-           :tables-copied (mapv (fn [t] {:table-name (:table-name t)
-                                         :rows-copied (:rows-copied t)}) tables-copied)
-           :tables-failed (mapv (fn [t] {:table-name (:table-name t)
-                                         :error (:error t)
-                                         :phase (:phase t)}) tables-failed)
-           :duration-ms (- (System/currentTimeMillis) start)
-           :error nil})
-        (finally
-          (try (db/detach-database! db source-alias)
-               (catch Exception e
-                 (log/warn (format "Failed to detach source %s: %s"
-                                   source-alias (.getMessage e))))))))))
+    (try
+      (let [source-alias (attach-source! db database-code source-credentials)]
+        (try
+          (let [{:keys [tables-copied tables-failed]}
+                (copy-schema db source-alias database-code config)]
+            {:success? (empty? tables-failed)
+             :database-code database-code
+             :schema-name schema-name
+             :tables-copied (mapv (fn [t] {:table-name (:table-name t)
+                                           :rows-copied (:rows-copied t)}) tables-copied)
+             :tables-failed (mapv (fn [t] {:table-name (:table-name t)
+                                           :error (:error t)
+                                           :phase (:phase t)}) tables-failed)
+             :duration-ms (- (System/currentTimeMillis) start)
+             :error nil})
+          (finally
+            (try (db/detach-database! db source-alias)
+                 (catch Exception e
+                   (log/warn (format "Failed to detach source %s: %s"
+                                     source-alias (.getMessage e))))))))
+      (catch Exception e
+        ;; attach-source! or copy-schema threw — detach the cache catalog we
+        ;; attached above so the next attempt with the same database-code can
+        ;; re-attach a fresh file, and surface a structured failure.
+        (try (db/detach-database! db database-code) (catch Exception _ nil))
+        {:success? false
+         :database-code database-code
+         :schema-name schema-name
+         :tables-copied []
+         :tables-failed []
+         :duration-ms (- (System/currentTimeMillis) start)
+         :error (.getMessage e)}))))
 
 (defn create-cache
   "Unified cache creation. postgres/mysql/bigquery use the native DuckDB
