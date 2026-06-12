@@ -10,11 +10,35 @@ su postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='ohdsi_app_user'
 su postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='webapi'\" | grep -q 1 || createdb -O ohdsi_app_user webapi"
 su postgres -c "psql -d webapi -c 'CREATE SCHEMA IF NOT EXISTS webapi AUTHORIZATION ohdsi_app_user;'"
 
+# OidcAuthConfig is baked into the native image: Spring AOT freezes its
+# @ConditionalOnProperty(security.auth.oidc.enabled=true) at build time (see
+# build-native-lib.sh), so oidcClientRegistrationRepository is ALWAYS instantiated
+# at boot regardless of the runtime flag. Its construction fetches the provider
+# discovery doc and now eagerly throws if security.auth.oidc.url is blank, so serve
+# a static discovery doc locally and point the bean at it — real issuer/clientId/
+# secret are supplied from env in production.
+echo "[smoke] starting mock OIDC discovery server"
+python3 - <<'PY' >/dev/null 2>&1 &
+import http.server, socketserver
+body = b'{"issuer":"http://127.0.0.1:8099/oidc","authorization_endpoint":"http://127.0.0.1:8099/oidc/auth","token_endpoint":"http://127.0.0.1:8099/oidc/token","jwks_uri":"http://127.0.0.1:8099/oidc/jwks","userinfo_endpoint":"http://127.0.0.1:8099/oidc/me","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],"scopes_supported":["openid","profile","email"]}'
+class H(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a): pass
+socketserver.TCPServer(("127.0.0.1", 8099), H).serve_forever()
+PY
+echo $! > /tmp/oidc_mock.pid
+for _ in $(seq 1 20); do curl -sf http://127.0.0.1:8099/oidc/.well-known/openid-configuration >/dev/null 2>&1 && break; sleep 0.5; done
+
 # cache.generation.cleanupInterval is shrunk so CleanupScheduler.removeOldCache
 # fires within seconds. It runs an entity-graph (Cosium) derived query, which
 # exercises a dynamic JDK proxy that static analysis can't see — without this the
 # smoke never hits that path and a missing proxy registration slips through.
-export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","trexsql.cache-path":"/tmp/trexcache","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_","cache.generation.cleanupInterval":"3000","cache.generation.invalidAfterDays":"1","logging.level.org.hibernate.SQL":"DEBUG"}'
+export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","trexsql.cache-path":"/tmp/trexcache","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_","cache.generation.cleanupInterval":"3000","cache.generation.invalidAfterDays":"1","logging.level.org.hibernate.SQL":"DEBUG","security.auth.oidc.enabled":"true","security.auth.oidc.clientId":"smoke","security.auth.oidc.apiSecret":"smoke","security.auth.oidc.url":"http://127.0.0.1:8099/oidc/.well-known/openid-configuration","security.auth.oauth.callback.api":"http://127.0.0.1:8099/cb","security.auth.oauth.callback.ui":"http://127.0.0.1:8099/ui"}'
 
 echo "[smoke] launching native WebAPI host"
 /app/harness > /tmp/harness.log 2>&1 &
