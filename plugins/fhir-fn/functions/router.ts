@@ -4,6 +4,13 @@ import { FhirError } from "./error.ts";
 import { AppState, externalBase, getState, stripMount } from "./state.ts";
 import { withConnection } from "./db.ts";
 import { getMetadata } from "./handlers/metadata.ts";
+import {
+  createDataset,
+  listDatasets,
+  getDataset,
+  updateDataset,
+  deleteDataset,
+} from "./handlers/dataset.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -343,6 +350,25 @@ async function dispatch(
 
     case "metadata":
       return await withConnection((conn) => getMetadata(parsed.datasetId, conn, state));
+
+    case "createDataset": {
+      const body = await req.json().catch(() => ({}));
+      return await withConnection((conn) => createDataset(body, conn, state));
+    }
+
+    case "listDatasets":
+      return await withConnection((conn) => listDatasets(conn, state));
+
+    case "getDataset":
+      return await withConnection((conn) => getDataset(parsed.datasetId, conn, state));
+
+    case "updateDataset": {
+      const body = await req.json().catch(() => ({}));
+      return await withConnection((conn) => updateDataset(parsed.datasetId, body, conn, state));
+    }
+
+    case "deleteDataset":
+      return await withConnection((conn) => deleteDataset(parsed.datasetId, conn, state));
 
     default:
       return FhirError.internal("handler not implemented").toResponse();
