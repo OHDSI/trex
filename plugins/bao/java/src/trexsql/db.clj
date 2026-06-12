@@ -244,22 +244,30 @@
           (source-dsn/bigquery-project credentials)
           (escape-identifier (source-alias-for database-code) "source-alias")))
 
-(defn- mask-credentials
-  "Redact password/user values so a failed ATTACH (whose error embeds the full
-   SQL via native/check-error!) never leaks credentials into logs or responses."
-  [^String s]
-  (-> (str s)
-      (str/replace #"(?i)password=[^ '\";]+" "password=***")
-      (str/replace #"(?i)user=[^ '\";]+" "user=***")))
+(defn- redact-credentials
+  "Replace the literal user/password values with *** wherever they appear, so a
+   failed-ATTACH error message cannot leak credentials into logs or API
+   responses — robust to how the value was quoted in the statement DuckDB echoes
+   back (bare, single-quoted, or SQL-doubled). Blank values are skipped so we
+   never replace the empty string everywhere."
+  [^String s {:keys [user password]}]
+  (cond-> (str s)
+    (not (str/blank? password)) (str/replace (str password) "***")
+    (not (str/blank? user))     (str/replace (str user) "***")))
 
 (defn- execute-attach!
-  "Run an ATTACH statement, masking credentials in any thrown error."
-  [^TrexsqlDatabase db ^String attach-sql]
+  "Run an ATTACH statement, redacting credentials from any thrown error.
+   We intentionally do NOT thread the original exception as the cause: the
+   DuckDB error message can echo the credential-bearing connection string, and
+   errors/format-error surfaces a cause's message into JSON responses — which
+   would re-leak the values we just redacted. The redacted message preserves the
+   diagnostic content (host, port, failure reason)."
+  [^TrexsqlDatabase db ^String attach-sql credentials]
   (try
     (execute! db attach-sql)
     (catch Exception e
       (throw (errors/resource-error
-              (str "Source ATTACH failed: " (mask-credentials (.getMessage e)))
+              (str "Source ATTACH failed: " (redact-credentials (.getMessage e) credentials))
               :source)))))
 
 (defn attach-source-postgres!
@@ -267,7 +275,7 @@
   [^TrexsqlDatabase db ^String database-code credentials]
   (ensure-open! db)
   (load-extension! db "postgres")
-  (execute-attach! db (postgres-attach-sql database-code credentials))
+  (execute-attach! db (postgres-attach-sql database-code credentials) credentials)
   (source-alias-for database-code))
 
 (defn attach-source-mysql!
@@ -275,7 +283,7 @@
   [^TrexsqlDatabase db ^String database-code credentials]
   (ensure-open! db)
   (load-extension! db "mysql")
-  (execute-attach! db (mysql-attach-sql database-code credentials))
+  (execute-attach! db (mysql-attach-sql database-code credentials) credentials)
   (source-alias-for database-code))
 
 (defn attach-source-bigquery!
@@ -283,7 +291,7 @@
   [^TrexsqlDatabase db ^String database-code credentials]
   (ensure-open! db)
   (load-extension! db "bigquery" :source "community")
-  (execute-attach! db (bigquery-attach-sql database-code credentials))
+  (execute-attach! db (bigquery-attach-sql database-code credentials) credentials)
   (source-alias-for database-code))
 
 (defn is-attached?

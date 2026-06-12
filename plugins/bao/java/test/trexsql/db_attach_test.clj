@@ -26,7 +26,17 @@
     (is (thrown? Exception
           (db/postgres-attach-sql "bad alias!" {:jdbc-url "jdbc:postgresql://h/d" :user "u" :password "p"})))))
 
-(deftest mask-credentials-test
-  (testing "user and password are redacted in DSN-bearing error text"
-    (is (= "host=h port=5432 dbname=d user=*** password=***"
-           (#'db/mask-credentials "host=h port=5432 dbname=d user=alice password=secret")))))
+(deftest redact-credentials-test
+  (testing "literal user/password values are redacted regardless of quoting"
+    (let [creds {:user "alice" :password "secret"}]
+      (testing "bare libpq form"
+        (is (= "host=h user=*** password=***"
+               (#'db/redact-credentials "host=h user=alice password=secret" creds))))
+      (testing "SQL-doubled-quote form (the form that actually appears in ATTACH errors)"
+        (is (= "host=''h'' user=''***'' password=''***''"
+               (#'db/redact-credentials "host=''h'' user=''alice'' password=''secret''" creds)))))
+    (testing "a password containing a space is still fully redacted"
+      (is (= "password=''***''"
+             (#'db/redact-credentials "password=''p w''" {:user "u" :password "p w"}))))
+    (testing "blank/nil credentials are not used as replacement patterns"
+      (is (= "host=h" (#'db/redact-credentials "host=h" {:user "" :password nil}))))))
