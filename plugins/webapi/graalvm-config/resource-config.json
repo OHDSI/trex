@@ -596,48 +596,6 @@
         "pattern": "\\Qslingshot/support__init.class\\E"
       },
       {
-        "pattern": "\\Qtrexsql/agent/bedrock.clj\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/bedrock__init.class\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/prompt.clj\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/prompt__init.class\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/route_context_format.clj\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/route_context_format__init.class\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/routes.clj\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/routes__init.class\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/routes_manifest.clj\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/routes_manifest__init.class\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/sse.clj\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/sse__init.class\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/tools.clj\\E"
-      },
-      {
-        "pattern": "\\Qtrexsql/agent/tools__init.class\\E"
-      },
-      {
         "pattern": "\\Qtrexsql/api.clj\\E"
       },
       {

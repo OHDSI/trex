@@ -2332,27 +2332,6 @@
     ]
   },
   {
-    "name": "trexsql.agent.bedrock__init"
-  },
-  {
-    "name": "trexsql.agent.prompt__init"
-  },
-  {
-    "name": "trexsql.agent.route_context_format__init"
-  },
-  {
-    "name": "trexsql.agent.routes__init"
-  },
-  {
-    "name": "trexsql.agent.routes_manifest__init"
-  },
-  {
-    "name": "trexsql.agent.sse__init"
-  },
-  {
-    "name": "trexsql.agent.tools__init"
-  },
-  {
     "name": "trexsql.api__init"
   },
   {
