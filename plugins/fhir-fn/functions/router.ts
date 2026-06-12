@@ -21,6 +21,7 @@ import { searchResources } from "./handlers/search.ts";
 import { resourceHistory, readResourceVersion } from "./handlers/history.ts";
 import { processBundle } from "./handlers/bundle.ts";
 import { importNdjson } from "./handlers/import.ts";
+import { systemExport, typeExport, exportStatus } from "./handlers/export.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -418,6 +419,18 @@ async function dispatch(
       const bodyText = await req.text();
       return await withConnection((conn) => importNdjson(parsed.datasetId, bodyText, conn, state));
     }
+
+    case "export": {
+      const u = new URL(req.url);
+      const query = Object.fromEntries(u.searchParams.entries());
+      return await withConnection((conn) => systemExport(parsed.datasetId, query, conn, state));
+    }
+
+    case "typeExport":
+      return await withConnection((conn) => typeExport(parsed.datasetId, parsed.resourceType, conn, state));
+
+    case "exportStatus":
+      return await withConnection((conn) => exportStatus(parsed.datasetId, parsed.jobId, conn, state));
 
     default:
       return FhirError.internal("handler not implemented").toResponse();
