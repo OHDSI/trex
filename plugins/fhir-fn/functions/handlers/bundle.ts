@@ -8,8 +8,9 @@ import { validateDatasetId } from "../sql_safety.ts";
 import { toQualifiedSchema } from "../sql_safety.ts";
 import { ResourceRegistry } from "../fhir/resource_registry.ts";
 import { processBundleEntries, ProcessedEntry } from "../fhir/bundle_processor.ts";
-import { buildInsertSql, buildUpdateSql } from "../schema/sql_builder.ts";
+import { buildInsertSql } from "../schema/sql_builder.ts";
 import { buildHistoryInsertSql } from "./crud.ts";
+import { upsertResource } from "./upsert.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -226,83 +227,23 @@ async function processSingleEntry(
     }
 
     case "PUT": {
-      // Read current version (check if exists)
-      const checkSql = `SELECT _version_id::VARCHAR, _raw FROM ${schemaName}."${entry.resourceType.toLowerCase()}" WHERE _id = $1`;
-      let currentVersion: number;
-      let isNew: boolean;
-      let currentRaw: string;
-
-      try {
-        const rows = await conn.query(checkSql, [entry.serverId]);
-        if (!rows || rows.length === 0) {
-          currentVersion = 0;
-          isNew = true;
-          currentRaw = "";
-        } else {
-          const row = rows[0];
-          const vStr: string = row._version_id ?? row.column0 ?? "1";
-          const n = parseInt(vStr, 10);
-          currentVersion = isNaN(n) ? 1 : n;
-          currentRaw = row._raw ?? row.column1 ?? "{}";
-          isNew = false;
-        }
-      } catch (e) {
-        throw new Error(`Check failed: ${e}`);
-      }
-
-      const newVersion = currentVersion + 1;
       const now = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 
-      const resource = JSON.parse(JSON.stringify(entry.resource));
-      resource.id = entry.serverId;
-      resource.meta = {
-        versionId: String(newVersion),
-        lastUpdated: now,
-      };
-
-      let rawJson: string;
-      try {
-        rawJson = JSON.stringify(resource);
-      } catch (e) {
-        throw new Error(`JSON serialize: ${e}`);
-      }
-
-      // Write current version into _history (only when updating an existing resource)
-      if (!isNew) {
-        const historySql = buildHistoryInsertSql(schemaName, currentVersion);
-        try {
-          await conn.query(historySql, [entry.serverId, entry.resourceType, currentRaw]);
-        } catch (e) {
-          console.error(
-            `[fhir] WARNING: history write failed for ${entry.resourceType}/${entry.serverId}: ${e}`,
-          );
-        }
-      }
-
-      let transformSpec: string;
-      let columnNames: string[];
-      try {
-        transformSpec = state.registry.getJsonTransform(entry.resourceType);
-        columnNames = state.registry.getColumnNames(entry.resourceType);
-      } catch (e) {
-        throw new Error(`Transform spec: ${e}`);
-      }
-
-      const upsertSql = isNew
-        ? buildInsertSql(schemaName, tableName, newVersion, transformSpec, columnNames)
-        : buildUpdateSql(schemaName, tableName, newVersion, transformSpec, columnNames);
-
-      try {
-        await conn.query(upsertSql, [entry.serverId, rawJson]);
-      } catch (e) {
-        throw new Error(`Upsert failed: ${e}`);
-      }
+      const { version, isNew } = await upsertResource(
+        conn,
+        state,
+        schemaName,
+        entry.resourceType,
+        entry.serverId,
+        entry.resource,
+        now,
+      );
 
       return buildPutResponseEntry(
         datasetId,
         entry.resourceType,
         entry.serverId,
-        newVersion,
+        version,
         isNew,
       );
     }
