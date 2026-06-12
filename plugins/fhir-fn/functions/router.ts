@@ -2,6 +2,8 @@
 
 import { FhirError } from "./error.ts";
 import { AppState, externalBase, getState, stripMount } from "./state.ts";
+import { withConnection } from "./db.ts";
+import { getMetadata } from "./handlers/metadata.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -322,9 +324,9 @@ export async function route(req: Request, state: AppState): Promise<Response> {
 }
 
 async function dispatch(
-  _req: Request,
+  req: Request,
   parsed: Route,
-  _state: AppState,
+  state: AppState,
 ): Promise<Response> {
   switch (parsed.kind) {
     case "health":
@@ -338,6 +340,9 @@ async function dispatch(
 
     case "notFound":
       return FhirError.notFound("no route matched").toResponse();
+
+    case "metadata":
+      return await withConnection((conn) => getMetadata(parsed.datasetId, conn, state));
 
     default:
       return FhirError.internal("handler not implemented").toResponse();
