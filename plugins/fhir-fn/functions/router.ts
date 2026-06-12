@@ -59,10 +59,14 @@ export function parseRoute(method: string, path: string): Route {
   const s0 = segs[0];
 
   // -------------------------------------------------------------------------
-  // /health  /metrics
+  // /health  /metrics  — reserved literals at 1-segment; non-GET → notFound
   // -------------------------------------------------------------------------
-  if (n === 1 && s0 === "health" && m === "GET") return { kind: "health" };
-  if (n === 1 && s0 === "metrics" && m === "GET") return { kind: "metrics" };
+  if (n === 1 && s0 === "health") {
+    return m === "GET" ? { kind: "health" } : { kind: "notFound" };
+  }
+  if (n === 1 && s0 === "metrics") {
+    return m === "GET" ? { kind: "metrics" } : { kind: "notFound" };
+  }
 
   // -------------------------------------------------------------------------
   // /datasets  /datasets/{dataset_id}
@@ -98,19 +102,29 @@ export function parseRoute(method: string, path: string): Route {
   // 2-segment paths with literal s1
   // -------------------------------------------------------------------------
   if (n === 2) {
-    // /{ds}/metadata
-    if (s1 === "metadata" && m === "GET") return { kind: "metadata", datasetId };
+    // /{ds}/metadata  — literal; non-GET → notFound
+    if (s1 === "metadata") {
+      return m === "GET" ? { kind: "metadata", datasetId } : { kind: "notFound" };
+    }
 
-    // /{ds}/$import
-    if (s1 === "$import" && m === "POST") return { kind: "import", datasetId };
+    // /{ds}/$import  — literal; non-POST → notFound
+    if (s1 === "$import") {
+      return m === "POST" ? { kind: "import", datasetId } : { kind: "notFound" };
+    }
 
     // /{ds}/$export  (GET only — status sub-path handled below at n===4)
-    if (s1 === "$export" && m === "GET") return { kind: "export", datasetId };
+    if (s1 === "$export") {
+      return m === "GET" ? { kind: "export", datasetId } : { kind: "notFound" };
+    }
 
-    // /{ds}/$cql
-    if (s1 === "$cql" && m === "POST") return { kind: "cql", datasetId };
+    // /{ds}/$cql  — literal; non-POST → notFound
+    if (s1 === "$cql") {
+      return m === "POST" ? { kind: "cql", datasetId } : { kind: "notFound" };
+    }
 
-    // /{ds}/Measure/$evaluate-measure  — handled at n===3 below; but won't reach here
+    // Any other segment starting with "$" is an unknown operation → notFound
+    if (s1.startsWith("$")) return { kind: "notFound" };
+
     // /{ds}/{resourceType}  search / create
     const resourceType = s1;
     if (m === "GET") return { kind: "search", datasetId, resourceType };
@@ -124,17 +138,22 @@ export function parseRoute(method: string, path: string): Route {
   const s2 = segs[2];
 
   if (n === 3) {
-    // /{ds}/$export/status — needs 4 segments (job_id) — fall through; handled at n===4
+    // /{ds}/$export/...  — s1 is a known operation literal; any other 3-seg path with it is notFound
+    if (s1 === "$export") return { kind: "notFound" };
 
     // /{ds}/Measure/$evaluate-measure  (literal "Measure" + literal "$evaluate-measure")
     if (s1 === "Measure" && s2 === "$evaluate-measure") {
       if (m === "GET" || m === "POST") return { kind: "evaluateMeasure", datasetId };
+      return { kind: "notFound" };
     }
 
-    // /{ds}/{resourceType}/$export  (type-level export)
-    if (s2 === "$export" && m === "GET") {
-      return { kind: "typeExport", datasetId, resourceType: s1 };
+    // /{ds}/{resourceType}/$export  (type-level export) — literal s2; non-GET → notFound
+    if (s2 === "$export") {
+      return m === "GET" ? { kind: "typeExport", datasetId, resourceType: s1 } : { kind: "notFound" };
     }
+
+    // Any other s2 starting with "$" is an unknown operation → notFound
+    if (s2.startsWith("$")) return { kind: "notFound" };
 
     // /{ds}/{resourceType}/{id}  — read / update / delete
     const resourceType = s1;
@@ -151,21 +170,29 @@ export function parseRoute(method: string, path: string): Route {
   const s3 = segs[3];
 
   if (n === 4) {
-    // /{ds}/$export/status/{job_id}
-    if (s1 === "$export" && s2 === "status" && m === "GET") {
-      return { kind: "exportStatus", datasetId, jobId: s3 };
+    // /{ds}/$export/... — s1 is a literal operation; fence it
+    if (s1 === "$export") {
+      if (s2 === "status" && m === "GET") {
+        return { kind: "exportStatus", datasetId, jobId: s3 };
+      }
+      return { kind: "notFound" };
     }
 
-    // /{ds}/Measure/{measure_id}/$evaluate-measure
+    // /{ds}/Measure/{measure_id}/$evaluate-measure  — fence: wrong method → notFound
     if (s1 === "Measure" && s3 === "$evaluate-measure") {
       if (m === "GET" || m === "POST") {
         return { kind: "evaluateMeasure", datasetId, measureId: s2 };
       }
+      return { kind: "notFound" };
     }
 
+    // s3 is a literal operation or reserved segment — fence it
+    if (s3 === "$evaluate-measure") return { kind: "notFound" };
+    if (s3.startsWith("$")) return { kind: "notFound" };
+
     // /{ds}/{resourceType}/{id}/_history
-    if (s3 === "_history" && m === "GET") {
-      return { kind: "history", datasetId, resourceType: s1, id: s2 };
+    if (s3 === "_history") {
+      return m === "GET" ? { kind: "history", datasetId, resourceType: s1, id: s2 } : { kind: "notFound" };
     }
 
     return { kind: "notFound" };
@@ -255,7 +282,6 @@ export async function postProcess(
         }
         return entry;
       });
-      bodyText = JSON.stringify(obj);
     }
   }
 

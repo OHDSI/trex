@@ -162,6 +162,66 @@ Deno.test("parseRoute: notFound for unknown path", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Wrong-method fencing: literal/operation segments must not fall through
+// ---------------------------------------------------------------------------
+
+Deno.test("wrong-method: GET /ds/$import → notFound (not search)", () => {
+  assertEquals(parseRoute("GET", "/ds/$import"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: GET /ds/$cql → notFound (not search)", () => {
+  assertEquals(parseRoute("GET", "/ds/$cql"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: POST /ds/$export → notFound (not create)", () => {
+  assertEquals(parseRoute("POST", "/ds/$export"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: POST /ds/metadata → notFound (not create)", () => {
+  assertEquals(parseRoute("POST", "/ds/metadata"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: DELETE /ds/Patient/$export → notFound (not delete with id=$export)", () => {
+  assertEquals(parseRoute("DELETE", "/ds/Patient/$export"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: PUT /ds/Patient/$export → notFound (not update with id=$export)", () => {
+  assertEquals(parseRoute("PUT", "/ds/Patient/$export"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: DELETE /ds/Measure/$evaluate-measure → notFound", () => {
+  assertEquals(parseRoute("DELETE", "/ds/Measure/$evaluate-measure"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: PUT /ds/Measure/$evaluate-measure → notFound", () => {
+  assertEquals(parseRoute("PUT", "/ds/Measure/$evaluate-measure"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: DELETE /ds/Measure/m1/$evaluate-measure → notFound", () => {
+  assertEquals(parseRoute("DELETE", "/ds/Measure/m1/$evaluate-measure"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: PUT /ds/Measure/m1/$evaluate-measure → notFound", () => {
+  assertEquals(parseRoute("PUT", "/ds/Measure/m1/$evaluate-measure"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: POST /health → notFound (not bundle)", () => {
+  assertEquals(parseRoute("POST", "/health"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: POST /metrics → notFound (not bundle)", () => {
+  assertEquals(parseRoute("POST", "/metrics"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: DELETE /ds/$export/status/j1 → notFound", () => {
+  assertEquals(parseRoute("DELETE", "/ds/$export/status/j1"), { kind: "notFound" });
+});
+
+Deno.test("wrong-method: PUT /ds/Patient/p1/_history → notFound", () => {
+  assertEquals(parseRoute("PUT", "/ds/Patient/p1/_history"), { kind: "notFound" });
+});
+
+// ---------------------------------------------------------------------------
 // Precedence assertions
 // ---------------------------------------------------------------------------
 
