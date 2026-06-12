@@ -18,6 +18,7 @@ import {
   deleteResource,
 } from "./handlers/crud.ts";
 import { searchResources } from "./handlers/search.ts";
+import { resourceHistory, readResourceVersion } from "./handlers/history.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -399,6 +400,12 @@ async function dispatch(
       const params = Object.fromEntries(u.searchParams.entries());
       return await withConnection((conn) => searchResources(parsed.datasetId, parsed.resourceType, params, conn, state));
     }
+
+    case "history":
+      return await withConnection((conn) => resourceHistory(parsed.datasetId, parsed.resourceType, parsed.id, conn, state));
+
+    case "vread":
+      return await withConnection((conn) => readResourceVersion(parsed.datasetId, parsed.resourceType, parsed.id, parsed.versionId, conn, state));
 
     default:
       return FhirError.internal("handler not implemented").toResponse();
