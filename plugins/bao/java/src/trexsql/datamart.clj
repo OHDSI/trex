@@ -6,6 +6,7 @@
   (:require [trexsql.db :as db]
             [trexsql.util :as util]
             [trexsql.batch :as batch]
+            [trexsql.errors :as errors]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [honey.sql :as sql])
@@ -166,6 +167,150 @@
     (.put "fts-indexes-created" (ArrayList. ^java.util.Collection (or (:fts-indexes-created result) [])))
     (.put "duration-ms" (:duration-ms result))
     (.put "error" (:error result))))
+
+;; === Native-scanner copy helpers (DuckDB ATTACH + CREATE TABLE AS SELECT) ===
+
+(defn get-source-tables
+  "List table names in the attached source schema via information_schema."
+  [db source-alias schema-name]
+  (db/validate-identifier! source-alias "source-alias")
+  (db/validate-identifier! schema-name "schema-name")
+  (let [[query-sql & params] (sql/format
+                              {:select [:table_name]
+                               :from [:information_schema.tables]
+                               :where [:and
+                                       [:= :table_schema schema-name]
+                                       [:= :table_catalog source-alias]]})
+        results (db/query-with-params db query-sql (vec params))]
+    (mapv #(.get ^HashMap % "table_name") results)))
+
+(defn apply-table-filter
+  "Keep only tables present in `table-filter` keys; nil filter keeps all."
+  [tables table-filter]
+  (if (nil? table-filter)
+    tables
+    (filterv #(contains? table-filter %) tables)))
+
+(defn build-select-clause
+  "\"*\" for nil/empty/[\"*\"]; otherwise escaped, comma-joined column names."
+  [columns]
+  (if (or (nil? columns) (empty? columns)
+          (= ["*"] columns) (= "*" (first columns)))
+    "*"
+    (do
+      (doseq [col columns] (db/validate-identifier! col "column-name"))
+      (str/join ", " (map #(db/escape-identifier % "column") columns)))))
+
+(defn- validate-patient-ids [patient-filter]
+  (when patient-filter
+    (let [invalid (seq (remove #(or (integer? %)
+                                    (and (string? %) (re-matches #"^\d+$" %)))
+                               patient-filter))]
+      (when invalid
+        (str "Invalid patient IDs (must be numeric): " (pr-str (take 5 invalid)))))))
+
+(defn- validate-timestamp-filter [timestamp-filter]
+  (when timestamp-filter
+    (when-not (re-matches #"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$" (str timestamp-filter))
+      (str "Invalid timestamp format: " timestamp-filter
+           ". Expected ISO 8601 (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"))))
+
+(defn build-where-clause
+  "WHERE clause for patient and timestamp filters, or nil. Validates inputs."
+  [patient-filter timestamp-filter]
+  (when-let [error (validate-patient-ids patient-filter)]
+    (throw (errors/validation-error error {:field :patient-filter})))
+  (when-let [error (validate-timestamp-filter timestamp-filter)]
+    (throw (errors/validation-error error {:field :timestamp-filter})))
+  (let [clauses (cond-> []
+                  patient-filter
+                  (conj (str "person_id IN ("
+                             (str/join ", " (map #(if (integer? %) % (Long/parseLong (str %)))
+                                                 patient-filter))
+                             ")"))
+                  timestamp-filter
+                  (conj (str "observation_date >= '" timestamp-filter "'")))]
+    (when (seq clauses)
+      (str " WHERE " (str/join " AND " clauses)))))
+
+(defn copy-table
+  "Copy one table from the attached source to the cache catalog.
+   Returns TableResult on success, TableError on failure."
+  [db source-alias cache-alias schema-name target-schema table-name config]
+  (try
+    (db/validate-identifier! source-alias "source-alias")
+    (db/validate-identifier! cache-alias "cache-alias")
+    (db/validate-identifier! schema-name "schema-name")
+    (db/validate-identifier! target-schema "target-schema")
+    (db/validate-identifier! table-name "table-name")
+    (let [{:keys [table-filter patient-filter timestamp-filter]} config
+          columns (get table-filter table-name)
+          select-clause (build-select-clause columns)
+          where-clause (build-where-clause patient-filter timestamp-filter)
+          source-table (format "%s.%s.%s"
+                               (db/escape-identifier source-alias "source-alias")
+                               (db/escape-identifier schema-name "schema-name")
+                               (db/escape-identifier table-name "table-name"))
+          target-table (format "%s.%s.%s"
+                               (db/escape-identifier cache-alias "cache-alias")
+                               (db/escape-identifier target-schema "target-schema")
+                               (db/escape-identifier table-name "table-name"))
+          create-sql (format "CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s WHERE false"
+                             target-table select-clause source-table)
+          insert-sql (format "INSERT INTO %s SELECT %s FROM %s%s"
+                             target-table select-clause source-table (or where-clause ""))]
+      (db/execute! db create-sql)
+      (db/execute! db insert-sql)
+      (let [count-sql (format "SELECT COUNT(*) as cnt FROM %s" target-table)
+            count-result (db/query db count-sql)
+            row-count (or (some-> count-result first (.get "cnt")) 0)]
+        (->TableResult table-name row-count 0)))
+    (catch Exception e
+      (->TableError table-name (.getMessage e) "copy"))))
+
+(defn- copy-tables-sequential
+  [db source-alias cache-alias schema-name target-schema tables-to-copy config]
+  (let [total (count tables-to-copy)]
+    (loop [remaining tables-to-copy, idx 1, copied [], failed []]
+      (if (empty? remaining)
+        {:tables-copied copied :tables-failed failed}
+        (let [t (first remaining)
+              _ (log/info (format "Copying table %d of %d: %s" idx total t))
+              result (copy-table db source-alias cache-alias schema-name target-schema t config)]
+          (if (instance? TableResult result)
+            (recur (rest remaining) (inc idx) (conj copied result) failed)
+            (recur (rest remaining) (inc idx) copied (conj failed result))))))))
+
+(defn- copy-tables-parallel
+  [db source-alias cache-alias schema-name target-schema tables-to-copy config]
+  (let [results (doall
+                 (pmap #(copy-table db source-alias cache-alias schema-name target-schema % config)
+                       tables-to-copy))
+        {copied true failed false} (group-by #(instance? TableResult %) results)]
+    {:tables-copied (vec copied) :tables-failed (vec failed)}))
+
+(defn copy-schema
+  "Copy all (filtered) tables from the source schema into the cache catalog.
+   Returns {:tables-copied [...] :tables-failed [...]}."
+  [db source-alias cache-alias config]
+  (let [{:keys [schema-name target-schema-name table-filter parallel-copy]} config
+        target-schema (or target-schema-name schema-name)
+        _ (db/validate-identifier! cache-alias "cache-alias")
+        _ (db/validate-identifier! target-schema "target-schema")
+        all-tables (get-source-tables db source-alias schema-name)
+        tables-to-copy (apply-table-filter all-tables table-filter)
+        create-schema-sql (format "CREATE SCHEMA IF NOT EXISTS %s.%s"
+                                  (db/escape-identifier cache-alias "cache-alias")
+                                  (db/escape-identifier target-schema "target-schema"))]
+    (try
+      (db/execute! db create-schema-sql)
+      (catch Exception e
+        (when-not (re-find #"(?i)already exists" (.getMessage e))
+          (log/warn (format "Failed to create schema %s.%s: %s"
+                            cache-alias target-schema (.getMessage e))))))
+    (if parallel-copy
+      (copy-tables-parallel db source-alias cache-alias schema-name target-schema tables-to-copy config)
+      (copy-tables-sequential db source-alias cache-alias schema-name target-schema tables-to-copy config))))
 
 ;; Mirrors d2e's DUCKDB_FULLTEXT_SEARCH_CONFIG
 ;; (plugins/flows/base/create_cachedb_file_plugin/utils.py). Tables without a
