@@ -738,7 +738,8 @@
       },
       {
         "pattern": "java.base:\\Qsun/net/www/content-types.properties\\E"
-      }
+      },
+      { "pattern": "\\QMETA-INF/services/java.sql.Driver\\E" }
     ]
   },
   "bundles": [
