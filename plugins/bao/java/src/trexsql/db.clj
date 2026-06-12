@@ -3,7 +3,8 @@
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [trexsql.native :as native]
-            [trexsql.errors :as errors])
+            [trexsql.errors :as errors]
+            [trexsql.source-dsn :as source-dsn])
   (:import [com.sun.jna Pointer]
            [java.util ArrayList HashMap]))
 
@@ -201,6 +202,89 @@
                   (str "Cache file is locked by another process: " file-path)
                   :cache-file))
           (throw e))))))
+
+;; === Native source attach (DuckDB scanners) ===
+;; The per-run source alias is "<database-code>__srcdb". It is attached on the
+;; same in-memory handle that already holds the cache file as catalog
+;; <database-code>, so a cross-catalog CREATE TABLE AS SELECT copies the data.
+
+(defn- source-alias-for [database-code]
+  (str database-code "__srcdb"))
+
+(defn- sql-literal
+  "Wrap s as a single-quoted SQL string literal, doubling internal single quotes.
+   The DSN from source-dsn already single-quotes its values (libpq layer); this
+   adds the SQL-literal layer for embedding the whole DSN inside ATTACH '...'."
+  [s]
+  (str "'" (str/replace s "'" "''") "'"))
+
+(defn postgres-attach-sql
+  "Pure: the READ_ONLY postgres ATTACH statement for a source. No I/O."
+  [database-code credentials]
+  (validate-identifier! database-code "database-code")
+  (format "ATTACH IF NOT EXISTS %s AS %s (TYPE postgres, READ_ONLY)"
+          (sql-literal (source-dsn/postgres-dsn credentials))
+          (escape-identifier (source-alias-for database-code) "source-alias")))
+
+(defn mysql-attach-sql
+  "Pure: the READ_ONLY mysql ATTACH statement for a source. No I/O."
+  [database-code credentials]
+  (validate-identifier! database-code "database-code")
+  (format "ATTACH IF NOT EXISTS %s AS %s (TYPE mysql, READ_ONLY)"
+          (sql-literal (source-dsn/mysql-dsn credentials))
+          (escape-identifier (source-alias-for database-code) "source-alias")))
+
+(defn bigquery-attach-sql
+  "Pure: the bigquery ATTACH statement (inherently read-only). No I/O.
+   BigQuery project ids are a restricted charset (lowercase letters, digits,
+   hyphens), so the project value needs no extra escaping."
+  [database-code credentials]
+  (validate-identifier! database-code "database-code")
+  (format "ATTACH IF NOT EXISTS 'project=%s' AS %s (TYPE bigquery)"
+          (source-dsn/bigquery-project credentials)
+          (escape-identifier (source-alias-for database-code) "source-alias")))
+
+(defn- mask-credentials
+  "Redact password/user values so a failed ATTACH (whose error embeds the full
+   SQL via native/check-error!) never leaks credentials into logs or responses."
+  [^String s]
+  (-> (str s)
+      (str/replace #"(?i)password=[^ '\";]+" "password=***")
+      (str/replace #"(?i)user=[^ '\";]+" "user=***")))
+
+(defn- execute-attach!
+  "Run an ATTACH statement, masking credentials in any thrown error."
+  [^TrexsqlDatabase db ^String attach-sql]
+  (try
+    (execute! db attach-sql)
+    (catch Exception e
+      (throw (errors/resource-error
+              (str "Source ATTACH failed: " (mask-credentials (.getMessage e)))
+              :source)))))
+
+(defn attach-source-postgres!
+  "INSTALL/LOAD the postgres scanner and ATTACH the source. Returns the alias."
+  [^TrexsqlDatabase db ^String database-code credentials]
+  (ensure-open! db)
+  (load-extension! db "postgres")
+  (execute-attach! db (postgres-attach-sql database-code credentials))
+  (source-alias-for database-code))
+
+(defn attach-source-mysql!
+  "INSTALL/LOAD the mysql scanner and ATTACH the source. Returns the alias."
+  [^TrexsqlDatabase db ^String database-code credentials]
+  (ensure-open! db)
+  (load-extension! db "mysql")
+  (execute-attach! db (mysql-attach-sql database-code credentials))
+  (source-alias-for database-code))
+
+(defn attach-source-bigquery!
+  "INSTALL/LOAD the bigquery (community) scanner and ATTACH. Returns the alias."
+  [^TrexsqlDatabase db ^String database-code credentials]
+  (ensure-open! db)
+  (load-extension! db "bigquery" :source "community")
+  (execute-attach! db (bigquery-attach-sql database-code credentials))
+  (source-alias-for database-code))
 
 (defn is-attached?
   "Check if a database with the given alias is currently attached.
