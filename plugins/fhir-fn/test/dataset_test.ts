@@ -20,9 +20,11 @@ import {
   buildUpdateDatasetTypesSql,
   buildUpdateDatasetResponse,
   initFhirMeta,
+  parseCustomDefinitions,
   createDataset,
   listDatasets,
   getDataset,
+  updateDataset,
   deleteDataset,
 } from "../functions/handlers/dataset.ts";
 import { FhirError } from "../functions/error.ts";
@@ -540,4 +542,179 @@ Deno.test("initFhirMeta creates schema and two tables", async () => {
 
   const hasExportJobs = sqlLog.some((s) => s.includes("_export_jobs") && s.includes("CREATE TABLE IF NOT EXISTS"));
   assertEquals(hasExportJobs, true);
+});
+
+// ---------------------------------------------------------------------------
+// parseCustomDefinitions tests
+// ---------------------------------------------------------------------------
+
+/** Minimal valid SD Bundle for a custom resource type. */
+function makeCustomSdBundle(resourceName: string) {
+  return {
+    resourceType: "Bundle",
+    type: "collection",
+    entry: [
+      {
+        resource: {
+          resourceType: "StructureDefinition",
+          name: resourceName,
+          type: resourceName,
+          kind: "resource",
+          abstract: false,
+          derivation: "specialization",
+          snapshot: {
+            element: [
+              // root element (skipped by parser)
+              { path: resourceName, min: 0, max: "*", type: [] },
+              // one simple field
+              { path: `${resourceName}.id`, min: 0, max: "1", type: [{ code: "string" }] },
+            ],
+          },
+        },
+      },
+    ],
+  };
+}
+
+Deno.test("parseCustomDefinitions: non-Bundle resource type throws badRequest", () => {
+  let thrown: FhirError | undefined;
+  try {
+    parseCustomDefinitions({ resourceType: "Patient" });
+  } catch (e) {
+    thrown = e as FhirError;
+  }
+  assertEquals(thrown instanceof FhirError, true);
+  assertEquals(thrown!.status, 400);
+  assertEquals(thrown!.diagnostics.includes("must be a FHIR Bundle"), true);
+});
+
+Deno.test("parseCustomDefinitions: Bundle missing entry array throws badRequest", () => {
+  let thrown: FhirError | undefined;
+  try {
+    parseCustomDefinitions({ resourceType: "Bundle" });
+  } catch (e) {
+    thrown = e as FhirError;
+  }
+  assertEquals(thrown instanceof FhirError, true);
+  assertEquals(thrown!.status, 400);
+  assertEquals(thrown!.diagnostics.includes("missing 'entry' array"), true);
+});
+
+Deno.test("parseCustomDefinitions: empty Bundle entry array throws badRequest", () => {
+  let thrown: FhirError | undefined;
+  try {
+    parseCustomDefinitions({ resourceType: "Bundle", entry: [] });
+  } catch (e) {
+    thrown = e as FhirError;
+  }
+  assertEquals(thrown instanceof FhirError, true);
+  assertEquals(thrown!.status, 400);
+  assertEquals(thrown!.diagnostics.includes("is empty"), true);
+});
+
+Deno.test("parseCustomDefinitions: valid SD Bundle returns names including the resource type", () => {
+  const bundle = makeCustomSdBundle("MyCustomResource");
+  const { names, customDefs } = parseCustomDefinitions(bundle);
+  assertEquals(names.includes("MyCustomResource"), true);
+  assertEquals(customDefs.resourceTypeNames().includes("MyCustomResource"), true);
+});
+
+// ---------------------------------------------------------------------------
+// createDataset WITH custom structure_definitions
+// ---------------------------------------------------------------------------
+
+Deno.test("createDataset with custom structure_definitions returns 201 and CREATE TABLE for custom resource", async () => {
+  const state = makeState(); // empty registry — custom path doesn't need it
+
+  const sdBundle = makeCustomSdBundle("MyReport");
+  const sqlLog: string[] = [];
+  const conn = makeFakeConn((sql) => {
+    sqlLog.push(sql);
+    return [];
+  });
+
+  const res = await createDataset(
+    { id: "custom-ds", name: "Custom Dataset", structure_definitions: sdBundle },
+    conn,
+    state,
+  );
+  assertEquals(res.status, 201);
+
+  const body = await res.json();
+  assertEquals(body.id, "custom-ds");
+  assertEquals(body.status, "active");
+  assertEquals(Array.isArray(body.resource_types), true);
+  assertEquals(body.resource_types.includes("MyReport"), true);
+
+  // The captured SQLs must include a CREATE TABLE for the custom resource (lowercased table name)
+  const hasCreateTable = sqlLog.some(
+    (s) => s.includes("CREATE TABLE") && s.toLowerCase().includes("myreport"),
+  );
+  assertEquals(
+    hasCreateTable,
+    true,
+    `Expected CREATE TABLE for myreport in: ${sqlLog.join(" | ")}`,
+  );
+
+  // Must also include CREATE SCHEMA
+  const hasCreateSchema = sqlLog.some((s) => s.includes("CREATE SCHEMA") && s.includes("custom_ds"));
+  assertEquals(hasCreateSchema, true, `Expected CREATE SCHEMA for custom_ds`);
+});
+
+// ---------------------------------------------------------------------------
+// updateDataset tests
+// ---------------------------------------------------------------------------
+
+Deno.test("updateDataset: missing dataset returns 404", async () => {
+  const state = makeState();
+  const conn = makeFakeConn(() => []); // empty rows = dataset not found
+
+  await assertRejects(
+    () => updateDataset("ghost-ds", { structure_definitions: makeCustomSdBundle("X") }, conn, state),
+    FhirError,
+    "not found",
+  );
+});
+
+Deno.test("updateDataset: missing structure_definitions field throws 400", async () => {
+  const state = makeState();
+  const conn = makeFakeConn((sql) => {
+    // Return a row for the exists check
+    if (sql.includes("_datasets")) return [{ id: "ds1" }];
+    return [];
+  });
+
+  await assertRejects(
+    () => updateDataset("ds1", {}, conn, state),
+    FhirError,
+    "Missing 'structure_definitions'",
+  );
+});
+
+Deno.test("updateDataset happy path: 200 with list_concat UPDATE", async () => {
+  const state = makeState();
+  const sdBundle = makeCustomSdBundle("NewType");
+  const sqlLog: string[] = [];
+
+  const conn = makeFakeConn((sql) => {
+    sqlLog.push(sql);
+    // dataset exists check
+    if (sql.includes("_datasets") && sql.includes("SELECT")) return [{ id: "ds1" }];
+    return [];
+  });
+
+  const res = await updateDataset("ds1", { structure_definitions: sdBundle }, conn, state);
+  assertEquals(res.status, 200);
+
+  const body = await res.json();
+  assertEquals(body.id, "ds1");
+  assertEquals(Array.isArray(body.added_types), true);
+  assertEquals(body.added_types.includes("NewType"), true);
+  assertEquals(body.skipped, 0);
+
+  // Should have issued the list_concat UPDATE
+  const hasUpdate = sqlLog.some(
+    (s) => s.includes("list_concat") && s.includes("resource_types"),
+  );
+  assertEquals(hasUpdate, true, `Expected list_concat UPDATE in: ${sqlLog.join(" | ")}`);
 });

@@ -10,6 +10,8 @@ import {
   toQualifiedSchema,
 } from "../sql_safety.ts";
 import { buildDatasetExistsSql } from "./metadata.ts";
+import { DefinitionRegistry } from "../fhir/structure_definition.ts";
+import { generateDdl } from "../schema/generator.ts";
 
 // ---------------------------------------------------------------------------
 // Meta schema init (port of init_fhir_meta from lib.rs lines ~34-72)
@@ -195,6 +197,51 @@ export function buildUpdateDatasetResponse(
 }
 
 // ---------------------------------------------------------------------------
+// parseCustomDefinitions (port of parse_custom_definitions in dataset.rs)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse and validate a FHIR Bundle of StructureDefinitions.
+ * Returns { names, customDefs } where names is the list of resource type names
+ * and customDefs is the loaded DefinitionRegistry.
+ * Throws FhirError.badRequest on any validation failure.
+ */
+export function parseCustomDefinitions(
+  bundle: unknown,
+): { names: string[]; customDefs: DefinitionRegistry } {
+  const b = bundle as Record<string, unknown>;
+  const resourceType = typeof b?.resourceType === "string" ? b.resourceType : "";
+  if (resourceType !== "Bundle") {
+    throw FhirError.badRequest("structure_definitions must be a FHIR Bundle");
+  }
+
+  const entries = b?.entry;
+  if (!Array.isArray(entries)) {
+    throw FhirError.badRequest("Bundle missing 'entry' array");
+  }
+  if (entries.length === 0) {
+    throw FhirError.badRequest("structure_definitions Bundle is empty");
+  }
+
+  const bundleStr = JSON.stringify(bundle);
+  const emptyTypes = '{"resourceType":"Bundle","type":"collection","entry":[]}';
+
+  let registry: DefinitionRegistry;
+  try {
+    registry = DefinitionRegistry.loadFromJson(bundleStr, emptyTypes);
+  } catch (e) {
+    throw FhirError.badRequest(`Invalid StructureDefinitions: ${e}`);
+  }
+
+  const names = registry.resourceTypeNames();
+  if (names.length === 0) {
+    throw FhirError.badRequest("No valid resource StructureDefinitions found in Bundle");
+  }
+
+  return { names, customDefs: registry };
+}
+
+// ---------------------------------------------------------------------------
 // Conn adapter: the Conn interface uses query() which returns array of objects,
 // but our DDL/DML statements don't need rows back; errors are thrown.
 // We use a small wrapper so errors propagate as FhirError.
@@ -222,10 +269,20 @@ export async function createDataset(
   // Ensure meta schema exists
   await initFhirMeta(conn, state.dbName);
 
-  // Compute resource types — default path (custom SD path deferred; see concerns)
-  const resourceTypeNames = state.registry.resourceTypeNames();
-  if (resourceTypeNames.length === 0) {
-    throw FhirError.internal("No FHIR definitions loaded on server");
+  // Compute resource types: custom SD path or default registry path
+  let resourceTypeNames: string[];
+  let customDefs: DefinitionRegistry | undefined;
+
+  if (body?.structure_definitions != null) {
+    const parsed = parseCustomDefinitions(body.structure_definitions);
+    resourceTypeNames = parsed.names;
+    customDefs = parsed.customDefs;
+  } else {
+    resourceTypeNames = state.registry.resourceTypeNames();
+    if (resourceTypeNames.length === 0) {
+      throw FhirError.internal("No FHIR definitions loaded on server");
+    }
+    customDefs = undefined;
   }
 
   const qualifiedSchema = toQualifiedSchema(state.dbName, id);
@@ -258,17 +315,35 @@ export async function createDataset(
   const createdTypes: string[] = [];
   const errors: string[] = [];
 
-  const allDdl = state.registry.generateAllDdl(qualifiedSchema);
-  for (const { resourceType: typeName, ddl, error } of allDdl) {
-    if (error !== null || ddl === null) {
-      errors.push(`${typeName}: ${error ?? "no DDL"}`);
-      continue;
+  if (customDefs !== undefined) {
+    // Custom SD path: generate DDL from the custom DefinitionRegistry
+    for (const typeName of resourceTypeNames) {
+      try {
+        const ddl = generateDdl(customDefs, typeName, qualifiedSchema);
+        try {
+          await exec(conn, ddl);
+          createdTypes.push(typeName);
+        } catch (e) {
+          errors.push(`${typeName}: ${String(e)}`);
+        }
+      } catch (e) {
+        errors.push(`${typeName}: ${String(e)}`);
+      }
     }
-    try {
-      await exec(conn, ddl);
-      createdTypes.push(typeName);
-    } catch (e) {
-      errors.push(`${typeName}: ${String(e)}`);
+  } else {
+    // Default path: use the registry's generateAllDdl
+    const allDdl = state.registry.generateAllDdl(qualifiedSchema);
+    for (const { resourceType: typeName, ddl, error } of allDdl) {
+      if (error !== null || ddl === null) {
+        errors.push(`${typeName}: ${error ?? "no DDL"}`);
+        continue;
+      }
+      try {
+        await exec(conn, ddl);
+        createdTypes.push(typeName);
+      } catch (e) {
+        errors.push(`${typeName}: ${String(e)}`);
+      }
     }
   }
 
@@ -372,22 +447,37 @@ export async function updateDataset(
     throw FhirError.badRequest("Missing 'structure_definitions' field");
   }
 
-  // Validate bundle shape
-  if (sdBundle.resourceType !== "Bundle") {
-    throw FhirError.badRequest("structure_definitions must be a FHIR Bundle");
-  }
-  if (!Array.isArray(sdBundle.entry)) {
-    throw FhirError.badRequest("Bundle missing 'entry' array");
-  }
-  if (sdBundle.entry.length === 0) {
-    throw FhirError.badRequest("structure_definitions Bundle is empty");
+  const { names: newTypes, customDefs } = parseCustomDefinitions(sdBundle);
+  const qualifiedSchema = toQualifiedSchema(state.dbName, datasetId);
+
+  const added: string[] = [];
+
+  for (const typeName of newTypes) {
+    let ddl: string;
+    try {
+      ddl = generateDdl(customDefs, typeName, qualifiedSchema);
+    } catch (e) {
+      console.error(`[fhir] Failed to generate DDL for ${typeName}:`, e);
+      throw FhirError.internal(`Failed to generate DDL for ${typeName}`);
+    }
+
+    try {
+      await exec(conn, ddl);
+      added.push(typeName);
+    } catch (e) {
+      console.error(`[fhir] Failed to create table for ${typeName}:`, e);
+      throw FhirError.internal(`Failed to create table for ${typeName}`);
+    }
   }
 
-  // NOTE: The custom DefinitionRegistry path (parsing SD bundle + generating DDL)
-  // requires the full DefinitionRegistry.loadFromJson API which is not yet exposed
-  // from structure_definition.ts in a way compatible with this path.
-  // This is DONE_WITH_CONCERNS — see report.
-  throw FhirError.internal("Custom structure_definitions not yet supported in updateDataset");
+  if (added.length > 0) {
+    const newTypesSql = buildResourceTypesSqlList(added);
+    try {
+      await exec(conn, buildUpdateDatasetTypesSql(metaSchema, datasetId, newTypesSql));
+    } catch { /* best-effort, mirrors Rust let _ = ... */ }
+  }
+
+  return Response.json(buildUpdateDatasetResponse(datasetId, added, newTypes.length));
 }
 
 export async function deleteDataset(
