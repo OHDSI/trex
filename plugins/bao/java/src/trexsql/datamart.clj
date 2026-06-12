@@ -55,6 +55,17 @@
 ;; valid-dialects.
 (def jdbc-dialects valid-dialects)
 
+;; Dialects DuckDB can read directly via a bundled scanner. These take the
+;; native ATTACH + CREATE TABLE AS SELECT path; every other valid dialect
+;; falls back to the JDBC batch path. postgresql/mariadb are aliases.
+(def native-scanner-dialects
+  #{"postgres" "postgresql" "mysql" "mariadb" "bigquery"})
+
+(defn native-scanner-dialect?
+  "True if `dialect` should use the native DuckDB scanner path."
+  [dialect]
+  (contains? native-scanner-dialects (str/lower-case (or dialect ""))))
+
 (defn- valid-database-code?
   "Check if database-code is valid for filesystem naming."
   [code]
@@ -487,18 +498,61 @@
      :cache-path (or cache-path "./data/cache")
      :batch-size (or (:batch-size config) 10000)}))
 
+(defn attach-source!
+  "Attach the source via the matching DuckDB scanner. Returns the alias."
+  [db database-code credentials]
+  (case (str/lower-case (:dialect credentials))
+    ("postgres" "postgresql") (db/attach-source-postgres! db database-code credentials)
+    ("mysql" "mariadb")       (db/attach-source-mysql! db database-code credentials)
+    "bigquery"                (db/attach-source-bigquery! db database-code credentials)
+    (throw (errors/config-error
+            (str "Dialect is not a native-scanner dialect: " (:dialect credentials))
+            :dialect))))
+
+(defn create-cache-native
+  "Native-scanner cache read. Attaches the cache file and the source on the
+   same handle, copies the schema with DuckDB doing all type conversion, then
+   detaches the source. Returns the SAME map shape as batch/create-cache-jdbc
+   (no FTS, no ->CacheResult — create-cache adds those), so the shared FTS
+   step in create-cache works identically for both paths."
+  [db config]
+  (let [start (System/currentTimeMillis)
+        {:keys [database-code schema-name source-credentials cache-path]} config]
+    (db/attach-cache-file! db database-code (or cache-path "./data/cache"))
+    (let [source-alias (attach-source! db database-code source-credentials)]
+      (try
+        (let [{:keys [tables-copied tables-failed]}
+              (copy-schema db source-alias database-code config)]
+          {:success? (empty? tables-failed)
+           :database-code database-code
+           :schema-name schema-name
+           :tables-copied (mapv (fn [t] {:table-name (:table-name t)
+                                         :rows-copied (:rows-copied t)}) tables-copied)
+           :tables-failed (mapv (fn [t] {:table-name (:table-name t)
+                                         :error (:error t)
+                                         :phase (:phase t)}) tables-failed)
+           :duration-ms (- (System/currentTimeMillis) start)
+           :error nil})
+        (finally
+          (try (db/detach-database! db source-alias)
+               (catch Exception e
+                 (log/warn (format "Failed to detach source %s: %s"
+                                   source-alias (.getMessage e))))))))))
+
 (defn create-cache
-  "Unified cache creation. Every supported dialect goes through the JDBC
-   batch transfer path (HikariCP + SqlRender). After the table copy
-   completes successfully, FTS indexes are built on the configured tables
-   (default: `concept`, `concept_synonym`) inside the cache file.
+  "Unified cache creation. postgres/mysql/bigquery use the native DuckDB
+   scanner path; all other dialects use the JDBC batch transfer path. After the
+   copy, FTS indexes are built on the configured tables (default: `concept`,
+   `concept_synonym`) inside the cache file.
    Returns a CacheResult.
    `progress-fn` is invoked with per-phase progress events during transfer."
   ([db config]
    (create-cache db config nil))
   ([db config progress-fn]
-   (let [jdbc-config (convert-config-for-jdbc config)
-         result (batch/create-cache-jdbc db jdbc-config progress-fn)
+   (let [dialect (get-in config [:source-credentials :dialect])
+         result (if (native-scanner-dialect? dialect)
+                  (create-cache-native db config)
+                  (batch/create-cache-jdbc db (convert-config-for-jdbc config) progress-fn))
          tables-copied (:tables-copied result)
          ;; Only attempt FTS when the copy itself succeeded — pointless to
          ;; build indexes on a half-populated cache.

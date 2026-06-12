@@ -265,3 +265,15 @@
     (is (= ["a" "b"] (datamart/apply-table-filter ["a" "b"] nil))))
   (testing "map filter keeps only matching keys"
     (is (= ["a"] (datamart/apply-table-filter ["a" "b"] {"a" ["*"]})))))
+
+(deftest native-scanner-dialect-pred-test
+  (testing "postgres/mysql/bigquery + aliases are native; others are not"
+    (is (true?  (datamart/native-scanner-dialect? "postgres")))
+    (is (true?  (datamart/native-scanner-dialect? "postgresql")))
+    (is (true?  (datamart/native-scanner-dialect? "mysql")))
+    (is (true?  (datamart/native-scanner-dialect? "mariadb")))
+    (is (true?  (datamart/native-scanner-dialect? "bigquery")))
+    (is (true?  (datamart/native-scanner-dialect? "BigQuery")))   ; case-insensitive
+    (is (false? (datamart/native-scanner-dialect? "oracle")))
+    (is (false? (datamart/native-scanner-dialect? "sql server")))
+    (is (false? (datamart/native-scanner-dialect? nil)))))
