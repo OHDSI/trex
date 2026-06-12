@@ -1,4 +1,4 @@
 {
-  "workspace": ["./core", "./plugins/runtime"],
+  "workspace": ["./core", "./plugins/runtime", "./plugins/fhir-fn"],
   "nodeModulesDir": "auto"
 }
