@@ -20,6 +20,7 @@ import {
 import { searchResources } from "./handlers/search.ts";
 import { resourceHistory, readResourceVersion } from "./handlers/history.ts";
 import { processBundle } from "./handlers/bundle.ts";
+import { importNdjson } from "./handlers/import.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -411,6 +412,11 @@ async function dispatch(
     case "bundle": {
       const body = await req.json().catch(() => ({}));
       return await withConnection((conn) => processBundle(parsed.datasetId, body, conn, state));
+    }
+
+    case "import": {
+      const bodyText = await req.text();
+      return await withConnection((conn) => importNdjson(parsed.datasetId, bodyText, conn, state));
     }
 
     default:
