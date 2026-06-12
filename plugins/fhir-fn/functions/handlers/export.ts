@@ -4,7 +4,7 @@
 import { Conn } from "../db.ts";
 import { AppState } from "../state.ts";
 import { FhirError } from "../error.ts";
-import { validateDatasetId, validateResourceType } from "../sql_safety.ts";
+import { validateDatasetId, validateResourceType, validateUuid } from "../sql_safety.ts";
 import { toQualifiedMetaSchema } from "../sql_safety.ts";
 import {
   createExportJob,
@@ -191,6 +191,10 @@ export async function exportStatus(
   conn: Conn,
   state: AppState,
 ): Promise<Response> {
+  // Match the native server: validate dataset id + job id (UUID) before querying.
+  validateDatasetId(datasetId);
+  validateUuid(jobId);
+
   const metaSchema = toQualifiedMetaSchema(state.dbName);
 
   const job = await getExportJob(conn, jobId, metaSchema).catch((e) => {

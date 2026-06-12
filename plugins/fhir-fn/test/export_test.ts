@@ -322,7 +322,7 @@ Deno.test("export_status_complete_job_returns_200_with_output", async () => {
   const { conn } = makeFakeConn(responses);
   const state = makeState();
 
-  const res = await exportStatus("ds1", "job-1", conn, state);
+  const res = await exportStatus("ds1", "00000000-0000-0000-0000-000000000001", conn, state);
   assertEquals(res.status, 200);
   const body = await res.json();
   assertEquals(body["transactionTime"], "2026-05-23T00:00:00Z");
@@ -339,11 +339,11 @@ Deno.test("export_status_accepted_job_returns_202", async () => {
   const { conn } = makeFakeConn(responses);
   const state = makeState();
 
-  const res = await exportStatus("ds1", "job-2", conn, state);
+  const res = await exportStatus("ds1", "00000000-0000-0000-0000-000000000002", conn, state);
   assertEquals(res.status, 202);
   const body = await res.json();
   assertEquals(body["status"], "accepted");
-  assertEquals(body["jobId"], "job-2");
+  assertEquals(body["jobId"], "00000000-0000-0000-0000-000000000002");
 });
 
 Deno.test("export_status_in_progress_job_returns_202", async () => {
@@ -353,7 +353,7 @@ Deno.test("export_status_in_progress_job_returns_202", async () => {
   const { conn } = makeFakeConn(responses);
   const state = makeState();
 
-  const res = await exportStatus("ds1", "job-3", conn, state);
+  const res = await exportStatus("ds1", "00000000-0000-0000-0000-000000000003", conn, state);
   assertEquals(res.status, 202);
   const body = await res.json();
   assertEquals(body["status"], "in-progress");
@@ -368,7 +368,7 @@ Deno.test("export_status_error_job_throws_fhir_internal", async () => {
 
   let threw = false;
   try {
-    await exportStatus("ds1", "job-4", conn, state);
+    await exportStatus("ds1", "00000000-0000-0000-0000-000000000004", conn, state);
   } catch (e) {
     threw = true;
     assert(e instanceof FhirError);
@@ -384,7 +384,7 @@ Deno.test("export_status_complete_with_no_output_returns_empty_array", async () 
   const { conn } = makeFakeConn(responses);
   const state = makeState();
 
-  const res = await exportStatus("ds1", "job-5", conn, state);
+  const res = await exportStatus("ds1", "00000000-0000-0000-0000-000000000005", conn, state);
   assertEquals(res.status, 200);
   const body = await res.json();
   assertEquals((body["output"] as any[]).length, 0);
