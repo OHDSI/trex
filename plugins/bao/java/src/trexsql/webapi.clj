@@ -990,13 +990,17 @@
               ^ResultSet rs (.executeQuery stmt sql)]
     (let [^java.sql.ResultSetMetaData meta (.getMetaData rs)
           col-count (.getColumnCount meta)
-          col-names (mapv #(.getColumnLabel meta (inc %)) (range col-count))]
+          ;; Hint at the call site: a ^ResultSet/^ResultSetMetaData binding hint
+          ;; does NOT propagate into these closures, so without it Clojure reflects
+          ;; (fatal in a native image — "No matching method ... for PgResultSet").
+          col-names (mapv (fn [i] (.getColumnLabel ^java.sql.ResultSetMetaData meta (inc i)))
+                          (range col-count))]
       (loop [rows []]
         (if (.next rs)
           (recur (conj rows
                    (into {}
                      (map (fn [i]
-                            [(get col-names i) (.getObject rs (inc i))])
+                            [(nth col-names i) (.getObject ^ResultSet rs (inc i))])
                        (range col-count)))))
           rows)))))
 
