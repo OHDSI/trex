@@ -13,7 +13,11 @@ use std::{
     error::Error,
     ffi::{c_char, c_int, c_void, CStr},
     ptr,
-    sync::Mutex,
+    sync::{
+        mpsc::{channel, Receiver, Sender},
+        Mutex,
+    },
+    thread,
 };
 
 // ---------------------------------------------------------------------------
@@ -43,10 +47,20 @@ struct WebApiLib {
     thread: *mut graal_isolatethread_t,
 }
 
-// The Graal isolate thread is only ever used behind the WEBAPI mutex.
-unsafe impl Send for WebApiLib {}
+// A Graal isolate thread is bound to the OS thread that created it and must only
+// be called from there. DuckDB runs scalar functions on a transient thread pool
+// with small stacks, so the isolate is owned by one dedicated large-stack thread
+// and start/stop/status are marshalled to it over a channel.
+enum Cmd {
+    Start(Sender<String>),
+    Stop(Sender<String>),
+    Status(Sender<String>),
+}
 
-static WEBAPI: Mutex<Option<WebApiLib>> = Mutex::new(None);
+static WEBAPI_TX: Mutex<Option<Sender<Cmd>>> = Mutex::new(None);
+
+// Large stack so WebAPI's deep native-image call chains can't overflow it.
+const WEBAPI_STACK_SIZE: usize = 512 * 1024 * 1024;
 
 const LIB_ENV: &str = "WEBAPI_NATIVE_LIB";
 const DEFAULT_LIB: &str = "libwebapi-native.so";
@@ -74,36 +88,90 @@ unsafe fn libc_dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void {
     dlsym(handle, name)
 }
 
-/// Resolve and initialise the WebAPI native library + a Graal isolate. Idempotent.
-fn ensure_loaded(lib_guard: &mut Option<WebApiLib>) -> std::result::Result<(), String> {
-    if lib_guard.is_some() {
-        return Ok(());
-    }
+/// dlopen libwebapi-native.so, resolve the symbols, and create a Graal isolate.
+/// MUST run on the dedicated isolate thread — the returned isolate-thread pointer
+/// is only valid there.
+unsafe fn load_lib() -> std::result::Result<WebApiLib, String> {
     let path = std::env::var(LIB_ENV).unwrap_or_else(|_| DEFAULT_LIB.to_string());
     let c_path = std::ffi::CString::new(path.clone()).map_err(|e| e.to_string())?;
-    unsafe {
-        let handle = dlopen(c_path.as_ptr(), RTLD_NOW | RTLD_GLOBAL);
-        if handle.is_null() {
-            let err = dlerror();
-            let msg = if err.is_null() {
-                "unknown".to_string()
-            } else {
-                CStr::from_ptr(err).to_string_lossy().into_owned()
-            };
-            return Err(format!("dlopen({path}) failed: {msg}"));
-        }
-        let create: CreateIsolateFn = dlsym_or(handle, b"graal_create_isolate\0")?;
-        let start: StartFn = dlsym_or(handle, b"webapi_start\0")?;
-        let stop: StopOrStatusFn = dlsym_or(handle, b"webapi_stop\0")?;
-        let status: StopOrStatusFn = dlsym_or(handle, b"webapi_status\0")?;
+    let handle = dlopen(c_path.as_ptr(), RTLD_NOW | RTLD_GLOBAL);
+    if handle.is_null() {
+        let err = dlerror();
+        let msg = if err.is_null() {
+            "unknown".to_string()
+        } else {
+            CStr::from_ptr(err).to_string_lossy().into_owned()
+        };
+        return Err(format!("dlopen({path}) failed: {msg}"));
+    }
+    let create: CreateIsolateFn = dlsym_or(handle, b"graal_create_isolate\0")?;
+    let start: StartFn = dlsym_or(handle, b"webapi_start\0")?;
+    let stop: StopOrStatusFn = dlsym_or(handle, b"webapi_stop\0")?;
+    let status: StopOrStatusFn = dlsym_or(handle, b"webapi_status\0")?;
 
-        let mut isolate: *mut graal_isolate_t = ptr::null_mut();
-        let mut thread: *mut graal_isolatethread_t = ptr::null_mut();
-        if create(ptr::null_mut(), &mut isolate, &mut thread) != 0 || thread.is_null() {
-            return Err("graal_create_isolate failed".to_string());
+    let mut isolate: *mut graal_isolate_t = ptr::null_mut();
+    let mut thread: *mut graal_isolatethread_t = ptr::null_mut();
+    if create(ptr::null_mut(), &mut isolate, &mut thread) != 0 || thread.is_null() {
+        return Err("graal_create_isolate failed".to_string());
+    }
+    Ok(WebApiLib { start, stop, status, thread })
+}
+
+/// Body of the dedicated isolate thread: load the library here (so the isolate
+/// thread is bound to this OS thread), report init status, then serve commands
+/// on this same thread until the channel closes.
+fn isolate_thread_main(cmd_rx: Receiver<Cmd>, init_tx: Sender<std::result::Result<(), String>>) {
+    let lib = match unsafe { load_lib() } {
+        Ok(lib) => lib,
+        Err(e) => {
+            let _ = init_tx.send(Err(e));
+            return;
         }
-        *lib_guard = Some(WebApiLib { start, stop, status, thread });
-        Ok(())
+    };
+    let _ = init_tx.send(Ok(()));
+
+    // All FFI into the isolate happens here, on the thread that created it.
+    while let Ok(cmd) = cmd_rx.recv() {
+        unsafe {
+            match cmd {
+                Cmd::Start(reply) => {
+                    let _ = reply.send(cstr_to_string((lib.start)(lib.thread, ptr::null_mut())));
+                }
+                Cmd::Stop(reply) => {
+                    let _ = reply.send(cstr_to_string((lib.stop)(lib.thread)));
+                }
+                Cmd::Status(reply) => {
+                    let _ = reply.send(cstr_to_string((lib.status)(lib.thread)));
+                }
+            }
+        }
+    }
+}
+
+/// Lazily spawn the dedicated isolate thread (idempotent) and return a sender to it.
+fn ensure_thread() -> std::result::Result<Sender<Cmd>, String> {
+    let mut guard = WEBAPI_TX
+        .lock()
+        .map_err(|_| "webapi lock poisoned".to_string())?;
+    if let Some(tx) = guard.as_ref() {
+        return Ok(tx.clone());
+    }
+    let (cmd_tx, cmd_rx) = channel::<Cmd>();
+    let (init_tx, init_rx) = channel::<std::result::Result<(), String>>();
+    thread::Builder::new()
+        .name("webapi-isolate".to_string())
+        .stack_size(WEBAPI_STACK_SIZE)
+        .spawn(move || isolate_thread_main(cmd_rx, init_tx))
+        .map_err(|e| format!("spawn webapi isolate thread failed: {e}"))?;
+    // Block until the thread has loaded the lib + created the isolate, so init
+    // errors surface to the caller and a failed attempt can be retried later.
+    match init_rx.recv() {
+        Ok(Ok(())) => {
+            *guard = Some(cmd_tx.clone());
+            Ok(cmd_tx)
+        }
+        Ok(Err(e)) => Err(e),
+        Err(e) => Err(format!("webapi isolate thread init failed: {e}")),
     }
 }
 
@@ -115,16 +183,20 @@ unsafe fn cstr_to_string(p: *mut c_char) -> String {
     }
 }
 
-/// Run a closure against the loaded library, producing a status string.
-fn with_lib<F: FnOnce(&WebApiLib) -> String>(f: F) -> String {
-    let mut guard = match WEBAPI.lock() {
-        Ok(g) => g,
-        Err(_) => return "error: webapi lock poisoned".to_string(),
+/// Send a command to the dedicated isolate thread and block for its reply.
+fn call(make_cmd: impl FnOnce(Sender<String>) -> Cmd) -> String {
+    let tx = match ensure_thread() {
+        Ok(tx) => tx,
+        Err(e) => return format!("error: {e}"),
     };
-    if let Err(e) = ensure_loaded(&mut guard) {
-        return format!("error: {e}");
+    let (reply_tx, reply_rx) = channel::<String>();
+    if tx.send(make_cmd(reply_tx)).is_err() {
+        return "error: webapi isolate thread is not running".to_string();
     }
-    f(guard.as_ref().unwrap())
+    match reply_rx.recv() {
+        Ok(s) => s,
+        Err(e) => format!("error: webapi reply channel closed: {e}"),
+    }
 }
 
 fn emit(output: &mut dyn WritableVector, value: &str) {
@@ -141,7 +213,7 @@ impl VScalar for WebApiStart {
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let msg = with_lib(|lib| cstr_to_string((lib.start)(lib.thread, ptr::null_mut())));
+        let msg = call(Cmd::Start);
         let n = input.len().max(1);
         for _ in 0..n {
             emit(output, &msg);
@@ -161,7 +233,7 @@ impl VScalar for WebApiStop {
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let msg = with_lib(|lib| cstr_to_string((lib.stop)(lib.thread)));
+        let msg = call(Cmd::Stop);
         emit(output, &msg);
         Ok(())
     }
@@ -178,7 +250,7 @@ impl VScalar for WebApiStatus {
         _input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let msg = with_lib(|lib| cstr_to_string((lib.status)(lib.thread)));
+        let msg = call(Cmd::Status);
         emit(output, &msg);
         Ok(())
     }

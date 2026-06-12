@@ -36,6 +36,7 @@ use std::env;
 use std::error::Error as StdError;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use tracing::warn;
 use uuid::Uuid;
@@ -47,7 +48,7 @@ use tokio::sync::{mpsc, oneshot};
 
 type PendingRequestsMap =
   Arc<Mutex<HashMap<String, oneshot::Sender<JsonValue>>>>;
-type RequestChannelType = Arc<Mutex<Option<mpsc::Sender<JsonValue>>>>;
+type RequestListenersMap = Arc<Mutex<HashMap<u64, mpsc::Sender<JsonValue>>>>;
 
 static TREX_DB: LazyLock<Arc<Mutex<Connection>>> = LazyLock::new(|| {
   let cfg = Config::default()
@@ -87,8 +88,13 @@ static DB_CREDENTIALS: LazyLock<Arc<Mutex<String>>> = LazyLock::new(|| {
   )))
 });
 
-static REQUEST_CHANNEL: LazyLock<RequestChannelType> =
-  LazyLock::new(|| Arc::new(Mutex::new(None)));
+// Inter-worker request listeners, keyed by registration id. The trexas main
+// service runs as several isolates (one per primary-pool thread), each
+// registering a listener, so a superseded/closed one no longer disables the
+// channel for the others.
+static REQUEST_LISTENERS: LazyLock<RequestListenersMap> =
+  LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
+static LISTENER_NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 static PENDING_REQUESTS: LazyLock<PendingRequestsMap> =
   LazyLock::new(|| Arc::new(Mutex::new(HashMap::new())));
@@ -997,12 +1003,22 @@ impl Resource for QueryStreamResource {
 }
 
 pub struct RequestResource {
+  listener_id: u64,
   receiver: RefCell<Option<mpsc::Receiver<JsonValue>>>,
 }
 
 impl Resource for RequestResource {
   fn name(&self) -> std::borrow::Cow<str> {
     "RequestResource".into()
+  }
+}
+
+impl Drop for RequestResource {
+  fn drop(&mut self) {
+    // Deregister this listener when its worker isolate is torn down.
+    if let Ok(mut listeners) = REQUEST_LISTENERS.lock() {
+      listeners.remove(&self.listener_id);
+    }
   }
 }
 
@@ -1029,42 +1045,55 @@ async fn send_request_inner(
     "message": message
   });
 
-  let send_result = {
-    let channel_guard = REQUEST_CHANNEL.lock().unwrap();
-    if let Some(sender) = channel_guard.as_ref() {
-      sender.try_send(request_with_id)
-    } else {
-      let mut pending = PENDING_REQUESTS.lock().unwrap();
-      pending.remove(&request_id);
+  // Dispatch to the oldest live listener (the long-lived primary main worker),
+  // failing over to newer ones and pruning closed senders.
+  let delivered = {
+    let mut listeners = REQUEST_LISTENERS.lock().unwrap();
+    if listeners.is_empty() {
+      PENDING_REQUESTS.lock().unwrap().remove(&request_id);
       return Err(TrexError::Generic("No active listeners".to_string()));
     }
-  };
-
-  match send_result {
-    Ok(()) => {
-      match tokio::time::timeout(
-        std::time::Duration::from_secs(30),
-        response_receiver,
-      )
-      .await
-      {
-        Ok(Ok(response)) => Ok(response),
-        Ok(Err(_)) => {
-          let mut pending = PENDING_REQUESTS.lock().unwrap();
-          pending.remove(&request_id);
-          Err(TrexError::Generic("Request cancelled".to_string()))
-        }
-        Err(_) => {
-          let mut pending = PENDING_REQUESTS.lock().unwrap();
-          pending.remove(&request_id);
-          Err(TrexError::Generic("Request timeout".to_string()))
+    let mut ids: Vec<u64> = listeners.keys().copied().collect();
+    ids.sort_unstable();
+    let mut delivered = false;
+    let mut dead: Vec<u64> = Vec::new();
+    for id in &ids {
+      if let Some(sender) = listeners.get(id) {
+        match sender.try_send(request_with_id.clone()) {
+          Ok(()) => {
+            delivered = true;
+            break;
+          }
+          Err(mpsc::error::TrySendError::Closed(_)) => dead.push(*id),
+          Err(mpsc::error::TrySendError::Full(_)) => {}
         }
       }
     }
+    for id in dead {
+      listeners.remove(&id);
+    }
+    delivered
+  };
+
+  if !delivered {
+    PENDING_REQUESTS.lock().unwrap().remove(&request_id);
+    return Err(TrexError::Generic("Failed to send request".to_string()));
+  }
+
+  match tokio::time::timeout(
+    std::time::Duration::from_secs(30),
+    response_receiver,
+  )
+  .await
+  {
+    Ok(Ok(response)) => Ok(response),
+    Ok(Err(_)) => {
+      PENDING_REQUESTS.lock().unwrap().remove(&request_id);
+      Err(TrexError::Generic("Request cancelled".to_string()))
+    }
     Err(_) => {
-      let mut pending = PENDING_REQUESTS.lock().unwrap();
-      pending.remove(&request_id);
-      Err(TrexError::Generic("Failed to send request".to_string()))
+      PENDING_REQUESTS.lock().unwrap().remove(&request_id);
+      Err(TrexError::Generic("Request timeout".to_string()))
     }
   }
 }
@@ -1073,13 +1102,15 @@ async fn send_request_inner(
 #[serde]
 fn op_req_listen(state: &mut OpState) -> Result<ResourceId, TrexError> {
   let (sender, receiver) = mpsc::channel::<JsonValue>(1000);
+  let listener_id = LISTENER_NEXT_ID.fetch_add(1, Ordering::Relaxed);
 
   {
-    let mut channel_guard = REQUEST_CHANNEL.lock().unwrap();
-    *channel_guard = Some(sender);
+    let mut listeners = REQUEST_LISTENERS.lock().unwrap();
+    listeners.insert(listener_id, sender);
   }
 
   let resource = RequestResource {
+    listener_id,
     receiver: RefCell::new(Some(receiver)),
   };
   Ok(state.resource_table.add(resource))
@@ -1100,8 +1131,8 @@ async fn op_req_next(
 
     if next_message.is_none() {
       {
-        let mut channel_guard = REQUEST_CHANNEL.lock().unwrap();
-        *channel_guard = None;
+        let mut listeners = REQUEST_LISTENERS.lock().unwrap();
+        listeners.remove(&resource.listener_id);
       }
 
       state
@@ -1321,8 +1352,8 @@ mod tests {
 
   fn cleanup_request_state() {
     {
-      let mut ch = REQUEST_CHANNEL.lock().unwrap();
-      *ch = None;
+      let mut listeners = REQUEST_LISTENERS.lock().unwrap();
+      listeners.clear();
     }
     {
       let mut pending = PENDING_REQUESTS.lock().unwrap();
@@ -2217,8 +2248,8 @@ mod tests {
 
     let (tx, mut rx) = mpsc::channel::<JsonValue>(100);
     {
-      let mut ch = REQUEST_CHANNEL.lock().unwrap();
-      *ch = Some(tx);
+      let mut listeners = REQUEST_LISTENERS.lock().unwrap();
+      listeners.insert(1, tx);
     }
 
     let response_handle = tokio::spawn(async move {
@@ -2272,8 +2303,8 @@ mod tests {
 
     let (tx, mut rx) = mpsc::channel::<JsonValue>(100);
     {
-      let mut ch = REQUEST_CHANNEL.lock().unwrap();
-      *ch = Some(tx);
+      let mut listeners = REQUEST_LISTENERS.lock().unwrap();
+      listeners.insert(1, tx);
     }
 
     let handle = tokio::spawn(async move {
