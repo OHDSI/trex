@@ -1,11 +1,13 @@
 (ns trexsql.datamart
-  "Datamart creation functionality for caching source database schemas in TrexSQL.
-   Every supported source dialect goes through the same JDBC batch transfer
-   path (HikariCP + SqlRender). FTS indexing and progress reporting run on
-   the cache file after the copy completes."
+  "Datamart (cache) creation for source database schemas in TrexSQL.
+   postgres/mysql/bigquery use DuckDB's native scanners (ATTACH + CREATE TABLE
+   AS SELECT over the TrexEngine FFI handle); all other dialects use the JDBC
+   batch transfer path (HikariCP + HoneySQL-built standard SQL). FTS indexing
+   and progress reporting run on the cache file after the copy completes."
   (:require [trexsql.db :as db]
             [trexsql.util :as util]
             [trexsql.batch :as batch]
+            [trexsql.errors :as errors]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
             [honey.sql :as sql])
@@ -27,14 +29,14 @@
   [success? database-code schema-name tables-copied tables-failed fts-indexes-created duration-ms error])
 
 ;; Mirrors WebAPI's DBMSType enum (org.ohdsi.webapi.arachne.commons.types.DBMSType)
-;; so any source the WebAPI accepts can also be cached. The corresponding JDBC
-;; drivers are bundled with WebAPI and therefore reachable from bao via
-;; java.sql.DriverManager when running in-process. Every dialect goes through
-;; the same JDBC + HikariCP + SqlRender path; there is no longer a native
-;; DuckDB scanner code path.
+;; so any source the WebAPI accepts can also be cached. postgres/mysql/bigquery
+;; read via DuckDB's bundled scanners (see native-scanner-dialects); the rest
+;; read via JDBC (HikariCP + HoneySQL-built standard SQL), whose drivers are
+;; bundled with WebAPI and reachable from bao via java.sql.DriverManager when
+;; running in-process.
 ;;
-;; "postgres" is kept alongside "postgresql" as a forgiving alias because
-;; older Source rows may still carry the short form.
+;; "postgres" is kept alongside "postgresql" (and "mariadb" alongside "mysql")
+;; as a forgiving alias because older Source rows may still carry the short form.
 ;; "mysql" / "mariadb" are extras — not in WebAPI's enum, but harmless to
 ;; accept since the drivers may be present in custom deployments.
 (def valid-dialects
@@ -53,6 +55,17 @@
 ;; Now that every supported dialect goes through JDBC, this is identical to
 ;; valid-dialects.
 (def jdbc-dialects valid-dialects)
+
+;; Dialects DuckDB can read directly via a bundled scanner. These take the
+;; native ATTACH + CREATE TABLE AS SELECT path; every other valid dialect
+;; falls back to the JDBC batch path. postgresql/mariadb are aliases.
+(def native-scanner-dialects
+  #{"postgres" "postgresql" "mysql" "mariadb" "bigquery"})
+
+(defn native-scanner-dialect?
+  "True if `dialect` should use the native DuckDB scanner path."
+  [dialect]
+  (contains? native-scanner-dialects (str/lower-case (or dialect ""))))
 
 (defn- valid-database-code?
   "Check if database-code is valid for filesystem naming."
@@ -166,6 +179,156 @@
     (.put "fts-indexes-created" (ArrayList. ^java.util.Collection (or (:fts-indexes-created result) [])))
     (.put "duration-ms" (:duration-ms result))
     (.put "error" (:error result))))
+
+;; === Native-scanner copy helpers (DuckDB ATTACH + CREATE TABLE AS SELECT) ===
+
+(defn get-source-tables
+  "List table names in the attached source schema via information_schema."
+  [db source-alias schema-name]
+  (db/validate-identifier! source-alias "source-alias")
+  (db/validate-identifier! schema-name "schema-name")
+  (let [[query-sql & params] (sql/format
+                              {:select [:table_name]
+                               :from [:information_schema.tables]
+                               :where [:and
+                                       [:= :table_schema schema-name]
+                                       [:= :table_catalog source-alias]]})
+        results (db/query-with-params db query-sql (vec params))]
+    (mapv #(.get ^HashMap % "table_name") results)))
+
+(defn apply-table-filter
+  "Keep only tables present in `table-filter` keys; nil filter keeps all."
+  [tables table-filter]
+  (if (nil? table-filter)
+    tables
+    (filterv #(contains? table-filter %) tables)))
+
+(defn build-select-clause
+  "\"*\" for nil/empty/[\"*\"]; otherwise escaped, comma-joined column names."
+  [columns]
+  (if (or (nil? columns) (empty? columns)
+          (= ["*"] columns) (= "*" (first columns)))
+    "*"
+    (do
+      (doseq [col columns] (db/validate-identifier! col "column-name"))
+      (str/join ", " (map #(db/escape-identifier % "column") columns)))))
+
+(defn- validate-patient-ids [patient-filter]
+  (when patient-filter
+    (let [invalid (seq (remove #(or (integer? %)
+                                    (and (string? %) (re-matches #"^\d+$" %)))
+                               patient-filter))]
+      (when invalid
+        (str "Invalid patient IDs (must be numeric): " (pr-str (take 5 invalid)))))))
+
+(defn- validate-timestamp-filter [timestamp-filter]
+  (when timestamp-filter
+    (when-not (re-matches #"^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2}:\d{2})?$" (str timestamp-filter))
+      (str "Invalid timestamp format: " timestamp-filter
+           ". Expected ISO 8601 (YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS)"))))
+
+(defn build-where-clause
+  "WHERE clause for patient and timestamp filters, or nil. Validates inputs."
+  [patient-filter timestamp-filter]
+  (when-let [error (validate-patient-ids patient-filter)]
+    (throw (errors/validation-error error {:field :patient-filter})))
+  (when-let [error (validate-timestamp-filter timestamp-filter)]
+    (throw (errors/validation-error error {:field :timestamp-filter})))
+  (let [clauses (cond-> []
+                  patient-filter
+                  (conj (str "person_id IN ("
+                             (str/join ", " (map #(if (integer? %) % (Long/parseLong (str %)))
+                                                 patient-filter))
+                             ")"))
+                  timestamp-filter
+                  (conj (str "observation_date >= '" timestamp-filter "'")))]
+    (when (seq clauses)
+      (str " WHERE " (str/join " AND " clauses)))))
+
+(defn copy-table
+  "Copy one table from the attached source to the cache catalog.
+   Returns TableResult on success, TableError on failure."
+  [db source-alias cache-alias schema-name target-schema table-name config]
+  (try
+    (db/validate-identifier! source-alias "source-alias")
+    (db/validate-identifier! cache-alias "cache-alias")
+    (db/validate-identifier! schema-name "schema-name")
+    (db/validate-identifier! target-schema "target-schema")
+    (db/validate-identifier! table-name "table-name")
+    (let [{:keys [table-filter patient-filter timestamp-filter]} config
+          columns (get table-filter table-name)
+          select-clause (build-select-clause columns)
+          where-clause (build-where-clause patient-filter timestamp-filter)
+          source-table (format "%s.%s.%s"
+                               (db/escape-identifier source-alias "source-alias")
+                               (db/escape-identifier schema-name "schema-name")
+                               (db/escape-identifier table-name "table-name"))
+          target-table (format "%s.%s.%s"
+                               (db/escape-identifier cache-alias "cache-alias")
+                               (db/escape-identifier target-schema "target-schema")
+                               (db/escape-identifier table-name "table-name"))
+          create-sql (format "CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s WHERE false"
+                             target-table select-clause source-table)
+          insert-sql (format "INSERT INTO %s SELECT %s FROM %s%s"
+                             target-table select-clause source-table (or where-clause ""))]
+      (db/execute! db create-sql)
+      (db/execute! db insert-sql)
+      (let [count-sql (format "SELECT COUNT(*) as cnt FROM %s" target-table)
+            count-result (db/query db count-sql)
+            row-count (or (some-> count-result first (.get "cnt")) 0)]
+        (->TableResult table-name row-count 0)))
+    (catch Exception e
+      (->TableError table-name (.getMessage e) "copy"))))
+
+(defn- copy-tables-sequential
+  [db source-alias cache-alias schema-name target-schema tables-to-copy config]
+  (let [total (count tables-to-copy)]
+    (loop [remaining tables-to-copy, idx 1, copied [], failed []]
+      (if (empty? remaining)
+        {:tables-copied copied :tables-failed failed}
+        (let [t (first remaining)
+              _ (log/info (format "Copying table %d of %d: %s" idx total t))
+              result (copy-table db source-alias cache-alias schema-name target-schema t config)]
+          (if (instance? TableResult result)
+            (recur (rest remaining) (inc idx) (conj copied result) failed)
+            (recur (rest remaining) (inc idx) copied (conj failed result))))))))
+
+(defn- copy-tables-parallel
+  ;; Opt-in (:parallel-copy). pmap interleaves statements across tables on one
+  ;; shared `db` handle — only safe if the native layer serializes per-handle.
+  [db source-alias cache-alias schema-name target-schema tables-to-copy config]
+  (let [results (doall
+                 (pmap #(copy-table db source-alias cache-alias schema-name target-schema % config)
+                       tables-to-copy))
+        {copied true failed false} (group-by #(instance? TableResult %) results)]
+    {:tables-copied (vec copied) :tables-failed (vec failed)}))
+
+(defn copy-schema
+  "Copy all (filtered) tables from the source schema into the cache catalog.
+   Returns {:tables-copied [...] :tables-failed [...]}."
+  [db source-alias cache-alias config]
+  ;; Cache mirrors the source schema (target-schema-name is not honored, matching
+  ;; the JDBC path) so both read paths and the FTS step resolve the same tables.
+  (let [{:keys [schema-name table-filter parallel-copy]} config
+        target-schema schema-name
+        _ (db/validate-identifier! source-alias "source-alias")
+        _ (db/validate-identifier! schema-name "schema-name")
+        _ (db/validate-identifier! cache-alias "cache-alias")
+        _ (db/validate-identifier! target-schema "target-schema")
+        all-tables (get-source-tables db source-alias schema-name)
+        tables-to-copy (apply-table-filter all-tables table-filter)
+        create-schema-sql (format "CREATE SCHEMA IF NOT EXISTS %s.%s"
+                                  (db/escape-identifier cache-alias "cache-alias")
+                                  (db/escape-identifier target-schema "target-schema"))]
+    (try
+      (db/execute! db create-schema-sql)
+      (catch Exception e
+        (when-not (re-find #"(?i)already exists" (.getMessage e))
+          (log/warn (format "Failed to create schema %s.%s: %s"
+                            cache-alias target-schema (.getMessage e))))))
+    (if parallel-copy
+      (copy-tables-parallel db source-alias cache-alias schema-name target-schema tables-to-copy config)
+      (copy-tables-sequential db source-alias cache-alias schema-name target-schema tables-to-copy config))))
 
 ;; Mirrors d2e's DUCKDB_FULLTEXT_SEARCH_CONFIG
 ;; (plugins/flows/base/create_cachedb_file_plugin/utils.py). Tables without a
@@ -334,26 +497,75 @@
      :cache-path (or cache-path "./data/cache")
      :batch-size (or (:batch-size config) 10000)}))
 
+(defn- attach-source!
+  "Attach the source via the matching DuckDB scanner. Returns the alias."
+  [db database-code credentials]
+  (case (str/lower-case (or (:dialect credentials) ""))
+    ("postgres" "postgresql") (db/attach-source-postgres! db database-code credentials)
+    ("mysql" "mariadb")       (db/attach-source-mysql! db database-code credentials)
+    "bigquery"                (db/attach-source-bigquery! db database-code credentials)
+    (throw (errors/config-error
+            (str "Dialect is not a native-scanner dialect: " (:dialect credentials))
+            :dialect))))
+
+(defn- create-cache-native
+  "Native-scanner cache read: attach cache + source on one handle, copy the
+   schema (DuckDB handles type conversion), detach source. Returns the same map
+   shape as batch/create-cache-jdbc so create-cache's shared FTS/result code is
+   path-agnostic. On failure the cache catalog is detached and a structured
+   failure map is returned; on success the cache stays attached for the FTS step."
+  [db config]
+  (let [start (System/currentTimeMillis)
+        {:keys [database-code schema-name source-credentials cache-path]} config]
+    (db/attach-cache-file! db database-code (or cache-path "./data/cache"))
+    (try
+      (let [source-alias (attach-source! db database-code source-credentials)]
+        (try
+          (let [{:keys [tables-copied tables-failed]}
+                (copy-schema db source-alias database-code config)]
+            {:success? (empty? tables-failed)
+             :database-code database-code
+             :schema-name schema-name
+             :tables-copied (mapv (fn [t] {:table-name (:table-name t)
+                                           :rows-copied (:rows-copied t)}) tables-copied)
+             :tables-failed (mapv (fn [t] {:table-name (:table-name t)
+                                           :error (:error t)
+                                           :phase (:phase t)}) tables-failed)
+             :duration-ms (- (System/currentTimeMillis) start)
+             :error nil})
+          (finally
+            (try (db/detach-database! db source-alias)
+                 (catch Exception e
+                   (log/warn (format "Failed to detach source %s: %s"
+                                     source-alias (.getMessage e))))))))
+      (catch Exception e
+        ;; Detach the cache so a retry with the same database-code isn't blocked.
+        (try (db/detach-database! db database-code) (catch Exception _ nil))
+        {:success? false
+         :database-code database-code
+         :schema-name schema-name
+         :tables-copied []
+         :tables-failed []
+         :duration-ms (- (System/currentTimeMillis) start)
+         :error (.getMessage e)}))))
+
 (defn create-cache
-  "Unified cache creation. Every supported dialect goes through the JDBC
-   batch transfer path (HikariCP + SqlRender). After the table copy
-   completes successfully, FTS indexes are built on the configured tables
-   (default: `concept`, `concept_synonym`) inside the cache file.
+  "Unified cache creation. postgres/mysql/bigquery use the native DuckDB
+   scanner path; all other dialects use the JDBC batch transfer path. After the
+   copy, FTS indexes are built on the configured tables (default: `concept`,
+   `concept_synonym`) inside the cache file.
    Returns a CacheResult.
    `progress-fn` is invoked with per-phase progress events during transfer."
   ([db config]
    (create-cache db config nil))
   ([db config progress-fn]
-   (let [jdbc-config (convert-config-for-jdbc config)
-         result (batch/create-cache-jdbc db jdbc-config progress-fn)
+   (let [dialect (get-in config [:source-credentials :dialect])
+         result (if (native-scanner-dialect? dialect)
+                  (create-cache-native db config)
+                  (batch/create-cache-jdbc db (convert-config-for-jdbc config) progress-fn))
          tables-copied (:tables-copied result)
-         ;; Only attempt FTS when the copy itself succeeded — pointless to
-         ;; build indexes on a half-populated cache.
-         ;; The JDBC batch path creates tables at
-         ;; `<cache-alias>.<source-schema>.<table>` — the schema mirrors the
-         ;; source's CDM schema so the cache count + circe SQL handlers can
-         ;; query `<cache-alias>.<cdm-schema>.<table>` directly. The FTS
-         ;; indexer needs the same coordinates.
+         ;; FTS only on success; both paths write at <cache>.<source-schema>.<table>,
+         ;; the coordinates the FTS indexer and downstream cache queries resolve.
          fts-created (when (and (:success? result) (seq tables-copied))
                        (try
                          (create-fts-indexes db

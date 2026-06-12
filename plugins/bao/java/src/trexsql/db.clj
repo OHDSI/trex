@@ -3,7 +3,8 @@
   (:require [clojure.string :as str]
             [clojure.tools.logging :as log]
             [trexsql.native :as native]
-            [trexsql.errors :as errors])
+            [trexsql.errors :as errors]
+            [trexsql.source-dsn :as source-dsn])
   (:import [com.sun.jna Pointer]
            [java.util ArrayList HashMap]))
 
@@ -201,6 +202,86 @@
                   (str "Cache file is locked by another process: " file-path)
                   :cache-file))
           (throw e))))))
+
+;; === Native source attach (DuckDB scanners) ===
+;; Source attached as alias "<database-code>__srcdb" on the same handle that
+;; holds the cache, so a cross-catalog CREATE TABLE AS SELECT copies the data.
+
+(defn- source-alias-for [database-code]
+  (str database-code "__srcdb"))
+
+(defn- sql-literal
+  "Single-quoted SQL string literal (doubling internal quotes) for the ATTACH DSN."
+  [s]
+  (str "'" (str/replace s "'" "''") "'"))
+
+(defn postgres-attach-sql
+  "READ_ONLY postgres ATTACH statement for a source. Pure."
+  [database-code credentials]
+  (validate-identifier! database-code "database-code")
+  (format "ATTACH IF NOT EXISTS %s AS %s (TYPE postgres, READ_ONLY)"
+          (sql-literal (source-dsn/postgres-dsn credentials))
+          (escape-identifier (source-alias-for database-code) "source-alias")))
+
+(defn mysql-attach-sql
+  "READ_ONLY mysql ATTACH statement for a source. Pure."
+  [database-code credentials]
+  (validate-identifier! database-code "database-code")
+  (format "ATTACH IF NOT EXISTS %s AS %s (TYPE mysql, READ_ONLY)"
+          (sql-literal (source-dsn/mysql-dsn credentials))
+          (escape-identifier (source-alias-for database-code) "source-alias")))
+
+(defn bigquery-attach-sql
+  "BigQuery ATTACH statement (inherently read-only). Pure."
+  [database-code credentials]
+  (validate-identifier! database-code "database-code")
+  (format "ATTACH IF NOT EXISTS 'project=%s' AS %s (TYPE bigquery)"
+          (source-dsn/bigquery-project credentials)
+          (escape-identifier (source-alias-for database-code) "source-alias")))
+
+(defn- redact-credentials
+  "Replace literal user/password values with *** so a failed-ATTACH error can't
+   leak them (robust to quoting). Blank values are skipped."
+  [^String s {:keys [user password]}]
+  (cond-> (str s)
+    (not (str/blank? password)) (str/replace (str password) "***")
+    (not (str/blank? user))     (str/replace (str user) "***")))
+
+(defn- execute-attach!
+  "Run an ATTACH, redacting credentials from any thrown error. The original
+   cause is dropped on purpose — errors/format-error would surface its message
+   (which can echo the connection string) into JSON responses."
+  [^TrexsqlDatabase db ^String attach-sql credentials]
+  (try
+    (execute! db attach-sql)
+    (catch Exception e
+      (throw (errors/resource-error
+              (str "Source ATTACH failed: " (redact-credentials (.getMessage e) credentials))
+              :source)))))
+
+(defn attach-source-postgres!
+  "INSTALL/LOAD the postgres scanner and ATTACH the source. Returns the alias."
+  [^TrexsqlDatabase db ^String database-code credentials]
+  (ensure-open! db)
+  (load-extension! db "postgres")
+  (execute-attach! db (postgres-attach-sql database-code credentials) credentials)
+  (source-alias-for database-code))
+
+(defn attach-source-mysql!
+  "INSTALL/LOAD the mysql scanner and ATTACH the source. Returns the alias."
+  [^TrexsqlDatabase db ^String database-code credentials]
+  (ensure-open! db)
+  (load-extension! db "mysql")
+  (execute-attach! db (mysql-attach-sql database-code credentials) credentials)
+  (source-alias-for database-code))
+
+(defn attach-source-bigquery!
+  "INSTALL/LOAD the bigquery (community) scanner and ATTACH. Returns the alias."
+  [^TrexsqlDatabase db ^String database-code credentials]
+  (ensure-open! db)
+  (load-extension! db "bigquery" :source "community")
+  (execute-attach! db (bigquery-attach-sql database-code credentials) credentials)
+  (source-alias-for database-code))
 
 (defn is-attached?
   "Check if a database with the given alias is currently attached.

@@ -236,3 +236,44 @@
     ;; No DB available here — heuristic path throws on db query, caller logs
     ;; the warning and we get nil. Test asserts no NPE and graceful nil.
     (is (nil? (datamart/get-document-identifier nil "cache" "cdm" "totally_unknown_table")))))
+
+(deftest build-select-clause-test
+  (testing "nil / * / empty → *"
+    (is (= "*" (datamart/build-select-clause nil)))
+    (is (= "*" (datamart/build-select-clause ["*"])))
+    (is (= "*" (datamart/build-select-clause []))))
+  (testing "explicit columns are escaped and comma-joined"
+    (is (= "\"person_id\", \"birth_year\""
+           (datamart/build-select-clause ["person_id" "birth_year"])))))
+
+(deftest build-where-clause-test
+  (testing "no filters → nil"
+    (is (nil? (datamart/build-where-clause nil nil))))
+  (testing "numeric patient filter builds an IN clause"
+    (is (= " WHERE person_id IN (1, 2, 3)"
+           (datamart/build-where-clause [1 2 3] nil))))
+  (testing "non-numeric patient id is rejected"
+    (is (thrown? Exception (datamart/build-where-clause ["1; DROP TABLE x"] nil))))
+  (testing "timestamp filter builds a >= clause"
+    (is (= " WHERE observation_date >= '2020-01-01'"
+           (datamart/build-where-clause nil "2020-01-01"))))
+  (testing "bad timestamp is rejected"
+    (is (thrown? Exception (datamart/build-where-clause nil "not-a-date")))))
+
+(deftest apply-table-filter-test
+  (testing "nil filter → all tables"
+    (is (= ["a" "b"] (datamart/apply-table-filter ["a" "b"] nil))))
+  (testing "map filter keeps only matching keys"
+    (is (= ["a"] (datamart/apply-table-filter ["a" "b"] {"a" ["*"]})))))
+
+(deftest native-scanner-dialect-pred-test
+  (testing "postgres/mysql/bigquery + aliases are native; others are not"
+    (is (true?  (datamart/native-scanner-dialect? "postgres")))
+    (is (true?  (datamart/native-scanner-dialect? "postgresql")))
+    (is (true?  (datamart/native-scanner-dialect? "mysql")))
+    (is (true?  (datamart/native-scanner-dialect? "mariadb")))
+    (is (true?  (datamart/native-scanner-dialect? "bigquery")))
+    (is (true?  (datamart/native-scanner-dialect? "BigQuery")))   ; case-insensitive
+    (is (false? (datamart/native-scanner-dialect? "oracle")))
+    (is (false? (datamart/native-scanner-dialect? "sql server")))
+    (is (false? (datamart/native-scanner-dialect? nil)))))

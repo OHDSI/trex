@@ -68,10 +68,39 @@ for path in \
   echo "  $code  $path"
 done
 
+echo "=== native-scanner cache create probe ==="
+# Register a self-referential Postgres source, then create a cache for the
+# webapi schema. This exercises the native DuckDB postgres-scanner ATTACH +
+# CREATE TABLE AS SELECT path inside the native image (no JDBC for postgres).
+curl -s -m 20 -X POST "$BASE/source" -H 'Content-Type: application/json' -d '{
+  "sourceName":"smoke-pg","sourceKey":"smoke_pg","sourceDialect":"postgresql",
+  "sourceConnection":"jdbc:postgresql://localhost:5432/webapi",
+  "username":"ohdsi_app_user","password":"app1",
+  "daimons":[{"daimonType":"CDM","tableQualifier":"webapi","priority":0}]
+}' -o /tmp/smoke-source.json -w "  source-register: %{http_code}\n" || true
+cache_code=$(curl -s -m 60 -X POST "$BASE/source/smoke_pg/cache" \
+  -H 'Content-Type: application/json' -d '{"schemaName":"webapi"}' \
+  -o /tmp/smoke-cache.json -w "%{http_code}" || echo ERR)
+echo "  cache-create: $cache_code"
+head -c 400 /tmp/smoke-cache.json 2>/dev/null; echo
+if ls -1 /tmp/trexcache/smoke_pg.db >/dev/null 2>&1; then
+  echo "OK: cache file /tmp/trexcache/smoke_pg.db created (native scanner path)"
+else
+  echo "WARN: cache file not found — check the cache-create response above"
+fi
+
 echo "=== native-image reachability errors during the sweep (server log) ==="
 grep -iE "UnsupportedFeatureError|ClassNotFoundException|NoClassDefFoundError|not registered for reflection|NoSuchMethodError|InaccessibleObjectException|No such (field|method) found|registered for reflection" /tmp/harness.log \
   | grep -viE "error loading .* driver|WEBAPI_STATUS" | sort -u | head -25
 echo "(empty above = no native-image reachability gaps hit on the swept endpoints)"
+
+echo "=== cache-path native-image reachability check (JDBC driver / duckdb scanner) ==="
+if grep -iE "No suitable driver|error loading .*driver|org\.postgresql\.Driver|postgres_scanner|mysql_scanner|bigquery.*extension|not registered for reflection" /tmp/harness.log \
+   | grep -iE "Unsupported|ClassNotFound|NoClassDefFound|not registered|No suitable driver|FileNotFound|could not (load|open)" ; then
+  echo "FAIL: cache-path reachability/resource gap in the native image (see lines above)"
+else
+  echo "OK: no JDBC-driver / duckdb-scanner reachability gaps on the cache path"
+fi
 
 echo "=== server-side errors/exceptions during the sweep (root causes of 500s) ==="
 grep -nE "ERROR|Exception|Caused by|Servlet.service|nested exception" /tmp/harness.log \

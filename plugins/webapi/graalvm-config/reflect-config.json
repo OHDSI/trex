@@ -944,6 +944,14 @@
   {
     "name": "com.zaxxer.hikari.HikariDataSource"
   },
+  { "name": "org.postgresql.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  { "name": "com.microsoft.sqlserver.jdbc.SQLServerDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  { "name": "oracle.jdbc.OracleDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  { "name": "com.amazon.redshift.jdbc.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  { "name": "net.snowflake.client.jdbc.SnowflakeDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  { "name": "com.cloudera.impala.jdbc.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  { "name": "org.apache.hive.jdbc.HiveDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  { "name": "org.netezza.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
   {
     "name": "crouton.html__init"
   },
