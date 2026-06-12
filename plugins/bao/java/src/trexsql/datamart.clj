@@ -1,8 +1,9 @@
 (ns trexsql.datamart
-  "Datamart creation functionality for caching source database schemas in TrexSQL.
-   Every supported source dialect goes through the same JDBC batch transfer
-   path (HikariCP + SqlRender). FTS indexing and progress reporting run on
-   the cache file after the copy completes."
+  "Datamart (cache) creation for source database schemas in TrexSQL.
+   postgres/mysql/bigquery use DuckDB's native scanners (ATTACH + CREATE TABLE
+   AS SELECT over the TrexEngine FFI handle); all other dialects use the JDBC
+   batch transfer path (HikariCP + SqlRender). FTS indexing and progress
+   reporting run on the cache file after the copy completes."
   (:require [trexsql.db :as db]
             [trexsql.util :as util]
             [trexsql.batch :as batch]
@@ -28,14 +29,13 @@
   [success? database-code schema-name tables-copied tables-failed fts-indexes-created duration-ms error])
 
 ;; Mirrors WebAPI's DBMSType enum (org.ohdsi.webapi.arachne.commons.types.DBMSType)
-;; so any source the WebAPI accepts can also be cached. The corresponding JDBC
-;; drivers are bundled with WebAPI and therefore reachable from bao via
-;; java.sql.DriverManager when running in-process. Every dialect goes through
-;; the same JDBC + HikariCP + SqlRender path; there is no longer a native
-;; DuckDB scanner code path.
+;; so any source the WebAPI accepts can also be cached. postgres/mysql/bigquery
+;; read via DuckDB's bundled scanners (see native-scanner-dialects); the rest
+;; read via JDBC + HikariCP + SqlRender, whose drivers are bundled with WebAPI
+;; and reachable from bao via java.sql.DriverManager when running in-process.
 ;;
-;; "postgres" is kept alongside "postgresql" as a forgiving alias because
-;; older Source rows may still carry the short form.
+;; "postgres" is kept alongside "postgresql" (and "mariadb" alongside "mysql")
+;; as a forgiving alias because older Source rows may still carry the short form.
 ;; "mysql" / "mariadb" are extras — not in WebAPI's enum, but harmless to
 ;; accept since the drivers may be present in custom deployments.
 (def valid-dialects
