@@ -1247,11 +1247,16 @@
       (service-unavailable "Agent service_role key unavailable")
       (let [auth (get-in request [:headers "authorization"])
             extra (cond-> {"apikey" key}
-                    (not (str/blank? auth)) (assoc "authorization" auth))]
+                    (not (str/blank? auth)) (assoc "authorization" auth))
+            ;; The servlet middleware already parsed the JSON request body into a
+            ;; keyword-keyed Clojure map; re-encode it to JSON so the upstream node
+            ;; gets valid JSON (the proxy's generic (str body) would emit {:k ...}).
+            body (let [b (:body request)]
+                   (cond (nil? b) nil (string? b) b :else (json/write-str b)))]
         ;; Long socket timeout: a single agent turn can stream over many
         ;; seconds (tool execution between deltas). :as :stream keeps the
         ;; body unbuffered so SSE chunks flow through as they arrive.
-        (proxy/proxy-request request agent-upstream-base extra
+        (proxy/proxy-request (assoc request :body body) agent-upstream-base extra
                              {:socket-timeout 300000
                               :connection-timeout 10000})))))
 
