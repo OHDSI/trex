@@ -2,7 +2,7 @@
 // Port of plugins/fhir/src/export/ndjson.rs
 
 import { Conn } from "../db.ts";
-import { toQualifiedSchema, toQualifiedMetaSchema } from "../sql_safety.ts";
+import { toQualifiedSchema } from "../sql_safety.ts";
 
 // ---------------------------------------------------------------------------
 // ExportStatus — mirrors Rust enum ExportStatus

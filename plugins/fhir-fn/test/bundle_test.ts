@@ -18,7 +18,6 @@ import {
   processBundle,
 } from "../functions/handlers/bundle.ts";
 import { FhirError } from "../functions/error.ts";
-import { ResourceRegistry } from "../functions/fhir/resource_registry.ts";
 import { SearchParamRegistry } from "../functions/fhir/search_parameter.ts";
 
 // ---------------------------------------------------------------------------

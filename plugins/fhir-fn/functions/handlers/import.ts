@@ -125,12 +125,12 @@ export async function importNdjson(
     // outcome.kind === "accepted"
     const { resource, resourceType, id } = outcome;
 
-    // Fetch transform spec and column names (mirrors Rust doing get_json_transform + get_column_names)
-    let transformSpec: string;
-    let columnNames: string[];
+    // Mirror Rust: getJsonTransform + getColumnNames validate the type and throw
+    // for unknown types. We don't need the values here (upsertResource re-fetches),
+    // only the validation/throw behavior.
     try {
-      transformSpec = state.registry.getJsonTransform(resourceType);
-      columnNames = state.registry.getColumnNames(resourceType);
+      state.registry.getJsonTransform(resourceType);
+      state.registry.getColumnNames(resourceType);
     } catch (e) {
       totalErrors += 1;
       errorCounts[resourceType] = (errorCounts[resourceType] ?? 0) + 1;

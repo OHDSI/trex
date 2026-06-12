@@ -310,8 +310,8 @@ Deno.test("token_condition: system|code — contains both system and code", () =
     }],
   }));
   const rr = ResourceRegistry.empty();
-  const sql = generateSearchSql(sp, rr, "Patient", { identifier: "http://example.com|12345" });
-  assert(sql.includes("http://example.com"), `Missing system: ${sql}`);
+  const sql = generateSearchSql(sp, rr, "Patient", { identifier: "urn:oid:1.2.3.4|12345" });
+  assert(sql.includes("urn:oid:1.2.3.4"), `Missing system: ${sql}`);
   assert(sql.includes("12345"), `Missing code: ${sql}`);
 });
 

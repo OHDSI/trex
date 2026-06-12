@@ -1,7 +1,7 @@
 // @ts-nocheck - Deno edge function
 
 import { FhirError } from "./error.ts";
-import { AppState, externalBase, getState, stripMount } from "./state.ts";
+import { AppState, externalBase, stripMount } from "./state.ts";
 import { withConnection } from "./db.ts";
 import { getMetadata } from "./handlers/metadata.ts";
 import {

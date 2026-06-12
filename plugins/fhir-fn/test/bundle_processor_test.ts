@@ -5,17 +5,11 @@
 import { assertEquals, assertThrows } from "std/assert/mod.ts";
 import {
   processBundleEntries,
-  ProcessedEntry,
 } from "../functions/fhir/bundle_processor.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/** UUID pattern: 8-4-4-4-12 hex groups separated by hyphens */
-function isUuid(s: string): boolean {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(s);
-}
 
 // ---------------------------------------------------------------------------
 // Tests mirroring Rust #[cfg(test)] (10 tests)

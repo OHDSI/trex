@@ -11,7 +11,6 @@ import {
   validateVersionId,
   toQualifiedSchema,
 } from "../sql_safety.ts";
-import { ResourceRegistry } from "../fhir/resource_registry.ts";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (port of history.rs pure fns, exact SQL strings)

@@ -48,38 +48,6 @@ function makeState(knownTypes: string[] = ["Patient", "Observation"]): {
   return { registry, searchParams, dbName: "memory" };
 }
 
-/** A fake Conn that records SQL calls and returns configurable row sequences. */
-function makeFakeConn(responses: Map<string | RegExp, any[]>): {
-  conn: any;
-  calls: { sql: string; params: unknown[] }[];
-} {
-  const calls: { sql: string; params: unknown[] }[] = [];
-  const conn = {
-    async query(sql: string, params: unknown[] = []) {
-      calls.push({ sql, params });
-      for (const [key, rows] of responses.entries()) {
-        if (typeof key === "string") {
-          if (sql.includes(key)) return rows;
-        } else {
-          if (key.test(sql)) return rows;
-        }
-      }
-      return [];
-    },
-  };
-  return { conn, calls };
-}
-
-/** Make a Conn that throws on any query matching the key. */
-function makeErrorConn(matchKey: string, errorMsg: string): any {
-  return {
-    async query(sql: string) {
-      if (sql.includes(matchKey)) throw new Error(errorMsg);
-      return [];
-    },
-  };
-}
-
 // ---------------------------------------------------------------------------
 // stampResourceMeta — port of Rust tests
 // ---------------------------------------------------------------------------
