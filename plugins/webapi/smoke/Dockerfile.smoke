@@ -22,8 +22,15 @@ RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=amd64 ;; arm6
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+# Network env tames flaky crates.io CDN downloads ("[18] Transferred a partial file"):
+# disable HTTP/2 multiplexing and bump cargo's own retry count. The outer loop is a
+# belt-and-braces retry around the whole build for any leftover transient fetch errors.
+ENV CARGO_NET_RETRY=10 CARGO_HTTP_MULTIPLEXING=false
 RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/src/target \
-    TREXSQL_LIB_DIR=/opt/trexsql cargo build --release --lib \
+    ok=0; for i in 1 2 3; do \
+        if TREXSQL_LIB_DIR=/opt/trexsql cargo build --release --lib; then ok=1; break; fi; \
+        echo "cargo build attempt $i failed; retrying..." >&2; sleep 5; \
+    done; [ "$ok" = 1 ] \
     && cp target/release/libtrexsql_engine.so /opt/trexsql/libtrexsql_engine.so
 
 ############################
