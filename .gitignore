@@ -28,3 +28,6 @@ deno.lock
 plugins/devx/public/monaco/
 agent-out/
 out/
+
+# Superpowers brainstorming companion (local-only)
+.superpowers/
