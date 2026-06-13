@@ -12,14 +12,14 @@
       <div>
         <AtlasAlert v-if="searchError" severity="danger" :title="searchError" class="mb-3" />
         <AtlasCard padding="none">
-        <table class="results">
-          <thead><tr><th v-for="c in columns" :key="c">{{ c }}</th></tr></thead>
-          <tbody>
-            <tr v-for="r in rows" :key="r.id" data-result-row @click="open(r)">
-              <td v-for="c in columns" :key="c">{{ display(r, c) }}</td>
-            </tr>
-          </tbody>
-        </table>
+          <AtlasDataTable
+            :headers="headers"
+            :items="items"
+            :loading="loading"
+            :no-data-text="`No ${type} found`"
+            :hide-default-footer="items.length <= 10"
+            @click:row="onRowClick"
+          />
         </AtlasCard>
       </div>
     </div>
@@ -27,10 +27,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from "vue";
+import { ref, reactive, computed, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { AtlasPageShell, AtlasCard, AtlasTextField, AtlasButton, AtlasAlert } from "@atlas-ui";
+import { AtlasPageShell, AtlasCard, AtlasTextField, AtlasButton, AtlasAlert, AtlasDataTable } from "@atlas-ui";
 import { useFhir } from "@/composables/useFhir";
+import { humanize } from "@/utils/humanize";
+import { formatFhirValue } from "@/utils/fhirDisplay";
 import type { SearchParam } from "@/stores/profile";
 
 const props = defineProps<{ dataset: string; type: string }>();
@@ -40,32 +42,72 @@ const router = useRouter();
 const params = ref<SearchParam[]>([]);
 const filters = reactive<Record<string, string>>({});
 const rows = ref<any[]>([]);
-const columns = ref<string[]>(["id"]);
+const columnKeys = ref<string[]>(["id"]);
 const searchError = ref<string | null>(null);
+const loading = ref(false);
+
+const headers = computed(() =>
+  columnKeys.value.map((k) => ({ key: k, title: humanize(k) }))
+);
+
+const items = computed(() =>
+  rows.value.map((r) => {
+    const display: Record<string, unknown> = { _raw: r };
+    for (const k of columnKeys.value) {
+      display[k] = formatFhirValue(r[k]);
+    }
+    return display;
+  })
+);
 
 function activeFilters() { return Object.fromEntries(Object.entries(filters).filter(([, v]) => v)); }
+
 async function runSearch() {
   searchError.value = null;
+  loading.value = true;
   try {
     const bundle = await client.search(props.dataset, props.type, activeFilters());
     rows.value = (bundle.entry ?? []).map((e: any) => e.resource);
-    columns.value = ["id", ...params.value.slice(0, 4).map((p) => p.name)];
   } catch (e: any) {
     searchError.value = e?.message ?? "Search failed";
+  } finally {
+    loading.value = false;
   }
 }
-function display(r: any, c: string) { const v = r[c]; return typeof v === "object" ? JSON.stringify(v) : v ?? ""; }
+
+function onRowClick(_event: unknown, ctx: { item: any }) {
+  const raw = ctx?.item?._raw ?? ctx?.item;
+  open(raw);
+}
+
 function open(r: any) {
   if (props.type === "Questionnaire") router.push(`/${props.dataset}/Questionnaire/${r.id}/build`);
   else router.push(`/${props.dataset}/${props.type}/${r.id}/edit`);
 }
 
-onMounted(async () => { params.value = await profile.getSearchParams(props.type); await runSearch(); });
+onMounted(async () => {
+  params.value = await profile.getSearchParams(props.type);
+  try {
+    const def = await profile.getDefinition(props.type);
+    const sdCols = def.elements.slice(0, 5).map((e: any) => e.name);
+    columnKeys.value = ["id", ...sdCols];
+  } catch {
+    // Fallback: derive columns from search params if SD unavailable
+    columnKeys.value = ["id", ...params.value.slice(0, 4).map((p) => p.name)];
+  }
+  await runSearch();
+});
 </script>
 
 <style scoped>
-.search-layout{display:grid;grid-template-columns:240px 1fr;gap:18px}
-.results{width:100%;border-collapse:collapse;font-size:13px}
-.results th{text-align:left;padding:9px 12px;border-bottom:1px solid rgb(var(--v-theme-outline-variant));color:rgb(var(--v-theme-on-surface-variant))}
-.results td{padding:10px 12px;border-bottom:1px solid rgba(0,0,0,.04);cursor:pointer}
+.search-layout {
+  display: grid;
+  grid-template-columns: 240px 1fr;
+  gap: 18px;
+}
+@media (max-width: 700px) {
+  .search-layout {
+    grid-template-columns: 1fr;
+  }
+}
 </style>
