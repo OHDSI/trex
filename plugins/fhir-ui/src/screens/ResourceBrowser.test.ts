@@ -5,21 +5,34 @@ import { createVuetify } from "vuetify";
 import * as components from "vuetify/components";
 import ResourceBrowser from "./ResourceBrowser.vue";
 
+const mockGetResourceTypes = vi.fn().mockResolvedValue(["Patient", "Observation", "Questionnaire"]);
+
 vi.mock("@/composables/useFhir", () => ({
   useFhir: () => ({
     client: {},
     profile: {
-      getResourceTypes: vi.fn().mockResolvedValue(["Patient", "Observation", "Questionnaire"]),
+      getResourceTypes: mockGetResourceTypes,
       getSearchParams: vi.fn().mockResolvedValue([]),
     },
   }),
 }));
 
+const mountOptions = () => ({
+  props: { dataset: "ds1" },
+  global: { plugins: [createVuetify({ components }), createTestingPinia()], stubs: { RouterLink: true } },
+});
+
 it("renders a card per resource type", async () => {
-  const w = mount(ResourceBrowser, {
-    props: { dataset: "ds1" },
-    global: { plugins: [createVuetify({ components }), createTestingPinia()], stubs: { RouterLink: true } },
-  });
+  mockGetResourceTypes.mockResolvedValueOnce(["Patient", "Observation", "Questionnaire"]);
+  const w = mount(ResourceBrowser, mountOptions());
   await flushPromises();
   expect(w.findAll('[data-rt-card]').length).toBe(3);
+});
+
+it("shows error alert when getResourceTypes rejects", async () => {
+  mockGetResourceTypes.mockRejectedValueOnce(new Error("Server unavailable"));
+  const w = mount(ResourceBrowser, mountOptions());
+  await flushPromises();
+  expect(w.find('[data-error]').exists()).toBe(true);
+  expect(w.findAll('[data-rt-card]').length).toBe(0);
 });

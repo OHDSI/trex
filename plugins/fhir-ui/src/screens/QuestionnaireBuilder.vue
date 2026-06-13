@@ -74,4 +74,8 @@ async function save() {
   background: rgba(0, 0, 0, 0.02);
   border-left: 1px solid rgb(var(--v-theme-outline-variant, 0, 0, 0));
 }
+@media (max-width: 900px) {
+  .qb { grid-template-columns: 1fr; }
+  .qb-col.preview { border-left: none; }
+}
 </style>
