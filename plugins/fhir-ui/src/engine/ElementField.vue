@@ -5,12 +5,12 @@
 
     <!-- complex array: render nested card with children via ElementBody -->
     <template v-if="hasChildren">
-      <div v-for="(_, i) in arr" :key="i" class="repeat-card">
+      <AtlasCard v-for="(_, i) in arr" :key="i" padding="sm" class="repeat-card">
         <div class="repeat-card__inner">
           <ElementBody :element="element" :base-path="[...basePath, element.name, i]" :model="model" @change="$emit('change')" />
         </div>
         <button class="card-remove" :data-remove="element.path" @click="removeAt(i)" aria-label="Remove">✕</button>
-      </div>
+      </AtlasCard>
     </template>
 
     <!-- primitive array: standard Atlas field per item -->
@@ -32,9 +32,9 @@
   <!-- single complex/backbone element: nested card -->
   <div v-else-if="hasChildren" class="field-block">
     <div class="section-label">{{ humanLabel }}<span v-if="required" data-req class="req"> *</span></div>
-    <div class="group-card">
+    <AtlasCard padding="sm" class="group-card">
       <ElementBody :element="element" :base-path="[...basePath, element.name]" :model="model" @change="$emit('change')" />
-    </div>
+    </AtlasCard>
   </div>
 
   <!-- single leaf element: standard Atlas field with its floating label -->
@@ -51,6 +51,7 @@ import { widgetFor } from "./widgetRegistry";
 import { getAt, setAt } from "./fhirPath";
 import StringWidget from "./widgets/StringWidget.vue";
 import ElementBody from "./ElementBody.vue";
+import { AtlasCard } from "@atlas-ui";
 import { humanize } from "@/utils/humanize";
 
 const props = defineProps<{ element: ElementInfo; basePath: (string|number)[]; model: any }>();
@@ -88,24 +89,14 @@ function setPrimAt(i: number, v: any) { const a = arr.value.slice(); a[i] = v; s
   opacity: 0.85;
 }
 
-/* Nested group container */
-.group-card {
-  border: 1px solid rgb(var(--v-theme-outline-variant, #cac4d0));
-  border-radius: 10px;
-  padding: 12px 14px 2px;
-  background: rgba(var(--v-theme-on-surface), 0.012);
-}
+/* Nested group container (real AtlasCard provides the elevated surface) */
+.group-card :deep(.atlas-card),
+.group-card.atlas-card { padding-bottom: 2px; }
 
 /* Repeating complex item card */
-.repeat-card {
-  border: 1px solid rgb(var(--v-theme-outline-variant, #cac4d0));
-  border-radius: 10px;
-  padding: 12px 14px 2px;
-  position: relative;
-  margin-bottom: 8px;
-  background: rgba(var(--v-theme-on-surface), 0.012);
-}
-.repeat-card:hover { border-color: rgba(var(--v-theme-primary), 0.45); }
+.repeat-card { position: relative; margin-bottom: 10px; }
+.repeat-card :deep(.atlas-card),
+.repeat-card.atlas-card { padding-bottom: 2px; }
 .repeat-card__inner { padding-right: 24px; }
 
 .card-remove {
