@@ -47,4 +47,10 @@ describe("SDFormRenderer", () => {
     expect(w.find('[data-repeat="Patient.name"]').exists()).toBe(true);
     expect(w.find('[data-add="Patient.name"]').exists()).toBe(true);
   });
+
+  it("collapses elements beyond the common set into an advanced section", () => {
+    const w = render({ resourceType: "Patient" });
+    // birthDate (required) and name (has data) are common; gender (optional, empty) is advanced
+    expect(w.find('[data-advanced-toggle]').exists()).toBe(true);
+  });
 });
