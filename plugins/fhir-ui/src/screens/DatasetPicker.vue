@@ -15,7 +15,7 @@ import { useFhir } from "@/composables/useFhir";
 const { client } = useFhir();
 const datasets = ref<any[]>([]);
 onMounted(async () => {
-  const res = await client.listDatasets();
+  const res: any = await client.listDatasets();
   datasets.value = Array.isArray(res) ? res : (res?.entry?.map((e: any) => e.resource) ?? []);
 });
 </script>
