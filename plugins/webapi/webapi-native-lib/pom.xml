@@ -149,7 +149,7 @@
           <buildArgs>
             <buildArg>--no-fallback</buildArg>
             <buildArg>-H:+ReportExceptionStackTraces</buildArg>
-            <buildArg>-J-Xmx12g</buildArg>
+            <buildArg>-J-Xmx8g</buildArg>
             <!-- This image (WebAPI + trexsql + the whole Clojure runtime) compiles slowly;
                  disable the deadlock watchdog so a slow phase isn't mistaken for a hang. -->
             <buildArg>-H:DeadlockWatchdogInterval=0</buildArg>

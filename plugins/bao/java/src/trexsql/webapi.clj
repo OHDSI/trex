@@ -33,11 +33,16 @@
   @source-repository)
 
 (defn- find-source-by-key [source-key]
-  (when-let [repo @source-repository]
-    (try
-      (.findBySourceKey repo source-key)
-      (catch Exception e
-        nil))))
+  (let [repo @source-repository]
+    (if (nil? repo)
+      (do (log/error "find-source-by-key: source-repository atom is nil for key" source-key) nil)
+      (try
+        (let [result (.findBySourceKey repo source-key)]
+          (log/info "find-source-by-key" source-key "->" (if result "found" "nil-result"))
+          result)
+        (catch Exception e
+          (log/error e "find-source-by-key failed for" source-key ":" (.getMessage e))
+          nil)))))
 
 (defn- get-daimon-type
   "Get DaimonType enum value by name at runtime."

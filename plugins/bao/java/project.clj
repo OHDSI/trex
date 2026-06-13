@@ -40,6 +40,10 @@
                  [org.springframework.boot/spring-boot "3.5.6" :scope "provided"]
                  [org.springframework/spring-context "6.2.6" :scope "provided"]
                  [org.springframework/spring-web "6.2.6" :scope "provided"]
+                 ;; spring-orm + JPA API for the /trexsql/* OpenEntityManagerInView
+                 ;; filter (binds an EntityManager to servlet-thread requests).
+                 [org.springframework/spring-orm "6.2.6" :scope "provided"]
+                 [jakarta.persistence/jakarta.persistence-api "3.1.0" :scope "provided"]
                  ;; OHDSI vocabulary interfaces (provided by WebAPI at runtime)
                  [org.ohdsi/standardized-analysis-specs "1.5.0" :scope "provided"]
                  ;; SLF4J API (provided by WebAPI at runtime)
