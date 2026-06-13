@@ -34,7 +34,7 @@
     "vuetify": "^3.5.0"
   },
   "devDependencies": {
-    "@pinia/testing": "^1.0.3",
+    "@pinia/testing": "^0.1.7",
     "@playwright/test": "^1.40.0",
     "@vitejs/plugin-vue": "^5.0.0",
     "@vue/test-utils": "^2.4.0",

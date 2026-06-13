@@ -9,7 +9,9 @@
         <AtlasButton variant="primary" @click="runSearch">Apply filters</AtlasButton>
       </AtlasCard>
 
-      <AtlasCard padding="none">
+      <div>
+        <AtlasAlert v-if="searchError" severity="danger" :title="searchError" class="mb-3" />
+        <AtlasCard padding="none">
         <table class="results">
           <thead><tr><th v-for="c in columns" :key="c">{{ c }}</th></tr></thead>
           <tbody>
@@ -18,7 +20,8 @@
             </tr>
           </tbody>
         </table>
-      </AtlasCard>
+        </AtlasCard>
+      </div>
     </div>
   </AtlasPageShell>
 </template>
@@ -26,7 +29,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from "vue";
 import { useRouter } from "vue-router";
-import { AtlasPageShell, AtlasCard, AtlasTextField, AtlasButton } from "@atlas-ui";
+import { AtlasPageShell, AtlasCard, AtlasTextField, AtlasButton, AtlasAlert } from "@atlas-ui";
 import { useFhir } from "@/composables/useFhir";
 import type { SearchParam } from "@/stores/profile";
 
@@ -38,12 +41,18 @@ const params = ref<SearchParam[]>([]);
 const filters = reactive<Record<string, string>>({});
 const rows = ref<any[]>([]);
 const columns = ref<string[]>(["id"]);
+const searchError = ref<string | null>(null);
 
 function activeFilters() { return Object.fromEntries(Object.entries(filters).filter(([, v]) => v)); }
 async function runSearch() {
-  const bundle = await client.search(props.dataset, props.type, activeFilters());
-  rows.value = (bundle.entry ?? []).map((e: any) => e.resource);
-  columns.value = ["id", ...params.value.slice(0, 4).map((p) => p.name)];
+  searchError.value = null;
+  try {
+    const bundle = await client.search(props.dataset, props.type, activeFilters());
+    rows.value = (bundle.entry ?? []).map((e: any) => e.resource);
+    columns.value = ["id", ...params.value.slice(0, 4).map((p) => p.name)];
+  } catch (e: any) {
+    searchError.value = e?.message ?? "Search failed";
+  }
 }
 function display(r: any, c: string) { const v = r[c]; return typeof v === "object" ? JSON.stringify(v) : v ?? ""; }
 function open(r: any) { router.push(`/${props.dataset}/${props.type}/${r.id}/edit`); }
