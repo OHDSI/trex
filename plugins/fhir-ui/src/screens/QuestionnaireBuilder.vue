@@ -8,6 +8,7 @@
     <div class="qb">
       <div class="qb-col" data-builder-edit>
         <div class="text-overline mb-2">Structure</div>
+        <AtlasTextField label="Title" v-model="draft.title" class="mb-3" />
         <QuestionnaireItemEditor v-model="draft.item" />
       </div>
       <div class="qb-col preview" data-builder-preview>
@@ -20,7 +21,8 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
-import { AtlasPageShell, AtlasButton, AtlasChip, AtlasCard, AtlasAlert } from "@atlas-ui";
+import { useRouter } from "vue-router";
+import { AtlasPageShell, AtlasButton, AtlasChip, AtlasCard, AtlasAlert, AtlasTextField } from "@atlas-ui";
 import QuestionnaireItemEditor from "@/engine/QuestionnaireItemEditor.vue";
 import QuestionnaireRenderer from "@/engine/QuestionnaireRenderer.vue";
 import { useFhir } from "@/composables/useFhir";
@@ -28,6 +30,7 @@ import { FhirError } from "@/services/fhirClient";
 
 const props = defineProps<{ dataset: string; id: string }>();
 const { client } = useFhir(props.dataset);
+const router = useRouter();
 
 const draft = ref<any>({ resourceType: "Questionnaire", item: [] });
 const saving = ref(false);
@@ -43,15 +46,28 @@ const statusTone = computed(() => {
 });
 
 onMounted(async () => {
-  const q = await client.read(props.dataset, "Questionnaire", props.id);
-  if (!q.item) q.item = [];
-  draft.value = q;
+  if (props.id === "new") {
+    draft.value = { resourceType: "Questionnaire", status: "draft", title: "Untitled questionnaire", item: [] };
+    return;
+  }
+  try {
+    const q = await client.read(props.dataset, "Questionnaire", props.id);
+    if (!q.item) q.item = [];
+    draft.value = q;
+  } catch (e) {
+    error.value = e instanceof FhirError ? e.message : String(e);
+  }
 });
 
 async function save() {
   saving.value = true; error.value = "";
   try {
-    await client.update(props.dataset, "Questionnaire", props.id, draft.value);
+    if (props.id === "new") {
+      const created = await client.create(props.dataset, "Questionnaire", draft.value);
+      router.replace(`/${props.dataset}/Questionnaire/${created.id}/build`);
+    } else {
+      await client.update(props.dataset, "Questionnaire", props.id, draft.value);
+    }
   } catch (e) {
     error.value = e instanceof FhirError ? e.message : String(e);
   } finally {

@@ -1,5 +1,8 @@
 <template>
   <AtlasPageShell :eyebrow="type" :title="`Search ${type}`">
+    <template #actions>
+      <AtlasButton variant="primary" data-new @click="createNew">+ New {{ humanize(type) }}</AtlasButton>
+    </template>
     <div class="search-layout">
       <AtlasCard padding="sm">
         <div class="text-caption font-weight-medium mb-2">Filters</div>
@@ -83,6 +86,11 @@ function onRowClick(_event: unknown, ctx: { item: any }) {
 function open(r: any) {
   if (props.type === "Questionnaire") router.push(`/${props.dataset}/Questionnaire/${r.id}/build`);
   else router.push(`/${props.dataset}/${props.type}/${r.id}/edit`);
+}
+
+function createNew() {
+  if (props.type === "Questionnaire") router.push(`/${props.dataset}/Questionnaire/new/build`);
+  else router.push(`/${props.dataset}/${props.type}/new/edit`);
 }
 
 onMounted(async () => {

@@ -3,6 +3,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { createTestingPinia } from "@pinia/testing";
 import { createVuetify } from "vuetify";
 import * as components from "vuetify/components";
+import { createRouter, createMemoryHistory } from "vue-router";
 import ResourceBrowser from "./ResourceBrowser.vue";
 
 const mockGetResourceTypes = vi.fn().mockResolvedValue(["Patient", "Observation", "Questionnaire"]);
@@ -17,9 +18,19 @@ vi.mock("@/composables/useFhir", () => ({
   }),
 }));
 
+vi.mock("@atlas-ui", () => ({
+  AtlasPageShell: { template: '<div><slot /></div>', props: ["eyebrow", "title"] },
+  AtlasCard: { template: '<div><slot /></div>', props: ["interactive", "padding"] },
+  AtlasAlert: { template: '<div data-error class="alert">{{ title }}</div>', props: ["severity", "title"] },
+  AtlasProgressCircular: { template: '<div class="progress" />', props: ["indeterminate"] },
+  AtlasIconButton: { template: '<button v-bind="$attrs" />', props: ["icon", "ariaLabel"] },
+}));
+
+const router = createRouter({ history: createMemoryHistory(), routes: [{ path: "/:pathMatch(.*)*", component: { template: "<div />" } }] });
+
 const mountOptions = () => ({
   props: { dataset: "ds1" },
-  global: { plugins: [createVuetify({ components }), createTestingPinia()], stubs: { RouterLink: true } },
+  global: { plugins: [createVuetify({ components }), createTestingPinia(), router], stubs: { RouterLink: { template: '<a v-bind="$attrs" data-rt-card><slot /></a>', props: ["to"] } } },
 });
 
 it("renders a card per resource type", async () => {

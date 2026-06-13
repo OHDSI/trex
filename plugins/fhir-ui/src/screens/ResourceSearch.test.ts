@@ -7,7 +7,7 @@ import ResourceSearch from "./ResourceSearch.vue";
 import { useFhir } from "@/composables/useFhir";
 
 vi.mock("@atlas-ui", () => ({
-  AtlasPageShell: { template: '<div><slot /></div>', props: ["eyebrow", "title"] },
+  AtlasPageShell: { template: '<div><slot name="actions" /><slot /></div>', props: ["eyebrow", "title"] },
   AtlasCard: { template: '<div><slot /></div>', props: ["padding"] },
   AtlasTextField: { template: '<input :data-filter="label" />', props: ["modelValue", "label"] },
   AtlasButton: { template: '<button v-bind="$attrs"><slot /></button>', props: ["variant"] },
@@ -81,4 +81,10 @@ it("derives columns from StructureDefinition elements", async () => {
   // Headers from SD: id, name, gender, birthDate → humanized: Id, Name, Gender, Birth date
   expect(html).toContain("Name");
   expect(html).toContain("Gender");
+});
+
+it("renders a [data-new] button in the actions slot", async () => {
+  const w = mountSearch();
+  await flushPromises();
+  expect(w.find('[data-new]').exists()).toBe(true);
 });
