@@ -32,7 +32,7 @@ const flatItems = computed(() => flatten(props.questionnaire.item ?? []));
 function flatten(items: QItem[]): QItem[] { return items.flatMap((i) => [i, ...(i.item ? flatten(i.item) : [])]); }
 
 function enabled(item: QItem) { return isEnabled(item, answers); }
-function options(item: QItem) { return (item.answerOption ?? []).map((o) => ({ value: o.valueString ?? o.valueCoding?.code, label: o.valueString ?? o.valueCoding?.display ?? o.valueCoding?.code })); }
+function options(item: QItem) { return (item.answerOption ?? []).map((o) => ({ value: o.valueString ?? o.valueCoding?.code ?? "", label: o.valueString ?? o.valueCoding?.display ?? o.valueCoding?.code ?? "" })); }
 function inputType(t: string) { return t === "integer" || t === "decimal" ? "number" : t === "date" ? "date" : "text"; }
 function set(linkId: string, v: any) { answers[linkId] = v; }
 
