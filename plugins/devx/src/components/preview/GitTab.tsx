@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GitBranch, GitCommitHorizontal, RefreshCw, ChevronDown, FileDiff } from "lucide-react";
+import { GitBranch, GitCommitHorizontal, RefreshCw, ChevronDown, FileDiff, ArrowUp, ArrowDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -21,6 +21,8 @@ export function GitTab({ git, appId }: GitTabProps) {
   const { status, log, branches, loading, refresh } = git;
   const [commitMsg, setCommitMsg] = useState("");
   const [committing, setCommitting] = useState(false);
+  const [syncing, setSyncing] = useState<null | "push" | "pull">(null);
+  const [syncMsg, setSyncMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
 
   const handleCommit = async () => {
     if (!commitMsg.trim() || status.length === 0 || committing) return;
@@ -33,6 +35,32 @@ export function GitTab({ git, appId }: GitTabProps) {
       console.error("Commit failed:", err);
     } finally {
       setCommitting(false);
+    }
+  };
+
+  const handleSwitchBranch = async (name: string) => {
+    if (name === branches.current) return;
+    try {
+      await api.gitSwitchBranch(appId, name);
+      refresh();
+    } catch (err) {
+      console.error("Switch branch failed:", err);
+    }
+  };
+
+  const handleSync = async (action: "push" | "pull") => {
+    if (syncing) return;
+    setSyncing(action);
+    setSyncMsg(null);
+    try {
+      const res = action === "push" ? await api.gitPush(appId) : await api.gitPull(appId);
+      setSyncMsg({ kind: "ok", text: res.message || (action === "push" ? "Pushed" : "Pulled") });
+      refresh();
+    } catch (err) {
+      const text = err instanceof Error ? err.message : `${action} failed`;
+      setSyncMsg({ kind: "err", text });
+    } finally {
+      setSyncing(null);
     }
   };
 
@@ -58,17 +86,54 @@ export function GitTab({ git, appId }: GitTabProps) {
           </DropdownMenuTrigger>
           <DropdownMenuContent>
             {branches.branches.map((b) => (
-              <DropdownMenuItem key={b} className={b === branches.current ? "font-medium" : ""}>
+              <DropdownMenuItem
+                key={b}
+                className={b === branches.current ? "font-medium" : ""}
+                onClick={() => handleSwitchBranch(b)}
+              >
                 {b}
               </DropdownMenuItem>
             ))}
           </DropdownMenuContent>
         </DropdownMenu>
         <div className="flex-1" />
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 text-xs"
+          onClick={() => handleSync("pull")}
+          disabled={!!syncing}
+          title="Pull from remote"
+        >
+          <ArrowDown className="h-3.5 w-3.5" />
+          Pull
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-7 gap-1 text-xs"
+          onClick={() => handleSync("push")}
+          disabled={!!syncing}
+          title="Push to remote"
+        >
+          <ArrowUp className="h-3.5 w-3.5" />
+          Push
+        </Button>
         <Button variant="ghost" size="icon" className="h-7 w-7" onClick={refresh}>
           <RefreshCw className="h-3.5 w-3.5" />
         </Button>
       </div>
+
+      {syncMsg && (
+        <div
+          className={`px-3 py-1.5 text-xs border-b shrink-0 truncate ${
+            syncMsg.kind === "err" ? "text-destructive bg-destructive/10" : "text-green-600 bg-green-500/10"
+          }`}
+          title={syncMsg.text}
+        >
+          {syncMsg.text}
+        </div>
+      )}
 
       {/* Quick commit */}
       <div className="flex items-center gap-2 px-3 py-2 border-b shrink-0">

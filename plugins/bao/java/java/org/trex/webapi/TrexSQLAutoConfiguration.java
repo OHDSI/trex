@@ -4,10 +4,14 @@ import org.ohdsi.vocabulary.SearchProvider;
 import org.ohdsi.webapi.plugins.WebApiPlugin;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.boot.web.servlet.ServletRegistrationBean;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
+import org.springframework.core.Ordered;
 import org.springframework.core.env.Environment;
+import org.springframework.orm.jpa.support.OpenEntityManagerInViewFilter;
+import jakarta.persistence.EntityManagerFactory;
 import jakarta.servlet.http.HttpServlet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,6 +72,29 @@ public class TrexSQLAutoConfiguration {
             new ServletRegistrationBean<>(servlet, "/trexsql/*");
         reg.setLoadOnStartup(1);
         log.info("TrexSQL servlet registered at /trexsql/*");
+        return reg;
+    }
+
+    // The TrexSQL servlet is a plain ServletRegistrationBean, so it runs outside
+    // Spring MVC's OpenEntityManagerInView interceptor. Without a thread-bound
+    // EntityManager, SourceRepository.findBySourceKey throws and the servlet
+    // reports "Source not found". Bind an EntityManager for /trexsql/* requests
+    // the same way MVC does. The factory is supplied explicitly so the filter
+    // does not rely on a runtime context lookup (unavailable in native-image).
+    @Bean
+    public FilterRegistrationBean<OpenEntityManagerInViewFilter> trexsqlOpenEntityManagerInViewFilter(
+            EntityManagerFactory entityManagerFactory) {
+        OpenEntityManagerInViewFilter filter = new OpenEntityManagerInViewFilter() {
+            @Override
+            protected EntityManagerFactory lookupEntityManagerFactory() {
+                return entityManagerFactory;
+            }
+        };
+        FilterRegistrationBean<OpenEntityManagerInViewFilter> reg =
+            new FilterRegistrationBean<>(filter);
+        reg.addUrlPatterns("/trexsql/*");
+        reg.setName("trexsqlOpenEntityManagerInViewFilter");
+        reg.setOrder(Ordered.HIGHEST_PRECEDENCE);
         return reg;
     }
 }

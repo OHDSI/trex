@@ -153,7 +153,12 @@ export async function streamClaudeCodeChat({
                 break;
               case "tool_call_start": {
                 const callId = data.callId;
-                send({ type: "chunk", content: `\n<!--tool:${callId}-->\n` });
+                // Append the marker to fullContent (not just the live stream) so the
+                // persisted message records WHERE the tool was invoked — otherwise the
+                // reloaded message has no marker and the UI appends tool cards at the end.
+                const marker = `\n<!--tool:${callId}-->\n`;
+                fullContent += marker;
+                send({ type: "chunk", content: marker });
                 send({ type: "tool_call_start", callId, name: data.name, args: data.args || {} });
                 break;
               }

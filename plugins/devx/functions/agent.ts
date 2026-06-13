@@ -306,8 +306,12 @@ export async function streamAgentChat({
         }
 
         const callId = toolCallId;
-        // Inject tool marker into the content stream so frontend can render it inline
-        send({ type: "chunk", content: `<!--tool:${callId}-->` });
+        // Inject tool marker into the content stream AND the persisted content so the
+        // frontend can render the tool inline both live and on reload. (The fullStream
+        // "tool-call" part doesn't reliably carry the id, so this is the single source.)
+        const marker = `\n<!--tool:${callId}-->\n`;
+        fullContent += marker;
+        send({ type: "chunk", content: marker });
         send({ type: "tool_call_start", callId, name, args: effectiveArgs });
         try {
           let result = await toolDef.execute(effectiveArgs, ctx);
@@ -407,16 +411,21 @@ export async function streamAgentChat({
             if (!approved) return "Tool call denied by user.";
 
             const callId = crypto.randomUUID();
-            send({ type: "chunk", content: `<!--tool:${callId}-->` });
+            const marker = `\n<!--tool:${callId}-->\n`;
+            fullContent += marker;
+            send({ type: "chunk", content: marker });
             send({ type: "tool_call_start", callId, name: toolName, args });
             try {
               const result = await mcpManager.executeTool(userId, mcpTool.serverName, mcpTool.name, args);
+              // Persist the MCP call so the marker has a matching tool card on reload.
+              collectedToolCalls.push({ callId, name: toolName, args, result: result.slice(0, 500) });
               send({ type: "tool_call_end", callId, name: toolName, result: result.slice(0, 500) });
               return result.length > 20_000
                 ? result.slice(0, 20_000) + `\n\n[truncated]`
                 : result;
             } catch (err) {
               const errMsg = `MCP tool error: ${err.message || String(err)}`;
+              collectedToolCalls.push({ callId, name: toolName, args, result: errMsg, error: true });
               send({ type: "tool_call_end", callId, name: toolName, result: errMsg, error: true });
               return errMsg;
             }
@@ -465,15 +474,10 @@ export async function streamAgentChat({
           fullContent += text;
           send({ type: "chunk", content: text });
         }
-      } else if (part.type === "tool-call") {
-        // Inject marker at tool invocation position (before tool executes)
-        const callId = (part as any).toolCallId;
-        if (callId) {
-          const marker = `\n<!--tool:${callId}-->\n`;
-          fullContent += marker;
-          send({ type: "chunk", content: marker });
-        }
       }
+      // Tool markers are emitted from each tool's execute() callback (above), which is
+      // the single source so the live stream and persisted content always agree. We do
+      // NOT also emit here on "tool-call" — that would double the marker.
     }
 
     // Send token usage info after streaming completes

@@ -5,13 +5,24 @@ use std::error::Error;
 
 pub fn git_init(path: &str) -> Result<String, Box<dyn Error>> {
     validate_workspace_path(path)?;
-    run_git(&["init"], path)?;
+    // Default to `main` so the local branch matches GitHub's default — otherwise
+    // a fresh repo lands on `master` and the first push creates a mismatched branch.
+    run_git(&["init", "-b", "main"], path)?;
     run_git(&["add", "-A"], path)?;
     match run_git(&["commit", "-m", "Initial commit", "--allow-empty"], path) {
         Ok(_) => {}
         Err(_) => {} // May fail if nothing to commit
     }
     Ok(json!({"ok": true, "message": "Git repository initialized"}).to_string())
+}
+
+/// Clone a remote repository into `dest` (which must be an empty/new directory).
+pub fn git_clone(url: &str, dest: &str) -> Result<String, Box<dyn Error>> {
+    validate_remote_url(url)?;
+    validate_workspace_path(dest)?;
+    // Run from "/" — `git clone <url> <dest>` works into an existing empty dir.
+    run_git(&["clone", url, dest], "/")?;
+    Ok(json!({"ok": true, "message": "Repository cloned"}).to_string())
 }
 
 pub fn git_status(path: &str) -> Result<String, Box<dyn Error>> {
@@ -134,15 +145,21 @@ pub fn git_revert(path: &str, hash: &str) -> Result<String, Box<dyn Error>> {
 pub fn git_push(path: &str, remote_url: &str) -> Result<String, Box<dyn Error>> {
     validate_workspace_path(path)?;
     validate_remote_url(remote_url)?;
-    let out = run_git(&["push", remote_url], path).unwrap_or_else(|_| "Pushed successfully".to_string());
-    Ok(json!({"ok": true, "message": out}).to_string())
+    // Push the current branch by name (`HEAD` → remote ref of the same name).
+    // A bare `git push <url>` fails with "no upstream branch" because a URL
+    // remote can't be an upstream. Propagate errors — do NOT report success on
+    // failure, or the UI silently claims a push that never happened.
+    let out = run_git(&["push", remote_url, "HEAD"], path)?;
+    let msg = if out.is_empty() { "Pushed".to_string() } else { out };
+    Ok(json!({"ok": true, "message": msg}).to_string())
 }
 
 pub fn git_pull(path: &str, remote_url: &str) -> Result<String, Box<dyn Error>> {
     validate_workspace_path(path)?;
     validate_remote_url(remote_url)?;
-    let out = run_git(&["pull", remote_url], path).unwrap_or_else(|_| "Pulled successfully".to_string());
-    Ok(json!({"ok": true, "message": out}).to_string())
+    let out = run_git(&["pull", remote_url], path)?;
+    let msg = if out.is_empty() { "Pulled".to_string() } else { out };
+    Ok(json!({"ok": true, "message": msg}).to_string())
 }
 
 pub fn git_set_remote(path: &str, url: &str) -> Result<String, Box<dyn Error>> {

@@ -52,6 +52,13 @@ class GitOps {
     return result.message;
   }
 
+  /** Clone `url` into `dest` (must be an empty/new directory). */
+  async clone(url: string, dest: string): Promise<string> {
+    const json = await duckdb(`SELECT * FROM trex_devx_git_clone('${escapeSql(url)}', '${escapeSql(dest)}')`);
+    const result = JSON.parse(json);
+    return result.message;
+  }
+
   async status(wsPath: string): Promise<{ files: GitFile[] }> {
     const json = await duckdb(`SELECT * FROM trex_devx_git_status('${escapeSql(wsPath)}')`);
     return JSON.parse(json);

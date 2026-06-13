@@ -165,10 +165,17 @@ export async function listApps(): Promise<App[]> {
   return apiFetch("/apps");
 }
 
-export async function createApp(name: string, template?: string): Promise<App> {
+export async function createApp(
+  name: string,
+  opts?: { template?: string; gitUrl?: string },
+): Promise<App> {
   return apiFetch("/apps", {
     method: "POST",
-    body: JSON.stringify({ name, template }),
+    body: JSON.stringify(
+      opts?.gitUrl
+        ? { name, git_url: opts.gitUrl }
+        : { name, template: opts?.template },
+    ),
   });
 }
 
@@ -338,6 +345,14 @@ export async function gitCommit(appId: string, message: string): Promise<void> {
     method: "POST",
     body: JSON.stringify({ message }),
   });
+}
+
+export async function gitPush(appId: string): Promise<{ ok: boolean; message: string }> {
+  return apiFetch(`/apps/${appId}/git/push`, { method: "POST" });
+}
+
+export async function gitPull(appId: string): Promise<{ ok: boolean; message: string }> {
+  return apiFetch(`/apps/${appId}/git/pull`, { method: "POST" });
 }
 
 // Git branch management

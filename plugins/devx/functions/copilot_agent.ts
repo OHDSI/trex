@@ -116,7 +116,11 @@ export async function streamCopilotChat({
                 break;
               case "tool_call_start": {
                 const callId = data.callId;
-                send({ type: "chunk", content: `\n<!--tool:${callId}-->\n` });
+                // Persist the marker in fullContent so the reloaded message keeps the
+                // tool's inline position (otherwise the UI appends cards at the end).
+                const marker = `\n<!--tool:${callId}-->\n`;
+                fullContent += marker;
+                send({ type: "chunk", content: marker });
                 send({ type: "tool_call_start", callId, name: data.name, args: data.args || {} });
                 break;
               }

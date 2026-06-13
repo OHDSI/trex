@@ -16,6 +16,41 @@ function getClientId(): string {
   return Deno.env.get("GITHUB_CLIENT_ID") || DEFAULT_GITHUB_CLIENT_ID;
 }
 
+/**
+ * Best-effort fetch of the user's stored GitHub OAuth token, or null if it
+ * can't be produced (not connected, no DEVX_ENCRYPTION_KEY configured, or
+ * decrypt failure). Shared by github/git routes so private clone/push/pull can
+ * authenticate — but a missing token must NOT break public, no-auth operations,
+ * so callers treat null as "proceed unauthenticated".
+ */
+export async function getGithubToken(userId: string, sql): Promise<string | null> {
+  const result = await sql(
+    `SELECT encrypted_token, token_iv FROM devx.integrations WHERE user_id = $1 AND provider = 'github' LIMIT 1`,
+    [userId],
+  );
+  if (result.rows.length === 0) return null;
+  try {
+    return await decryptToken(result.rows[0].encrypted_token, result.rows[0].token_iv);
+  } catch (err) {
+    console.warn("[github] could not decrypt stored token (proceeding unauthenticated):", err?.message || err);
+    return null;
+  }
+}
+
+/**
+ * Inject a token into an https GitHub URL as the basic-auth user so git can
+ * authenticate non-interactively. The token is never persisted in this form —
+ * callers build it transiently per push/pull/clone. Non-GitHub / non-https
+ * URLs are returned unchanged.
+ */
+export function injectToken(url: string, token: string | null): string {
+  if (!token) return url;
+  if (url.startsWith("https://github.com/")) {
+    return url.replace("https://github.com/", `https://x-access-token:${token}@github.com/`);
+  }
+  return url;
+}
+
 export async function handleGithubRoutes(path, method, req, userId, sql, corsHeaders) {
   // POST /integrations/github/device-code — start device flow
   if (path.endsWith("/integrations/github/device-code") && method === "POST") {
@@ -170,15 +205,14 @@ export async function handleGithubRoutes(path, method, req, userId, sql, corsHea
     }
     const repo = await res.json();
 
-    // Set remote in workspace
+    // Set remote in workspace (store the clean URL; token is injected at push time)
     const wsPath = getAppWorkspacePath(userId, appId);
     await gitOps.setRemote(wsPath, repo.clone_url);
     await sql(`UPDATE devx.apps SET git_remote_url = $1 WHERE id = $2`, [repo.clone_url, appId]);
 
-    // Push
-    const authUrl = repo.clone_url.replace("https://github.com/", `https://x-access-token:${token}@github.com/`);
+    // Push the current branch to the new repo.
     try {
-      await gitOps.push(wsPath, authUrl);
+      await gitOps.push(wsPath, injectToken(repo.clone_url, token));
     } catch { /* may fail if no commits yet */ }
 
     return Response.json({ url: repo.html_url, clone_url: repo.clone_url }, { headers: corsHeaders });
