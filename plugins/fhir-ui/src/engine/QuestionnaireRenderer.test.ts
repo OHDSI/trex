@@ -30,3 +30,25 @@ it("emits typed answer values (boolean → valueBoolean)", async () => {
   const last = events[events.length - 1]?.[0] as any;
   expect(last.item.find((i: any) => i.linkId === "ok").answer[0]).toEqual({ valueBoolean: true });
 });
+
+it("renders a group heading and its nested child question", async () => {
+  const nestedQ = {
+    resourceType: "Questionnaire",
+    item: [
+      {
+        linkId: "g",
+        type: "group",
+        text: "Demographics",
+        item: [{ linkId: "n", text: "Name", type: "string" }],
+      },
+    ],
+  };
+  const w = mount(QuestionnaireRenderer, { props: { questionnaire: nestedQ }, global: { plugins: [vuetify] } });
+  await flushPromises();
+  // Group heading text should appear somewhere in the rendered output
+  expect(w.text()).toContain("Demographics");
+  // The nested question should be rendered with its data-q attribute
+  expect(w.find('[data-q="n"]').exists()).toBe(true);
+  // The group container itself should NOT have data-q (groups are headings, not inputs)
+  expect(w.find('[data-q="g"]').exists()).toBe(false);
+});

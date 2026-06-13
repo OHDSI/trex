@@ -7,7 +7,7 @@
         <div class="flex-grow-1">
           <AtlasTextField
             :model-value="it.text"
-            label="Question text"
+            :label="it.type === 'group' ? 'Group label' : 'Question text'"
             @update:model-value="patch(i, { text: String($event ?? '') })"
           />
           <div class="d-flex ga-2 mt-1">
@@ -19,6 +19,7 @@
               @update:model-value="patch(i, { type: String($event ?? 'string') })"
             />
             <AtlasCheckbox
+              v-if="it.type !== 'group'"
               :model-value="!!it.required"
               label="Required"
               @update:model-value="patch(i, { required: Boolean($event) })"
@@ -46,6 +47,14 @@
             </div>
             <AtlasButton variant="ghost" size="sm" data-add-option @click="addOption(i)">+ Add option</AtlasButton>
           </div>
+          <!-- Nested children editor for group items -->
+          <div v-if="it.type === 'group'" class="group-children mt-2">
+            <div class="text-caption mb-1">Group items</div>
+            <QuestionnaireItemEditor
+              :model-value="it.item ?? []"
+              @update:model-value="patch(i, { item: $event })"
+            />
+          </div>
         </div>
         <AtlasIconButton icon="mdi-close" ariaLabel="Remove" @click="remove(i)" />
       </div>
@@ -61,6 +70,8 @@
 import { onMounted } from "vue";
 import { AtlasCard, AtlasTextField, AtlasSelect, AtlasCheckbox, AtlasButton, AtlasIconButton } from "@atlas-ui";
 import type { QItem } from "./enableWhen";
+// Self-import for recursive nesting — Vue supports this pattern
+import QuestionnaireItemEditor from "./QuestionnaireItemEditor.vue";
 
 const TYPES = ["group", "display", "string", "text", "integer", "decimal", "boolean", "date", "choice"];
 
@@ -110,4 +121,9 @@ function removeOption(i: number, oi: number) {
 <style scoped>
 .drag { color: rgb(var(--v-theme-on-surface-variant, 0, 0, 0)); }
 .options-editor { border-left: 2px solid rgba(var(--v-border-color, 0, 0, 0), 0.12); }
+.group-children {
+  margin-left: 16px;
+  border-left: 2px solid rgba(var(--v-border-color, 0, 0, 0), 0.2);
+  padding-left: 12px;
+}
 </style>
