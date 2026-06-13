@@ -18,6 +18,7 @@ export default defineConfig({
   build: {
     lib: { entry: path.resolve(__dirname, "src/spa.ts"), formats: ["es"], fileName: () => "fhir-ui-spa.js" },
     outDir: "dist",
-    emptyOutDir: false,
+    emptyOutDir: false, // preserve main-build dist/assets/ between the two build passes
+    rollupOptions: { output: { inlineDynamicImports: true } },
   },
 });

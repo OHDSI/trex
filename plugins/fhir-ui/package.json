@@ -6,7 +6,7 @@
   "scripts": {
     "vendor": "node scripts/vendor-atlas-ui.mjs",
     "dev": "vite",
-    "build": "vue-tsc -b && vite build && vite build --config vite.config.spa.ts && cp dist/assets/index-*.css dist/fhir-ui-spa.css",
+    "build": "vue-tsc -b && vite build && vite build --config vite.config.spa.ts && cp \"$(ls dist/assets/index-*.css | head -1)\" dist/fhir-ui-spa.css",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
