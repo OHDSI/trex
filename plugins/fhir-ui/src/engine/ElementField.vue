@@ -13,12 +13,13 @@
       </div>
     </template>
 
-    <!-- primitive array: render one bare leaf widget per item -->
+    <!-- primitive array: standard Atlas field per item -->
     <template v-else>
       <div v-for="(_, i) in arr" :key="i" :data-field="element.path" class="primitive-repeat-item">
         <component
           :is="widget"
           :model-value="getAt(model, [...basePath, element.name, i])"
+          :label="humanLabel"
           @update:model-value="setPrimAt(i, $event)"
         />
         <button class="card-remove card-remove--inline" :data-remove="element.path" @click="removeAt(i)" aria-label="Remove">✕</button>
@@ -36,16 +37,9 @@
     </div>
   </div>
 
-  <!-- single boolean leaf: inline switch with its own label -->
-  <div v-else-if="isBoolean" :data-field="element.path" :data-required="String(required)" class="field-block field-block--inline">
-    <component :is="widget" :model-value="leafValue" :label="humanLabel + (required ? ' *' : '')"
-      @update:model-value="setLeaf($event)" />
-  </div>
-
-  <!-- single leaf element: caption label above a bare compact input -->
+  <!-- single leaf element: standard Atlas field with its floating label -->
   <div v-else :data-field="element.path" :data-required="String(required)" class="field-block">
-    <label class="field-label">{{ humanLabel }}<span v-if="required" data-req class="req"> *</span></label>
-    <component :is="widget" :model-value="leafValue"
+    <component :is="widget" :model-value="leafValue" :label="leafLabel"
       @update:model-value="setLeaf($event)" />
   </div>
 </template>
@@ -65,8 +59,8 @@ const emit = defineEmits<{ change: [] }>();
 const humanLabel = computed(() => humanize(props.element.name));
 const required = computed(() => props.element.min >= 1);
 const hasChildren = computed(() => props.element.children.length > 0);
-const isBoolean = computed(() => props.element.typeCodes[0] === "boolean");
 const widget = computed(() => widgetFor(props.element.typeCodes[0]) ?? StringWidget);
+const leafLabel = computed(() => humanLabel.value + (required.value ? " *" : ""));
 
 const fullPath = computed(() => [...props.basePath, props.element.name]);
 const leafValue = computed(() => getAt(props.model, fullPath.value));
@@ -79,22 +73,11 @@ function setPrimAt(i: number, v: any) { const a = arr.value.slice(); a[i] = v; s
 </script>
 
 <style scoped>
-.field-block { margin-bottom: 14px; }
-.field-block--inline { display: flex; align-items: center; min-height: 34px; }
+.field-block { margin-bottom: 12px; }
 
 .req { color: rgb(var(--v-theme-accent, #eb6622)); font-weight: 700; }
 
-/* Caption label above a field */
-.field-label {
-  display: block;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: rgb(var(--v-theme-on-surface-variant, #49454f));
-  margin-bottom: 4px;
-}
-
-/* Section header above a group / repeating element */
+/* Section header above a group / repeating element (chrome only — not the control) */
 .section-label {
   font-size: 10.5px;
   font-weight: 700;
@@ -151,7 +134,7 @@ function setPrimAt(i: number, v: any) { const a = arr.value.slice(); a[i] = v; s
 }
 .primitive-repeat-item > :first-child { flex: 1; }
 
-/* Add button — subtle accent pill */
+/* Add button — subtle accent pill (chrome) */
 .add-btn {
   display: inline-flex;
   align-items: center;
