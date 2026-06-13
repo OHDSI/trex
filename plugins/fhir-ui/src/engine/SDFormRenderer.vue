@@ -27,7 +27,10 @@ const emit = defineEmits<{ "update:modelValue": [any] }>();
 function deepClone<T>(v: T): T { return JSON.parse(JSON.stringify(v)); }
 const model = reactive(deepClone(props.modelValue ?? { resourceType: props.definition.resourceType }));
 function onChange() { emit("update:modelValue", deepClone(model)); }
-watch(() => props.modelValue, (v) => { Object.assign(model, deepClone(v)); });
+watch(() => props.modelValue, (v) => {
+  if (JSON.stringify(v) === JSON.stringify(model)) return;
+  Object.assign(model, deepClone(v));
+});
 
 const showAdvanced = ref(false);
 const common = computed(() => props.definition.elements.filter((e) => e.min >= 1 || getAt(model, [e.name]) != null));

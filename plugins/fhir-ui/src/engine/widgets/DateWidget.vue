@@ -4,5 +4,5 @@
 <script setup lang="ts">
 import { AtlasTextField } from "@atlas-ui";
 defineProps<{ modelValue?: string; label?: string }>();
-defineEmits<{ "update:modelValue": [string] }>();
+defineEmits<{ "update:modelValue": [string | number] }>();
 </script>

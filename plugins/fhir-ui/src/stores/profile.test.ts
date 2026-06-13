@@ -3,7 +3,7 @@ import { setActivePinia, createPinia } from "pinia";
 import { useProfileStore } from "./profile";
 const sd = { resourceType: "Patient", kind: "resource", isAbstract: false, elements: [{ path: "Patient.gender", name: "gender", typeCodes: ["code"], min: 0, max: "1", isArray: false, isChoice: false, children: [] }] };
 describe("profileStore", () => {
-  beforeEach(() => setActivePinia(createPinia()));
+  beforeEach(() => { setActivePinia(createPinia()); });
   it("caches a fetched StructureDefinition (one network call)", async () => {
     const client = { getStructureDefinition: vi.fn().mockResolvedValue(sd) } as any;
     const store = useProfileStore(); store.init(client, "ds1");

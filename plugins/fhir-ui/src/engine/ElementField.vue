@@ -4,7 +4,7 @@
     <div class="text-caption font-weight-medium mb-1">{{ label }}<span v-if="required" data-req class="req"> *</span></div>
     <AtlasCard v-for="(_, i) in arr" :key="i" padding="sm" class="mb-2">
       <ElementBody :element="element" :base-path="[...basePath, element.name, i]" :model="model" @change="$emit('change')" />
-      <template #append><AtlasIconButton icon="mdi-close" @click="removeAt(i)" :data-remove="element.path" /></template>
+      <template #append><AtlasIconButton icon="mdi-close" ariaLabel="Remove" @click="removeAt(i)" :data-remove="element.path" /></template>
     </AtlasCard>
     <AtlasButton variant="link" :data-add="element.path" @click="add">+ Add {{ element.name }}</AtlasButton>
   </div>
@@ -44,7 +44,7 @@ const leafValue = computed(() => getAt(props.model, fullPath.value));
 function setLeaf(v: any) { setAt(props.model, fullPath.value, v); emit("change"); }
 
 const arr = computed<any[]>(() => getAt(props.model, fullPath.value) ?? []);
-function add() { const a = arr.value.slice(); a.push({}); setAt(props.model, fullPath.value, a); emit("change"); }
+function add() { const a = arr.value.slice(); a.push(hasChildren.value ? {} : ""); setAt(props.model, fullPath.value, a); emit("change"); }
 function removeAt(i: number) { const a = arr.value.slice(); a.splice(i, 1); setAt(props.model, fullPath.value, a); emit("change"); }
 </script>
 

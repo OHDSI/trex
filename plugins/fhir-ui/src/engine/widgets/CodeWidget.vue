@@ -7,5 +7,5 @@
 <script setup lang="ts">
 import { AtlasSelect, AtlasTextField } from "@atlas-ui";
 defineProps<{ modelValue?: string; label?: string; options?: string[] }>();
-defineEmits<{ "update:modelValue": [string] }>();
+defineEmits<{ "update:modelValue": [string | number | unknown] }>();
 </script>

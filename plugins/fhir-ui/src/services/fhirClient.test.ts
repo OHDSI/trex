@@ -3,7 +3,7 @@ import { FhirClient } from "./fhirClient";
 const json = (body: unknown, init: any = {}) =>
   new Response(JSON.stringify(body), { headers: { "content-type": "application/fhir+json" }, ...init });
 describe("FhirClient", () => {
-  beforeEach(() => vi.restoreAllMocks());
+  beforeEach(() => { vi.restoreAllMocks(); });
   it("searches a resource type with query params", async () => {
     const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
       json({ resourceType: "Bundle", total: 1, entry: [{ resource: { resourceType: "Patient", id: "p1" } }] }));
