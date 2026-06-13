@@ -1,7 +1,7 @@
 <template>
   <AtlasPageShell :eyebrow="`${type} · ${id}`" :title="`Edit ${type}`">
     <template #actions>
-      <AtlasButton variant="ghost" @click="router?.back()">Cancel</AtlasButton>
+      <AtlasButton variant="ghost" @click="router.back()">Cancel</AtlasButton>
       <AtlasButton variant="primary" data-save :loading="saving" @click="save">Save</AtlasButton>
     </template>
 
@@ -33,26 +33,21 @@ onMounted(async () => {
   definition.value = await profile.getDefinition(props.type);
   if (props.id !== "new") {
     draft.value = await client.read(props.dataset, props.type, props.id);
-  } else {
-    draft.value = { resourceType: props.type } as FhirResource;
   }
 });
 
 async function save() {
-  saving.value = true;
-  error.value = null;
+  saving.value = true; error.value = "";
   try {
     if (props.id === "new") {
-      await client.create(props.dataset, props.type, draft.value);
+      const created = await client.create(props.dataset, props.type, draft.value);
+      router.push(`/${props.dataset}/${props.type}/${created.id}/edit`);
     } else {
       await client.update(props.dataset, props.type, props.id, draft.value);
+      router.push(`/${props.dataset}/${props.type}`);
     }
   } catch (e) {
-    if (e instanceof FhirError) {
-      error.value = e.message;
-    } else {
-      error.value = String(e);
-    }
+    error.value = e instanceof FhirError ? e.message : String(e);
   } finally {
     saving.value = false;
   }
