@@ -10,7 +10,7 @@
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"],
-      "@atlas-ui": ["vendor/atlas-ui/atlas-ui.js"]
+      "@atlas-ui": ["vendor/atlas-ui/atlas-ui.d.ts"]
     },
     "skipLibCheck": true
   },
