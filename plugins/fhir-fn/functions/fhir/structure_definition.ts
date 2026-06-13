@@ -291,4 +291,14 @@ export class DefinitionRegistry {
   getType(name: string): ParsedStructureDefinition | undefined {
     return this.types.get(name);
   }
+
+  /** Return a sorted list of all concrete resource type names. */
+  listResourceTypes(): string[] {
+    return [...this.resources.keys()].sort();
+  }
+
+  /** Return the parsed definition for a resource type, or undefined if unknown. */
+  getResourceDefinition(type: string): ParsedStructureDefinition | undefined {
+    return this.resources.get(type);
+  }
 }
