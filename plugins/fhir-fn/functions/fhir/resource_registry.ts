@@ -1,7 +1,7 @@
 // @ts-nocheck - Deno edge function
 // Port of plugins/fhir/src/fhir/resource_registry.rs
 
-import { DefinitionRegistry } from "./structure_definition.ts";
+import { DefinitionRegistry, ParsedStructureDefinition } from "./structure_definition.ts";
 import { generateDdl, generateAllDdl } from "../schema/generator.ts";
 import { generateJsonTransform, generateColumnNames } from "../schema/json_transform.ts";
 
@@ -50,7 +50,7 @@ export class ResourceRegistry {
   }
 
   /** Return the parsed definition for a resource type, or undefined if unknown or no definitions. */
-  getResourceDefinition(type: string): import("./structure_definition.ts").ParsedStructureDefinition | undefined {
+  getResourceDefinition(type: string): ParsedStructureDefinition | undefined {
     return this._definitions?.getResourceDefinition(type);
   }
 

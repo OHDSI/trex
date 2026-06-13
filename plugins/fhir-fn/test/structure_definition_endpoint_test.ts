@@ -47,14 +47,13 @@ Deno.test("handler: read returns the parsed definition", async () => {
   const body = await res.json();
   assertEquals(body.resourceType, "Patient");
 });
-Deno.test("handler: read unknown type → 404", async () => {
+Deno.test("handler: read unknown type → throws FhirError 404", () => {
   const defReg = DefinitionRegistry.loadFromJson(RES, TYPES);
   const reg = ResourceRegistry.withDefinitions(defReg);
   try {
-    const res = handleStructureDefinitionRead({ registry: reg } as any, "Nope");
-    assertEquals(res.status, 404);
+    handleStructureDefinitionRead({ registry: reg } as any, "Nope");
+    throw new Error("expected FhirError to be thrown");
   } catch (e) {
-    // FhirError.notFound may throw rather than return a Response; assert it's a 404-style error
-    assert(String(e).includes("not found") || (e as any).status === 404);
+    assertEquals((e as any).status, 404);
   }
 });

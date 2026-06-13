@@ -7,3 +7,9 @@ Deno.test("GET /{ds}/StructureDefinition → list", () => {
 Deno.test("GET /{ds}/StructureDefinition/Patient → read", () => {
   assertEquals(parseRoute("GET", "/ds1/StructureDefinition/Patient"), { kind: "structureDefinitionRead", datasetId: "ds1", type: "Patient" });
 });
+Deno.test("POST /{ds}/StructureDefinition → notFound", () => {
+  assertEquals(parseRoute("POST", "/ds1/StructureDefinition"), { kind: "notFound" });
+});
+Deno.test("DELETE /{ds}/StructureDefinition/Patient → notFound", () => {
+  assertEquals(parseRoute("DELETE", "/ds1/StructureDefinition/Patient"), { kind: "notFound" });
+});
