@@ -24,6 +24,28 @@
               @update:model-value="patch(i, { required: Boolean($event) })"
             />
           </div>
+          <!-- Answer options editor: shown only for choice / open-choice questions -->
+          <div v-if="it.type === 'choice' || it.type === 'open-choice'" class="mt-2 pl-2 options-editor">
+            <div class="text-caption mb-1">Options</div>
+            <div
+              v-for="(opt, oi) in (it.answerOption ?? [])"
+              :key="oi"
+              class="d-flex ga-2 align-center mb-1"
+              :data-option-row="i"
+            >
+              <AtlasTextField
+                :model-value="opt.valueString ?? ''"
+                label="Option"
+                @update:model-value="setOption(i, oi, String($event ?? ''))"
+              />
+              <AtlasIconButton
+                icon="mdi-close"
+                ariaLabel="Remove option"
+                @click="removeOption(i, oi)"
+              />
+            </div>
+            <AtlasButton variant="ghost" size="sm" data-add-option @click="addOption(i)">+ Add option</AtlasButton>
+          </div>
         </div>
         <AtlasIconButton icon="mdi-close" ariaLabel="Remove" @click="remove(i)" />
       </div>
@@ -69,8 +91,23 @@ function remove(i: number) {
 function add(type: string) {
   commit([...props.modelValue, { linkId: nextId(), text: "", type }]);
 }
+
+function setOption(i: number, oi: number, text: string) {
+  const opts = (props.modelValue[i].answerOption ?? []).slice();
+  opts[oi] = { ...opts[oi], valueString: text };
+  patch(i, { answerOption: opts });
+}
+function addOption(i: number) {
+  patch(i, { answerOption: [...(props.modelValue[i].answerOption ?? []), { valueString: "" }] });
+}
+function removeOption(i: number, oi: number) {
+  const opts = (props.modelValue[i].answerOption ?? []).slice();
+  opts.splice(oi, 1);
+  patch(i, { answerOption: opts });
+}
 </script>
 
 <style scoped>
 .drag { color: rgb(var(--v-theme-on-surface-variant, 0, 0, 0)); }
+.options-editor { border-left: 2px solid rgba(var(--v-border-color, 0, 0, 0), 0.12); }
 </style>
