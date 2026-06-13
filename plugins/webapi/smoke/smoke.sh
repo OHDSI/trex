@@ -32,7 +32,13 @@ class H(http.server.BaseHTTPRequestHandler):
 socketserver.TCPServer(("127.0.0.1", 8099), H).serve_forever()
 PY
 echo $! > /tmp/oidc_mock.pid
-for _ in $(seq 1 20); do curl -sf http://127.0.0.1:8099/oidc/.well-known/openid-configuration >/dev/null 2>&1 && break; sleep 0.5; done
+oidc_up=0
+for _ in $(seq 1 20); do curl -sf http://127.0.0.1:8099/oidc/.well-known/openid-configuration >/dev/null 2>&1 && { oidc_up=1; break; }; sleep 0.5; done
+# The mock relies on python3's http.server/socketserver stdlib (needs the full
+# python3 package, not python3-minimal). If it never bound, WebAPI's eager OIDC
+# discovery fetch will fail with "Connection refused" and boot dies — fail loudly
+# here instead of letting that surface as an inscrutable bean-instantiation error.
+[ "$oidc_up" = 1 ] || { echo "[smoke] FATAL: mock OIDC server never came up on 127.0.0.1:8099"; exit 1; }
 
 # cache.generation.cleanupInterval is shrunk so CleanupScheduler.removeOldCache
 # fires within seconds. It runs an entity-graph (Cosium) derived query, which
