@@ -21,7 +21,7 @@ const TEMPLATES = [
 interface AppCreateDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreateApp: (name: string, template?: string) => Promise<App>;
+  onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string }) => Promise<App>;
 }
 
 const CREATION_PHASES = [
@@ -32,40 +32,66 @@ const CREATION_PHASES = [
   "Installing dependencies...",
 ];
 
+const GIT_PHASES = [
+  "Creating project...",
+  "Cloning repository...",
+  "Detecting tech stack...",
+  "Configuring dev tools...",
+];
+
 export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDialogProps) {
   const [name, setName] = useState("");
   const [template, setTemplate] = useState("react-vite");
+  const [mode, setMode] = useState<"template" | "git">("template");
+  const [gitUrl, setGitUrl] = useState("");
   const [creating, setCreating] = useState(false);
   const [done, setDone] = useState(false);
   const [phase, setPhase] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const phaseTimer = useRef<ReturnType<typeof setInterval>>(undefined);
 
+  const phases = mode === "git" ? GIT_PHASES : CREATION_PHASES;
+
   // Cycle through phases while creating
   useEffect(() => {
     if (creating) {
       setPhase(0);
       phaseTimer.current = setInterval(() => {
-        setPhase((p) => Math.min(p + 1, CREATION_PHASES.length - 1));
+        setPhase((p) => Math.min(p + 1, phases.length - 1));
       }, 600);
     } else {
       clearInterval(phaseTimer.current);
     }
     return () => clearInterval(phaseTimer.current);
-  }, [creating]);
+  }, [creating, phases.length]);
+
+  // Derive a default name from the repo URL when importing.
+  const deriveName = (url: string) =>
+    url.replace(/\.git$/, "").replace(/\/$/, "").split("/").pop() || "";
+
+  const effectiveName = mode === "git" && !name.trim() ? deriveName(gitUrl) : name.trim();
+  const canCreate = mode === "git"
+    ? /^https:\/\/.+/.test(gitUrl.trim())
+    : !!name.trim();
 
   const handleCreate = async () => {
-    if (!name.trim()) return;
+    if (!canCreate) return;
     setCreating(true);
     setDone(false);
     setError(null);
     try {
-      await onCreateApp(name.trim(), template);
+      if (mode === "git") {
+        await onCreateApp(effectiveName || "Imported App", { gitUrl: gitUrl.trim() });
+      } else {
+        await onCreateApp(name.trim(), { template });
+      }
       setDone(true);
       // Brief success state before closing
       setTimeout(() => {
         setName("");
         setTemplate("react-vite");
+        setGitUrl("");
+        setMode("template");
         setDone(false);
         onOpenChange(false);
       }, 800);
@@ -82,20 +108,59 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle>Create New App</DialogTitle>
-          <DialogDescription>Choose a name and template for your new app.</DialogDescription>
+          <DialogDescription>Start from a template or import an existing git repository.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
+          {/* Mode toggle: template vs import from git */}
+          <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-muted/50 border">
+            <button
+              type="button"
+              onClick={() => setMode("template")}
+              className={`text-sm py-1.5 rounded-md transition-colors ${
+                mode === "template" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"
+              }`}
+            >
+              Template
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode("git")}
+              className={`text-sm py-1.5 rounded-md transition-colors ${
+                mode === "git" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"
+              }`}
+            >
+              Import from Git
+            </button>
+          </div>
+
+          {mode === "git" && (
+            <div className="space-y-2">
+              <Label htmlFor="git-url">Repository URL</Label>
+              <Input
+                id="git-url"
+                placeholder="https://github.com/owner/repo.git"
+                value={gitUrl}
+                onChange={(e) => setGitUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+              />
+              <p className="text-xs text-muted-foreground">
+                Connect GitHub in Settings to clone private repositories.
+              </p>
+            </div>
+          )}
+
           <div className="space-y-2">
-            <Label htmlFor="app-name">App Name</Label>
+            <Label htmlFor="app-name">App Name {mode === "git" && <span className="text-muted-foreground font-normal">(optional)</span>}</Label>
             <Input
               id="app-name"
-              placeholder="My App"
+              placeholder={mode === "git" ? (deriveName(gitUrl) || "Derived from repo URL") : "My App"}
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleCreate()}
             />
           </div>
 
+          {mode === "template" && (
           <div className="space-y-2">
             <Label>Template</Label>
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
@@ -126,6 +191,7 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
               ))}
             </div>
           </div>
+          )}
 
           {error && (
             <p className="text-sm text-destructive">{error}</p>
@@ -139,7 +205,7 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
                 <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />
               )}
               <span className="text-sm text-muted-foreground">
-                {done ? "App created successfully!" : CREATION_PHASES[phase]}
+                {done ? "App created successfully!" : phases[phase]}
               </span>
             </div>
           )}
@@ -147,9 +213,9 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
           <Button
             className="w-full"
             onClick={handleCreate}
-            disabled={!name.trim() || creating || done}
+            disabled={!canCreate || creating || done}
           >
-            {creating ? "Creating..." : done ? "Done" : "Create App"}
+            {creating ? (mode === "git" ? "Importing..." : "Creating...") : done ? "Done" : mode === "git" ? "Import Repository" : "Create App"}
           </Button>
         </div>
       </DialogContent>

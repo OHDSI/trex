@@ -14,6 +14,8 @@ import { parseQaFindings } from "./qa_review_prompt.ts";
 import { parseDesignFindings } from "./design_review_prompt.ts";
 import { TEMPLATES, scaffoldTemplate, injectComponentTagger } from "./templates.ts";
 import { relative } from "https://deno.land/std@0.224.0/path/mod.ts";
+import { gitOps } from "./git.ts";
+import { getGithubToken, injectToken } from "./routes/github_routes.ts";
 // Phase 6: Extracted route handlers
 import { handleGitRoutes } from "./routes/git_routes.ts";
 import { handleGithubRoutes } from "./routes/github_routes.ts";
@@ -679,6 +681,7 @@ Deno.serve(async (req: Request) => {
                 hasComponentSelection,
               });
               fullContent = agentResult.content;
+              if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;
             } else if (settings.provider === "copilot") {
               // Copilot SDK: use agent-style streaming even in build/ask mode
               const { streamCopilotChat } = await import("./copilot_agent.ts");
@@ -696,6 +699,7 @@ Deno.serve(async (req: Request) => {
                 hasComponentSelection,
               });
               fullContent = agentResult.content;
+              if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;
             } else if (settings.provider === "anthropic") {
               fullContent = await streamAnthropic(settings, history, send, systemPrompt);
             } else if (settings.provider === "google") {
@@ -1070,9 +1074,80 @@ Deno.serve(async (req: Request) => {
       return Response.json(result.rows, { headers: corsHeaders });
     }
 
-    // POST /apps - create app
+    // POST /apps - create app (from a template, or by cloning a git URL)
     if (path.endsWith("/apps") && method === "POST") {
       const body = await req.json();
+      const gitUrl = typeof body.git_url === "string" ? body.git_url.trim() : "";
+
+      // --- Import from a git URL: clone the repo into the workspace ---
+      if (gitUrl) {
+        if (!gitUrl.startsWith("https://")) {
+          return Response.json({ error: "Only https:// git URLs are supported" }, { status: 400, headers: corsHeaders });
+        }
+        // Derive a name from the repo path if none was given.
+        const repoName = gitUrl.replace(/\.git$/, "").split("/").pop() || "Imported App";
+        const name = (body.name && body.name.trim()) || repoName;
+
+        const result = await sql(
+          `INSERT INTO devx.apps (user_id, name, path, tech_stack, dev_command, install_command, build_command, git_remote_url)
+           VALUES ($1, $2, '', '', '', '', '', $3)
+           RETURNING id, user_id, name, path, tech_stack, dev_command, install_command, build_command, dev_port, config, created_at, updated_at`,
+          [userId, name, gitUrl],
+        );
+        const app = result.rows[0];
+        const wsPath = getAppWorkspacePath(userId, app.id);
+        const relPath = `${userId}/${app.id}`;
+        await sql(`UPDATE devx.apps SET path = $1 WHERE id = $2`, [relPath, app.id]);
+        app.path = relPath;
+
+        try {
+          // `git clone` creates the leaf dir itself but needs the parent to
+          // exist — ensure the per-user workspace dir is present first.
+          const parentDir = wsPath.substring(0, wsPath.lastIndexOf("/"));
+          await Deno.mkdir(parentDir, { recursive: true });
+
+          // Clone with the user's token injected so private repos work. The
+          // clean URL stays in git_remote_url; the token is only used here.
+          const token = await getGithubToken(userId, sql);
+          await gitOps.clone(injectToken(gitUrl, token), wsPath);
+
+          // Best-effort tech-stack / dev-command detection from package.json.
+          try {
+            const pkg = JSON.parse(await Deno.readTextFile(`${wsPath}/package.json`));
+            const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+            const scripts = pkg.scripts || {};
+            let techStack = "";
+            if (deps.next) techStack = "Next.js";
+            else if (deps.vue) techStack = "Vue";
+            else if (deps.react) techStack = "React";
+            else if (pkg.name) techStack = "Node";
+            const devCommand = scripts.dev ? "npm run dev" : (scripts.start ? "npm start" : "");
+            const buildCommand = scripts.build ? "npm run build" : "";
+            const installCommand = "npm install";
+            await sql(
+              `UPDATE devx.apps SET tech_stack = $1, dev_command = $2, build_command = $3, install_command = $4 WHERE id = $5`,
+              [techStack, devCommand, buildCommand, installCommand, app.id],
+            );
+            app.tech_stack = techStack;
+            app.dev_command = devCommand;
+            app.build_command = buildCommand;
+            app.install_command = installCommand;
+          } catch { /* no package.json — leave fields blank */ }
+
+          // Inject the component tagger so visual-edit/inspect works on the clone.
+          try { await injectComponentTagger(wsPath); } catch { /* non-fatal */ }
+        } catch (err) {
+          // Roll back the half-created app so the user can retry cleanly.
+          console.error("Git clone error:", err);
+          await sql(`DELETE FROM devx.apps WHERE id = $1`, [app.id]);
+          try { await Deno.remove(wsPath, { recursive: true }); } catch { /* may not exist */ }
+          return Response.json({ error: `Failed to clone repository: ${err.message}` }, { status: 502, headers: corsHeaders });
+        }
+
+        return Response.json(app, { headers: corsHeaders });
+      }
+
+      // --- Create from a template ---
       const name = body.name || "New App";
       const templateId = body.template || "blank";
       const template = TEMPLATES.find((t) => t.id === templateId) || TEMPLATES.find((t) => t.id === "blank");

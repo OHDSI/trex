@@ -2,6 +2,7 @@
 import { gitOps } from "../git.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
 import { duckdb, escapeSql } from "../duckdb.ts";
+import { getGithubToken, injectToken } from "./github_routes.ts";
 
 export async function handleGitRoutes(path, method, req, userId, sql, corsHeaders) {
   // GET /apps/:id/git/status
@@ -142,6 +143,50 @@ export async function handleGitRoutes(path, method, req, userId, sql, corsHeader
     const wsPath = getAppWorkspacePath(userId, appId);
     try {
       const result = await gitOps.withLock(wsPath, () => gitOps.commit(wsPath, message));
+      return Response.json({ ok: true, message: result }, { headers: corsHeaders });
+    } catch (err) {
+      return Response.json({ error: err.message }, { status: 400, headers: corsHeaders });
+    }
+  }
+
+  // POST /apps/:id/git/push — push the current branch to the app's remote
+  const pushMatch = path.match(/\/apps\/([^/]+)\/git\/push$/);
+  if (pushMatch && method === "POST") {
+    const appId = pushMatch[1];
+    const appCheck = await sql(`SELECT git_remote_url FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
+    if (appCheck.rows.length === 0) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const remoteUrl = appCheck.rows[0].git_remote_url;
+    if (!remoteUrl) {
+      return Response.json({ error: "No remote configured. Connect a GitHub repo first." }, { status: 400, headers: corsHeaders });
+    }
+    const wsPath = getAppWorkspacePath(userId, appId);
+    try {
+      const token = await getGithubToken(userId, sql);
+      const result = await gitOps.withLock(wsPath, () => gitOps.push(wsPath, injectToken(remoteUrl, token)));
+      return Response.json({ ok: true, message: result }, { headers: corsHeaders });
+    } catch (err) {
+      return Response.json({ error: err.message }, { status: 400, headers: corsHeaders });
+    }
+  }
+
+  // POST /apps/:id/git/pull — pull the app's remote into the current branch
+  const pullMatch = path.match(/\/apps\/([^/]+)\/git\/pull$/);
+  if (pullMatch && method === "POST") {
+    const appId = pullMatch[1];
+    const appCheck = await sql(`SELECT git_remote_url FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
+    if (appCheck.rows.length === 0) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const remoteUrl = appCheck.rows[0].git_remote_url;
+    if (!remoteUrl) {
+      return Response.json({ error: "No remote configured. Connect a GitHub repo first." }, { status: 400, headers: corsHeaders });
+    }
+    const wsPath = getAppWorkspacePath(userId, appId);
+    try {
+      const token = await getGithubToken(userId, sql);
+      const result = await gitOps.withLock(wsPath, () => gitOps.pull(wsPath, injectToken(remoteUrl, token)));
       return Response.json({ ok: true, message: result }, { headers: corsHeaders });
     } catch (err) {
       return Response.json({ error: err.message }, { status: 400, headers: corsHeaders });

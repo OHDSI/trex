@@ -167,6 +167,11 @@ services:
       # — put GITHUB_CLIENT_ID=<id> in ./.env (compose auto-loads it). Unset
       # falls back to the bundled default in github_routes.ts.
       GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      # AES-256 key (64 hex chars) used to encrypt stored integration tokens
+      # (devx → Connect GitHub). Supplied via ./.env. Without it, token
+      # encrypt/decrypt is disabled and GitHub connect / private-repo clone fail
+      # (public clone still works — the token lookup is best-effort).
+      DEVX_ENCRYPTION_KEY: ${DEVX_ENCRYPTION_KEY:-}
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins

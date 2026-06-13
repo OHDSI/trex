@@ -17,7 +17,7 @@ interface AppSelectorProps {
   loading?: boolean;
   activeAppId: string | null;
   onSelectApp: (appId: string | null) => void;
-  onCreateApp: (name: string, template?: string) => Promise<App>;
+  onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string }) => Promise<App>;
   onDeleteApp: (appId: string) => Promise<void>;
 }
 

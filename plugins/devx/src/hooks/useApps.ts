@@ -42,8 +42,8 @@ export function useApps() {
     return () => { cancelled = true; clearTimeout(timeout); };
   }, []);
 
-  const create = useCallback(async (name: string, template?: string) => {
-    const app = await api.createApp(name, template);
+  const create = useCallback(async (name: string, opts?: { template?: string; gitUrl?: string }) => {
+    const app = await api.createApp(name, opts);
     setApps((prev) => [app, ...prev]);
     return app;
   }, []);

@@ -103,8 +103,8 @@ export default function ChatPage() {
   );
 
   const handleCreateApp = useCallback(
-    async (name: string, template?: string) => {
-      const app = await createApp(name, template);
+    async (name: string, opts?: { template?: string; gitUrl?: string }) => {
+      const app = await createApp(name, opts);
       setActiveAppId(app.id);
       return app;
     },
@@ -164,7 +164,7 @@ export default function ChatPage() {
   useKeyboardShortcuts(shortcutHandlers);
 
   return (
-    <div className="h-screen flex flex-col">
+    <div className="h-full flex flex-col">
       {/* Header */}
       <header className="flex items-center justify-between border-b px-4 h-12 shrink-0">
         <div className="flex items-center gap-3">

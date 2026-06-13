@@ -231,6 +231,7 @@ macro_rules! define_vtab_3param {
 // ---------------------------------------------------------------------------
 
 define_vtab_1param!(DevxGitInitVTab, GitInitBind, GitInitInit, git::git_init);
+define_vtab_2param!(DevxGitCloneVTab, GitCloneBind, GitCloneInit, git::git_clone);
 define_vtab_1param!(DevxGitStatusVTab, GitStatusBind, GitStatusInit, git::git_status);
 define_vtab_2param!(DevxGitCommitVTab, GitCommitBind, GitCommitInit, git::git_commit);
 define_vtab_2param!(DevxGitLogVTab, GitLogBind, GitLogInit, git::git_log);
@@ -319,6 +320,7 @@ define_vtab_2param!(DevxProcessInputVTab, ProcessInputBind, ProcessInputInit, pr
 #[duckdb_entrypoint_c_api()]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
     con.register_table_function::<DevxGitInitVTab>("trex_devx_git_init")?;
+    con.register_table_function::<DevxGitCloneVTab>("trex_devx_git_clone")?;
     con.register_table_function::<DevxGitStatusVTab>("trex_devx_git_status")?;
     con.register_table_function::<DevxGitCommitVTab>("trex_devx_git_commit")?;
     con.register_table_function::<DevxGitLogVTab>("trex_devx_git_log")?;

@@ -124,7 +124,7 @@ export default function AppDetailsPage() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen">
+      <div className="flex items-center justify-center h-full">
         <p className="text-muted-foreground">Loading...</p>
       </div>
     );
@@ -132,7 +132,7 @@ export default function AppDetailsPage() {
 
   if (error || !app) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen gap-4">
+      <div className="flex flex-col items-center justify-center h-full gap-4">
         <p className="text-destructive">{error || "App not found"}</p>
         <Button variant="outline" onClick={() => navigate("/")}>
           <ArrowLeft className="h-4 w-4 mr-2" />
@@ -143,7 +143,7 @@ export default function AppDetailsPage() {
   }
 
   return (
-    <div className="min-h-screen bg-background">
+    <div className="h-full overflow-y-auto bg-background">
       {/* Header */}
       <header className="flex items-center border-b px-4 h-12 shrink-0 gap-3">
         <Button variant="ghost" size="icon" onClick={() => navigate("/")}>
