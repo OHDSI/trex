@@ -1,3 +1,51 @@
 .v-application {
   font-size: 14px;
 }
+
+/* ----------------------------------------------------------------------------
+   Compact, refined text inputs.
+   The Atlas theme is already density=compact; we tighten further and give the
+   fields a calmer hairline look with an accent focus ring.
+   Scoped to outlined text-like fields so switches/checkboxes are unaffected.
+---------------------------------------------------------------------------- */
+.v-field--variant-outlined .v-field__input {
+  min-height: 34px;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  font-size: 13px;
+}
+.v-field--variant-outlined .v-field__input input,
+.v-field--variant-outlined .v-field__input textarea {
+  font-size: 13px;
+}
+
+/* Calmer hairline border by default */
+.v-field--variant-outlined .v-field__outline__start,
+.v-field--variant-outlined .v-field__outline__end,
+.v-field--variant-outlined .v-field__outline__notch::before,
+.v-field--variant-outlined .v-field__outline__notch::after {
+  opacity: 0.55;
+}
+
+/* Accent focus ring — a touch of delight */
+.v-field--variant-outlined.v-field--focused .v-field__outline {
+  --v-field-border-width: 2px;
+  color: rgb(var(--v-theme-primary));
+  opacity: 1;
+}
+.v-field--variant-outlined.v-field--focused .v-field__outline__start,
+.v-field--variant-outlined.v-field--focused .v-field__outline__end,
+.v-field--variant-outlined.v-field--focused .v-field__outline__notch::before,
+.v-field--variant-outlined.v-field--focused .v-field__outline__notch::after {
+  opacity: 1;
+}
+
+/* When the field carries no label, kill the reserved label gutter so the box is tight */
+.v-field--variant-outlined:not(.v-field--has-label) .v-field__field {
+  --v-field-padding-top: 0px;
+}
+
+/* Smooth interactions */
+.v-field, .v-btn, .rt-card, .atlas-card, .v-card {
+  transition: box-shadow .15s ease, border-color .15s ease, background-color .15s ease, transform .12s ease;
+}
