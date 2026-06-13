@@ -55,7 +55,10 @@ async function runSearch() {
   }
 }
 function display(r: any, c: string) { const v = r[c]; return typeof v === "object" ? JSON.stringify(v) : v ?? ""; }
-function open(r: any) { router.push(`/${props.dataset}/${props.type}/${r.id}/edit`); }
+function open(r: any) {
+  if (props.type === "Questionnaire") router.push(`/${props.dataset}/Questionnaire/${r.id}/build`);
+  else router.push(`/${props.dataset}/${props.type}/${r.id}/edit`);
+}
 
 onMounted(async () => { params.value = await profile.getSearchParams(props.type); await runSearch(); });
 </script>
