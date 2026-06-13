@@ -12,7 +12,8 @@
       "@/*": ["src/*"],
       "@atlas-ui": ["vendor/atlas-ui/atlas-ui.d.ts"]
     },
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "noEmit": true
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "vendor/atlas-ui/*.d.ts"]
 }
