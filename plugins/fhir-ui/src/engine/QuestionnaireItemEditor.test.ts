@@ -1,4 +1,4 @@
-import { expect } from "vitest";
+import { it, expect } from "vitest";
 import { flushPromises, mount } from "@vue/test-utils";
 import { createVuetify } from "vuetify";
 import * as components from "vuetify/components";
