@@ -12,6 +12,9 @@ describe("FhirClient", () => {
     expect(b.total).toBe(1);
     expect(fetchMock.mock.calls[0][0]).toBe("http://h/fhir/ds1/Patient?gender=female");
     expect((fetchMock.mock.calls[0][1] as RequestInit).headers as any).toMatchObject({ apikey: "k" });
+    const hdrs = (fetchMock.mock.calls[0][1] as RequestInit).headers as any;
+    expect(hdrs.accept).toBe("application/fhir+json");
+    expect(hdrs["content-type"]).toBeUndefined();
   });
   it("reads a structure definition", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(json({ resourceType: "Patient", kind: "resource", isAbstract: false, elements: [] }));
@@ -23,5 +26,18 @@ describe("FhirClient", () => {
       json({ resourceType: "OperationOutcome", issue: [{ severity: "error", diagnostics: "bad" }] }, { status: 400 }));
     const c = new FhirClient("http://h/fhir", "k");
     await expect(c.read("ds1", "Patient", "x")).rejects.toThrow("bad");
+  });
+  it("throws FhirError on a non-JSON error body", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response("<html>502</html>", { status: 502 }));
+    const c = new FhirClient("http://h/fhir", "k");
+    await expect(c.read("ds1", "Patient", "x")).rejects.toThrow("HTTP 502");
+  });
+  it("search accepts URLSearchParams", async () => {
+    const fetchMock = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ resourceType: "Bundle" }), { headers: { "content-type": "application/fhir+json" } }));
+    const c = new FhirClient("http://h/fhir", "k");
+    const p = new URLSearchParams(); p.append("_profile", "A"); p.append("_profile", "B");
+    await c.search("ds1", "Patient", p);
+    expect(fetchMock.mock.calls[0][0]).toBe("http://h/fhir/ds1/Patient?_profile=A&_profile=B");
   });
 });

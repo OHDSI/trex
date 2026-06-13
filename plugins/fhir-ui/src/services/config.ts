@@ -1,4 +1,4 @@
-// The host may inject window.__FHIR_UI_CONFIG__ = { baseUrl, apiKey }.
+// The host may inject globalThis.__FHIR_UI_CONFIG__ = { baseUrl, apiKey }.
 export interface FhirUiConfig { baseUrl: string; apiKey: string; }
 export function resolveConfig(): FhirUiConfig {
   const injected = (globalThis as any).__FHIR_UI_CONFIG__;
