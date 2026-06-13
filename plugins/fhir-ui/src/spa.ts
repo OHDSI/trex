@@ -3,6 +3,7 @@ import { createPinia } from "pinia";
 import singleSpaVue from "single-spa-vue";
 import App from "./App.vue";
 import { vuetify } from "./plugins/vuetify";
+import "./styles/app.css";
 import { createAppRouter } from "./router";
 
 const lifecycles = singleSpaVue({

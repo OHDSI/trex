@@ -6,4 +6,14 @@ import { buildVuetifyOptions } from "@atlas-ui";
 
 // buildVuetifyOptions() supplies the Atlas theme (primary #1f425a, accent #eb6622,
 // compact density, outlined inputs). Falls back to a literal theme if the export shape differs.
-export const vuetify = createVuetify(buildVuetifyOptions());
+const opts = buildVuetifyOptions();
+export const vuetify = createVuetify({
+  ...opts,
+  defaults: {
+    ...(opts.defaults ?? {}),
+    // Collapse the empty ~22px .v-input__details strip when there are no hints/errors.
+    // hideDetails:"auto" still renders the strip (and shows validation messages) whenever
+    // there ARE messages — so validation errors remain fully visible.
+    global: { ...((opts.defaults as any)?.global ?? {}), hideDetails: "auto", density: "compact" },
+  },
+});
