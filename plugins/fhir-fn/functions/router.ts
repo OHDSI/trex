@@ -50,6 +50,8 @@ export type Route =
   | { kind: "typeExport"; datasetId: string; resourceType: string }
   | { kind: "evaluateMeasure"; datasetId: string; measureId?: string }
   | { kind: "cql"; datasetId: string }
+  | { kind: "structureDefinitionList"; datasetId: string }
+  | { kind: "structureDefinitionRead"; datasetId: string; type: string }
   | { kind: "notFound" };
 
 // ---------------------------------------------------------------------------
@@ -145,6 +147,11 @@ export function parseRoute(method: string, path: string): Route {
     // Any other segment starting with "$" is an unknown operation → notFound
     if (s1.startsWith("$")) return { kind: "notFound" };
 
+    // /{ds}/StructureDefinition  — registry list (no DB required)
+    if (s1 === "StructureDefinition") {
+      return m === "GET" ? { kind: "structureDefinitionList", datasetId } : { kind: "notFound" };
+    }
+
     // /{ds}/{resourceType}  search / create
     const resourceType = s1;
     if (m === "GET") return { kind: "search", datasetId, resourceType };
@@ -174,6 +181,11 @@ export function parseRoute(method: string, path: string): Route {
 
     // Any other s2 starting with "$" is an unknown operation → notFound
     if (s2.startsWith("$")) return { kind: "notFound" };
+
+    // /{ds}/StructureDefinition/{type}  — registry read (no DB required)
+    if (s1 === "StructureDefinition") {
+      return m === "GET" ? { kind: "structureDefinitionRead", datasetId, type: s2 } : { kind: "notFound" };
+    }
 
     // /{ds}/{resourceType}/{id}  — read / update / delete
     const resourceType = s1;
