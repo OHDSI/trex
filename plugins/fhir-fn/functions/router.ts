@@ -4,6 +4,7 @@ import { FhirError } from "./error.ts";
 import { AppState, externalBase, stripMount } from "./state.ts";
 import { withConnection } from "./db.ts";
 import { getMetadata } from "./handlers/metadata.ts";
+import { handleStructureDefinitionList, handleStructureDefinitionRead } from "./handlers/structure_definition.ts";
 import {
   createDataset,
   listDatasets,
@@ -373,6 +374,12 @@ async function dispatch(
 
     case "metadata":
       return await withConnection((conn) => getMetadata(parsed.datasetId, conn, state));
+
+    case "structureDefinitionList":
+      return handleStructureDefinitionList(state);
+
+    case "structureDefinitionRead":
+      return handleStructureDefinitionRead(state, parsed.type);
 
     case "createDataset": {
       const body = await req.json().catch(() => ({}));

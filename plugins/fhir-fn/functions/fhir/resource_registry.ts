@@ -44,6 +44,16 @@ export class ResourceRegistry {
     return this._definitions.resourceTypeNames();
   }
 
+  /** Return a sorted list of all concrete resource type names (tolerant of missing definitions). */
+  listResourceTypes(): string[] {
+    return this._definitions?.listResourceTypes() ?? [];
+  }
+
+  /** Return the parsed definition for a resource type, or undefined if unknown or no definitions. */
+  getResourceDefinition(type: string): import("./structure_definition.ts").ParsedStructureDefinition | undefined {
+    return this._definitions?.getResourceDefinition(type);
+  }
+
   // Rust: is_known_type — tolerant of missing definitions (returns false)
   isKnownResourceType(resourceType: string): boolean {
     if (this._definitions === undefined) {
