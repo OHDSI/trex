@@ -5,7 +5,7 @@
       <AtlasButton variant="primary" data-save :loading="saving" @click="save">Save</AtlasButton>
     </template>
 
-    <AtlasAlert v-if="error" severity="danger" :title="error" class="mb-3" />
+    <AtlasAlert v-if="error" severity="danger" :title="error" data-error class="mb-3" />
 
     <SDFormRenderer v-if="definition" v-model="draft" :definition="definition" />
   </AtlasPageShell>
