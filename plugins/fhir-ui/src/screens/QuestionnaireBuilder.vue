@@ -1,9 +1,10 @@
 <template>
   <AtlasPageShell eyebrow="Questionnaire" :title="draft.title || 'Questionnaire'">
     <template #actions>
-      <AtlasChip v-if="draft.status" tone="warning">{{ draft.status }}</AtlasChip>
+      <AtlasChip v-if="draft.status" :tone="statusTone">{{ draft.status }}</AtlasChip>
       <AtlasButton variant="primary" data-publish :loading="saving" @click="save">Publish</AtlasButton>
     </template>
+    <AtlasAlert v-if="error" severity="danger" :title="error" class="mb-3" />
     <div class="qb">
       <div class="qb-col" data-builder-edit>
         <div class="text-overline mb-2">Structure</div>
@@ -18,17 +19,28 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
-import { AtlasPageShell, AtlasButton, AtlasChip, AtlasCard } from "@atlas-ui";
+import { ref, computed, onMounted } from "vue";
+import { AtlasPageShell, AtlasButton, AtlasChip, AtlasCard, AtlasAlert } from "@atlas-ui";
 import QuestionnaireItemEditor from "@/engine/QuestionnaireItemEditor.vue";
 import QuestionnaireRenderer from "@/engine/QuestionnaireRenderer.vue";
 import { useFhir } from "@/composables/useFhir";
+import { FhirError } from "@/services/fhirClient";
 
 const props = defineProps<{ dataset: string; id: string }>();
 const { client } = useFhir(props.dataset);
 
 const draft = ref<any>({ resourceType: "Questionnaire", item: [] });
 const saving = ref(false);
+const error = ref("");
+
+const statusTone = computed(() => {
+  switch (draft.value?.status) {
+    case "active": return "success";
+    case "retired": return "neutral";
+    case "draft": return "warning";
+    default: return "neutral";
+  }
+});
 
 onMounted(async () => {
   const q = await client.read(props.dataset, "Questionnaire", props.id);
@@ -37,9 +49,11 @@ onMounted(async () => {
 });
 
 async function save() {
-  saving.value = true;
+  saving.value = true; error.value = "";
   try {
     await client.update(props.dataset, "Questionnaire", props.id, draft.value);
+  } catch (e) {
+    error.value = e instanceof FhirError ? e.message : String(e);
   } finally {
     saving.value = false;
   }

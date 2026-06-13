@@ -36,6 +36,7 @@
 </template>
 
 <script setup lang="ts">
+import { onMounted } from "vue";
 import { AtlasCard, AtlasTextField, AtlasSelect, AtlasCheckbox, AtlasButton, AtlasIconButton } from "@atlas-ui";
 import type { QItem } from "./enableWhen";
 
@@ -46,6 +47,12 @@ const emit = defineEmits<{ "update:modelValue": [QItem[]] }>();
 
 // Simple counter-based ID — avoids Date.now() flakiness in tests
 let seq = 0;
+onMounted(() => {
+  for (const it of props.modelValue ?? []) {
+    const m = /^q(\d+)$/.exec(it.linkId || "");
+    if (m) seq = Math.max(seq, Number(m[1]));
+  }
+});
 function nextId() { return `q${++seq}`; }
 
 function commit(next: QItem[]) { emit("update:modelValue", next); }
@@ -65,5 +72,5 @@ function add(type: string) {
 </script>
 
 <style scoped>
-.drag { color: rgb(var(--v-theme-on-surface-variant, 0, 0, 0)); cursor: grab; }
+.drag { color: rgb(var(--v-theme-on-surface-variant, 0, 0, 0)); }
 </style>
