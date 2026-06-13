@@ -12,7 +12,9 @@
         <AtlasSwitch v-else-if="item.type === 'boolean'" :model-value="answers[item.linkId]"
           @update:model-value="set(item.linkId, $event)" />
 
-        <AtlasTextField v-else :type="inputType(item.type)" :model-value="answers[item.linkId]"
+        <div v-else-if="item.type === 'group'" class="text-subtitle-2 mt-2">{{ item.text }}</div>
+
+        <AtlasTextField v-else-if="item.type !== 'group'" :type="inputType(item.type)" :model-value="answers[item.linkId]"
           @update:model-value="set(item.linkId, $event)" />
       </div>
     </template>
@@ -36,15 +38,20 @@ function options(item: QItem) { return (item.answerOption ?? []).map((o) => ({ v
 function inputType(t: string) { return t === "integer" || t === "decimal" ? "number" : t === "date" ? "date" : "text"; }
 function set(linkId: string, v: any) { answers[linkId] = v; }
 
+function answerValue(item: QItem, v: any) {
+  if (item.type === "boolean") return { valueBoolean: Boolean(v) };
+  if (item.type === "integer") return { valueInteger: Number(v) };
+  if (item.type === "decimal") return { valueDecimal: Number(v) };
+  return { valueString: String(v) };
+}
+
 watch(answers, () => {
   emit("update:response", {
     resourceType: "QuestionnaireResponse", status: "in-progress",
     item: flatItems.value.filter(enabled).filter((i) => answers[i.linkId] != null)
-      .map((i) => ({ linkId: i.linkId, answer: [{ valueString: String(answers[i.linkId]) }] })),
+      .map((i) => ({ linkId: i.linkId, answer: [answerValue(i, answers[i.linkId])] })),
   });
 }, { deep: true });
-
-defineExpose({ answers });
 </script>
 
 <style scoped>.req{color:rgb(var(--v-theme-accent,#eb6622));font-weight:700}</style>

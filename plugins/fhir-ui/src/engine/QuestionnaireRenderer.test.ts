@@ -17,3 +17,16 @@ it("renders enabled items and hides disabled ones; emits a QuestionnaireResponse
   expect(w.find('[data-q="name"]').exists()).toBe(true);
   expect(w.find('[data-q="cigs"]').exists()).toBe(false); // smoke not answered yes
 });
+
+it("emits typed answer values (boolean → valueBoolean)", async () => {
+  const boolQ = { resourceType: "Questionnaire", item: [{ linkId: "ok", text: "OK?", type: "boolean" }] };
+  const w = mount(QuestionnaireRenderer, { props: { questionnaire: boolQ }, global: { plugins: [vuetify] } });
+  await flushPromises();
+  // Drive the boolean via the AtlasSwitch update:modelValue emit
+  const sw = w.findComponent({ name: "AtlasSwitch" });
+  await sw.vm.$emit("update:modelValue", true);
+  await flushPromises();
+  const events = w.emitted("update:response") ?? [];
+  const last = events[events.length - 1]?.[0] as any;
+  expect(last.item.find((i: any) => i.linkId === "ok").answer[0]).toEqual({ valueBoolean: true });
+});

@@ -1,7 +1,7 @@
 <template>
   <AtlasPageShell :eyebrow="q?.title || 'Questionnaire'" :title="q?.title || 'Form'">
     <div style="max-width:560px;margin:0 auto">
-      <AtlasProgressLinear class="mb-4" />
+      <AtlasProgressLinear v-if="loading" class="mb-4" />
       <AtlasCard padding="md" v-if="q">
         <QuestionnaireRenderer :questionnaire="q" @update:response="response = $event" />
         <div class="d-flex ga-2 mt-2">
@@ -27,8 +27,17 @@ const { client } = useFhir(props.dataset);
 const q = ref<any>(null);
 const response = ref<any>({});
 const error = ref("");
+const loading = ref(true);
 
-onMounted(async () => { q.value = await client.read(props.dataset, "Questionnaire", props.id); });
+onMounted(async () => {
+  try {
+    q.value = await client.read(props.dataset, "Questionnaire", props.id);
+  } catch (e) {
+    error.value = e instanceof FhirError ? e.message : String(e);
+  } finally {
+    loading.value = false;
+  }
+});
 
 async function submit(status: string) {
   error.value = "";
