@@ -129,5 +129,53 @@ export async function handlePlanRoutes(path, method, req, userId, sql, corsHeade
     return Response.json(result.rows[0], { headers: corsHeaders });
   }
 
+  // POST /plans/:id/execute — start an agent-driven run that implements the plan
+  // via the subagent-driven-development skill. Creates a subagent_runs row; the
+  // UI's agent-run poll auto-starts it through POST /agent-runs/:id/start.
+  const execMatch = path.match(/\/plans\/([^/]+)\/execute$/);
+  if (execMatch && method === "POST") {
+    const planId = execMatch[1];
+    if (planId.startsWith("file:")) {
+      return Response.json(
+        { error: "Filesystem plans can't be executed — use Implement in chat instead" },
+        { status: 400, headers: corsHeaders },
+      );
+    }
+    // Load the plan + its chat/app, scoped to the user.
+    const planRes = await sql(
+      `SELECT p.id, p.content, p.chat_id, c.app_id
+       FROM devx.plans p
+       JOIN devx.chats c ON c.id = p.chat_id
+       WHERE p.id = $1 AND c.user_id = $2`,
+      [planId, userId],
+    );
+    if (planRes.rows.length === 0) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const plan = planRes.rows[0];
+    // Mark the plan accepted (idempotent) so the lifecycle reflects execution start.
+    await sql(
+      `UPDATE devx.plans SET status = 'accepted', updated_at = NOW()
+       WHERE id = $1 AND status NOT IN ('implemented')`,
+      [planId],
+    );
+    const runRes = await sql(
+      `INSERT INTO devx.subagent_runs
+         (parent_chat_id, agent_name, task, user_id, app_id, skill_name, run_kind, plan_id, status)
+       VALUES ($1, $2, $3, $4, $5, $6, 'agent', $7, 'running')
+       RETURNING id`,
+      [
+        plan.chat_id,
+        "Plan executor",
+        plan.content,
+        userId,
+        plan.app_id,
+        "subagent-driven-development",
+        planId,
+      ],
+    );
+    return Response.json({ runId: runRes.rows[0].id }, { headers: corsHeaders });
+  }
+
   return null;
 }

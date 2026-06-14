@@ -402,6 +402,12 @@ export interface SubagentRun {
   result?: string | null;
   created_at: string;
   completed_at: string | null;
+  app_id?: string | null;
+  run_kind?: "agent" | "subagent" | null;
+  plan_id?: string | null;
+  branch?: string | null;
+  worktree_path?: string | null;
+  parent_run_id?: string | null;
 }
 
 /** Item returned by /slash-completions endpoint */

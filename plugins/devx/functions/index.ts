@@ -865,15 +865,35 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      const agentSettingsResult = await sql(
-        `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems
-         FROM devx.settings WHERE user_id = $1`,
+      // Resolve the active provider (multi-provider) with legacy fallback,
+      // mirroring POST /chats/:id/stream, so plan runs can use claude-code.
+      const activeProvider = (await sql(
+        `SELECT pc.provider, pc.model, pc.api_key, pc.base_url
+         FROM devx.provider_configs pc WHERE pc.user_id = $1 AND pc.is_active = true LIMIT 1`,
         [userId],
-      );
-      const agentSettings = agentSettingsResult.rows[0];
-      if (!agentSettings?.api_key) {
+      )).rows[0];
+      const agentPrefs = (await sql(
+        `SELECT ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+        [userId],
+      )).rows[0] || {};
+      let agentSettings = activeProvider
+        ? {
+            ...activeProvider,
+            ai_rules: agentPrefs.ai_rules || null,
+            max_steps: agentPrefs.max_steps ?? 100,
+            max_tool_steps: agentPrefs.max_tool_steps ?? 10,
+            auto_fix_problems: agentPrefs.auto_fix_problems ?? false,
+          }
+        : (await sql(
+            `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+            [userId],
+          )).rows[0];
+      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
+      if (!agentSettings || (!agentSettings.api_key && !noKeyProviders.has(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
       }
+      // Agent-driven runs are autonomous.
+      agentSettings = { ...agentSettings, auto_approve: true };
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -900,30 +920,52 @@ Deno.serve(async (req: Request) => {
               }
             };
 
-            const result = await streamAgentChat({
+            // Plan-execution runs get a directive prompt that pre-decides
+            // subagent-driven execution (so the skill won't re-ask), and run on
+            // the claude-code path where superpowers skills are invocable.
+            const isPlanRun = run.run_kind === "agent" && !!run.plan_id;
+            const runPrompt = isPlanRun
+              ? `Execute the following implementation plan using the subagent-driven-development skill. Do not ask which execution strategy to use — use subagent-driven execution. Implement everything end-to-end with your tools.\n\nPLAN:\n${run.task}`
+              : run.task + ". Use your tools to thoroughly analyze the project.";
+
+            const baseArgs = {
               chatId: `agent-run-${runId}`,
               userId,
               appId: run.app_id,
-              chatMode: "agent",
-              settings: {
-                ...agentSettings,
-                max_steps: matchedSkill?.allowed_tools ? 100 : 100,
-                auto_approve: true,
-              },
-              history: [{ role: "user", content: run.task + ". Use your tools to thoroughly analyze the project." }],
+              chatMode: "agent" as const,
+              settings: { ...agentSettings, max_steps: 100, auto_approve: true },
+              history: [{ role: "user", content: runPrompt }],
               send: agentSend,
               sqlFn: sql,
               skillContext: skillBody,
               commandOverride: matchedSkill?.allowed_tools
                 ? { allowed_tools: matchedSkill.allowed_tools, model: null, body: "" }
                 : undefined,
-            });
+            };
+
+            let result;
+            if (isPlanRun && agentSettings.provider === "claude-code") {
+              const { streamClaudeCodeChat } = await import("./claude_code_agent.ts");
+              result = await streamClaudeCodeChat(baseArgs);
+            } else {
+              if (isPlanRun && agentSettings.provider !== "claude-code") {
+                agentSend({ type: "chunk", content: "\n> ⚠️ Subagent-driven execution needs the Claude Code provider; running in basic autonomous mode.\n\n" });
+              }
+              result = await streamAgentChat(baseArgs);
+            }
 
             const fullContent = result.content || "";
             await sql(
               `UPDATE devx.subagent_runs SET status = 'completed', result = $1, completed_at = NOW() WHERE id = $2`,
               [fullContent.slice(0, 50000), runId],
             );
+            // Plan-execution runs mark their plan implemented on success.
+            if (run.plan_id) {
+              await sql(
+                `UPDATE devx.plans SET status = 'implemented', updated_at = NOW() WHERE id = $1`,
+                [run.plan_id],
+              ).catch(() => {});
+            }
             // Save final assistant message
             await sql(
               `INSERT INTO devx.subagent_messages (run_id, role, content) VALUES ($1, 'assistant', $2)`,
