@@ -51,12 +51,26 @@
   "Create a TrexSQL native connection.
    Returns a JNA Pointer handle to the database.
    Config options:
-   - :allow-unsigned-extensions - enable loading unsigned extensions"
+   - :allow-unsigned-extensions - enable loading unsigned extensions
+
+   When running as the in-engine WebAPI DuckDB extension, the host passes its
+   duckdb_database pointer via the 'trexsql.host.duckdb.handle' system property;
+   we then SHARE that instance (so cache files built by either path are
+   immediately visible) instead of opening a separate ':memory:' database. When
+   the property is absent/0 (e.g. WebAPI running standalone on the JVM) we open
+   our own instance as before."
   ([]
    (create-connection {}))
   ([config]
-   (let [flags (if (:allow-unsigned-extensions config) 1 0)]
-     (native/open ":memory:" flags))))
+   (let [flags (if (:allow-unsigned-extensions config) 1 0)
+         host-handle (System/getProperty "trexsql.host.duckdb.handle")]
+     (if (and host-handle
+              (not (str/blank? host-handle))
+              (not= (str/trim host-handle) "0"))
+       (let [ptr (Pointer. (Long/parseUnsignedLong (str/trim host-handle)))]
+         (log/info "Connecting to host trex engine duckdb instance (shared)")
+         (native/open-existing ptr))
+       (native/open ":memory:" flags)))))
 
 (defrecord TrexsqlDatabase [handle                ; JNA Pointer to native TrexDatabase
                             extensions-loaded      ; atom of set

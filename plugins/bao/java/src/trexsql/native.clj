@@ -33,6 +33,17 @@
        (check-error! "open"))
      handle)))
 
+(defn open-existing
+  "Open a trexsql database that SHARES an existing duckdb_database handle owned by
+   the host (the trex engine instance this process runs in), instead of opening a
+   new one. raw-db is the host's duckdb_database pointer (a com.sun.jna.Pointer).
+   Returns a Pointer handle; the underlying database is NOT closed by close!."
+  [^Pointer raw-db]
+  (let [handle (.trexsql_open_existing (engine) raw-db)]
+    (when (nil? handle)
+      (check-error! "open-existing"))
+    handle))
+
 (defn close!
   "Close a database handle."
   [^Pointer handle]

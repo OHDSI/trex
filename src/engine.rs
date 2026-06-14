@@ -12,6 +12,10 @@ use crate::result::TrexResult;
 pub struct TrexDatabase {
     conn: Mutex<ManuallyDrop<Connection>>,
     raw_db: ffi::duckdb_database,
+    // Whether this TrexDatabase owns the underlying duckdb_database (and must
+    // close it on drop). False when wrapping a handle owned by the host process
+    // (the native WebAPI extension sharing the trex engine's instance).
+    owns_db: bool,
 }
 
 unsafe impl Send for TrexDatabase {}
@@ -66,8 +70,33 @@ impl TrexDatabase {
             Ok(TrexDatabase {
                 conn: Mutex::new(ManuallyDrop::new(conn)),
                 raw_db,
+                owns_db: true,
             })
         }
+    }
+
+    /// Wrap an existing `duckdb_database` owned by the host process and open a new
+    /// connection on it, so this engine shares the host's catalog (attached
+    /// databases, cache files, …) instead of opening a separate `:memory:`
+    /// instance. Used when the native WebAPI runs as a DuckDB extension inside the
+    /// trex engine: passing the host handle here means a cache built by one path
+    /// is immediately visible to the other (no stale file-attach snapshot).
+    ///
+    /// # Safety
+    /// `raw_db` must be a live `duckdb_database` from the same in-process DuckDB
+    /// library; it is NOT closed on drop (the host owns its lifetime).
+    pub unsafe fn open_existing(raw_db: ffi::duckdb_database) -> Result<Self, String> {
+        if raw_db.is_null() {
+            return Err("open_existing: null database handle".into());
+        }
+        let conn = Connection::open_from_raw(raw_db)
+            .map_err(|e| format!("Failed to connect to existing database: {e}"))?;
+        let _ = conn.execute_batch("CALL disable_logging()");
+        Ok(TrexDatabase {
+            conn: Mutex::new(ManuallyDrop::new(conn)),
+            raw_db,
+            owns_db: false,
+        })
     }
 
     pub fn execute(&self, sql: &str) -> Result<(), String> {
@@ -90,7 +119,9 @@ impl Drop for TrexDatabase {
     fn drop(&mut self) {
         let conn = self.conn.get_mut().unwrap_or_else(|e| e.into_inner());
         unsafe { ManuallyDrop::drop(conn); }
-        if !self.raw_db.is_null() {
+        // Only close the database if we opened it. A borrowed host handle
+        // (open_existing) is owned by the trex engine and must outlive us.
+        if self.owns_db && !self.raw_db.is_null() {
             unsafe {
                 ffi::duckdb_close(&mut self.raw_db);
             }

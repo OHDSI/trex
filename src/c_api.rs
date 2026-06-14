@@ -53,6 +53,34 @@ pub unsafe extern "C" fn trexsql_open(
     }
 }
 
+/// Open a TrexSQL database that SHARES an existing `duckdb_database` handle owned
+/// by the caller, rather than opening a new instance. Used by the native WebAPI
+/// extension to run inside the trex engine's DuckDB instance (so a cache built by
+/// one path is immediately visible to the other). The handle is NOT closed by
+/// `trexsql_close` — the caller owns its lifetime. Returns NULL on error.
+///
+/// # Safety
+/// `raw_db` must be a live `duckdb_database` from the same in-process DuckDB library.
+#[no_mangle]
+pub unsafe extern "C" fn trexsql_open_existing(
+    raw_db: duckdb::ffi::duckdb_database,
+) -> *mut TrexDatabase {
+    error::clear_last_error();
+
+    if raw_db.is_null() {
+        error::set_last_error("trexsql_open_existing: null database handle");
+        return std::ptr::null_mut();
+    }
+
+    match TrexDatabase::open_existing(raw_db) {
+        Ok(db) => Box::into_raw(Box::new(db)),
+        Err(e) => {
+            error::set_last_error(&e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Close and free a database handle.
 #[no_mangle]
 pub unsafe extern "C" fn trexsql_close(db: *mut TrexDatabase) {
