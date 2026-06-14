@@ -75,7 +75,7 @@ jobs:
       - id: shuffle
         run: echo "random_runner=$(shuf -e ubuntu-22.04 ubuntu-24.04 | head -n 1)" >> "$GITHUB_OUTPUT"
 
-  fhir-ui:
+  prometheus:
     needs: [pick_runner]
     if: |
       (github.ref_name == 'develop' || github.ref_name == 'main' || contains('release', github.ref_name) || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
@@ -105,18 +105,18 @@ jobs:
           scope: "@trex"
       - name: Install dependencies
         run: |
-          cd ./plugins/fhir-ui
+          cd ./plugins/prometheus
           npm install --ignore-scripts
         env:
           CI: true
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Unit tests
         run: |
-          cd ./plugins/fhir-ui
+          cd ./plugins/prometheus
           npm run test
       - name: Build
         run: |
-          cd ./plugins/fhir-ui
+          cd ./plugins/prometheus
           npm run build
 
   build:
@@ -1284,13 +1284,13 @@ jobs:
         run: docker system prune -af
 
   success:
-    needs: [build, build-arm, build-docker, merge-docker, create-release, e2e-d2e, fhir-ui]
+    needs: [build, build-arm, build-docker, merge-docker, create-release, e2e-d2e, prometheus]
     if: always()
     runs-on: ubuntu-latest
     steps:
       - name: Check
         run: |
-          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-arm.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.merge-docker.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" || "${{ needs.e2e-d2e.result }}" == "failure" || "${{ needs.fhir-ui.result }}" == "failure" ]]; then
+          if [[ "${{ needs.build.result }}" == "failure" || "${{ needs.build-arm.result }}" == "failure" || "${{ needs.build-docker.result }}" == "failure" || "${{ needs.merge-docker.result }}" == "failure" || "${{ needs.create-release.result }}" == "failure" || "${{ needs.e2e-d2e.result }}" == "failure" || "${{ needs.prometheus.result }}" == "failure" ]]; then
             echo "::error::One or more jobs failed"
             exit 1
           fi

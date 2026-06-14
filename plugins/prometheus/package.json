@@ -1,5 +1,5 @@
 {
-  "name": "@trex/fhir-ui",
+  "name": "@trex/prometheus",
   "version": "1.0.0",
   "type": "module",
   "files": [
@@ -8,17 +8,27 @@
   "scripts": {
     "vendor": "node scripts/vendor-atlas-ui.mjs",
     "dev": "vite",
-    "build": "vue-tsc -b && vite build && vite build --config vite.config.spa.ts && cp \"$(ls dist/assets/index-*.css | head -1)\" dist/fhir-ui-spa.css",
+    "build": "vue-tsc -b && vite build && vite build --config vite.config.spa.ts && cp \"$(ls dist/assets/index-*.css | head -1)\" dist/prometheus-spa.css",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "lint": "eslint ."
   },
   "trex": {
+    "functions": {
+      "env": {
+        "_shared": {
+          "FHIR_BASE_PATH": "/trex/fhir"
+        }
+      },
+      "api": [
+        { "source": "/fhir", "function": "/functions" }
+      ]
+    },
     "ui": {
       "routes": [
         {
-          "path": "/fhir-ui",
+          "path": "/prometheus",
           "dir": "dist",
           "spa": true
         }

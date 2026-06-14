@@ -66,7 +66,7 @@ services:
       - ./functions:/usr/src/functions
       - ./plugins/web/dist:/usr/src/plugins-dev/web/dist
       - ./plugins/notebook/dist:/usr/src/plugins-dev/notebook/dist
-      - ./plugins/fhir-ui/dist:/usr/src/plugins-dev/fhir-ui/dist
+      - ./plugins/prometheus/dist:/usr/src/plugins-dev/prometheus/dist
       - ./plugins/storage:/usr/src/plugins-dev/storage
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
@@ -94,8 +94,8 @@ services:
       SWARM_NODE: local
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: "3000"
-      # Register fhir-ui in the web shell's top nav (consumed by plugins/web).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/fhir-ui","label":"Prometheus","plugin":"fhir-ui"}]'
+      # Register prometheus in the web shell's top nav (consumed by plugins/web).
+      TREX_WEB_NAV_EXTRA: '[{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
