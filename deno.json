@@ -1,4 +1,4 @@
 {
-  "workspace": ["./core", "./plugins/runtime", "./plugins/fhir-fn"],
+  "workspace": ["./core", "./plugins/runtime", "./plugins/prometheus"],
   "nodeModulesDir": "auto"
 }

@@ -28,3 +28,11 @@ deno.lock
 plugins/devx/public/monaco/
 agent-out/
 out/
+
+# Superpowers brainstorming companion (local-only)
+.superpowers/
+
+# Prometheus dev scratch (local-only)
+/*.png
+docker-compose.override.yml
+plugins/prometheus/tsconfig.tsbuildinfo
