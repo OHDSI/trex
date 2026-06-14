@@ -145,6 +145,22 @@ curl -fsS -X POST "$BASE/source/gen_config_pg/cache" -H 'Content-Type: applicati
   echo "[gen-config] WARN: cache creation returned non-zero (cache trace may be incomplete)"
 sleep 5
 
+# Exercise the /trexsql/* servlet (registered separately from Spring MVC) so the
+# agent records the reflective interop the in-engine cache controller performs:
+# SourceRepository's JDK proxy (findBySourceKey) plus the Source getters
+# (getTableQualifier/getSourceDialect/...) and the SourceDaimon$DaimonType enum.
+# Without this the servlet's reflection is never traced and the native build
+# reports "Source not found" for every trexsql cache request.
+curl -fsS "$BASE/trexsql/gen_config_pg/cache/status?databaseCode=gen_config_pg" \
+  -o /tmp/gen-config-trexsql-status.json \
+  -w "[gen-config] trexsql cache-status: %{http_code}\n" || \
+  echo "[gen-config] WARN: trexsql cache status returned non-zero"
+curl -fsS -X POST "$BASE/trexsql/gen_config_pg/cache" -H 'Content-Type: application/json' \
+  -d '{"schemaName":"webapi"}' -o /tmp/gen-config-trexsql-cache.json \
+  -w "[gen-config] trexsql cache-create: %{http_code}\n" || \
+  echo "[gen-config] WARN: trexsql cache creation returned non-zero"
+sleep 5
+
 # cleanup() (EXIT trap) stops the app gracefully so the agent writes the merged config.
 echo "[gen-config] done — review changes:"
 echo "    git -C '$REPO_ROOT' diff -- plugins/webapi/graalvm-config/"
