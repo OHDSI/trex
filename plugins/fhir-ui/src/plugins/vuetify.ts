@@ -4,10 +4,8 @@ import "../../vendor/atlas-ui/atlas-ui.css";
 import { createVuetify } from "vuetify";
 import { buildVuetifyOptions } from "@atlas-ui";
 
-// buildVuetifyOptions(primaryOverride) supplies the Atlas theme. We override the primary
-// from the default near-black navy to a refined teal (accent stays Atlas orange #eb6622).
-const TEAL_PRIMARY = "#0f766e";
-const opts = buildVuetifyOptions(TEAL_PRIMARY);
+// buildVuetifyOptions() supplies the genuine Atlas theme (Atlas primary + accent).
+const opts = buildVuetifyOptions();
 export const vuetify = createVuetify({
   ...opts,
   defaults: {
