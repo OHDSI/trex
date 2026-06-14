@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { Link } from "react-router-dom";
 import {
   PanelGroup,
@@ -25,7 +25,7 @@ import type { SelectedElement, SelectedComponent, VisualEditContext } from "@/li
 export default function ChatPage() {
   const nav = useNavState();
   const { activeAppId, activeChatId } = nav;
-  const { chats, create, remove, updateMode } = useChats(activeAppId);
+  const { chats, loading: chatsLoading, create, remove, updateMode } = useChats(activeAppId);
   const { apps, loading: appsLoading, create: createApp, remove: removeApp } = useApps();
   useSettings(); // pre-load settings for navigation to settings page
   const { initialSizes, saveSizes } = usePanelSizes();
@@ -127,6 +127,18 @@ export default function ChatPage() {
   }), [handleNewChat]);
   useKeyboardShortcuts(shortcutHandlers);
 
+  // Reconcile persisted nav state against loaded data: a deleted app/chat
+  // restored from localStorage must not strand the user on a dead view.
+  useEffect(() => {
+    if (!appsLoading && activeAppId && !apps.some((a) => a.id === activeAppId)) {
+      nav.goToApps();
+      return;
+    }
+    if (nav.view === "chat" && !chatsLoading && activeChatId && !chats.some((c) => c.id === activeChatId)) {
+      nav.showAppChats();
+    }
+  }, [appsLoading, chatsLoading, apps, chats, activeAppId, activeChatId, nav]);
+
   // Breadcrumb model: Apps / <app> / <chat>
   const crumbs: Crumb[] = [{
     key: "apps",
@@ -137,7 +149,7 @@ export default function ChatPage() {
   if (nav.view !== "apps") {
     crumbs.push({
       key: "app",
-      label: activeApp?.name ?? "Quick chat",
+      label: activeAppId === null ? "Quick chat" : activeApp?.name ?? "Loading…",
       onNavigate: nav.view === "chat" ? nav.showAppChats : undefined,
       siblings: apps.filter((a) => a.id !== activeAppId).map((a) => ({ id: a.id, label: a.name })),
       onSwitch: (id) => nav.openApp(id),
