@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Monitor, Code, AlertTriangle, GitBranch, ClipboardList, Package, Bot } from "lucide-react";
+import { Monitor, Code, AlertTriangle, GitBranch, ClipboardList, Package, Sparkles } from "lucide-react";
 import { PreviewTab } from "./PreviewTab";
 import { CodeTab } from "./CodeTab";
 import { ProblemsTab } from "./ProblemsTab";
@@ -80,7 +80,7 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
             Checks
           </TabsTrigger>
           <TabsTrigger value="agents" className="gap-1.5 text-xs">
-            <Bot className="h-3.5 w-3.5" />
+            <Sparkles className="h-3.5 w-3.5" />
             Agents
             {reviewAgents.runningCount > 0 && (
               <span className="ml-1 text-[10px] bg-blue-500/20 text-blue-600 px-1 rounded-full min-w-[16px] text-center">

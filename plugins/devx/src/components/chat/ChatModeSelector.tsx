@@ -1,11 +1,11 @@
-import { Hammer, MessageCircle, Bot, Map } from "lucide-react";
+import { Hammer, MessageCircle, Sparkles, Map } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { CHAT_MODES, type ChatMode } from "@/lib/types";
 
 const MODE_ICONS: Partial<Record<ChatMode, React.ElementType>> = {
   build: Hammer,
   ask: MessageCircle,
-  agent: Bot,
+  agent: Sparkles,
   plan: Map,
 };
 
