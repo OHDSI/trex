@@ -31,12 +31,23 @@ ENV JAVA_HOME=/opt/graalvm
 ENV GRAAL_HOME=/opt/graalvm
 ENV PATH=$JAVA_HOME/bin:$PATH
 
+# Leiningen builds + installs the bao trexsql jar (org.trex:trexsql) so WebAPI's
+# Boot jar resolves it and the /trexsql/* servlet registers under the agent.
+RUN curl -fsSL https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein \
+      -o /usr/local/bin/lein \
+    && chmod +x /usr/local/bin/lein \
+    && lein version
+
 WORKDIR /src
+COPY plugins/bao/java ./plugins/bao/java
 COPY plugins/webapi ./plugins/webapi
 
-# Builds the WebAPI boot jar, boots it under the agent, captures proxies, and
-# merges them into plugins/webapi/graalvm-config/.
-RUN bash plugins/webapi/gen-graalvm-config.sh
+# Install the bao trexsql jar, then build the WebAPI boot jar, boot it under the
+# tracing agent, exercise the /trexsql/* cache path, and merge the captured
+# reflection/proxy config into plugins/webapi/graalvm-config/.
+RUN --mount=type=cache,target=/root/.m2 \
+    ( cd plugins/bao/java && lein install ) \
+    && bash plugins/webapi/gen-graalvm-config.sh
 
 FROM scratch AS export
 COPY --from=build /src/plugins/webapi/graalvm-config /graalvm-config

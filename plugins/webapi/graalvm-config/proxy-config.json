@@ -21,5 +21,14 @@
       "org.springframework.aop.framework.Advised",
       "org.springframework.core.DecoratingProxy"
     ]
+  },
+  {
+    "interfaces": [
+      "org.ohdsi.webapi.source.SourceRepository",
+      "org.springframework.data.repository.Repository",
+      "org.springframework.transaction.interceptor.TransactionalProxy",
+      "org.springframework.aop.framework.Advised",
+      "org.springframework.core.DecoratingProxy"
+    ]
   }
 ]

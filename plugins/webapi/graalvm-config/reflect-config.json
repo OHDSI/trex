@@ -944,14 +944,46 @@
   {
     "name": "com.zaxxer.hikari.HikariDataSource"
   },
-  { "name": "org.postgresql.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
-  { "name": "com.microsoft.sqlserver.jdbc.SQLServerDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
-  { "name": "oracle.jdbc.OracleDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
-  { "name": "com.amazon.redshift.jdbc.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
-  { "name": "net.snowflake.client.jdbc.SnowflakeDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
-  { "name": "com.cloudera.impala.jdbc.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
-  { "name": "org.apache.hive.jdbc.HiveDriver", "allDeclaredConstructors": true, "allPublicConstructors": true },
-  { "name": "org.netezza.Driver", "allDeclaredConstructors": true, "allPublicConstructors": true },
+  {
+    "name": "org.postgresql.Driver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "com.microsoft.sqlserver.jdbc.SQLServerDriver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "oracle.jdbc.OracleDriver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "com.amazon.redshift.jdbc.Driver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "net.snowflake.client.jdbc.SnowflakeDriver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "com.cloudera.impala.jdbc.Driver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.apache.hive.jdbc.HiveDriver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.netezza.Driver",
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
   {
     "name": "crouton.html__init"
   },
@@ -2430,7 +2462,15 @@
     "name": "trexsql.webapi__init"
   },
   {
-    "name": "org.ohdsi.webapi.source.SourceRepository"
+    "name": "org.ohdsi.webapi.source.SourceRepository",
+    "allPublicMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredMethods": true,
+    "queryAllDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
   },
   {
     "name": "org.ohdsi.webapi.CommonDTO",
@@ -7948,6 +7988,39 @@
     "allPublicFields": true,
     "allDeclaredMethods": true,
     "allPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.source.Source",
+    "allPublicMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredMethods": true,
+    "queryAllDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.source.SourceDaimon",
+    "allPublicMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredMethods": true,
+    "queryAllDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.source.SourceDaimon$DaimonType",
+    "allPublicMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredMethods": true,
+    "queryAllDeclaredMethods": true,
+    "allDeclaredFields": true,
+    "allPublicFields": true,
     "allDeclaredConstructors": true,
     "allPublicConstructors": true
   }
