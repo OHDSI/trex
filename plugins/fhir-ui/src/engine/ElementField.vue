@@ -37,6 +37,44 @@
     </AtlasCard>
   </div>
 
+  <!-- choice [x] element: type picker + per-type rendering -->
+  <div
+    v-else-if="element.isChoice"
+    :data-field="element.path"
+    :data-choice-type="chosenType"
+    :data-required="String(required)"
+    class="field-block"
+  >
+    <div class="section-label">{{ humanLabel }}<span v-if="required" data-req class="req"> *</span></div>
+    <AtlasSelect
+      :model-value="chosenType"
+      :items="element.typeCodes"
+      :label="humanLabel + ' type'"
+      @update:model-value="onChoiceTypeChange($event)"
+    />
+    <!-- primitive choice type -->
+    <component
+      v-if="!isComplexChoiceType"
+      :is="choiceWidget"
+      :model-value="getAt(model, fullChoicePath)"
+      :label="humanLabel"
+      @update:model-value="setChoiceValue($event)"
+    />
+    <!-- complex choice type with known children -->
+    <AtlasCard v-else-if="choiceChildren.length" padding="sm" class="group-card choice-group">
+      <ElementField
+        v-for="child in choiceChildren"
+        :key="child.path"
+        :element="child"
+        :base-path="fullChoicePath"
+        :model="model"
+        @change="$emit('change')"
+      />
+    </AtlasCard>
+    <!-- complex choice type without children definition -->
+    <p v-else class="choice-no-fields">No editable fields for {{ chosenType }}</p>
+  </div>
+
   <!-- single leaf element: standard Atlas field with its floating label -->
   <div v-else :data-field="element.path" :data-required="String(required)" class="field-block">
     <component :is="widget" :model-value="leafValue" :label="leafLabel"
@@ -45,13 +83,14 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import type { ElementInfo } from "@/types/fhir";
 import { widgetFor } from "./widgetRegistry";
 import { getAt, setAt } from "./fhirPath";
+import { activeChoiceType, choiceProp } from "./choice";
 import StringWidget from "./widgets/StringWidget.vue";
 import ElementBody from "./ElementBody.vue";
-import { AtlasCard } from "@atlas-ui";
+import { AtlasCard, AtlasSelect } from "@atlas-ui";
 import { humanize } from "@/utils/humanize";
 
 const props = defineProps<{ element: ElementInfo; basePath: (string|number)[]; model: any }>();
@@ -71,6 +110,50 @@ const arr = computed<any[]>(() => getAt(props.model, fullPath.value) ?? []);
 function add() { const a = arr.value.slice(); a.push(hasChildren.value ? {} : ""); setAt(props.model, fullPath.value, a); emit("change"); }
 function removeAt(i: number) { const a = arr.value.slice(); a.splice(i, 1); setAt(props.model, fullPath.value, a); emit("change"); }
 function setPrimAt(i: number, v: any) { const a = arr.value.slice(); a[i] = v; setAt(props.model, fullPath.value, a); emit("change"); }
+
+// --- choice [x] support ---
+
+const chosenType = ref(
+  props.element.isChoice
+    ? activeChoiceType(props.model, props.basePath, props.element.name, props.element.typeCodes)
+    : (props.element.typeCodes[0] ?? ""),
+);
+
+// Keep chosenType in sync if model changes externally (e.g. parent resets)
+watch(
+  () => props.element.isChoice
+    ? activeChoiceType(props.model, props.basePath, props.element.name, props.element.typeCodes)
+    : null,
+  (newType) => { if (newType != null && newType !== chosenType.value) chosenType.value = newType; },
+);
+
+function onChoiceTypeChange(raw: unknown) {
+  const newType = String(raw);
+  // Clear all sibling value<Type> props so only one is set
+  for (const tc of props.element.typeCodes) {
+    const prop = choiceProp(props.element.name, tc);
+    setAt(props.model, [...props.basePath, prop], undefined);
+  }
+  chosenType.value = newType;
+  emit("change");
+}
+
+const fullChoicePath = computed(() =>
+  [...props.basePath, choiceProp(props.element.name, chosenType.value)],
+);
+
+const isComplexChoiceType = computed(() => widgetFor(chosenType.value) == null);
+
+const choiceWidget = computed(() => widgetFor(chosenType.value) ?? StringWidget);
+
+const choiceChildren = computed(() =>
+  props.element.childrenByType?.[chosenType.value] ?? [],
+);
+
+function setChoiceValue(v: any) {
+  setAt(props.model, fullChoicePath.value, v);
+  emit("change");
+}
 </script>
 
 <style scoped>
@@ -141,4 +224,15 @@ function setPrimAt(i: number, v: any) { const a = arr.value.slice(); a[i] = v; s
   margin-top: 2px;
 }
 .add-btn:hover { background: rgba(var(--v-theme-primary), 0.06); border-color: rgb(var(--v-theme-primary)); }
+
+/* Choice group sub-card spacing */
+.choice-group { margin-top: 8px; }
+
+/* Muted note for complex types without childrenByType */
+.choice-no-fields {
+  font-size: 12px;
+  color: rgb(var(--v-theme-on-surface-variant, #49454f));
+  opacity: 0.7;
+  margin: 8px 0 0;
+}
 </style>

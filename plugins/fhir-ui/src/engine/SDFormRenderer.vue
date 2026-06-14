@@ -4,7 +4,7 @@
       <div
         v-for="el in common"
         :key="el.path"
-        :class="['sd-form-cell', { 'span-2': el.isArray || el.children.length > 0 }]"
+        :class="['sd-form-cell', { 'span-2': el.isArray || el.children.length > 0 || el.isChoice }]"
       >
         <ElementField :element="el" :base-path="[]" :model="model" @change="onChange" />
       </div>
@@ -18,7 +18,7 @@
         <div
           v-for="el in advanced"
           :key="el.path"
-          :class="['sd-form-cell', { 'span-2': el.isArray || el.children.length > 0 }]"
+          :class="['sd-form-cell', { 'span-2': el.isArray || el.children.length > 0 || el.isChoice }]"
         >
           <ElementField :element="el" :base-path="[]" :model="model" @change="onChange" />
         </div>
@@ -29,9 +29,10 @@
 
 <script setup lang="ts">
 import { reactive, watch, ref, computed } from "vue";
-import type { ParsedStructureDefinition } from "@/types/fhir";
+import type { ParsedStructureDefinition, ElementInfo } from "@/types/fhir";
 import ElementField from "./ElementField.vue";
 import { getAt } from "./fhirPath";
+import { choiceProp } from "./choice";
 
 const props = defineProps<{ definition: ParsedStructureDefinition; modelValue: any }>();
 const emit = defineEmits<{ "update:modelValue": [any] }>();
@@ -46,11 +47,18 @@ watch(() => props.modelValue, (v) => {
 
 const showAdvanced = ref(false);
 
+function hasValue(e: ElementInfo): boolean {
+  if (e.isChoice) {
+    return e.typeCodes.some((tc) => getAt(model, [choiceProp(e.name, tc)]) != null);
+  }
+  return getAt(model, [e.name]) != null;
+}
+
 // B2: progressive-disclosure: common = required OR has value.
 // Fallback: if nothing qualifies, show first 6 so a new/empty resource isn't blank.
 const common = computed(() => {
   const els = props.definition.elements;
-  const qualified = els.filter((e) => e.min >= 1 || getAt(model, [e.name]) != null);
+  const qualified = els.filter((e) => e.min >= 1 || hasValue(e));
   if (qualified.length > 0) return qualified;
   return els.slice(0, 6);
 });

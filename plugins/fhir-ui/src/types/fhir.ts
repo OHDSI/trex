@@ -1,6 +1,7 @@
 export interface ElementInfo {
   path: string; name: string; typeCodes: string[]; min: number; max: string;
   isArray: boolean; isChoice: boolean; contentReference?: string; children: ElementInfo[];
+  childrenByType?: Record<string, ElementInfo[]>;
 }
 export interface ParsedStructureDefinition { resourceType: string; kind: string; isAbstract: boolean; elements: ElementInfo[]; }
 export interface FhirResource { resourceType: string; id?: string; [k: string]: unknown; }
