@@ -41,7 +41,7 @@ plugin package:
 
 | Field | Description |
 |-------|-------------|
-| `path` (or `source`) | URL path relative to `${PLUGINS_BASE_PATH}` (default `/plugins`). With the default, an entry of `path: "/my-plugin"` is reachable at `/plugins/my-plugin`. |
+| `path` (or `source`) | URL path relative to `${PLUGINS_BASE_PATH}` (default `/plugins`). With the default, an entry of `path: "/my-plugin"` is reachable at `/plugins/my-plugin`. For scoped packages, the scope segment (e.g. `/trex` for `@trex/...`) is inserted between `${PLUGINS_BASE_PATH}` and the route path, consistent with function routes. |
 | `dir` (or `target`) | Directory containing built assets, relative to the plugin root. |
 | `spa` | When `true`, serves `index.html` as a fallback for any sub-path so client-side routers (React Router, Vue Router) work. |
 

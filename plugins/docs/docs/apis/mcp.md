@@ -6,7 +6,7 @@ sidebar_position: 3
 
 Trex ships a [Model Context Protocol](https://modelcontextprotocol.io/) server that
 exposes the management surface (users, roles, plugins, databases, the analytical
-catalog, etc.) as 47 typed tools. AI assistants connect with a Bearer API key.
+catalog, etc.) as 50 typed tools. AI assistants connect with a Bearer API key.
 
 ## Endpoint
 
@@ -31,7 +31,7 @@ API keys are scoped to admin users. Issue them via:
 - `POST ${BASE_PATH}/api/api-keys` (browser session)
 
 The `sbp_…` prefix is also accepted (issued by the CLI login flow) and validates
-against the same `trex.api_key` table.
+against the same `trexdb.api_key` table.
 
 ## Session Management
 

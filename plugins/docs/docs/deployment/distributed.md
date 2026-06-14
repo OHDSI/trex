@@ -71,7 +71,7 @@ cluster, plus a per-node `SWARM_NODE` env var that picks its identity:
         {"name":"trexas","config":{"host":"0.0.0.0","port":8001, ...}},
         {"name":"pgwire","config":{"host":"0.0.0.0","port":5432}},
         {"name":"flight","config":{
-          "host":"0.0.0.0","port":8815,
+          "host":"0.0.0.0","port":50051,
           "tls_cert_path":"/certs/server.crt",
           "tls_key_path":"/certs/server.key",
           "ca_cert_path":"/certs/ca.crt"
@@ -93,6 +93,12 @@ cluster, plus a per-node `SWARM_NODE` env var that picks its identity:
 The first node bootstraps without seeds. Every other node must list at least
 one already-running peer in `seeds` (use coordinator hostnames, since
 coordinators are first to start in the rolling deploy).
+
+:::note
+Flight binds `50051` in the repo's compose files (matching the example above).
+Most stacks use gossip port `4200`; `docker-compose.pg-trex.yml` is the
+exception and uses `7946`.
+:::
 
 ## TLS for Flight
 

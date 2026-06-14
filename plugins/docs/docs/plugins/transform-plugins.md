@@ -6,6 +6,11 @@ sidebar_position: 7
 
 Transform plugins define data transformation projects with SQL models, seeds, and tests. Once deployed, model results are served as HTTP endpoints in JSON, CSV, or Arrow format.
 
+:::note
+The `plugins/transform` directory in this repository is the DuckDB extension that
+powers this feature — it is not an example transform plugin.
+:::
+
 ## Configuration
 
 ```json
@@ -195,7 +200,7 @@ mutation {
 
 ## Endpoint Recovery
 
-Deployments are persisted in the `trex.transform_deployment` PostgreSQL table. On server restart, the system recovers previously registered endpoints by re-compiling the project and restoring routes from the stored `dest_db` and `dest_schema` values.
+Deployments are persisted in the `trexdb.transform_deployment` PostgreSQL table. On server restart, the system recovers previously registered endpoints by re-compiling the project and restoring routes from the stored `dest_db` and `dest_schema` values.
 
 ## Complete Example
 

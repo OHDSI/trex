@@ -9,8 +9,9 @@ into the [Expression Logical Model (ELM)](https://cql.hl7.org/04-logicalspecific
 JSON representation. Combined with the [fhir extension](fhir), it lets you author
 quality measures in CQL and execute them against FHIR resources stored in Trex.
 
-The extension wraps the official OHDSI `cql2elm` Java library, compiled to a
-native image via GraalVM and loaded as a DuckDB C-API extension.
+The extension wraps the HL7 cqframework cql-to-elm translator
+(`info.cqframework:cql-to-elm`), compiled to a native image via GraalVM and
+loaded as a DuckDB C-API extension.
 
 ## Functions
 
@@ -36,7 +37,7 @@ SELECT trex_fhir_cql_translate('
 
 The function is named `trex_fhir_cql_translate` (not `trex_cql2elm_*`) because
 the primary consumer is the FHIR / quality-measure pipeline. Pass the resulting
-ELM JSON to FHIR `$measure-evaluate` or store it for later use.
+ELM JSON to FHIR `$evaluate-measure` or store it for later use.
 
 ## Pairing with the FHIR Extension
 
@@ -56,7 +57,7 @@ See the [fhir extension](fhir) docs for the runtime side of measure
 evaluation. The integration tests under
 `integration-tests/test_fhir_cql*.py` show the full end-to-end flow:
 ingest FHIR resources, define a CQL library, translate to ELM, run
-`$measure-evaluate`, validate the resulting `MeasureReport`.
+`$evaluate-measure`, validate the resulting `MeasureReport`.
 
 ## Why ELM and not direct CQL?
 

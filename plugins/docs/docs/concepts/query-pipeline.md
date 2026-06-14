@@ -57,7 +57,7 @@ sequenceDiagram
     Pgwire->>Pool: Borrow connection
     Pool-->>Pgwire: Connection (default catalog)
 
-    Note over Pgwire,Pool: Read-only? → fresh borrow per statement.<br/>Write or parameterized? → auto-pin.<br/>ATTACH / temp table? → persistent session.
+    Note over Pgwire,Pool: One pool session per pgwire connection.<br/>Session-local state (ATTACH / temp / SET / USE)<br/>persists for the session; writes are serialized.
 
     Pgwire->>Engine: Execute query bytes
     Engine->>Engine: Parse, plan, optimize
@@ -77,9 +77,9 @@ Three things worth pulling out:
    the pgwire layer translates Arrow types into Postgres wire types
    (see [SQL Reference → pgwire](../sql-reference/pgwire) for the full
    mapping).
-3. **Pool borrow strategy is decided per statement.** The `Note` above
-   summarizes the decision tree from
-   [Concepts → Connection Pool](connection-pool).
+3. **Each pgwire connection leases one pool session.** Session-local state
+   lives for the session and writes are serialized — the `Note` above
+   summarizes the model from [Concepts → Connection Pool](connection-pool).
 
 ## A distributed query (multi-node)
 
@@ -108,7 +108,9 @@ sequenceDiagram
 ```
 
 This is a sketch — the actual planner choices (broadcast vs. shuffle, partial
-vs. global aggregate) are documented in `specs/003-ballista-duckdb-distributed/`.
+vs. global aggregate) live in the `db` extension's distributed engine
+(gossip membership, shuffle registry, and Arrow Flight transport under
+`plugins/db/src/`).
 
 ## A GraphQL query (PostGraphile path)
 
@@ -167,10 +169,11 @@ the worker exits.
 
 ## Failure modes worth knowing
 
-- **Pool exhaustion**: if all 64 pool connections are held by long-running
-  pinned sessions, new statements queue. Admission control (see
-  `trex_db_query_status()`) typically bites before this matters in practice,
-  but it's the next thing to investigate when concurrency stalls.
+- **Pool exhaustion**: if every pool connection (`TREX_POOL_SIZE`, default 64)
+  is held by a long-lived session, new leases wait up to
+  `TREX_POOL_LEASE_TIMEOUT_MS` (default 30s) and then error. Admission control
+  (see `trex_db_query_status()`) typically bites before this matters in
+  practice, but it's the next thing to investigate when concurrency stalls.
 - **Federation latency**: a query against a federated source is bounded by
   that source's response time. Push as much filtering and projection into the
   scan as possible — the engine handles `WHERE` and `SELECT` pushdown for

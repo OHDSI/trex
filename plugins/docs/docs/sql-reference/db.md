@@ -10,7 +10,7 @@ table partitioning, admission control, and the metrics surface for the
 whole cluster. Every function is a SQL entry point into one of those
 subsystems.
 
-This page is dense — 32 functions across seven groups. Use the structure
+This page is dense — 31 functions across six groups. Use the structure
 below to navigate; for the conceptual model see
 [Concepts → Architecture → Cluster Topology](../concepts/architecture#cluster-topology)
 and [Concepts → Query Pipeline](../concepts/query-pipeline).
@@ -100,13 +100,13 @@ SELECT trex_db_set_distributed(true);
 -- Hash-partition a table by user_id into 4 partitions
 SELECT trex_db_partition_table(
   'memory.main.events',
-  '{"strategy":"hash","column":"user_id","num_partitions":4}'
+  '{"strategy":"hash","column":"user_id","partitions":4}'
 );
 
 -- Or create a new partitioned table from scratch
 SELECT trex_db_create_table(
   'CREATE TABLE events (id BIGINT, user_id BIGINT, ts TIMESTAMP)',
-  '{"strategy":"hash","column":"user_id","num_partitions":4}'
+  '{"strategy":"hash","column":"user_id","partitions":4}'
 );
 
 -- Inspect placement
@@ -117,8 +117,11 @@ Supported strategies:
 
 | Strategy | Config |
 |----------|--------|
-| `hash` | `{"strategy":"hash","column":"<col>","num_partitions":N}` |
-| `range` | `{"strategy":"range","column":"<col>","ranges":["v1","v2",...]}` |
+| `hash` | `{"strategy":"hash","column":"<col>","partitions":N}` |
+| `range` | `{"strategy":"range","column":"<col>","ranges":[{"lower":"v0","upper":"v1"},{"lower":"v1","upper":"v2"}]}` |
+
+Range bounds are objects with optional `lower`/`upper` keys (an omitted key
+means unbounded on that side).
 
 ### Manage workload concurrency
 
@@ -163,7 +166,7 @@ Start the gossip protocol and join a cluster.
 **Returns:** VARCHAR
 
 ```sql
-SELECT trex_db_start('0.0.0.0', 7946, 'my-cluster');
+SELECT trex_db_start('0.0.0.0', 4200, 'my-cluster');
 ```
 
 ### `trex_db_start_seeds(host, port, cluster_id, seeds)`
@@ -180,7 +183,7 @@ Start the gossip protocol with known seed nodes.
 **Returns:** VARCHAR
 
 ```sql
-SELECT trex_db_start_seeds('0.0.0.0', 7946, 'my-cluster', '10.0.0.2:7946,10.0.0.3:7946');
+SELECT trex_db_start_seeds('0.0.0.0', 4200, 'my-cluster', '10.0.0.2:4200,10.0.0.3:4200');
 ```
 
 ### `trex_db_stop()`
@@ -324,7 +327,7 @@ Partition an existing table with hash or range strategy.
 **Returns:** VARCHAR
 
 ```sql
-SELECT trex_db_partition_table('events', '{"strategy": "hash", "column": "user_id", "num_partitions": 4}');
+SELECT trex_db_partition_table('events', '{"strategy": "hash", "column": "user_id", "partitions": 4}');
 ```
 
 ### `trex_db_create_table(create_sql, config)`
@@ -341,7 +344,7 @@ Create a new distributed table with partition configuration.
 ```sql
 SELECT trex_db_create_table(
   'CREATE TABLE events (id INTEGER, user_id VARCHAR, ts TIMESTAMP)',
-  '{"strategy": "hash", "column": "user_id", "num_partitions": 4}'
+  '{"strategy": "hash", "column": "user_id", "partitions": 4}'
 );
 ```
 
@@ -357,7 +360,7 @@ Change partitioning strategy of an existing distributed table.
 **Returns:** VARCHAR
 
 ```sql
-SELECT trex_db_repartition_table('events', '{"strategy": "range", "column": "ts", "ranges": ["2024-01-01", "2024-07-01"]}');
+SELECT trex_db_repartition_table('events', '{"strategy": "range", "column": "ts", "ranges": [{"upper": "2024-01-01"}, {"lower": "2024-01-01", "upper": "2024-07-01"}, {"lower": "2024-07-01"}]}');
 ```
 
 ## Service Management

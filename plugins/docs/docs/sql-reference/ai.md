@@ -53,7 +53,7 @@ SELECT trex_ai_load_model('chat', '/models/llama-2-7b-chat.Q4_K_M.gguf');
 SELECT trex_ai_generate(
   'chat',
   'Summarize the OMOP CDM in two sentences.',
-  '{"temperature": 0.7, "max_tokens": 256}'
+  '{"temperature": 0.8, "max_tokens": 100}'
 );
 
 -- For embeddings, load a separate embedding-optimized model
@@ -149,18 +149,19 @@ Single-prompt text completion. `options` is a JSON object — common keys:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `temperature` | 0.7 | Sampling temperature. Lower = more deterministic. |
+| `temperature` | 0.8 | Sampling temperature. Lower = more deterministic. |
 | `top_p` | 0.9 | Nucleus sampling cutoff. |
 | `top_k` | 40 | Top-k sampling. |
-| `max_tokens` | 256 | Output length cap. |
-| `stop` | — | Array of stop sequences. |
-| `seed` | random | Reproducibility seed. |
+| `max_tokens` | 100 | Output length cap. |
+
+Only `temperature`, `top_p`, `top_k`, and `max_tokens` are honored today; any
+other keys in the JSON object are ignored.
 
 ```sql
 SELECT trex_ai_generate(
   'llama2',
   'Explain SQL joins in one paragraph.',
-  '{"temperature": 0.3, "max_tokens": 200, "stop": ["\n\n"]}'
+  '{"temperature": 0.3, "max_tokens": 200}'
 );
 ```
 

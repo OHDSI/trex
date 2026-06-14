@@ -16,7 +16,7 @@ By the end you'll have:
 - The cohort materialised in the OMOP `cohort` results table.
 - FHIR resources served by the `fhir` extension.
 - A CQL library translated to ELM with `cql2elm`.
-- A `MeasureReport` produced by the FHIR server's `$measure-evaluate`.
+- A `MeasureReport` produced by the FHIR server's `$evaluate-measure`.
 
 ```mermaid
 flowchart TD
@@ -31,7 +31,7 @@ flowchart TD
     CQL -->|trex_fhir_cql_translate| ELM["ELM JSON"]
     FHIR --> FhirServer["fhir extension HTTP server"]
     ELM --> FhirServer
-    FhirServer -->|$measure-evaluate| Report["MeasureReport"]
+    FhirServer -->|$evaluate-measure| Report["MeasureReport"]
 ```
 
 Prerequisites: [Quickstart: Deploy](../quickstarts/deploy) running and
@@ -234,8 +234,8 @@ SELECT * FROM trex_fhir_status();
 
 > **Port 8080 is not published by the default `docker-compose.yml`.**
 > Either run curl from inside the container, e.g.
-> `docker exec trexsql-trex-1 curl http://localhost:8080/health`, or
-> add a `- "8080:8080"` mapping to the `trex` service in compose and
+> `docker compose exec trex-server curl http://localhost:8080/health`, or
+> add a `- "8080:8080"` mapping to the `trex-server` service in compose and
 > restart. The rest of this section assumes you've done one or the
 > other.
 
@@ -334,7 +334,7 @@ FROM (SELECT readfile('/data/diabetes_a1c.cql') AS txt) cql;
 
 ## 7. Evaluate the measure (3 min)
 
-The FHIR server exposes `$measure-evaluate`. Hand it the ELM JSON plus the
+The FHIR server exposes `$evaluate-measure`. Hand it the ELM JSON plus the
 population window:
 
 ```bash

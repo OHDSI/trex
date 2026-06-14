@@ -69,6 +69,9 @@ Each entry in `api` registers an Express handler at
 | `eszip` | string | Path to a prebuilt ESZIP bundle (e.g. produced by `deno bundle` / `esbuild` + `eszip`). When set, the worker loads from the bundle instead of source. |
 | `allowHostFsAccess` | bool | When `true`, the worker may read/write the host filesystem outside its sandbox. Default `false`. |
 | `permissions` | object | Deno permissions object passed straight to the worker (e.g. `{ net: [...], read: [...] }`). |
+| `memoryLimitMb` | number | Per-worker memory cap. Default `4096`. |
+| `cpuTimeSoftLimitMs` | number | CPU soft limit. Default `60000000`. |
+| `cpuTimeHardLimitMs` | number | CPU hard limit. Default `120000000`. |
 
 All HTTP methods (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`) route to the worker
 under the registered path.
@@ -95,7 +98,7 @@ Plugins ship their own authorization model. The loader merges plugin roles into
 the global `ROLE_SCOPES` map and prepends `scopes[].path` patterns into the
 URL-scope check list.
 
-- Roles are auto-created in `trex.role` at startup (via `ensureRolesExist`).
+- Roles are auto-created in `trexdb.role` at startup (via `ensureRolesExist`).
 - Admin users bypass every scope check.
 - Non-admin callers must hold a role whose scope set covers all scopes required
   by the matched URL pattern.
@@ -108,8 +111,12 @@ Workers receive a merged env map composed of:
 
 1. `_shared` from the plugin config (with `${VAR}` substitution).
 2. The block named by the `api[].env` field, if any.
-3. All decrypted secrets from `trex.secret` (refreshed every 30s).
-4. `TREX_FUNCTION_PATH` — absolute path to the plugin directory.
+3. `TREX_FUNCTION_PATH` — absolute path to the plugin directory.
+
+Plugin workers do **not** receive auto-injected database secrets. The 30s-TTL
+decrypted-secrets injection (from `trexdb.secret`) applies to the trex serverless
+functions runtime, not to plugin workers — surface any secrets a plugin needs
+through `_shared` / the `env` block with `${VAR}` substitution.
 
 Substitution syntax (in the plugin config — not at runtime in the worker):
 
@@ -136,10 +143,15 @@ to avoid double-encoded responses.
 
 ## Worker Limits
 
-Each worker is bounded by:
+Each request worker is bounded by (defaults):
 
-- 1000 MB memory limit.
+- `memoryLimitMb` — 4096 MB.
 - 30-minute wall clock timeout per request.
-- 1 000 000 ms CPU soft limit / 2 000 000 ms hard limit.
+- `cpuTimeSoftLimitMs` — 60 000 000 ms soft / `cpuTimeHardLimitMs` — 120 000 000 ms hard.
 
-Limits are not currently configurable per-plugin.
+All three limits are configurable per-plugin via the `api` entry
+(`memoryLimitMb`, `cpuTimeSoftLimitMs`, `cpuTimeHardLimitMs`).
+
+Init workers (see [Init Hooks](#init-hooks)) use a separate, non-configurable set
+of limits: 1000 MB memory, a 3-minute timeout, and 100 000 / 200 000 ms CPU
+soft/hard limits.

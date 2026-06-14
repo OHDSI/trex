@@ -35,7 +35,9 @@ Files that don't match this pattern are silently skipped. Duplicate version numb
 
 ### History Table
 
-Each target schema gets a `refinery_schema_history` table:
+Each target schema gets a `refinery_schema_history` table. This is a custom,
+refinery-*compatible* implementation (it reuses the well-known table name and
+shape) — the extension does not depend on the `refinery` crate:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -50,13 +52,29 @@ Checksums are computed from the migration name, version number, and SQL content 
 
 ### Multi-Database Support
 
-The `_schema` variants support both trexsql and PostgreSQL databases:
+The `_schema` variants support both trexsql and PostgreSQL databases. Routing
+is dynamic, not based on hard-coded database names: the runner calls
+`is_postgres_database()`, which queries `duckdb_databases()` and checks whether
+the target database's `type` is `postgres`.
 
-| Database value | Target |
-|----------------|--------|
-| `_config` | PostgreSQL metadata database |
-| `memory` | trexsql in-memory database |
-| *other* | A named trexsql attached database |
+| Database type (from `duckdb_databases()`) | Target |
+|-------------------------------------------|--------|
+| `postgres` | Migrations run against the attached PostgreSQL database |
+| anything else | Migrations run against the trexsql attached/in-memory database |
+
+Any database attached as a PostgreSQL database (including the `_config`
+metadata database) is dispatched to the PostgreSQL path automatically.
+
+### Status values
+
+`trex_migration_run` / `trex_migration_run_schema` report a per-migration
+`status`. Besides the success/error states, already-applied migrations that are
+re-discovered on a subsequent run are reported with status `skipped`.
+
+:::note
+At startup the Trex binary runs its core schema migrations against the
+`trexdb` schema (not `trex`).
+:::
 
 ### Transaction Safety
 
@@ -92,7 +110,7 @@ bottom of this page.
 
 ### `trex_migration_run(path)`
 
-Discover and execute pending migrations from a directory. Migrations are SQL files named with a numeric version prefix (e.g., `001_create_tables.sql`).
+Discover and execute pending migrations from a directory. Migrations are SQL files named with the `V<version>__<name>.sql` convention (e.g., `V1__create_tables.sql`); see [File Naming Convention](#file-naming-convention).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

@@ -36,17 +36,25 @@ flowchart LR
     Chdb -->|after each execute| ResultBuffer
 ```
 
-`chdb` runs as an in-process session. You start it once per node, execute
-ClickHouse SQL with `trex_chdb_execute`, and read results back via
+`chdb` runs as an in-process session. You start it with `trex_chdb_start`,
+execute ClickHouse SQL with `trex_chdb_execute`, and read results back via
 `trex_chdb_scan` (or its alias `trex_chdb_query`). The result buffer holds
 **only** the most recent query — there is no streaming or cursor model.
 Capture results into a Trex table (`CREATE TABLE … AS SELECT * FROM
 trex_chdb_scan()`) if you need to keep them.
 
+:::warning Fixed working directory
+In the current implementation, `trex_chdb_execute` and `trex_chdb_scan`
+always operate against a fixed on-disk working directory, `/tmp/chdb_dml`,
+regardless of any path you pass to `trex_chdb_start`. See
+[Persistence](#persistence) below for the details.
+:::
+
 ## Typical workflow
 
 ```sql
--- 1. Start chdb (once per node, persistent on disk)
+-- 1. Start chdb (once per node). Note: execute/scan operate against the
+--    fixed /tmp/chdb_dml working dir regardless of the path given here.
 SELECT trex_chdb_start('/data/chdb');
 
 -- 2. Define a ClickHouse table
@@ -82,8 +90,8 @@ SELECT * FROM trex_chdb_scan();
 
 ### `trex_chdb_start()`
 
-Start the chDB session in ephemeral mode (data is held in memory and
-discarded on stop). Useful for tests and short-lived workloads.
+Initialize the chDB session. With no argument, the session is created
+without an explicit data path.
 
 ```sql
 SELECT trex_chdb_start();
@@ -91,20 +99,28 @@ SELECT trex_chdb_start();
 
 ### `trex_chdb_start(path)`
 
-Start chDB with a persistent on-disk catalog. Tables and data survive
-restarts at the given path.
+Initialize the chDB session and record `path` as the global session's data
+directory.
 
 ```sql
 SELECT trex_chdb_start('/data/chdb');
 ```
 
-The path is a regular ClickHouse data directory; `chdb` initializes it on
-first use.
+:::caution Path not yet honored by execute/scan
+The `path` you pass here is stored on the global session, but
+`trex_chdb_execute` and `trex_chdb_scan` do **not** use it — they always
+open their own session at the fixed directory `/tmp/chdb_dml`. As a result,
+data written by `execute` and read by `scan` lives under `/tmp/chdb_dml`
+irrespective of the start path. See [Persistence](#persistence).
+:::
 
 ### `trex_chdb_stop()`
 
-Stop the session. Persistent storage at `/data/chdb` (if used) remains on
-disk; ephemeral data is lost.
+Returns the status string `"Database stopped"`. In the current
+implementation this is effectively a no-op: it does **not** tear down the
+global session, close anything, or delete on-disk data. Data under
+`/tmp/chdb_dml` persists across `stop`/`start` cycles and process restarts
+until you remove the directory yourself.
 
 ```sql
 SELECT trex_chdb_stop();
@@ -135,18 +151,41 @@ from the ClickHouse result schema. The two names are aliases.
 SELECT * FROM trex_chdb_scan();
 ```
 
+## Persistence
+
+The persistence model is simpler — and more fixed — than the `start(path)`
+signature suggests:
+
+- **`execute` and `scan` always use `/tmp/chdb_dml`.** Both
+  `trex_chdb_execute` and `trex_chdb_scan` open their own chDB session
+  against the hardcoded on-disk directory `/tmp/chdb_dml`. They do this
+  regardless of whether you called `trex_chdb_start` at all, and regardless
+  of the path you passed to it. There is no in-memory / ephemeral mode for
+  these functions — they always hit disk.
+- **The start path is recorded but unused by execute/scan.** A path passed
+  to `trex_chdb_start(path)` is stored on the global session object, but the
+  execute/scan code paths do not read it. This is the current behavior; the
+  start path is not yet honored.
+- **`stop` does not free data.** `trex_chdb_stop()` returns a status string
+  without tearing down the session or deleting `/tmp/chdb_dml`. To reclaim
+  the space, remove the directory at the OS level.
+
+If you need a clean slate between runs, delete `/tmp/chdb_dml` yourself
+before starting.
+
 ## Operational notes
 
-- **Single session per process.** `chdb` is a singleton — calling
-  `trex_chdb_start` twice without `trex_chdb_stop` in between is a no-op.
 - **Memory pressure.** chDB allocates separately from the Trex engine; large
-  in-memory MergeTree tables count against process RSS, not Trex's normal
+  MergeTree tables count against process RSS, not Trex's normal
   memory accounting.
 - **No CDC into chdb.** The `etl` extension replicates Postgres → Trex
   catalog. If you want continuous data into chDB tables, write a transform
   plugin or use ClickHouse's own table functions (e.g. `postgresql()`).
-- **AMD64 only.** The chDB native library currently ships only for amd64.
-  ARM builds load the extension but `trex_chdb_start` will fail.
+- **x86_64 builds only (packaging constraint).** The bundled chDB native
+  library is fetched per-platform by `install_chdb.sh`, which has packages
+  for linux x86_64 / linux aarch64 / macOS x86_64. There is no `target_arch`
+  guard in the extension source; availability is a function of which
+  `libchdb` package the build pulls in for your platform.
 
 ## Next steps
 

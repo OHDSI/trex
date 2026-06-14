@@ -1,5 +1,5 @@
 ---
-sidebar_position: 9
+sidebar_position: 11
 ---
 
 # transform — SQL Transformation Models
@@ -74,11 +74,12 @@ SELECT name, materialized, "order"
  ORDER BY "order";
 
 -- 2. Preview the next run
+--    dest schema is positional; source_schema is an optional NAMED parameter
 SELECT name, action, reason
   FROM trex_transform_plan(
     '/path/to/project',
-    'analytics',   -- dest schema (where models materialize)
-    'main'         -- source schema (where source() resolves)
+    'analytics',                  -- dest schema (where models materialize)
+    source_schema := 'main'       -- where source() resolves (optional)
   );
 
 -- 3. Load seeds first (CSV → tables)
@@ -88,13 +89,13 @@ SELECT name, action, rows
 -- 4. Materialize models
 SELECT name, action, duration_ms
   FROM trex_transform_run(
-    '/path/to/project', 'analytics', 'main'
+    '/path/to/project', 'analytics', source_schema := 'main'
   );
 
 -- 5. Run tests
 SELECT name, status, rows_returned
   FROM trex_transform_test(
-    '/path/to/project', 'analytics', 'main'
+    '/path/to/project', 'analytics', source_schema := 'main'
   );
 
 -- 6. Watch freshness in production
@@ -136,10 +137,10 @@ list without executing any SQL.
 |--------|------|-------------|
 | name | VARCHAR | Model name. |
 | materialized | VARCHAR | `view`, `table`, `incremental`, or `ephemeral`. |
+| dependencies | VARCHAR | Comma-separated upstream model names. |
 | order | INTEGER | Topological execution order. |
 | status | VARCHAR | `ok` or an error message. |
-| sql | VARCHAR | Compiled SQL (Jinja-rendered, `ref()` resolved). |
-| references | VARCHAR | Comma-separated upstream model names. |
+| message | VARCHAR | Status / error string. |
 | endpoint_path | VARCHAR | If declared in the model config, the relative HTTP path under `/plugins/transform/<plugin>`. |
 | endpoint_roles | VARCHAR | Comma-separated role list with access. |
 | endpoint_formats | VARCHAR | Comma-separated allowed formats (`json`, `csv`, `arrow`). |
@@ -148,7 +149,7 @@ list without executing any SQL.
 SELECT * FROM trex_transform_compile('/usr/src/plugins/@trex/analytics/project');
 ```
 
-### `trex_transform_plan(project_path, dest_schema, source_schema)`
+### `trex_transform_plan(project_path, dest_schema [, source_schema := ...])`
 
 Diff what `trex_transform_run` would change against the destination schema's
 current state. Useful as a dry-run.
@@ -157,7 +158,7 @@ current state. Useful as a dry-run.
 |-----------|------|-------------|
 | project_path | VARCHAR | Project root. |
 | dest_schema | VARCHAR | Schema where models are materialized. |
-| source_schema | VARCHAR | Schema for `source()` references. |
+| source_schema | VARCHAR | Optional **named** parameter. Schema for `source()` references. Pass as `source_schema := 'main'`. |
 
 **Returns:** TABLE
 
@@ -172,11 +173,11 @@ current state. Useful as a dry-run.
 SELECT * FROM trex_transform_plan(
   '/usr/src/plugins/@trex/analytics/project',
   'analytics',
-  'main'
+  source_schema := 'main'
 );
 ```
 
-### `trex_transform_run(project_path, dest_schema, source_schema)`
+### `trex_transform_run(project_path, dest_schema [, source_schema := ...])`
 
 Execute every model in topological order against `dest_schema`.
 
@@ -184,7 +185,7 @@ Execute every model in topological order against `dest_schema`.
 |-----------|------|-------------|
 | project_path | VARCHAR | Project root. |
 | dest_schema | VARCHAR | Destination schema (created if missing). |
-| source_schema | VARCHAR | Schema for `source()` resolution. |
+| source_schema | VARCHAR | Optional **named** parameter. Schema for `source()` resolution. Pass as `source_schema := 'main'`. |
 
 **Returns:** TABLE
 
@@ -200,7 +201,7 @@ Execute every model in topological order against `dest_schema`.
 SELECT * FROM trex_transform_run(
   '/usr/src/plugins/@trex/analytics/project',
   'analytics',
-  'main'
+  source_schema := 'main'
 );
 ```
 
@@ -220,13 +221,14 @@ are dropped and recreated.
 |--------|------|-------------|
 | name | VARCHAR | Seed name (filename without `.csv`). |
 | action | VARCHAR | `created` or `replaced`. |
-| rows | BIGINT | Rows inserted. |
+| rows | VARCHAR | Rows inserted. |
 | message | VARCHAR | Status / error string. |
 
-### `trex_transform_test(project_path, dest_schema, source_schema)`
+### `trex_transform_test(project_path, dest_schema [, source_schema := ...])`
 
 Run every `.sql` test under `tests/`. Tests are SQL queries that should return
-zero rows; any returned rows are failures.
+zero rows; any returned rows are failures. `source_schema` is an optional
+**named** parameter (`source_schema := 'main'`).
 
 **Returns:** TABLE
 
@@ -234,7 +236,8 @@ zero rows; any returned rows are failures.
 |--------|------|-------------|
 | name | VARCHAR | Test name. |
 | status | VARCHAR | `pass` or `fail`. |
-| rows_returned | BIGINT | Rows returned by the test query (0 = pass). |
+| rows_returned | VARCHAR | Rows returned by the test query (0 = pass). |
+| message | VARCHAR | Status / error string. |
 
 ### `trex_transform_freshness(project_path, dest_schema)`
 
@@ -247,7 +250,7 @@ Check `loaded_at` columns on materialized models against per-model
 |--------|------|-------------|
 | name | VARCHAR | Model name. |
 | status | VARCHAR | `ok`, `warn`, or `error`. |
-| max_loaded_at | TIMESTAMP | Most recent row timestamp. |
+| max_loaded_at | VARCHAR | Most recent row timestamp. |
 | age_hours | DOUBLE | Hours since `max_loaded_at`. |
 | warn_after | VARCHAR | Configured warning threshold. |
 | error_after | VARCHAR | Configured error threshold. |
@@ -259,12 +262,12 @@ Check `loaded_at` columns on materialized models against per-model
 SELECT * FROM trex_transform_compile('/path/to/project');
 
 -- Preview the next run
-SELECT * FROM trex_transform_plan('/path/to/project', 'analytics', 'main');
+SELECT * FROM trex_transform_plan('/path/to/project', 'analytics', source_schema := 'main');
 
 -- Materialize seeds first, then models, then run tests
 SELECT * FROM trex_transform_seed('/path/to/project', 'analytics');
-SELECT * FROM trex_transform_run('/path/to/project', 'analytics', 'main');
-SELECT * FROM trex_transform_test('/path/to/project', 'analytics', 'main');
+SELECT * FROM trex_transform_run('/path/to/project', 'analytics', source_schema := 'main');
+SELECT * FROM trex_transform_test('/path/to/project', 'analytics', source_schema := 'main');
 
 -- Watch freshness in production
 SELECT * FROM trex_transform_freshness('/path/to/project', 'analytics');

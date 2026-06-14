@@ -47,17 +47,17 @@ at the resolver layer.
 ## Schema
 
 PostGraphile derives the auto-generated schema from the comma-separated `PG_SCHEMA`
-env var (default: `trex`). The connection-filter plugin is enabled, so every
+env var (default: `trexdb`). The connection-filter plugin is enabled, so every
 Connection field accepts a `condition` / `filter` argument.
 
-The `trex` schema includes (among others):
+The `trexdb` schema includes (among others):
 
 - `user`, `session`, `account`, `verification` — core auth tables
 - `role`, `api_key`, `sso_provider` — authorization
 - `setting` — server settings (omitted from GraphQL via the omit-sensitive plugin)
 - `database`, `app`, `secret`, `transform_deployment` — management state
 
-The `trex.setting` table is force-omitted from the schema regardless of column
+The `trexdb.setting` table is force-omitted from the schema regardless of column
 comments — it stores secrets and JWTs.
 
 ## Custom Plugin Operations
@@ -83,7 +83,7 @@ to the analytical engine and PostgreSQL pool.
 | `transformCompile(pluginName)` | `[TransformCompileResult!]!` | Compile a project's models without running them. |
 | `transformPlan(pluginName, destDb, destSchema, sourceDb, sourceSchema)` | `[TransformPlanResult!]!` | Show what `transformRun` would do. |
 | `transformFreshness(pluginName, destDb, destSchema)` | `[TransformFreshnessResult!]!` | Per-model freshness vs `warn_after` / `error_after`. |
-| `pluginInfos` | `[PluginInfo!]!` | Installed-vs-registry plugin status. |
+| `availablePlugins` | `[PluginInfo!]!` | Installed-vs-registry plugin status. |
 
 ### Mutations
 
@@ -92,12 +92,13 @@ to the analytical engine and PostgreSQL pool.
 | `installPlugin(packageSpec)` | `PluginResult!` | Install a plugin from the configured npm registry. |
 | `uninstallPlugin(packageName)` | `PluginResult!` | Remove an installed plugin. |
 | `runPluginMigrations(pluginName)` | `RunMigrationResult!` | Run pending migrations for one or all plugins. |
-| `startTrexService(node, name, config)` | `ServiceActionResult!` | Start a service extension on a node. |
-| `stopTrexService(node, name)` | `ServiceActionResult!` | Stop a service extension. |
+| `startService(extension, config)` | `ServiceActionResult!` | Start a service extension. |
+| `stopService(extension)` | `ServiceActionResult!` | Stop a service extension. |
+| `restartService(extension, config)` | `ServiceActionResult!` | Restart a service extension. |
 | `testDatabaseConnection(databaseId)` | `TestConnectionResult!` | Smoke-test a federated database config. |
 | `startEtlPipeline(...)` | `EtlActionResult!` | Start an ETL pipeline via the etl extension. |
 | `stopEtlPipeline(name)` | `EtlActionResult!` | Stop a pipeline. |
-| `transformRun(pluginName, destDb, destSchema, sourceDb, sourceSchema)` | `[TransformRunResult!]!` | Run all models. Persists deployment in `trex.transform_deployment` and registers HTTP endpoints. |
+| `transformRun(pluginName, destDb, destSchema, sourceDb, sourceSchema)` | `[TransformRunResult!]!` | Run all models. Persists deployment in `trexdb.transform_deployment` and registers HTTP endpoints. |
 | `transformSeed(pluginName, destDb, destSchema)` | `[TransformSeedResult!]!` | Load CSV seeds. |
 | `transformTest(pluginName, destDb, destSchema, sourceDb, sourceSchema)` | `[TransformTestResult!]!` | Run model tests. |
 

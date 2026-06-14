@@ -16,9 +16,11 @@ trex --version
 ```
 
 The postinstall script downloads a platform-specific binary from the matching
-GitHub release. Alternatively, build from source:
+GitHub release. Alternatively, build from source. The CLI lives in a git
+submodule, so initialize it first:
 
 ```bash
+git submodule update --init plugins/cli
 cd plugins/cli
 go build -o trex
 ./trex --version
@@ -110,7 +112,7 @@ curl http://localhost:8001/trex/functions/v1/hello-world
 
 ## 5. Manage secrets
 
-Function workers receive every entry in `trex.secret` as an env var. Set
+Function workers receive every entry in `trexdb.secret` as an env var. Set
 them with the CLI:
 
 ```bash
