@@ -30,7 +30,7 @@ const dataset = computed(() => route.params.dataset as string | undefined);
 const nav = computed(() => {
   const ds = dataset.value;
   return ds
-    ? [{ to: `/${ds}`, label: "Browse" }, { to: "/datasets", label: "Datasets" }]
+    ? [{ to: `/${ds}`, label: "Browse" }, { to: `/${ds}/cql`, label: "CQL" }, { to: "/datasets", label: "Datasets" }]
     : [{ to: "/datasets", label: "Datasets" }];
 });
 const searchQuery = ref("");

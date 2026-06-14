@@ -44,4 +44,5 @@ export class FhirClient {
   read(ds: string, type: string, id: string): Promise<FhirResource> { return this.req("GET", `/${ds}/${type}/${id}`); }
   create(ds: string, type: string, body: FhirResource): Promise<FhirResource> { return this.req("POST", `/${ds}/${type}`, body); }
   update(ds: string, type: string, id: string, body: FhirResource): Promise<FhirResource> { return this.req("PUT", `/${ds}/${type}/${id}`, body); }
+  runCql(ds: string, cql: string): Promise<any> { return this.req("POST", `/${ds}/$cql`, { cql }); }
 }

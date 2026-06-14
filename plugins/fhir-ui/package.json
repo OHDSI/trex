@@ -26,7 +26,12 @@
     }
   },
   "dependencies": {
+    "@codemirror/commands": "^6.0.0",
+    "@codemirror/language": "^6.0.0",
+    "@codemirror/state": "^6.0.0",
+    "@codemirror/view": "^6.0.0",
     "@mdi/font": "^7.4.47",
+    "codemirror": "^6.0.0",
     "pinia": "^2.1.0",
     "single-spa-vue": "^3.0.1",
     "vue": "^3.4.0",
