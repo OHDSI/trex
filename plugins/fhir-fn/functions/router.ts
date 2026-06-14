@@ -24,6 +24,7 @@ import { processBundle } from "./handlers/bundle.ts";
 import { importNdjson } from "./handlers/import.ts";
 import { systemExport, typeExport, exportStatus } from "./handlers/export.ts";
 import { getCounts } from "./handlers/counts.ts";
+import { globalSearch } from "./handlers/global_search.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -55,6 +56,7 @@ export type Route =
   | { kind: "structureDefinitionList"; datasetId: string }
   | { kind: "structureDefinitionRead"; datasetId: string; type: string }
   | { kind: "counts"; datasetId: string }
+  | { kind: "globalSearch"; datasetId: string }
   | { kind: "notFound" };
 
 // ---------------------------------------------------------------------------
@@ -150,6 +152,11 @@ export function parseRoute(method: string, path: string): Route {
     // /{ds}/$counts  — literal; non-GET → notFound
     if (s1 === "$counts") {
       return m === "GET" ? { kind: "counts", datasetId } : { kind: "notFound" };
+    }
+
+    // /{ds}/$global-search  — literal; non-GET → notFound
+    if (s1 === "$global-search") {
+      return m === "GET" ? { kind: "globalSearch", datasetId } : { kind: "notFound" };
     }
 
     // Any other segment starting with "$" is an unknown operation → notFound
@@ -390,6 +397,12 @@ async function dispatch(
 
     case "counts":
       return await withConnection((conn) => getCounts(parsed.datasetId, conn, state));
+
+    case "globalSearch": {
+      const u = new URL(req.url);
+      const q = u.searchParams.get("q") ?? "";
+      return await withConnection((conn) => globalSearch(parsed.datasetId, q, conn, state));
+    }
 
     case "createDataset": {
       const body = await req.json().catch(() => ({}));

@@ -35,6 +35,7 @@ export class FhirClient {
   getStructureDefinition(ds: string, type: string): Promise<ParsedStructureDefinition> { return this.req("GET", `/${ds}/StructureDefinition/${type}`); }
 
   getCounts(ds: string): Promise<{ counts: Record<string, number> }> { return this.req("GET", `/${ds}/$counts`); }
+  globalSearch(ds: string, q: string): Promise<Bundle> { return this.req("GET", `/${ds}/$global-search?q=${encodeURIComponent(q)}`); }
 
   search(ds: string, type: string, params: Record<string, string> | URLSearchParams = {}): Promise<Bundle> {
     const qs = (params instanceof URLSearchParams ? params : new URLSearchParams(params)).toString();
