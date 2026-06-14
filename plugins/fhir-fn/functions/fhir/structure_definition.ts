@@ -11,6 +11,7 @@ export interface ElementInfo {
   isChoice: boolean;
   contentReference: string | undefined;
   children: ElementInfo[];
+  childrenByType?: Record<string, ElementInfo[]>;
 }
 
 export interface ParsedStructureDefinition {
@@ -23,6 +24,9 @@ export interface ParsedStructureDefinition {
 export class DefinitionRegistry {
   private resources: Map<string, ParsedStructureDefinition>;
   private types: Map<string, ParsedStructureDefinition>;
+  private _resolvedCache = new Map<string, ParsedStructureDefinition>();
+  private _typeChildCache = new Map<string, ElementInfo[]>();
+  private static MAX_DEPTH = 2;
 
   private constructor(
     resources: Map<string, ParsedStructureDefinition>,
@@ -276,6 +280,55 @@ export class DefinitionRegistry {
     };
   }
 
+  // Resolution helpers for UI-friendly resolved copies
+
+  private _isComplex(typeName: string): boolean {
+    return this.types.get(typeName)?.kind === "complex-type";
+  }
+
+  // deep clone + drop boilerplate; SKIP_ALWAYS at all levels, SKIP_ROOT only at the top
+  private _filterClone(els: ElementInfo[], isRoot: boolean): ElementInfo[] {
+    const SKIP_ALWAYS = new Set(["id", "extension", "modifierExtension"]);
+    const SKIP_ROOT = new Set(["meta", "implicitRules", "language", "text", "contained"]);
+    const out: ElementInfo[] = [];
+    for (const e of els) {
+      if (SKIP_ALWAYS.has(e.name)) continue;
+      if (isRoot && SKIP_ROOT.has(e.name)) continue;
+      out.push({ ...e, children: this._filterClone(e.children ?? [], false) });
+    }
+    return out;
+  }
+
+  // resolve the children of a named complex type, depth-limited + cycle-guarded
+  private _resolveTypeChildren(typeName: string, depth: number): ElementInfo[] {
+    if (depth > DefinitionRegistry.MAX_DEPTH) return [];
+    const key = `${typeName}@${depth}`;
+    const cached = this._typeChildCache.get(key);
+    if (cached) return cached;
+    const sd = this.types.get(typeName);
+    if (!sd) return [];
+    this._typeChildCache.set(key, []); // cycle guard
+    const tree = this._filterClone(sd.elements, false);
+    this._resolveInto(tree, depth);
+    this._typeChildCache.set(key, tree);
+    return tree;
+  }
+
+  private _resolveInto(nodes: ElementInfo[], depth: number): void {
+    for (const n of nodes) {
+      if (n.isChoice && n.typeCodes.length > 1) {
+        n.childrenByType = {};
+        for (const tc of n.typeCodes) {
+          if (this._isComplex(tc)) n.childrenByType[tc] = this._resolveTypeChildren(tc, depth + 1);
+        }
+      } else if ((n.children?.length ?? 0) === 0 && n.typeCodes.length && this._isComplex(n.typeCodes[0])) {
+        n.children = this._resolveTypeChildren(n.typeCodes[0], depth + 1);
+      } else if (n.children?.length) {
+        this._resolveInto(n.children, depth);
+      }
+    }
+  }
+
   // Public API
 
   resourceTypeNames(): string[] {
@@ -297,8 +350,16 @@ export class DefinitionRegistry {
     return this.resourceTypeNames();
   }
 
-  /** Return the parsed definition for a resource type, or undefined if unknown. */
+  /** Return a UI-friendly resolved copy of the parsed definition for a resource type, or undefined if unknown. */
   getResourceDefinition(type: string): ParsedStructureDefinition | undefined {
-    return this.getResource(type);
+    const cached = this._resolvedCache.get(type);
+    if (cached) return cached;
+    const base = this.getResource(type);
+    if (!base) return undefined;
+    const elements = this._filterClone(base.elements, true);
+    this._resolveInto(elements, 0);
+    const resolved = { ...base, elements };
+    this._resolvedCache.set(type, resolved);
+    return resolved;
   }
 }
