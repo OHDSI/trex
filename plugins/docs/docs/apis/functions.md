@@ -16,13 +16,18 @@ deploy / manage them.
 |---------|-------------|
 | `${BASE_PATH}/functions/v1/:slug` | Invoke a built-in function by slug (any HTTP method). |
 | `${BASE_PATH}/functions/v1/:slug/*` | Subpath under the same worker. |
-| `${BASE_PATH}/plugins${scopePrefix}/:source/*` | Invoke a function registered by a plugin. |
+| `${PLUGINS_BASE_PATH}${scopePrefix}/:source/*` | Invoke a function registered by a plugin. |
 
-`BASE_PATH` defaults to `/trex`. `scopePrefix` is the plugin scope (e.g. `/@trex`)
-and is omitted for non-scoped plugins.
+`BASE_PATH` defaults to `/trex`. Plugin-routed functions use the **separate**
+`PLUGINS_BASE_PATH` (default `/plugins`), not `BASE_PATH` — so with defaults a scoped
+plugin function lives at `/plugins/@trex/:source/*`, not `/trex/plugins/...`.
+`scopePrefix` is the plugin scope (e.g. `/@trex`) and is omitted for non-scoped
+plugins.
 
-The auth context middleware injects `x-user-id` and `x-user-role` headers into the
-worker request based on the session JWT.
+For plugin-routed functions, the `authContext` middleware injects `x-user-id` and
+`x-user-role` headers into the worker request based on the session JWT. The built-in
+`/functions/v1/:slug` invoker does **not** inject those headers — it verifies the JWT
+(when `verify_jwt` is set) and forwards only the inbound `Authorization` header.
 
 ### Management API (Supabase CLI compatible)
 
@@ -33,38 +38,38 @@ against a Trex deployment. Every endpoint requires admin auth: a Bearer JWT with
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/organizations` | Returns `[{ id: "trex-org", name: "trex" }]`. |
-| GET | `/v1/projects` | Returns a single synthetic project (used by `supabase login` to validate tokens). |
-| GET | `/v1/projects/:ref` | Project metadata with the resolved DB host (`EXTERNAL_DB_URL` → `POOLER_URL` → `DATABASE_URL`). |
-| GET | `/v1/projects/:ref/api-keys?reveal=true` | Anon and service-role keys (`reveal=true` returns plaintext for admins). |
-| POST | `/v1/projects/:ref/cli/login-role` | Allocates a temporary `cli_login_*` Postgres role with login privilege, valid for 1 hour. |
-| GET / PATCH / PUT | `/v1/projects/:ref/config/auth` | GoTrue config. PATCH/PUT updates persist into `trex.setting`. |
-| GET / PATCH / PUT | `/v1/projects/:ref/config/database/postgres` | Postgres tunables (advisory; `trex.setting` only). |
-| GET / PATCH / PUT | `/v1/projects/:ref/config/storage` | Storage config (file-size limit, image-transformation flag). |
-| GET | `/v1/projects/:ref/config/database/pooler` | Connection pool / pooler info derived from env DB URLs. |
-| GET / PATCH / PUT | `/v1/projects/:ref/postgrest` | PostgREST config. |
-| GET | `/v1/projects/:ref/network-restrictions` | Stub (returns `0.0.0.0/0`). |
-| GET | `/v1/projects/:ref/ssl-enforcement` | Stub. |
-| GET | `/v1/projects/:ref/billing/addons` | Empty addon list (required by `supabase config push`). |
+| GET | `${BASE_PATH}/v1/organizations` | Returns `[{ id: "trex-org", name: "trex" }]`. |
+| GET | `${BASE_PATH}/v1/projects` | Returns a single synthetic project (used by `supabase login` to validate tokens). |
+| GET | `${BASE_PATH}/v1/projects/:ref` | Project metadata with the resolved DB host (`EXTERNAL_DB_URL` → `POOLER_URL` → `DATABASE_URL`). |
+| GET | `${BASE_PATH}/v1/projects/:ref/api-keys?reveal=true` | Anon and service-role keys (`reveal=true` returns plaintext for admins). |
+| POST | `${BASE_PATH}/v1/projects/:ref/cli/login-role` | Allocates a temporary `cli_login_*` Postgres role with login privilege, valid for 1 hour. |
+| GET / PATCH / PUT | `${BASE_PATH}/v1/projects/:ref/config/auth` | GoTrue config. PATCH/PUT updates persist into `trexdb.setting`. |
+| GET / PATCH / PUT | `${BASE_PATH}/v1/projects/:ref/config/database/postgres` | Postgres tunables (advisory; `trexdb.setting` only). |
+| GET / PATCH / PUT | `${BASE_PATH}/v1/projects/:ref/config/storage` | Storage config (file-size limit, image-transformation flag). |
+| GET | `${BASE_PATH}/v1/projects/:ref/config/database/pooler` | Connection pool / pooler info derived from env DB URLs. |
+| GET / PATCH / PUT | `${BASE_PATH}/v1/projects/:ref/postgrest` | PostgREST config. |
+| GET | `${BASE_PATH}/v1/projects/:ref/network-restrictions` | Stub (returns `0.0.0.0/0`). |
+| GET | `${BASE_PATH}/v1/projects/:ref/ssl-enforcement` | Stub. |
+| GET | `${BASE_PATH}/v1/projects/:ref/billing/addons` | Empty addon list (required by `supabase config push`). |
 
 #### Functions
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/projects/:ref/functions` | List all functions discovered under `FUNCTIONS_DIR` (default `./functions`). |
-| GET | `/v1/projects/:ref/functions/:slug` | Function metadata. `entrypoint_path` is rewritten to a `file:///` URL for CLI compatibility. |
-| GET | `/v1/projects/:ref/functions/:slug/body` | Returns the ESZIP bundle (`esbuild.esz`, optionally `EZBR`-prefixed Brotli) if present, otherwise the entrypoint source. |
-| POST | `/v1/projects/:ref/functions?slug=…&entrypoint_path=…&verify_jwt=…` | Deploy. Body is the raw ESZIP bundle. Stored at `FUNCTIONS_DIR/:slug/esbuild.esz`. Bumps `version`. |
-| POST | `/v1/projects/:ref/functions/deploy` | Legacy JSON deploy: `{ slug, name?, body, verify_jwt?, entrypoint_path?, import_map? }`. |
-| DELETE | `/v1/projects/:ref/functions/:slug` | Remove the function directory. |
+| GET | `${BASE_PATH}/v1/projects/:ref/functions` | List all functions discovered under `FUNCTIONS_DIR` (default `./functions`). |
+| GET | `${BASE_PATH}/v1/projects/:ref/functions/:slug` | Function metadata. `entrypoint_path` is rewritten to a `file:///` URL for CLI compatibility. |
+| GET | `${BASE_PATH}/v1/projects/:ref/functions/:slug/body` | Returns the ESZIP bundle (`esbuild.esz`, optionally `EZBR`-prefixed Brotli) if present, otherwise the entrypoint source. |
+| POST | `${BASE_PATH}/v1/projects/:ref/functions?slug=…&entrypoint_path=…&verify_jwt=…` | Deploy. Body is the raw ESZIP bundle. Stored at `FUNCTIONS_DIR/:slug/esbuild.esz`. Bumps `version`. |
+| POST | `${BASE_PATH}/v1/projects/:ref/functions/deploy` | Legacy JSON deploy: `{ slug, name?, body, verify_jwt?, entrypoint_path?, import_map? }`. |
+| DELETE | `${BASE_PATH}/v1/projects/:ref/functions/:slug` | Remove the function directory. |
 
 #### Secrets
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/projects/:ref/secrets` | List secrets (name + hash, no plaintext). `SUPABASE_*` names are filtered out. |
-| POST | `/v1/projects/:ref/secrets` | Body: `[{ name, value }, …]`. Values are stored encrypted in `trex.secret`. |
-| DELETE | `/v1/projects/:ref/secrets` | Body: `[name, …]`. |
+| GET | `${BASE_PATH}/v1/projects/:ref/secrets` | List secrets (name + hash, no plaintext). `SUPABASE_*` names are filtered out. |
+| POST | `${BASE_PATH}/v1/projects/:ref/secrets` | Body: `[{ name, value }, …]`. Values are stored encrypted in `trexdb.secret`. |
+| DELETE | `${BASE_PATH}/v1/projects/:ref/secrets` | Body: `[name, …]`. |
 
 Secrets are decrypted and injected as env vars for every edge-function worker. The
 server caches decrypted secrets for 30 seconds; mutations invalidate the cache.
@@ -73,7 +78,7 @@ server caches decrypted secrets for 30 seconds; mutations invalidate the cache.
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/v1/projects/:ref/types/typescript?included_schemas=public,trex` | Generate Supabase-style `Database` TypeScript types from `information_schema`. Used by `supabase gen types typescript`. |
+| GET | `${BASE_PATH}/v1/projects/:ref/types/typescript?included_schemas=public,trexdb` | Generate Supabase-style `Database` TypeScript types from `information_schema`. Used by `supabase gen types typescript`. |
 
 ## Function Metadata (`function.json`)
 
@@ -111,12 +116,13 @@ Deno.serve(async (req: Request) => {
 
 ### Auth Context
 
-Every invocation receives:
+Plugin-routed functions (via `PLUGINS_BASE_PATH`) receive the injected user headers;
+the built-in `/functions/v1/:slug` invoker forwards only `Authorization`:
 
 | Header | Source |
 |--------|--------|
-| `x-user-id` | `app.user_id` from `pgSettings` |
-| `x-user-role` | `app.user_role` from `pgSettings` |
+| `x-user-id` | `app.user_id` from `pgSettings` (plugin-routed only) |
+| `x-user-role` | `app.user_role` from `pgSettings` (plugin-routed only) |
 | `Authorization` | Forwarded from the inbound request |
 
 `accept-encoding` is stripped before the worker runs to avoid double-encoded
@@ -126,7 +132,7 @@ responses.
 
 Workers receive:
 
-- All decrypted entries from `trex.secret` (refreshed every 30s).
+- All decrypted entries from `trexdb.secret` (refreshed every 30s).
 - The plugin's `_shared` env block (with `${VAR}`/`${VAR:-default}` substitution).
 - The plugin's per-`NODE_ENV` env block (e.g. `production`).
 - `TREX_FUNCTION_PATH` — absolute path to the plugin directory.

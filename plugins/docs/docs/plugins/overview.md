@@ -21,13 +21,13 @@ A single plugin can combine multiple types.
 
 ```mermaid
 flowchart TD
-    Startup["Server Startup"] --> Scan["Scan PLUGINS_PATH (+ PLUGINS_DEV_PATH if dev)"]
+    Startup["Server Startup"] --> Scan["Scan PLUGINS_DEV_PATH (dev-first), then PLUGINS_PATH"]
     Scan --> ReadPkg["Read package.json"]
     ReadPkg --> RegFn["Register function routes"]
     ReadPkg --> RegUI["Register UI routes"]
     ReadPkg --> RegFlow["Register Prefect flows"]
-    ReadPkg --> RegTx["Register transforms (recover endpoints from trex.transform_deployment)"]
-    RegFn --> EnsureRoles["ensureRolesExist — upsert into trex.role"]
+    ReadPkg --> RegTx["Register transforms (recover endpoints from trexdb.transform_deployment)"]
+    RegFn --> EnsureRoles["ensureRolesExist — upsert into trexdb.role"]
     EnsureRoles --> CliLogin["Mount cliLoginRouter"]
     CliLogin --> AuthCtx["authContext middleware"]
     AuthCtx --> Ready["Server ready"]
@@ -41,9 +41,9 @@ flowchart TD
 Plugins are scanned from two directories at server startup:
 
 - **`PLUGINS_PATH`** (default: `./plugins`) — production plugins
-- **`PLUGINS_DEV_PATH`** (default: `./plugins-dev`) — development plugins (only when `NODE_ENV=development`)
+- **`PLUGINS_DEV_PATH`** (default: `./plugins-dev`) — development plugins, always scanned (no `NODE_ENV` check)
 
-The scanner walks each directory, enters scoped packages (those starting with `@`), and reads `package.json` from each subdirectory. The short name is derived from the package name (e.g., `@trex/my-plugin` becomes `my-plugin`).
+The dev path is scanned first (dev-first, higher priority), then the production path. The scanner walks each directory, enters scoped packages (those starting with `@`), and reads `package.json` from each subdirectory. The short name is derived from the package name (e.g., `@trex/my-plugin` becomes `my-plugin`). The URL scope segment is derived from the package **scope**, not the short name — `@trex/...` yields a `/trex` segment.
 
 ## Plugin Installation
 
@@ -74,6 +74,6 @@ Plugins can define custom roles and scopes for fine-grained access control:
 }
 ```
 
-- Roles are auto-created in the `trex.role` database table at startup
+- Roles are auto-created in the `trexdb.role` database table at startup
 - Admin users bypass all scope checks
 - Plugin routes are protected by auth context and authorization middleware

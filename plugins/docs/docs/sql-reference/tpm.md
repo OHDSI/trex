@@ -153,8 +153,12 @@ SELECT * FROM trex_plugin_list('./plugins');
 
 ### `trex_plugin_seed(install_dir)`
 
-Bulk-install every plugin advertised by `PLUGINS_INFORMATION_URL`. Used in
-build pipelines to bake a known set of plugins into the runtime image.
+Bulk-install the plugins listed in the `PLUGINS_SEED` environment variable (a
+JSON array of package specs). Used in build pipelines to bake a known set of
+plugins into the runtime image. The function also honors `PLUGINS_SEED_UPDATE`
+(re-fetch/update already-installed seed packages) and `PLUGINS_API_VERSION`
+(the dist-tag to resolve, default `latest`). If `PLUGINS_SEED` is empty or
+unset, this is a no-op.
 
 ```sql
 SELECT * FROM trex_plugin_seed('./plugins');
@@ -174,9 +178,9 @@ SELECT * FROM trex_plugin_delete('@trex/notebook', './plugins');
 - **Restart required.** The plugin loader scans on server startup. Install
   via `tpm`, then restart Trex (the admin UI's "pendingRestart" flag tracks
   this).
-- **Registry auth**: configure the npm registry's auth via standard
-  `TPM_REGISTRY_AUTH_TOKEN` or include credentials in `TPM_REGISTRY_URL`
-  (e.g. `https://user:token@private-registry/...`).
+- **Registry auth**: embed credentials directly in `TPM_REGISTRY_URL`
+  (e.g. `https://user:token@private-registry/...`). This is the only supported
+  auth mechanism — there is no separate auth-token environment variable.
 - **Disk space**: installs are uncompressed tarballs. Large plugins (the
   notebook bundle, the storage worker) can run to 100+ MB each.
 - **Aliases**: `tpm_install` is a deprecated alias for `trex_plugin_install`.

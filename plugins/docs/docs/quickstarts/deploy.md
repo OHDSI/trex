@@ -12,48 +12,60 @@ installed.
 ## 1. Clone and start the stack
 
 ```bash
-git clone https://github.com/p-hoffmann/trexsql
-cd trexsql
+git clone https://github.com/OHDSI/trex.git
+cd trex
 docker compose up -d
 ```
 
-The first run pulls three images (Trex, Postgres 16, PostgREST) and starts
-them. After ~30 seconds the stack is healthy.
+The first run pulls the images and starts several services — the data node
+(`trex-data`), the API/GraphQL/MCP/pgwire server (`trex-server`), Postgres 16,
+PostgREST, Studio, and Realtime. After ~30 seconds the stack is healthy.
 
 ```bash
 docker compose ps
 ```
 
-You should see three services in `running (healthy)` state.
+You should see the services in `running (healthy)` state.
 
-## 2. Create the first admin user
+## 2. Log in as the admin user
 
-The first user to register is automatically promoted to `admin`. Open the
-admin UI:
+Self-registration is **disabled by default**. A default admin account is
+seeded on first boot:
+
+- **Email:** `admin@trex.local`
+- **Password:** `password`
+
+Open the admin UI:
 
 ```
 http://localhost:8001/trex/
 ```
 
-Sign up with any email + password. After registration you'll land on the
-admin dashboard. (If sign-up appears disabled, ensure `auth.selfRegistration`
-is set in the admin UI's settings — it's enabled by default in fresh
-deployments.)
+Log in with those credentials. After login you'll land on the admin
+dashboard. **Change the default password** under **Settings** right away —
+the seeded credentials are well-known.
 
 :::tip
-For non-interactive bootstrapping, set `ADMIN_EMAIL=you@example.com` in the
-`trex` service's environment before `docker compose up`. Any user matching
-that email is auto-promoted to admin on registration.
+To let other users sign up themselves, enable `auth.selfRegistration` in the
+admin UI's settings (or via the auth config). It's off by default so a fresh
+deployment isn't open to public registration.
 :::
 
 ## 3. Try the GraphQL endpoint
 
-Enable GraphiQL by setting `ENABLE_GRAPHIQL=true` in the compose file and
-restarting:
+Enable GraphiQL by setting `ENABLE_GRAPHIQL=true` under the `trex-server`
+service's `environment:` block in `docker-compose.yml`, then recreate it:
+
+```yaml
+# docker-compose.yml
+services:
+  trex-server:
+    environment:
+      ENABLE_GRAPHIQL: 'true'
+```
 
 ```bash
-echo "      ENABLE_GRAPHIQL: 'true'" >> docker-compose.yml   # add under trex.environment
-docker compose up -d trex
+docker compose up -d trex-server
 ```
 
 Then open:
@@ -116,12 +128,13 @@ curl -X POST http://localhost:8001/trex/mcp \
 
 ## What just happened
 
-The compose file started three containers: Postgres (auth + plugin metadata),
-Trex (everything else, in one process), and PostgREST (auto-REST over the
-Postgres metadata DB). Inside the Trex container, the Rust binary loaded every
-SQL extension out of `EXTENSION_DIR`, then the `trexas` HTTP server brought up
-the Deno-based core management application — which mounted GraphQL, auth, MCP,
-the edge-function runtime, and the plugin loader. See
+The compose file started several services: Postgres (auth + plugin metadata),
+the `trex-data` node (the analytical engine + Arrow Flight transport), the
+`trex-server` node (everything else — GraphQL, auth, MCP, pgwire, the
+edge-function runtime, and the plugin loader), PostgREST (auto-REST over the
+Postgres metadata DB), plus Studio and Realtime. Inside the Trex nodes, the
+Rust binary loaded every SQL extension out of `EXTENSION_DIR`, then the
+`trexas` HTTP server brought up the Deno-based core management application. See
 [Concepts → Architecture](../concepts/architecture) for the full picture.
 
 ## Next steps

@@ -32,12 +32,24 @@
 (defn get-source-repository []
   @source-repository)
 
+;; Resolved once: the SourceRepository#findBySourceKey interface Method. Invoking
+;; through the interface Method avoids Clojure's reflective scan of the Spring Data
+;; JDK proxy's concrete class, which the closed-world native image cannot enumerate
+;; (it yields "No matching method findBySourceKey for class jdk.proxy*"). Method
+;; invocation against the interface routes through the proxy's InvocationHandler.
+(defonce ^:private find-by-source-key-method
+  (delay
+    (.getMethod (Class/forName "org.ohdsi.webapi.source.SourceRepository")
+                "findBySourceKey"
+                (into-array Class [String]))))
+
 (defn- find-source-by-key [source-key]
   (let [repo @source-repository]
     (if (nil? repo)
       (do (log/error "find-source-by-key: source-repository atom is nil for key" source-key) nil)
       (try
-        (let [result (.findBySourceKey repo source-key)]
+        (let [^java.lang.reflect.Method m @find-by-source-key-method
+              result (.invoke m repo (object-array [source-key]))]
           (log/info "find-source-by-key" source-key "->" (if result "found" "nil-result"))
           result)
         (catch Exception e

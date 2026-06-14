@@ -1,0 +1,10 @@
+.v-application {
+  font-size: 14px;
+}
+
+/* Smooth, subtle interactions (does not alter the Atlas control chrome) */
+.v-field,
+.v-btn,
+.v-card {
+  transition: box-shadow .15s ease, border-color .15s ease, background-color .15s ease;
+}

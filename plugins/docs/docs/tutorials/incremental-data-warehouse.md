@@ -251,10 +251,17 @@ SELECT order_id
 
 Tests pass when they return zero rows.
 
-Restart Trex so the plugin is loaded:
+Plugins under `plugins-dev/` are only bind-mounted into the container when
+the dev compose overlay is enabled. Bring the stack up with the overlay (if
+you haven't already), then restart the Trex service so the plugin loads. The
+`-f` flags must be repeated on every `docker compose` call:
 
 ```bash
-docker compose restart trex
+# enable the dev overlay (exposes plugins-dev/ as a bind mount)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+# reload the plugin
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart trex
 ```
 
 ## 4. First run — bulk build (3 min)

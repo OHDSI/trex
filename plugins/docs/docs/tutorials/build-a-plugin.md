@@ -123,16 +123,18 @@ reads from the merged env block.
 ## 5. Restart and test
 
 The plugin loader scans `plugins-dev/` at startup. With the dev compose
-overlay running, restart only the Trex service:
+overlay running, restart only the Trex service. The `-f` overlay flags must
+be repeated on every `docker compose` invocation, or Compose falls back to
+the base file (which has no `trex` service):
 
 ```bash
-docker compose restart trex
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart trex
 ```
 
 Watch the logs:
 
 ```bash
-docker compose logs trex --since=30s | grep hello
+docker compose -f docker-compose.yml -f docker-compose.dev.yml logs trex --since=30s | grep hello
 ```
 
 You should see something like:
@@ -210,7 +212,7 @@ If only certain users should hit your endpoint, add to `package.json`:
 }
 ```
 
-After restart, the role `hello-user` is auto-created in `trex.role`. Admins
+After restart, the role `hello-user` is auto-created in `trexdb.role`. Admins
 still bypass the check; assign `hello-user` to non-admin users via the admin
 UI or the `user-role-assign` MCP tool.
 

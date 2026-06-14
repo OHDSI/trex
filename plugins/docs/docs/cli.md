@@ -28,7 +28,11 @@ GitHub release.
 
 ### Build from Source
 
+`plugins/cli` is a git submodule (upstream `github.com/p-hoffmann/cli.git`). It
+is not checked out by a plain clone — initialize it first:
+
 ```bash
+git submodule update --init plugins/cli
 cd plugins/cli
 go build -o trex
 ./trex --version
@@ -103,7 +107,7 @@ trex secrets set MY_API_KEY=… ANOTHER_VAR=…
 trex secrets unset MY_API_KEY
 ```
 
-Secrets land in `trex.secret` (encrypted) and are injected into every edge
+Secrets land in `trexdb.secret` (encrypted) and are injected into every edge
 function worker.
 
 ### Database Connection
@@ -126,7 +130,7 @@ trex config pull
 trex config push
 ```
 
-`config push` updates rows in `trex.setting` for the auth / Postgres / PostgREST
+`config push` updates rows in `trexdb.setting` for the auth / Postgres / PostgREST
 / storage sections.
 
 ## Compatibility Notes
@@ -151,5 +155,7 @@ trex config push
 
 `plugins/cli/` ships the source of the Trex CLI fork. Build artifacts are not
 included in the runtime image — the CLI is a developer tool, not a runtime
-service. See [`plugins/cli/README.md`](https://github.com/p-hoffmann/trexsql/tree/main/plugins/cli/README.md)
+service. `plugins/cli` is a git submodule (upstream
+`github.com/p-hoffmann/cli.git`) — run `git submodule update --init plugins/cli`
+before building. See [`plugins/cli/README.md`](https://github.com/OHDSI/trex/tree/main/plugins/cli/README.md)
 for build details.

@@ -57,7 +57,7 @@ resources support the same five-method shape (`list`, `retrieve`, `create`,
 
 ### Common patterns
 
-**List**: `GET /<resource>?included_schemas=public,trex&excluded_schemas=…&limit=…`
+**List**: `GET /<resource>?included_schemas=public,trexdb&excluded_schemas=…&limit=…`
 
 ```bash
 curl -H "Authorization: Bearer trex_…" \
@@ -103,7 +103,7 @@ By default, every list endpoint accepts `included_schemas` /
 `excluded_schemas` query parameters. Without them, postgres-meta uses its
 internal default (excludes Postgres system schemas).
 
-Trex's auth schema (`trex`) and the auth-router internals (`auth.*`,
+Trex's auth schema (`trexdb`) and the auth-router internals (`auth.*`,
 `storage.*`) are visible through these endpoints to admin users — be careful
 when sharing API key tokens, the catalog browser surface is broad.
 
