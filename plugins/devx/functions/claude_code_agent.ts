@@ -60,7 +60,7 @@ async function ensureClaudeCodeServer() {
 
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-  skillContext, commandOverride, hasComponentSelection,
+  skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
 }) {
   const mode = chatMode || "agent";
   const maxSteps = settings.max_steps || 100;
@@ -68,7 +68,10 @@ export async function streamClaudeCodeChat({
     ? { ...settings, model: commandOverride.model }
     : settings;
 
-  const workspacePath = appId
+  // Optional isolated workspace (git worktree for an agent-driven run).
+  const workspacePath = workspacePathOverride
+    ? workspacePathOverride
+    : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
 

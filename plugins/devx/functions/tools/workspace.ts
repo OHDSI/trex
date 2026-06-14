@@ -42,3 +42,15 @@ export async function ensureAppWorkspace(userId: string, appId: string): Promise
   await Deno.mkdir(wsPath, { recursive: true });
   return wsPath;
 }
+
+/** Path to an isolated run worktree under an app: <appWs>/.worktrees/<runId>.
+ * Used to run agent-driven plan execution in isolation from the main tree. */
+export function getRunWorktreePath(userId: string, appId: string, runId: string): string {
+  return join(getAppWorkspacePath(userId, appId), ".worktrees", sanitizeId(runId));
+}
+
+/** Ensure the .worktrees parent dir exists for an app (git worktree add needs
+ * the parent to exist; the leaf must NOT exist). */
+export async function ensureWorktreeParent(userId: string, appId: string): Promise<void> {
+  await Deno.mkdir(join(getAppWorkspacePath(userId, appId), ".worktrees"), { recursive: true });
+}

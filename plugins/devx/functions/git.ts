@@ -128,6 +128,66 @@ class GitOps {
     const result = JSON.parse(json);
     return result.message;
   }
+
+  // --- Worktree operations ---
+  // Interim implementation via the allowlisted raw `git` (trex_devx_run_command);
+  // swap for dedicated trex_devx_git_worktree_* vtab ops when the Rust ext is rebuilt.
+  // run_command splits the command on whitespace (no shell), so paths/branches
+  // must not contain spaces — they don't (sanitized ids).
+
+  private async runGit(repoRoot: string, cmd: string): Promise<string> {
+    const json = await duckdb(`SELECT * FROM trex_devx_run_command('${escapeSql(repoRoot)}', '${escapeSql(cmd)}')`);
+    const r = JSON.parse(json);
+    if (!r.ok) throw new Error(r.output || `git failed: ${cmd}`);
+    return r.output || "";
+  }
+
+  async worktreeAdd(repoRoot: string, worktreePath: string, branch: string): Promise<string> {
+    validateBranchName(branch);
+    await this.runGit(repoRoot, `git worktree add ${worktreePath} -b ${branch}`);
+    return worktreePath;
+  }
+
+  async worktreeRemove(repoRoot: string, worktreePath: string, force = false): Promise<void> {
+    await this.runGit(repoRoot, `git worktree remove ${force ? "--force " : ""}${worktreePath}`);
+  }
+
+  async worktreePrune(repoRoot: string): Promise<void> {
+    try { await this.runGit(repoRoot, `git worktree prune`); } catch { /* best effort */ }
+  }
+
+  async worktreeList(repoRoot: string): Promise<{ path: string; head: string; branch: string | null; bare: boolean; detached: boolean }[]> {
+    let out = "";
+    try { out = await this.runGit(repoRoot, `git worktree list --porcelain`); } catch { return []; }
+    const entries: { path: string; head: string; branch: string | null; bare: boolean; detached: boolean }[] = [];
+    let cur: { path: string; head: string; branch: string | null; bare: boolean; detached: boolean } | null = null;
+    for (const line of out.split("\n")) {
+      if (line.startsWith("worktree ")) {
+        if (cur) entries.push(cur);
+        cur = { path: line.slice(9).trim(), head: "", branch: null, bare: false, detached: false };
+      } else if (cur && line.startsWith("HEAD ")) {
+        cur.head = line.slice(5).trim();
+      } else if (cur && line.startsWith("branch ")) {
+        cur.branch = line.slice(7).trim().replace("refs/heads/", "");
+      } else if (cur && line.trim() === "bare") {
+        cur.bare = true;
+      } else if (cur && line.trim() === "detached") {
+        cur.detached = true;
+      }
+    }
+    if (cur) entries.push(cur);
+    return entries;
+  }
+
+  async mergeBranch(repoRoot: string, branch: string): Promise<string> {
+    validateBranchName(branch);
+    return await this.runGit(repoRoot, `git merge --no-ff ${branch}`);
+  }
+
+  async deleteBranch(repoRoot: string, branch: string, force = false): Promise<void> {
+    validateBranchName(branch);
+    await this.runGit(repoRoot, `git branch ${force ? "-D" : "-d"} ${branch}`);
+  }
 }
 
 export const gitOps = new GitOps();

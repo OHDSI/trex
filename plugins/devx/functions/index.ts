@@ -2,7 +2,7 @@
 import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
-import { ensureAppWorkspace, getAppWorkspacePath } from "./tools/workspace.ts";
+import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent } from "./tools/workspace.ts";
 import { safeJoin, EXCLUDED_DIRS, EXCLUDED_FILES } from "./tools/path_safety.ts";
 import { parseBuildTags, stripBuildTags } from "./build_tag_parser.ts";
 import { executeBuildTags } from "./build_tag_executor.ts";
@@ -928,6 +928,28 @@ Deno.serve(async (req: Request) => {
               ? `Execute the following implementation plan using the subagent-driven-development skill. Do not ask which execution strategy to use — use subagent-driven execution. Implement everything end-to-end with your tools.\n\nPLAN:\n${run.task}`
               : run.task + ". Use your tools to thoroughly analyze the project.";
 
+            // Isolate agent-driven plan runs in a dedicated git worktree on a
+            // run/<id> branch, so concurrent runs don't collide and the work is
+            // reviewable/mergeable from the Git tab. Non-fatal on failure.
+            let cwdOverride: string | undefined;
+            if (isPlanRun && run.app_id) {
+              try {
+                const repoRoot = getAppWorkspacePath(userId, run.app_id);
+                await ensureWorktreeParent(userId, run.app_id);
+                const wtPath = getRunWorktreePath(userId, run.app_id, runId);
+                const branch = `run/${runId.slice(0, 8)}`;
+                await gitOps.worktreeAdd(repoRoot, wtPath, branch);
+                cwdOverride = wtPath;
+                await sql(
+                  `UPDATE devx.subagent_runs SET branch = $1, worktree_path = $2 WHERE id = $3`,
+                  [branch, wtPath, runId],
+                );
+                agentSend({ type: "chunk", content: `\n> 🌿 Isolated worktree \`${branch}\` created — review/merge it from the Git tab.\n\n` });
+              } catch (e) {
+                agentSend({ type: "chunk", content: `\n> ⚠️ Could not create an isolated worktree (${e.message}); running in the main tree.\n\n` });
+              }
+            }
+
             const baseArgs = {
               chatId: `agent-run-${runId}`,
               userId,
@@ -941,6 +963,7 @@ Deno.serve(async (req: Request) => {
               commandOverride: matchedSkill?.allowed_tools
                 ? { allowed_tools: matchedSkill.allowed_tools, model: null, body: "" }
                 : undefined,
+              workspacePathOverride: cwdOverride,
             };
 
             let result;
