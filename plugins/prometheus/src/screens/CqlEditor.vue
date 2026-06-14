@@ -103,23 +103,51 @@ function getEditorText(): string {
 
 interface ParsedParam { name: string; display: string; }
 
+function tryParse(s: unknown): unknown {
+  if (typeof s !== "string") return s;
+  const t = s.trim();
+  if (!(t.startsWith("{") || t.startsWith("[") || t.startsWith("\""))) return s;
+  try { return JSON.parse(t); } catch { return s; }
+}
+
+// Render a single value/part readably: CQL returns FHIR resources as (sometimes
+// double-) JSON-encoded valueStrings; unwrap them and humanize.
+function valueDisplay(v: unknown): string {
+  // unwrap a part/sub-parameter to its value
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const o = v as any;
+    if (o.resource) return valueDisplay(o.resource);
+    const vk = Object.keys(o).find((k) => k.startsWith("value"));
+    if (vk && o.resourceType === undefined) return valueDisplay(o[vk]);
+  }
+  // parse JSON strings (handle double-encoding)
+  let parsed = tryParse(v);
+  if (typeof parsed === "string") parsed = tryParse(parsed);
+  if (parsed && typeof parsed === "object" && (parsed as any).resourceType) {
+    const r = parsed as any;
+    const label = formatFhirValue(r.name ?? r.code ?? r.title ?? r.text) || r.id || "";
+    return label ? `${r.resourceType}: ${label}` : r.resourceType;
+  }
+  return formatFhirValue(parsed) || (typeof parsed === "object" ? JSON.stringify(parsed) : String(parsed));
+}
+
 const resultParams = computed<ParsedParam[]>(() => {
   if (!result.value?.parameter) return [];
   return (result.value.parameter as any[]).map((p) => {
     const name = p.name ?? "";
-    // Find value: any key starting with "value" or "resource" or "part"
-    let val: unknown = undefined;
-    if (p.resource !== undefined) {
-      const r = p.resource as any;
-      val = r.resourceType && r.id ? `${r.resourceType}/${r.id}` : JSON.stringify(r);
-    } else if (p.part !== undefined) {
-      val = JSON.stringify(p.part);
-    } else {
-      // Try valueString, valueInteger, valueBoolean, valueDecimal, etc.
-      const valueKey = Object.keys(p).find((k) => k.startsWith("value"));
-      if (valueKey) val = p[valueKey];
-    }
-    return { name, display: val !== undefined ? formatFhirValue(val) || JSON.stringify(val) : "" };
+    // A define result is usually a list: either p.part[] or a value* that is an array.
+    const valueKey = Object.keys(p).find((k) => k.startsWith("value"));
+    const raw = p.resource ?? p.part ?? (valueKey ? p[valueKey] : undefined);
+    let items: unknown[];
+    const parsedRaw = tryParse(raw);
+    if (Array.isArray(parsedRaw)) items = parsedRaw;
+    else if (Array.isArray(raw)) items = raw;
+    else items = raw === undefined ? [] : [raw];
+    const rendered = items.map(valueDisplay).filter(Boolean);
+    const display = rendered.length > 1
+      ? `${rendered.length} results — ${rendered.join("; ")}`
+      : rendered.join("; ");
+    return { name, display };
   });
 });
 
