@@ -28,14 +28,6 @@ export const CHAT_MODES: { id: ChatMode; label: string; description: string }[] 
   { id: "ask", label: "Chat", description: "Chat without code changes" },
 ];
 
-export type LayoutMode = "left-only" | "split" | "right-only";
-export type PanelContent = "chat" | "preview";
-export interface PanelAssignment { left: PanelContent; right: PanelContent; }
-export const LAYOUT_MODES: { id: LayoutMode; label: string }[] = [
-  { id: "left-only", label: "Left only" },
-  { id: "split", label: "Split" },
-  { id: "right-only", label: "Right only" },
-];
 
 export interface DevxSettings {
   id: string;
