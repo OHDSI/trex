@@ -230,6 +230,15 @@ export async function streamClaudeCodeChat({
                 }).catch(() => {});
                 break;
               }
+              case "subagent_start":
+                send({ type: "subagent_start", taskId: data.taskId, name: data.name, task: data.task });
+                break;
+              case "subagent_step":
+                send({ type: "subagent_step", taskId: data.taskId, step: data.step, lastTool: data.lastTool, summary: data.summary });
+                break;
+              case "subagent_done":
+                send({ type: "subagent_done", taskId: data.taskId, status: data.status, result: data.result });
+                break;
               case "error":
                 throw new Error(data.error);
               case "done":

@@ -157,6 +157,7 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
                 agentRuns={agentRuns.runStates}
                 onExpandRun={agentRuns.loadMessages}
                 onStopRun={agentRuns.stopRun}
+                childrenByParent={agentRuns.childrenByParent}
               />
             </TabsContent>
             <TabsContent value="git" className="flex-1 m-0 overflow-hidden">

@@ -823,15 +823,15 @@ Deno.serve(async (req: Request) => {
       const appIdParam = url.searchParams.get("app_id");
       const result = appIdParam
         ? await sql(
-            `SELECT id, parent_chat_id, agent_name, skill_name, task, status, created_at, completed_at
+            `SELECT id, parent_chat_id, parent_run_id, run_kind, branch, agent_name, skill_name, task, status, created_at, completed_at
              FROM devx.subagent_runs WHERE user_id = $1 AND app_id = $2
-             ORDER BY created_at DESC LIMIT 20`,
+             ORDER BY created_at DESC LIMIT 50`,
             [userId, appIdParam],
           )
         : await sql(
-            `SELECT id, parent_chat_id, agent_name, skill_name, task, status, created_at, completed_at
+            `SELECT id, parent_chat_id, parent_run_id, run_kind, branch, agent_name, skill_name, task, status, created_at, completed_at
              FROM devx.subagent_runs WHERE user_id = $1
-             ORDER BY created_at DESC LIMIT 20`,
+             ORDER BY created_at DESC LIMIT 50`,
             [userId],
           );
       return Response.json(result.rows, { headers: corsHeaders });
@@ -908,7 +908,11 @@ Deno.serve(async (req: Request) => {
           try {
             const { streamAgentChat } = await import("./agent.ts");
 
-            // Log tool calls and chunks as subagent messages
+            // Map SDK Task ids → child subagent_runs ids (for nested display).
+            const childRuns = new Map<string, string>();
+
+            // Log tool calls as subagent messages; bridge SDK Task subagents
+            // into child subagent_runs rows (parent_run_id = this run).
             const agentSend = (data: any) => {
               send(data); // Forward to SSE
               if (data.type === "tool_call_start") {
@@ -917,6 +921,29 @@ Deno.serve(async (req: Request) => {
                    VALUES ($1, 'tool', $2, $3, $4)`,
                   [runId, JSON.stringify(data.args || {}), data.name, data.callId],
                 ).catch(() => {});
+              } else if (data.type === "subagent_start" && data.taskId) {
+                sql(
+                  `INSERT INTO devx.subagent_runs
+                     (parent_chat_id, parent_run_id, agent_name, task, user_id, app_id, run_kind, status)
+                   VALUES ($1, $2, $3, $4, $5, $6, 'subagent', 'running') RETURNING id`,
+                  [run.parent_chat_id, runId, (data.name || "subagent").slice(0, 200), (data.task || "").slice(0, 4000), userId, run.app_id],
+                ).then((r) => { if (r.rows[0]) childRuns.set(data.taskId, r.rows[0].id); }).catch(() => {});
+              } else if (data.type === "subagent_step" && data.taskId && data.lastTool) {
+                const cid = childRuns.get(data.taskId);
+                if (cid) {
+                  sql(
+                    `INSERT INTO devx.subagent_messages (run_id, role, content, tool_name) VALUES ($1, 'tool', $2, $3)`,
+                    [cid, (data.summary || "").slice(0, 4000), data.lastTool],
+                  ).catch(() => {});
+                }
+              } else if (data.type === "subagent_done" && data.taskId) {
+                const cid = childRuns.get(data.taskId);
+                if (cid) {
+                  sql(
+                    `UPDATE devx.subagent_runs SET status = $1, result = $2, completed_at = NOW() WHERE id = $3`,
+                    [data.status === "completed" ? "completed" : "failed", (data.result || "").slice(0, 50000), cid],
+                  ).catch(() => {});
+                }
               }
             };
 

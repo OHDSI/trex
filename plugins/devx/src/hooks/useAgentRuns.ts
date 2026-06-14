@@ -36,7 +36,9 @@ export function useAgentRuns(appId: string | null) {
   // Auto-start any "running" runs that haven't been started yet
   useEffect(() => {
     for (const run of runs) {
-      if (run.status === "running" && !controllersRef.current.has(run.id)) {
+      // Only the controller may execute runs; child subagent rows (parent_run_id
+      // set) are populated server-side — never call /start on them.
+      if (run.status === "running" && !run.parent_run_id && !controllersRef.current.has(run.id)) {
         startRun(run.id);
       }
       // Initialize state for new runs
@@ -167,5 +169,15 @@ export function useAgentRuns(appId: string | null) {
     };
   }, []);
 
-  return { runs, runStates, startRun, loadMessages, stopRun };
+  // Group child subagent runs under their parent run id (for nested display).
+  const childrenByParent = new Map<string, SubagentRun[]>();
+  for (const run of runs) {
+    if (run.parent_run_id) {
+      const arr = childrenByParent.get(run.parent_run_id) || [];
+      arr.push(run);
+      childrenByParent.set(run.parent_run_id, arr);
+    }
+  }
+
+  return { runs, runStates, startRun, loadMessages, stopRun, childrenByParent };
 }

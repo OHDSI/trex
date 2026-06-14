@@ -131,6 +131,8 @@ const server = http.createServer(async (req, res) => {
         // Discover the materialized devx skills from ~/.claude/skills so the
         // agent's Skill tool can autonomously invoke them (brainstorming, etc.).
         settingSources: ["user"],
+        // Forward subagent (Task) text so consumers can render nested transcripts.
+        forwardSubagentText: true,
       };
 
       const resumeId = chatSessions.get(sessionKey);
@@ -205,6 +207,34 @@ const server = http.createServer(async (req, res) => {
         // Handle tool_progress events if available
         if (message.type === "tool_progress") {
           // Could forward partial results here
+        }
+
+        // Subagent (Task) lifecycle → forward as subagent_* SSE so the Agents
+        // tab can render nested child runs. See docs note 2026-06-14-sdk-subagent-events.
+        if (message.type === "system" && message.subtype === "task_started") {
+          sendSSE(res, "subagent_start", {
+            taskId: message.task_id,
+            name: message.subagent_type || message.task_type || "subagent",
+            task: message.description || message.prompt || "",
+          });
+        }
+        if (message.type === "system" && message.subtype === "task_progress") {
+          sendSSE(res, "subagent_step", {
+            taskId: message.task_id,
+            step: message.usage?.tool_uses || 0,
+            lastTool: message.last_tool_name || null,
+            summary: message.summary || null,
+          });
+        }
+        if (message.type === "system" && (message.subtype === "task_updated" || message.subtype === "task_notification")) {
+          const status = message.subtype === "task_notification" ? message.status : message.patch?.status;
+          if (status === "completed" || status === "failed" || status === "killed" || status === "stopped") {
+            sendSSE(res, "subagent_done", {
+              taskId: message.task_id,
+              status: status === "completed" ? "completed" : "failed",
+              result: message.summary || message.patch?.error || "",
+            });
+          }
         }
 
         if (message.type === "result") {
