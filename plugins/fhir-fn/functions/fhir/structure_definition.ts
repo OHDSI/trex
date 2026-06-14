@@ -317,17 +317,39 @@ export class DefinitionRegistry {
     return tree;
   }
 
-  private _resolveInto(nodes: ElementInfo[], depth: number): void {
+  private _findByPath(nodes: ElementInfo[], path: string): ElementInfo | undefined {
+    for (const n of nodes) {
+      if (n.path === path) return n;
+      const found = this._findByPath(n.children ?? [], path);
+      if (found) return found;
+    }
+    return undefined;
+  }
+
+  private _resolveInto(
+    nodes: ElementInfo[],
+    depth: number,
+    rootElements?: ElementInfo[],   // raw base resource tree for contentReference lookup
+    crDepth = 0,                    // how many contentReference hops taken on this branch
+  ): void {
     for (const n of nodes) {
       if (n.isChoice && n.typeCodes.length > 1) {
         n.childrenByType = {};
         for (const tc of n.typeCodes) {
           if (this._isComplex(tc)) n.childrenByType[tc] = this._resolveTypeChildren(tc, depth + 1);
         }
+      } else if ((n.children?.length ?? 0) === 0 && n.contentReference && rootElements && crDepth < 2) {
+        const target = this._findByPath(rootElements, n.contentReference);
+        if (target) {
+          // clone+filter the target's children and resolve them, counting a contentReference hop
+          const cloned = this._filterClone(target.children ?? [], false);
+          this._resolveInto(cloned, depth, rootElements, crDepth + 1);
+          n.children = cloned;
+        }
       } else if ((n.children?.length ?? 0) === 0 && n.typeCodes.length && this._isComplex(n.typeCodes[0])) {
         n.children = this._resolveTypeChildren(n.typeCodes[0], depth + 1);
       } else if (n.children?.length) {
-        this._resolveInto(n.children, depth);
+        this._resolveInto(n.children, depth, rootElements, crDepth);
       }
     }
   }
@@ -360,7 +382,7 @@ export class DefinitionRegistry {
     const base = this.getResource(type);
     if (!base) return undefined;
     const elements = this._filterClone(base.elements, true);
-    this._resolveInto(elements, 0);
+    this._resolveInto(elements, 0, base.elements, 0);
     const resolved = { ...base, elements };
     this._resolvedCache.set(type, resolved);
     return resolved;
