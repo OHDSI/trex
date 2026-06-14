@@ -43,20 +43,11 @@ WORKDIR /usr/src/trexsql
 # --- 1. libtrexsql_engine.so (trex C API: adds trexsql_open_existing) ---
 COPY Cargo.toml Cargo.lock ./
 COPY src/ ./src/
+COPY plugins/pool-client ./plugins/pool-client
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/usr/src/trexsql/target \
     cargo build --release --lib && \
     cp target/release/libtrexsql_engine.so /opt/libtrexsql_engine.so
 
-# --- 2. webapi.trex extension (captures host db, passes via webapi_start) ---
-COPY plugins/extension-ci-tools /usr/src/trexsql/plugins/extension-ci-tools
-COPY plugins/webapi /usr/src/trexsql/plugins/webapi
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    cd plugins/webapi && \
-    make configure && \
-    make release && \
-    cp build/release/extension/*/webapi.trex /opt/webapi.trex
-
 FROM scratch AS export
 COPY --from=builder /opt/libtrexsql_engine.so /libtrexsql_engine.so
-COPY --from=builder /opt/webapi.trex /webapi.trex

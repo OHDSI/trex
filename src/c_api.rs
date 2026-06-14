@@ -81,6 +81,22 @@ pub unsafe extern "C" fn trexsql_open_existing(
     }
 }
 
+/// Open a TrexSQL database backed by a session from the trex pool, so queries run
+/// on the shared host engine instance (same catalog/cache as the runtime), rather
+/// than a private database. The pool must be initialised (running inside trex).
+/// Returns NULL on error.
+#[no_mangle]
+pub extern "C" fn trexsql_open_pool_session() -> *mut TrexDatabase {
+    error::clear_last_error();
+    match TrexDatabase::open_pool_session() {
+        Ok(db) => Box::into_raw(Box::new(db)),
+        Err(e) => {
+            error::set_last_error(&e);
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Close and free a database handle.
 #[no_mangle]
 pub unsafe extern "C" fn trexsql_close(db: *mut TrexDatabase) {

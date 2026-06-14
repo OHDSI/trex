@@ -35,6 +35,10 @@ public interface TrexEngine extends Library {
     // a new one. rawDb is the host's duckdb_database pointer. The handle is not
     // closed by trexsql_close. Returns null on error (check trexsql_last_error).
     Pointer trexsql_open_existing(Pointer rawDb);
+    // Open a database backed by a trex pool session, so queries run on the shared
+    // host engine instance (same catalog/cache as the runtime). Returns null on
+    // error. Used when the WebAPI runs embedded as the trex DuckDB extension.
+    Pointer trexsql_open_pool_session();
     void trexsql_close(Pointer db);
 
     int trexsql_execute(Pointer db, String sql);

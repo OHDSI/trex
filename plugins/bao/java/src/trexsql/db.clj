@@ -53,23 +53,21 @@
    Config options:
    - :allow-unsigned-extensions - enable loading unsigned extensions
 
-   When running as the in-engine WebAPI DuckDB extension, the host passes its
-   duckdb_database pointer via the 'trexsql.host.duckdb.handle' system property;
-   we then SHARE that instance (so cache files built by either path are
-   immediately visible) instead of opening a separate ':memory:' database. When
-   the property is absent/0 (e.g. WebAPI running standalone on the JVM) we open
-   our own instance as before."
+   When running embedded as the trex DuckDB extension (trexsql.use.pool=true),
+   acquire a trex pool session so queries share the host engine instance (same
+   catalog/cache as the runtime). Otherwise (standalone JVM) open our own
+   ':memory:' database. Falls back to ':memory:' if the pool is unavailable."
   ([]
    (create-connection {}))
   ([config]
-   (let [flags (if (:allow-unsigned-extensions config) 1 0)
-         host-handle (System/getProperty "trexsql.host.duckdb.handle")]
-     (if (and host-handle
-              (not (str/blank? host-handle))
-              (not= (str/trim host-handle) "0"))
-       (let [ptr (Pointer. (Long/parseUnsignedLong (str/trim host-handle)))]
-         (log/info "Connecting to host trex engine duckdb instance (shared)")
-         (native/open-existing ptr))
+   (let [flags (if (:allow-unsigned-extensions config) 1 0)]
+     (if (= "true" (System/getProperty "trexsql.use.pool"))
+       (try
+         (log/info "Acquiring trex pool session (shared host instance)")
+         (native/open-pool-session)
+         (catch Exception e
+           (log/warn (str "pool session unavailable, opening own :memory: db: " (.getMessage e)))
+           (native/open ":memory:" flags)))
        (native/open ":memory:" flags)))))
 
 (defrecord TrexsqlDatabase [handle                ; JNA Pointer to native TrexDatabase

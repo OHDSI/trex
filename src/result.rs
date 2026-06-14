@@ -1,6 +1,12 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 
+use arrow_array::{
+    Array, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array, Int32Array,
+    Int64Array, Int8Array, LargeStringArray, RecordBatch, StringArray, UInt16Array, UInt32Array,
+    UInt64Array, UInt8Array,
+};
+use arrow_schema::{DataType, Schema};
 use duckdb::types::Value;
 use duckdb::Connection;
 
@@ -37,6 +43,33 @@ impl TrexResult {
                 values.push(val);
             }
             rows.push(values);
+        }
+
+        Ok(TrexResult {
+            column_names,
+            rows,
+            current_row: -1,
+        })
+    }
+
+    /// Build a result from Arrow batches returned by a pool session.
+    pub fn from_pool_batches(schema: &Schema, batches: &[RecordBatch]) -> Result<Self, String> {
+        let column_names: Vec<CString> = schema
+            .fields()
+            .iter()
+            .map(|f| CString::new(f.name().as_str()).unwrap_or_else(|_| CString::new("?").unwrap()))
+            .collect();
+        let ncols = column_names.len();
+
+        let mut rows = Vec::new();
+        for batch in batches {
+            for r in 0..batch.num_rows() {
+                let mut values = Vec::with_capacity(ncols);
+                for c in 0..ncols {
+                    values.push(arrow_value(batch.column(c).as_ref(), r));
+                }
+                rows.push(values);
+            }
         }
 
         Ok(TrexResult {
@@ -160,6 +193,33 @@ fn value_to_double(v: &Value) -> f64 {
         Value::Double(f) => *f,
         _ => 0.0,
     }
+}
+
+// Convert one cell of an Arrow array (from a pool session) to a duckdb Value.
+// Covers the scalar types trex/bao queries return; unhandled types map to Null.
+fn arrow_value(array: &dyn Array, row: usize) -> Value {
+    if array.is_null(row) {
+        return Value::Null;
+    }
+    let any = array.as_any();
+    let v = match array.data_type() {
+        DataType::Boolean => any.downcast_ref::<BooleanArray>().map(|a| Value::Boolean(a.value(row))),
+        DataType::Int8 => any.downcast_ref::<Int8Array>().map(|a| Value::TinyInt(a.value(row))),
+        DataType::Int16 => any.downcast_ref::<Int16Array>().map(|a| Value::SmallInt(a.value(row))),
+        DataType::Int32 => any.downcast_ref::<Int32Array>().map(|a| Value::Int(a.value(row))),
+        DataType::Int64 => any.downcast_ref::<Int64Array>().map(|a| Value::BigInt(a.value(row))),
+        DataType::UInt8 => any.downcast_ref::<UInt8Array>().map(|a| Value::UTinyInt(a.value(row))),
+        DataType::UInt16 => any.downcast_ref::<UInt16Array>().map(|a| Value::USmallInt(a.value(row))),
+        DataType::UInt32 => any.downcast_ref::<UInt32Array>().map(|a| Value::UInt(a.value(row))),
+        DataType::UInt64 => any.downcast_ref::<UInt64Array>().map(|a| Value::UBigInt(a.value(row))),
+        DataType::Float32 => any.downcast_ref::<Float32Array>().map(|a| Value::Float(a.value(row))),
+        DataType::Float64 => any.downcast_ref::<Float64Array>().map(|a| Value::Double(a.value(row))),
+        DataType::Utf8 => any.downcast_ref::<StringArray>().map(|a| Value::Text(a.value(row).to_string())),
+        DataType::LargeUtf8 => any.downcast_ref::<LargeStringArray>().map(|a| Value::Text(a.value(row).to_string())),
+        DataType::Date32 => any.downcast_ref::<Date32Array>().map(|a| Value::Date32(a.value(row))),
+        _ => None,
+    };
+    v.unwrap_or(Value::Null)
 }
 
 #[cfg(test)]

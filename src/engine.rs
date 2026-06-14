@@ -9,13 +9,26 @@ use duckdb::Connection;
 
 use crate::result::TrexResult;
 
+// A TrexDatabase is backed either by its own DuckDB connection, or by a session
+// borrowed from the trex pool (so it shares the host engine's instance — same
+// catalog, attached cache files, etc.).
+enum Backend {
+    DuckDb {
+        conn: Mutex<ManuallyDrop<Connection>>,
+        raw_db: ffi::duckdb_database,
+        // Whether we own raw_db (and must close it on drop). False when wrapping
+        // a handle owned by the host process.
+        owns_db: bool,
+    },
+    // A pool session id (see plugins/pool). Queries route through trex_pool_client
+    // so they run on the shared host instance; destroyed on drop.
+    Pool {
+        session_id: u64,
+    },
+}
+
 pub struct TrexDatabase {
-    conn: Mutex<ManuallyDrop<Connection>>,
-    raw_db: ffi::duckdb_database,
-    // Whether this TrexDatabase owns the underlying duckdb_database (and must
-    // close it on drop). False when wrapping a handle owned by the host process
-    // (the native WebAPI extension sharing the trex engine's instance).
-    owns_db: bool,
+    backend: Backend,
 }
 
 unsafe impl Send for TrexDatabase {}
@@ -40,51 +53,38 @@ impl TrexDatabase {
             let mut raw_db: ffi::duckdb_database = ptr::null_mut();
             let mut c_err: *mut c_char = ptr::null_mut();
 
-            let rc = ffi::duckdb_open_ext(
-                c_path.as_ptr(),
-                &mut raw_db,
-                config,
-                &mut c_err,
-            );
+            let rc = ffi::duckdb_open_ext(c_path.as_ptr(), &mut raw_db, config, &mut c_err);
             ffi::duckdb_destroy_config(&mut config);
 
             if rc != ffi::DuckDBSuccess {
                 let msg = if c_err.is_null() {
                     "Failed to open database".to_string()
                 } else {
-                    let s = std::ffi::CStr::from_ptr(c_err)
-                        .to_string_lossy()
-                        .to_string();
+                    let s = std::ffi::CStr::from_ptr(c_err).to_string_lossy().to_string();
                     ffi::duckdb_free(c_err as *mut std::ffi::c_void);
                     s
                 };
                 return Err(msg);
             }
 
-            // Connection won't close the database on drop -- we manage that in TrexDatabase::drop
             let conn = Connection::open_from_raw(raw_db)
                 .map_err(|e| format!("Failed to create connection: {e}"))?;
-
             let _ = conn.execute_batch("CALL disable_logging()");
 
             Ok(TrexDatabase {
-                conn: Mutex::new(ManuallyDrop::new(conn)),
-                raw_db,
-                owns_db: true,
+                backend: Backend::DuckDb {
+                    conn: Mutex::new(ManuallyDrop::new(conn)),
+                    raw_db,
+                    owns_db: true,
+                },
             })
         }
     }
 
-    /// Wrap an existing `duckdb_database` owned by the host process and open a new
-    /// connection on it, so this engine shares the host's catalog (attached
-    /// databases, cache files, …) instead of opening a separate `:memory:`
-    /// instance. Used when the native WebAPI runs as a DuckDB extension inside the
-    /// trex engine: passing the host handle here means a cache built by one path
-    /// is immediately visible to the other (no stale file-attach snapshot).
+    /// Wrap an existing host-owned `duckdb_database` (not closed on drop).
     ///
     /// # Safety
-    /// `raw_db` must be a live `duckdb_database` from the same in-process DuckDB
-    /// library; it is NOT closed on drop (the host owns its lifetime).
+    /// `raw_db` must be a live handle from the same in-process DuckDB library.
     pub unsafe fn open_existing(raw_db: ffi::duckdb_database) -> Result<Self, String> {
         if raw_db.is_null() {
             return Err("open_existing: null database handle".into());
@@ -93,37 +93,72 @@ impl TrexDatabase {
             .map_err(|e| format!("Failed to connect to existing database: {e}"))?;
         let _ = conn.execute_batch("CALL disable_logging()");
         Ok(TrexDatabase {
-            conn: Mutex::new(ManuallyDrop::new(conn)),
-            raw_db,
-            owns_db: false,
+            backend: Backend::DuckDb {
+                conn: Mutex::new(ManuallyDrop::new(conn)),
+                raw_db,
+                owns_db: false,
+            },
+        })
+    }
+
+    /// Acquire a session from the trex pool so queries run on the shared host
+    /// instance (same mechanism the runtime/pgwire use), rather than a private
+    /// database. The pool must be initialised (trex runs inside the engine).
+    pub fn open_pool_session() -> Result<Self, String> {
+        let session_id = trex_pool_client::create_session()
+            .map_err(|e| format!("Failed to acquire pool session: {e}"))?;
+        Ok(TrexDatabase {
+            backend: Backend::Pool { session_id },
         })
     }
 
     pub fn execute(&self, sql: &str) -> Result<(), String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute_batch(sql)
-            .map_err(|e| format!("{e}"))
+        match &self.backend {
+            Backend::DuckDb { conn, .. } => {
+                let conn = conn.lock().map_err(|e| e.to_string())?;
+                conn.execute_batch(sql).map_err(|e| format!("{e}"))
+            }
+            Backend::Pool { session_id } => {
+                trex_pool_client::session_execute(*session_id, sql).map(|_| ())
+            }
+        }
     }
 
     pub fn query(&self, sql: &str) -> Result<TrexResult, String> {
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        TrexResult::from_query(&conn, sql)
+        match &self.backend {
+            Backend::DuckDb { conn, .. } => {
+                let conn = conn.lock().map_err(|e| e.to_string())?;
+                TrexResult::from_query(&conn, sql)
+            }
+            Backend::Pool { session_id } => {
+                let (schema, batches) = trex_pool_client::session_execute(*session_id, sql)?;
+                TrexResult::from_pool_batches(&schema, &batches)
+            }
+        }
     }
 
+    /// The underlying `duckdb_database` (for the appender API). Null for pool
+    /// sessions, where the appender path is unsupported (use SQL instead).
     pub fn raw_db(&self) -> ffi::duckdb_database {
-        self.raw_db
+        match &self.backend {
+            Backend::DuckDb { raw_db, .. } => *raw_db,
+            Backend::Pool { .. } => ptr::null_mut(),
+        }
     }
 }
 
 impl Drop for TrexDatabase {
     fn drop(&mut self) {
-        let conn = self.conn.get_mut().unwrap_or_else(|e| e.into_inner());
-        unsafe { ManuallyDrop::drop(conn); }
-        // Only close the database if we opened it. A borrowed host handle
-        // (open_existing) is owned by the trex engine and must outlive us.
-        if self.owns_db && !self.raw_db.is_null() {
-            unsafe {
-                ffi::duckdb_close(&mut self.raw_db);
+        match &mut self.backend {
+            Backend::DuckDb { conn, raw_db, owns_db } => {
+                let conn = conn.get_mut().unwrap_or_else(|e| e.into_inner());
+                unsafe { ManuallyDrop::drop(conn); }
+                if *owns_db && !raw_db.is_null() {
+                    unsafe { ffi::duckdb_close(raw_db); }
+                }
+            }
+            Backend::Pool { session_id } => {
+                let _ = trex_pool_client::destroy_session(*session_id);
             }
         }
     }

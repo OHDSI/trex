@@ -44,6 +44,16 @@
       (check-error! "open-existing"))
     handle))
 
+(defn open-pool-session
+  "Open a trexsql database backed by a trex pool session, so queries run on the
+   shared host engine instance (same catalog/cache as the runtime) instead of a
+   private database. Returns a Pointer handle."
+  []
+  (let [handle (.trexsql_open_pool_session (engine))]
+    (when (nil? handle)
+      (check-error! "open-pool-session"))
+    handle))
+
 (defn close!
   "Close a database handle."
   [^Pointer handle]
