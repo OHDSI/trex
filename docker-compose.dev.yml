@@ -95,7 +95,7 @@ services:
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: "3000"
       # Register fhir-ui in the web shell's top nav (consumed by plugins/web).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/fhir-ui","label":"FHIR","plugin":"fhir-ui"}]'
+      TREX_WEB_NAV_EXTRA: '[{"path":"/fhir-ui","label":"Prometheus","plugin":"fhir-ui"}]'
 
   postgrest:
     image: postgrest/postgrest:v12.2.3

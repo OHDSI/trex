@@ -174,7 +174,7 @@ services:
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: "3000"
       # Register devx and fhir-ui in the web shell's top nav (consumed by plugins/web).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"DevX","plugin":"devx"},{"path":"/fhir-ui","label":"FHIR","plugin":"fhir-ui"}]'
+      TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"DevX","plugin":"devx"},{"path":"/fhir-ui","label":"Prometheus","plugin":"fhir-ui"}]'
     healthcheck:
       # /trex/api/ready returns 200 only after auth keys are written to the DB,
       # which is a stronger readiness signal than auth/v1/health.

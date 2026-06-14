@@ -23,6 +23,7 @@ import { resourceHistory, readResourceVersion } from "./handlers/history.ts";
 import { processBundle } from "./handlers/bundle.ts";
 import { importNdjson } from "./handlers/import.ts";
 import { systemExport, typeExport, exportStatus } from "./handlers/export.ts";
+import { getCounts } from "./handlers/counts.ts";
 
 // ---------------------------------------------------------------------------
 // Route type
@@ -53,6 +54,7 @@ export type Route =
   | { kind: "cql"; datasetId: string }
   | { kind: "structureDefinitionList"; datasetId: string }
   | { kind: "structureDefinitionRead"; datasetId: string; type: string }
+  | { kind: "counts"; datasetId: string }
   | { kind: "notFound" };
 
 // ---------------------------------------------------------------------------
@@ -143,6 +145,11 @@ export function parseRoute(method: string, path: string): Route {
     // /{ds}/$cql  — literal; non-POST → notFound
     if (s1 === "$cql") {
       return m === "POST" ? { kind: "cql", datasetId } : { kind: "notFound" };
+    }
+
+    // /{ds}/$counts  — literal; non-GET → notFound
+    if (s1 === "$counts") {
+      return m === "GET" ? { kind: "counts", datasetId } : { kind: "notFound" };
     }
 
     // Any other segment starting with "$" is an unknown operation → notFound
@@ -380,6 +387,9 @@ async function dispatch(
 
     case "structureDefinitionRead":
       return handleStructureDefinitionRead(state, parsed.type);
+
+    case "counts":
+      return await withConnection((conn) => getCounts(parsed.datasetId, conn, state));
 
     case "createDataset": {
       const body = await req.json().catch(() => ({}));
