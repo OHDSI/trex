@@ -17,6 +17,7 @@ with a hardcoded salt (`"trex/v1"`) and a distinct `info` label per purpose:
 | `trex.pgmeta.aes.v1`          | Studio / pg-meta `PG_META_CRYPTO_KEY`        |
 | `trex.realtime.internal.v1`   | Realtime-internal material: first 16 chars feed `DB_ENC_KEY` (AES-128), concatenated with the `dek.wrap` subkey to form Realtime's 64-char `SECRET_KEY_BASE` |
 | `trex.dek.wrap.v1`            | KEK that wraps the Data Encryption Key (also contributes entropy to Realtime's `SECRET_KEY_BASE`) |
+| `trex.devx.token.aes.v1`      | devx integration-token crypto: feeds `DEVX_ENCRYPTION_KEY`, the AES-256-GCM key encrypting stored devx integration tokens (e.g. GitHub) |
 
 Data at rest (`trexdb.secret`, `trexdb.database_credential.password_encrypted`)
 is encrypted with a random 32-byte DEK that is itself wrapped under the
@@ -33,7 +34,7 @@ The `trex-init` compose service (one-shot, runs before everything else):
    exactly the names each downstream container expects
    (`PGRST_JWT_SECRET`, `PG_META_CRYPTO_KEY`, `AUTH_JWT_SECRET`,
    `API_JWT_SECRET`, `METRICS_JWT_SECRET`, `SECRET_KEY_BASE`,
-   `DB_ENC_KEY`).
+   `DB_ENC_KEY`, `DEVX_ENCRYPTION_KEY`).
 
 Every other container consumes those files via `env_file:` with
 `required: false` and `depends_on: trex-init` (`condition:

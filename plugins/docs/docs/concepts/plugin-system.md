@@ -35,6 +35,13 @@ Three things follow from "it's an NPM package":
 3. **Discovery** is a directory scan: any `package.json` with a `trex` block
    inside `PLUGINS_PATH` (or `PLUGINS_DEV_PATH` in dev) is a plugin.
 
+The same `trex` block also carries non-server-plugin entries. A `trex.core`
+entry (with a `name`) marks a loadable SQL/native engine extension — `pool`,
+`db`, `runtime` (core name `as`), `atlas` (`circe`), `hana` (`hana_scan`),
+`webapi`, and friends are discovered this way. Those are loaded by the engine
+rather than mounted as one of the four server plugin types below; see
+[Concepts → Architecture](architecture) for the extension catalog.
+
 ## Discovery and loading
 
 ```mermaid
@@ -48,7 +55,7 @@ flowchart TD
     Loaders --> UI["ui.ts<br/>register static routes"]
     Loaders --> Flow["flow.ts<br/>register Prefect deployments"]
     Loaders --> Tx["transform.ts<br/>recover endpoints"]
-    Fns --> EnsureRoles["Auto-create roles in trex.role"]
+    Fns --> EnsureRoles["Auto-create roles in trexdb.role"]
     EnsureRoles --> CliLogin["Mount cliLoginRouter"]
     CliLogin --> AuthCtx["Install authContext middleware"]
     AuthCtx --> Ready["Server ready"]
@@ -69,7 +76,7 @@ means `<plugin-dir>/foo.ts`.
 | **Function** | `plugin/function.ts` | HTTP endpoints powered by Deno EdgeRuntime workers. Each worker runs in isolation with configurable env vars, Deno permissions, and an optional ESZIP bundle. |
 | **UI** | `plugin/ui.ts` | Static frontend assets and admin-shell sidebar entries. Supports plain static-file serving, single-page-app fallback, and the single-spa micro-frontend protocol. |
 | **Flow** | `plugin/flow.ts` | Prefect deployments registered against `PREFECT_API_URL`. The image, work pool, concurrency limits, and image-tag overrides are read from the plugin config. |
-| **Transform** | `plugin/transform.ts` | dbt-like SQL projects whose models compile, materialize, and serve as JSON / CSV / Arrow HTTP endpoints. Endpoints persist across restarts via `trex.transform_deployment`. |
+| **Transform** | `plugin/transform.ts` | dbt-like SQL projects whose models compile, materialize, and serve as JSON / CSV / Arrow HTTP endpoints. Endpoints persist across restarts via `trexdb.transform_deployment`. |
 
 A single plugin can contribute multiple types — most non-trivial plugins
 combine UI + functions. Schema migrations for a plugin-owned schema are
@@ -82,7 +89,7 @@ install-time SQL script that calls `trex_migration_run_schema`.
 Plugins shape Trex's authorization in two ways:
 
 1. **`trex.functions.roles`** declares named scope bundles. The loader merges
-   these into a global `ROLE_SCOPES` map and auto-creates rows in `trex.role`
+   these into a global `ROLE_SCOPES` map and auto-creates rows in `trexdb.role`
    so they're assignable from the admin UI / MCP.
 2. **`trex.functions.scopes`** declares URL-pattern → required-scope mappings.
    The loader prepends them to a global pattern list checked by the
@@ -116,7 +123,7 @@ flowchart LR
 
     subgraph PG["PostgreSQL"]
         Migrations["Plugin migrations"]
-        Roles["trex.role / trex.user_role"]
+        Roles["trexdb.role / trexdb.user_role"]
     end
 
     subgraph Prefect["Prefect API"]

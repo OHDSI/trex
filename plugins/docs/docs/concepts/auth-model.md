@@ -10,18 +10,19 @@ the endpoint-by-endpoint reference, see [APIs → Auth](../apis/auth).
 ## Two Identity Surfaces
 
 Trex carries two parallel identity surfaces, both backed by Postgres tables in
-the `trex` schema:
+the `trexdb` schema:
 
 ```mermaid
 flowchart LR
     Browser["Browser / Web UI"] -->|JWT + refresh| AuthRouter["GoTrue-compatible<br/>auth router"]
     Code["Server-to-server<br/>(MCP, CLI, scripts)"] -->|Bearer trex_… or sbp_…| ApiKeyAuth["API Key validator"]
 
-    AuthRouter --> UserTable["trex.user"]
-    AuthRouter --> RefreshTable["trex.refresh_token"]
-    ApiKeyAuth --> ApiKeyTable["trex.api_key"]
+    AuthRouter --> UserTable["trexdb.user"]
+    AuthRouter --> RefreshTable["trexdb.refresh_token"]
+    ApiKeyAuth --> ApiKeyTable["trexdb.api_key"]
 
-    UserTable --> RoleTable["trex.role"]
+    UserTable --> RoleTable["trexdb.role"]
+    UserTable --> UserRole["trexdb.user_role"]
     ApiKeyTable --> UserTable
 ```
 
@@ -31,7 +32,7 @@ flowchart LR
 - **Machine-to-machine** clients (MCP, the `trex` CLI, automation scripts)
   present long-lived API keys. There are two prefixes — `trex_…` for
   server-issued keys and `sbp_…` for keys issued through the CLI device-code
-  login. Both validate against `trex.api_key`.
+  login. Both validate against `trexdb.api_key`.
 
 The two surfaces share a single user table: every API key is owned by a user,
 and that user's role determines what the key can do.
@@ -46,6 +47,10 @@ router signs a JWT with the following shape:
   "sub": "<user-id>",
   "email": "alice@example.com",
   "role": "authenticated",
+  "aud": "authenticated",
+  "iss": "http://localhost:8000/trex/auth/v1",
+  "iat": <unix timestamp>,
+  "exp": <unix timestamp>,
   "session_id": "<uuid>",
   "app_metadata": {
     "provider": "email",
@@ -56,14 +61,22 @@ router signs a JWT with the following shape:
     "name": "Alice",
     "image": null,
     "must_change_password": false
-  },
-  "exp": <unix timestamp>
+  }
 }
 ```
 
-The signing key is `BETTER_AUTH_SECRET` (≥32 chars). The token is consumed by
-the `authContext` middleware, which extracts the `trex_role` and exposes it as
-the Postgres GUC `app.user_role` for downstream queries.
+Note that the system role lives at `app_metadata.trex_role` — the top-level
+`role` is always `authenticated` (Supabase/GoTrue compatibility); `iss` is
+derived from `BETTER_AUTH_URL` + the base path.
+
+The token is an HS256 JWT signed with a key derived from `TREX_ROOT_KEY` via
+HKDF under the label `trex.jwt.hs256.v1` (see `core/server/auth/jwt.ts` and
+`keys.ts`). `BETTER_AUTH_SECRET` is no longer the signing key — it survives
+only as a legacy compatibility comment. To rotate the signing key, bump the
+HKDF label suffix (e.g. `.v2`) and re-issue tokens; all tokens signed under the
+old label become invalid by design. The token is consumed by the `authContext`
+middleware, which extracts the `trex_role` and exposes it as the Postgres GUC
+`app.user_role` for downstream queries.
 
 ## Roles & Scopes
 
@@ -72,11 +85,13 @@ different layers:
 
 | Layer | Where | Purpose |
 |-------|-------|---------|
-| **System role** | `trex.user.role` (`admin` or `user`) | Determines whether the caller bypasses scope checks. |
-| **Plugin roles** | `trex.role` (auto-created by plugins) | Fine-grained URL-pattern authorization for plugin routes. |
+| **System role** | `trexdb.user.role` (`admin` or `user`) | Determines whether the caller bypasses scope checks. |
+| **Plugin roles** | `trexdb.role` (auto-created by plugins) + `trexdb.user_role` join | Fine-grained URL-pattern authorization for plugin routes. |
 
 The system role is binary: admins bypass every authorization check. Non-admins
 need plugin roles whose scope set covers the URL pattern they're hitting.
+Plugin roles are assigned to users through the `trexdb.user_role` join table
+(one row per `(userId, roleId)` pair).
 
 ```mermaid
 flowchart TD
@@ -93,13 +108,13 @@ flowchart TD
 A plugin contributes to this model by declaring `roles` and `scopes` in its
 `package.json`. Scopes are URL patterns mapped to a list of required scope
 strings; roles are named bundles of scope strings. The plugin loader
-auto-creates rows in `trex.role` at startup so admins can assign them via the
-UI/MCP.
+auto-creates rows in `trexdb.role` at startup so admins can assign them to
+users (via `trexdb.user_role`) through the UI/MCP.
 
 ## Sessions & Refresh Tokens
 
 Every interactive sign-in creates a session UUID and stores a refresh token in
-`trex.refresh_token` keyed by that session. The session is the unit of
+`trexdb.refresh_token` keyed by that session. The session is the unit of
 revocation: logging out, rotating a password, or revoking from
 `/auth/v1/sessions` invalidates all refresh tokens tied to that session, but
 leaves other sessions intact (so signing out of one device doesn't sign you out
@@ -114,7 +129,7 @@ one in the same session.
 The `/auth/v1/settings` endpoint reports which SSO providers are enabled. For
 each provider, settings come from one of two sources:
 
-1. **`trex.sso_provider`** (DB-driven) — preferred. Allows runtime
+1. **`trexdb.sso_provider`** (DB-driven) — preferred. Allows runtime
    configuration, supports Apple, and tracks per-provider client IDs.
 2. **Environment variables** (`GOOGLE_CLIENT_ID`, etc.) — legacy fallback for
    bootstrap.
@@ -151,8 +166,8 @@ sequenceDiagram
 
     U->>W: Open admin UI
     W->>A: POST /auth/v1/token (password grant)
-    A->>DB: Verify trex.user.password_hash
-    A->>DB: INSERT trex.refresh_token
+    A->>DB: Verify trexdb.user.password_hash
+    A->>DB: INSERT trexdb.refresh_token
     A-->>W: { access_token, refresh_token }
     W->>API: GET /trex/graphql<br/>Authorization: Bearer access_token
     API->>API: authContext: validate JWT, set app.user_id / app.user_role

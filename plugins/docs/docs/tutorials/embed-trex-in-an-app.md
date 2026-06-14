@@ -78,21 +78,22 @@ SELECT type, COUNT(*) FROM analytics.event GROUP BY type;
 You should see ~3,333 rows per type, totalling 10,000.
 
 Next, expose the `analytics` schema to PostGraphile. Add a `PG_SCHEMA`
-line under `trex.environment` in `docker-compose.yml` (it isn't there by
-default):
+line under the `trex-server` service's `environment:` block in
+`docker-compose.yml` (it isn't there by default — `trex-server` is the node
+that runs GraphQL/MCP/pgwire):
 
 ```yaml
 # docker-compose.yml
 services:
-  trex:
+  trex-server:
     environment:
       PG_SCHEMA: trex,analytics
 ```
 
-Then bring Trex back up so the new env var takes effect:
+Then recreate the server node so the new env var takes effect:
 
 ```bash
-docker compose up -d trex
+docker compose up -d trex-server
 ```
 
 ## 2. JDBC from Java (5 min)
@@ -142,7 +143,7 @@ JDBC is the right path when:
   BI tools).
 - Your queries are heavy and you want streaming row sets.
 - You want bind parameters (auto-pinning kicks in — see [Concepts →
-  Connection Pool](../concepts/connection-pool#sessions-and-pinning)).
+  Connection Pool](../concepts/connection-pool#sessions-and-session-local-state)).
 
 It's not the right path when you're building a browser-side feature
 (JDBC doesn't run in browsers) — use GraphQL for that.

@@ -94,8 +94,12 @@ SELECT * FROM trex_pgwire_status();
 Once the pgwire server is running, connect with any PostgreSQL client:
 
 ```bash
-psql -h localhost -p 5432 -U trex -d main
+psql -h localhost -p 5432 -U trex -d memory
 ```
+
+The default catalog is `memory`, so `-d memory` connects you to it. The
+username (`-U trex`) is accepted but not validated — `SimpleAuthSource` checks
+only the password.
 
 ## Connection Pool & Session Pinning
 
@@ -127,18 +131,19 @@ follows. Types not explicitly mapped are pre-cast to `TEXT` before encoding.
 |-------------------|--------------------|-------|
 | `BOOLEAN` | `bool` | |
 | `INT8` / `INT16` / `INT32` / `INT64` | `int2` / `int2` / `int4` / `int8` | |
-| `UINT8` / `UINT16` / `UINT32` / `UINT64` | `int2` / `int4` / `int8` / `numeric` | UInt64 widened to numeric to avoid overflow. |
+| `UINT8` / `UINT16` / `UINT32` / `UINT64` | `int2` / `int4` / `int8` / `int8` | |
 | `FLOAT32` / `FLOAT64` | `float4` / `float8` | |
-| `DECIMAL128(p,s)` | `numeric(p,s)` | Added in v1.4. |
+| `DECIMAL128(p,s)` | `numeric` | Bare NUMERIC — precision/scale are discarded in the wire type. |
 | `UTF8` / `LARGE_UTF8` | `text` | |
 | `BINARY` / `LARGE_BINARY` | `bytea` | |
 | `DATE32` / `DATE64` | `date` | |
 | `TIME32` / `TIME64` | `time` | |
 | `TIMESTAMP` (any unit, no tz) | `timestamp` | Formatted as `YYYY-MM-DD HH:MM:SS.mmm` (millisecond precision). |
 | `TIMESTAMP` (any unit, UTC) | `timestamptz` | |
-| `INTERVAL` | `interval` | |
-| `LIST` / `LARGE_LIST` | array of element type | One level deep. |
-| `STRUCT` / `MAP` | `text` (JSON) | Serialized to JSON, then text-encoded. |
-| `DECIMAL256`, `FIXED_SIZE_BINARY`, dictionary types | `text` | Pre-cast for compatibility. |
+| `DECIMAL256` | `numeric` | Values are text-encoded, but the wire OID stays NUMERIC. |
+| `INTERVAL` | `text` | No interval branch — falls through to TEXT. |
+| `LIST` / `LARGE_LIST` | `text` | Falls through to TEXT. |
+| `STRUCT` / `MAP` | `text` | Generic cast to a Utf8 string; not guaranteed to be JSON. |
+| `FIXED_SIZE_BINARY`, dictionary types | `text` | Pre-cast for compatibility. |
 
 NULLs are encoded with the standard `-1` length sentinel.

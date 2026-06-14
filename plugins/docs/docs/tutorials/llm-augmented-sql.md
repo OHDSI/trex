@@ -326,7 +326,7 @@ depending on context-pool size and GPU.
 - **Determinism.** Set `"temperature": 0.0` and `"seed": 42` for
   reproducible outputs — useful in tests, harmful in summaries.
 - **Pgwire pinning.** Heavy AI calls auto-pin the underlying engine
-  connection (see [Concepts → Connection Pool](../concepts/connection-pool#sessions-and-pinning)).
+  connection (see [Concepts → Connection Pool](../concepts/connection-pool#sessions-and-session-local-state)).
   At high concurrency this can saturate the pool — observe
   `trex_ai_context_pool_status()` and `trex_db_query_status()` together.
 - **Embedding drift.** If you upgrade the embedding model, you need to

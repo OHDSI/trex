@@ -6,6 +6,11 @@ sidebar_position: 5
 
 Flow plugins deploy workflow definitions to a [Prefect](https://www.prefect.io/) server. Each flow is registered as a Prefect deployment with Docker-based execution, concurrency limits, and tagging.
 
+:::note
+No bundled plugin currently ships a `trex.flow` block — the examples below are
+illustrative of the supported configuration.
+:::
+
 ## Prerequisites
 
 - A running Prefect server (set `PREFECT_API_URL`)

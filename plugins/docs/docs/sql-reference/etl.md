@@ -20,28 +20,33 @@ storage at sub-second latency.
 ```mermaid
 flowchart LR
     PG["Source PostgreSQL"]
-    PG -->|wal2json / pgoutput| Pipeline["etl pipeline<br/>(bao task)"]
+    PG -->|pgoutput logical replication| Pipeline["etl pipeline<br/>(dedicated OS thread)"]
     Pipeline -->|Arrow batches| Engine["Trex Engine<br/>(mirrored tables)"]
     Engine --> Query["SELECT, JOIN, AGG..."]
 ```
 
-Each pipeline is a long-running async task scheduled by the `bao` orchestrator
-(see [Concepts → Connection Pool](../concepts/connection-pool)). It uses
-Postgres' built-in logical replication, so the source needs:
+Each pipeline runs on a dedicated OS thread with its own single-threaded
+tokio runtime. That thread drives the replication state machine and writes
+into the engine through `trex_pool_client` sessions — there is no external
+scheduler or task queue involved. It uses Postgres' built-in logical
+replication, so the source needs:
 
 - `wal_level = logical` in `postgresql.conf`.
 - A `REPLICATION` privilege for the connection user.
 - A publication declaring which tables to replicate (`CREATE PUBLICATION
-  trex_pub FOR TABLE …`). The pipeline auto-creates a replication slot but
-  **not** the publication — that's a deliberate Postgres-side decision.
+  trex_pub FOR TABLE …`). You name this publication in the connection string
+  (`publication=trex_pub`); the pipeline does not create it for you.
 
 ## Replication modes
 
 | Mode | What it does | When to use |
 |------|--------------|-------------|
-| `snapshot` | Bulk-copy current table contents once, then stop. | One-shot loads, dev/test. |
-| `cdc` | Tail the logical replication slot for INSERT/UPDATE/DELETE indefinitely. | Standing replication. Default for production. |
-| `snapshot_then_cdc` | Bulk-copy, then switch to CDC streaming with no gap. | Initial bootstrap of a long-lived pipeline. |
+| `copy_and_cdc` | Bulk-copy current table contents, then switch to CDC streaming with no gap. **Default.** | Standing replication / initial bootstrap of a long-lived pipeline. |
+| `cdc_only` | Skip the initial copy; tail the logical replication stream for INSERT/UPDATE/DELETE only. | Resuming or attaching to an already-loaded target. |
+| `copy_only` | Bulk-copy current table contents once. | One-shot loads, dev/test. |
+
+`copy_and_cdc` is the mode used when you call `trex_etl_start` without an
+explicit mode argument.
 
 ## Typical workflow
 
@@ -51,14 +56,15 @@ Postgres' built-in logical replication, so the source needs:
 --      CREATE PUBLICATION trex_pub FOR ALL TABLES;
 --      CREATE ROLE trex_repl WITH REPLICATION LOGIN PASSWORD '...';
 
--- 2. In Trex, start the pipeline:
+-- 2. In Trex, start the pipeline. The connection string is a libpq
+--    keyword string and must include publication= for cdc modes:
 SELECT trex_etl_start(
   'orders_pipeline',
-  'postgres://trex_repl:pass@source-db:5432/app',
-  'snapshot_then_cdc',
+  'host=source-db port=5432 dbname=app user=trex_repl password=pass publication=trex_pub schema=public',
+  'copy_and_cdc',
   1000,    -- batch size
   5000,    -- batch timeout (ms)
-  3000,    -- retry delay (ms)
+  10000,   -- retry delay (ms)
   5        -- max retries
 );
 
@@ -76,43 +82,75 @@ SELECT trex_etl_stop('orders_pipeline');
 
 ## Functions
 
+### Connection string format
+
+The `connection_string` is a **libpq keyword/value string**, not a
+`postgres://` URL. Supported keys:
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `host` | no | `localhost` | Source Postgres host. |
+| `port` | no | `5432` | Source Postgres port. |
+| `dbname` | no | `postgres` | Source database name. |
+| `user` | no | `postgres` | Connection user (needs `REPLICATION`). |
+| `password` | no | — | Connection password. |
+| `publication` | **yes for `copy_and_cdc` / `cdc_only`** | — | Name of the Postgres publication to read. Optional for `copy_only`. |
+| `schema` | no | `public` | Source schema to replicate. |
+
+```
+host=source-db port=5432 dbname=app user=trex_repl password=pass publication=trex_pub schema=public
+```
+
+Omitting `publication=` in a cdc mode fails with
+`connection string must include 'publication=<name>'`.
+
 ### `trex_etl_start(name, connection_string, ...)`
 
-Start a CDC replication pipeline. Three signatures, picked by argument count:
+Start a replication pipeline. Picked by argument count:
 
-**Minimal** — defaults to `cdc` mode, batch size 500, 1s timeout, 1s retry,
-3 retries:
-
-```sql
-SELECT trex_etl_start('my_pipeline', 'postgres://user:pass@host:5432/db');
-```
-
-**With mode**:
-
-```sql
-SELECT trex_etl_start('my_pipeline', 'postgres://...', 'snapshot');
-```
-
-**Full configuration**:
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| name | VARCHAR | Pipeline name. Used as the replication slot name. |
-| connection_string | VARCHAR | Postgres URL with `REPLICATION` privilege. |
-| mode | VARCHAR | `snapshot`, `cdc`, or `snapshot_then_cdc`. |
-| batch_size | INTEGER | Rows per Arrow batch flushed to the engine. |
-| batch_timeout | INTEGER | Maximum ms to wait before flushing a partial batch. |
-| retry_delay | INTEGER | Initial delay between retry attempts on connection failure. |
-| retry_max | INTEGER | Maximum retry attempts before the pipeline goes to `error` state. |
+**Minimal** (2 args) — defaults to `copy_and_cdc` mode and default params
+(batch size 1000, 5s timeout, 10s retry, 5 retries):
 
 ```sql
 SELECT trex_etl_start(
   'my_pipeline',
-  'postgres://user:pass@host:5432/db',
-  'cdc',
-  1000, 5000, 3000, 5
+  'host=host port=5432 dbname=db user=u password=p publication=trex_pub'
 );
 ```
+
+**With mode** (3 args):
+
+```sql
+SELECT trex_etl_start('my_pipeline', 'host=… publication=trex_pub', 'cdc_only');
+```
+
+**Legacy params, no mode** (6 args) — defaults to `copy_and_cdc` mode,
+params from the four trailing integers:
+
+```sql
+SELECT trex_etl_start('my_pipeline', 'host=… publication=trex_pub', 1000, 5000, 10000, 5);
+```
+
+**Full configuration** (7 args) — mode plus params:
+
+```sql
+SELECT trex_etl_start(
+  'my_pipeline',
+  'host=host port=5432 dbname=db user=u password=p publication=trex_pub',
+  'copy_and_cdc',
+  1000, 5000, 10000, 5
+);
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| name | VARCHAR | — | Pipeline name. Registry key; also the `__etl_<name>` ATTACH alias used internally (dashes become underscores). |
+| connection_string | VARCHAR | — | libpq keyword string (see above). |
+| mode | VARCHAR | `copy_and_cdc` | `copy_and_cdc`, `cdc_only`, or `copy_only`. |
+| batch_size | INTEGER | 1000 | Rows per Arrow batch flushed to the engine. |
+| batch_timeout | INTEGER | 5000 | Maximum ms to wait before flushing a partial batch. |
+| retry_delay | INTEGER | 10000 | Delay (ms) between retry attempts on connection failure. |
+| retry_max | INTEGER | 5 | Maximum retry attempts before the pipeline goes to `error` state. |
 
 Tuning: bigger `batch_size` improves throughput but increases peak memory and
 end-to-end latency. `batch_timeout` is the *maximum* a row sits in the buffer
@@ -120,9 +158,7 @@ before being applied — set it to your latency target.
 
 ### `trex_etl_stop(name)`
 
-Stop a pipeline. The replication slot is **not** dropped — call it again with
-the same name to resume. Drop the slot manually on the source if you're
-permanently retiring the pipeline (`pg_drop_replication_slot('my_pipeline')`).
+Stop a running pipeline, identified by its registry `name`.
 
 ```sql
 SELECT trex_etl_stop('my_pipeline');
@@ -137,13 +173,13 @@ Show every pipeline known to this node.
 | Column | Description |
 |--------|-------------|
 | name | Pipeline name. |
-| state | `running`, `stopped`, `error`, `connecting`, `snapshotting`. |
+| state | One of `starting`, `snapshotting`, `streaming`, `stopping`, `stopped`, `error`. |
 | mode | The mode the pipeline was started with. |
 | connection | Connection string (password redacted). |
 | publication | The Postgres publication being read. |
-| snapshot | Snapshot LSN if applicable. |
+| snapshot | The boolean `snapshot_enabled`, rendered as `"true"`/`"false"` — i.e. whether this mode performs the initial copy (`true` for `copy_and_cdc` / `copy_only`). Not an LSN. |
 | rows_replicated | Cumulative count since pipeline start. |
-| last_activity | Last time a batch was flushed. |
+| last_activity | Last time a batch was flushed (epoch seconds). |
 | error | Last error string if state is `error`. |
 
 ```sql
@@ -157,19 +193,19 @@ SELECT name, state, rows_replicated, last_activity, error
   them. A stopped or stuck pipeline can fill the source's disk — set up
   alerting on `pg_replication_slots.confirmed_flush_lsn` lag.
 - **Schema changes are not replicated.** The pipeline reads data, not DDL. If
-  you `ALTER TABLE` on the source, restart the pipeline and Trex will adopt
-  the new schema on the next snapshot.
-- **One pipeline = one slot = one publication.** Don't attempt to point two
-  pipelines at the same slot name; results are undefined.
-- **TLS**: append `?sslmode=require` to the connection string and set
-  `DB_TLS_CA_PATH` / `DB_TLS_INSECURE` on the Trex container as needed.
-- The pipeline runs on `bao` workers — a single Trex node can host many
-  pipelines without dedicated processes.
+  you `ALTER TABLE` on the source, restart the pipeline (in a copy mode such
+  as `copy_and_cdc`) so Trex re-reads the table structure on the next copy.
+- **Each pipeline name is unique.** The name is the key in the in-memory
+  pipeline registry; starting a second pipeline with a name already in use is
+  rejected.
+- **Dedicated thread, not a shared scheduler.** Each pipeline runs on its own
+  OS thread with a private tokio runtime, writing into the engine via
+  `trex_pool_client` sessions. A single Trex node can host many pipelines this
+  way; there is no external orchestrator. (The separate `plugins/bao` is a
+  Clojure datamart application, unrelated to ETL scheduling.)
 
 ## Next steps
 
-- [Concepts → Connection Pool](../concepts/connection-pool) — how `bao`
-  schedules ETL work alongside other async tasks.
 - [SQL Reference → db](db) — distributing replicated tables across cluster
   nodes via `trex_db_partition_table`.
 - [Quickstart: Federate a Postgres database](../quickstarts/federate-postgres)

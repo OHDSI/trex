@@ -58,7 +58,7 @@ flowchart TD
     end
 
     subgraph InfraExtensions["Infra (C-API libraries)"]
-        pool & runtime & bao
+        pool & runtime
     end
 
     Browser --> WebUI
@@ -82,6 +82,13 @@ core management application) and `pgwire` (the Postgres wire-protocol server).
 The core server, in turn, scans plugin directories and mounts whatever each
 plugin contributes.
 
+> **Loadable-extension names vs. directory names.** A few extensions load under
+> a core name that differs from their `plugins/<dir>` folder. The mapping comes
+> from each plugin's `trex.core.name` in `package.json`: `runtime` → `as`,
+> `atlas` → `circe`, `hana` → `hana_scan`, `devx-ext` → `devx_ext`. Most others
+> (`pool`, `db`, `cache`, `hades`, `webapi`, `fhir`, …) keep their directory
+> name.
+
 ## Three Layers
 
 ### 1. Analytical Engine
@@ -96,9 +103,12 @@ for the infrastructure ones.
 ### 2. Core Server
 
 The core server (`core/server/`, Deno + Express + PostGraphile) hosts the
-application surface: auth, GraphQL, REST proxy (PostgREST), MCP, edge functions,
-the plugin loader, and a Supabase-CLI-compatible management API. PostgreSQL
-(separate from the Trex engine) backs auth and configuration state. See
+application surface: auth, GraphQL, REST, MCP, edge functions, the plugin
+loader, and a Supabase-CLI-compatible management API. The REST surface at
+`/trex/rest/v1` is a reverse proxy: the core server forwards those requests to
+an external **PostgREST** service (a `postgrest` container in the default
+compose stack) that connects directly to PostgreSQL. PostgreSQL (separate from
+the Trex engine) backs auth and configuration state. See
 [APIs](../apis/graphql) for endpoint references and [Concepts → Auth Model](auth-model)
 for the auth narrative.
 
@@ -107,8 +117,9 @@ for the auth narrative.
 Plugins are NPM packages with a `trex` block in `package.json`. Each plugin can
 contribute a mix of UI assets, function workers, Prefect flows, schema
 migrations, and dbt-like transformation projects. The bundled image already
-ships a few — `web` (admin UI), `docs` (this site), `notebook`, `cli`, `storage`
-(Supabase Storage fork), `pg-meta` (postgres-meta fork). See
+ships a few — `web` (admin UI), `docs` (this site), `notebook`, `storage`
+(Supabase Storage fork), `pg-meta` (postgres-meta fork), `studio` (Supabase
+Studio wrapper), `devx` (AI code editor), and `fhir-fn`. See
 [Concepts → Plugin System](plugin-system) for how plugins are discovered and
 loaded; see [Plugins](../plugins/overview) for the per-type reference.
 
@@ -174,11 +185,14 @@ infrastructure (consumed by other extensions, never directly by you).
 | [migration](../sql-reference/migration) | SQL | Schema-migration runner. |
 | [transform](../sql-reference/transform) | SQL | dbt-like SQL model compile / plan / run / seed / test / freshness. |
 | [ai](../sql-reference/ai) | SQL | In-process LLM inference via llama.cpp (CPU / CUDA / Vulkan / Metal). |
-| [atlas](../sql-reference/atlas) | SQL | OHDSI Atlas cohort JSON → SQL via Circe. |
+| [atlas](../sql-reference/atlas) | SQL (`circe`) | OHDSI Atlas cohort JSON → SQL via Circe. |
 | [cql2elm](../sql-reference/cql2elm) | SQL | Clinical Quality Language → ELM translator. |
-| pool | infra | Shared connection pool consumed by `pgwire`, `runtime`, and other extensions. |
-| runtime | infra | Trex Deno runtime — host of edge function and plugin loaders. |
-| bao | infra | Background async orchestrator used by `runtime` and `etl`. |
+| cache | SQL | Query/result caching extension. |
+| hades | SQL | OHDSI HADES R-analytics support. |
+| webapi | SQL | Embedded OHDSI WebAPI (`webapi_start`/`stop`/`status`) — runs the full WebAPI stack in-process against Trex/DuckDB. |
+| devx-ext (`devx_ext`) | SQL | Native extension backing the `devx` AI code-editor plugin. |
+| pool | infra | Shared DuckDB connection pool with a serialized write queue, consumed by `pgwire`, `runtime` (`as`), `db`, `etl`, and other extensions. |
+| runtime (`as`) | infra | Trex Deno runtime — host of edge function and plugin loaders. |
 
 ## Default Service Endpoints
 

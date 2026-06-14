@@ -5,17 +5,33 @@ sidebar_position: 1
 # Docker Deployment
 
 Trex is published as a single multi-arch Docker image
-(`ghcr.io/p-hoffmann/trexsql:latest`) that bundles the `trex` Rust binary, the
+(`ghcr.io/ohdsi/trexsql:latest`) that bundles the `trex` Rust binary, the
 auto-loaded extensions, the Deno-based core management application, and the web
-frontend. The repository ships three compose files for different scenarios.
+frontend. The default stack runs a two-node cluster plus its supporting
+services. The repository ships several compose files for different scenarios.
 
 ## Compose Files
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.yml` | Default stack: Postgres 16 + Trex + PostgREST. Uses the published image. |
-| `docker-compose.dev.yml` | Development overlay. Live-mounts `core/server`, `functions`, `plugins-dev`, and the web/docs `dist/` directories so changes hot-reload into the running container. |
-| `docker-compose.pg-trex.yml` | Replaces vanilla Postgres with the `pg-trex` image (Postgres + the Trex extensions co-located in one process). |
+| `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus PostgREST, Studio, and Realtime. Uses the published image. |
+| `docker-compose.dev.yml` | Development overlay. Collapses to a single-node `trex` service and live-mounts `core/server`, `core/event`, `functions`, and the prebuilt `plugins/web/dist`, `plugins/notebook/dist`, and `plugins/storage` directories so changes take effect without rebuilding. |
+| `docker-compose.dx.yml` | Standalone devx stack: a single-node trex with the devx plugin and `devx_ext` extension baked into a dedicated image (`ghcr.io/ohdsi/trexsql-dx:latest`). Runs alongside the default stack (ports offset +1000 on HTTP / +20 on pg). |
+| `docker-compose.pg-trex.yml` | Replaces vanilla Postgres with the `pg-trex` image (Postgres + the Trex extensions co-located in one process). Uses gossip port `7946`. |
+
+## Secrets
+
+The only secret operators set directly is `POSTGRES_PASSWORD`. All cryptographic
+keys are generated on first boot by the one-shot `trex-init` service, which
+writes `./secrets/root.env` (the `TREX_ROOT_KEY` root secret) and
+`./secrets/derived.env` (all per-service subkeys derived from it). Every other
+service consumes those files via `env_file:` (`required: false`) and gates on
+`trex-init` completing.
+
+Mount `./secrets` as a secret-grade volume in production and back it up — losing
+`root.env` invalidates every encrypted secret in `trexdb.{secret,database_credential}`
+and every issued JWT. See [Secret Rotation](../operations/secret-rotation) for
+the derivation model.
 
 ## Quick Start
 
@@ -25,88 +41,112 @@ docker compose up -d
 
 This starts:
 
-- **postgres** (`postgres:16`) — application metadata + the auth schema. Published
-  on host port `65433` so it doesn't collide with the Trex pgwire endpoint.
-- **trex** — the Trex container. Publishes the web/MCP/REST/GraphQL HTTP endpoints
-  on `8001`, the TLS variant on `8000`, and the pgwire endpoint on `5433`.
-- **postgrest** (`postgrest:v12.2.3`) — auto-generated REST API over Postgres. It
-  is reverse-proxied through Trex at `${BASE_PATH}/rest/v1/*`.
+- **trex-init** — one-shot key generator. Writes `./secrets/{root,derived}.env`
+  and exits, gating every other service.
+- **postgres** (`postgres:16`) — application metadata + the auth schema. Started
+  with `wal_level=logical` (and bumped replication-slot / WAL-sender limits) for
+  Realtime. Published on host port `65433`.
+- **trex-data** — the data node. Holds the analytical pool and serves Arrow
+  Flight SQL on `50051` (internal only). Runs the schema migrations.
+- **trex-server** — the non-data node. Serves the web/MCP/REST/GraphQL HTTP
+  surface on `8001`, the TLS variant on `8000`, and the pgwire endpoint on
+  `5433`. Opens remote sessions to `trex-data`.
+- **postgrest** (`postgrest:v12.2.3`) — auto-generated REST API over Postgres,
+  reverse-proxied through Trex at `${BASE_PATH}/rest/v1/*`.
+- **studio** — the Supabase Studio sidecar (internal only; Trex proxies
+  `/plugins/trex/studio/**` to it).
+- **realtime** (`supabase/realtime:v2.93.3`) — the Realtime server.
+
+The two nodes auto-converge: gossip seeds are derived from the `nodes` map in
+`SWARM_CONFIG`. `trex-data` advertises Flight under its gossip host so the server
+gets a routable endpoint.
 
 ## Published Ports
 
 | Host | Container | Service |
 |------|-----------|---------|
-| `8001` | `8001` | HTTP — Web UI, GraphQL, REST proxy, MCP, edge functions, auth. |
+| `8001` | `8001` | HTTP — Web UI, GraphQL, REST proxy, MCP, edge functions, auth (on `trex-server`). |
 | `8000` | `8000` | HTTPS — TLS-terminated variant of the same surface. |
 | `5433` | `5432` | pgwire — Postgres-compatible wire protocol into the analytical engine. |
-| `65433` | `5432` | Postgres metadata DB (only `docker-compose.yml`). |
+| `65433` | `5432` | Postgres metadata DB. |
 
-The gossip / cluster-membership port (default `4200`) is **not** published by the
-default compose file. Enable it explicitly when running multi-node deployments.
+Arrow Flight SQL (`50051`) and gossip cluster membership (default `4200`) are
+**not** published by the default compose file — they are cluster-internal. The
+two nodes reach each other over the compose network.
 
 ## Default `docker-compose.yml`
 
+The base file uses a shared `SWARM_CONFIG` YAML anchor (`x-swarm-config`) that
+defines both nodes — `data` (Flight on `50051`, `data_node: true`) and `server`
+(trexas on `8001`/`8000` + pgwire on `5432`, `data_node: false`). Each service
+selects its identity with `SWARM_NODE` and loads its secrets from
+`./secrets/{root,derived}.env`. The accurate excerpt:
+
 ```yaml
-volumes:
-  core-pgdata:
+x-swarm-config: &swarm-config
+  SWARM_CONFIG: >-
+    {"cluster_id":"local","nodes":{
+      "data":{
+        "gossip_addr":"trex-data:4200","data_node":true,
+        "extensions":[
+          {"name":"flight","config":{"host":"0.0.0.0","port":50051}}
+        ]},
+      "server":{
+        "gossip_addr":"trex-server:4200","data_node":false,
+        "extensions":[
+          {"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server/index.eszip","event_worker_path":"/usr/src/core/event/index.eszip","tls_port":8000,"tls_cert_path":"/usr/src/server.crt","tls_key_path":"/usr/src/server.key"}},
+          {"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}
+        ]}
+    }}
 
 services:
   postgres:
     image: postgres:16
     ports:
       - 65433:5432
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_replication_slots=10
+      - -c
+      - max_wal_senders=10
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: mypass
-      POSTGRES_DB: testdb
-    volumes:
-      - core-pgdata:/var/lib/postgresql/data
-      - ./core/seed.sql:/docker-entrypoint-initdb.d/seed.sql
-      - ./core/schema:/docker-entrypoint-initdb.d/schema
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 5s
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypass}
 
-  trex:
-    image: ghcr.io/p-hoffmann/trexsql:latest
-    platform: linux/amd64
+  trex-server:
+    image: ghcr.io/ohdsi/trexsql:latest
     ports:
       - 8000:8000
       - 8001:8001
       - 5433:5432
-    depends_on:
-      postgres:
-        condition: service_healthy
+    env_file:
+      - path: ./secrets/root.env
+        required: false
+      - path: ./secrets/derived.env
+        required: false
     environment:
-      DATABASE_URL: postgres://postgres:mypass@postgres:5432/testdb
-      BETTER_AUTH_SECRET: dev-secret-at-least-32-characters-long!!
-      BASE_PATH: /trex
-      BETTER_AUTH_URL: http://localhost:8001/trex
-      PLUGINS_PATH: /usr/src/plugins
-      PLUGINS_DEV_PATH: /usr/src/plugins-dev
-      SCHEMA_DIR: /usr/src/core/schema
-      POSTGREST_HOST: postgrest
-      POSTGREST_PORT: "3000"
-      SWARM_CONFIG: >-
-        {"cluster_id":"local","nodes":{"local":{
-          "gossip_addr":"0.0.0.0:4200",
-          "extensions":[
-            {"name":"trexas","config":{...}},
-            {"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}
-          ]}}}
-      SWARM_NODE: local
+      <<: *swarm-config
+      SWARM_NODE: server
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
 
   postgrest:
     image: postgrest/postgrest:v12.2.3
-    depends_on:
-      postgres:
-        condition: service_healthy
+    env_file:
+      - path: ./secrets/derived.env   # supplies PGRST_JWT_SECRET
+        required: false
     environment:
       PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
       PGRST_DB_SCHEMAS: public
       PGRST_DB_ANON_ROLE: anon
-      PGRST_JWT_SECRET: dev-secret-at-least-32-characters-long!!
 ```
+
+There is **no** standalone `trex` service in the base file — that exists only in
+`docker-compose.dev.yml`. `PGRST_JWT_SECRET` is not a literal; it is sourced from
+`./secrets/derived.env`. See the real
+[`docker-compose.yml`](https://github.com/OHDSI/trex/blob/main/docker-compose.yml)
+for the full definition.
 
 ## Development Overlay
 
@@ -116,44 +156,47 @@ For live source mounts during plugin / server development:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 ```
 
-The overlay bind-mounts `./core/server`, `./functions`, `./plugins-dev`, and the
-prebuilt `./plugins/web/dist` and `./plugins/docs` into the container so edits on
+The overlay defines a single-node `trex` service and bind-mounts `./core/server`,
+`./core/event`, `./functions`, and the prebuilt `./plugins/web/dist`,
+`./plugins/notebook/dist`, and `./plugins/storage` into the container so edits on
 the host take effect without rebuilding.
 
 ## Services Started by Default
 
-The Rust `trex` binary boots the engine, loads every `*.trex` / `*.duckdb_extension`
-in `EXTENSION_DIR` (default `/usr/lib/trexsql/extensions`), then iterates the
-`extensions` array in `SWARM_CONFIG` to start service extensions. The default
-compose starts:
+The Rust `trex` binary boots the engine, loads every `*.trex` /
+`*.duckdb_extension` in `EXTENSION_DIR` (default `/usr/lib/trexsql/extensions`),
+then iterates the `extensions` array for its `SWARM_NODE` in `SWARM_CONFIG` to
+start service extensions:
 
-- **trexas** — the core HTTP server (Express + Deno). Mounts the web UI, GraphQL,
-  GraphiQL, MCP, edge functions, REST proxy, and auth on `:8001` (HTTP) and
-  `:8000` (HTTPS).
-- **pgwire** — Postgres wire protocol on `:5432` (published as host `:5433`).
-
-The Arrow Flight SQL service (`flight`) and gossip cluster membership are
-**not** started by the default compose file. Add them to `SWARM_CONFIG` when
-running distributed deployments.
+- **flight** (on `trex-data`) — the Arrow Flight SQL service on `:50051`. The
+  data node holds the analytical pool.
+- **trexas** (on `trex-server`) — the core HTTP server (Express + Deno). Mounts
+  the web UI, GraphQL, GraphiQL, MCP, edge functions, REST proxy, and auth on
+  `:8001` (HTTP) and `:8000` (HTTPS).
+- **pgwire** (on `trex-server`) — Postgres wire protocol on `:5432` (published as
+  host `:5433`).
 
 ## Dockerfile
 
-The image is built in five stages:
+The image is built in multiple stages:
 
 1. **builder** (`debian:trixie-slim`) — Installs Rust 1.88, downloads the pinned
-   `libtrexsql.so` (and `libchdb.so` on amd64) from GitHub release artifacts, then
-   builds the `trex` binary with cached dependency layers.
+   `libtrexsql.so` from `github.com/p-hoffmann/trexsql-rs` (and `libchdb.so`),
+   then builds the `trex` binary with cached dependency layers.
 2. **web-builder** (`node:22-trixie-slim`) — Builds the admin web UI (`plugins/web`).
 3. **notebook-builder** (`node:22-trixie-slim`) — Builds the React notebook bundle
    (`plugins/notebook`).
 4. **docs-builder** (`node:22-trixie-slim`) — Builds the Docusaurus docs site.
-5. **runtime** (`node:22-trixie-slim`) — Installs the runtime dependencies, copies
-   the artefacts from the previous stages, fetches the npm-distributed Trex
-   extensions into `/usr/lib/trexsql/extensions/`, and sets `trex` as the entry
+5. **pg-meta-builder** (`node:22-trixie-slim`) — Builds `postgres-meta` (TypeScript → `dist/`).
+6. **studio-builder** (`node:22-trixie-slim`) — Builds the Studio Next.js static export.
+7. **runtime** (`node:22-trixie-slim`) — Installs Deno and the runtime
+   dependencies, copies the artefacts from the previous stages, fetches the
+   npm-distributed and official DuckDB extensions into the extensions dir,
+   pre-bundles the core Deno workers into eszips, and sets `trex` as the entry
    point.
 
-The `TREXSQL_VERSION` and `CHDB_VERSION` build args pin the upstream native
-libraries.
+The `TREXSQL_VERSION` (`v1.4.4-trex`) and `CHDB_VERSION` (`v3.6.0`) build args
+pin the upstream native libraries.
 
 ## Accessing Services
 
@@ -168,5 +211,5 @@ libraries.
 | pgwire (analytical engine) | `postgresql://localhost:5433/main` |
 | HTTPS (self-signed) | https://localhost:8000/trex/ |
 
-For cloud-managed deployments, see [`deploy/`](https://github.com/p-hoffmann/trexsql/tree/main/deploy)
+For cloud-managed deployments, see [`deploy/`](https://github.com/OHDSI/trex/tree/main/deploy)
 which uses Pulumi to provision Trex on AWS ECS Fargate or Azure Container Apps.

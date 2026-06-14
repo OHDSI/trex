@@ -32,8 +32,13 @@ SELECT trex_fhir_start('0.0.0.0', 8080);
 ```
 
 After that, the server accepts standard FHIR R4 REST traffic at the configured
-host/port — `GET /Patient/123`, `POST /Patient`, `GET /Observation?subject=Patient/123`,
-search bundles, transaction bundles, `$everything` operations, etc.
+host/port. Routes are **dataset-scoped** — every resource path is prefixed with a
+dataset id: `GET /{dataset_id}/Patient/123`, `POST /{dataset_id}/Patient`,
+`GET /{dataset_id}/Observation?subject=Patient/123`, search bundles, transaction
+bundles, and the FHIR operations `$evaluate-measure`, `$cql`, `$import`, `$export`.
+
+Create a dataset first with `POST /datasets`; the returned id is what you use as
+`{dataset_id}` in subsequent resource calls.
 
 ## Resource storage
 
@@ -48,11 +53,11 @@ individual `POST` requests; both append to the underlying tables.
 
 The FHIR server pairs naturally with the [cql2elm extension](cql2elm) for
 running CQL-based quality measures: translate the CQL to ELM JSON, hand it to
-the FHIR server's `$measure-evaluate` endpoint, and receive a `MeasureReport`.
+the FHIR server's `$evaluate-measure` endpoint, and receive a `MeasureReport`.
 
 ## Functions
 
-### `trex_fhir_start(host, port)`
+### `trex_fhir_start(host, port [, db_name [, db_path]])`
 
 Start the FHIR server bound to `host:port`. Multiple servers on different
 ports can run concurrently (e.g. one for production, one for testing).
@@ -61,15 +66,19 @@ ports can run concurrently (e.g. one for production, one for testing).
 |-----------|------|-------------|
 | host | VARCHAR | Bind address. `0.0.0.0` to expose externally; `127.0.0.1` for local only. |
 | port | INTEGER | TCP port. |
+| db_name | VARCHAR | Optional. Database/catalog name. Defaults to the file stem of `db_path` (e.g. `fhir`). |
+| db_path | VARCHAR | Optional. Backing database file. Defaults to `./fhir.db`. |
 
 **Returns:** VARCHAR — status message.
 
 ```sql
 SELECT trex_fhir_start('0.0.0.0', 8080);
--- Then in another terminal:
---   curl http://localhost:8080/metadata           -- CapabilityStatement
---   curl http://localhost:8080/Patient            -- Search all patients
---   curl http://localhost:8080/Patient/123        -- Read one patient
+
+-- First create a dataset, then talk to it (routes are dataset-scoped):
+--   curl -X POST http://localhost:8080/datasets -d '{"name":"demo"}'
+--   curl http://localhost:8080/{dataset_id}/metadata        -- CapabilityStatement
+--   curl http://localhost:8080/{dataset_id}/Patient         -- Search all patients
+--   curl http://localhost:8080/{dataset_id}/Patient/123     -- Read one patient
 ```
 
 The server auto-loads the JSON and ICU DuckDB extensions on startup so it can
@@ -124,7 +133,7 @@ SELECT * FROM trex_fhir_status();
 ## Next steps
 
 - [SQL Reference → cql2elm](cql2elm) — translate Clinical Quality Language to
-  ELM JSON for `$measure-evaluate`.
+  ELM JSON for `$evaluate-measure`.
 - [SQL Reference → atlas](atlas) — convert OHDSI cohort definitions to SQL
   (an alternative cohort-building path).
 - The integration tests under `integration-tests/test_fhir_*.py` show

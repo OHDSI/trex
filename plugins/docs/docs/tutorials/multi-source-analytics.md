@@ -93,8 +93,9 @@ hostname. Two ways to get there:
 
 - **Same compose project (easiest):** put the `minio` service in the same
   `docker-compose.yml` as Trex. Compose's default network puts both
-  containers on it (e.g. `trexsql-trex-1` and `trexsql-minio-1`), with the
-  service name `minio` resolving to the container.
+  containers on it, with the service name `minio` resolving to the
+  container. (To exec into the Trex node, use the service name, e.g.
+  `docker compose exec trex-server …` — container names vary by project.)
 - **Separate compose projects:** create a shared user-defined network
   (`docker network create trex-shared`) and add `networks: [trex-shared]`
   to both the Trex and MinIO services in their respective compose files.
@@ -304,15 +305,22 @@ endpoint:
   formats: [json, csv]
 ```
 
-Restart Trex so the plugin is picked up:
+Plugins under `plugins-dev/` are only bind-mounted when the dev compose
+overlay is enabled. Bring the stack up with the overlay, then restart the
+Trex service so the plugin is picked up — the `-f` flags must be repeated on
+every `docker compose` call:
 
 ```bash
-docker compose restart trex
+# enable the dev overlay (exposes plugins-dev/ as a bind mount)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+# reload the plugin
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart trex
 ```
 
 Then run the model. **Use the GraphQL `transformRun` mutation** — it
 materialises the table *and* registers the HTTP endpoint by writing a row to
-`trex.transform_deployment` and calling `registerTransformEndpoints`:
+`trexdb.transform_deployment` and calling `registerTransformEndpoints`:
 
 ```bash
 TOKEN=trex_...

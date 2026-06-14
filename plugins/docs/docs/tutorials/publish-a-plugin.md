@@ -373,11 +373,18 @@ Once deployed, this is reachable at
 
 ## 6. Local install + test (3 min)
 
-While developing, the plugin lives in `plugins-dev/`. Restart Trex so the
-loader picks it up:
+While developing, the plugin lives in `plugins-dev/`, which is only
+bind-mounted into the container when the dev compose overlay is enabled.
+Bring the stack up with the overlay, then restart the Trex service so the
+loader picks it up — the `-f` flags must be repeated on every
+`docker compose` call:
 
 ```bash
-docker compose restart trex
+# enable the dev overlay (exposes plugins-dev/ as a bind mount)
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+
+# reload the plugin
+docker compose -f docker-compose.yml -f docker-compose.dev.yml restart trex
 ```
 
 Watch the logs:

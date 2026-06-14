@@ -54,7 +54,7 @@ services:
       interval: 5s
 
   node-1:
-    image: ghcr.io/p-hoffmann/trexsql:latest
+    image: ghcr.io/ohdsi/trexsql:latest
     ports:
       - 8001:8001
       - 5433:5432
@@ -64,9 +64,8 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://postgres:mypass@postgres:5432/testdb
-      BETTER_AUTH_SECRET: dev-secret-at-least-32-characters-long!!
+      TREX_ROOT_KEY: dev-root-key-at-least-32-characters-long!!
       BASE_PATH: /trex
-      BETTER_AUTH_URL: http://localhost:8001/trex
       SCHEMA_DIR: /usr/src/core/schema
       SWARM_NODE: node-1
       SWARM_CONFIG: |
@@ -91,7 +90,7 @@ services:
         }}
 
   node-2:
-    image: ghcr.io/p-hoffmann/trexsql:latest
+    image: ghcr.io/ohdsi/trexsql:latest
     ports:
       - 8002:8001
       - 5434:5432
@@ -103,9 +102,8 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://postgres:mypass@postgres:5432/testdb
-      BETTER_AUTH_SECRET: dev-secret-at-least-32-characters-long!!
+      TREX_ROOT_KEY: dev-root-key-at-least-32-characters-long!!
       BASE_PATH: /trex
-      BETTER_AUTH_URL: http://localhost:8002/trex
       SCHEMA_DIR: /usr/src/core/schema
       SWARM_NODE: node-2
       SWARM_CONFIG: <same JSON as node-1>
@@ -167,7 +165,7 @@ CREATE TABLE memory.main.events (
 
 SELECT trex_db_partition_table(
   'memory.main.events',
-  '{"strategy":"hash","column":"user_id","num_partitions":4}'
+  '{"strategy":"hash","column":"user_id","partitions":4}'
 );
 ```
 

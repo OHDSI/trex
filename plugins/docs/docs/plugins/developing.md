@@ -15,7 +15,7 @@ my-plugin/
   package.json
   functions/           # API endpoint source files
     index.ts
-    import_map.json
+    deno.json          # Deno config / import map (optional)
   dist/                # Built frontend assets
   migrations/          # SQL migration files
     001_init.sql
@@ -40,7 +40,7 @@ The `trex` key defines what the plugin provides:
         {
           "source": "/my-plugin",
           "function": "/functions",
-          "imports": "/functions/import_map.json"
+          "imports": "/functions/deno.json"
         }
       ]
     },
@@ -61,6 +61,10 @@ The `trex` key defines what the plugin provides:
   }
 }
 ```
+
+The `imports` field is optional — most function plugins omit it and rely on a
+`deno.json` discovered by the runtime. `eszip` is an advanced field for shipping
+a prebuilt bundle and is rarely set.
 
 ## Environment Variable Substitution
 
@@ -86,7 +90,7 @@ Run one-time setup tasks at plugin startup:
         {
           "function": "/functions/setup.ts",
           "env": "production",
-          "imports": "/functions/import_map.json",
+          "imports": "/functions/deno.json",
           "waitfor": "http://localhost:5432",
           "delay": 1000
         }
@@ -100,18 +104,18 @@ Run one-time setup tasks at plugin startup:
 |-------|-------------|
 | `function` | Path to init script. |
 | `env` | Environment block to merge with `_shared`. |
-| `imports` | Path to a Deno import map. |
-| `eszip` | Path to a prebuilt ESZIP bundle (alternative to source). |
+| `imports` | _(optional)_ Path to a Deno config / import map (e.g. `deno.json`). |
+| `eszip` | _(optional, advanced)_ Path to a prebuilt ESZIP bundle (alternative to source). |
 | `waitfor` | URL to poll before running. |
 | `waitforEnvVar` | Env var containing URL to poll. |
 | `delay` | Milliseconds to wait after init. |
 
 ## Development Workflow
 
-1. Create your plugin directory in `plugins-dev/` (auto-discovered when `NODE_ENV=development`)
+1. Create your plugin directory in `plugins-dev/` (always auto-discovered, dev-first)
 2. Add your `package.json` with the `trex` configuration
 3. Start the server with `docker compose up` — volume mounts enable hot reload
-4. Access function endpoints at `/trex/plugins/<source>/*`
+4. Access function endpoints at `${PLUGINS_BASE_PATH}<scope>/<source>/*` — i.e. under `/plugins` (not `/trex`) including the package scope segment, e.g. `/plugins/trex/devx-api` for `@trex/...` with `source: "/devx-api"`
 5. Access UI routes at the configured paths
 
 ## Publishing

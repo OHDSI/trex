@@ -35,6 +35,16 @@ verification (acceptable for local Express containers; not for production).
 For real HANA Cloud, configure the trust store via standard SAP HANA client
 mechanisms.
 
+:::note Non-TLS scheme
+The plain `hdbsql://` scheme (no `s`, no TLS) is also accepted. It connects
+without encryption and is convenient for local HANA Express containers. Use
+`hdbsqls://` for anything over an untrusted network.
+
+```
+hdbsql://USER:PASS@HOST:39015/HDB
+```
+:::
+
 ## Typical workflow
 
 ```sql
