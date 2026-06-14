@@ -7,6 +7,7 @@ import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import type { Plan } from "@/lib/types";
 import * as api from "@/lib/api";
+import { toast } from "sonner";
 
 interface PlanTabProps {
   appId: string | null;
@@ -196,9 +197,16 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
     onFixPrompt?.(`Implement the following plan: "${title}"\n\n${plan.content}`);
   };
 
-  const implementAsAgent = (plan: Plan) => {
-    const title = planTitle(plan);
-    onFixPrompt?.(`Implement the following plan autonomously, using your tools to create and modify all necessary files: "${title}"\n\n${plan.content}`);
+  // Agent-driven execution: start a run that implements the plan via the
+  // subagent-driven skill. It appears as an agent in the Agents tab.
+  const runPlan = async (plan: Plan) => {
+    try {
+      await api.executePlan(plan.id);
+      toast.success("Agent run started — see the Agents tab");
+      setPlans((prev) => prev.map((p) => (p.id === plan.id ? { ...p, status: "accepted" } : p)));
+    } catch {
+      toast.error("Failed to start agent run");
+    }
   };
 
   if (!appId) {
@@ -266,16 +274,7 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
                           onClick={() => implementInChat(plan)}
                         >
                           <Play className="h-3 w-3" />
-                          Implement in Chat
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="h-7 text-xs gap-1.5"
-                          onClick={() => implementAsAgent(plan)}
-                        >
-                          <Sparkles className="h-3 w-3" />
-                          Run as Agent
+                          Implement in chat
                         </Button>
                       </div>
                     )}
@@ -288,11 +287,21 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
                       size="sm"
                       variant="default"
                       className="h-7 text-xs gap-1.5"
+                      onClick={() => runPlan(plan)}
+                      disabled={markingId === plan.id}
+                    >
+                      <Sparkles className="h-3 w-3" />
+                      Accept &amp; implement
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs gap-1.5"
                       onClick={() => acceptPlan(plan)}
                       disabled={markingId === plan.id}
                     >
                       <ThumbsUp className="h-3 w-3" />
-                      Accept Plan
+                      Accept
                     </Button>
                     <Button
                       size="sm"
@@ -315,19 +324,19 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
                           size="sm"
                           variant="default"
                           className="h-7 text-xs gap-1.5"
-                          onClick={() => implementInChat(plan)}
+                          onClick={() => runPlan(plan)}
                         >
-                          <Play className="h-3 w-3" />
-                          Implement in Chat
+                          <Sparkles className="h-3 w-3" />
+                          Run (agent-driven)
                         </Button>
                         <Button
                           size="sm"
                           variant="outline"
                           className="h-7 text-xs gap-1.5"
-                          onClick={() => implementAsAgent(plan)}
+                          onClick={() => implementInChat(plan)}
                         >
-                          <Sparkles className="h-3 w-3" />
-                          Run as Agent
+                          <Play className="h-3 w-3" />
+                          Implement in chat
                         </Button>
                       </>
                     )}

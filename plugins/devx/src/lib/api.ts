@@ -534,6 +534,12 @@ export async function updatePlanStatus(planId: string, status: Plan["status"]): 
   });
 }
 
+/** Start an agent-driven run that implements the plan via the subagent-driven
+ * skill. Returns the new agent-run id (surfaces in the Agents tab). */
+export async function executePlan(planId: string): Promise<{ runId: string }> {
+  return apiFetch(`/plans/${planId}/execute`, { method: "POST" });
+}
+
 // Security
 export async function securityScan(appId: string): Promise<{ findings: { severity: string; title: string; description: string; file?: string }[] }> {
   return apiFetch(`/apps/${appId}/security/scan`, { method: "POST" });
