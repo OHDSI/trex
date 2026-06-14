@@ -30,9 +30,7 @@ import {
   CHAT_MODES,
   type Provider,
   type ChatMode,
-  type PanelContent,
 } from "@/lib/types";
-import { useLayoutMode } from "@/hooks/useLayoutMode";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { getLanguage, setLanguage, getAvailableLanguages } from "@/lib/i18n";
@@ -55,7 +53,6 @@ export default function SettingsPage() {
   const providerConfigs = useProviderConfigs();
   const mcp = useMcpServers();
   const { theme, setTheme } = useTheme();
-  const { panelAssignment, setPanelAssignment } = useLayoutMode();
 
   const [activeSection, setActiveSection] = useState<Section>("general");
   const [saving, setSaving] = useState(false);
@@ -290,50 +287,6 @@ export default function SettingsPage() {
                     </option>
                   ))}
                 </select>
-              </div>
-
-              {/* Panel Layout */}
-              <div className="space-y-2">
-                <Label>Panel Layout</Label>
-                <p className="text-xs text-muted-foreground">
-                  Choose what content appears in each panel position.
-                </p>
-                <div className="flex gap-4">
-                  <div className="space-y-1 flex-1">
-                    <Label className="text-xs">Left Panel</Label>
-                    <select
-                      value={panelAssignment.left}
-                      onChange={(e) => {
-                        const val = e.target.value as PanelContent;
-                        setPanelAssignment({
-                          left: val,
-                          right: val === "chat" ? "preview" : "chat",
-                        });
-                      }}
-                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    >
-                      <option value="chat">Chat</option>
-                      <option value="preview">Preview / Code</option>
-                    </select>
-                  </div>
-                  <div className="space-y-1 flex-1">
-                    <Label className="text-xs">Right Panel</Label>
-                    <select
-                      value={panelAssignment.right}
-                      onChange={(e) => {
-                        const val = e.target.value as PanelContent;
-                        setPanelAssignment({
-                          right: val,
-                          left: val === "chat" ? "preview" : "chat",
-                        });
-                      }}
-                      className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                    >
-                      <option value="chat">Chat</option>
-                      <option value="preview">Preview / Code</option>
-                    </select>
-                  </div>
-                </div>
               </div>
             </div>
           )}
