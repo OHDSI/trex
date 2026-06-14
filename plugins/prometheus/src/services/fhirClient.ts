@@ -45,4 +45,5 @@ export class FhirClient {
   create(ds: string, type: string, body: FhirResource): Promise<FhirResource> { return this.req("POST", `/${ds}/${type}`, body); }
   update(ds: string, type: string, id: string, body: FhirResource): Promise<FhirResource> { return this.req("PUT", `/${ds}/${type}/${id}`, body); }
   runCql(ds: string, cql: string): Promise<any> { return this.req("POST", `/${ds}/$cql`, { cql }); }
+  createDataset(body: { id: string; name?: string }): Promise<unknown> { return this.req("POST", `/datasets`, body); }
 }
