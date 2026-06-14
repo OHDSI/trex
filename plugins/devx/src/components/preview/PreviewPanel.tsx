@@ -97,23 +97,23 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
 
           <div className="flex-1" />
 
-          {/* status rail: icon + count badge, label via title */}
-          <TabsTrigger value="problems" title="Checks" className="px-2 data-[state=active]:bg-accent">
-            <AlertTriangle className="h-4 w-4" />
+          {/* status rail: compact icon + count badge, label via title */}
+          <TabsTrigger value="problems" title="Checks" className="h-7 w-7 justify-center p-0 text-muted-foreground data-[state=active]:bg-accent data-[state=active]:text-foreground">
+            <AlertTriangle className="h-3.5 w-3.5" />
           </TabsTrigger>
-          <TabsTrigger value="agents" title="Agents" className="px-2 data-[state=active]:bg-accent">
-            <Sparkles className="h-4 w-4" />
+          <TabsTrigger value="agents" title="Agents" className="h-7 gap-1 px-1.5 text-muted-foreground data-[state=active]:bg-accent data-[state=active]:text-foreground">
+            <Sparkles className="h-3.5 w-3.5" />
             {reviewAgents.runningCount > 0 && (
-              <span className="ml-1 text-[10px] bg-brand text-brand-foreground px-1 rounded-full min-w-[16px] text-center">
+              <span className="text-[10px] bg-brand text-brand-foreground px-1 rounded-full min-w-[16px] text-center">
                 {reviewAgents.runningCount}
               </span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="git" title="Git" className="px-2 data-[state=active]:bg-accent">
-            <GitBranch className="h-4 w-4" />
+          <TabsTrigger value="git" title="Git" className="h-7 gap-1 px-1.5 text-muted-foreground data-[state=active]:bg-accent data-[state=active]:text-foreground">
+            <GitBranch className="h-3.5 w-3.5" />
             {/* yellow = uncommitted changes (warning), distinct from the brand agents badge */}
             {git.status.length > 0 && (
-              <span className="ml-1 text-[10px] bg-yellow-500/20 text-yellow-600 px-1 rounded">
+              <span className="text-[10px] bg-yellow-500/20 text-yellow-600 px-1 rounded">
                 {git.status.length}
               </span>
             )}
