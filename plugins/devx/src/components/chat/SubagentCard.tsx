@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ChevronDown, ChevronRight, Bot, CheckCircle, XCircle, Loader2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Sparkles, CheckCircle, XCircle, Loader2 } from "lucide-react";
 
 interface SubagentCardProps {
   agentName: string;
@@ -37,7 +37,7 @@ export function SubagentCard({
         ) : (
           <ChevronRight className="w-3.5 h-3.5 text-[var(--color-text-secondary)]" />
         )}
-        <Bot className="w-4 h-4 text-blue-400" />
+        <Sparkles className="w-4 h-4 text-blue-400" />
         <span className="font-medium text-[var(--color-text-primary)]">
           {agentName}
         </span>

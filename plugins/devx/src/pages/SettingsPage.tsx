@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import {
   ArrowLeft,
   Settings,
-  Bot,
+  Sparkles,
   Cpu,
   Plug,
   Github,
@@ -42,7 +42,7 @@ type Section = "general" | "ai" | "agent" | "integrations";
 const SECTIONS: { id: Section; label: string; icon: React.ElementType }[] = [
   { id: "general", label: "General", icon: Settings },
   { id: "ai", label: "AI", icon: Cpu },
-  { id: "agent", label: "Agent", icon: Bot },
+  { id: "agent", label: "Agent", icon: Sparkles },
   { id: "integrations", label: "Integrations", icon: Plug },
 ];
 

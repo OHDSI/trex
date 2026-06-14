@@ -1,4 +1,4 @@
-import { Bot, ShieldCheck, Check, Ban, AlertTriangle } from "lucide-react";
+import { Sparkles, ShieldCheck, Check, Ban, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ConsentRequest } from "@/lib/types";
 
@@ -12,7 +12,7 @@ export function AgentConsentBanner({ consent, error, onDecision }: AgentConsentB
   return (
     <div className="mx-3 mb-2 rounded-lg border bg-muted/50 p-3">
       <div className="flex items-center gap-2 mb-2">
-        <Bot className="h-4 w-4 text-muted-foreground" />
+        <Sparkles className="h-4 w-4 text-muted-foreground" />
         <span className="text-sm font-medium">
           Agent wants to use: <strong>{consent.toolName}</strong>
         </span>

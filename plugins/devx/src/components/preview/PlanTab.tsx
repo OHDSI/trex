@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ClipboardList, CheckCircle2, Circle, Play, Bot, Loader2, Check, X, ThumbsUp, FileText } from "lucide-react";
+import { ClipboardList, CheckCircle2, Circle, Play, Sparkles, Loader2, Check, X, ThumbsUp, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
@@ -274,7 +274,7 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
                           className="h-7 text-xs gap-1.5"
                           onClick={() => implementAsAgent(plan)}
                         >
-                          <Bot className="h-3 w-3" />
+                          <Sparkles className="h-3 w-3" />
                           Run as Agent
                         </Button>
                       </div>
@@ -326,7 +326,7 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
                           className="h-7 text-xs gap-1.5"
                           onClick={() => implementAsAgent(plan)}
                         >
-                          <Bot className="h-3 w-3" />
+                          <Sparkles className="h-3 w-3" />
                           Run as Agent
                         </Button>
                       </>

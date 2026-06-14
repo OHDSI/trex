@@ -8,7 +8,7 @@ import {
   TestTube2,
   Palette,
   XCircle,
-  Bot,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
@@ -156,7 +156,7 @@ export function AgentsTab({ agents, onStop, agentRuns, onExpandRun, onStopRun }:
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
         <div className="text-center space-y-2">
-          <Bot className="h-8 w-8 mx-auto opacity-30" />
+          <Sparkles className="h-8 w-8 mx-auto opacity-30" />
           <p className="text-xs">No agents running.</p>
           <p className="text-xs">Use <code className="bg-muted px-1 rounded">/agent /review</code> to start one.</p>
         </div>
@@ -186,7 +186,7 @@ export function AgentsTab({ agents, onStop, agentRuns, onExpandRun, onStopRun }:
         {subagentEntries.map((state) => (
           <AccordionItem key={state.run.id} value={state.run.id}>
             <AccordionTrigger>
-              <Bot className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <Sparkles className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <span className="text-xs font-medium truncate">{state.run.agent_name}</span>
               <StatusBadge status={state.run.status} />
               <div className="flex-1 mx-2">
