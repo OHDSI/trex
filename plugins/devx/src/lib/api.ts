@@ -2,7 +2,7 @@ import { API_BASE } from "./config";
 import type {
   Chat, Message, DevxSettings, ProviderConfigRecord, AgentTodo, ToolCall, ConsentRequest,
   App, DevServerStatus, FileTreeEntry, Problem,
-  GitFile, GitCommit, GitBranches, GitHubStatus, GitHubDeviceCode, GitHubRepo,
+  GitFile, GitCommit, GitBranches, GitWorktree, GitHubStatus, GitHubDeviceCode, GitHubRepo,
   McpServer, McpTool, Plan, QuestionnaireRequest, BuildAction,
   SupabaseStatus, SupabaseDeployConfig, SupabaseProject, Deployment, DeployStep,
   SecurityReview,
@@ -374,6 +374,25 @@ export async function gitDeleteBranch(appId: string, name: string): Promise<void
   await apiFetch(`/apps/${appId}/git/branches/delete`, {
     method: "POST",
     body: JSON.stringify({ name }),
+  });
+}
+
+// Worktrees (agent-driven run isolation)
+export async function getGitWorktrees(appId: string): Promise<{ worktrees: GitWorktree[] }> {
+  return apiFetch(`/apps/${appId}/git/worktrees`);
+}
+
+export async function mergeGitWorktree(appId: string, branch: string, path?: string): Promise<{ ok: boolean; message?: string }> {
+  return apiFetch(`/apps/${appId}/git/worktrees/merge`, {
+    method: "POST",
+    body: JSON.stringify({ branch, path }),
+  });
+}
+
+export async function discardGitWorktree(appId: string, branch: string | null, path: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/apps/${appId}/git/worktrees/discard`, {
+    method: "POST",
+    body: JSON.stringify({ branch, path }),
   });
 }
 

@@ -253,6 +253,16 @@ export interface GitBranches {
   branches: string[];
 }
 
+export interface GitWorktree {
+  path: string;
+  branch: string | null;
+  head: string;
+  isMain: boolean;
+  status: GitFile[];
+  runId: string | null;
+  runStatus?: string | null;
+}
+
 // GitHub types
 export interface GitHubStatus {
   connected: boolean;
