@@ -95,9 +95,10 @@ Deno.test("getResourceDefinition populates childrenByType for choice value[x]", 
   const sd = reg.getResourceDefinition("Patient");
   assert(sd !== undefined);
 
-  const valueEl = sd.elements.find((e) => e.name === "value[x]");
-  assert(valueEl !== undefined, "value[x] element should be present");
-  assert(valueEl.isChoice, "value[x] should be a choice element");
+  // The `[x]` suffix is stripped in the resolved copy (UI binds to value<Type>).
+  const valueEl = sd.elements.find((e) => e.name === "value" && e.isChoice);
+  assert(valueEl !== undefined, "choice value element should be present (name stripped of [x])");
+  assert(valueEl.isChoice, "value should be a choice element");
   assert(valueEl.childrenByType !== undefined, "childrenByType should be populated");
 
   const quantityChildren = valueEl.childrenByType!["Quantity"];

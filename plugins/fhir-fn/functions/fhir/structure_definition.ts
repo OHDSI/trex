@@ -294,7 +294,10 @@ export class DefinitionRegistry {
     for (const e of els) {
       if (SKIP_ALWAYS.has(e.name)) continue;
       if (isRoot && SKIP_ROOT.has(e.name)) continue;
-      out.push({ ...e, children: this._filterClone(e.children ?? [], false) });
+      // For choice elements the UI binds to `${base}${Type}` (e.g. valueQuantity),
+      // so strip the `[x]` suffix from the name in the resolved copy.
+      const name = e.isChoice ? e.name.replace(/\[x\]$/, "") : e.name;
+      out.push({ ...e, name, children: this._filterClone(e.children ?? [], false) });
     }
     return out;
   }
