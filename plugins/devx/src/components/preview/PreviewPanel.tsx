@@ -15,6 +15,7 @@ import { useReviewAgents } from "@/hooks/useReviewAgents";
 import { useAgentRuns } from "@/hooks/useAgentRuns";
 import type { App } from "@/lib/types";
 import * as api from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 interface PreviewPanelProps {
   appId: string | null;
@@ -27,11 +28,25 @@ interface PreviewPanelProps {
 }
 
 export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWithAI, onComponentsSelected, refreshSignal, onFixPrompt }: PreviewPanelProps) {
-  const [activeTab, setActiveTab] = useState("plan");
+  const [activeTab, setActiveTab] = useState("preview");
   const [app, setApp] = useState<App | null>(null);
   const [configRefresh, setConfigRefresh] = useState(0);
   const fileTree = useFileTree(appId);
   const devServer = useDevServer(appId);
+  const [userPickedTab, setUserPickedTab] = useState(false);
+
+  // Default to Preview when the dev server is running, else Plan — until the user picks a tab.
+  useEffect(() => {
+    if (userPickedTab) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setActiveTab(devServer.status?.status === "running" ? "preview" : "plan");
+  }, [devServer.status?.status, userPickedTab]);
+
+  const handleTabChange = useCallback((v: string) => {
+    setUserPickedTab(true);
+    setActiveTab(v);
+  }, []);
+
   const git = useGit(appId);
   const reviewAgents = useReviewAgents(appId || "");
   const agentRuns = useAgentRuns(appId);
@@ -61,52 +76,63 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
 
   return (
     <div className="flex flex-col h-full">
-      <Tabs value={activeTab} onValueChange={setActiveTab} className="flex flex-col h-full">
-        <TabsList className="w-full justify-start rounded-none border-b bg-transparent px-2 h-9 shrink-0">
-          <TabsTrigger value="plan" className="gap-1.5 text-xs">
-            <ClipboardList className="h-3.5 w-3.5" />
-            Plans
-          </TabsTrigger>
+      <Tabs value={activeTab} onValueChange={handleTabChange} className="flex flex-col h-full">
+        <TabsList className="w-full justify-start gap-1 rounded-none border-b bg-transparent px-2 h-9 shrink-0">
+          {/* destinations */}
           <TabsTrigger value="preview" className="gap-1.5 text-xs">
-            <Monitor className="h-3.5 w-3.5" />
-            Preview
+            <Monitor className="h-4 w-4" /> Preview
           </TabsTrigger>
           <TabsTrigger value="code" className="gap-1.5 text-xs">
-            <Code className="h-3.5 w-3.5" />
-            Code
+            <Code className="h-4 w-4" /> Code
           </TabsTrigger>
-          <TabsTrigger value="problems" className="gap-1.5 text-xs">
-            <AlertTriangle className="h-3.5 w-3.5" />
-            Checks
+          <TabsTrigger value="plan" className="gap-1.5 text-xs">
+            <ClipboardList className="h-4 w-4" /> Plan
           </TabsTrigger>
-          <TabsTrigger value="agents" className="gap-1.5 text-xs">
-            <Sparkles className="h-3.5 w-3.5" />
-            Agents
+
+          <div className="flex-1" />
+
+          {/* status rail: icon + count badge, label via title */}
+          <TabsTrigger value="problems" title="Checks" className="relative px-2 data-[state=active]:bg-accent">
+            <AlertTriangle className="h-4 w-4" />
+          </TabsTrigger>
+          <TabsTrigger value="agents" title="Agents" className="relative px-2 data-[state=active]:bg-accent">
+            <Sparkles className="h-4 w-4" />
             {reviewAgents.runningCount > 0 && (
-              <span className="ml-1 text-[10px] bg-blue-500/20 text-blue-600 px-1 rounded-full min-w-[16px] text-center">
+              <span className="ml-1 text-[10px] bg-brand text-brand-foreground px-1 rounded-full min-w-[16px] text-center">
                 {reviewAgents.runningCount}
               </span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="git" className="gap-1.5 text-xs">
-            <GitBranch className="h-3.5 w-3.5" />
-            Git
+          <TabsTrigger value="git" title="Git" className="relative px-2 data-[state=active]:bg-accent">
+            <GitBranch className="h-4 w-4" />
             {git.status.length > 0 && (
               <span className="ml-1 text-[10px] bg-yellow-500/20 text-yellow-600 px-1 rounded">
                 {git.status.length}
               </span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="publish" className="gap-1.5 text-xs">
-            <Package className="h-3.5 w-3.5" />
-            Export
-          </TabsTrigger>
+
+          <div className="mx-1 h-4 w-px bg-border" />
+
+          {/* Export action */}
+          <button
+            type="button"
+            onClick={() => handleTabChange("publish")}
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
+              activeTab === "publish"
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+            )}
+          >
+            <Package className="h-4 w-4" /> Export
+          </button>
         </TabsList>
 
         {appId && (
           <>
             <TabsContent value="preview" className="flex-1 m-0 overflow-hidden">
-              <PreviewTab appId={appId} app={app} devServer={devServer} onEditWithAI={onEditWithAI} onComponentsSelected={onComponentsSelected} refreshSignal={(refreshSignal || 0) + configRefresh} appConfig={app?.config} onConfigChanged={handleConfigChanged} onOpenFile={(path) => { fileTree.selectFile(path); setActiveTab("code"); }} />
+              <PreviewTab appId={appId} app={app} devServer={devServer} onEditWithAI={onEditWithAI} onComponentsSelected={onComponentsSelected} refreshSignal={(refreshSignal || 0) + configRefresh} appConfig={app?.config} onConfigChanged={handleConfigChanged} onOpenFile={(path) => { fileTree.selectFile(path); handleTabChange("code"); }} />
             </TabsContent>
             <TabsContent value="code" className="flex-1 m-0 overflow-hidden">
               <CodeTab appId={appId} fileTree={fileTree} onFixPrompt={onFixPrompt} />
@@ -116,7 +142,7 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
                 appId={appId}
                 onOpenFile={(path) => {
                   fileTree.selectFile(path);
-                  setActiveTab("code");
+                  handleTabChange("code");
                 }}
                 onFixPrompt={onFixPrompt}
                 reviewAgents={reviewAgents}
