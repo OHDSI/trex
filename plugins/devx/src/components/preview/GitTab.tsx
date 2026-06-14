@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { GitBranch, GitCommitHorizontal, RefreshCw, ChevronDown, FileDiff, ArrowUp, ArrowDown } from "lucide-react";
+import { GitBranch, GitCommitHorizontal, RefreshCw, ChevronDown, FileDiff, ArrowUp, ArrowDown, FolderGit2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -18,11 +18,32 @@ interface GitTabProps {
 }
 
 export function GitTab({ git, appId }: GitTabProps) {
-  const { status, log, branches, loading, refresh } = git;
+  const { status, log, branches, worktrees, loading, refresh, mergeWorktree, discardWorktree } = git;
   const [commitMsg, setCommitMsg] = useState("");
   const [committing, setCommitting] = useState(false);
   const [syncing, setSyncing] = useState<null | "push" | "pull">(null);
   const [syncMsg, setSyncMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+  const [wtBusy, setWtBusy] = useState<string | null>(null);
+  const [wtMsg, setWtMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
+
+  const handleMergeWorktree = async (branch: string, path: string) => {
+    setWtBusy(path); setWtMsg(null);
+    try {
+      await mergeWorktree(branch, path);
+      setWtMsg({ kind: "ok", text: `Merged ${branch}` });
+    } catch (err) {
+      setWtMsg({ kind: "err", text: err instanceof Error ? err.message : "Merge failed" });
+    } finally { setWtBusy(null); }
+  };
+
+  const handleDiscardWorktree = async (branch: string | null, path: string) => {
+    setWtBusy(path); setWtMsg(null);
+    try {
+      await discardWorktree(branch, path);
+    } catch (err) {
+      setWtMsg({ kind: "err", text: err instanceof Error ? err.message : "Discard failed" });
+    } finally { setWtBusy(null); }
+  };
 
   const handleCommit = async () => {
     if (!commitMsg.trim() || status.length === 0 || committing) return;
@@ -176,6 +197,51 @@ export function GitTab({ git, appId }: GitTabProps) {
       </div>
 
       <div className="flex-1 overflow-auto">
+        {/* Agent run worktrees */}
+        {worktrees.filter((w) => !w.isMain).length > 0 && (
+          <div className="border-b">
+            <div className="px-3 py-1.5 text-xs font-medium text-muted-foreground bg-muted/30 flex items-center gap-1.5">
+              <FolderGit2 className="h-3 w-3" />
+              Agent run worktrees ({worktrees.filter((w) => !w.isMain).length})
+            </div>
+            {worktrees.filter((w) => !w.isMain).map((w) => (
+              <div key={w.path} className="px-3 py-2 border-t first:border-t-0 flex items-center gap-2">
+                <GitBranch className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-xs font-medium truncate">{w.branch || w.head.slice(0, 7)}</div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {w.status.length} change{w.status.length === 1 ? "" : "s"}
+                    {w.runStatus ? ` · ${w.runStatus}` : ""}
+                  </div>
+                </div>
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="h-6 text-xs"
+                  disabled={wtBusy === w.path || !w.branch}
+                  onClick={() => w.branch && handleMergeWorktree(w.branch, w.path)}
+                >
+                  Merge
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-xs text-destructive"
+                  disabled={wtBusy === w.path}
+                  onClick={() => handleDiscardWorktree(w.branch, w.path)}
+                >
+                  Discard
+                </Button>
+              </div>
+            ))}
+            {wtMsg && (
+              <div className={`px-3 py-1 text-[11px] ${wtMsg.kind === "err" ? "text-destructive" : "text-green-600"}`} title={wtMsg.text}>
+                {wtMsg.text}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Uncommitted changes */}
         {status.length > 0 && (
           <div className="border-b">

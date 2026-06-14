@@ -131,13 +131,15 @@ export async function streamAgentChat({
   skillContext,
   commandOverride,
   hasComponentSelection,
+  // Optional isolated workspace (e.g. a git worktree for an agent-driven run)
+  workspacePathOverride,
 }) {
   // Dispatch to Claude Code SDK agent when that provider is selected
   if (settings.provider === "claude-code") {
     const { streamClaudeCodeChat } = await import("./claude_code_agent.ts");
     return streamClaudeCodeChat({
       chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-      skillContext, commandOverride, hasComponentSelection,
+      skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
     });
   }
 
@@ -146,7 +148,7 @@ export async function streamAgentChat({
     const { streamCopilotChat } = await import("./copilot_agent.ts");
     return streamCopilotChat({
       chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-      skillContext, commandOverride, hasComponentSelection,
+      skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
     });
   }
 
@@ -158,8 +160,11 @@ export async function streamAgentChat({
     ? { ...settings, model: commandOverride.model }
     : settings;
 
-  // Ensure workspace exists — app-scoped if chat belongs to an app
-  const workspacePath = appId
+  // Ensure workspace exists — app-scoped if chat belongs to an app, or an
+  // explicit override (e.g. an isolated git worktree for an agent-driven run).
+  const workspacePath = workspacePathOverride
+    ? workspacePathOverride
+    : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
 

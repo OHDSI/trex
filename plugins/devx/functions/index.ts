@@ -2,7 +2,7 @@
 import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
-import { ensureAppWorkspace, getAppWorkspacePath } from "./tools/workspace.ts";
+import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent } from "./tools/workspace.ts";
 import { safeJoin, EXCLUDED_DIRS, EXCLUDED_FILES } from "./tools/path_safety.ts";
 import { parseBuildTags, stripBuildTags } from "./build_tag_parser.ts";
 import { executeBuildTags } from "./build_tag_executor.ts";
@@ -823,15 +823,15 @@ Deno.serve(async (req: Request) => {
       const appIdParam = url.searchParams.get("app_id");
       const result = appIdParam
         ? await sql(
-            `SELECT id, parent_chat_id, agent_name, skill_name, task, status, created_at, completed_at
+            `SELECT id, parent_chat_id, parent_run_id, run_kind, branch, agent_name, skill_name, task, status, created_at, completed_at
              FROM devx.subagent_runs WHERE user_id = $1 AND app_id = $2
-             ORDER BY created_at DESC LIMIT 20`,
+             ORDER BY created_at DESC LIMIT 50`,
             [userId, appIdParam],
           )
         : await sql(
-            `SELECT id, parent_chat_id, agent_name, skill_name, task, status, created_at, completed_at
+            `SELECT id, parent_chat_id, parent_run_id, run_kind, branch, agent_name, skill_name, task, status, created_at, completed_at
              FROM devx.subagent_runs WHERE user_id = $1
-             ORDER BY created_at DESC LIMIT 20`,
+             ORDER BY created_at DESC LIMIT 50`,
             [userId],
           );
       return Response.json(result.rows, { headers: corsHeaders });
@@ -865,15 +865,35 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      const agentSettingsResult = await sql(
-        `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems
-         FROM devx.settings WHERE user_id = $1`,
+      // Resolve the active provider (multi-provider) with legacy fallback,
+      // mirroring POST /chats/:id/stream, so plan runs can use claude-code.
+      const activeProvider = (await sql(
+        `SELECT pc.provider, pc.model, pc.api_key, pc.base_url
+         FROM devx.provider_configs pc WHERE pc.user_id = $1 AND pc.is_active = true LIMIT 1`,
         [userId],
-      );
-      const agentSettings = agentSettingsResult.rows[0];
-      if (!agentSettings?.api_key) {
+      )).rows[0];
+      const agentPrefs = (await sql(
+        `SELECT ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+        [userId],
+      )).rows[0] || {};
+      let agentSettings = activeProvider
+        ? {
+            ...activeProvider,
+            ai_rules: agentPrefs.ai_rules || null,
+            max_steps: agentPrefs.max_steps ?? 100,
+            max_tool_steps: agentPrefs.max_tool_steps ?? 10,
+            auto_fix_problems: agentPrefs.auto_fix_problems ?? false,
+          }
+        : (await sql(
+            `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+            [userId],
+          )).rows[0];
+      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
+      if (!agentSettings || (!agentSettings.api_key && !noKeyProviders.has(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
       }
+      // Agent-driven runs are autonomous.
+      agentSettings = { ...agentSettings, auto_approve: true };
 
       const stream = new ReadableStream({
         async start(controller) {
@@ -888,7 +908,11 @@ Deno.serve(async (req: Request) => {
           try {
             const { streamAgentChat } = await import("./agent.ts");
 
-            // Log tool calls and chunks as subagent messages
+            // Map SDK Task ids → child subagent_runs ids (for nested display).
+            const childRuns = new Map<string, string>();
+
+            // Log tool calls as subagent messages; bridge SDK Task subagents
+            // into child subagent_runs rows (parent_run_id = this run).
             const agentSend = (data: any) => {
               send(data); // Forward to SSE
               if (data.type === "tool_call_start") {
@@ -897,33 +921,101 @@ Deno.serve(async (req: Request) => {
                    VALUES ($1, 'tool', $2, $3, $4)`,
                   [runId, JSON.stringify(data.args || {}), data.name, data.callId],
                 ).catch(() => {});
+              } else if (data.type === "subagent_start" && data.taskId) {
+                sql(
+                  `INSERT INTO devx.subagent_runs
+                     (parent_chat_id, parent_run_id, agent_name, task, user_id, app_id, run_kind, status)
+                   VALUES ($1, $2, $3, $4, $5, $6, 'subagent', 'running') RETURNING id`,
+                  [run.parent_chat_id, runId, (data.name || "subagent").slice(0, 200), (data.task || "").slice(0, 4000), userId, run.app_id],
+                ).then((r) => { if (r.rows[0]) childRuns.set(data.taskId, r.rows[0].id); }).catch(() => {});
+              } else if (data.type === "subagent_step" && data.taskId && data.lastTool) {
+                const cid = childRuns.get(data.taskId);
+                if (cid) {
+                  sql(
+                    `INSERT INTO devx.subagent_messages (run_id, role, content, tool_name) VALUES ($1, 'tool', $2, $3)`,
+                    [cid, (data.summary || "").slice(0, 4000), data.lastTool],
+                  ).catch(() => {});
+                }
+              } else if (data.type === "subagent_done" && data.taskId) {
+                const cid = childRuns.get(data.taskId);
+                if (cid) {
+                  sql(
+                    `UPDATE devx.subagent_runs SET status = $1, result = $2, completed_at = NOW() WHERE id = $3`,
+                    [data.status === "completed" ? "completed" : "failed", (data.result || "").slice(0, 50000), cid],
+                  ).catch(() => {});
+                }
               }
             };
 
-            const result = await streamAgentChat({
+            // Plan-execution runs get a directive prompt that pre-decides
+            // subagent-driven execution (so the skill won't re-ask), and run on
+            // the claude-code path where superpowers skills are invocable.
+            const isPlanRun = run.run_kind === "agent" && !!run.plan_id;
+            const runPrompt = isPlanRun
+              ? `Execute the following implementation plan using the subagent-driven-development skill. Do not ask which execution strategy to use — use subagent-driven execution. Implement everything end-to-end with your tools.\n\nPLAN:\n${run.task}`
+              : run.task + ". Use your tools to thoroughly analyze the project.";
+
+            // Isolate agent-driven plan runs in a dedicated git worktree on a
+            // run/<id> branch, so concurrent runs don't collide and the work is
+            // reviewable/mergeable from the Git tab. Non-fatal on failure.
+            let cwdOverride: string | undefined;
+            if (isPlanRun && run.app_id) {
+              try {
+                const repoRoot = getAppWorkspacePath(userId, run.app_id);
+                await ensureWorktreeParent(userId, run.app_id);
+                const wtPath = getRunWorktreePath(userId, run.app_id, runId);
+                const branch = `run/${runId.slice(0, 8)}`;
+                await gitOps.worktreeAdd(repoRoot, wtPath, branch);
+                cwdOverride = wtPath;
+                await sql(
+                  `UPDATE devx.subagent_runs SET branch = $1, worktree_path = $2 WHERE id = $3`,
+                  [branch, wtPath, runId],
+                );
+                agentSend({ type: "chunk", content: `\n> 🌿 Isolated worktree \`${branch}\` created — review/merge it from the Git tab.\n\n` });
+              } catch (e) {
+                agentSend({ type: "chunk", content: `\n> ⚠️ Could not create an isolated worktree (${e.message}); running in the main tree.\n\n` });
+              }
+            }
+
+            const baseArgs = {
               chatId: `agent-run-${runId}`,
               userId,
               appId: run.app_id,
-              chatMode: "agent",
-              settings: {
-                ...agentSettings,
-                max_steps: matchedSkill?.allowed_tools ? 100 : 100,
-                auto_approve: true,
-              },
-              history: [{ role: "user", content: run.task + ". Use your tools to thoroughly analyze the project." }],
+              chatMode: "agent" as const,
+              settings: { ...agentSettings, max_steps: 100, auto_approve: true },
+              history: [{ role: "user", content: runPrompt }],
               send: agentSend,
               sqlFn: sql,
               skillContext: skillBody,
               commandOverride: matchedSkill?.allowed_tools
                 ? { allowed_tools: matchedSkill.allowed_tools, model: null, body: "" }
                 : undefined,
-            });
+              workspacePathOverride: cwdOverride,
+            };
+
+            let result;
+            if (isPlanRun && agentSettings.provider === "claude-code") {
+              const { streamClaudeCodeChat } = await import("./claude_code_agent.ts");
+              result = await streamClaudeCodeChat(baseArgs);
+            } else {
+              if (isPlanRun && agentSettings.provider !== "claude-code") {
+                agentSend({ type: "chunk", content: "\n> ⚠️ Subagent-driven execution needs the Claude Code provider; running in basic autonomous mode.\n\n" });
+              }
+              result = await streamAgentChat(baseArgs);
+            }
 
             const fullContent = result.content || "";
             await sql(
               `UPDATE devx.subagent_runs SET status = 'completed', result = $1, completed_at = NOW() WHERE id = $2`,
               [fullContent.slice(0, 50000), runId],
             );
+            // Plan-execution runs mark their plan implemented on success.
+            if (run.plan_id) {
+              await sql(
+                `UPDATE devx.plans SET status = 'implemented', updated_at = NOW() WHERE id = $1`,
+                [run.plan_id],
+              ).catch(() => {});
+            }
             // Save final assistant message
             await sql(
               `INSERT INTO devx.subagent_messages (run_id, role, content) VALUES ($1, 'assistant', $2)`,

@@ -60,7 +60,7 @@ async function ensureClaudeCodeServer() {
 
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-  skillContext, commandOverride, hasComponentSelection,
+  skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
 }) {
   const mode = chatMode || "agent";
   const maxSteps = settings.max_steps || 100;
@@ -68,7 +68,10 @@ export async function streamClaudeCodeChat({
     ? { ...settings, model: commandOverride.model }
     : settings;
 
-  const workspacePath = appId
+  // Optional isolated workspace (git worktree for an agent-driven run).
+  const workspacePath = workspacePathOverride
+    ? workspacePathOverride
+    : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
 
@@ -227,6 +230,15 @@ export async function streamClaudeCodeChat({
                 }).catch(() => {});
                 break;
               }
+              case "subagent_start":
+                send({ type: "subagent_start", taskId: data.taskId, name: data.name, task: data.task });
+                break;
+              case "subagent_step":
+                send({ type: "subagent_step", taskId: data.taskId, step: data.step, lastTool: data.lastTool, summary: data.summary });
+                break;
+              case "subagent_done":
+                send({ type: "subagent_done", taskId: data.taskId, status: data.status, result: data.result });
+                break;
               case "error":
                 throw new Error(data.error);
               case "done":

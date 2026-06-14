@@ -10,7 +10,6 @@ import type { VisualEditContext, SelectedComponent } from "@/lib/visual-editing-
 
 interface ChatPanelProps {
   chatId: string | null;
-  mode: ChatMode;
   onModeChange: (mode: ChatMode) => void;
   onPlanContentChange?: (content: string | null) => void;
   visualEditContext?: VisualEditContext | null;
@@ -24,7 +23,7 @@ interface ChatPanelProps {
   onNewChat?: () => void;
 }
 
-export function ChatPanel({ chatId, mode, onModeChange, onPlanContentChange, visualEditContext, onClearVisualEditContext, selectedComponents, onRemoveSelectedComponent, onClearSelectedComponents, onAppCommand, onBuildAction, sendRef, onNewChat }: ChatPanelProps) {
+export function ChatPanel({ chatId, onModeChange, onPlanContentChange, visualEditContext, onClearVisualEditContext, selectedComponents, onRemoveSelectedComponent, onClearSelectedComponents, onAppCommand, onBuildAction, sendRef, onNewChat }: ChatPanelProps) {
   const {
     messages,
     streaming,
@@ -103,8 +102,6 @@ export function ChatPanel({ chatId, mode, onModeChange, onPlanContentChange, vis
         onCancel={cancel}
         streaming={streaming}
         disabled={!chatId}
-        mode={mode}
-        onModeChange={onModeChange}
         todos={todos}
         consentRequest={consentRequest}
         consentError={consentError}

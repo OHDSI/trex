@@ -193,5 +193,90 @@ export async function handleGitRoutes(path, method, req, userId, sql, corsHeader
     }
   }
 
+  // GET /apps/:id/git/worktrees — list run worktrees with per-worktree status
+  const wtListMatch = path.match(/\/apps\/([^/]+)\/git\/worktrees$/);
+  if (wtListMatch && method === "GET") {
+    const appId = wtListMatch[1];
+    const appCheck = await sql(`SELECT id FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
+    if (appCheck.rows.length === 0) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const repoRoot = getAppWorkspacePath(userId, appId);
+    try {
+      await gitOps.worktreePrune(repoRoot);
+      const list = await gitOps.worktreeList(repoRoot);
+      const runs = (await sql(
+        `SELECT id, branch, status FROM devx.subagent_runs WHERE app_id = $1 AND branch IS NOT NULL`,
+        [appId],
+      )).rows;
+      const worktrees = [];
+      for (const wt of list) {
+        const isMain = !wt.path.includes("/.worktrees/");
+        let files = [];
+        try { files = (await gitOps.status(wt.path)).files || []; } catch { /* worktree may be gone */ }
+        const run = runs.find((r) => r.branch === wt.branch);
+        worktrees.push({
+          path: wt.path,
+          branch: wt.branch,
+          head: wt.head,
+          isMain,
+          status: files,
+          runId: run?.id || null,
+          runStatus: run?.status || null,
+        });
+      }
+      return Response.json({ worktrees }, { headers: corsHeaders });
+    } catch (err) {
+      return Response.json({ worktrees: [], error: err.message }, { headers: corsHeaders });
+    }
+  }
+
+  // POST /apps/:id/git/worktrees/merge — merge a run branch into the base tree, then remove the worktree
+  const wtMergeMatch = path.match(/\/apps\/([^/]+)\/git\/worktrees\/merge$/);
+  if (wtMergeMatch && method === "POST") {
+    const appId = wtMergeMatch[1];
+    const appCheck = await sql(`SELECT id FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
+    if (appCheck.rows.length === 0) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const { branch, path: wtPath } = await req.json();
+    if (!branch) {
+      return Response.json({ error: "branch required" }, { status: 400, headers: corsHeaders });
+    }
+    const repoRoot = getAppWorkspacePath(userId, appId);
+    try {
+      const out = await gitOps.withLock(repoRoot, async () => {
+        const msg = await gitOps.mergeBranch(repoRoot, branch);
+        if (wtPath) { try { await gitOps.worktreeRemove(repoRoot, wtPath, false); } catch { /* leave worktree */ } }
+        try { await gitOps.deleteBranch(repoRoot, branch, false); } catch { /* keep if not fully merged */ }
+        return msg;
+      });
+      return Response.json({ ok: true, message: out }, { headers: corsHeaders });
+    } catch (err) {
+      return Response.json({ error: err.message }, { status: 400, headers: corsHeaders });
+    }
+  }
+
+  // POST /apps/:id/git/worktrees/discard — remove a run worktree and delete its branch
+  const wtDiscardMatch = path.match(/\/apps\/([^/]+)\/git\/worktrees\/discard$/);
+  if (wtDiscardMatch && method === "POST") {
+    const appId = wtDiscardMatch[1];
+    const appCheck = await sql(`SELECT id FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
+    if (appCheck.rows.length === 0) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const { branch, path: wtPath } = await req.json();
+    const repoRoot = getAppWorkspacePath(userId, appId);
+    try {
+      await gitOps.withLock(repoRoot, async () => {
+        if (wtPath) await gitOps.worktreeRemove(repoRoot, wtPath, true);
+        if (branch) { try { await gitOps.deleteBranch(repoRoot, branch, true); } catch { /* */ } }
+      });
+      return Response.json({ ok: true }, { headers: corsHeaders });
+    } catch (err) {
+      return Response.json({ error: err.message }, { status: 400, headers: corsHeaders });
+    }
+  }
+
   return null;
 }

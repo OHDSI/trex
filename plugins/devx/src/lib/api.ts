@@ -2,7 +2,7 @@ import { API_BASE } from "./config";
 import type {
   Chat, Message, DevxSettings, ProviderConfigRecord, AgentTodo, ToolCall, ConsentRequest,
   App, DevServerStatus, FileTreeEntry, Problem,
-  GitFile, GitCommit, GitBranches, GitHubStatus, GitHubDeviceCode, GitHubRepo,
+  GitFile, GitCommit, GitBranches, GitWorktree, GitHubStatus, GitHubDeviceCode, GitHubRepo,
   McpServer, McpTool, Plan, QuestionnaireRequest, BuildAction,
   SupabaseStatus, SupabaseDeployConfig, SupabaseProject, Deployment, DeployStep,
   SecurityReview,
@@ -377,6 +377,25 @@ export async function gitDeleteBranch(appId: string, name: string): Promise<void
   });
 }
 
+// Worktrees (agent-driven run isolation)
+export async function getGitWorktrees(appId: string): Promise<{ worktrees: GitWorktree[] }> {
+  return apiFetch(`/apps/${appId}/git/worktrees`);
+}
+
+export async function mergeGitWorktree(appId: string, branch: string, path?: string): Promise<{ ok: boolean; message?: string }> {
+  return apiFetch(`/apps/${appId}/git/worktrees/merge`, {
+    method: "POST",
+    body: JSON.stringify({ branch, path }),
+  });
+}
+
+export async function discardGitWorktree(appId: string, branch: string | null, path: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/apps/${appId}/git/worktrees/discard`, {
+    method: "POST",
+    body: JSON.stringify({ branch, path }),
+  });
+}
+
 // GitHub
 export async function startGitHubDeviceFlow(): Promise<GitHubDeviceCode> {
   return apiFetch("/integrations/github/device-code", { method: "POST" });
@@ -532,6 +551,12 @@ export async function updatePlanStatus(planId: string, status: Plan["status"]): 
     method: "PATCH",
     body: JSON.stringify({ status }),
   });
+}
+
+/** Start an agent-driven run that implements the plan via the subagent-driven
+ * skill. Returns the new agent-run id (surfaces in the Agents tab). */
+export async function executePlan(planId: string): Promise<{ runId: string }> {
+  return apiFetch(`/plans/${planId}/execute`, { method: "POST" });
 }
 
 // Security

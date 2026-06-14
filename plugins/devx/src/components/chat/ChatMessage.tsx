@@ -1,7 +1,7 @@
 import { memo, useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Bot, User, Copy, Check, Loader2 } from "lucide-react";
+import { Sparkles, User, Copy, Check, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -282,7 +282,7 @@ export const ChatMessage = memo(function ChatMessage({
     >
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border bg-background">
         {isAssistant ? (
-          <Bot className="h-4 w-4" />
+          <Sparkles className="h-4 w-4" />
         ) : (
           <User className="h-4 w-4" />
         )}

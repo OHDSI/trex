@@ -8,12 +8,13 @@ import {
   TestTube2,
   Palette,
   XCircle,
-  Bot,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
 import type { ReviewAgent, ReviewType } from "@/hooks/useReviewAgents";
 import type { AgentRunState } from "@/hooks/useAgentRuns";
+import type { SubagentRun } from "@/lib/types";
 
 interface AgentsTabProps {
   agents: ReviewAgent[];
@@ -21,6 +22,7 @@ interface AgentsTabProps {
   agentRuns: Map<string, AgentRunState>;
   onExpandRun: (runId: string) => void;
   onStopRun: (runId: string) => void;
+  childrenByParent?: Map<string, SubagentRun[]>;
 }
 
 const ICONS: Record<ReviewType, React.ElementType> = {
@@ -144,11 +146,11 @@ function ToolCallList({ messages }: { messages: { tool_name?: string | null; cre
   );
 }
 
-export function AgentsTab({ agents, onStop, agentRuns, onExpandRun, onStopRun }: AgentsTabProps) {
+export function AgentsTab({ agents, onStop, agentRuns, onExpandRun, onStopRun, childrenByParent }: AgentsTabProps) {
   const reviewsWithActivity = agents.filter(a => a.running || a.logs.length > 0);
-  const subagentEntries = Array.from(agentRuns.values()).sort(
-    (a, b) => new Date(b.run.created_at).getTime() - new Date(a.run.created_at).getTime(),
-  );
+  const subagentEntries = Array.from(agentRuns.values())
+    .filter((s) => !s.run.parent_run_id) // top-level runs only; children render nested
+    .sort((a, b) => new Date(b.run.created_at).getTime() - new Date(a.run.created_at).getTime());
 
   const hasActivity = reviewsWithActivity.length > 0 || subagentEntries.length > 0;
 
@@ -156,7 +158,7 @@ export function AgentsTab({ agents, onStop, agentRuns, onExpandRun, onStopRun }:
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
         <div className="text-center space-y-2">
-          <Bot className="h-8 w-8 mx-auto opacity-30" />
+          <Sparkles className="h-8 w-8 mx-auto opacity-30" />
           <p className="text-xs">No agents running.</p>
           <p className="text-xs">Use <code className="bg-muted px-1 rounded">/agent /review</code> to start one.</p>
         </div>
@@ -186,8 +188,11 @@ export function AgentsTab({ agents, onStop, agentRuns, onExpandRun, onStopRun }:
         {subagentEntries.map((state) => (
           <AccordionItem key={state.run.id} value={state.run.id}>
             <AccordionTrigger>
-              <Bot className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+              <Sparkles className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
               <span className="text-xs font-medium truncate">{state.run.agent_name}</span>
+              {state.run.branch && (
+                <span className="text-[10px] text-muted-foreground font-mono shrink-0" title="Isolated worktree branch — see Git tab">{state.run.branch}</span>
+              )}
               <StatusBadge status={state.run.status} />
               <div className="flex-1 mx-2">
                 {(state.step > 0 || state.run.status === "running") && (
@@ -209,6 +214,18 @@ export function AgentsTab({ agents, onStop, agentRuns, onExpandRun, onStopRun }:
             <AccordionContent>
               <ToolCallList messages={state.messages} />
               <StreamViewer content={state.streamContent || state.run.result || ""} />
+              {(childrenByParent?.get(state.run.id)?.length ?? 0) > 0 && (
+                <div className="mt-2 ml-3 border-l pl-3 space-y-1">
+                  <div className="text-[10px] uppercase tracking-wide text-muted-foreground">Sub-agents</div>
+                  {childrenByParent!.get(state.run.id)!.map((child) => (
+                    <div key={child.id} className="flex items-center gap-2 py-1">
+                      <Sparkles className="h-3 w-3 text-muted-foreground shrink-0" />
+                      <span className="text-xs truncate flex-1">{child.agent_name}</span>
+                      <StatusBadge status={child.status} />
+                    </div>
+                  ))}
+                </div>
+              )}
             </AccordionContent>
           </AccordionItem>
         ))}

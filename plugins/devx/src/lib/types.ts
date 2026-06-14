@@ -28,14 +28,6 @@ export const CHAT_MODES: { id: ChatMode; label: string; description: string }[] 
   { id: "ask", label: "Chat", description: "Chat without code changes" },
 ];
 
-export type LayoutMode = "left-only" | "split" | "right-only";
-export type PanelContent = "chat" | "preview";
-export interface PanelAssignment { left: PanelContent; right: PanelContent; }
-export const LAYOUT_MODES: { id: LayoutMode; label: string }[] = [
-  { id: "left-only", label: "Left only" },
-  { id: "split", label: "Split" },
-  { id: "right-only", label: "Right only" },
-];
 
 export interface DevxSettings {
   id: string;
@@ -261,6 +253,16 @@ export interface GitBranches {
   branches: string[];
 }
 
+export interface GitWorktree {
+  path: string;
+  branch: string | null;
+  head: string;
+  isMain: boolean;
+  status: GitFile[];
+  runId: string | null;
+  runStatus?: string | null;
+}
+
 // GitHub types
 export interface GitHubStatus {
   connected: boolean;
@@ -410,6 +412,12 @@ export interface SubagentRun {
   result?: string | null;
   created_at: string;
   completed_at: string | null;
+  app_id?: string | null;
+  run_kind?: "agent" | "subagent" | null;
+  plan_id?: string | null;
+  branch?: string | null;
+  worktree_path?: string | null;
+  parent_run_id?: string | null;
 }
 
 /** Item returned by /slash-completions endpoint */
