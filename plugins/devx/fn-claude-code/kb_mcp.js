@@ -10,11 +10,26 @@ import { createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { promises as fs } from "node:fs";
 import { exec } from "node:child_process";
-import { join, relative, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 const execAsync = promisify(exec);
 const KB_BASE_DIR = "/tmp/devx-kb";
+
+// Local, pre-bundled doc sources shipped inside the devx plugin (no git clone,
+// no network). They live under fn-claude-code/kb-local/<id>/ and are read with
+// the exact same KBRead/KBSearch/KBListFiles/KBOverview/KBFindSymbols tools as
+// the cloneable OHDSI repos — they just never need KBInit. trex-docs is copied
+// in at image-build time (see Dockerfile.dx); d2e is authored in-repo.
+const KB_LOCAL_DIR = join(dirname(fileURLToPath(import.meta.url)), "kb-local");
+const LOCAL_SOURCES = {
+  "trex-docs": join(KB_LOCAL_DIR, "trex-docs"),
+  "d2e": join(KB_LOCAL_DIR, "d2e"),
+};
+const isLocalSource = (repo) => Object.prototype.hasOwnProperty.call(LOCAL_SOURCES, repo);
+// Where a repo's files live on disk: a bundled local dir, or the cloned copy.
+const repoDir = (repo) => LOCAL_SOURCES[repo] ?? join(KB_BASE_DIR, repo);
 
 const SUPPORTED_REPOS = {
   // Core
@@ -72,6 +87,13 @@ const SUPPORTED_REPOS = {
 };
 
 const REPO_CATEGORIES = {
+  "local": {
+    description: "Bundled local docs — always available, no clone needed",
+    repos: {
+      "trex-docs": "trex platform documentation (Docusaurus) — APIs, plugins, concepts, SQL reference, tutorials, deployment",
+      "d2e": "Data2Evidence (d2e) architecture & services summary — reference for developing d2e features in trex",
+    },
+  },
   "atlas": {
     description: "OHDSI Atlas platform and backend",
     repos: {
@@ -197,6 +219,15 @@ function validateRepo(repo) {
 }
 
 async function ensureKbExists(repo) {
+  // Local sources are shipped in the image — no clone, just confirm they're present.
+  if (isLocalSource(repo)) {
+    const localPath = LOCAL_SOURCES[repo];
+    try {
+      const stat = await fs.stat(localPath);
+      if (stat.isDirectory()) return localPath;
+    } catch { /* fall through */ }
+    throw new Error(`Bundled knowledge base "${repo}" is missing from the image at ${localPath}.`);
+  }
   validateRepo(repo);
   const kbPath = join(KB_BASE_DIR, repo);
   try {
@@ -244,10 +275,10 @@ const kbListRepos = tool(
     for (const [catId, cat] of Object.entries(categories)) {
       lines.push(`## ${catId} — ${cat.description}`);
       for (const [repoId, desc] of Object.entries(cat.repos)) {
-        let status = "";
+        let status = isLocalSource(repoId) ? " [bundled]" : "";
         try {
-          await fs.stat(join(KB_BASE_DIR, repoId));
-          status = " [initialized]";
+          await fs.stat(repoDir(repoId));
+          if (!isLocalSource(repoId)) status = " [initialized]";
         } catch { /* not cloned */ }
         lines.push(`  ${repoId}${status} — ${desc}`);
       }
@@ -265,6 +296,9 @@ const kbInit = tool(
     "Skips if already cloned. Use KBListRepos to see all available repos.",
   { repo: z.string() },
   async (args) => {
+    if (isLocalSource(args.repo)) {
+      return textResult(`"${args.repo}" is a bundled local source — always available, no clone needed. Use KBOverview/KBListFiles/KBSearch/KBRead directly.`);
+    }
     const url = validateRepo(args.repo);
     const kbPath = join(KB_BASE_DIR, args.repo);
     try {
@@ -275,7 +309,10 @@ const kbInit = tool(
     try {
       await execAsync(`git clone --depth 1 ${url} ${args.repo}`, { cwd: KB_BASE_DIR, maxBuffer: 50 * 1024 * 1024 });
     } catch (err) {
-      throw new Error(`Failed to clone ${url}: ${err.stderr || err.message}`);
+      throw new Error(
+        `Failed to clone ${url} (this requires network + git access from the container): ` +
+          `${err.stderr || err.message}. For trex/d2e questions use the bundled "trex-docs" / "d2e" sources, which need no clone.`,
+      );
     }
     return textResult(`Successfully cloned OHDSI/${args.repo} to ${kbPath}`);
   },
@@ -465,7 +502,7 @@ const kbOverview = tool(
     await walk(kbPath);
 
     const lines = [
-      `# ${args.repo} (OHDSI/${args.repo})`,
+      isLocalSource(args.repo) ? `# ${args.repo} (bundled local source)` : `# ${args.repo} (OHDSI/${args.repo})`,
       "",
       "## Top-level structure",
       ...topLevel.map((e) => `  ${e}`),

@@ -39,6 +39,12 @@ RUN make configure EXTENSION_VERSION="${DEVX_EXT_VERSION}" && \
 FROM node:22-trixie-slim AS devx-builder
 WORKDIR /work
 COPY plugins/devx/ /work/
+# Bundle the trex Docusaurus docs as a local knowledge-base source so the agent
+# can query them via the kb MCP server's `trex-docs` source — no clone, no
+# network at runtime. Source of truth stays in plugins/docs; this is a build-time
+# snapshot. (The `d2e` local source is authored in-repo under fn-claude-code/
+# kb-local/d2e and ships via the COPY above.)
+COPY plugins/docs/docs/ /work/fn-claude-code/kb-local/trex-docs/
 # Build the SPA, then install runtime deps for the two agent sidecar servers.
 RUN npm ci && \
     npm run build && \

@@ -571,24 +571,35 @@ Do NOT ask the user for permission to search — just do it when it would help.
 </web_research>`;
 
 const KNOWLEDGE_BASE_BLOCK = `<knowledge_base>
-You have access to an OHDSI knowledge base — cloneable reference repositories covering the full OHDSI ecosystem (Strategus, HADES packages, Atlas/WebAPI, cohort libraries, the Book of OHDSI, and canonical study templates). Prefer it over web search for OHDSI/OMOP/Strategus questions: the code is authoritative, offline, and grep-able.
+You have a knowledge base of reference docs and code, exposed as MCP tools (their full
+names are \`mcp__kb__KBListRepos\`, \`mcp__kb__KBInit\`, \`mcp__kb__KBSearch\`,
+\`mcp__kb__KBFindSymbols\`, \`mcp__kb__KBRead\`, \`mcp__kb__KBListFiles\`, \`mcp__kb__KBOverview\`).
+Prefer the knowledge base over web search for trex, OHDSI/OMOP/Strategus, and d2e questions:
+it is authoritative, offline, and grep-able.
+
+It contains two kinds of sources:
+1. **Bundled local sources** — always available, NO clone needed, NO network:
+   - \`trex-docs\` — the trex platform documentation (APIs, plugins, concepts, SQL reference, tutorials, deployment, operations). Consult this first for any question about trex itself.
+   - \`d2e\` — a Data2Evidence architecture & services summary. Consult when developing or reasoning about d2e features in trex.
+2. **Cloneable OHDSI repos** — the full OHDSI ecosystem (Strategus, HADES packages, Atlas/WebAPI, cohort libraries, the Book of OHDSI, study templates). These require \`mcp__kb__KBInit\` to clone first (needs network + git).
 
 Tools:
-- \`KBListRepos\` - Discover what's available (categories: orchestration, estimation, prediction, characterization, cohorts, quality, infrastructure, studies, reference)
-- \`KBInit\` - Clone a repo (e.g. \`strategus\`, \`book-of-ohdsi-2nd\`, \`phenotype-library\`, \`strategus-study-template\`, \`ehden-hmb\`, \`legendt2dm\`, \`reward\`)
-- \`KBSearch\` - Grep for a pattern inside a cloned repo
-- \`KBFindSymbols\` - Locate function/class/type definitions
-- \`KBRead\` - Read a specific file (optionally by line range)
-- \`KBListFiles\` / \`KBOverview\` - Browse repo structure
+- \`mcp__kb__KBListRepos\` - Discover what's available (categories include: local, atlas, orchestration, estimation, prediction, characterization, cohorts, quality, infrastructure, studies, reference)
+- \`mcp__kb__KBInit\` - Clone an OHDSI repo (e.g. \`strategus\`, \`book-of-ohdsi-2nd\`, \`phenotype-library\`, \`strategus-study-template\`). Not needed for \`trex-docs\` / \`d2e\`.
+- \`mcp__kb__KBSearch\` - Grep for a pattern inside a source
+- \`mcp__kb__KBFindSymbols\` - Locate function/class/type definitions
+- \`mcp__kb__KBRead\` - Read a specific file (optionally by line range)
+- \`mcp__kb__KBListFiles\` / \`mcp__kb__KBOverview\` - Browse a source's structure
 
 When to consult the knowledge base:
-- Designing a Strategus study → clone \`strategus-study-template\` for the canonical file layout, and clone \`ehden-hmb\`, \`legendt2dm\`, and \`reward\` as reference implementations of real studies (optional but strongly recommended — real studies show correct module wiring, negative control sets, and parameter choices that are easy to get wrong).
-- Questions about OHDSI methodology, OMOP CDM concepts, propensity score methodology, empirical calibration → clone \`book-of-ohdsi-2nd\` and search it.
-- Module-specific settings (CohortMethod, SelfControlledCaseSeries, PatientLevelPrediction, Characterization, etc.) → clone the corresponding package repo and search it.
+- Anything about trex (plugins, SQL reference, connection pool, auth, deployment, MCP, embedding) → search \`trex-docs\`.
+- Developing or reasoning about d2e functionality → read \`d2e\`.
+- Designing a Strategus study → clone \`strategus-study-template\` for the canonical file layout; \`ehden-hmb\`, \`legendt2dm\`, and \`reward\` are real reference studies (strongly recommended — they show correct module wiring, negative control sets, and parameter choices that are easy to get wrong).
+- OHDSI methodology, OMOP CDM concepts, propensity scores, empirical calibration → clone \`book-of-ohdsi-2nd\`.
+- Module-specific settings (CohortMethod, SelfControlledCaseSeries, PatientLevelPrediction, Characterization, …) → clone the corresponding package repo.
 - Cohort definitions → \`phenotype-library\` has 1100+ pre-defined cohorts; search there before writing one by hand.
-- Atlas/WebAPI integration questions → clone \`atlas\` or \`webapi\`.
 
-Do NOT ask for permission to call \`KBListRepos\`, \`KBRead\`, \`KBSearch\`, \`KBFindSymbols\`, \`KBListFiles\`, or \`KBOverview\` — they're read-only. \`KBInit\` will prompt for consent once per repo.
+Do NOT ask for permission to call the read-only tools (\`KBListRepos\`, \`KBRead\`, \`KBSearch\`, \`KBFindSymbols\`, \`KBListFiles\`, \`KBOverview\`). \`KBInit\` will prompt for consent once per repo.
 </knowledge_base>`;
 
 const APP_COMMANDS_BLOCK = `<app_commands>

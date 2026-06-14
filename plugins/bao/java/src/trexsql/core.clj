@@ -48,8 +48,7 @@
 
 (defn select-mode
   "Pure mode-selector. Returns one of :scoped-or-default, :orchestrated,
-   :scoped, :default. See spec docs/superpowers/specs/2026-05-17-bao-delegates-to-db-orchestrator-design.md
-   for the precedence order.
+   :scoped, :default. See the precedence order below.
 
    `env` is the environment map (typically (System/getenv) wrapped) — passed
    in so the function stays pure and testable."

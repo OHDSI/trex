@@ -949,7 +949,7 @@ Deno.serve(async (req: Request) => {
 
             // Plan-execution runs get a directive prompt that pre-decides
             // subagent-driven execution (so the skill won't re-ask), and run on
-            // the claude-code path where superpowers skills are invocable.
+            // the claude-code path where the devx skills are invocable.
             const isPlanRun = run.run_kind === "agent" && !!run.plan_id;
             const runPrompt = isPlanRun
               ? `Execute the following implementation plan using the subagent-driven-development skill. Do not ask which execution strategy to use — use subagent-driven execution. Implement everything end-to-end with your tools.\n\nPLAN:\n${run.task}`

@@ -28,7 +28,7 @@ test_release: test_extension_release
 clean: clean_build clean_rust
 clean_all: clean_configure clean
 
-# ---- Coverage (cargo-llvm-cov, see docs/superpowers/specs/2026-05-17-test-infrastructure-and-coverage-design.md) ----
+# ---- Coverage (cargo-llvm-cov) ----
 
 .PHONY: coverage coverage_html debug_coverage
 
