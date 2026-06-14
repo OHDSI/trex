@@ -41,7 +41,7 @@ flowchart TD
 ```
 
 The pool is initialized at startup with a fixed number of connections. The
-size defaults to 64 but is configurable via the `TREX_POOL_SIZE` environment
+size defaults to 1024 but is configurable via the `TREX_POOL_SIZE` environment
 variable (`plugins/pool/src/lib.rs`). Every incoming pgwire connection, every
 transform query, and every CDC pipeline leases a connection from the pool,
 executes, and returns it. Leases that aren't returned within a timeout
@@ -99,8 +99,13 @@ This matters in two contexts:
 
 ## What you might tune
 
-- **`TREX_POOL_SIZE`** — number of connections in the pool (default 64). Raise
+- **`TREX_POOL_SIZE`** — number of connections in the pool (default 1024). Raise
   it if many concurrent sessions hold long leases.
+- **`TREX_PG_CONNECTION_LIMIT`** — cap on real Postgres connections the DuckDB
+  postgres extension opens per attached catalog (default 1024, extension default
+  64). Must be >= `TREX_POOL_SIZE` and <= the Postgres server's `max_connections`,
+  or sessions touching `_config.*` fail with "PostgresConnectionPool maximum
+  connection count exceeded".
 - **`TREX_POOL_LEASE_TIMEOUT_MS`** — how long a caller waits for a free
   connection before erroring out (default 30000). The error message points back
   at `TREX_POOL_SIZE` or a leaked/long-held session.

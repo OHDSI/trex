@@ -167,6 +167,22 @@ fn main() {
                 println!("FAILED to install postgres scanner: {e}");
             }
         }
+        // Cap on real connections the postgres extension opens per attached
+        // catalog. Must be >= TREX_POOL_SIZE, else pooled sessions that touch
+        // `_config.*` race for too few Postgres slots and fail with
+        // "PostgresConnectionPool maximum connection count exceeded". The
+        // extension default is 64; keep this in lockstep with the pool size.
+        let pg_connection_limit: usize = env::var("TREX_PG_CONNECTION_LIMIT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1024)
+            .max(1);
+        if let Err(e) = conn.execute(
+            &format!("SET pg_connection_limit = {pg_connection_limit}"),
+            [],
+        ) {
+            println!("WARN: failed to set pg_connection_limit: {e}");
+        }
         let attach_sql = format!("ATTACH '{safe_url}' AS _config (TYPE postgres)");
         match conn.execute(&attach_sql, []) {
             Ok(_) => println!("ok"),

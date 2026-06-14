@@ -43,7 +43,8 @@ plugin loaders.
 | `FUNCTIONS_DIR` | `./functions` | Directory scanned for built-in edge functions. |
 | `DEVX_WORKSPACE_DIR` | `/tmp/devx-workspaces` | Workspace root for the devx plugin. |
 | `DEVX_ENCRYPTION_KEY` | — | AES-256 key (64 hex chars) encrypting stored devx integration tokens (e.g. GitHub). Derived from `TREX_ROOT_KEY` under the `trex.devx.token.aes.v1` label by `trex-init`; supplied via `./secrets/derived.env` (`docker-compose.dx.yml:174`). |
-| `TREX_POOL_SIZE` | `64` | Shared DuckDB session pool size (pgwire + the function runtime's `sql()`). Must not exceed the DuckDB postgres extension's connection limit. |
+| `TREX_POOL_SIZE` | `1024` | Shared DuckDB session pool size (pgwire + the function runtime's `sql()`). Must not exceed `TREX_PG_CONNECTION_LIMIT`. |
+| `TREX_PG_CONNECTION_LIMIT` | `1024` | Cap on real Postgres connections the DuckDB postgres extension opens per attached catalog (e.g. `_config`). Must be >= `TREX_POOL_SIZE` and <= Postgres `max_connections`. Extension default is 64. |
 | `TREX_POOL_LEASE_TIMEOUT_MS` | `30000` | Bounds the lease wait so an exhausted pool fails the request instead of blocking forever. |
 | `TREX_WEB_NAV_EXTRA` | — | JSON array of extra nav entries injected into the web UI. |
 | `ADMIN_EMAIL` | — | Email auto-promoted to `admin` on registration. |
