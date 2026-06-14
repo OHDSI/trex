@@ -205,7 +205,6 @@ export default function ChatPage() {
                 {nav.view === "chat" && (
                   <ChatPanel
                     chatId={activeChatId}
-                    mode={currentMode}
                     onModeChange={handleModeChange}
                     onPlanContentChange={setPlanContent}
                     visualEditContext={visualEditContext}

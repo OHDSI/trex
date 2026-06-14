@@ -1,7 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 import { Send, Square, Paperclip, X, BarChart3, Paintbrush, Code2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ChatModeSelector } from "./ChatModeSelector";
 import { TodoList } from "./TodoList";
 import { AgentConsentBanner } from "./AgentConsentBanner";
 import { TokenBar } from "./TokenBar";
@@ -9,7 +8,7 @@ import { VoiceInput } from "./VoiceInput";
 import { SlashCommandPopup } from "./SlashCommandPopup";
 import { useTokenCount } from "@/hooks/useTokenCount";
 import { useSlashCommands } from "@/hooks/useSlashCommands";
-import type { ChatMode, AgentTodo, ConsentRequest, Message, SlashCompletion } from "@/lib/types";
+import type { AgentTodo, ConsentRequest, Message, SlashCompletion } from "@/lib/types";
 import type { VisualEditContext, SelectedComponent } from "@/lib/visual-editing-types";
 
 interface AttachmentFile {
@@ -24,8 +23,6 @@ interface ChatInputProps {
   onCancel: () => void;
   streaming: boolean;
   disabled?: boolean;
-  mode: ChatMode;
-  onModeChange: (mode: ChatMode) => void;
   todos: AgentTodo[];
   consentRequest: ConsentRequest | null;
   consentError?: string | null;
@@ -49,8 +46,6 @@ export function ChatInput({
   onCancel,
   streaming,
   disabled,
-  mode,
-  onModeChange,
   todos,
   consentRequest,
   consentError,
@@ -182,8 +177,6 @@ export function ChatInput({
       <TodoList todos={todos} />
       {showTokenBar && <TokenBar counts={tokenCounts} />}
       <div className="p-3 space-y-2">
-        <ChatModeSelector mode={mode} onChange={onModeChange} disabled={streaming} />
-
         {/* Visual edit context badge */}
         {visualEditContext && (
           <div className="flex items-center gap-1 rounded-md border border-primary/30 bg-primary/5 px-2 py-1 text-xs">
