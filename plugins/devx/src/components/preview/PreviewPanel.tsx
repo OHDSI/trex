@@ -15,7 +15,7 @@ import { useReviewAgents } from "@/hooks/useReviewAgents";
 import { useAgentRuns } from "@/hooks/useAgentRuns";
 import type { App } from "@/lib/types";
 import * as api from "@/lib/api";
-import { cn } from "@/lib/utils";
+
 
 interface PreviewPanelProps {
   appId: string | null;
@@ -28,7 +28,7 @@ interface PreviewPanelProps {
 }
 
 export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWithAI, onComponentsSelected, refreshSignal, onFixPrompt }: PreviewPanelProps) {
-  const [activeTab, setActiveTab] = useState("preview");
+  const [activeTab, setActiveTab] = useState("plan");
   const [app, setApp] = useState<App | null>(null);
   const [configRefresh, setConfigRefresh] = useState(0);
   const fileTree = useFileTree(appId);
@@ -41,6 +41,12 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setActiveTab(devServer.status?.status === "running" ? "preview" : "plan");
   }, [devServer.status?.status, userPickedTab]);
+
+  // Re-enable auto-default when switching apps.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setUserPickedTab(false);
+  }, [appId]);
 
   const handleTabChange = useCallback((v: string) => {
     setUserPickedTab(true);
@@ -92,10 +98,10 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
           <div className="flex-1" />
 
           {/* status rail: icon + count badge, label via title */}
-          <TabsTrigger value="problems" title="Checks" className="relative px-2 data-[state=active]:bg-accent">
+          <TabsTrigger value="problems" title="Checks" className="px-2 data-[state=active]:bg-accent">
             <AlertTriangle className="h-4 w-4" />
           </TabsTrigger>
-          <TabsTrigger value="agents" title="Agents" className="relative px-2 data-[state=active]:bg-accent">
+          <TabsTrigger value="agents" title="Agents" className="px-2 data-[state=active]:bg-accent">
             <Sparkles className="h-4 w-4" />
             {reviewAgents.runningCount > 0 && (
               <span className="ml-1 text-[10px] bg-brand text-brand-foreground px-1 rounded-full min-w-[16px] text-center">
@@ -103,8 +109,9 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
               </span>
             )}
           </TabsTrigger>
-          <TabsTrigger value="git" title="Git" className="relative px-2 data-[state=active]:bg-accent">
+          <TabsTrigger value="git" title="Git" className="px-2 data-[state=active]:bg-accent">
             <GitBranch className="h-4 w-4" />
+            {/* yellow = uncommitted changes (warning), distinct from the brand agents badge */}
             {git.status.length > 0 && (
               <span className="ml-1 text-[10px] bg-yellow-500/20 text-yellow-600 px-1 rounded">
                 {git.status.length}
@@ -115,18 +122,13 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
           <div className="mx-1 h-4 w-px bg-border" />
 
           {/* Export action */}
-          <button
-            type="button"
-            onClick={() => handleTabChange("publish")}
-            className={cn(
-              "inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors",
-              activeTab === "publish"
-                ? "bg-primary text-primary-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-            )}
+          <TabsTrigger
+            value="publish"
+            title="Export"
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=inactive]:text-muted-foreground hover:bg-accent hover:text-accent-foreground"
           >
             <Package className="h-4 w-4" /> Export
-          </button>
+          </TabsTrigger>
         </TabsList>
 
         {appId && (
