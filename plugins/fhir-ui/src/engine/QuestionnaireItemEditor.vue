@@ -1,9 +1,23 @@
 <template>
   <div>
-    <!-- Drag-reorder is deferred to a follow-up (vuedraggable); only add/remove/edit implemented now -->
-    <AtlasCard v-for="(it, i) in props.modelValue" :key="it.linkId" data-q-row padding="sm" class="mb-2">
+    <AtlasCard
+      v-for="(it, i) in props.modelValue"
+      :key="it.linkId"
+      data-q-row
+      padding="sm"
+      class="mb-2"
+      :class="{ 'drag-over': dragOverIndex === i }"
+      @dragover.prevent="onDragOver(i)"
+      @dragleave="onDragLeave(i)"
+      @drop.prevent="onDrop(i)"
+    >
       <div class="d-flex ga-3 align-start">
-        <span class="drag">⠿</span>
+        <span
+          class="drag"
+          draggable="true"
+          @dragstart="onDragStart(i)"
+          @dragend="onDragEnd"
+        >⠿</span>
         <div class="flex-grow-1">
           <AtlasTextField
             :model-value="it.text"
@@ -67,7 +81,7 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted } from "vue";
+import { ref, onMounted } from "vue";
 import { AtlasCard, AtlasTextField, AtlasSelect, AtlasCheckbox, AtlasButton, AtlasIconButton } from "@atlas-ui";
 import type { QItem } from "./enableWhen";
 // Self-import for recursive nesting — Vue supports this pattern
@@ -116,10 +130,48 @@ function removeOption(i: number, oi: number) {
   opts.splice(oi, 1);
   patch(i, { answerOption: opts });
 }
+
+// Drag-and-drop reorder (HTML5 native, no extra deps)
+const dragIndex = ref<number | null>(null);
+const dragOverIndex = ref<number | null>(null);
+
+function onDragStart(i: number) {
+  dragIndex.value = i;
+}
+function onDragEnd() {
+  dragIndex.value = null;
+  dragOverIndex.value = null;
+}
+function onDragOver(i: number) {
+  if (dragIndex.value !== null && dragIndex.value !== i) {
+    dragOverIndex.value = i;
+  }
+}
+function onDragLeave(i: number) {
+  if (dragOverIndex.value === i) dragOverIndex.value = null;
+}
+function onDrop(toIndex: number) {
+  const fromIndex = dragIndex.value;
+  dragIndex.value = null;
+  dragOverIndex.value = null;
+  if (fromIndex === null || fromIndex === toIndex) return;
+  const next = props.modelValue.slice();
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  commit(next);
+}
 </script>
 
 <style scoped>
-.drag { color: rgb(var(--v-theme-on-surface-variant, 0, 0, 0)); }
+.drag {
+  color: rgb(var(--v-theme-on-surface-variant, 0, 0, 0));
+  cursor: grab;
+  user-select: none;
+}
+.drag:active { cursor: grabbing; }
+.drag-over {
+  border-top: 2px solid rgb(var(--v-theme-primary, 25, 118, 210)) !important;
+}
 .options-editor { border-left: 2px solid rgba(var(--v-border-color, 0, 0, 0), 0.12); }
 .group-children {
   margin-left: 16px;

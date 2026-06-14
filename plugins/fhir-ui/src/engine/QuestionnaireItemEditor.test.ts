@@ -54,3 +54,31 @@ it("renders a nested editor for a group item; clicking nested '+ Add question' a
   // The group's item array gained a child
   expect(last[0].item.length).toBe(1);
 });
+
+it("drag-reorder: dropping item 0 onto item 1 emits the items in swapped order", async () => {
+  const twoItems = [
+    { linkId: "a", text: "First", type: "string" },
+    { linkId: "b", text: "Second", type: "string" },
+  ];
+  const w = mount(QuestionnaireItemEditor, { props: { modelValue: twoItems }, global: { plugins: [vuetify] } });
+  await flushPromises();
+
+  const rows = w.findAll('[data-q-row]');
+  expect(rows.length).toBe(2);
+
+  // Trigger dragstart on the handle (span.drag) inside the first row
+  const handle0 = rows[0].find('.drag');
+  await handle0.trigger("dragstart");
+
+  // Trigger dragover then drop on the second row (dragover sets dragOverIndex, drop commits)
+  await rows[1].trigger("dragover");
+  await rows[1].trigger("drop");
+  await flushPromises();
+
+  const allEmits = w.emitted("update:modelValue");
+  expect(allEmits).toBeTruthy();
+  const lastEmit = (allEmits![allEmits!.length - 1] as any[])[0] as typeof twoItems;
+  // After swapping: "Second" should be first, "First" should be second
+  expect(lastEmit[0].linkId).toBe("b");
+  expect(lastEmit[1].linkId).toBe("a");
+});
