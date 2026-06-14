@@ -13,9 +13,10 @@ interface AppsOverviewProps {
   onOpenFreeChat: () => void;
   onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string }) => Promise<App>;
   onDeleteApp: (appId: string) => Promise<void>;
+  settingsAction?: React.ReactNode;
 }
 
-export function AppsOverview({ apps, loading, onOpenApp, onOpenFreeChat, onCreateApp, onDeleteApp }: AppsOverviewProps) {
+export function AppsOverview({ apps, loading, onOpenApp, onOpenFreeChat, onCreateApp, onDeleteApp, settingsAction }: AppsOverviewProps) {
   const [createOpen, setCreateOpen] = useState(false);
   const [query, setQuery] = useState("");
   const navigate = useNavigate();
@@ -36,6 +37,7 @@ export function AppsOverview({ apps, loading, onOpenApp, onOpenFreeChat, onCreat
         <Button size="sm" className="gap-1.5" onClick={() => setCreateOpen(true)}>
           <Plus className="h-3.5 w-3.5" /> New app
         </Button>
+        {settingsAction}
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1">

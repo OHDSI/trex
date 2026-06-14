@@ -8,7 +8,6 @@ import {
 import { Settings, Box } from "lucide-react";
 import { ChatPanel } from "@/components/ChatPanel";
 import { PreviewPanel } from "@/components/preview/PreviewPanel";
-import { ThemeToggle } from "@/components/ThemeToggle";
 import { Button } from "@/components/ui/button";
 import { Breadcrumb, type Crumb } from "@/components/nav/Breadcrumb";
 import { AppsOverview } from "@/components/nav/AppsOverview";
@@ -166,24 +165,19 @@ export default function ChatPage() {
     });
   }
 
-  return (
-    <div className="h-full flex flex-col">
-      {/* Header */}
-      <header className="flex items-center justify-between border-b px-4 h-12 shrink-0">
-        <h1 className="text-sm font-semibold">DevX</h1>
-        <div className="flex items-center gap-1">
-          <ThemeToggle />
-          <Link to="/settings">
-            <Button variant="ghost" size="icon" className="h-8 w-8">
-              <Settings className="h-4 w-4" />
-            </Button>
-          </Link>
-        </div>
-      </header>
+  const settingsAction = (
+    <Link to="/settings">
+      <Button variant="ghost" size="icon" className="h-7 w-7" title="Settings">
+        <Settings className="h-4 w-4" />
+      </Button>
+    </Link>
+  );
 
-      {/* Two-pane layout */}
-      <PanelGroup direction="horizontal" className="flex-1" onLayout={saveSizes}>
-        <Panel defaultSize={initialSizes[0]} minSize={24} collapsible className="flex flex-col">
+  return (
+    <div className="h-full">
+      {/* Two-pane layout (no header — the trex shell provides chrome; settings live in the panels) */}
+      <PanelGroup direction="horizontal" className="h-full" onLayout={saveSizes}>
+        <Panel defaultSize={initialSizes[0]} minSize={24} collapsible className="flex flex-col min-h-0">
           {nav.view === "apps" && (
             <AppsOverview
               apps={apps}
@@ -192,36 +186,40 @@ export default function ChatPage() {
               onOpenFreeChat={nav.openFreeChat}
               onCreateApp={handleCreateApp}
               onDeleteApp={handleDeleteApp}
+              settingsAction={settingsAction}
             />
           )}
           {nav.view !== "apps" && (
             <>
-              <Breadcrumb crumbs={crumbs} />
-              {nav.view === "app" && (
-                <ChatsOverview
-                  chats={chats}
-                  onOpenChat={handleSelectChat}
-                  onNewChat={handleNewChat}
-                  onDeleteChat={handleDeleteChat}
-                />
-              )}
-              {nav.view === "chat" && (
-                <ChatPanel
-                  chatId={activeChatId}
-                  mode={currentMode}
-                  onModeChange={handleModeChange}
-                  onPlanContentChange={setPlanContent}
-                  visualEditContext={visualEditContext}
-                  onClearVisualEditContext={() => setVisualEditContext(null)}
-                  selectedComponents={selectedComponents}
-                  onRemoveSelectedComponent={(devxId) => setSelectedComponents((prev) => prev.filter((c) => c.devxId !== devxId))}
-                  onClearSelectedComponents={() => setSelectedComponents([])}
-                  onAppCommand={handleAppCommand}
-                  onBuildAction={handleBuildAction}
-                  sendRef={sendRef}
-                  onNewChat={handleNewChat}
-                />
-              )}
+              {/* Breadcrumb stays pinned; the content below it owns the scroll */}
+              <Breadcrumb crumbs={crumbs} actions={settingsAction} />
+              <div className="flex-1 min-h-0">
+                {nav.view === "app" && (
+                  <ChatsOverview
+                    chats={chats}
+                    onOpenChat={handleSelectChat}
+                    onNewChat={handleNewChat}
+                    onDeleteChat={handleDeleteChat}
+                  />
+                )}
+                {nav.view === "chat" && (
+                  <ChatPanel
+                    chatId={activeChatId}
+                    mode={currentMode}
+                    onModeChange={handleModeChange}
+                    onPlanContentChange={setPlanContent}
+                    visualEditContext={visualEditContext}
+                    onClearVisualEditContext={() => setVisualEditContext(null)}
+                    selectedComponents={selectedComponents}
+                    onRemoveSelectedComponent={(devxId) => setSelectedComponents((prev) => prev.filter((c) => c.devxId !== devxId))}
+                    onClearSelectedComponents={() => setSelectedComponents([])}
+                    onAppCommand={handleAppCommand}
+                    onBuildAction={handleBuildAction}
+                    sendRef={sendRef}
+                    onNewChat={handleNewChat}
+                  />
+                )}
+              </div>
             </>
           )}
         </Panel>

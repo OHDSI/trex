@@ -26,7 +26,7 @@ export interface Crumb {
   newLabel?: string;
 }
 
-export function Breadcrumb({ crumbs }: { crumbs: Crumb[] }) {
+export function Breadcrumb({ crumbs, actions }: { crumbs: Crumb[]; actions?: React.ReactNode }) {
   return (
     <nav className="flex items-center gap-0.5 px-3 h-9 border-b shrink-0 text-sm">
       {crumbs.map((c, i) => {
@@ -77,6 +77,7 @@ export function Breadcrumb({ crumbs }: { crumbs: Crumb[] }) {
           </div>
         );
       })}
+      {actions && <div className="ml-auto flex items-center">{actions}</div>}
     </nav>
   );
 }
