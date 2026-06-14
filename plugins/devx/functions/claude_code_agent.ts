@@ -13,24 +13,24 @@ import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 const CLAUDE_PORT = 4322;
 const CLAUDE_PROCESS = "claude-code-node-server";
 
-// Always-on preamble: the using-superpowers skill content is injected into
+// Always-on preamble: the using-skills skill content is injected into
 // every session's system prompt. Loaded lazily and cached for the worker
 // lifecycle (skills/sync.ts already resolves the same plugin base path).
-let _superpowersPreamble: string | null = null;
-async function loadSuperpowersPreamble(): Promise<string> {
-  if (_superpowersPreamble !== null) return _superpowersPreamble;
+let _skillsPreamble: string | null = null;
+async function loadSkillsPreamble(): Promise<string> {
+  if (_skillsPreamble !== null) return _skillsPreamble;
   try {
     const fnPath = Deno.env.get("TREX_FUNCTION_PATH") || new URL("../", import.meta.url).pathname;
     const pluginBase = fnPath.replace(/\/functions\/?$/, "").replace(/\/$/, "");
-    const body = await Deno.readTextFile(`${pluginBase}/skills/using-superpowers/SKILL.md`);
+    const body = await Deno.readTextFile(`${pluginBase}/skills/using-skills/SKILL.md`);
     // Strip frontmatter so the body reads as a system-prompt section, not a skill file.
     const stripped = body.replace(/^---\n[\s\S]*?\n---\n+/, "");
-    _superpowersPreamble = stripped.trim();
+    _skillsPreamble = stripped.trim();
   } catch (err) {
-    console.warn("[claude_code_agent] using-superpowers preamble not loaded:", err?.message || err);
-    _superpowersPreamble = "";
+    console.warn("[claude_code_agent] using-skills preamble not loaded:", err?.message || err);
+    _skillsPreamble = "";
   }
-  return _superpowersPreamble;
+  return _skillsPreamble;
 }
 
 async function ensureClaudeCodeServer() {
@@ -81,12 +81,11 @@ export async function streamClaudeCodeChat({
   }
 
   let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext);
-  const superpowersPreamble = await loadSuperpowersPreamble();
-  if (superpowersPreamble) {
-    const namingRule = `<naming>\nDo NOT use the word "Superpowers" in user-facing text — not in chat replies, not in commit messages, not in titles, not in code comments you author for the user, not on visual companion screens. Refer to the skill system generically as "skills" and to specific skills by their slug (e.g., "the brainstorming skill", "the writing-plans skill"). When citing a doc path that contains the word, just give the path — do not narrate the brand name. This applies even though the system prompt below uses the term internally.\n</naming>`;
+  const skillsPreamble = await loadSkillsPreamble();
+  if (skillsPreamble) {
     const skillUsageRule = `<skill-usage>\nThe skills above are real and invocable via the Skill tool. When the user asks you to build a feature, component, app, or mockups, FIRST invoke the appropriate skill (e.g. the brainstorming skill to explore the idea and present design options) BEFORE writing app code. Do not jump straight to implementation, and do not write throwaway mockups into the user's app.\n</skill-usage>`;
     const askQuestionRule = `<asking-questions>\nWhenever you need to ask the user ANYTHING — a clarifying question, a choice between options, or a confirmation — you MUST use the \`mcp__ask__ask_question\` tool. Pass \`options\` for a single choice, add \`multiSelect: true\` for multiple, or omit \`options\` for free text. This applies everywhere, not only during brainstorming. NEVER write a question as plain text in your reply: plain-text questions do NOT render as an interactive prompt and the user may not answer them.\n</asking-questions>`;
-    systemPrompt = `${namingRule}\n\n<skills-protocol>\n${superpowersPreamble}\n</skills-protocol>\n\n${skillUsageRule}\n\n${askQuestionRule}\n\n${systemPrompt}`;
+    systemPrompt = `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${skillUsageRule}\n\n${askQuestionRule}\n\n${systemPrompt}`;
   }
   if (hasComponentSelection) {
     systemPrompt += "\nThe user has selected specific components for editing. Focus your modifications on those components.";

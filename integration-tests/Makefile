@@ -197,7 +197,7 @@ test-fhir: check-fhir
 clean:
 	rm -rf venv __pycache__ .pytest_cache
 
-# ---- Coverage merge (see docs/superpowers/specs/2026-05-17-test-infrastructure-and-coverage-design.md) ----
+# ---- Coverage merge ----
 
 .PHONY: coverage-merge coverage-clean
 

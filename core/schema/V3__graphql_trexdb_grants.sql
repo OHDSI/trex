@@ -1,7 +1,7 @@
 -- Grant trexdb privileges so PostGraphile (connecting as `authenticator` and
 -- SET ROLE-ing per request) can serve the schema under RLS. Before this, only
 -- public/storage/auth had role grants, and GraphQL ran as the owner (bypassing
--- RLS entirely). See docs/superpowers/specs/2026-06-01-postgraphile-rls-auth-design.md
+-- RLS entirely).
 --
 -- Design decisions:
 --   * service_role (BYPASSRLS): full access — admins + service_role apikey.
