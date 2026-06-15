@@ -38,6 +38,7 @@ WORKDIR /src
 # Build the trexsql engine native lib.
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY plugins/pool-client ./plugins/pool-client
 # --lib only: build the libtrexsql_engine.so cdylib; the `trex` bin isn't needed.
 RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/src/target \
     TREXSQL_LIB_DIR=/opt/trexsql cargo build --release --lib \

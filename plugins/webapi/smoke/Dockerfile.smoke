@@ -22,6 +22,7 @@ RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=amd64 ;; arm6
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY plugins/pool-client ./plugins/pool-client
 # Network env tames flaky crates.io CDN downloads ("[18] Transferred a partial file"):
 # disable HTTP/2 multiplexing and bump cargo's own retry count. The outer loop is a
 # belt-and-braces retry around the whole build for any leftover transient fetch errors.

@@ -44,6 +44,7 @@ RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in amd64) A=amd64 ;; arm6
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
+COPY plugins/pool-client ./plugins/pool-client
 RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/src/target \
     TREXSQL_LIB_DIR=/opt/trexsql cargo build --release --lib \
     && cp target/release/libtrexsql_engine.so /opt/trexsql/libtrexsql_engine.so
