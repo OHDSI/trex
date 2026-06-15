@@ -103,7 +103,7 @@ This matters in two contexts:
   it if many concurrent sessions hold long leases.
 - **`TREX_PG_CONNECTION_LIMIT`** — cap on real Postgres connections the DuckDB
   postgres extension opens per attached catalog (default 1024, extension default
-  64). Must be >= `TREX_POOL_SIZE` and <= the Postgres server's `max_connections`,
+  64). Must be `>=` `TREX_POOL_SIZE` and `<=` the Postgres server's `max_connections`,
   or sessions touching `_config.*` fail with "PostgresConnectionPool maximum
   connection count exceeded".
 - **`TREX_POOL_LEASE_TIMEOUT_MS`** — how long a caller waits for a free
