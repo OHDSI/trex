@@ -220,10 +220,10 @@
                  (.put "schema-name" schema-name)
                  (.put "cache-path" cache-path)
                  (.put "source-credentials" (build-credentials-map credentials))
-                 (.put "fts-tables" (ArrayList. (or (:ftsTables request) ["concept"]))))]
+                 (.put "fts-tables" (let [^java.util.Collection c (or (:ftsTables request) ["concept"])] (ArrayList. c))))]
     (when-let [v (:targetSchemaName request)] (.put config "target-schema-name" v))
-    (when-let [v (:tables request)] (.put config "tables" (ArrayList. v)))
-    (when-let [v (:patientFilter request)] (.put config "patient-filter" (ArrayList. v)))
+    (when-let [v (:tables request)] (.put config "tables" (ArrayList. ^java.util.Collection v)))
+    (when-let [v (:patientFilter request)] (.put config "patient-filter" (ArrayList. ^java.util.Collection v)))
     (when-let [v (:timestampFilter request)] (.put config "timestamp-filter" v))
     config))
 
@@ -275,7 +275,7 @@
                                                           cache-path credentials request)
                         validated-config (datamart/java-map->datamart-config config-map)]
                     (when-let [error (datamart/validate-config validated-config)]
-                      (throw (IllegalArgumentException. error)))
+                      (throw (IllegalArgumentException. ^String error)))
                     ;; Dispatch the actual cache build to a background thread.
                     ;; A full CDM batch copy takes 30s–minutes; HTTP callers
                     ;; (the d2e dataset gateway) time out at 30s. Progress is
@@ -332,7 +332,7 @@
         (if-let [validation-error (validate-database-code database-code)]
           (bad-request validation-error)
           (let [cache-path (or (:cachePath params) (get-cache-path-from-config))
-                cache-file (File. (get-cache-path cache-path database-code))
+                cache-file (File. ^String (get-cache-path cache-path database-code))
                 exists? (.exists cache-file)
                 ;; Auto-attach if the cache file exists but isn't currently
                 ;; attached to the main trex handle. After a restart the
@@ -409,7 +409,7 @@
       (not-found (str "Source not found: " source-key))
       (let [database-code (or (:databaseCode params) (sanitize-database-code source-key))
             cache-path (or (:cachePath params) (get-cache-path-from-config))
-            cache-file (File. (get-cache-path cache-path database-code))]
+            cache-file (File. ^String (get-cache-path cache-path database-code))]
         (if-not (.exists cache-file)
           (not-found (str "Cache not found for source: " source-key))
           (do
@@ -713,7 +713,7 @@
                                                       cache-path credentials body-params)
                     validated-config (datamart/java-map->datamart-config config-map)]
                 (when-let [error (datamart/validate-config validated-config)]
-                  (throw (IllegalArgumentException. error)))
+                  (throw (IllegalArgumentException. ^String error)))
                 ;; Dispatch the actual cache build to a background thread —
                 ;; see handle-create-cache for the rationale. Clients poll
                 ;; cache/status until activeJob status hits COMPLETE.
@@ -852,8 +852,8 @@
                           total-sql (format "SELECT COUNT(DISTINCT person_id) as cnt FROM %s.person" qualified-cdm)
                           cohort-result (db/query db cohort-sql)
                           total-result (db/query db total-sql)
-                          cohort-count (or (some-> cohort-result first (.get "cnt")) 0)
-                          total-count (or (some-> total-result first (.get "cnt")) 0)
+                          cohort-count (or (when-let [^java.util.Map r (first cohort-result)] (.get r "cnt")) 0)
+                          total-count (or (when-let [^java.util.Map r (first total-result)] (.get r "cnt")) 0)
                           exec-time (- (System/currentTimeMillis) start-time)]
                       (ok {:cohortPatientCount cohort-count
                            :totalPatientCount total-count
@@ -951,9 +951,9 @@
                       summary-rows (db/query db (format "SELECT base_count, final_count FROM %s WHERE cohort_definition_id = %d AND mode_id = 1"
                                                         summary-tbl cohort-id))
                       total-rows (db/query db (format "SELECT COUNT(DISTINCT person_id) AS cnt FROM %s.person" qualified-cdm))
-                      total-count (or (some-> total-rows first (.get "cnt")) 0)
-                      base-count (or (some-> summary-rows first (.get "base_count")) 0)
-                      final-count (or (some-> summary-rows first (.get "final_count")) 0)
+                      total-count (or (when-let [^java.util.Map r (first total-rows)] (.get r "cnt")) 0)
+                      base-count (or (when-let [^java.util.Map r (first summary-rows)] (.get r "base_count")) 0)
+                      final-count (or (when-let [^java.util.Map r (first summary-rows)] (.get r "final_count")) 0)
                       rule-count (count rule-defs)
                       ->long (fn [v]
                                (cond (nil? v) 0

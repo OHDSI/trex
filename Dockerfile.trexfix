@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1.4
+#
+# Builds the two Rust artifacts needed for the "WebAPI extension shares the host
+# DuckDB instance" fix, for overlaying onto an existing trexsql base:
+#   - libtrexsql_engine.so  (new trexsql_open_existing C API)
+#   - webapi.trex           (captures host duckdb_database, passes via webapi_start)
+# Both pull the duckdb crate at rev 9d6d6fb (Connection::raw_database accessor).
+#
+#   DOCKER_BUILDKIT=1 docker build --platform linux/arm64 -f Dockerfile.trexfix \
+#     --target export -o type=local,dest=./out-trexfix .
+
+FROM debian:trixie-slim AS builder
+
+ARG TREXSQL_VERSION=v1.4.4-trex
+ARG CHDB_VERSION=v3.6.0
+ARG TARGETARCH
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl unzip wget gcc libc6-dev git make python3 python3-venv pkg-config ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain 1.88.0
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+RUN mkdir -p /opt/trexsql && \
+    wget -O /tmp/libtrexsql.zip \
+      https://github.com/p-hoffmann/trexsql-rs/releases/download/${TREXSQL_VERSION}/libtrexsql-linux-${TARGETARCH}.zip && \
+    unzip /tmp/libtrexsql.zip -d /opt/trexsql && rm /tmp/libtrexsql.zip
+ENV TREXSQL_LIB_DIR=/opt/trexsql
+ENV TREXSQL_INCLUDE_DIR=/opt/trexsql
+
+RUN mkdir -p /opt/chdb && \
+    case "$TARGETARCH" in \
+      amd64) CHDB_ARCH=x86_64 ;; \
+      arm64) CHDB_ARCH=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    cd /tmp && wget -O libchdb.tar.gz \
+      https://github.com/chdb-io/chdb/releases/download/${CHDB_VERSION}/linux-${CHDB_ARCH}-libchdb.tar.gz && \
+    tar -xzf libchdb.tar.gz && mv libchdb.so /opt/chdb/ && rm -f libchdb.tar.gz chdb.h
+ENV LD_LIBRARY_PATH=/opt/trexsql:/opt/chdb
+
+WORKDIR /usr/src/trexsql
+# --- 1. libtrexsql_engine.so (trex C API: adds trexsql_open_existing) ---
+COPY Cargo.toml Cargo.lock ./
+COPY src/ ./src/
+COPY plugins/pool-client ./plugins/pool-client
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/usr/src/trexsql/target \
+    cargo build --release --lib && \
+    cp target/release/libtrexsql_engine.so /opt/libtrexsql_engine.so
+
+FROM scratch AS export
+COPY --from=builder /opt/libtrexsql_engine.so /libtrexsql_engine.so

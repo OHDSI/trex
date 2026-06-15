@@ -145,12 +145,26 @@ curl -fsS -X POST "$BASE/source/gen_config_pg/cache" -H 'Content-Type: applicati
   echo "[gen-config] WARN: cache creation returned non-zero (cache trace may be incomplete)"
 sleep 5
 
+# Seed a source row directly (the /source API needs multipart + admin:source auth,
+# which this no-security agent run lacks) so find-source-by-key resolves it and the
+# WHOLE /trexsql/* cache path executes under the agent. DaimonType is ORDINAL:
+# CDM=0, Vocabulary=1, Results=2.
+echo "[gen-config] seeding webapi.source gen_config_pg for the trexsql cache trace"
+su postgres -c "psql -d webapi -v ON_ERROR_STOP=0 <<'SQL'
+INSERT INTO webapi.source (source_id, source_name, source_dialect, source_connection, source_key, username, password, is_cache_enabled, check_connection)
+VALUES (999,'gen-config-pg','postgresql','jdbc:postgresql://localhost:5432/webapi','gen_config_pg','ohdsi_app_user','app1',true,false)
+ON CONFLICT (source_id) DO NOTHING;
+INSERT INTO webapi.source_daimon (source_daimon_id, source_id, daimon_type, table_qualifier, priority)
+VALUES (9001,999,0,'webapi',0),(9002,999,1,'webapi',0),(9003,999,2,'webapi',0)
+ON CONFLICT (source_daimon_id) DO NOTHING;
+SQL" || echo "[gen-config] WARN: source seed failed (trexsql trace may be incomplete)"
+
 # Exercise the /trexsql/* servlet (registered separately from Spring MVC) so the
 # agent records the reflective interop the in-engine cache controller performs:
 # SourceRepository's JDK proxy (findBySourceKey) plus the Source getters
-# (getTableQualifier/getSourceDialect/...) and the SourceDaimon$DaimonType enum.
-# Without this the servlet's reflection is never traced and the native build
-# reports "Source not found" for every trexsql cache request.
+# (getTableQualifier/getSourceDialect/...), the SourceDaimon$DaimonType enum, and
+# the cache-path file/JDBC machinery. Without this the servlet's reflection is
+# never traced and the native build fails each trexsql cache request.
 curl -fsS "$BASE/trexsql/gen_config_pg/cache/status?databaseCode=gen_config_pg" \
   -o /tmp/gen-config-trexsql-status.json \
   -w "[gen-config] trexsql cache-status: %{http_code}\n" || \
@@ -160,6 +174,15 @@ curl -fsS -X POST "$BASE/trexsql/gen_config_pg/cache" -H 'Content-Type: applicat
   -w "[gen-config] trexsql cache-create: %{http_code}\n" || \
   echo "[gen-config] WARN: trexsql cache creation returned non-zero"
 sleep 5
+
+# Surface what the servlet logged for the trexsql calls (find-source-by-key
+# diagnostic, "Source not found", stack traces) so a failed trace is debuggable.
+echo "[gen-config] ===== trexsql servlet log (find-source-by-key / cache) ====="
+grep -iE "find-source-by-key|Source not found|trexsql|No matching|cache" "$RUN_LOG" | tail -40 || true
+echo "[gen-config] ===== trexsql response bodies ====="
+echo "status: $(cat /tmp/gen-config-trexsql-status.json 2>/dev/null)"
+echo "create: $(cat /tmp/gen-config-trexsql-cache.json 2>/dev/null)"
+echo "[gen-config] ============================================================"
 
 # cleanup() (EXIT trap) stops the app gracefully so the agent writes the merged config.
 echo "[gen-config] done — review changes:"

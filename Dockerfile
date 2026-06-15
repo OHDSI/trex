@@ -35,6 +35,7 @@ RUN mkdir -p /opt/chdb && \
 
 # Cache dependency build: copy manifests first, build with dummy src, then replace
 COPY Cargo.toml Cargo.lock /usr/src/trexsql/
+COPY plugins/pool-client /usr/src/trexsql/plugins/pool-client
 WORKDIR /usr/src/trexsql
 RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && \
     cargo build --release && \

@@ -169,7 +169,7 @@ the worker exits.
 
 ## Failure modes worth knowing
 
-- **Pool exhaustion**: if every pool connection (`TREX_POOL_SIZE`, default 64)
+- **Pool exhaustion**: if every pool connection (`TREX_POOL_SIZE`, default 1024)
   is held by a long-lived session, new leases wait up to
   `TREX_POOL_LEASE_TIMEOUT_MS` (default 30s) and then error. Admission control
   (see `trex_db_query_status()`) typically bites before this matters in

@@ -84,6 +84,10 @@ services:
       - max_replication_slots=10
       - -c
       - max_wal_senders=10
+      # Headroom for the DuckDB pool (TREX_POOL_SIZE=1024) plus postgrest,
+      # the superuser reserve, and other clients. Must exceed the pool size.
+      - -c
+      - max_connections=1200
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mypass}
@@ -146,14 +150,18 @@ services:
       SCHEMA_DIR: /usr/src/core/schema
       TREX_PRODUCTION_MODE: ${TREX_PRODUCTION_MODE:-0}
       # Shared DuckDB session pool (pgwire + the function runtime's sql()).
-      # MUST NOT exceed the DuckDB postgres extension's connection limit (64),
-      # which caps real connections to the `_config` Postgres: each session that
-      # touches `_config.*` (devx.* tables, catalog refresh) pins one. Oversizing
-      # this (e.g. 256) lets >64 sessions race for 64 Postgres slots →
-      # "PostgresConnectionPool maximum connection count exceeded (64/64)" and
-      # devx chat/persist fail. Keep at 64 unless you also raise the pg limit
-      # AND Postgres max_connections (currently 100).
-      TREX_POOL_SIZE: ${TREX_POOL_SIZE:-64}
+      # Each pooled session that touches `_config.*` (devx.* tables, catalog
+      # refresh) pins one real Postgres connection via the DuckDB postgres
+      # extension. The three limits must move together:
+      #   TREX_POOL_SIZE <= TREX_PG_CONNECTION_LIMIT <= Postgres max_connections
+      # If the pool exceeds the pg limit, sessions race for too few Postgres
+      # slots → "PostgresConnectionPool maximum connection count exceeded".
+      # If the pg limit exceeds Postgres max_connections (set to 1200 in the
+      # postgres service command), Postgres rejects with "too many clients".
+      TREX_POOL_SIZE: ${TREX_POOL_SIZE:-1024}
+      # Cap on real Postgres connections the pg extension opens per catalog.
+      # Keep >= TREX_POOL_SIZE; extension default is 64.
+      TREX_PG_CONNECTION_LIMIT: ${TREX_PG_CONNECTION_LIMIT:-1024}
       # Bound the lease wait so an exhausted pool fails the request instead of
       # blocking forever (requires the @trex/pool recv_timeout build to take effect).
       TREX_POOL_LEASE_TIMEOUT_MS: ${TREX_POOL_LEASE_TIMEOUT_MS:-30000}

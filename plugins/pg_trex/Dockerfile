@@ -25,6 +25,7 @@ RUN cd /tmp && \
     rm -f libchdb.tar.gz chdb.h
 
 COPY Cargo.toml Cargo.lock /usr/src/trexsql/
+COPY plugins/pool-client /usr/src/trexsql/plugins/pool-client
 WORKDIR /usr/src/trexsql
 RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && \
     cargo build --release && \

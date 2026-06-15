@@ -51,12 +51,24 @@
   "Create a TrexSQL native connection.
    Returns a JNA Pointer handle to the database.
    Config options:
-   - :allow-unsigned-extensions - enable loading unsigned extensions"
+   - :allow-unsigned-extensions - enable loading unsigned extensions
+
+   When running embedded as the trex DuckDB extension (trexsql.use.pool=true),
+   acquire a trex pool session so queries share the host engine instance (same
+   catalog/cache as the runtime). Otherwise (standalone JVM) open our own
+   ':memory:' database. Falls back to ':memory:' if the pool is unavailable."
   ([]
    (create-connection {}))
   ([config]
    (let [flags (if (:allow-unsigned-extensions config) 1 0)]
-     (native/open ":memory:" flags))))
+     (if (= "true" (System/getProperty "trexsql.use.pool"))
+       (try
+         (log/info "Acquiring trex pool session (shared host instance)")
+         (native/open-pool-session)
+         (catch Exception e
+           (log/warn (str "pool session unavailable, opening own :memory: db: " (.getMessage e)))
+           (native/open ":memory:" flags)))
+       (native/open ":memory:" flags)))))
 
 (defrecord TrexsqlDatabase [handle                ; JNA Pointer to native TrexDatabase
                             extensions-loaded      ; atom of set

@@ -14,6 +14,7 @@ use std::{
     ffi::{c_char, c_int, c_void, CStr},
     ptr,
     sync::{
+        atomic::{AtomicU64, Ordering},
         mpsc::{channel, Receiver, Sender},
         Mutex,
     },
@@ -58,6 +59,13 @@ enum Cmd {
 }
 
 static WEBAPI_TX: Mutex<Option<Sender<Cmd>>> = Mutex::new(None);
+
+// duckdb_database handle of the host trex engine instance, captured at extension
+// load. Passed to webapi_start so the embedded WebAPI (bao) connects to this same
+// instance (shared catalog + cache files) instead of opening its own ":memory:"
+// database. 0 = no host handle, in which case the WebAPI opens its own instance
+// (e.g. when running standalone on the JVM rather than as a DuckDB extension).
+static WEBAPI_HOST_DB: AtomicU64 = AtomicU64::new(0);
 
 // Large stack so WebAPI's deep native-image call chains can't overflow it.
 const WEBAPI_STACK_SIZE: usize = 512 * 1024 * 1024;
@@ -135,7 +143,15 @@ fn isolate_thread_main(cmd_rx: Receiver<Cmd>, init_tx: Sender<std::result::Resul
         unsafe {
             match cmd {
                 Cmd::Start(reply) => {
-                    let _ = reply.send(cstr_to_string((lib.start)(lib.thread, ptr::null_mut())));
+                    // Hand the host duckdb_database pointer (decimal string) to the
+                    // embedded WebAPI so it shares this engine instance; "0" when
+                    // absent (WebAPI then opens its own database). The CString lives
+                    // until after start() returns (the call is synchronous).
+                    let host_db = WEBAPI_HOST_DB.load(Ordering::SeqCst);
+                    let cfg = std::ffi::CString::new(host_db.to_string()).unwrap_or_default();
+                    let _ = reply.send(cstr_to_string(
+                        (lib.start)(lib.thread, cfg.as_ptr() as *mut c_char),
+                    ));
                 }
                 Cmd::Stop(reply) => {
                     let _ = reply.send(cstr_to_string((lib.stop)(lib.thread)));
@@ -261,6 +277,9 @@ impl VScalar for WebApiStatus {
 
 #[duckdb_entrypoint_c_api()]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
+    // Capture the host engine's duckdb_database so webapi_start can pass it to the
+    // embedded WebAPI, which then shares this instance instead of opening its own.
+    WEBAPI_HOST_DB.store(con.raw_database() as usize as u64, Ordering::SeqCst);
     con.register_scalar_function::<WebApiStart>("webapi_start")
         .expect("register webapi_start");
     con.register_scalar_function::<WebApiStop>("webapi_stop")

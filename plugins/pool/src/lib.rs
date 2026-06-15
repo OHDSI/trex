@@ -465,7 +465,7 @@ fn serialize_arrow_ipc(
 }
 
 
-const DEFAULT_POOL_SIZE: usize = 64;
+const DEFAULT_POOL_SIZE: usize = 1024;
 
 #[duckdb_loadable_macros::duckdb_entrypoint_c_api(ext_name = "pool")]
 pub unsafe fn extension_entrypoint(con: Connection) -> std::result::Result<(), Box<dyn std::error::Error>> {
