@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Monitor, Code, AlertTriangle, GitBranch, ClipboardList, Package, Sparkles } from "lucide-react";
+import { Monitor, Code, AlertTriangle, GitBranch, ClipboardList, Package, Sparkles, Boxes } from "lucide-react";
 import { PreviewTab } from "./PreviewTab";
 import { CodeTab } from "./CodeTab";
 import { ProblemsTab } from "./ProblemsTab";
@@ -8,6 +8,7 @@ import { AgentsTab } from "./AgentsTab";
 import { GitTab } from "./GitTab";
 import { PlanTab } from "./PlanTab";
 import { PublishTab } from "./PublishTab";
+import { D2ESubAppPanel } from "../d2e/D2ESubAppPanel";
 import { useFileTree } from "@/hooks/useFileTree";
 import { useDevServer } from "@/hooks/useDevServer";
 import { useGit } from "@/hooks/useGit";
@@ -94,6 +95,11 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
           <TabsTrigger value="plan" className="gap-1.5 text-xs">
             <ClipboardList className="h-4 w-4" /> Plan
           </TabsTrigger>
+          {app?.tech_stack === "d2e" && (
+            <TabsTrigger value="d2e" className="gap-1.5 text-xs">
+              <Boxes className="h-4 w-4" /> Data2Evidence
+            </TabsTrigger>
+          )}
 
           <div className="flex-1" />
 
@@ -166,6 +172,11 @@ export function PreviewPanel({ appId, planContent, chatMode: _chatMode, onEditWi
             <TabsContent value="plan" className="flex-1 m-0 overflow-hidden">
               <PlanTab appId={appId} livePlanContent={planContent} onFixPrompt={onFixPrompt} />
             </TabsContent>
+            {app?.tech_stack === "d2e" && app && (
+              <TabsContent value="d2e" className="flex-1 m-0 overflow-hidden">
+                <D2ESubAppPanel app={app} />
+              </TabsContent>
+            )}
             <TabsContent value="publish" className="flex-1 m-0 overflow-hidden">
               <PublishTab appId={appId} />
             </TabsContent>

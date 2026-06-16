@@ -9,6 +9,7 @@ import type {
   CodeReview,
   QaTestReview,
   DesignReview,
+  D2EConfig,
 } from "./types";
 
 function getAuthToken(): string | null {
@@ -167,16 +168,39 @@ export async function listApps(): Promise<App[]> {
 
 export async function createApp(
   name: string,
-  opts?: { template?: string; gitUrl?: string },
+  opts?: { template?: string; gitUrl?: string; kind?: "d2e" },
 ): Promise<App> {
   return apiFetch("/apps", {
     method: "POST",
     body: JSON.stringify(
       opts?.gitUrl
-        ? { name, git_url: opts.gitUrl }
+        ? { name, git_url: opts.gitUrl, kind: opts.kind }
         : { name, template: opts?.template },
     ),
   });
+}
+
+// Data2Evidence (d2e)
+export async function getD2E(appId: string): Promise<D2EConfig | null> {
+  return apiFetch(`/apps/${appId}/d2e`);
+}
+
+export async function selectD2ESubApp(appId: string, key: string): Promise<{ ok: boolean; activeSubApp: string }> {
+  return apiFetch(`/apps/${appId}/d2e/select`, {
+    method: "POST",
+    body: JSON.stringify({ key }),
+  });
+}
+
+export async function setD2EExternalApi(appId: string, externalApiBase: string): Promise<{ ok: boolean }> {
+  return apiFetch(`/apps/${appId}/d2e/external-api`, {
+    method: "PATCH",
+    body: JSON.stringify({ externalApiBase }),
+  });
+}
+
+export async function redetectD2E(appId: string): Promise<D2EConfig> {
+  return apiFetch(`/apps/${appId}/d2e/redetect`, { method: "POST" });
 }
 
 export async function getApp(appId: string): Promise<App> {

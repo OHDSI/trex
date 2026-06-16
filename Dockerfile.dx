@@ -58,6 +58,24 @@ RUN npm ci && \
 FROM ${BASE_IMAGE}
 USER root
 
+# d2e runtime deps (for a FUTURE rebuild; the running dx image predates this).
+# - yarn (via Corepack) is needed to install the d2e-ui Nx/yarn-workspaces monorepo.
+# - python3 + uv + prefect are needed to actually RUN d2e flows.
+#   NOTE: installing them here only makes the binaries PRESENT. Fully RUNNING flows
+#   ALSO requires adding `python`/`python3`/`uv`/`prefect` to the Rust
+#   `validate_command` allowlist in `plugins/devx-ext/src/validation.rs` (which today
+#   only permits npm/npx/yarn/pnpm/node/deno/bun/echo/git/mkdir/sh/cat/cp and injects
+#   only PORT) and rebuilding the devx_ext extension — out of scope here. Until then
+#   flows are context-only (the flowRun recipe echoes guidance).
+# Best-effort: guard with `|| true` so the build still proceeds if apt is unavailable.
+RUN (corepack enable || npm i -g yarn) || true
+RUN (apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip pipx && \
+     rm -rf /var/lib/apt/lists/*) || true
+# Prefect for flows (uv preferred; fall back to pip with --break-system-packages).
+RUN (pipx install uv || pip3 install --break-system-packages uv || true) && \
+    (uv tool install prefect || pip3 install --break-system-packages prefect || true)
+
 # The plugin scanner picks devx up from plugins-dev via its package.json.
 COPY --from=devx-builder --chown=node:node /work/ /usr/src/plugins-dev/devx/
 # Locally-built DuckDB extension (read by pg_trex at startup).

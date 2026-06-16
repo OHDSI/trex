@@ -10,7 +10,7 @@ export const template: AppTemplate = {
   install_command: "npm install",
   build_command: "npm run build",
   files: {
-    "AI_RULES.md": `# Tech Stack
+    "TREX.md": `# Tech Stack
 - This is a blank project. Set up the tech stack as needed.
 - UPDATE the main entry point to include new code. OTHERWISE, the user can NOT see any changes!
 `,

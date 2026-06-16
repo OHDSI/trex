@@ -37,7 +37,7 @@ interface PreviewTabProps {
   onEditWithAI?: (element: SelectedElement) => void;
   onComponentsSelected?: (components: SelectedComponent[]) => void;
   refreshSignal?: number;
-  appConfig?: Record<string, string> | null;
+  appConfig?: Record<string, unknown> | null;
   onConfigChanged?: (config: Record<string, string>) => void;
   onOpenFile?: (path: string) => void;
 }
@@ -94,7 +94,7 @@ export function PreviewTab({ appId, app, devServer, onEditWithAI, onComponentsSe
     if (token) params.set("token", token);
     if (appConfig) {
       for (const [k, v] of Object.entries(appConfig)) {
-        if (v) params.set(k, v);
+        if (typeof v === "string" && v) params.set(k, v);
       }
     }
     const qs = params.toString();

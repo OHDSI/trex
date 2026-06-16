@@ -43,6 +43,21 @@ export async function ensureAppWorkspace(userId: string, appId: string): Promise
   return wsPath;
 }
 
+/** Project rules filenames, in preference order. TREX.md is the current
+ * convention; AI_RULES.md is the legacy name kept for backward compatibility. */
+export const PROJECT_RULES_FILES = ["TREX.md", "AI_RULES.md"] as const;
+
+/** Read the project rules file from a workspace, preferring TREX.md and falling
+ * back to the legacy AI_RULES.md. Returns undefined if neither exists. */
+export async function readProjectRules(workspacePath: string): Promise<string | undefined> {
+  for (const name of PROJECT_RULES_FILES) {
+    try {
+      return await Deno.readTextFile(`${workspacePath}/${name}`);
+    } catch { /* try next candidate */ }
+  }
+  return undefined;
+}
+
 /** Path to an isolated run worktree under an app: <appWs>/.worktrees/<runId>.
  * Used to run agent-driven plan execution in isolation from the main tree. */
 export function getRunWorktreePath(userId: string, appId: string, runId: string): string {

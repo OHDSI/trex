@@ -2,7 +2,7 @@
 import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
-import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent } from "./tools/workspace.ts";
+import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
 import { safeJoin, EXCLUDED_DIRS, EXCLUDED_FILES } from "./tools/path_safety.ts";
 import { parseBuildTags, stripBuildTags } from "./build_tag_parser.ts";
 import { executeBuildTags } from "./build_tag_executor.ts";
@@ -28,6 +28,8 @@ import { handleAttachmentRoutes } from "./routes/attachment_routes.ts";
 import { handleSecurityRoutes } from "./routes/security_routes.ts";
 import { handleVisualEditingRoutes } from "./routes/visual_editing_routes.ts";
 import { handlePrototypeRoutes } from "./routes/prototype_routes.ts";
+import { handleD2ERoutes } from "./routes/d2e_routes.ts";
+import { detectD2E } from "./d2e/detect.ts";
 import { handleSupabaseRoutes } from "./routes/supabase_routes.ts";
 import { handleSkillsRoutes } from "./routes/skills_routes.ts";
 import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
@@ -154,6 +156,7 @@ Deno.serve(async (req: Request) => {
       await handleSecurityRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleVisualEditingRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handlePrototypeRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleD2ERoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSkillsRoutes(path, method, req, userId, sql, corsHeaders);
     if (routeResult) return routeResult;
 
@@ -574,13 +577,13 @@ Deno.serve(async (req: Request) => {
         chatMode = "agent";
       }
 
-      // Read AI_RULES.md from app workspace (like Dyad), fall back to DB settings
+      // Read project rules (TREX.md, legacy AI_RULES.md) from the app
+      // workspace, fall back to DB settings.
       let aiRules = settings.ai_rules || undefined;
       if (streamAppId) {
-        try {
-          const wsPath = getAppWorkspacePath(userId, streamAppId);
-          aiRules = await Deno.readTextFile(`${wsPath}/AI_RULES.md`);
-        } catch { /* no AI_RULES.md, use DB setting or default */ }
+        const wsPath = getAppWorkspacePath(userId, streamAppId);
+        const rules = await readProjectRules(wsPath);
+        if (rules !== undefined) aiRules = rules;
       }
 
       let systemPrompt = constructSystemPrompt(chatMode, aiRules);
@@ -1228,6 +1231,20 @@ Deno.serve(async (req: Request) => {
 
           // Inject the component tagger so visual-edit/inspect works on the clone.
           try { await injectComponentTagger(wsPath); } catch { /* non-fatal */ }
+
+          // Data2Evidence: detect runnable sub-apps and persist the registry.
+          if (body.kind === "d2e") {
+            try {
+              const d2e = await detectD2E(wsPath, gitUrl);
+              const cfg = { ...(app.config || {}), d2e };
+              await sql(`UPDATE devx.apps SET config = $1, tech_stack = 'd2e' WHERE id = $2`,
+                [JSON.stringify(cfg), app.id]);
+              app.config = cfg;
+              app.tech_stack = "d2e";
+            } catch (e) {
+              console.error("[d2e] detection failed:", e);
+            }
+          }
         } catch (err) {
           // Roll back the half-created app so the user can retry cleanly.
           console.error("Git clone error:", err);
@@ -1649,7 +1666,7 @@ Deno.serve(async (req: Request) => {
     if (serverStartMatch && method === "POST") {
       const appId = serverStartMatch[1];
       const appResult = await sql(
-        `SELECT id, dev_command, install_command, tech_stack FROM devx.apps WHERE id = $1 AND user_id = $2`,
+        `SELECT id, dev_command, install_command, tech_stack, config FROM devx.apps WHERE id = $1 AND user_id = $2`,
         [appId, userId],
       );
       if (appResult.rows.length === 0) {
@@ -1672,7 +1689,52 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      const status = await devServerManager.start(userId, appId, wsPath, app.dev_command, app.install_command);
+      // d2e: run the active sub-app instead of the workspace root.
+      let startDevCmd = app.dev_command;
+      let startInstallCmd = app.install_command;
+      let override = {};
+      if (app.tech_stack === "d2e" && app.config?.d2e?.activeSubApp) {
+        const d2e = app.config.d2e;
+        const sa = d2e.subApps?.find((s) => s.key === d2e.activeSubApp);
+        if (sa) {
+          // sa.run.devCwd/installCwd come from owner-PATCH-able config; clamp them to
+          // the workspace with safeJoin (throws on traversal/absolute/empty). On any
+          // unsafe value, skip the d2e override entirely and fall back to app defaults.
+          let devCwdAbs: string | null = null;
+          let installCwdAbs: string | null = null;
+          try {
+            devCwdAbs = safeJoin(wsPath, sa.run.devCwd);
+            installCwdAbs = safeJoin(wsPath, sa.run.installCwd);
+          } catch {
+            console.error("[d2e] unsafe sub-app cwd, skipping run override");
+            devCwdAbs = null;
+            installCwdAbs = null;
+          }
+          if (devCwdAbs && installCwdAbs) {
+            startInstallCmd = sa.run.installCommand;
+            startDevCmd = sa.run.devCommand;
+            // Custom env is delivered via files (the Rust process manager can't take inline env).
+            if (d2e.externalApiBase) {
+              try {
+                await Deno.writeTextFile(`${devCwdAbs}/.env.local`,
+                  `D2E_API_BASE=${d2e.externalApiBase}\nVITE_D2E_API_BASE=${d2e.externalApiBase}\n`);
+              } catch (e) { console.error("[d2e] .env.local write failed", e); }
+            }
+            if (sa.run.needsGithubToken) {
+              const tok = await getGithubToken(userId, sql).catch(() => null);
+              if (tok) {
+                try {
+                  await Deno.writeTextFile(`${installCwdAbs}/.npmrc`,
+                    `//npm.pkg.github.com/:_authToken=${tok}\n@portal:registry=https://npm.pkg.github.com\n`);
+                } catch (e) { console.error("[d2e] .npmrc write failed", e); }
+              }
+            }
+            override = { installCwd: installCwdAbs, devCwd: devCwdAbs, portStyle: sa.run.portStyle, nxApp: sa.key.split(":")[1] };
+          }
+        }
+      }
+
+      const status = await devServerManager.start(userId, appId, wsPath, startDevCmd, startInstallCmd, override);
 
       // Register backend functions for this app (idempotent)
       try {

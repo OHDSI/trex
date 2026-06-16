@@ -10,7 +10,7 @@ export const template: AppTemplate = {
   install_command: "",
   build_command: "",
   files: {
-    "AI_RULES.md": `# Strategus Study Project
+    "TREX.md": `# Strategus Study Project
 
 ## Overview
 This is an OHDSI Strategus study project for observational health research.

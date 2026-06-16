@@ -6,7 +6,7 @@
  */
 import { duckdb, escapeSql } from "./duckdb.ts";
 import { constructSystemPrompt } from "./prompts.ts";
-import { ensureWorkspace, ensureAppWorkspace } from "./tools/workspace.ts";
+import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 
 const COPILOT_PORT = 4321;
@@ -53,7 +53,8 @@ export async function streamCopilotChat({
 
   let aiRules = effectiveSettings.ai_rules || undefined;
   if (appId) {
-    try { aiRules = await Deno.readTextFile(`${workspacePath}/AI_RULES.md`); } catch {}
+    const rules = await readProjectRules(workspacePath);
+    if (rules !== undefined) aiRules = rules;
   }
 
   let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext);
