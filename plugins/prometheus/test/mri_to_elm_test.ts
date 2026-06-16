@@ -41,6 +41,8 @@ Deno.test("ifrToElm: gender filter → patientWhere Compare; age axis added", ()
   assertEquals(elm.filters.length, 0);
   assertEquals(elm.axes.length, 1);
   assertEquals(elm.axes[0].binSize, 10);
+  assertEquals(elm.axes[0].id, "patient.attributes.Age");
+  assertEquals(elm.axes[0].axisNum, 1);
   assertEquals(elm.patientWhere.type, "And");
 });
 

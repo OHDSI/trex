@@ -19,10 +19,11 @@ export interface ElmRetrieve {
 
 /** A stratification axis (MVP: Patient-level attributes). */
 export interface ElmAxis {
-  id: string;             // "x1" | "y1" | ...
+  id: string;             // full attribute config-path, e.g. "patient.attributes.Age"
   valueExpr: string;      // SQL value expression relative to the patient alias "p"
   kind: "text" | "num";
   binSize?: number;       // numeric binning
+  axisNum: number;        // 1 = X axis, 2 = Y/stacked axis (from MRI categoryId prefix)
 }
 
 export interface ElmQuery {

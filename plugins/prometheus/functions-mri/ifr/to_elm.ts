@@ -76,7 +76,7 @@ export function ifrToElm(ifr: Ifr, mapping: ConfigMapping): ElmQuery {
     const m = mapping[ax.attributeId];
     if (!m || m.resourceType !== "Patient") continue; // interaction-attr axes deferred
     const binSize = ax.binsize && ax.binsize !== "n/a" ? Number(ax.binsize) : undefined;
-    axes.push({ id: ax.categoryId, valueExpr: valueExprFor(m, "p"), kind: m.kind, binSize: Number.isFinite(binSize) ? binSize : undefined });
+    axes.push({ id: ax.attributeId, axisNum: ax.categoryId.startsWith("y") ? 2 : 1, valueExpr: valueExprFor(m, "p"), kind: m.kind, binSize: Number.isFinite(binSize) ? binSize : undefined });
   }
 
   return {

@@ -44,14 +44,14 @@ Deno.test("barchart end-to-end: Age × Gender → categories/measures + filled d
     ],
   };
   const conn = fakeConn([
-    { x1: 30, y1: "male", pcount: "5" },
-    { x1: 30, y1: "female", pcount: "3" },
-    { x1: 40, y1: "male", pcount: "7" },
+    { "patient.attributes.Age": 30, "patient.attributes.Gender": "male", pcount: "5" },
+    { "patient.attributes.Age": 30, "patient.attributes.Gender": "female", pcount: "3" },
+    { "patient.attributes.Age": 40, "patient.attributes.Gender": "male", pcount: "7" },
   ]);
   const res = await handleBarchart(await encodeMriQuery(ifr), conn, state);
   const body = await res.json();
   assertEquals(body.totalPatientCount, 15);
-  assertEquals(body.categories.map((c) => c.id), ["x1", "y1"]);
+  assertEquals(body.categories.map((c) => c.id), ["patient.attributes.Age", "patient.attributes.Gender"]);
   assertEquals(body.data.length, 4); // 2×2 filled
   assert(conn.seen[0].includes("GROUP BY"));
   assert(conn.seen[0].includes("floor("));

@@ -1,6 +1,8 @@
 // @ts-nocheck - Deno edge function
 
-interface AxisMeta { id: string; kind: "text" | "num"; binSize?: number; }
+const MEASURE_ID = "patient.attributes.pcount";
+
+interface AxisMeta { id: string; kind: "text" | "num"; binSize?: number; axisNum: number; }
 interface CategoryLabel { name: string; }
 
 export interface BarchartResult {
@@ -46,7 +48,7 @@ export function assembleBarchart(
   const data = combos.map((combo) => {
     const row: Record<string, string | number> = {};
     axes.forEach((ax, i) => { row[ax.id] = combo[i]; });
-    row.pcount = found.get(key(combo)) ?? 0;
+    row[MEASURE_ID] = found.get(key(combo)) ?? 0;
     return row;
   });
 
@@ -54,7 +56,7 @@ export function assembleBarchart(
     id: ax.id,
     name: labels[i]?.name ?? ax.id,
     type: ax.kind,
-    axis: ax.id.startsWith("y") ? 2 : 1,
+    axis: ax.axisNum,
     binsize: ax.binSize,
     order: "ASC",
   }));
@@ -62,7 +64,7 @@ export function assembleBarchart(
   return {
     data,
     categories,
-    measures: [{ id: "pcount", name: "Patient Count", type: "measure", group: 1 }],
+    measures: [{ id: MEASURE_ID, name: "Patient Count", type: "measure", group: 1 }],
     totalPatientCount: total,
     postProcessingConfig: { fillMissingValuesEnabled: true, NOVALUE: "NO_VALUE", shouldFormatBinningLabels: true },
   };
