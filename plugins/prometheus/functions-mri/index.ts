@@ -4,6 +4,7 @@ import { parseMriRoute } from "./router.ts";
 import { withConnection } from "./db.ts";
 import { handleGetMyConfig, handleGetMyConfigList, handleGetFrontendConfig } from "./handlers/config.ts";
 import { handlePatientCount } from "./handlers/patientcount.ts";
+import { handleBarchart } from "./handlers/barchart.ts";
 
 export async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url);
@@ -20,6 +21,10 @@ export async function handle(req: Request): Promise<Response> {
     case "patientcount": {
       const mriquery = url.searchParams.get("mriquery") ?? (req.method === "POST" ? await req.text() : "");
       return await withConnection((conn) => handlePatientCount(mriquery, conn, state));
+    }
+    case "barchart": {
+      const mriquery = url.searchParams.get("mriquery") ?? (req.method === "POST" ? await req.text() : "");
+      return await withConnection((conn) => handleBarchart(mriquery, conn, state));
     }
     default:
       return Response.json({ error: "not found" }, { status: 404 });
