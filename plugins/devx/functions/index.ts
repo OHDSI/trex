@@ -1697,27 +1697,40 @@ Deno.serve(async (req: Request) => {
         const d2e = app.config.d2e;
         const sa = d2e.subApps?.find((s) => s.key === d2e.activeSubApp);
         if (sa) {
-          const devCwdAbs = `${wsPath}/${sa.run.devCwd}`.replace(/\/\.$/, "");
-          const installCwdAbs = `${wsPath}/${sa.run.installCwd}`.replace(/\/\.$/, "");
-          startInstallCmd = sa.run.installCommand;
-          startDevCmd = sa.run.devCommand;
-          // Custom env is delivered via files (the Rust process manager can't take inline env).
-          if (d2e.externalApiBase) {
-            try {
-              await Deno.writeTextFile(`${devCwdAbs}/.env.local`,
-                `D2E_API_BASE=${d2e.externalApiBase}\nVITE_D2E_API_BASE=${d2e.externalApiBase}\n`);
-            } catch (e) { console.error("[d2e] .env.local write failed", e); }
+          // sa.run.devCwd/installCwd come from owner-PATCH-able config; clamp them to
+          // the workspace with safeJoin (throws on traversal/absolute/empty). On any
+          // unsafe value, skip the d2e override entirely and fall back to app defaults.
+          let devCwdAbs: string | null = null;
+          let installCwdAbs: string | null = null;
+          try {
+            devCwdAbs = safeJoin(wsPath, sa.run.devCwd);
+            installCwdAbs = safeJoin(wsPath, sa.run.installCwd);
+          } catch {
+            console.error("[d2e] unsafe sub-app cwd, skipping run override");
+            devCwdAbs = null;
+            installCwdAbs = null;
           }
-          if (sa.run.needsGithubToken) {
-            const tok = await getGithubToken(userId, sql).catch(() => null);
-            if (tok) {
+          if (devCwdAbs && installCwdAbs) {
+            startInstallCmd = sa.run.installCommand;
+            startDevCmd = sa.run.devCommand;
+            // Custom env is delivered via files (the Rust process manager can't take inline env).
+            if (d2e.externalApiBase) {
               try {
-                await Deno.writeTextFile(`${installCwdAbs}/.npmrc`,
-                  `//npm.pkg.github.com/:_authToken=${tok}\n@portal:registry=https://npm.pkg.github.com\n`);
-              } catch (e) { console.error("[d2e] .npmrc write failed", e); }
+                await Deno.writeTextFile(`${devCwdAbs}/.env.local`,
+                  `D2E_API_BASE=${d2e.externalApiBase}\nVITE_D2E_API_BASE=${d2e.externalApiBase}\n`);
+              } catch (e) { console.error("[d2e] .env.local write failed", e); }
             }
+            if (sa.run.needsGithubToken) {
+              const tok = await getGithubToken(userId, sql).catch(() => null);
+              if (tok) {
+                try {
+                  await Deno.writeTextFile(`${installCwdAbs}/.npmrc`,
+                    `//npm.pkg.github.com/:_authToken=${tok}\n@portal:registry=https://npm.pkg.github.com\n`);
+                } catch (e) { console.error("[d2e] .npmrc write failed", e); }
+              }
+            }
+            override = { installCwd: installCwdAbs, devCwd: devCwdAbs, portStyle: sa.run.portStyle, nxApp: sa.key.split(":")[1] };
           }
-          override = { installCwd: installCwdAbs, devCwd: devCwdAbs, portStyle: sa.run.portStyle, nxApp: sa.key.split(":")[1] };
         }
       }
 

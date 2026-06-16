@@ -47,7 +47,10 @@ interface RunOverride {
 }
 
 /** Validate that a command starts with an allowed prefix. envPrefix may prepend
- * KEY='val' tokens, so validate the first NON-`KEY=val` token. */
+ * KEY='val' tokens, so validate the first NON-`KEY=val` token.
+ * NOTE: the Rust `validate_command` (plugins/devx-ext/src/validation.rs) is the
+ * authoritative gate — this Deno allowlist/parser is advisory and must be kept in
+ * sync with it. */
 function validateCommand(command: string): void {
   const tokens = command.trim().split(/\s+/);
   let firstWord = tokens[0];

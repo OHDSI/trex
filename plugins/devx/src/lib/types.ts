@@ -92,7 +92,7 @@ export interface App {
   dev_port?: number | null;
   supabase_target?: string | null;
   supabase_project_id?: string | null;
-  config?: Record<string, string> | null;
+  config?: ({ d2e?: D2EConfig } & Record<string, unknown>) | null;
   created_at: string;
   updated_at: string;
 }

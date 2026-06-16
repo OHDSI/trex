@@ -16,9 +16,9 @@ export const UI_RECIPES: Record<string, { name: string; framework: string; devCo
 export function uiRun(uiRoot: string, appDirName: string): SubAppRun {
   const r = UI_RECIPES[appDirName];
   return {
-    installCwd: uiRoot,
+    installCwd: uiRoot === "." ? "." : uiRoot,
     installCommand: "yarn install",
-    devCwd: `${uiRoot}/apps/${appDirName}`,
+    devCwd: uiRoot === "." ? `apps/${appDirName}` : `${uiRoot}/apps/${appDirName}`,
     devCommand: r?.devCommand ?? "npm start",
     port: r?.port ?? null,
     portStyle: r?.portStyle ?? "vite",
