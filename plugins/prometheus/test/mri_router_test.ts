@@ -24,3 +24,13 @@ Deno.test("parseMriRoute: barchart", () => {
 Deno.test("parseMriRoute: unknown → notFound", () => {
   assertEquals(parseMriRoute("GET", "/analytics-svc/nope", new URLSearchParams()).kind, "notFound");
 });
+
+Deno.test("parseMriRoute: patientcount accepts POST", () => {
+  assertEquals(parseMriRoute("POST", "/analytics-svc/api/services/population/json/patientcount", new URLSearchParams()), {
+    kind: "patientcount",
+  });
+});
+
+Deno.test("parseMriRoute: barchart rejects DELETE → notFound", () => {
+  assertEquals(parseMriRoute("DELETE", "/analytics-svc/api/services/population/json/barchart", new URLSearchParams()).kind, "notFound");
+});

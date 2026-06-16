@@ -8,7 +8,7 @@ export async function handle(req: Request): Promise<Response> {
   if (route.kind === "notFound") {
     return Response.json({ error: "not found" }, { status: 404 });
   }
-  // Dispatch wired in later phases.
+  // Warm the state singleton; dispatch (with state) is wired in later phases.
   await getMriState();
   return Response.json({ error: "not implemented" }, { status: 501 });
 }

@@ -23,8 +23,10 @@ export function parseMriRoute(method: string, pathname: string, q: URLSearchPara
     return { kind: "notFound" };
   }
 
-  if (p === "/api/services/population/json/patientcount") return { kind: "patientcount" };
-  if (p === "/api/services/population/json/barchart") return { kind: "barchart" };
+  if (m === "GET" || m === "POST") {
+    if (p === "/api/services/population/json/patientcount") return { kind: "patientcount" };
+    if (p === "/api/services/population/json/barchart") return { kind: "barchart" };
+  }
 
   return { kind: "notFound" };
 }
