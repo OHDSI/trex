@@ -32,11 +32,29 @@ const PORT_END = 3999;
 const POLL_INTERVAL_MS = 500;
 
 /** Allowed command prefixes for dev/install/build commands */
-const ALLOWED_COMMAND_PREFIXES = ["npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "echo"];
+const ALLOWED_COMMAND_PREFIXES = ["npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "echo", "python", "python3", "uv", "prefect"];
 
-/** Validate that a command starts with an allowed prefix */
+/** Run override for d2e (and other) sub-apps: install in one dir, run in
+ * another, inject the allocated port per the framework's portStyle, and pass
+ * extra env (e.g. GITHUB_TOKEN, D2E_API_BASE) into the command. */
+interface RunOverride {
+  installCwd?: string;     // absolute dir to run the install command in
+  devCwd?: string;         // absolute dir to run the dev server in
+  portStyle?: "vite" | "webpack" | "cra" | "nx" | "deno" | "none";
+  env?: Record<string, string>;
+  nxApp?: string;          // for portStyle "nx": the nx project name
+}
+
+/** Validate that a command starts with an allowed prefix. envPrefix may prepend
+ * KEY='val' tokens, so validate the first NON-`KEY=val` token. */
 function validateCommand(command: string): void {
-  const firstWord = command.trim().split(/\s+/)[0];
+  const tokens = command.trim().split(/\s+/);
+  let firstWord = tokens[0];
+  for (const t of tokens) {
+    if (/^[A-Z0-9_]+=/.test(t)) continue;
+    firstWord = t;
+    break;
+  }
   if (!ALLOWED_COMMAND_PREFIXES.includes(firstWord)) {
     throw new Error(`Command not allowed: "${firstWord}". Must start with one of: ${ALLOWED_COMMAND_PREFIXES.join(", ")}`);
   }
@@ -93,10 +111,14 @@ class DevServerManager {
     appPath: string,
     devCommand: string,
     installCommand: string,
+    override: RunOverride = {},
   ): Promise<{ status: string; port?: number }> {
     // Validate commands before execution
     validateCommand(devCommand);
     validateCommand(installCommand);
+
+    const installCwd = override.installCwd ?? appPath;
+    const devCwd = override.devCwd ?? appPath;
 
     const k = this.key(userId, appId);
     const existing = this.servers.get(k);
@@ -121,12 +143,12 @@ class DevServerManager {
 
     // Check if node_modules exists, run install if not
     try {
-      await Deno.stat(`${appPath}/node_modules`);
+      await Deno.stat(`${installCwd}/node_modules`);
     } catch {
       this.emit(entry, { type: "stdout", data: `Running: ${installCommand}`, timestamp: Date.now() });
       try {
         const result = JSON.parse(await duckdb(
-          `SELECT * FROM trex_devx_run_command('${escapeSql(appPath)}', '${escapeSql(installCommand)}')`
+          `SELECT * FROM trex_devx_run_command('${escapeSql(installCwd)}', '${escapeSql(installCommand)}')`
         ));
         if (result.output) {
           this.emit(entry, { type: "stdout", data: result.output, timestamp: Date.now() });
@@ -154,13 +176,25 @@ class DevServerManager {
       // and serves assets from the proxy base path
       const proxyBase = `/plugins/trex/devx-api/apps/${appId}/proxy/`;
       let finalCommand = devCommand;
-      if (/\bnpm run\b/.test(devCommand)) {
-        finalCommand = `${devCommand} -- --port ${port} --base ${proxyBase}`;
-      } else if (/\bnpx serve\b/.test(devCommand)) {
-        finalCommand = `${devCommand} -l ${port}`;
+      const style = override.portStyle ?? "vite";
+      const envPrefix = (e?: Record<string, string>) =>
+        e ? Object.entries(e).map(([key, v]) => `${key}='${String(v).replace(/'/g, "")}'`).join(" ") + " " : "";
+      if (style === "vite") {
+        finalCommand = `${envPrefix(override.env)}${devCommand} -- --port ${port} --base ${proxyBase}`;
+      } else if (style === "nx") {
+        // nx start/serve/dev <app> --port <port>; base path is app-config dependent, omit
+        finalCommand = `${envPrefix(override.env)}${devCommand} --port ${port}`;
+      } else if (style === "cra") {
+        finalCommand = `${envPrefix({ ...override.env, PORT: String(port) })}${devCommand}`;
+      } else if (style === "webpack") {
+        finalCommand = `${envPrefix({ ...override.env, PORT: String(port) })}${devCommand} -- --port ${port}`;
+      } else if (style === "deno") {
+        finalCommand = `${envPrefix({ ...override.env, PORT: String(port) })}${devCommand}`;
+      } else { // "none"
+        finalCommand = `${envPrefix(override.env)}${devCommand}`;
       }
       const configJson = JSON.stringify({
-        path: appPath,
+        path: devCwd,
         command: finalCommand,
         port,
       });

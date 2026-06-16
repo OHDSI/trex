@@ -1,11 +1,12 @@
-import { useState, useEffect, useCallback } from "react";
-import { Loader2, RefreshCw, Play, Server } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { Loader2, RefreshCw, Play, Square, Server, ExternalLink } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 import * as api from "@/lib/api";
-import type { App, D2EConfig, SubApp, SubAppType } from "@/lib/types";
+import { API_BASE } from "@/lib/config";
+import type { App, D2EConfig, SubApp, SubAppType, DevServerStatus } from "@/lib/types";
 import { toast } from "sonner";
 
 interface D2ESubAppPanelProps {
@@ -18,6 +19,15 @@ const TYPE_SECTIONS: { type: SubAppType; heading: string }[] = [
   { type: "flow", heading: "Flows" },
 ];
 
+/** Auth token for the preview proxy URL (mirrors PreviewTab). */
+function authToken(): string | null {
+  try {
+    const raw = localStorage.getItem("trex.auth.session");
+    if (raw) return JSON.parse(raw).access_token;
+  } catch { /* ignore */ }
+  return null;
+}
+
 export function D2ESubAppPanel({ app }: D2ESubAppPanelProps) {
   const [config, setConfig] = useState<D2EConfig | null>(null);
   const [loading, setLoading] = useState(true);
@@ -26,6 +36,32 @@ export function D2ESubAppPanel({ app }: D2ESubAppPanelProps) {
   const [savingApi, setSavingApi] = useState(false);
   const [redetecting, setRedetecting] = useState(false);
   const [selecting, setSelecting] = useState<string | null>(null);
+  const [server, setServer] = useState<DevServerStatus>({ status: "stopped" });
+  const [busy, setBusy] = useState(false);
+  const pollRef = useRef<number | null>(null);
+
+  const clearPoll = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      const s = await api.getDevServerStatus(app.id);
+      setServer(s);
+      if (s.status !== "starting") clearPoll();
+      return s;
+    } catch {
+      return null;
+    }
+  }, [app.id, clearPoll]);
+
+  const startPoll = useCallback(() => {
+    clearPoll();
+    pollRef.current = window.setInterval(refreshStatus, 2000);
+  }, [clearPoll, refreshStatus]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -44,6 +80,68 @@ export function D2ESubAppPanel({ app }: D2ESubAppPanelProps) {
   useEffect(() => {
     load();
   }, [load]);
+
+  // Reflect any already-running server on mount; resume polling while starting.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const s = await refreshStatus();
+      if (!cancelled && s?.status === "starting") startPoll();
+    })();
+    return () => {
+      cancelled = true;
+      clearPoll();
+    };
+  }, [refreshStatus, startPoll, clearPoll]);
+
+  const handleRun = async (key: string) => {
+    setBusy(true);
+    try {
+      // Only one sub-app runs at a time — make this the active one first.
+      if (config?.activeSubApp !== key) {
+        await api.selectD2ESubApp(app.id, key);
+        await load();
+      }
+      const s = await api.startDevServer(app.id);
+      setServer(s);
+      startPoll();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to start sub-app");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleStop = async () => {
+    setBusy(true);
+    try {
+      await api.stopDevServer(app.id);
+      clearPoll();
+      setServer({ status: "stopped" });
+    } catch {
+      toast.error("Failed to stop sub-app");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const previewUrl = (() => {
+    const token = authToken();
+    const qs = new URLSearchParams();
+    if (token) qs.set("token", token);
+    if (config?.externalApiBase) qs.set("apiBase", config.externalApiBase);
+    const s = qs.toString();
+    return `${API_BASE}/apps/${app.id}/proxy/${s ? `?${s}` : ""}`;
+  })();
+
+  // Surface a GitHub-token hint when the install fails on private @portal pkgs.
+  const tokenHint = (() => {
+    const e = server.error || "";
+    if (/401|authentication|@portal/i.test(e)) {
+      return "This d2e UI needs a connected GitHub token (private @portal packages). Connect GitHub in Settings.";
+    }
+    return null;
+  })();
 
   const handleSelect = async (key: string) => {
     setSelecting(key);
@@ -110,8 +208,13 @@ export function D2ESubAppPanel({ app }: D2ESubAppPanelProps) {
     );
   }
 
+  const isRunning = server.status === "running";
+  const isStarting = server.status === "starting";
+
   const renderSubApp = (sa: SubApp) => {
     const active = config.activeSubApp === sa.key;
+    // Run/Stop reflects the single running server; only the active sub-app runs.
+    const runningHere = active && (isRunning || isStarting);
     return (
       <div
         key={sa.key}
@@ -135,16 +238,57 @@ export function D2ESubAppPanel({ app }: D2ESubAppPanelProps) {
           </div>
           <div className="text-xs text-muted-foreground truncate">{sa.dir}</div>
           {sa.notes && <p className="text-xs text-muted-foreground mt-1">{sa.notes}</p>}
+          {runningHere && (
+            <div className="mt-2 flex items-center gap-2">
+              <Badge
+                variant={isRunning ? "default" : "outline"}
+                className="text-[10px] px-1.5 py-0"
+              >
+                {isStarting ? "Starting…" : "Running"}
+                {server.port ? ` · :${server.port}` : ""}
+              </Badge>
+              {isRunning && (
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs text-primary hover:underline"
+                >
+                  <ExternalLink className="h-3 w-3" /> Open preview
+                </a>
+              )}
+            </div>
+          )}
+          {active && server.status === "error" && (
+            <p className="text-xs text-destructive mt-2">
+              {tokenHint ?? server.error ?? "Failed to start."}
+            </p>
+          )}
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled
-          title="wired in Phase 1"
-          className="shrink-0"
-        >
-          <Play className="h-3.5 w-3.5 mr-1.5" /> Run
-        </Button>
+        {runningHere ? (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy}
+            onClick={handleStop}
+            className="shrink-0"
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Square className="h-3.5 w-3.5 mr-1.5" />}
+            Stop
+          </Button>
+        ) : (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={busy || isRunning || isStarting}
+            onClick={() => handleRun(sa.key)}
+            title={isRunning || isStarting ? "Stop the running sub-app first" : undefined}
+            className="shrink-0"
+          >
+            {busy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Play className="h-3.5 w-3.5 mr-1.5" />}
+            Run
+          </Button>
+        )}
       </div>
     );
   };

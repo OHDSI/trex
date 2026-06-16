@@ -1666,7 +1666,7 @@ Deno.serve(async (req: Request) => {
     if (serverStartMatch && method === "POST") {
       const appId = serverStartMatch[1];
       const appResult = await sql(
-        `SELECT id, dev_command, install_command, tech_stack FROM devx.apps WHERE id = $1 AND user_id = $2`,
+        `SELECT id, dev_command, install_command, tech_stack, config FROM devx.apps WHERE id = $1 AND user_id = $2`,
         [appId, userId],
       );
       if (appResult.rows.length === 0) {
@@ -1689,7 +1689,35 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      const status = await devServerManager.start(userId, appId, wsPath, app.dev_command, app.install_command);
+      // d2e: run the active sub-app instead of the workspace root.
+      let startDevCmd = app.dev_command;
+      let startInstallCmd = app.install_command;
+      let override = {};
+      if (app.tech_stack === "d2e" && app.config?.d2e?.activeSubApp) {
+        const sa = app.config.d2e.subApps?.find((s) => s.key === app.config.d2e.activeSubApp);
+        if (sa) {
+          startInstallCmd = sa.run.installCommand;
+          startDevCmd = sa.run.devCommand;
+          const env = {};
+          if (sa.run.needsGithubToken) {
+            const tok = await getGithubToken(userId, sql).catch(() => null);
+            if (tok) {
+              env.GITHUB_TOKEN = tok;
+              env.NPM_TOKEN = tok;
+            }
+          }
+          if (app.config.d2e.externalApiBase) env.D2E_API_BASE = app.config.d2e.externalApiBase;
+          override = {
+            installCwd: `${wsPath}/${sa.run.installCwd}`.replace(/\/\.$/, ""),
+            devCwd: `${wsPath}/${sa.run.devCwd}`.replace(/\/\.$/, ""),
+            portStyle: sa.run.portStyle,
+            nxApp: sa.key.split(":")[1],
+            env,
+          };
+        }
+      }
+
+      const status = await devServerManager.start(userId, appId, wsPath, startDevCmd, startInstallCmd, override);
 
       // Register backend functions for this app (idempotent)
       try {
