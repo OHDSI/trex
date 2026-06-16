@@ -2,7 +2,7 @@
 import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
-import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent } from "./tools/workspace.ts";
+import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
 import { safeJoin, EXCLUDED_DIRS, EXCLUDED_FILES } from "./tools/path_safety.ts";
 import { parseBuildTags, stripBuildTags } from "./build_tag_parser.ts";
 import { executeBuildTags } from "./build_tag_executor.ts";
@@ -28,6 +28,8 @@ import { handleAttachmentRoutes } from "./routes/attachment_routes.ts";
 import { handleSecurityRoutes } from "./routes/security_routes.ts";
 import { handleVisualEditingRoutes } from "./routes/visual_editing_routes.ts";
 import { handlePrototypeRoutes } from "./routes/prototype_routes.ts";
+import { handleD2ERoutes } from "./routes/d2e_routes.ts";
+import { detectD2E } from "./d2e/detect.ts";
 import { handleSupabaseRoutes } from "./routes/supabase_routes.ts";
 import { handleSkillsRoutes } from "./routes/skills_routes.ts";
 import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
@@ -154,6 +156,7 @@ Deno.serve(async (req: Request) => {
       await handleSecurityRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleVisualEditingRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handlePrototypeRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleD2ERoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSkillsRoutes(path, method, req, userId, sql, corsHeaders);
     if (routeResult) return routeResult;
 
@@ -574,13 +577,13 @@ Deno.serve(async (req: Request) => {
         chatMode = "agent";
       }
 
-      // Read AI_RULES.md from app workspace (like Dyad), fall back to DB settings
+      // Read project rules (TREX.md, legacy AI_RULES.md) from the app
+      // workspace, fall back to DB settings.
       let aiRules = settings.ai_rules || undefined;
       if (streamAppId) {
-        try {
-          const wsPath = getAppWorkspacePath(userId, streamAppId);
-          aiRules = await Deno.readTextFile(`${wsPath}/AI_RULES.md`);
-        } catch { /* no AI_RULES.md, use DB setting or default */ }
+        const wsPath = getAppWorkspacePath(userId, streamAppId);
+        const rules = await readProjectRules(wsPath);
+        if (rules !== undefined) aiRules = rules;
       }
 
       let systemPrompt = constructSystemPrompt(chatMode, aiRules);
@@ -1228,6 +1231,20 @@ Deno.serve(async (req: Request) => {
 
           // Inject the component tagger so visual-edit/inspect works on the clone.
           try { await injectComponentTagger(wsPath); } catch { /* non-fatal */ }
+
+          // Data2Evidence: detect runnable sub-apps and persist the registry.
+          if (body.kind === "d2e") {
+            try {
+              const d2e = await detectD2E(wsPath, gitUrl);
+              const cfg = { ...(app.config || {}), d2e };
+              await sql(`UPDATE devx.apps SET config = $1, tech_stack = 'd2e' WHERE id = $2`,
+                [JSON.stringify(cfg), app.id]);
+              app.config = cfg;
+              app.tech_stack = "d2e";
+            } catch (e) {
+              console.error("[d2e] detection failed:", e);
+            }
+          }
         } catch (err) {
           // Roll back the half-created app so the user can retry cleanly.
           console.error("Git clone error:", err);
