@@ -22,7 +22,8 @@
         }
       },
       "api": [
-        { "source": "/fhir", "function": "/functions" }
+        { "source": "/fhir", "function": "/functions" },
+        { "source": "/analytics-svc", "function": "/functions-mri" }
       ]
     },
     "ui": {
