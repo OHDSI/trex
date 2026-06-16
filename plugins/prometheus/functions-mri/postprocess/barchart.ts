@@ -34,7 +34,7 @@ export function assembleBarchart(
   });
 
   // Cartesian product → keyed lookup → fill 0.
-  const key = (combo: any[]) => combo.map(String).join("");
+  const key = (combo: any[]) => JSON.stringify(combo); // collision-free combo key
   const found = new Map<string, number>();
   for (const r of norm) found.set(key(axes.map((ax) => r[ax.id])), r.pcount);
 
