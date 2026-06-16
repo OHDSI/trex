@@ -15,12 +15,15 @@ export function valueExprFor(m: AttrMapping, alias: string): string {
 
 function exprFromConstraints(m: AttrMapping, alias: string, c: IfrBoolean<any>): ElmExpr {
   const valueExpr = valueExprFor(m, alias);
-  const ops = (c.content ?? []).map((e: any): ElmExpr => ({
-    type: "Compare",
-    op: (e.operator ?? "=") as any,
-    valueExpr,
-    literal: e.value,
-  }));
+  const ops = (c.content ?? []).map((e: any): ElmExpr => {
+    const isNum = m.kind === "num" && Number.isFinite(Number(e.value));
+    return {
+      type: "Compare",
+      op: (e.operator ?? "=") as any,
+      valueExpr,
+      literal: isNum ? Number(e.value) : e.value,
+    };
+  });
   if (ops.length === 0) return { type: "True" };
   return c.op === "OR" ? { type: "Or", operands: ops } : { type: "And", operands: ops };
 }
@@ -43,7 +46,7 @@ export function ifrToElm(ifr: Ifr, mapping: ConfigMapping): ElmQuery {
   for (const card of cards) {
     const attrs: IfrAttribute[] = (card.attributes?.content ?? []).filter((a: any) => a.type === "Attribute");
     // Patient-level filter card → predicates on base patient table
-    if (card.configPath === "patient" || card.configPath.startsWith("patient.attributes")) {
+    if (card.configPath === "patient" || card.configPath.startsWith("patient.attributes.")) {
       for (const a of attrs) {
         const m = mapping[a.configPath];
         if (m && m.resourceType === "Patient") patientPreds.push(exprFromConstraints(m, "p", a.constraints));

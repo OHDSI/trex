@@ -43,3 +43,30 @@ Deno.test("ifrToElm: gender filter → patientWhere Compare; age axis added", ()
   assertEquals(elm.axes[0].binSize, 10);
   assertEquals(elm.patientWhere.type, "And");
 });
+
+Deno.test("ifrToElm: numeric Age filter literal is coerced to a number (unquoted)", () => {
+  const ifr = {
+    filter: {
+      configMetadata: { id: "fhir-ds1", version: "1" },
+      cards: {
+        type: "BooleanContainer", op: "AND",
+        content: [{
+          type: "FilterCard", configPath: "patient.attributes.Age",
+          attributes: {
+            type: "BooleanContainer", op: "AND",
+            content: [{
+              type: "Attribute", configPath: "patient.attributes.Age",
+              constraints: { type: "BooleanContainer", op: "AND", content: [{ type: "Expression", operator: ">=", value: "65" }] },
+            }],
+          },
+        }],
+      },
+    },
+    axisSelection: [],
+  };
+  const elm = ifrToElm(ifr, mapping);
+  const cmp = elm.patientWhere.operands[0].operands[0];
+  assertEquals(cmp.type, "Compare");
+  assertEquals(cmp.literal, 65);
+  assertEquals(typeof cmp.literal, "number");
+});
