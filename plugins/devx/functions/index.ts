@@ -1694,26 +1694,30 @@ Deno.serve(async (req: Request) => {
       let startInstallCmd = app.install_command;
       let override = {};
       if (app.tech_stack === "d2e" && app.config?.d2e?.activeSubApp) {
-        const sa = app.config.d2e.subApps?.find((s) => s.key === app.config.d2e.activeSubApp);
+        const d2e = app.config.d2e;
+        const sa = d2e.subApps?.find((s) => s.key === d2e.activeSubApp);
         if (sa) {
+          const devCwdAbs = `${wsPath}/${sa.run.devCwd}`.replace(/\/\.$/, "");
+          const installCwdAbs = `${wsPath}/${sa.run.installCwd}`.replace(/\/\.$/, "");
           startInstallCmd = sa.run.installCommand;
           startDevCmd = sa.run.devCommand;
-          const env = {};
+          // Custom env is delivered via files (the Rust process manager can't take inline env).
+          if (d2e.externalApiBase) {
+            try {
+              await Deno.writeTextFile(`${devCwdAbs}/.env.local`,
+                `D2E_API_BASE=${d2e.externalApiBase}\nVITE_D2E_API_BASE=${d2e.externalApiBase}\n`);
+            } catch (e) { console.error("[d2e] .env.local write failed", e); }
+          }
           if (sa.run.needsGithubToken) {
             const tok = await getGithubToken(userId, sql).catch(() => null);
             if (tok) {
-              env.GITHUB_TOKEN = tok;
-              env.NPM_TOKEN = tok;
+              try {
+                await Deno.writeTextFile(`${installCwdAbs}/.npmrc`,
+                  `//npm.pkg.github.com/:_authToken=${tok}\n@portal:registry=https://npm.pkg.github.com\n`);
+              } catch (e) { console.error("[d2e] .npmrc write failed", e); }
             }
           }
-          if (app.config.d2e.externalApiBase) env.D2E_API_BASE = app.config.d2e.externalApiBase;
-          override = {
-            installCwd: `${wsPath}/${sa.run.installCwd}`.replace(/\/\.$/, ""),
-            devCwd: `${wsPath}/${sa.run.devCwd}`.replace(/\/\.$/, ""),
-            portStyle: sa.run.portStyle,
-            nxApp: sa.key.split(":")[1],
-            env,
-          };
+          override = { installCwd: installCwdAbs, devCwd: devCwdAbs, portStyle: sa.run.portStyle, nxApp: sa.key.split(":")[1] };
         }
       }
 

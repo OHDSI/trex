@@ -35,13 +35,14 @@ const POLL_INTERVAL_MS = 500;
 const ALLOWED_COMMAND_PREFIXES = ["npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "echo", "python", "python3", "uv", "prefect"];
 
 /** Run override for d2e (and other) sub-apps: install in one dir, run in
- * another, inject the allocated port per the framework's portStyle, and pass
- * extra env (e.g. GITHUB_TOKEN, D2E_API_BASE) into the command. */
+ * another, and inject the allocated port per the framework's portStyle.
+ * Custom env is NOT passed here — the Rust process manager parses argv0 and
+ * has no inline-env, so custom env is delivered via files (.env.local/.npmrc).
+ * It does inject PORT into the child env, so PORT-based servers need no flags. */
 interface RunOverride {
   installCwd?: string;     // absolute dir to run the install command in
   devCwd?: string;         // absolute dir to run the dev server in
   portStyle?: "vite" | "webpack" | "cra" | "nx" | "deno" | "none";
-  env?: Record<string, string>;
   nxApp?: string;          // for portStyle "nx": the nx project name
 }
 
@@ -175,29 +176,19 @@ class DevServerManager {
       // Inject --port and --base so the dev server binds to the allocated port
       // and serves assets from the proxy base path
       const proxyBase = `/plugins/trex/devx-api/apps/${appId}/proxy/`;
-      let finalCommand = devCommand;
       const style = override.portStyle ?? "vite";
-      const envPrefix = (e?: Record<string, string>) =>
-        e ? Object.entries(e).map(([key, v]) => `${key}='${String(v).replace(/'/g, "")}'`).join(" ") + " " : "";
+      let finalCommand = devCommand;
       if (style === "vite") {
-        finalCommand = `${envPrefix(override.env)}${devCommand} -- --port ${port} --base ${proxyBase}`;
+        finalCommand = `${devCommand} -- --port ${port} --base ${proxyBase}`;
       } else if (style === "nx") {
-        // nx start/serve/dev <app> --port <port>; base path is app-config dependent, omit
-        finalCommand = `${envPrefix(override.env)}${devCommand} --port ${port}`;
-      } else if (style === "cra") {
-        finalCommand = `${envPrefix({ ...override.env, PORT: String(port) })}${devCommand}`;
+        finalCommand = `${devCommand} --port ${port}`;
       } else if (style === "webpack") {
-        finalCommand = `${envPrefix({ ...override.env, PORT: String(port) })}${devCommand} -- --port ${port}`;
-      } else if (style === "deno") {
-        finalCommand = `${envPrefix({ ...override.env, PORT: String(port) })}${devCommand}`;
-      } else { // "none"
-        finalCommand = `${envPrefix(override.env)}${devCommand}`;
+        finalCommand = `${devCommand} -- --port ${port}`;
+      } else {
+        // "cra" | "deno" | "none": the Rust process manager injects PORT env; pass no extra flags
+        finalCommand = devCommand;
       }
-      const configJson = JSON.stringify({
-        path: devCwd,
-        command: finalCommand,
-        port,
-      });
+      const configJson = JSON.stringify({ path: devCwd, command: finalCommand, port });
       const startResult = JSON.parse(await duckdb(
         `SELECT * FROM trex_devx_process_start('${escapeSql(processId)}', '${escapeSql(configJson)}')`
       ));
