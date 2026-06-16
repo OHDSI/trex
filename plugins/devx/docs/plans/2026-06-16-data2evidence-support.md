@@ -790,6 +790,8 @@ git commit -m "feat(devx/d2e): generate per-sub-app TREX.md on select"
 
 ## Phase 3 — Functions (best-effort run against an external d2e)
 
+> **v1 status (implemented):** Functions are **detectable + selectable**, get **type-specific context** (the `d2e` skill + a function `TREX.md`), and the **deno process starts** via the generic `server/start` branch (`functionRun` → `deno run --allow-all index.ts`, `portStyle:"deno"`, which the Rust `validate_command` allowlist permits and into which it injects `PORT`). **Deferred:** real DB/auth-backed routes. The Rust process manager (`plugins/devx-ext/src/validation.rs::validate_command`) injects **only `PORT`** and cannot inject arbitrary env; d2e functions read DB/API config from `Deno.env` (`PG__*`/`HANA__*`/`D2E_API_BASE`), which the `.env.local` file we write is NOT loaded into. So standalone functions only serve routes that don't need the d2e DB. Full function runtime needs an **external running d2e AND Rust env injection** (deferred).
+
 ### Task 3.1: Run a d2e function via Deno, pointed at external env
 
 **Files:**
@@ -807,25 +809,29 @@ git commit -m "feat(devx/d2e): generate per-sub-app TREX.md on select"
 
 ## Phase 4 — Flows (context + local test harness)
 
+> **v1 status (implemented):** Flows are **detectable + selectable** and get **type-specific context** (the `d2e` skill + a flow `TREX.md` with Prefect conventions). **Deferred:** execution. The Rust `validate_command` allowlist (`npm, npx, yarn, pnpm, node, deno, bun, echo, git, mkdir, sh, cat, cp`) has **no `python`/`prefect`**, so flows cannot be exec'd. `flowRun` therefore stays at `portStyle:"none"` + an **echo guidance** `devCommand` — it is deliberately NOT changed to call `python`/`pytest`/`prefect`, which the Rust allowlist would reject at runtime. Running flows for real requires (1) `python3`/`uv`/`prefect` in the image (the `Dockerfile.dx` deps in Task 4.1 below — present for a future rebuild) AND (2) adding `python`/`python3`/`uv`/`prefect` to the Rust `validate_command` allowlist in `plugins/devx-ext/src/validation.rs` + rebuilding the `devx_ext` extension (both deferred). v1 = context only.
+
 ### Task 4.1: Image deps for Python/Prefect
 
 **Files:**
 - Modify: `Dockerfile.dx` (final stage)
 
-- [ ] **Step 1:** Ensure `python3`, `pip`, `uv`, and `prefect` are available for `node` user (add an `apt-get`/`uv` install in the final stage, or document that flows require the d2e flow image). Enable `corepack`/`yarn` here too (needed by Phase 1).
+- [x] **Step 1:** Added to `Dockerfile.dx` **final stage** (as root, source-only — NOT rebuilt): `corepack enable || npm i -g yarn` (for the d2e-ui yarn-workspaces install) and a best-effort `apt-get` + `uv`/`pip` install of `python3`/`pip`/`uv`/`prefect`, each guarded with `|| true` so the build proceeds if apt is unavailable. A comment records that fully RUNNING flows ALSO requires adding `python`/`python3`/`uv`/`prefect` to the Rust `validate_command` allowlist in `plugins/devx-ext/src/validation.rs` + rebuilding `devx_ext` (out of scope).
 
-- [ ] **Step 2: Verify** `docker exec -u node trex-dx-trex-1 sh -c 'python3 --version && prefect version && yarn --version'`. **Commit.**
+- [ ] **Step 2 (deferred — requires rebuild):** After a future image rebuild, verify `docker exec -u node trex-dx-trex-1 sh -c 'python3 --version && prefect version && yarn --version'`. The running dx image predates these deps; we did **not** rebuild.
 
-### Task 4.2: Flow "run" = local test harness
+### Task 4.2: Flow "run" = echo guidance (test harness deferred)
 
 **Files:**
 - Modify: `plugins/devx/functions/d2e/recipes.ts` (`flowRun`)
 
-- [ ] **Step 1:** Make `flowRun` produce a `devCommand` that runs the flow's test (e.g. `python -m pytest <flow>/tests -q` if tests exist, else `echo` guidance). `portStyle:"none"` means no port/preview; the panel shows test output via `server/output` instead of a preview.
+> **Adjusted from the original step (verified constraint).** `flowRun` keeps `portStyle:"none"` and an **`echo` guidance** `devCommand`. It is deliberately NOT changed to `python -m pytest`/`prefect`: the Rust `validate_command` allowlist does not include `python`/`prefect`, so such a command would be **rejected at runtime** by the process manager. Real test-harness execution is therefore deferred behind the Rust allowlist + image rebuild (see the Phase 4 v1-status note above).
 
-- [ ] **Step 2: Verify** selecting a flow + Run streams test output (or the guidance echo). **Commit.**
+- [x] **Step 1:** `flowRun` produces an `echo`-only `devCommand` (allowed by the Rust allowlist) so "Run" surfaces guidance rather than failing. `portStyle:"none"` means no port/preview; the panel shows the echoed guidance via `server/output`.
 
-> Long-running Prefect server/worker orchestration is **out of scope for v1** (needs Docker + a Prefect server). The skill documents the real platform path; devx gives edit + context + unit test.
+- [x] **Step 2: Verified** selecting a flow writes a flow `TREX.md` (Prefect conventions) and the run spec is the echo guidance.
+
+> Long-running Prefect server/worker orchestration AND local test-harness execution are **out of scope for v1** (the test harness needs `python`/`prefect` in the Rust allowlist + image rebuild). The skill documents the real platform path; devx gives edit + context.
 
 ---
 
