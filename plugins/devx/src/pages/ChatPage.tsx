@@ -92,7 +92,7 @@ export default function ChatPage() {
   );
 
   const handleCreateApp = useCallback(
-    async (name: string, opts?: { template?: string; gitUrl?: string }) => {
+    async (name: string, opts?: { template?: string; gitUrl?: string; kind?: "d2e" }) => {
       const app = await createApp(name, opts);
       nav.openApp(app.id);
       return app;

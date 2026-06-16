@@ -21,8 +21,15 @@ const TEMPLATES = [
 interface AppCreateDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string }) => Promise<App>;
+  onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string; kind?: "d2e" }) => Promise<App>;
 }
+
+const D2E_REPOS = [
+  { url: "https://github.com/data2evidence/d2e-ui", label: "d2e-ui (portal, flow, analysis, jobs, mapping)" },
+  { url: "https://github.com/data2evidence/d2e-flows", label: "d2e-flows (Prefect flows)" },
+  { url: "https://github.com/OHDSI/d2e", label: "d2e (platform: functions + compose)" },
+  { url: "__custom__", label: "Custom URL…" },
+];
 
 const CREATION_PHASES = [
   "Creating project...",
@@ -42,15 +49,20 @@ const GIT_PHASES = [
 export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDialogProps) {
   const [name, setName] = useState("");
   const [template, setTemplate] = useState("react-vite");
-  const [mode, setMode] = useState<"template" | "git">("template");
+  const [mode, setMode] = useState<"template" | "git" | "d2e">("template");
   const [gitUrl, setGitUrl] = useState("");
+  const [d2eRepo, setD2eRepo] = useState(D2E_REPOS[0].url);
+  const [d2eCustomUrl, setD2eCustomUrl] = useState("");
   const [creating, setCreating] = useState(false);
   const [done, setDone] = useState(false);
   const [phase, setPhase] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const phaseTimer = useRef<ReturnType<typeof setInterval>>(undefined);
 
-  const phases = mode === "git" ? GIT_PHASES : CREATION_PHASES;
+  const phases = mode === "git" || mode === "d2e" ? GIT_PHASES : CREATION_PHASES;
+
+  // The effective repo URL chosen in d2e mode (select value, or the custom field).
+  const d2eUrl = (d2eRepo === "__custom__" ? d2eCustomUrl : d2eRepo).trim();
 
   // Cycle through phases while creating
   useEffect(() => {
@@ -69,10 +81,16 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
   const deriveName = (url: string) =>
     url.replace(/\.git$/, "").replace(/\/$/, "").split("/").pop() || "";
 
-  const effectiveName = mode === "git" && !name.trim() ? deriveName(gitUrl) : name.trim();
+  const effectiveName = mode === "git" && !name.trim()
+    ? deriveName(gitUrl)
+    : mode === "d2e" && !name.trim()
+      ? deriveName(d2eUrl)
+      : name.trim();
   const canCreate = mode === "git"
     ? /^https:\/\/.+/.test(gitUrl.trim())
-    : !!name.trim();
+    : mode === "d2e"
+      ? /^https:\/\/.+/.test(d2eUrl)
+      : !!name.trim();
 
   const handleCreate = async () => {
     if (!canCreate) return;
@@ -82,6 +100,8 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
     try {
       if (mode === "git") {
         await onCreateApp(effectiveName || "Imported App", { gitUrl: gitUrl.trim() });
+      } else if (mode === "d2e") {
+        await onCreateApp(effectiveName || "Data2Evidence App", { gitUrl: d2eUrl, kind: "d2e" });
       } else {
         await onCreateApp(name.trim(), { template });
       }
@@ -91,6 +111,8 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
         setName("");
         setTemplate("react-vite");
         setGitUrl("");
+        setD2eRepo(D2E_REPOS[0].url);
+        setD2eCustomUrl("");
         setMode("template");
         setDone(false);
         onOpenChange(false);
@@ -111,8 +133,8 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
           <DialogDescription>Start from a template or import an existing git repository.</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
-          {/* Mode toggle: template vs import from git */}
-          <div className="grid grid-cols-2 gap-1 p-1 rounded-lg bg-muted/50 border">
+          {/* Mode toggle: template vs import from git vs Data2Evidence */}
+          <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-muted/50 border">
             <button
               type="button"
               onClick={() => setMode("template")}
@@ -131,7 +153,43 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
             >
               Import from Git
             </button>
+            <button
+              type="button"
+              onClick={() => setMode("d2e")}
+              className={`text-sm py-1.5 rounded-md transition-colors ${
+                mode === "d2e" ? "bg-background shadow-sm font-medium" : "text-muted-foreground"
+              }`}
+            >
+              Data2Evidence
+            </button>
           </div>
+
+          {mode === "d2e" && (
+            <div className="space-y-2">
+              <Label htmlFor="d2e-repo">Data2Evidence repository</Label>
+              <select
+                id="d2e-repo"
+                value={d2eRepo}
+                onChange={(e) => setD2eRepo(e.target.value)}
+                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                {D2E_REPOS.map((r) => (
+                  <option key={r.url} value={r.url}>{r.label}</option>
+                ))}
+              </select>
+              {d2eRepo === "__custom__" && (
+                <Input
+                  placeholder="https://github.com/org/repo"
+                  value={d2eCustomUrl}
+                  onChange={(e) => setD2eCustomUrl(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && handleCreate()}
+                />
+              )}
+              <p className="text-xs text-muted-foreground">
+                Clones the repo and detects runnable UIs, functions, and flows. Private repos need a connected GitHub token.
+              </p>
+            </div>
+          )}
 
           {mode === "git" && (
             <div className="space-y-2">
@@ -150,10 +208,16 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
           )}
 
           <div className="space-y-2">
-            <Label htmlFor="app-name">App Name {mode === "git" && <span className="text-muted-foreground font-normal">(optional)</span>}</Label>
+            <Label htmlFor="app-name">App Name {(mode === "git" || mode === "d2e") && <span className="text-muted-foreground font-normal">(optional)</span>}</Label>
             <Input
               id="app-name"
-              placeholder={mode === "git" ? (deriveName(gitUrl) || "Derived from repo URL") : "My App"}
+              placeholder={
+                mode === "git"
+                  ? (deriveName(gitUrl) || "Derived from repo URL")
+                  : mode === "d2e"
+                    ? (deriveName(d2eUrl) || "Derived from repo URL")
+                    : "My App"
+              }
               value={name}
               onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleCreate()}
@@ -215,7 +279,15 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
             onClick={handleCreate}
             disabled={!canCreate || creating || done}
           >
-            {creating ? (mode === "git" ? "Importing..." : "Creating...") : done ? "Done" : mode === "git" ? "Import Repository" : "Create App"}
+            {creating
+              ? (mode === "git" || mode === "d2e" ? "Importing..." : "Creating...")
+              : done
+                ? "Done"
+                : mode === "git"
+                  ? "Import Repository"
+                  : mode === "d2e"
+                    ? "Create Data2Evidence App"
+                    : "Create App"}
           </Button>
         </div>
       </DialogContent>

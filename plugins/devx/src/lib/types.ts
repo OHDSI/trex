@@ -115,6 +115,41 @@ export const TEMPLATE_CONFIG_FIELDS: Record<string, TemplateConfigField[]> = {
   ],
 };
 
+// Data2Evidence (d2e) types — mirror of functions/d2e/types.ts
+
+export type SubAppType = "ui" | "function" | "flow";
+export type PortStyle = "vite" | "webpack" | "cra" | "nx" | "deno" | "none";
+
+export interface SubAppRun {
+  installCwd: string;
+  installCommand: string;
+  devCwd: string;
+  devCommand: string;
+  port: number | null;
+  portStyle: PortStyle;
+  needsGithubToken?: boolean;
+  env?: Record<string, string>;
+}
+
+export interface SubApp {
+  key: string;
+  type: SubAppType;
+  name: string;
+  dir: string;
+  framework: string;
+  run: SubAppRun;
+  notes?: string;
+}
+
+export interface D2EConfig {
+  repo: string;
+  repoKind: "ui" | "functions" | "flows" | "platform" | "unknown";
+  detectedAt: string;
+  subApps: SubApp[];
+  activeSubApp?: string;
+  externalApiBase?: string;
+}
+
 // Supabase deploy types
 
 export interface SupabaseDeployConfig {
@@ -317,7 +352,8 @@ export interface Plan {
   updated_at: string;
   chat_title?: string;
   /** "db" for plans tracked in devx.plans; "file" for read-only markdown
-   * surfaced from docs/devx/{plans,specs}/. File entries cannot have their
+   * surfaced from trex/{plans,specs}/ (or legacy docs/devx/{plans,specs}/).
+   * File entries cannot have their
    * status mutated. */
   source?: "db" | "file";
 }

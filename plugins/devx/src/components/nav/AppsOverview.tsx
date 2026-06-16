@@ -11,7 +11,7 @@ interface AppsOverviewProps {
   loading?: boolean;
   onOpenApp: (appId: string) => void;
   onOpenFreeChat: () => void;
-  onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string }) => Promise<App>;
+  onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string; kind?: "d2e" }) => Promise<App>;
   onDeleteApp: (appId: string) => Promise<void>;
   settingsAction?: React.ReactNode;
 }
