@@ -25,3 +25,10 @@ Deno.test("generateConfig ignores Patient in interactions and unknown types fall
   const { mriConfig } = generateConfig("ds1", ["Patient"]);
   assertEquals(Object.keys(mriConfig.config.patient.interactions).length, 0);
 });
+
+Deno.test("generateConfig includes the pcount measure attribute", () => {
+  const { mriConfig } = generateConfig("ds1", ["Patient"]);
+  const attrs = mriConfig.config.patient.attributes;
+  assert("pcount" in attrs);
+  assertEquals(attrs.pcount.measure, true);
+});

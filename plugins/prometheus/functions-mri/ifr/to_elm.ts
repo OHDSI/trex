@@ -3,6 +3,8 @@ import { Ifr, IfrFilterCard, IfrAttribute, IfrBoolean } from "./types.ts";
 import { AttrMapping, ConfigMapping } from "../config/mapping.ts";
 import { ElmQuery, ElmExpr, ElmRetrieve, ElmAxis } from "../elm/types.ts";
 
+const VALID_OPS = new Set(["=", "!=", "<", "<=", ">", ">="]);
+
 /** Build the SQL value expression for an attribute relative to a resource alias. */
 export function valueExprFor(m: AttrMapping, alias: string): string {
   const raw = `json_extract_string(${alias}._raw, '${m.jsonPath}')`;
@@ -16,10 +18,12 @@ export function valueExprFor(m: AttrMapping, alias: string): string {
 function exprFromConstraints(m: AttrMapping, alias: string, c: IfrBoolean<any>): ElmExpr {
   const valueExpr = valueExprFor(m, alias);
   const ops = (c.content ?? []).map((e: any): ElmExpr => {
+    const rawOp = e.operator ?? "=";
+    if (!VALID_OPS.has(rawOp)) throw new Error(`Invalid comparison operator: ${rawOp}`);
     const isNum = m.kind === "num" && Number.isFinite(Number(e.value));
     return {
       type: "Compare",
-      op: (e.operator ?? "=") as any,
+      op: rawOp as any,
       valueExpr,
       literal: isNum ? Number(e.value) : e.value,
     };

@@ -28,6 +28,18 @@ export function generateConfig(datasetId: string, presentTypes: string[]): Gener
     mapping[`patient.attributes.${name}`] = m;
   }
 
+  // The patient-count measure must exist in the config so the frontend can
+  // resolve measures[].id = "patient.attributes.pcount" via getAttributeByPath.
+  attributes["pcount"] = {
+    type: "num",
+    ordered: false,
+    measure: true,
+    category: false,
+    filtercard: { visible: false },
+    patientlist: { visible: false },
+  };
+  mapping["patient.attributes.pcount"] = { resourceType: "Patient", jsonPath: "$.id", kind: "num", binnable: false };
+
   // ---- patient.interactions (one per non-Patient resource present) ----
   const interactions: Record<string, any> = {};
   for (const rt of presentTypes) {

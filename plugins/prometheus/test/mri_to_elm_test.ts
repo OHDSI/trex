@@ -72,3 +72,22 @@ Deno.test("ifrToElm: numeric Age filter literal is coerced to a number (unquoted
   assertEquals(cmp.literal, 65);
   assertEquals(typeof cmp.literal, "number");
 });
+
+Deno.test("ifrToElm: rejects an injected comparison operator", () => {
+  const ifr = {
+    filter: { configMetadata: { id: "fhir-ds1", version: "1" }, cards: {
+      type: "BooleanContainer", op: "AND", content: [{
+        type: "FilterCard", configPath: "patient.attributes.Gender", attributes: {
+          type: "BooleanContainer", op: "AND", content: [{
+            type: "Attribute", configPath: "patient.attributes.Gender",
+            constraints: { type: "BooleanContainer", op: "OR", content: [{ type: "Expression", operator: "= 1 OR 1=1--", value: "x" }] },
+          }],
+        },
+      }],
+    } },
+    axisSelection: [],
+  };
+  let threw = false;
+  try { ifrToElm(ifr, mapping); } catch { threw = true; }
+  assertEquals(threw, true);
+});

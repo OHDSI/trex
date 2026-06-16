@@ -5,29 +5,37 @@ import { withConnection } from "./db.ts";
 import { handleGetMyConfig, handleGetMyConfigList, handleGetFrontendConfig } from "./handlers/config.ts";
 import { handlePatientCount } from "./handlers/patientcount.ts";
 import { handleBarchart } from "./handlers/barchart.ts";
+import { FhirError } from "../functions/error.ts";
 
 export async function handle(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const route = parseMriRoute(req.method, url.pathname, url.searchParams);
   const state = await getMriState();
 
-  switch (route.kind) {
-    case "getMyConfig":
-      return await withConnection((conn) => handleGetMyConfig(route.datasetId, conn, state));
-    case "getMyConfigList":
-      return await withConnection((conn) => handleGetMyConfigList(route.datasetId, conn, state));
-    case "getFrontendConfig":
-      return await withConnection((conn) => handleGetFrontendConfig(route.configId, conn, state));
-    case "patientcount": {
-      const mriquery = url.searchParams.get("mriquery") ?? (req.method === "POST" ? await req.text() : "");
-      return await withConnection((conn) => handlePatientCount(mriquery, conn, state));
+  try {
+    switch (route.kind) {
+      case "getMyConfig":
+        return await withConnection((conn) => handleGetMyConfig(route.datasetId, conn, state));
+      case "getMyConfigList":
+        return await withConnection((conn) => handleGetMyConfigList(route.datasetId, conn, state));
+      case "getFrontendConfig":
+        return await withConnection((conn) => handleGetFrontendConfig(route.configId, conn, state));
+      case "patientcount": {
+        const mriquery = url.searchParams.get("mriquery") ?? (req.method === "POST" ? await req.text() : "");
+        if (!mriquery) return Response.json({ error: "mriquery required" }, { status: 400 });
+        return await withConnection((conn) => handlePatientCount(mriquery, conn, state));
+      }
+      case "barchart": {
+        const mriquery = url.searchParams.get("mriquery") ?? (req.method === "POST" ? await req.text() : "");
+        if (!mriquery) return Response.json({ error: "mriquery required" }, { status: 400 });
+        return await withConnection((conn) => handleBarchart(mriquery, conn, state));
+      }
+      default:
+        return Response.json({ error: "not found" }, { status: 404 });
     }
-    case "barchart": {
-      const mriquery = url.searchParams.get("mriquery") ?? (req.method === "POST" ? await req.text() : "");
-      return await withConnection((conn) => handleBarchart(mriquery, conn, state));
-    }
-    default:
-      return Response.json({ error: "not found" }, { status: 404 });
+  } catch (err) {
+    if (err instanceof FhirError) return err.toResponse();
+    return Response.json({ error: String(err && err.message ? err.message : err) }, { status: 400 });
   }
 }
 
