@@ -1,6 +1,7 @@
 // @ts-nocheck - Deno edge function
 import { detectD2E } from "../d2e/detect.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
+import { renderD2ETrexMd } from "../d2e/trex_md.ts";
 
 async function loadCfg(appId, userId, sql) {
   const r = await sql(`SELECT config FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
@@ -29,7 +30,12 @@ export async function handleD2ERoutes(path, method, req, userId, sql, corsHeader
       return Response.json({ error: "Unknown sub-app" }, { status: 400, headers: corsHeaders });
     cfg.d2e.activeSubApp = key;
     await saveCfg(m[1], cfg, sql);
-    // TREX.md regeneration is wired in Phase 2 (Task 2.2).
+    // Write the per-sub-app TREX.md so the agent gets d2e-specific context.
+    const sa = cfg.d2e.subApps.find((s) => s.key === key);
+    try {
+      const ws = getAppWorkspacePath(userId, m[1]);
+      await Deno.writeTextFile(`${ws}/TREX.md`, renderD2ETrexMd(cfg.d2e, sa));
+    } catch (e) { console.error("[d2e] TREX.md write failed", e); }
     return Response.json({ ok: true, activeSubApp: key }, { headers: corsHeaders });
   }
   // PATCH /apps/:id/d2e/external-api  { externalApiBase }
