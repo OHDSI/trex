@@ -10,7 +10,7 @@ export const template: AppTemplate = {
   install_command: "npm install",
   build_command: "npm run build",
   files: {
-    "AI_RULES.md": `# Tech Stack
+    "TREX.md": `# Tech Stack
 - You are building a D2E admin portal plugin (micro-frontend).
 - Tech stack: React 18 + MUI 5 + single-spa + Vite (SystemJS output) frontend; Deno edge functions backend.
 - D2E theme: primary #000080 (navy), background #f2f0f1, table header #ebf1f8.

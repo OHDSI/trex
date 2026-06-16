@@ -10,7 +10,7 @@ export const template: AppTemplate = {
   install_command: "npm install",
   build_command: "npm run build",
   files: {
-    "AI_RULES.md": `# Tech Stack
+    "TREX.md": `# Tech Stack
 - You are building a Vue 3 application with Vite.
 - Use TypeScript with \`<script setup lang="ts">\` syntax.
 - Always put source code in the src folder.

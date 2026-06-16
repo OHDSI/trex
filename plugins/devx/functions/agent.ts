@@ -11,7 +11,7 @@ import { createAmazonBedrock } from "npm:@ai-sdk/amazon-bedrock";
 import { constructSystemPrompt } from "./prompts.ts";
 import { buildToolSet, getToolByName } from "./tools/registry.ts";
 import type { AgentContext } from "./tools/types.ts";
-import { ensureWorkspace, ensureAppWorkspace } from "./tools/workspace.ts";
+import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
 
@@ -168,12 +168,12 @@ export async function streamAgentChat({
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
 
-  // Read AI_RULES.md from app workspace (like Dyad), fall back to DB settings
+  // Read project rules (TREX.md, legacy AI_RULES.md) from the app workspace,
+  // fall back to DB settings.
   let aiRules = effectiveSettings.ai_rules || undefined;
   if (appId) {
-    try {
-      aiRules = await Deno.readTextFile(`${workspacePath}/AI_RULES.md`);
-    } catch { /* no AI_RULES.md, use DB setting or default */ }
+    const rules = await readProjectRules(workspacePath);
+    if (rules !== undefined) aiRules = rules;
   }
 
   let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext);

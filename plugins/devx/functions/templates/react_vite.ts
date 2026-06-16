@@ -10,7 +10,7 @@ export const template: AppTemplate = {
   install_command: "npm install",
   build_command: "npm run build",
   files: {
-    "AI_RULES.md": `# Tech Stack
+    "TREX.md": `# Tech Stack
 - You are building a React application.
 - Use TypeScript.
 - Use React Router. KEEP the routes in src/App.tsx

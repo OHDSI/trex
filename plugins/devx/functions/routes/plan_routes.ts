@@ -66,7 +66,8 @@ export async function handlePlanRoutes(path, method, req, userId, sql, corsHeade
   }
 
   // GET /apps/:id/plans — list all plans for an app (DB plans + filesystem
-  // plans/specs the agent has written to docs/devx/plans and docs/devx/specs)
+  // plans/specs the agent has written to trex/plans and trex/specs, plus the
+  // legacy docs/devx/{plans,specs} location)
   const appPlansMatch = path.match(/\/apps\/([^/]+)\/plans$/);
   if (appPlansMatch && method === "GET") {
     const appId = appPlansMatch[1];
@@ -89,11 +90,26 @@ export async function handlePlanRoutes(path, method, req, userId, sql, corsHeade
     let filePlans = [];
     if (appCheck.rows.length > 0) {
       const wsPath = getAppWorkspacePath(userId, appId);
-      const [plans, specs] = await Promise.all([
+      // Read from the current trex/ location first, then the legacy docs/devx/
+      // location for backward compatibility with older projects.
+      const [plans, specs, legacyPlans, legacySpecs] = await Promise.all([
+        readFilePlans(wsPath, "trex/plans", "plan"),
+        readFilePlans(wsPath, "trex/specs", "spec"),
         readFilePlans(wsPath, "docs/devx/plans", "plan"),
         readFilePlans(wsPath, "docs/devx/specs", "spec"),
       ]);
-      filePlans = [...plans, ...specs];
+      // Dedup by id (file:<kind>:<name>) so a file present in both the new and
+      // legacy location surfaces once, preferring the trex/ copy. Also drop any
+      // file whose content mirrors a DB plan — the WritePlan tool persists to
+      // both devx.plans and trex/specs/, and we don't want it listed twice.
+      const seen = new Set();
+      const dbContents = new Set(dbPlans.map((p) => (p.content || "").trim()));
+      filePlans = [...plans, ...specs, ...legacyPlans, ...legacySpecs].filter((p) => {
+        if (seen.has(p.id)) return false;
+        seen.add(p.id);
+        if (dbContents.has((p.content || "").trim())) return false;
+        return true;
+      });
     }
 
     const combined = [...dbPlans, ...filePlans].sort(

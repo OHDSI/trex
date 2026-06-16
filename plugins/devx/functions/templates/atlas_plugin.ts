@@ -10,7 +10,7 @@ export const template: AppTemplate = {
   install_command: "npm install",
   build_command: "npm run build",
   files: {
-    "AI_RULES.md": `# Atlas Plugin — Tech Stack & Design System
+    "TREX.md": `# Atlas Plugin — Tech Stack & Design System
 
 ## Design References
 - See \`ATLAS_DESIGN_SYSTEM.md\` for visual patterns, component styling, and Atlas-specific conventions

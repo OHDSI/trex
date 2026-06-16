@@ -24,12 +24,12 @@ function planSlug(content: string): string {
     .slice(0, 40);
 }
 
-/** Write plan content to specs/NN-title.md in the app workspace (best-effort). */
+/** Write plan content to trex/specs/NN-title.md in the app workspace (best-effort). */
 async function writePlanToWorkspace(userId: string, appId: string | null | undefined, content: string) {
   if (!appId) return;
   try {
     const wsPath = getAppWorkspacePath(userId, appId);
-    const specsDir = `${wsPath}/specs`;
+    const specsDir = `${wsPath}/trex/specs`;
     await Deno.mkdir(specsDir, { recursive: true });
 
     // Find the next number
@@ -183,7 +183,7 @@ export const writePlanTool: ToolDefinition<{ content: string }> = {
       [ctx.chatId, args.content],
     );
 
-    // Write plan to specs/plan.md in the app workspace
+    // Write plan to trex/specs/ in the app workspace
     await writePlanToWorkspace(ctx.userId, ctx.appId, args.content);
 
     // Notify client
@@ -221,7 +221,7 @@ export const exitPlanTool: ToolDefinition<{ confirmation: boolean }> = {
       [ctx.chatId],
     );
 
-    // Write the accepted plan to specs/plan.md in the app workspace
+    // Write the accepted plan to trex/specs/ in the app workspace
     try {
       const planResult = await ctx.sql(
         `SELECT content FROM devx.plans WHERE chat_id = $1`,
