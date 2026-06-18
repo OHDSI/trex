@@ -15,6 +15,17 @@
 (def ^:private shutdown-promise (promise))
 (defonce current-database (atom nil))
 
+(defn pooled?
+  "True when bao is attached to the shared host engine instance
+   (trexsql.use.pool=true) rather than running on its own :memory: database.
+
+   In pooled mode the host trex engine has already loaded every extension and
+   orchestrated its services at its own boot, so bao must NOT re-orchestrate —
+   doing so would start each service a second time in the same process, and a
+   second trexas (V8/Deno) runtime aborts with a V8 isolate panic."
+  []
+  (= "true" (System/getProperty "trexsql.use.pool")))
+
 (defn- camel->kebab
   "Convert camelCase string to kebab-case keyword.
    e.g. 'pgwirePort' -> :pgwire-port"
@@ -126,12 +137,19 @@
                              node-id (or (:swarm-node merged)
                                          (get env "SWARM_NODE")
                                          "local")
-                             sql     (format
-                                       "SELECT db_orchestrate_swarm('%s', '%s')"
-                                       (u/escape-sql-string (sw/config->json swarm))
-                                       (u/escape-sql-string node-id))
-                             orch-rows   (native/query handle sql)
-                             orch-result (some-> orch-rows first vals first str)]
+                             ;; When attached to the shared host instance, the host
+                             ;; engine already orchestrated its services at its own
+                             ;; boot. Re-running db_orchestrate_swarm here would start
+                             ;; them a SECOND time in the same process — and starting
+                             ;; the trexas (V8/Deno) runtime twice aborts with a V8
+                             ;; isolate panic. Skip orchestration; just sync bookkeeping.
+                             orch-result (when-not (pooled?)
+                                           (let [sql (format
+                                                       "SELECT db_orchestrate_swarm('%s', '%s')"
+                                                       (u/escape-sql-string (sw/config->json swarm))
+                                                       (u/escape-sql-string node-id))]
+                                             (some-> (native/query handle sql)
+                                                     first vals first str)))]
                          ;; db_orchestrate_swarm returns a single VARCHAR row. Error envelope is
                          ;; an "invalid SWARM_CONFIG: ..." or "node '...' not found..." prefix
                          ;; — see plugins/db/src/service_functions.rs::orchestrate_swarm_impl.
