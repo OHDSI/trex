@@ -752,6 +752,9 @@
     (if-not source
       (not-found (str "Source not found: " source-key))
       (let [{:keys [circeJson cdmSchema resultSchema cohortId targetTable generateStats]} body-params
+            ;; Sanitize the UUID source key into a valid SQL identifier (cache db
+            ;; alias). Lookup above still uses the raw source-key.
+            database-code (sanitize-database-code source-key)
             cache-path (or (:cache-path trex-config) (get-cache-path-from-config))]
         (cond
           (str/blank? circeJson) (bad-request "circeJson is required")
@@ -760,12 +763,12 @@
           (nil? cohortId) (bad-request "cohortId is required")
           :else
           (try
-            (when-not (db/is-attached? db source-key)
-              (log/info (format "Attaching cache for %s from %s" source-key cache-path))
-              (db/attach-cache-file! db source-key cache-path))
-            ;; Qualify schema names with source-key database alias
-            (let [qualified-cdm (str source-key "." cdmSchema)
-                  qualified-results (str source-key "." resultSchema)
+            (when-not (db/is-attached? db database-code)
+              (log/info (format "Attaching cache for %s (%s) from %s" source-key database-code cache-path))
+              (db/attach-cache-file! db database-code cache-path))
+            ;; Qualify schema names with the sanitized database alias
+            (let [qualified-cdm (str database-code "." cdmSchema)
+                  qualified-results (str database-code "." resultSchema)
                   qualified-target (str qualified-results "." (or targetTable "cohort"))
                   options-map (build-circe-options qualified-cdm qualified-results cohortId qualified-target generateStats)
                   clj-options (circe/java-map->circe-options options-map)
@@ -812,6 +815,9 @@
                              expression
                              (json/write-str expression))
             cdm-schema (get-cdm-schema source)
+            ;; Sanitize the UUID source key into a valid SQL identifier (cache db
+            ;; alias). Lookup above still uses the raw source-key.
+            database-code (sanitize-database-code source-key)
             cache-path (or (:cache-path trex-config) (get-cache-path-from-config))
             start-time (System/currentTimeMillis)]
         (cond
@@ -823,10 +829,10 @@
 
           :else
           (try
-            (when-not (db/is-attached? db source-key)
-              (log/info (format "Attaching cache for %s from %s" source-key cache-path))
-              (db/attach-cache-file! db source-key cache-path))
-            (let [qualified-cdm (str source-key "." cdm-schema)
+            (when-not (db/is-attached? db database-code)
+              (log/info (format "Attaching cache for %s (%s) from %s" source-key database-code cache-path))
+              (db/attach-cache-file! db database-code cache-path))
+            (let [qualified-cdm (str database-code "." cdm-schema)
                   ;; Circe's cohort-write templates emit the cohort target
                   ;; table as a bare identifier (no `@resultSchema.` prefix).
                   ;; Older versions of OHDSI Circe did prefix it, but the
@@ -881,6 +887,11 @@
       (let [{:keys [expression]} body-params
             expression-str (if (string? expression) expression (json/write-str expression))
             cdm-schema (get-cdm-schema source)
+            ;; The source key is a UUID; it can't be used as a raw SQL identifier
+            ;; (DuckDB attach alias / schema qualifier). Sanitize it to the cache
+            ;; database-code (matches every other handler + the stored cache_id),
+            ;; while find-source-by-key above still looks up by the raw UUID.
+            database-code (sanitize-database-code source-key)
             cache-path (or (:cache-path trex-config) (get-cache-path-from-config))
             start-time (System/currentTimeMillis)]
         (cond
@@ -892,10 +903,10 @@
 
           :else
           (try
-            (when-not (db/is-attached? db source-key)
-              (log/info (format "Attaching cache for %s from %s" source-key cache-path))
-              (db/attach-cache-file! db source-key cache-path))
-            (let [qualified-cdm (str source-key "." cdm-schema)
+            (when-not (db/is-attached? db database-code)
+              (log/info (format "Attaching cache for %s (%s) from %s" source-key database-code cache-path))
+              (db/attach-cache-file! db database-code cache-path))
+            (let [qualified-cdm (str database-code "." cdm-schema)
                   cohort-id 999999
                   ;; Circe with generate-stats=true emits two distinct
                   ;; reference styles in the same SQL bundle:
