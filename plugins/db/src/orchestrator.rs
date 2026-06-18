@@ -2,6 +2,33 @@ use crate::config::ExtensionConfig;
 use crate::gossip::GossipRegistry;
 use crate::logging::SwarmLogger;
 use crate::service_functions::get_start_service_sql;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
+
+/// Services already started in this process, keyed by "name:host:port".
+///
+/// Orchestration can run more than once inside a single process: the engine
+/// orchestrates on db.trex load at boot, and the embedded WebAPI (bao) — which
+/// attaches to the SAME host instance via the shared pool session — then re-runs
+/// `db_orchestrate_swarm`, calling `orchestrate_extensions` a second time. A
+/// second start is always wrong (the service's port is already bound), and for a
+/// V8-backed service (trexas) it aborts the whole process with a HandleScope/
+/// Context isolate-mismatch panic. So we start each (name, addr) at most once.
+static STARTED_SERVICES: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn service_already_started(key: &str) -> bool {
+    STARTED_SERVICES
+        .lock()
+        .map(|set| set.contains(key))
+        .unwrap_or(false)
+}
+
+fn mark_service_started(key: String) {
+    if let Ok(mut set) = STARTED_SERVICES.lock() {
+        set.insert(key);
+    }
+}
 
 /// Run a statement on a local connection (a clone of the node's main DuckDB
 /// connection, with all extensions already loaded).
@@ -106,6 +133,21 @@ pub fn orchestrate_extensions(
         let host = cfg_val["host"].as_str().unwrap_or("");
         let port = cfg_val["port"].as_u64().unwrap_or(0);
 
+        // Idempotency: if this process already started this service on this
+        // address (e.g. the engine orchestrated at boot and the embedded WebAPI
+        // is now re-orchestrating against the same shared host instance), skip
+        // the duplicate start instead of spawning a second listener / V8 isolate.
+        let service_key = format!("{}:{}:{}", ext.name, host, port);
+        if service_already_started(&service_key) {
+            let msg = format!(
+                "{}: already started on {}:{} in this process — skipping duplicate start",
+                ext.name, host, port
+            );
+            SwarmLogger::info("orchestrator", &msg);
+            statuses.push(msg);
+            continue;
+        }
+
         SwarmLogger::info(
             "orchestrator",
             &format!("Starting service: {} on {}:{}", ext.name, host, port),
@@ -127,6 +169,10 @@ pub fn orchestrate_extensions(
             statuses.push(msg);
             continue;
         }
+
+        // Record the successful start so a later orchestration pass in this same
+        // process treats it as a no-op (see STARTED_SERVICES).
+        mark_service_started(service_key);
 
         let registry = GossipRegistry::instance();
         if registry.is_running() {
@@ -416,6 +462,18 @@ mod tests {
             assert!(status.starts_with(&format!("ext_{i}")), "got: {status}");
             assert!(status.contains("no local connection"), "got: {status}");
         }
+    }
+
+    #[test]
+    fn service_started_set_is_idempotent() {
+        // Unique key so this test doesn't race other tests mutating the global set.
+        let key = "trexas:0.0.0.0:39999";
+        assert!(!service_already_started(key));
+        mark_service_started(key.to_string());
+        assert!(service_already_started(key));
+        // Marking again is harmless and stays "started".
+        mark_service_started(key.to_string());
+        assert!(service_already_started(key));
     }
 
     #[test]

@@ -26,3 +26,17 @@
 (deftest select-mode-orchestrator-flag-without-config-triggers-orchestrated
   (is (= :orchestrated
          (core/select-mode {:orchestrator? true} {}))))
+
+(deftest pooled?-reads-system-property
+  (let [prev (System/getProperty "trexsql.use.pool")]
+    (try
+      (System/setProperty "trexsql.use.pool" "true")
+      (is (true? (core/pooled?)))
+      (System/setProperty "trexsql.use.pool" "false")
+      (is (false? (core/pooled?)))
+      (System/clearProperty "trexsql.use.pool")
+      (is (false? (core/pooled?)))
+      (finally
+        (if prev
+          (System/setProperty "trexsql.use.pool" prev)
+          (System/clearProperty "trexsql.use.pool"))))))

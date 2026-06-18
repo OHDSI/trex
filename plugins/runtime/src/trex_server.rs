@@ -355,6 +355,24 @@ impl TrexServerManagerWrapper {
     use base::server::Builder;
     use std::sync::mpsc;
 
+    // A trexas server is a Deno/V8 runtime. If a server is already running on
+    // this address, spawning another would create a second V8 isolate in this
+    // process — which aborts with a HandleScope/Context isolate-mismatch panic —
+    // and could never bind the in-use port anyway. This happens when service
+    // orchestration double-fires (engine boot + embedded WebAPI re-orchestration
+    // against the shared host instance). Return the existing server instead.
+    if let Ok(servers) = self.manager.list_servers() {
+      if let Some((existing_id, _, _)) =
+        servers.iter().find(|(_, c, _)| c.addr == config.addr)
+      {
+        eprintln!(
+          "[TREX-EXT] Server already running on {} (id={}); skipping duplicate start",
+          config.addr, existing_id
+        );
+        return Ok(format!("Trex server already running: {}", existing_id));
+      }
+    }
+
     let server_id = format!(
       "trex_{}_{}",
       config.addr.port(),
@@ -788,5 +806,37 @@ impl TrexServerConfig {
       decorator: self.decorator,
       restrict_host_fs: self.restrict_host_fs,
     })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  // The duplicate-start guard in start_server_persistent finds an already-running
+  // server by matching ServerConfig.addr against the ServerManager registry. This
+  // verifies that lookup mechanism: a second start on the same addr is detectable,
+  // while a different addr is not.
+  #[test]
+  fn server_manager_detects_duplicate_addr() {
+    let manager = ServerManager::new();
+    let addr: SocketAddr = "127.0.0.1:33001".parse().unwrap();
+    let mut config = ServerConfig::default();
+    config.addr = addr;
+
+    manager
+      .register_server("trex_first".to_string(), config.clone())
+      .unwrap();
+
+    let servers = manager.list_servers().unwrap();
+    let same = servers.iter().find(|(_, c, _)| c.addr == addr);
+    assert!(same.is_some(), "existing server on same addr must be found");
+    assert_eq!(same.unwrap().0, "trex_first");
+
+    let other: SocketAddr = "127.0.0.1:44004".parse().unwrap();
+    assert!(
+      servers.iter().all(|(_, c, _)| c.addr != other),
+      "a different addr must not match"
+    );
   }
 }
