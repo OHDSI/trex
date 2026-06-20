@@ -178,5 +178,8 @@ export const requireAdmin: RequestHandler = async (req: any, res: any, next: any
   }
 
   (req as any).logtoSubject = sub ?? null;
+  // Stash the full verified claims so downstream handlers (e.g. /trex/log) can
+  // derive IdP identity without re-verifying or re-fetching the token.
+  (req as any).logtoPayload = payload;
   next();
 };

@@ -548,8 +548,30 @@ export function mountD2eRoutes(app: Express): void {
   // Logs a usage-agreement audit event to console (persisting to a database
   // log table is deferred to the parity phase).
   //
+  // IdP identity precedence (matches d2e log.ts exactly):
+  //   1. oid from the nested thirdPartyToken (Azure AD token) in the Logto JWT
+  //   2. Logto JWT claim at GATEWAY__IDP_SUBJECT_PROP (default "sub"), or "oid"
+  //   3. req.logtoSubject (set by requireAdmin from the verified "sub" claim)
+  //
   // Env vars: GATEWAY__IDP_SUBJECT_PROP (default "sub")
   // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Decode a JWT payload without signature verification.
+   * Used ONLY for the nested thirdPartyToken (an Azure AD token whose signing
+   * key is not in Logto's JWKS). The outer Logto token is already
+   * cryptographically verified by requireAdmin via jwtVerify — this inner
+   * decode-without-verify matches what d2e did (jwt.decode).
+   */
+  function decodeJwtPayload(token: string): Record<string, unknown> {
+    const parts = token.split(".");
+    if (parts.length < 2) throw new Error("Not a JWT");
+    // base64url → base64 → binary
+    const b64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const json = atob(b64.padEnd(b64.length + (4 - (b64.length % 4)) % 4, "="));
+    return JSON.parse(json) as Record<string, unknown>;
+  }
+
   app.post("/trex/log", requireAdmin, async (req: any, res: any) => {
     const body: any = (req as any).body ?? {};
     const { response } = body;
@@ -559,14 +581,28 @@ export function mountD2eRoutes(app: Express): void {
       return;
     }
 
-    // requireAdmin has already verified the JWT and set logtoSubject on the request.
-    // No need to re-check the Authorization header or manually decode the token.
-    const verifiedSubject: string | null = (req as any).logtoSubject ?? null;
+    // requireAdmin verified the JWT and stashed the full claims on req.logtoPayload.
+    const payload: Record<string, unknown> = (req as any).logtoPayload ?? {};
+    const subjectProp = Deno.env.get("GATEWAY__IDP_SUBJECT_PROP") ?? "sub";
+
+    let idpUserId: string | undefined;
+    try {
+      // Preferred: decode the nested Azure AD token and use its oid.
+      const tp = payload["thirdPartyToken"] as string | undefined;
+      if (!tp) throw new Error("no thirdPartyToken");
+      const oid = decodeJwtPayload(tp)["oid"] as string | undefined;
+      if (!oid) throw new Error("no oid in thirdPartyToken");
+      idpUserId = oid;
+    } catch {
+      // Fallback: GATEWAY__IDP_SUBJECT_PROP claim, then "oid", then logtoSubject.
+      console.info("[d2e-compat] /trex/log: third-party token not found or invalid, using Logto identity");
+      idpUserId =
+        (payload[subjectProp] as string | undefined) ??
+        (payload["oid"] as string | undefined) ??
+        ((req as any).logtoSubject as string | undefined);
+    }
 
     try {
-      // Use the already-verified subject as the primary identity.
-      const idpUserId: string | undefined = verifiedSubject ?? undefined;
-
       console.info(
         `[Data2Evidence][AUDITLOG][${Date.now()}] Usage agreement ${response} by user: ${idpUserId}`
       );
