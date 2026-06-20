@@ -20,6 +20,7 @@ import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
+import { applyD2eCompat, runD2eBoot } from "./d2e-compat/index.ts";
 
 console.log("main function started");
 console.log(Deno.version);
@@ -655,6 +656,7 @@ app.all(
 
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
+  applyD2eCompat(app);
   console.log("Plugin system initialized");
 
   // Re-register devx app functions (dynamic plugins don't survive restarts)
@@ -1381,6 +1383,8 @@ if (initialKeyName) {
     console.error("[mcp] Failed to bootstrap initial API key:", err);
   }
 }
+
+await runD2eBoot();
 
 server.listen(8000, () => {
   console.log("server listening on port 8000");
