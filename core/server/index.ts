@@ -1300,9 +1300,20 @@ try {
   console.log("Serving Shinylive assets from shinylive/");
 } catch { /* shinylive assets not present — skip */ }
 
-app.get("/", (_req, res) => {
-  res.redirect("/plugins/trex/web/");
-});
+// Root redirect to the trex web console (admin UI front door). Gated by
+// TREX_CONSOLE_ENABLED (default "true"). When "false", `/` is left unclaimed so
+// an upstream host (e.g. d2e's own frontend) can own the root path — the web UI
+// itself stays served at /plugins/trex/web/, it's just no longer auto-redirected.
+const TREX_CONSOLE_ENABLED = (Deno.env.get("TREX_CONSOLE_ENABLED") ?? "true") !== "false";
+if (TREX_CONSOLE_ENABLED) {
+  app.get("/", (_req, res) => {
+    res.redirect("/plugins/trex/web/");
+  });
+} else {
+  console.log(
+    "[trex] root console redirect disabled (TREX_CONSOLE_ENABLED=false); web UI still served at /plugins/trex/web/",
+  );
+}
 
 // HARD CUT detection: stored anon/service_role keys in trexdb.setting were
 // signed with the previous BETTER_AUTH_SECRET-derived key. If the stored
