@@ -656,7 +656,7 @@ app.all(
 
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
-  applyD2eCompat(app);
+  await applyD2eCompat(app);
   console.log("Plugin system initialized");
 
   // Re-register devx app functions (dynamic plugins don't survive restarts)

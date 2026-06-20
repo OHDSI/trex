@@ -35,10 +35,10 @@ async function exchangeToken(logtoToken: string): Promise<string | null> {
 
     const webApiToken = response.headers.get("Bearer");
     if (!webApiToken) {
-      const headers: string[] = [];
-      response.headers.forEach((v, k) => headers.push(`${k}: ${v}`));
+      const headerNames: string[] = [];
+      response.headers.forEach((_v, k) => headerNames.push(k));
       console.error(
-        `[d2e-compat] Token exchange: no Bearer header in response. Headers: ${headers.join(", ")}`,
+        `[d2e-compat] Token exchange: no Bearer header in response. Response header names: ${headerNames.join(", ")}`,
       );
       return null;
     }
