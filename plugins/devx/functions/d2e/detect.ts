@@ -12,9 +12,12 @@ async function readJson(p: string): Promise<any | null> {
   try { return JSON.parse(await Deno.readTextFile(p)); } catch { return null; }
 }
 
-/** Find an Nx/yarn-workspaces UI monorepo root at or below wsPath (depth<=1). */
+/** Find an Nx/yarn-workspaces UI monorepo root at or below wsPath (depth<=2). */
 async function findUiRoot(wsPath: string): Promise<string | null> {
-  const candidates = [wsPath, `${wsPath}/ui`, `${wsPath}/d2e-ui`];
+  // The d2e platform repo (OHDSI/Data2Evidence) ships its UI monorepo
+  // (@data2evidence/d2e-ui, Nx + yarn workspaces) under plugins/ui; standalone
+  // d2e-ui checkouts have it at the root, ./ui, or ./d2e-ui.
+  const candidates = [wsPath, `${wsPath}/ui`, `${wsPath}/d2e-ui`, `${wsPath}/plugins/ui`];
   for (const c of candidates) {
     if (await exists(`${c}/nx.json`) && await isDir(`${c}/apps`)) return c;
     const pkg = await readJson(`${c}/package.json`);
@@ -100,12 +103,54 @@ async function detectFlows(wsPath: string, subApps: SubApp[]): Promise<boolean> 
   return found;
 }
 
+/** Detect Python/Prefect flows: directories containing a `flow.py`. The d2e
+ * platform repo groups them as plugins/flows/<category>/<name>_plugin/flow.py. */
+async function detectPyFlows(wsPath: string, subApps: SubApp[]): Promise<boolean> {
+  const SKIP = new Set(["build", "docs", "drivers", "tests", "node_modules", "sql_scripts"]);
+  let found = false;
+  for (const base of ["plugins/flows", "flows"]) {
+    const root = `${wsPath}/${base}`;
+    if (!await isDir(root)) continue;
+    const stack = [root];
+    while (stack.length) {
+      const d = stack.pop()!;
+      let entries: Deno.DirEntry[] = [];
+      try { for await (const e of Deno.readDir(d)) entries.push(e); } catch { continue; }
+      // A directory with flow.py is a flow; record it and don't descend further.
+      if (entries.some((e) => e.isFile && e.name === "flow.py")) {
+        const rel = d.replace(wsPath + "/", "");
+        const name = rel.split("/").pop()!;
+        subApps.push({
+          key: `flow:${name}`, type: "flow", name,
+          dir: rel, framework: "prefect",
+          run: flowRun(rel, name),
+          notes: "Prefect (Python) flow; context-only in v1 — no long-running dev server.",
+        });
+        found = true;
+        continue;
+      }
+      for (const e of entries) {
+        if (!e.isDirectory || e.name.startsWith("_") || e.name.startsWith(".") || SKIP.has(e.name)) continue;
+        stack.push(`${d}/${e.name}`);
+      }
+    }
+  }
+  return found;
+}
+
 export async function detectD2E(wsPath: string, repoUrl: string): Promise<D2EConfig> {
   const subApps: SubApp[] = [];
   const hasUi = await detectUi(wsPath, subApps);
   const hasFn = await detectFunctions(wsPath, subApps);
-  const hasFlow = await detectFlows(wsPath, subApps);
+  // JS (trex.flow package.json) and Python (flow.py) flow conventions.
+  const hasFlow = (await detectFlows(wsPath, subApps)) || (await detectPyFlows(wsPath, subApps));
   const kinds = [hasUi && "ui", hasFn && "functions", hasFlow && "flows"].filter(Boolean);
   const repoKind = kinds.length > 1 ? "platform" : (kinds[0] as any) ?? "unknown";
-  return { repo: repoUrl, repoKind, detectedAt: new Date().toISOString(), subApps };
+  // Default the active sub-app so "Run" launches ONE app, never the whole
+  // platform: prefer the portal UI shell, else any UI, else the first sub-app.
+  const preferred = subApps.find((s) => s.key === "ui:portal")
+    ?? subApps.find((s) => s.type === "ui")
+    ?? subApps[0];
+  const activeSubApp = preferred?.key;
+  return { repo: repoUrl, repoKind, detectedAt: new Date().toISOString(), subApps, activeSubApp };
 }

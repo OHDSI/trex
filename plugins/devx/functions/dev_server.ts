@@ -77,19 +77,27 @@ class DevServerManager {
   private async allocatePort(): Promise<number> {
     for (let port = PORT_START; port <= PORT_END; port++) {
       if (allocatedPorts.has(port)) continue;
-      // Check if the port is actually free (handles stale processes from restarts)
-      try {
-        const conn = await Deno.connect({ hostname: "127.0.0.1", port });
-        conn.close();
-        // Port is in use — skip it
-        continue;
-      } catch {
-        // Connection refused = port is free
-        allocatedPorts.add(port);
-        return port;
-      }
+      // Check the port is actually free (handles leaked/stale processes). Probe
+      // BOTH loopback families: dev servers like vite (host 'localhost') bind
+      // IPv6 ::1, so an IPv4-only probe misses them and we'd hand out a port
+      // that then fails with EADDRINUSE.
+      if (await this.portInUse(port)) continue;
+      allocatedPorts.add(port);
+      return port;
     }
     throw new Error("No available ports");
+  }
+
+  /** True if anything is listening on the port over IPv4 or IPv6 loopback. */
+  private async portInUse(port: number): Promise<boolean> {
+    for (const hostname of ["127.0.0.1", "::1"]) {
+      try {
+        const conn = await Deno.connect({ hostname, port });
+        conn.close();
+        return true;
+      } catch { /* refused on this family */ }
+    }
+    return false;
   }
 
   private releasePort(entry: DevServerEntry): void {
@@ -184,7 +192,9 @@ class DevServerManager {
       if (style === "vite") {
         finalCommand = `${devCommand} -- --port ${port} --base ${proxyBase}`;
       } else if (style === "nx") {
-        finalCommand = `${devCommand} --port ${port}`;
+        // nx forwards extra flags to the underlying vite/serve script, so --base
+        // reaches vite and overrides a hardcoded base (e.g. d2e's vue-mri).
+        finalCommand = `${devCommand} --port ${port} --base ${proxyBase}`;
       } else if (style === "webpack") {
         finalCommand = `${devCommand} -- --port ${port}`;
       } else {
@@ -305,33 +315,28 @@ class DevServerManager {
   stop(userId: string, appId: string): void {
     const k = this.key(userId, appId);
     const entry = this.servers.get(k);
-    if (!entry) return;
 
-    // Clear polling timer
-    if (entry.pollTimer) {
-      clearTimeout(entry.pollTimer);
-      entry.pollTimer = undefined;
+    if (entry) {
+      if (entry.pollTimer) {
+        clearTimeout(entry.pollTimer);
+        entry.pollTimer = undefined;
+      }
+      entry.processId = null;
+      entry.status = "stopped";
+      this.releasePort(entry);
+      entry.outputBuffer = [];
+      this.emit(entry, { type: "status_change", data: "stopped", timestamp: Date.now() });
     }
-
-    if (!entry.processId) {
-      // No running process — clean up the entry entirely
-      this.servers.delete(k);
-      return;
-    }
-
-    const processId = entry.processId;
-    entry.processId = null;
-    entry.status = "stopped";
-    this.releasePort(entry);
-    entry.outputBuffer = [];
-    this.emit(entry, { type: "status_change", data: "stopped", timestamp: Date.now() });
 
     // Unregister from trex cluster gossip
     this.unregisterService(appId);
 
-    // Stop via DuckDB (fire and forget)
+    // Always kill by the deterministic process key (the start path uses k as the
+    // processId). This stops leaked dev servers whose in-memory entry was lost
+    // across a worker restart or a failed start — otherwise they keep holding
+    // their port and block the next Run (vite strictPort). Fire and forget.
     duckdb(
-      `SELECT * FROM trex_devx_process_stop('${escapeSql(processId)}', '')`
+      `SELECT * FROM trex_devx_process_stop('${escapeSql(k)}', '')`
     ).catch(() => { /* already dead */ });
   }
 

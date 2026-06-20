@@ -17,7 +17,9 @@ export function uiRun(uiRoot: string, appDirName: string): SubAppRun {
   const r = UI_RECIPES[appDirName];
   return {
     installCwd: uiRoot === "." ? "." : uiRoot,
-    installCommand: "yarn install",
+    // d2e-ui is a bun workspace (bun.lock; scripts use bun/bunx). Installing the
+    // monorepo root once links the apps/* and libs/* (@portal/*) workspaces.
+    installCommand: "bun install",
     devCwd: uiRoot === "." ? `apps/${appDirName}` : `${uiRoot}/apps/${appDirName}`,
     devCommand: r?.devCommand ?? "npm start",
     port: r?.port ?? null,

@@ -1206,6 +1206,13 @@ Deno.serve(async (req: Request) => {
           const token = await getGithubToken(userId, sql);
           await gitOps.clone(injectToken(gitUrl, token), wsPath);
 
+          // Fetch git submodules so workspace installs can resolve them — e.g.
+          // d2e-ui declares libs/react-notebook as a submodule, and bun/yarn
+          // fail with "workspace dependency not found" without it. Best-effort.
+          try {
+            await duckdb(`SELECT * FROM trex_devx_run_command('${escapeSql(wsPath)}', 'git submodule update --init --recursive')`);
+          } catch (e) { console.error("[devx] submodule init failed:", e); }
+
           // Best-effort tech-stack / dev-command detection from package.json.
           try {
             const pkg = JSON.parse(await Deno.readTextFile(`${wsPath}/package.json`));
@@ -1734,6 +1741,16 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      // A d2e app must run a specific sub-app. Without an active selection the
+      // fallback command is the repo-root script, which boots the ENTIRE d2e
+      // platform (every service + UI) at once — refuse and ask the user to pick.
+      if (app.tech_stack === "d2e" && !app.config?.d2e?.activeSubApp) {
+        return Response.json(
+          { error: "Select a Data2Evidence sub-app to run first." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+
       const status = await devServerManager.start(userId, appId, wsPath, startDevCmd, startInstallCmd, override);
 
       // Register backend functions for this app (idempotent)
@@ -1990,11 +2007,45 @@ Deno.serve(async (req: Request) => {
       const proxyPort = status.url ? new URL(status.url).port : String(status.port || entry?.port);
       // Vite is configured with --base matching the proxy path, so forward with the full base
       const proxyBase = path.replace(/\/proxy(\/.*)?$/, "/proxy/");
+      // Dev servers may be HTTP or self-signed HTTPS (e.g. d2e vite basicSsl).
+      // Try HTTP, then fall back to HTTPS trusting the dev server's own cert
+      // (basicSsl writes it under the active sub-app's .devServer/cert).
+      const reqHeaders = { "Accept": req.headers.get("Accept") || "*/*" };
+      const buildUrl = (scheme: string) => `${scheme}://localhost:${proxyPort}${proxyBase}${proxyPath}${url.search}`;
+      const getHttpsClient = async (): Promise<Deno.HttpClient | undefined> => {
+        const cache: Map<string, Deno.HttpClient> = ((globalThis as any).__devxHttpsClients ??= new Map());
+        if (cache.has(appId)) return cache.get(appId);
+        const caCerts: string[] = [];
+        try {
+          const cfgRes = await sql(`SELECT config FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
+          const d2e = cfgRes.rows[0]?.config?.d2e;
+          const sa = d2e?.subApps?.find((s: any) => s.key === d2e.activeSubApp);
+          if (sa?.run?.devCwd) {
+            const devAbs = safeJoin(getAppWorkspacePath(userId, appId), sa.run.devCwd);
+            for (const certDir of [`${devAbs}/.devServer/cert`, `${devAbs}/node_modules/.vite/basic-ssl`]) {
+              try {
+                for await (const e of Deno.readDir(certDir)) {
+                  if (e.isFile && e.name.endsWith(".pem")) {
+                    try { caCerts.push(await Deno.readTextFile(`${certDir}/${e.name}`)); } catch { /* skip */ }
+                  }
+                }
+              } catch { /* dir absent */ }
+            }
+          }
+        } catch { /* best-effort */ }
+        if (!caCerts.length) return undefined;
+        const client = Deno.createHttpClient({ caCerts });
+        cache.set(appId, client);
+        return client;
+      };
       try {
-        const targetUrl = `http://localhost:${proxyPort}${proxyBase}${proxyPath}${url.search}`;
-        const proxyRes = await fetch(targetUrl, {
-          headers: { "Accept": req.headers.get("Accept") || "*/*" },
-        });
+        let proxyRes: Response;
+        try {
+          proxyRes = await fetch(buildUrl("http"), { headers: reqHeaders });
+        } catch {
+          const client = await getHttpsClient();
+          proxyRes = await fetch(buildUrl("https"), client ? { headers: reqHeaders, client } : { headers: reqHeaders });
+        }
         const responseHeaders = new Headers(corsHeaders);
         // Forward content-type from dev server
         const ct = proxyRes.headers.get("Content-Type");

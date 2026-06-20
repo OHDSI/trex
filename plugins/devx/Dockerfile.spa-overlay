@@ -1,0 +1,30 @@
+# Fast dev overlay: rebuild ONLY the devx SPA dist in a clean node:22 stage and
+# layer it onto the published dx image. Avoids the full Dockerfile.dx rebuild
+# (Rust devx_ext extension + trexsql base image) when only client-side plugin
+# code changed. A clean `npm ci` here also sidesteps the host's broken
+# @rollup/rollup-darwin-arm64 optional dep under Node 26.
+#
+# Build (context = this directory):
+#   docker build -f Dockerfile.spa-overlay -t trexsql-dx:dev .
+# Run:
+#   TREX_IMAGE=trexsql-dx:dev docker compose -f ../../docker-compose.dx.yml up -d
+ARG BASE_IMAGE=ghcr.io/ohdsi/trexsql-dx:latest
+
+FROM node:22-trixie-slim AS spa-builder
+WORKDIR /work
+COPY . /work/
+RUN npm ci && npm run build
+
+FROM ${BASE_IMAGE}
+# d2e-ui is a bun workspace; the base dx image ships node/yarn/npm but not bun.
+USER root
+RUN npm i -g bun || true
+USER node
+# d2e-ui pulls phantomjs-prebuilt transitively; it has no linux/arm64 binary and
+# its postinstall hard-fails the whole install. Skipping the download lets the
+# install complete (phantomjs is only used by legacy MRI tests, not dev/run).
+ENV PHANTOMJS_SKIP_DOWNLOAD=true
+COPY --from=spa-builder --chown=node:node /work/dist/ /usr/src/plugins-dev/devx/dist/
+# Deno edge functions are pure source (no build step) — overlay them straight
+# from the build context so backend fixes (e.g. d2e detection) ship too.
+COPY --chown=node:node functions/ /usr/src/plugins-dev/devx/functions/

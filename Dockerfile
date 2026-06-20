@@ -91,8 +91,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Deno is required by docker/trex-init-entrypoint.sh (runs scripts/derive-secrets.ts)
 # and by the runtime extension. Install to /usr/local/bin so it's on PATH for the
-# trex-init compose service.
-RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --yes \
+# trex-init compose service. Pinned to 2.7.14: leaving it unpinned pulls whatever
+# is latest at build time (e.g. 2.8.x), which is not what the runtime is validated
+# against; the workspace-config behaviour noted below targets the 2.7 line.
+ARG DENO_VERSION=v2.7.14
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh -s -- --yes "${DENO_VERSION}" \
     && /usr/local/bin/deno --version
 
 # Copy trex binary, libtrexsql, and libtrexsql_engine

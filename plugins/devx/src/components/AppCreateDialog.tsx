@@ -4,7 +4,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Loader2, CheckCircle2 } from "lucide-react";
+import { Loader2, CheckCircle2, ChevronRight, ChevronDown } from "lucide-react";
 import type { App } from "@/lib/types";
 
 const TEMPLATES = [
@@ -24,12 +24,10 @@ interface AppCreateDialogProps {
   onCreateApp: (name: string, opts?: { template?: string; gitUrl?: string; kind?: "d2e" }) => Promise<App>;
 }
 
-const D2E_REPOS = [
-  { url: "https://github.com/data2evidence/d2e-ui", label: "d2e-ui (portal, flow, analysis, jobs, mapping)" },
-  { url: "https://github.com/data2evidence/d2e-flows", label: "d2e-flows (Prefect flows)" },
-  { url: "https://github.com/OHDSI/d2e", label: "d2e (platform: functions + compose)" },
-  { url: "__custom__", label: "Custom URL…" },
-];
+// Data2Evidence is a single mono-repo (functions + multiple UIs + flows); the
+// import flow detects and splits it into ui/function/flow sub-apps. The custom
+// URL escape hatch (Advanced) exists only for testing forks/branches.
+const D2E_REPO = "https://github.com/OHDSI/Data2Evidence";
 
 const CREATION_PHASES = [
   "Creating project...",
@@ -51,7 +49,7 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
   const [template, setTemplate] = useState("react-vite");
   const [mode, setMode] = useState<"template" | "git" | "d2e">("template");
   const [gitUrl, setGitUrl] = useState("");
-  const [d2eRepo, setD2eRepo] = useState(D2E_REPOS[0].url);
+  const [d2eAdvanced, setD2eAdvanced] = useState(false);
   const [d2eCustomUrl, setD2eCustomUrl] = useState("");
   const [creating, setCreating] = useState(false);
   const [done, setDone] = useState(false);
@@ -61,8 +59,9 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
 
   const phases = mode === "git" || mode === "d2e" ? GIT_PHASES : CREATION_PHASES;
 
-  // The effective repo URL chosen in d2e mode (select value, or the custom field).
-  const d2eUrl = (d2eRepo === "__custom__" ? d2eCustomUrl : d2eRepo).trim();
+  // The effective repo URL in d2e mode: the fixed canonical repo, or a custom
+  // fork URL when the Advanced override is enabled and filled in.
+  const d2eUrl = (d2eAdvanced && d2eCustomUrl.trim() ? d2eCustomUrl : D2E_REPO).trim();
 
   // Cycle through phases while creating
   useEffect(() => {
@@ -111,7 +110,7 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
         setName("");
         setTemplate("react-vite");
         setGitUrl("");
-        setD2eRepo(D2E_REPOS[0].url);
+        setD2eAdvanced(false);
         setD2eCustomUrl("");
         setMode("template");
         setDone(false);
@@ -166,27 +165,28 @@ export function AppCreateDialog({ open, onOpenChange, onCreateApp }: AppCreateDi
 
           {mode === "d2e" && (
             <div className="space-y-2">
-              <Label htmlFor="d2e-repo">Data2Evidence repository</Label>
-              <select
-                id="d2e-repo"
-                value={d2eRepo}
-                onChange={(e) => setD2eRepo(e.target.value)}
-                className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              <Label>Data2Evidence repository</Label>
+              <div className="flex h-9 w-full items-center rounded-md border border-input bg-muted/40 px-3 text-sm text-muted-foreground">
+                OHDSI/Data2Evidence
+              </div>
+              <button
+                type="button"
+                onClick={() => setD2eAdvanced((v) => !v)}
+                className="flex items-center gap-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
               >
-                {D2E_REPOS.map((r) => (
-                  <option key={r.url} value={r.url}>{r.label}</option>
-                ))}
-              </select>
-              {d2eRepo === "__custom__" && (
+                {d2eAdvanced ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                Advanced (custom fork URL)
+              </button>
+              {d2eAdvanced && (
                 <Input
-                  placeholder="https://github.com/org/repo"
+                  placeholder="https://github.com/your-fork/Data2Evidence"
                   value={d2eCustomUrl}
                   onChange={(e) => setD2eCustomUrl(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && handleCreate()}
                 />
               )}
               <p className="text-xs text-muted-foreground">
-                Clones the repo and detects runnable UIs, functions, and flows. Private repos need a connected GitHub token.
+                Clones the repo and splits it into UI, function, and flow sub-apps. Private repos need a connected GitHub token.
               </p>
             </div>
           )}
