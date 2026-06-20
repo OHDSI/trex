@@ -13,5 +13,5 @@ export async function runD2eBoot(): Promise<void> {
 export function applyD2eCompat(app: Express): void {
   if (!D2E_COMPAT) return;
   // Dynamic import kept sync-safe: registration runs synchronously at boot.
-  import("./routes.ts").then((m) => m.mountD2eRoutes(app));
+  import("./routes.ts").then((m) => m.mountD2eRoutes(app)).catch((err) => console.error("[d2e-compat] route mount failed:", err));
 }
