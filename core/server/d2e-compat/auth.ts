@@ -10,7 +10,7 @@
  *      LOGTO__ISSUER  (env.LOGTO_ISSUER = _env.LOGTO__ISSUER)
  */
 import type { RequestHandler } from "express";
-import { createRemoteJWKSet, jwtVerify } from "npm:jose";
+import { createRemoteJWKSet, jwtVerify, decodeJwt } from "npm:jose";
 import { getWebApiToken, getTokenSubject } from "./lib/token-exchange.ts";
 
 // Lazily initialised so Deno.env is read at first request (D2E_COMPAT path only).
@@ -102,5 +102,80 @@ export const logtoAuthn: RequestHandler = async (req, res, next) => {
 
   (req as any).webApiToken = webApiToken;
   (req as any).logtoSubject = getTokenSubject(token);
+  next();
+};
+
+// ---------------------------------------------------------------------------
+// requireAdmin — minimal admin gate for D2E_COMPAT thin-shell routes.
+//
+// Minimal admin gate for D2E_COMPAT thin-shell routes; full authz scope parity
+// is deferred to the parity phase.
+//
+// How "admin" is derived (from d2e services/trex/core/server/auth/authz.ts):
+//  1. The Logto JWT payload carries `userMgmtGroups.alp_role_system_admin: boolean`.
+//     When true the user has `ALP_SYSTEM_ADMIN` role — this is the system-admin flag.
+//  2. Service-account / client-credentials tokens (grant_type === "client_credentials"
+//     OR sub === client_id) are also treated as admin in d2e.
+//  Both cases are checked here. All other tokens are rejected 403.
+// ---------------------------------------------------------------------------
+
+/**
+ * ADMIN-ONLY middleware — unlike logtoAuthn, a missing token is ALWAYS a 401.
+ *
+ * Env vars consumed (same names as d2e env.ts):
+ *   LOGTO__ISSUER — the Logto issuer URL used to fetch the JWKS for verification.
+ */
+export const requireAdmin: RequestHandler = async (req: any, res: any, next: any) => {
+  const token = extractToken(req);
+
+  if (!token) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+
+  let jwks: ReturnType<typeof createRemoteJWKSet>;
+  try {
+    jwks = getJWKS();
+  } catch (err) {
+    console.error(`[d2e-compat] requireAdmin: JWKS init failed: ${err}`);
+    res.status(500).json({ error: "Auth configuration error" });
+    return;
+  }
+
+  // Verify the JWT signature and expiry.
+  try {
+    await jwtVerify(token, jwks);
+  } catch (err) {
+    console.error(`[d2e-compat] requireAdmin: invalid token: ${err}`);
+    res.status(401).send("Authentication Token not valid");
+    return;
+  }
+
+  // Decode claims (signature already verified above).
+  let payload: ReturnType<typeof decodeJwt>;
+  try {
+    payload = decodeJwt(token);
+  } catch (err) {
+    console.error(`[d2e-compat] requireAdmin: decodeJwt failed: ${err}`);
+    res.status(401).send("Invalid token payload");
+    return;
+  }
+
+  // Check admin status: service-account OR alp_role_system_admin flag.
+  const grantType = payload["grant_type"] as string | undefined;
+  const sub = payload["sub"] as string | undefined;
+  const clientId = payload["client_id"] as string | undefined;
+  const isClientCred = grantType === "client_credentials" || (!!sub && sub === clientId);
+
+  const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
+  const isSystemAdmin = userMgmtGroups?.["alp_role_system_admin"] === true;
+
+  if (!isClientCred && !isSystemAdmin) {
+    console.warn(`[d2e-compat] requireAdmin: forbidden — not system admin (sub=${sub})`);
+    res.status(403).json({ error: "Forbidden: admin role required" });
+    return;
+  }
+
+  (req as any).logtoSubject = sub ?? null;
   next();
 };
