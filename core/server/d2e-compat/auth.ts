@@ -14,6 +14,7 @@ import { createRemoteJWKSet, jwtVerify, decodeJwt } from "npm:jose";
 import { getWebApiToken, getTokenSubject } from "./lib/token-exchange.ts";
 
 // Lazily initialised so Deno.env is read at first request (D2E_COMPAT path only).
+// Both `requireAdmin` and `logtoAuthn` share this module-level singleton, keyed on LOGTO__ISSUER at first use.
 let _JWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
 function getJWKS(): ReturnType<typeof createRemoteJWKSet> {
   if (!_JWKS) {

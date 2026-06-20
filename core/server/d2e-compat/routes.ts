@@ -513,6 +513,10 @@ export function mountD2eRoutes(app: Express): void {
   // DELETE /trex/db/:name — delete a database entry
   app.delete("/trex/db/:name", requireAdmin, async (req: any, res: any) => {
     const name = (req as any).params.name as string;
+    if (!isValidDbCode(name)) {
+      (res as any).status(400).send("Database code invalid");
+      return;
+    }
     try {
       const client = await pool.connect();
       try {
@@ -555,56 +559,13 @@ export function mountD2eRoutes(app: Express): void {
       return;
     }
 
-    const authHeader = (req as any).headers["authorization"] as string | undefined;
-    if (!authHeader) {
-      (res as any).status(401).json({ error: "Authorization header missing" });
-      return;
-    }
+    // requireAdmin has already verified the JWT and set logtoSubject on the request.
+    // No need to re-check the Authorization header or manually decode the token.
+    const verifiedSubject: string | null = (req as any).logtoSubject ?? null;
 
     try {
-      const rawToken = authHeader.split(" ")[1];
-      // Decode JWT payload (signature already verified by requireAdmin).
-      const parts = rawToken?.split(".");
-      const payloadJson =
-        parts && parts.length >= 2
-          ? JSON.parse(
-              new TextDecoder().decode(
-                Uint8Array.from(
-                  atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")),
-                  (c) => c.charCodeAt(0)
-                )
-              )
-            )
-          : {};
-
-      // Try to extract a thirdPartyToken (Azure AD pass-through) first.
-      let idpUserId: string | undefined;
-      const thirdPartyToken = payloadJson["thirdPartyToken"];
-      if (thirdPartyToken) {
-        try {
-          const tpParts = thirdPartyToken.split(".");
-          const tpPayload =
-            tpParts.length >= 2
-              ? JSON.parse(
-                  new TextDecoder().decode(
-                    Uint8Array.from(
-                      atob(tpParts[1].replace(/-/g, "+").replace(/_/g, "/")),
-                      (c) => c.charCodeAt(0)
-                    )
-                  )
-                )
-              : {};
-          idpUserId = tpPayload["oid"];
-        } catch {
-          // Fall through to Logto subject.
-        }
-      }
-
-      if (!idpUserId) {
-        const subjectProp = envGet("GATEWAY__IDP_SUBJECT_PROP") || "sub";
-        const sub = payloadJson[subjectProp];
-        idpUserId = payloadJson["oid"] || sub;
-      }
+      // Use the already-verified subject as the primary identity.
+      const idpUserId: string | undefined = verifiedSubject ?? undefined;
 
       console.info(
         `[Data2Evidence][AUDITLOG][${Date.now()}] Usage agreement ${response} by user: ${idpUserId}`
