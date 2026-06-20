@@ -29,9 +29,7 @@ function getJWKS(): ReturnType<typeof createRemoteJWKSet> {
 function extractToken(req: import("express").Request): string | null {
   const regex = /\b(Bearer|bearer|token)\b/;
 
-  const authHeader =
-    (req.headers.authorization as string | undefined) ??
-    (req.headers["authorization"] as string | undefined);
+  const authHeader = req.headers.authorization as string | undefined;
 
   if (authHeader && authHeader.split(" ")[0].match(regex)) {
     return authHeader.split(" ")[1] || null;
@@ -42,9 +40,9 @@ function extractToken(req: import("express").Request): string | null {
     const cookies = cookieHeader.split("; ");
     for (const cookie of cookies) {
       if (cookie.startsWith("authtoken=")) {
-        return cookie.split("=")[1];
+        return cookie.slice("authtoken=".length).trim();
       } else if (cookie.startsWith("fhirtoken=")) {
-        const val = cookie.split("=")[1];
+        const val = cookie.slice("fhirtoken=".length).trim();
         return val.split(" ")[1] || null;
       }
     }
@@ -54,6 +52,11 @@ function extractToken(req: import("express").Request): string | null {
 }
 
 /**
+ * OPTIONAL auth — requests with NO token pass through unauthenticated (so
+ * WebAPI can serve its anonymous endpoints); requests with an INVALID token
+ * are rejected 401.  Do NOT use this alone to protect admin-only routes —
+ * those need an explicit authenticated-user check.
+ *
  * Express middleware that validates a Logto Bearer JWT, performs the WebAPI
  * token exchange, and sets `req.webApiToken` + `req.logtoSubject` on success.
  *
