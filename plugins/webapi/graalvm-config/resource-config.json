@@ -739,7 +739,33 @@
       {
         "pattern": "java.base:\\Qsun/net/www/content-types.properties\\E"
       },
-      { "pattern": "\\QMETA-INF/services/java.sql.Driver\\E" }
+      {
+        "pattern": "\\QMETA-INF/services/java.sql.Driver\\E"
+      },
+      {
+        "pattern": "inst/.*"
+      },
+      {
+        "pattern": ".*\\.csv"
+      },
+      {
+        "pattern": "db/migration/.*"
+      },
+      {
+        "pattern": "META-INF/build-info.properties"
+      },
+      {
+        "pattern": "i18n/.*"
+      },
+      {
+        "pattern": "ddl/.*"
+      },
+      {
+        "pattern": ".*\\.sql"
+      },
+      {
+        "pattern": "templates/.*"
+      }
     ]
   },
   "bundles": [

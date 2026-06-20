@@ -30,5 +30,201 @@
       "org.springframework.aop.framework.Advised",
       "org.springframework.core.DecoratingProxy"
     ]
+  },
+  {
+    "interfaces": [
+      "org.hibernate.query.hql.spi.SqmQueryImplementor",
+      "org.hibernate.query.sqm.internal.SqmInterpretationsKey$InterpretationsKeySource",
+      "org.hibernate.query.spi.DomainQueryExecutionContext",
+      "org.hibernate.query.SelectionQuery",
+      "org.hibernate.query.CommonQueryContract",
+      "org.springframework.aop.SpringProxy",
+      "org.springframework.aop.framework.Advised",
+      "org.springframework.core.DecoratingProxy"
+    ]
+  },
+  {
+    "interfaces": [
+      "org.hibernate.Session",
+      "org.springframework.orm.jpa.EntityManagerProxy",
+      "java.io.Serializable",
+      "org.springframework.aop.SpringProxy",
+      "org.springframework.aop.framework.Advised",
+      "org.springframework.core.DecoratingProxy"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlAccessorType",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlAccessorOrder",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlElement",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlElements",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlElementRef",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlElementRefs",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlElementWrapper",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlAttribute",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlAnyAttribute",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlAnyElement",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlType",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlRootElement",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlValue",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlMixed",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlID",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlIDREF",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlList",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlSchema",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlSchemaType",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlSchemaTypes",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlEnum",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlEnumValue",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlSeeAlso",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlTransient",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.adapters.XmlJavaTypeAdapter",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.adapters.XmlJavaTypeAdapters",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlInlineBinaryData",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlElementDecl",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
+  },
+  {
+    "interfaces": [
+      "jakarta.xml.bind.annotation.XmlRegistry",
+      "org.glassfish.jaxb.core.v2.model.annotation.Locatable"
+    ]
   }
 ]
