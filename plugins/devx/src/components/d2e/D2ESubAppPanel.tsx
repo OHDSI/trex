@@ -306,10 +306,16 @@ export function D2ESubAppPanel({ app }: D2ESubAppPanelProps) {
             </div>
           </div>
         </div>
-        <Button variant="outline" size="sm" onClick={handleRedetect} disabled={redetecting} className="shrink-0">
-          {redetecting ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
-          Redetect
-        </Button>
+        <div className="flex items-center gap-2 shrink-0">
+          <Button variant="outline" size="sm" onClick={handleStop} disabled={busy} title="Stop the running dev server">
+            {busy ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <Square className="h-3.5 w-3.5 mr-1.5" />}
+            Stop
+          </Button>
+          <Button variant="outline" size="sm" onClick={handleRedetect} disabled={redetecting}>
+            {redetecting ? <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5 mr-1.5" />}
+            Redetect
+          </Button>
+        </div>
       </div>
 
       {/* External API */}
