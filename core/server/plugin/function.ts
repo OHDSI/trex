@@ -307,10 +307,16 @@ function _addFunction(
   // Match both the bare source (`/list`) and any sub-path (`/list/...`).
   // Express 4's `/list/*` pattern requires content after `/list/`, so we
   // register two routes to cover both shapes.
-  const fullSource = name.startsWith("@trex/")
+  const isTrexPlugin = name.startsWith("@trex/");
+  const fullSource = isTrexPlugin
     ? PLUGINS_BASE_PATH + scopePrefix + url
     : url;
-  app.all([fullSource, fullSource + "/*"], apiLimiter, authContext, pluginAuthz, async (req: Request, res: Response) => {
+  // @trex plugins go through trex's auth (authContext + pluginAuthz). d2e/legacy
+  // plugins authenticate inside the function worker using the forwarded Logto
+  // Authorization header (as the d2e fork did); imposing trex's pluginAuthz here
+  // would 401 every Logto-authenticated call — including the portal's public APIs.
+  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [];
+  app.all([fullSource, fullSource + "/*"], apiLimiter, ...authMw, async (req: Request, res: Response) => {
     try {
       const host = req.get("host") || "localhost";
       const protocol = req.protocol || "http";
