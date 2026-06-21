@@ -135,7 +135,10 @@ RUN mkdir -p /usr/lib/trexsql/extensions && \
 # build for an arch, move it to DUCKDB_OPTIONAL_EXTENSIONS.
 ARG TARGETARCH
 ENV DUCKDB_VERSION=1.4.4
-ENV DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite sqlite_scanner vss"
+# NOTE: DuckDB publishes the SQLite reader as `sqlite_scanner`; there is no
+# standalone `sqlite` extension at extensions.duckdb.org (the URL 404s), so it is
+# intentionally NOT listed here — with fail-loud fetching it would abort the build.
+ENV DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite_scanner vss"
 ENV DUCKDB_COMMUNITY_EXTENSIONS="bigquery"
 ENV DUCKDB_OPTIONAL_EXTENSIONS=""
 RUN set -eu; \
