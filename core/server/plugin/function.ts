@@ -176,7 +176,15 @@ async function _callWorker(
     {},
     xenv["_shared"],
     fncfg.env in xenv ? xenv[fncfg.env] : {},
-    { TREX_FUNCTION_PATH: dir }
+    {
+      TREX_FUNCTION_PATH: dir,
+      // d2e functions build their `services` object from SERVICE_ROUTES; pass it
+      // through to the worker (the d2e fork did the same). Added only when set so
+      // @trex-only deployments are unaffected.
+      ...(Deno.env.get("SERVICE_ROUTES")
+        ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
+        : {}),
+    },
   );
   const _myenv = Object.keys(myenv).map((k) => [
     k,
@@ -243,7 +251,15 @@ async function _callInit(
     {},
     xenv["_shared"],
     fnEnv in xenv ? xenv[fnEnv] : {},
-    { TREX_FUNCTION_PATH: dir }
+    {
+      TREX_FUNCTION_PATH: dir,
+      // d2e functions build their `services` object from SERVICE_ROUTES; pass it
+      // through to the worker (the d2e fork did the same). Added only when set so
+      // @trex-only deployments are unaffected.
+      ...(Deno.env.get("SERVICE_ROUTES")
+        ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
+        : {}),
+    },
   );
   const _myenv = Object.keys(myenv).map((k) => [
     k,
