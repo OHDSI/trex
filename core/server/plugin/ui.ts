@@ -45,7 +45,11 @@ export function addPlugin(app: Express, value: any, dir: string, fullName: strin
       // without restarting trex; and skip paths that look like asset requests
       // (.js/.css/etc) so a stale browser HTML asking for a missing bundle gets
       // a clean 404 instead of HTML masquerading as JS.
-      if (r.spa) {
+      // Root-mounted d2e UIs (portal, ...) are React SPAs whose manifests use the
+      // source/target dialect without `spa:true`; they need client-route fallback
+      // (/portal/login-callback -> index.html) just like trex's `spa` routes. The
+      // statSync guard below skips routes that ship no index.html (pure asset dirs).
+      if (r.spa || rootMount) {
         const indexPath = join(fsPath, "index.html");
         try {
           // Validate the file exists at registration time; the handler reads fresh per request.
