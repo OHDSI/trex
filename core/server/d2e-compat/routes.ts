@@ -34,6 +34,7 @@
  */
 
 import type { Express } from "express";
+import express from "express";
 import { logtoAuthn, requireAdmin } from "./auth.ts";
 import { pool } from "../db.ts";
 import { getPluginsJson } from "../plugin/ui.ts";
@@ -223,7 +224,7 @@ export function mountD2eRoutes(app: Express): void {
   //
   // Env vars: LOGTO__TOKEN_URL, LOGTO__RESOURCE_API, SECURITY_AUTH_OIDC_APISECRET
   // ─────────────────────────────────────────────────────────────────────────
-  app.post("/oauth/token", async (req: any, res: any) => {
+  app.post("/oauth/token", express.urlencoded({ extended: true, limit: "1mb" }), async (req: any, res: any) => {
     console.log("[d2e-compat] /oauth/token: exchange code");
     const tokenUrl = envGet("LOGTO__TOKEN_URL");
     if (!tokenUrl) {
@@ -257,10 +258,19 @@ export function mountD2eRoutes(app: Express): void {
     const resource = envGet("LOGTO__RESOURCE_API");
     if (!params.has("resource") && resource) params.append("resource", resource);
 
-    const clientSecret = envGet("SECURITY_AUTH_OIDC_APISECRET");
+    // d2e env.ts maps env.LOGTO_CLIENT_SECRET <- SECURITY_AUTH_OIDC_APISECRET;
+    // accept either name (fall back to LOGTO__CLIENT_SECRET) in case only one
+    // reaches the worker env.
+    const clientSecret = envGet("SECURITY_AUTH_OIDC_APISECRET") || envGet("LOGTO__CLIENT_SECRET");
     if (!params.has("client_secret") && clientSecret) params.append("client_secret", clientSecret);
+    console.log(
+      `[d2e-compat] /oauth/token: secret_present=${clientSecret.length > 0} len=${clientSecret.length} keys=${[...params.keys()].join(",")}`,
+    );
 
     try {
+      // client_secret_post only (secret is in the body). Logto rejects requests
+      // that present client auth via two mechanisms, so do NOT also send a Basic
+      // Authorization header.
       const r = await fetch(tokenUrl, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
