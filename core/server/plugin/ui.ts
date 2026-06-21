@@ -18,11 +18,18 @@ export function getPluginsJson(): string {
 
 export function addPlugin(app: Express, value: any, dir: string, fullName: string = "") {
   const scopePrefix = scopeUrlPrefix(fullName);
+  // @trex plugins mount scoped under PLUGINS_BASE_PATH/<scope>/ (e.g.
+  // /plugins/trex/web). d2e/legacy plugins (@data2evidence, @ohdsi, ...) mount at
+  // their bare source paths (/portal, /atlas) the way the d2e fork served them, so
+  // the existing d2e front-end and routing keep resolving.
+  const rootMount = !fullName.startsWith("@trex/");
   if (value.routes) {
     for (const r of value.routes) {
       const urlPrefix = r.path || r.source;
       const fsPath = `${dir}/${r.dir || r.target}`;
-      const fullPrefix = `${PLUGINS_BASE_PATH}${scopePrefix}${urlPrefix}`;
+      const fullPrefix = rootMount
+        ? urlPrefix
+        : `${PLUGINS_BASE_PATH}${scopePrefix}${urlPrefix}`;
       console.log(`Registering static route: ${fullPrefix} -> ${fsPath}`);
       REGISTERED_UI_ROUTES.push({ pluginName: fullName, urlPrefix: fullPrefix, fsPath });
       try {

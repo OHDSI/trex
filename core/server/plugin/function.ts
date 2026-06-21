@@ -300,10 +300,16 @@ function _addFunction(
     _callWorker(req, path, imports, fncfg, dir, xenv);
 
   const scopePrefix = scopeUrlPrefix(name);
+  // @trex plugins mount scoped under PLUGINS_BASE_PATH/<scope>/; d2e/legacy
+  // plugins (@data2evidence, ...) mount their function routes at the bare source
+  // path (/analytics-svc, /system-portal, ...) as the d2e fork did, so the d2e
+  // UI's API calls keep resolving.
   // Match both the bare source (`/list`) and any sub-path (`/list/...`).
   // Express 4's `/list/*` pattern requires content after `/list/`, so we
   // register two routes to cover both shapes.
-  const fullSource = PLUGINS_BASE_PATH + scopePrefix + url;
+  const fullSource = name.startsWith("@trex/")
+    ? PLUGINS_BASE_PATH + scopePrefix + url
+    : url;
   app.all([fullSource, fullSource + "/*"], apiLimiter, authContext, pluginAuthz, async (req: Request, res: Response) => {
     try {
       const host = req.get("host") || "localhost";
