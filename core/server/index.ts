@@ -20,7 +20,7 @@ import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
-import { applyD2eCompat, runD2eBoot } from "./d2e-compat/index.ts";
+import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot } from "./d2e-compat/index.ts";
 
 console.log("main function started");
 console.log(Deno.version);
@@ -36,6 +36,8 @@ addEventListener("unhandledrejection", (ev) => {
 
 const app = express();
 app.set("trust proxy", true);
+// D2E_COMPAT: strip the /d2e base prefix before ANY route is registered.
+applyD2eCompatEarly(app);
 const server = createServer(app);
 
 const trustedOrigins = (Deno.env.get("BETTER_AUTH_TRUSTED_ORIGINS") || "").split(",").filter(Boolean);

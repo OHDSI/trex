@@ -2,6 +2,31 @@ import type { Express } from "express";
 
 export const D2E_COMPAT = Deno.env.get("D2E_COMPAT") === "true";
 
+/** d2e base path that the front-end/caddy prefix onto every request. */
+const D2E_BASE = (Deno.env.get("D2E_BASE_PATH") || "/d2e").replace(/\/+$/, "");
+
+/**
+ * Early middleware: strip the d2e base prefix (`/d2e/...` -> `/...`) so trex's
+ * routes and the root-mounted d2e plugin routes (/portal, /WebAPI, /analytics-svc)
+ * match. The d2e Hono fork did this in its Hono `getPath`; trex's Express main
+ * needs it as the FIRST middleware (before any route is registered). No-op unless
+ * D2E_COMPAT. Rewrites both `url` and `originalUrl` so downstream proxies that read
+ * either see the unprefixed path.
+ */
+export function applyD2eCompatEarly(app: Express): void {
+  if (!D2E_COMPAT) return;
+  const strip = (u: string): string => {
+    if (u === D2E_BASE || u === `${D2E_BASE}/`) return "/";
+    if (u.startsWith(`${D2E_BASE}/`)) return u.slice(D2E_BASE.length);
+    return u;
+  };
+  app.use((req, _res, next) => {
+    req.url = strip(req.url);
+    if (req.originalUrl) (req as { originalUrl: string }).originalUrl = strip(req.originalUrl);
+    next();
+  });
+}
+
 /** Boot-time DuckDB/native side-effects (webapi, fhir, attaches). No-op unless D2E_COMPAT.
  *  A boot failure (e.g. a missing DuckDB extension on a given arch) must NEVER take
  *  down trex's main worker — the server must still come up and serve. So the whole
