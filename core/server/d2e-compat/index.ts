@@ -20,9 +20,29 @@ export function applyD2eCompatEarly(app: Express): void {
     if (u.startsWith(`${D2E_BASE}/`)) return u.slice(D2E_BASE.length);
     return u;
   };
-  app.use((req, _res, next) => {
+  app.use((req, res, next) => {
+    const hadPrefix = req.url === D2E_BASE || req.url.startsWith(`${D2E_BASE}/`);
     req.url = strip(req.url);
     if (req.originalUrl) (req as { originalUrl: string }).originalUrl = strip(req.originalUrl);
+    if (hadPrefix) {
+      // A redirect issued against the stripped path (e.g. express.static's
+      // trailing-slash 301: /portal -> /portal/) would drop the /d2e prefix and
+      // bounce the client out of the base path, looping with the caddy front door
+      // (ERR_TOO_MANY_REDIRECTS). Re-add /d2e to root-relative Location targets.
+      const reprefix = (v: unknown): unknown =>
+        typeof v === "string" && v.startsWith("/") && v !== D2E_BASE &&
+          !v.startsWith(`${D2E_BASE}/`)
+          ? `${D2E_BASE}${v}`
+          : v;
+      const origSetHeader = res.setHeader.bind(res);
+      (res as { setHeader: (n: string, v: unknown) => unknown }).setHeader = (
+        name: string,
+        value: unknown,
+      ) => {
+        if (String(name).toLowerCase() === "location") value = reprefix(value);
+        return origSetHeader(name, value as never);
+      };
+    }
     next();
   });
 }
