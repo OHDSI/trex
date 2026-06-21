@@ -112,7 +112,18 @@ export function mountD2eRoutes(app: Express): void {
   // /WebAPI/* proxy — Task 1.3 route; unchanged.
   // ─────────────────────────────────────────────────────────────────────────
   app.all(/^\/WebAPI\/.*/, logtoAuthn, async (req: any, res: any) => {
-    const target = `http://localhost:8080${(req as any).originalUrl}`;
+    // Forward only the path+query to the fixed in-container WebAPI; the request
+    // must never influence the host (SSRF). The route already constrains the path
+    // to /WebAPI/, but re-derive pathname+search against a fixed base and re-check
+    // it so a crafted originalUrl (e.g. a protocol-relative //host) can't redirect
+    // the proxy to another origin.
+    const parsed = new URL((req as any).originalUrl, "http://localhost:8080");
+    const safePath = `${parsed.pathname}${parsed.search}`;
+    if (!safePath.startsWith("/WebAPI/")) {
+      (res as any).status(400).json({ error: "Invalid WebAPI path" });
+      return;
+    }
+    const target = `http://localhost:8080${safePath}`;
     const headers = new Headers();
     for (const [k, v] of Object.entries((req as any).headers as Record<string, string | string[]>)) {
       if (v && k.toLowerCase() !== "host") headers.set(k, Array.isArray(v) ? v.join(", ") : String(v));
@@ -200,7 +211,8 @@ export function mountD2eRoutes(app: Express): void {
         if (e?.constructor?.name === "WorkerAlreadyRetired" || e?.name === "WorkerAlreadyRetired") {
           return await callWorker();
         }
-        return new Response(JSON.stringify({ msg: String(e) }), {
+        console.error(`[d2e-compat] worker proxy error: ${e}`);
+        return new Response(JSON.stringify({ error: "Internal server error" }), {
           status: 500,
           headers: { "Content-Type": "application/json" },
         });
@@ -410,7 +422,7 @@ export function mountD2eRoutes(app: Express): void {
       }
     } catch (e) {
       console.error(`[d2e-compat] GET /trex/db/: ${e}`);
-      (res as any).status(500).send(String(e));
+      (res as any).status(500).json({ error: "Internal server error" });
     }
   });
 
@@ -478,7 +490,7 @@ export function mountD2eRoutes(app: Express): void {
       }
     } catch (e) {
       console.error(`[d2e-compat] POST /trex/db/: ${e}`);
-      (res as any).status(500).send(String(e));
+      (res as any).status(500).json({ error: "Internal server error" });
     }
   });
 
@@ -539,7 +551,7 @@ export function mountD2eRoutes(app: Express): void {
       }
     } catch (e) {
       console.error(`[d2e-compat] PUT /trex/db/: ${e}`);
-      (res as any).status(500).send(String(e));
+      (res as any).status(500).json({ error: "Internal server error" });
     }
   });
 
@@ -561,7 +573,7 @@ export function mountD2eRoutes(app: Express): void {
       }
     } catch (e) {
       console.error(`[d2e-compat] DELETE /trex/db/${name}: ${e}`);
-      (res as any).status(500).send(String(e));
+      (res as any).status(500).json({ error: "Internal server error" });
     }
   });
 
