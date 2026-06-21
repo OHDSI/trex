@@ -36,6 +36,7 @@
 import type { Express } from "express";
 import { logtoAuthn, requireAdmin } from "./auth.ts";
 import { pool } from "../db.ts";
+import { getPluginsJson } from "../plugin/ui.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -281,9 +282,11 @@ export function mountD2eRoutes(app: Express): void {
   // ambient global, so we degrade to an empty object.
   // ─────────────────────────────────────────────────────────────────────────
   app.get("/portal/plugin.json", (_req: any, res: any) => {
-    // Degrade: trex does not maintain a mutable global.PLUGINS_JSON.
-    // Return an empty object; plugin discovery is deferred to the parity phase.
-    (res as any).json({});
+    // trex's UI plugin loader builds the merged ui-plugins JSON as plugins
+    // register (ui.ts getPluginsJson). Read it lazily so it reflects every
+    // registered plugin by request time. This is what the d2e portal renders
+    // its nav/micro-frontends from.
+    (res as any).type("application/json").send(getPluginsJson());
   });
 
   // ─────────────────────────────────────────────────────────────────────────

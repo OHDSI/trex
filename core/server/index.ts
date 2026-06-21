@@ -656,9 +656,13 @@ app.all(
   },
 );
 
+  // D2E_COMPAT routes BEFORE plugins: specific d2e routes (/portal/env.js,
+  // /portal/plugin.json, /WebAPI, /logto, ...) must win over the d2e-ui plugin's
+  // /portal static + SPA fallback, which would otherwise shadow the dynamic
+  // /portal/env.js the portal needs (its absence crashes the portal app).
+  await applyD2eCompat(app);
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
-  await applyD2eCompat(app);
   console.log("Plugin system initialized");
 
   // Re-register devx app functions (dynamic plugins don't survive restarts)
