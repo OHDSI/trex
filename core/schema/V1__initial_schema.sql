@@ -1003,7 +1003,11 @@ BEGIN
   END IF;
 END $$;
 
-GRANT ALL PRIVILEGES ON DATABASE testdb TO supabase_admin;
+-- Grant on the ACTUAL database, not a hardcoded `testdb` (which breaks on any
+-- deployment whose database has another name, e.g. d2e's `alp`).
+DO $$ BEGIN
+  EXECUTE format('GRANT ALL PRIVILEGES ON DATABASE %I TO supabase_admin', current_database());
+END $$;
 
 -- Realtime issues `SET search_path TO _realtime` before its first DDL, so the
 -- schema must already exist.
