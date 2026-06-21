@@ -269,4 +269,17 @@ export async function d2eBoot(): Promise<void> {
   } catch (e) {
     log(`[attach-startup] failed: ${(e as Error).message}`);
   }
+
+  // ── Block 8: native DatabaseManager sync ─────────────────────────────────
+  // Push the trexdb registry into Trex.DatabaseManager (op_get_dbc store) so the
+  // d2e /trex/db façade and any worker reading Trex.DatabaseManager.getCredentials()
+  // see the live registry, and the native manager (re)attaches/publishes sources.
+  // This is the trex-native equivalent of d2e's DatabaseManager.get() priming
+  // trexdbm.setCredentials() at startup.
+  try {
+    const { syncTrexDatabaseManager } = await import("./dbm-sync.ts");
+    await syncTrexDatabaseManager();
+  } catch (e) {
+    err(`native DatabaseManager sync failed: ${(e as Error).message}`);
+  }
 }

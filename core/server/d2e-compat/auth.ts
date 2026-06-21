@@ -168,8 +168,16 @@ export const requireAdmin: RequestHandler = async (req: any, res: any, next: any
   const clientId = payload["client_id"] as string | undefined;
   const isClientCred = grantType === "client_credentials" || (!!sub && sub === clientId);
 
+  // Two token shapes carry system-admin status depending on the Logto custom-JWT
+  // build: (a) the legacy `userMgmtGroups.alp_role_system_admin` boolean, and
+  // (b) this stack's `roles` array containing `role.systemadmin` (LOGTO_ROLES.
+  // SYSTEM_ADMIN — the same claim usermgmt's getUserGroupsMetadataFromLogto reads).
+  // Accept either so the admin gate matches however the IdP issued the token.
   const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
-  const isSystemAdmin = userMgmtGroups?.["alp_role_system_admin"] === true;
+  const roles = payload["roles"];
+  const hasSystemAdminRole = Array.isArray(roles) && roles.includes("role.systemadmin");
+  const isSystemAdmin = userMgmtGroups?.["alp_role_system_admin"] === true ||
+    hasSystemAdminRole;
 
   if (!isClientCred && !isSystemAdmin) {
     console.warn(`[d2e-compat] requireAdmin: forbidden — not system admin (sub=${sub})`);

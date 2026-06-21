@@ -5,6 +5,7 @@ import { pluginAuthz } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
+import { buildDatabaseCredentials } from "../d2e-compat/dbm-sync.ts";
 
 export const ROLE_SCOPES: Record<string, string[]> = {};
 export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[] }> = [];
@@ -184,6 +185,14 @@ async function _callWorker(
       ...(Deno.env.get("SERVICE_ROUTES")
         ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
         : {}),
+      // Under d2e, provide the live DB registry to function workers the way d2e
+      // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
+      // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
+      // mapping stays in the plugin's own envConverter. Serialized to a JSON
+      // string by the _myenv builder below (like the d2e env var).
+      ...(Deno.env.get("D2E_COMPAT") === "true"
+        ? { DATABASE_CREDENTIALS: buildDatabaseCredentials() }
+        : {}),
     },
   );
   const _myenv = Object.keys(myenv).map((k) => [
@@ -202,11 +211,21 @@ async function _callWorker(
     netAccessDisabled: false,
     cpuTimeSoftLimitMs: fncfg.cpuTimeSoftLimitMs ?? 60_000_000,
     cpuTimeHardLimitMs: fncfg.cpuTimeHardLimitMs ?? 120_000_000,
-    allowHostFsAccess: fncfg.allowHostFsAccess === true,
+    // d2e function plugins are NestJS/typedi/TypeORM apps that rely on
+    // emitDecoratorMetadata for dependency injection and routing. Without this
+    // the metadata is never emitted and controllers/services fail to instantiate
+    // ("No url is set ...", 404s, hangs). The d2e fork set this for all workers;
+    // harmless for non-decorator (@trex) functions.
+    decoratorType: "typescript_with_metadata",
+    // The d2e fork granted host fs access to every worker. typeorm/npm:pg and the
+    // NestJS module loader touch the filesystem during init; denying it can make
+    // dataSource.initialize() hang silently. Default ON, allow explicit opt-out.
+    allowHostFsAccess: fncfg.allowHostFsAccess !== false,
     ...(fncfg.permissions ? { permissions: fncfg.permissions } : {}),
     context: {
       useReadSyncFileAPI: true,
       unstableSloppyImports: true,
+      sourceMap: true,
     },
   };
 
@@ -258,6 +277,14 @@ async function _callInit(
       // @trex-only deployments are unaffected.
       ...(Deno.env.get("SERVICE_ROUTES")
         ? { SERVICE_ROUTES: Deno.env.get("SERVICE_ROUTES") as string }
+        : {}),
+      // Under d2e, provide the live DB registry to function workers the way d2e
+      // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
+      // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
+      // mapping stays in the plugin's own envConverter. Serialized to a JSON
+      // string by the _myenv builder below (like the d2e env var).
+      ...(Deno.env.get("D2E_COMPAT") === "true"
+        ? { DATABASE_CREDENTIALS: buildDatabaseCredentials() }
         : {}),
     },
   );
@@ -312,8 +339,20 @@ function _addFunction(
 ) {
   REGISTERED_FUNCTIONS.push({ name, source: url, function: fncfg.function });
 
-  fnmap[`${name}${fncfg.function}`] = (req: globalThis.Request) =>
+  // Worker-to-worker calls (Trex.tokioChannel) address functions by the
+  // UNSCOPED plugin name + function path, e.g. `d2e-functions/portal` or
+  // `fhir/fhir-gateway` — never the npm scope (`@data2evidence/...`). The plugin
+  // loader passes the scoped fullName here, so register the fnmap handler under
+  // both the scoped key and the unscoped short key; otherwise every inter-service
+  // call (usermgmt→portal getDatasets, etc.) hits "Unknown service" → 404 and the
+  // caller silently gets undefined.
+  const shortName = name.startsWith("@") && name.includes("/")
+    ? name.slice(name.indexOf("/") + 1)
+    : name;
+  const handler = (req: globalThis.Request) =>
     _callWorker(req, path, imports, fncfg, dir, xenv);
+  fnmap[`${name}${fncfg.function}`] = handler;
+  fnmap[`${shortName}${fncfg.function}`] = handler;
 
   const scopePrefix = scopeUrlPrefix(name);
   // @trex plugins mount scoped under PLUGINS_BASE_PATH/<scope>/; d2e/legacy

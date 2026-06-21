@@ -1312,8 +1312,14 @@ try {
 // itself stays served at /plugins/trex/web/, it's just no longer auto-redirected.
 const TREX_CONSOLE_ENABLED = (Deno.env.get("TREX_CONSOLE_ENABLED") ?? "true") !== "false";
 if (TREX_CONSOLE_ENABLED) {
+  // Under d2e (D2E_COMPAT), the d2e portal owns the root path, so `/` redirects
+  // to /d2e/portal rather than the trex admin console. The trex web UI is still
+  // reachable directly at /plugins/trex/web/.
+  const rootTarget = Deno.env.get("D2E_COMPAT") === "true"
+    ? "/d2e/portal"
+    : "/plugins/trex/web/";
   app.get("/", (_req, res) => {
-    res.redirect("/plugins/trex/web/");
+    res.redirect(rootTarget);
   });
 } else {
   console.log(

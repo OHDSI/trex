@@ -38,6 +38,7 @@ import express from "express";
 import { logtoAuthn, requireAdmin } from "./auth.ts";
 import { pool } from "../db.ts";
 import { getPluginsJson } from "../plugin/ui.ts";
+import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -296,7 +297,15 @@ export function mountD2eRoutes(app: Express): void {
     // register (ui.ts getPluginsJson). Read it lazily so it reflects every
     // registered plugin by request time. This is what the d2e portal renders
     // its nav/micro-frontends from.
-    (res as any).type("application/json").send(getPluginsJson());
+    //
+    // d2e served this as `c.json(global.PLUGINS_JSON)` where PLUGINS_JSON is a
+    // STRING — i.e. the body is a JSON-encoded string (double-encoded). Consumers
+    // rely on that: FeatureService/SystemService do `JSON.parse(await res.json())`
+    // and the portal UI JSON.parses REACT_APP_PLUGINS. getPluginsJson() returns a
+    // string, so res.json() reproduces the double-encoding. Using .send() here
+    // would emit single-encoded object text and break those JSON.parse() calls
+    // ("[object Object]" is not valid JSON).
+    (res as any).json(getPluginsJson());
   });
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -333,7 +342,13 @@ export function mountD2eRoutes(app: Express): void {
       REACT_APP_IDP_NAME_PROP: "username",
       REACT_APP_IDP_OIDC_CONFIG: `{ "client_id": "${clientId}", "redirect_uri": "{window.location.origin}/d2e/portal/login-callback", "authority": "${gatewayBase}", "authority_configuration": { "issuer": "${issuer}", "authorization_endpoint": "${authorizationUrl}", "token_endpoint": "https://${gatewayHost}/d2e/oauth/token", "end_session_endpoint": "${endSessionUrl}" }, "scope": "${scope}", "refresh_time_before_tokens_expiration_in_second": 180 }`,
       REACT_APP_DB_CREDENTIALS_PUBLIC_KEYS: certEscapeNewLine(envGet("DB_CREDENTIALS__PUBLIC_KEYS")).replace("}\\\n", "}"),
-      REACT_APP_PLUGINS: "{}",
+      // d2e set this to global.PLUGINS_JSON — the merged UI-plugins menu STRING
+      // that the portal parses to build its nav/micro-frontends. Hardcoding "{}"
+      // leaves the portal with no menu, so views like /researcher crash in a
+      // useMemo (undefined.forEach) and render blank. getPluginsJson() returns the
+      // same string served at /portal/plugin.json (read lazily so all registered
+      // plugins are reflected).
+      REACT_APP_PLUGINS: getPluginsJson(),
       REACT_APP_MRI_CONFIG_NAME: "OMOP_GDM_PA_CONF",
       REACT_APP_LOG_DISCLAIMER: envGet("PORTAL__LOG_DISCLAIMER"),
       REACT_APP_USE_PUBLIC_WEBAPI_PROXY: envGet("USE_PUBLIC_WEBAPI_PROXY"),
@@ -399,10 +414,9 @@ export function mountD2eRoutes(app: Express): void {
     }
   });
 
-  // GET /trex/db/publications/ — degraded to empty array
-  // Trex.DatabaseManager (ambient EdgeRuntime global) is not available.
+  // GET /trex/db/publications/ — sourced from the trex-native DatabaseManager.
   app.get("/trex/db/publications/", requireAdmin, (_req: any, res: any) => {
-    (res as any).json([]);
+    (res as any).json(getTrexPublications());
   });
 
   // POST /trex/db/ — create / upsert a database entry
@@ -455,6 +469,9 @@ export function mountD2eRoutes(app: Express): void {
             );
           }
         }
+        // Push the updated registry into the trex-native DatabaseManager so the
+        // source DB is attached/queryable (the d2e main did this on every write).
+        await syncTrexDatabaseManager();
         (res as any).json({ id: code });
       } finally {
         client.release();
@@ -513,6 +530,9 @@ export function mountD2eRoutes(app: Express): void {
             );
           }
         }
+        // Push the updated registry into the trex-native DatabaseManager so the
+        // source DB is attached/queryable (the d2e main did this on every write).
+        await syncTrexDatabaseManager();
         (res as any).json({ id: code });
       } finally {
         client.release();
@@ -534,6 +554,7 @@ export function mountD2eRoutes(app: Express): void {
       const client = await pool.connect();
       try {
         await client.query("DELETE FROM trexdb.database WHERE id = $1", [name]);
+        await syncTrexDatabaseManager();
         (res as any).json({ id: name });
       } finally {
         client.release();
