@@ -134,8 +134,15 @@ export class DatabaseManager {
     ) {
 		op_execute_query("memory","INSTALL bigquery FROM community",[]);
 		op_execute_query("memory","LOAD bigquery",[]);
+		// An empty/blank dataset attaches the whole project, exposing every
+		// dataset as a schema (queryable as `${name}.<dataset>.<table>`). A
+		// specified dataset pins the connection to that single schema.
+		const dataset = credentials.dataset?.trim();
+		const conn = dataset
+			? `project=${credentials.project} dataset=${dataset}`
+			: `project=${credentials.project}`;
 		op_execute_query("memory",
-        `ATTACH IF NOT EXISTS 'project=${credentials.project} dataset=${credentials.dataset}' AS ${name} (TYPE bigquery, READ_ONLY)`, []
+        `ATTACH IF NOT EXISTS '${conn}' AS ${name} (TYPE bigquery, READ_ONLY)`, []
         );
 	}
 

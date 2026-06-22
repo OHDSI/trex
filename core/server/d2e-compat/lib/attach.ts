@@ -82,9 +82,15 @@ export async function ensureSourceAttached(
   }
   if (c.dialect === "bigquery") {
     const host = sqlQuote(c.host);
-    const name = sqlQuote(c.name);
+    // An empty/blank dataset attaches the whole project, exposing every dataset
+    // as a schema (queryable as `<alias>.<dataset>.<table>`). A specified
+    // dataset pins the connection to that single schema (legacy behavior).
+    const dataset = c.name?.trim() ?? "";
+    const conn = dataset
+      ? `project=${host} dataset=${sqlQuote(dataset)}`
+      : `project=${host}`;
     const sql =
-      `ATTACH IF NOT EXISTS 'project=${host} dataset=${name}' AS ${alias} (TYPE bigquery, READ_ONLY)`;
+      `ATTACH IF NOT EXISTS '${conn}' AS ${alias} (TYPE bigquery, READ_ONLY)`;
     await opts.exec(sql);
     return;
   }
