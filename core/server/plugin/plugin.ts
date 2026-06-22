@@ -126,9 +126,15 @@ export class Plugins {
     const pluginsPath = Deno.env.get("PLUGINS_PATH") || "./plugins";
     console.log("Scanning and registering plugins");
 
-    // Dev plugins have highest priority — scanned first
-    await Plugins.scanAndRegister(app, devPath, "dev");
-    await Plugins.scanAndRegister(app, pluginsPath, "npm");
+    // PLUGINS_DEV_PATH / PLUGINS_PATH may be colon-separated PATH-style lists
+    // (e.g. d2e uses /usr/src/plugins-dev:/usr/src/bundled-plugins:/usr/src/plugins),
+    // so scan each entry. Dev paths have highest priority — scanned first.
+    for (const p of devPath.split(":").map((s) => s.trim()).filter(Boolean)) {
+      await Plugins.scanAndRegister(app, p, "dev");
+    }
+    for (const p of pluginsPath.split(":").map((s) => s.trim()).filter(Boolean)) {
+      await Plugins.scanAndRegister(app, p, "npm");
+    }
 
     console.log(
       `Plugin registration complete: ${Plugins.activeRegistry.size} plugins active`

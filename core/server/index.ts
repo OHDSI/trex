@@ -20,6 +20,7 @@ import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
+import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot } from "./d2e-compat/index.ts";
 
 console.log("main function started");
 console.log(Deno.version);
@@ -35,6 +36,8 @@ addEventListener("unhandledrejection", (ev) => {
 
 const app = express();
 app.set("trust proxy", true);
+// D2E_COMPAT: strip the /d2e base prefix before ANY route is registered.
+applyD2eCompatEarly(app);
 const server = createServer(app);
 
 const trustedOrigins = (Deno.env.get("BETTER_AUTH_TRUSTED_ORIGINS") || "").split(",").filter(Boolean);
@@ -653,6 +656,11 @@ app.all(
   },
 );
 
+  // D2E_COMPAT routes BEFORE plugins: specific d2e routes (/portal/env.js,
+  // /portal/plugin.json, /WebAPI, /logto, ...) must win over the d2e-ui plugin's
+  // /portal static + SPA fallback, which would otherwise shadow the dynamic
+  // /portal/env.js the portal needs (its absence crashes the portal app).
+  await applyD2eCompat(app);
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
   console.log("Plugin system initialized");
@@ -1298,9 +1306,26 @@ try {
   console.log("Serving Shinylive assets from shinylive/");
 } catch { /* shinylive assets not present — skip */ }
 
-app.get("/", (_req, res) => {
-  res.redirect("/plugins/trex/web/");
-});
+// Root redirect to the trex web console (admin UI front door). Gated by
+// TREX_CONSOLE_ENABLED (default "true"). When "false", `/` is left unclaimed so
+// an upstream host (e.g. d2e's own frontend) can own the root path — the web UI
+// itself stays served at /plugins/trex/web/, it's just no longer auto-redirected.
+const TREX_CONSOLE_ENABLED = (Deno.env.get("TREX_CONSOLE_ENABLED") ?? "true") !== "false";
+if (TREX_CONSOLE_ENABLED) {
+  // Under d2e (D2E_COMPAT), the d2e portal owns the root path, so `/` redirects
+  // to /d2e/portal rather than the trex admin console. The trex web UI is still
+  // reachable directly at /plugins/trex/web/.
+  const rootTarget = Deno.env.get("D2E_COMPAT") === "true"
+    ? "/d2e/portal"
+    : "/plugins/trex/web/";
+  app.get("/", (_req, res) => {
+    res.redirect(rootTarget);
+  });
+} else {
+  console.log(
+    "[trex] root console redirect disabled (TREX_CONSOLE_ENABLED=false); web UI still served at /plugins/trex/web/",
+  );
+}
 
 // HARD CUT detection: stored anon/service_role keys in trexdb.setting were
 // signed with the previous BETTER_AUTH_SECRET-derived key. If the stored
@@ -1381,6 +1406,8 @@ if (initialKeyName) {
     console.error("[mcp] Failed to bootstrap initial API key:", err);
   }
 }
+
+await runD2eBoot();
 
 server.listen(8000, () => {
   console.log("server listening on port 8000");

@@ -127,20 +127,45 @@ RUN mkdir -p /usr/lib/trexsql/extensions && \
     find node_modules/@trex -name "*.trex" -exec cp {} /usr/lib/trexsql/extensions/ \; && \
     find node_modules/@trex -name "*.duckdb_extension" -exec cp {} /usr/lib/trexsql/extensions/ \;
 
-# Download official trexsql extensions for offline use (arch-specific)
+# Download official DuckDB extensions for offline use (arch-specific). buildx runs
+# this once per target platform, so it guarantees BOTH linux_amd64 and linux_arm64
+# images carry the full set. Each download is verified: a missing extension for the
+# target arch FAILS the build (no silent gaps), so we never ship an image where
+# `LOAD <ext>` blows up at runtime. To deliberately skip an extension that has no
+# build for an arch, move it to DUCKDB_OPTIONAL_EXTENSIONS.
 ARG TARGETARCH
 ENV DUCKDB_VERSION=1.4.4
-RUN DUCKDB_PLATFORM="linux_${TARGETARCH}" && \
-    mkdir -p /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM} && \
-    cd /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM} && \
-    for lib in avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite sqlite_scanner vss; do \
-        curl -sfO https://extensions.duckdb.org/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/${lib}.duckdb_extension.gz && \
-        gzip -d ${lib}.duckdb_extension.gz; \
-    done && \
-    for lib in bigquery; do \
-        curl -sfO https://community-extensions.duckdb.org/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/${lib}.duckdb_extension.gz && \
-        gzip -d ${lib}.duckdb_extension.gz; \
-    done
+# NOTE: DuckDB publishes the SQLite reader as `sqlite_scanner`; there is no
+# standalone `sqlite` extension at extensions.duckdb.org (the URL 404s), so it is
+# intentionally NOT listed here — with fail-loud fetching it would abort the build.
+ENV DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite_scanner vss"
+ENV DUCKDB_COMMUNITY_EXTENSIONS="bigquery"
+ENV DUCKDB_OPTIONAL_EXTENSIONS=""
+RUN set -eu; \
+    DUCKDB_PLATFORM="linux_${TARGETARCH}"; \
+    DEST="/usr/share/trexsql/extensions/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM}"; \
+    mkdir -p "$DEST"; \
+    fetch() { \
+      url="$1/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM}/$2.duckdb_extension.gz"; \
+      echo "  - $2 (${DUCKDB_PLATFORM})"; \
+      curl -fsSL -o "${DEST}/$2.duckdb_extension.gz" "$url" \
+        || { echo "ERROR: extension '$2' not available for ${DUCKDB_PLATFORM}: $url" >&2; return 1; }; \
+      gzip -df "${DEST}/$2.duckdb_extension.gz"; \
+    }; \
+    missing=""; \
+    echo "Fetching DuckDB core extensions:"; \
+    for lib in ${DUCKDB_CORE_EXTENSIONS}; do fetch https://extensions.duckdb.org "$lib" || missing="${missing} ${lib}"; done; \
+    echo "Fetching DuckDB community extensions:"; \
+    for lib in ${DUCKDB_COMMUNITY_EXTENSIONS}; do fetch https://community-extensions.duckdb.org "$lib" || missing="${missing} ${lib}"; done; \
+    for lib in ${DUCKDB_OPTIONAL_EXTENSIONS}; do fetch https://extensions.duckdb.org "$lib" || echo "WARN: optional '$lib' missing for ${DUCKDB_PLATFORM}, skipping"; done; \
+    if [ -n "${missing}" ]; then echo "FATAL: required DuckDB extensions missing for ${DUCKDB_PLATFORM}:${missing}" >&2; exit 1; fi; \
+    # Seed DuckDB's default per-user lookup path so `LOAD <ext>` resolves even when a
+    # worker connection doesn't pick up DUCKDB_EXTENSION_DIRECTORY.
+    HOME_EXT="/home/node/.duckdb/extensions/v${DUCKDB_VERSION}/${DUCKDB_PLATFORM}"; \
+    mkdir -p "$HOME_EXT"; \
+    cp -f "${DEST}"/*.duckdb_extension "$HOME_EXT"/; \
+    chown -R node:node /home/node/.duckdb; \
+    echo "DuckDB extensions present for ${DUCKDB_PLATFORM}:"; ls -1 "$DEST"
 
 # Override npm extensions with CI-built ones
 # Supports both flat layout (local builds) and arch-specific layout (CI multi-arch builds)

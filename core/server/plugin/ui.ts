@@ -18,11 +18,18 @@ export function getPluginsJson(): string {
 
 export function addPlugin(app: Express, value: any, dir: string, fullName: string = "") {
   const scopePrefix = scopeUrlPrefix(fullName);
+  // @trex plugins mount scoped under PLUGINS_BASE_PATH/<scope>/ (e.g.
+  // /plugins/trex/web). d2e/legacy plugins (@data2evidence, @ohdsi, ...) mount at
+  // their bare source paths (/portal, /atlas) the way the d2e fork served them, so
+  // the existing d2e front-end and routing keep resolving.
+  const rootMount = !fullName.startsWith("@trex/");
   if (value.routes) {
     for (const r of value.routes) {
       const urlPrefix = r.path || r.source;
       const fsPath = `${dir}/${r.dir || r.target}`;
-      const fullPrefix = `${PLUGINS_BASE_PATH}${scopePrefix}${urlPrefix}`;
+      const fullPrefix = rootMount
+        ? urlPrefix
+        : `${PLUGINS_BASE_PATH}${scopePrefix}${urlPrefix}`;
       console.log(`Registering static route: ${fullPrefix} -> ${fsPath}`);
       REGISTERED_UI_ROUTES.push({ pluginName: fullName, urlPrefix: fullPrefix, fsPath });
       try {
@@ -38,16 +45,22 @@ export function addPlugin(app: Express, value: any, dir: string, fullName: strin
       // without restarting trex; and skip paths that look like asset requests
       // (.js/.css/etc) so a stale browser HTML asking for a missing bundle gets
       // a clean 404 instead of HTML masquerading as JS.
-      if (r.spa) {
+      // Root-mounted d2e UIs (portal, ...) are React SPAs whose manifests use the
+      // source/target dialect without `spa:true`; they need client-route fallback
+      // (/portal/login-callback -> index.html) just like trex's `spa` routes. The
+      // statSync guard below skips routes that ship no index.html (pure asset dirs).
+      if (r.spa || rootMount) {
         const indexPath = join(fsPath, "index.html");
         try {
           // Validate the file exists at registration time; the handler reads fresh per request.
           Deno.statSync(indexPath);
-          app.use(fullPrefix, (req, res) => {
-            // Bail on extension-bearing paths — those are asset requests, not SPA routes.
+          app.use(fullPrefix, (req, res, next) => {
+            // Bail on extension-bearing paths — those are asset requests, not SPA
+            // routes. Fall THROUGH (next) rather than 404 here, so dynamic sibling
+            // routes still match (e.g. d2e's generated /portal/env.js, plugin.json);
+            // a genuinely missing asset then gets a clean 404 from the final handler.
             if (/\.[a-zA-Z0-9]{1,8}$/.test(req.path)) {
-              res.status(404).send("Not found");
-              return;
+              return next();
             }
             try {
               const html = Deno.readTextFileSync(indexPath);
