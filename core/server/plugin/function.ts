@@ -165,6 +165,25 @@ function substituteEnvVarsInObject(obj: any): any {
   return obj;
 }
 
+// Under D2E_COMPAT, function workers bake the DB registry (DATABASE_CREDENTIALS,
+// built from Trex.DatabaseManager) into their startup env. The runtime reuses
+// workers by servicePath, so a worker created before a database was registered at
+// runtime keeps a stale credential set — analytics-svc then 404s /alpdb/schema/exists
+// for the just-added DB ("not found in analyticsCredentials"), failing demo setup.
+// We track the credential signature each path's worker was created with; when it
+// changes we forceCreate a fresh worker so it re-reads the current registry.
+const _workerCredSig = new Map<string, string>();
+
+function _credentialSignature(creds: unknown): string {
+  if (!Array.isArray(creds)) return "";
+  // Order-independent: sort by code so DatabaseManager iteration order doesn't
+  // cause spurious refreshes; include contents so credential edits also refresh.
+  const sorted = [...creds].sort((a, b) =>
+    String(a?.code ?? "").localeCompare(String(b?.code ?? "")),
+  );
+  return JSON.stringify(sorted);
+}
+
 async function _callWorker(
   req: globalThis.Request,
   servicePath: string,
@@ -200,6 +219,17 @@ async function _callWorker(
     typeof myenv[k] === "string" ? myenv[k] : JSON.stringify(myenv[k]),
   ]);
 
+  // Force a fresh worker when this path's baked DB registry has changed since the
+  // last worker was created for it (see _workerCredSig above). First call records
+  // the signature without forcing; only a subsequent change triggers a recreate.
+  let forceCreate = false;
+  if (Deno.env.get("D2E_COMPAT") === "true") {
+    const sig = _credentialSignature(myenv.DATABASE_CREDENTIALS);
+    const prev = _workerCredSig.get(servicePath);
+    if (prev !== undefined && prev !== sig) forceCreate = true;
+    _workerCredSig.set(servicePath, sig);
+  }
+
   const options: any = {
     servicePath,
     memoryLimitMb: fncfg.memoryLimitMb ?? 4096,
@@ -207,7 +237,7 @@ async function _callWorker(
     noModuleCache: false,
     importMapPath: imports,
     envVars: _myenv,
-    forceCreate: false,
+    forceCreate,
     netAccessDisabled: false,
     cpuTimeSoftLimitMs: fncfg.cpuTimeSoftLimitMs ?? 60_000_000,
     cpuTimeHardLimitMs: fncfg.cpuTimeHardLimitMs ?? 120_000_000,
