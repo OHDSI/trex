@@ -5,7 +5,7 @@ import { pluginAuthz } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
-import { buildDatabaseCredentials } from "../d2e-compat/dbm-sync.ts";
+import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
 
 export const ROLE_SCOPES: Record<string, string[]> = {};
 export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[] }> = [];
@@ -170,19 +170,16 @@ function substituteEnvVarsInObject(obj: any): any {
 // workers by servicePath, so a worker created before a database was registered at
 // runtime keeps a stale credential set — analytics-svc then 404s /alpdb/schema/exists
 // for the just-added DB ("not found in analyticsCredentials"), failing demo setup.
-// We track the credential signature each path's worker was created with; when it
-// changes we forceCreate a fresh worker so it re-reads the current registry.
-const _workerCredSig = new Map<string, string>();
-
-function _credentialSignature(creds: unknown): string {
-  if (!Array.isArray(creds)) return "";
-  // Order-independent: sort by code so DatabaseManager iteration order doesn't
-  // cause spurious refreshes; include contents so credential edits also refresh.
-  const sorted = [...creds].sort((a, b) =>
-    String(a?.code ?? "").localeCompare(String(b?.code ?? "")),
-  );
-  return JSON.stringify(sorted);
-}
+// We record the registration epoch each path's worker was created at; when a later
+// deliberate registry sync bumps the epoch (getRegistrationEpoch in dbm-sync), the
+// next call to that path forceCreates a fresh worker so it re-reads the registry.
+//
+// The trigger is the sync epoch, NOT a content hash of getCredentials(): runtime
+// cache attaches (POST /trex/attach, e.g. a dataset's source DB and cache) mutate
+// the credential view mid-flow, so a content signature would churn workers during
+// long operations like DQD and crash them. Only syncTrexDatabaseManager — boot and
+// /trex/db writes — bumps the epoch, so cache attaches leave warm workers untouched.
+const _workerEpoch = new Map<string, number>();
 
 async function _callWorker(
   req: globalThis.Request,
@@ -219,15 +216,15 @@ async function _callWorker(
     typeof myenv[k] === "string" ? myenv[k] : JSON.stringify(myenv[k]),
   ]);
 
-  // Force a fresh worker when this path's baked DB registry has changed since the
-  // last worker was created for it (see _workerCredSig above). First call records
-  // the signature without forcing; only a subsequent change triggers a recreate.
+  // Force a fresh worker when a deliberate registry sync has bumped the epoch since
+  // the last worker was created for this path (see _workerEpoch above). First call
+  // records the epoch without forcing; only a subsequent bump triggers a recreate.
   let forceCreate = false;
   if (Deno.env.get("D2E_COMPAT") === "true") {
-    const sig = _credentialSignature(myenv.DATABASE_CREDENTIALS);
-    const prev = _workerCredSig.get(servicePath);
-    if (prev !== undefined && prev !== sig) forceCreate = true;
-    _workerCredSig.set(servicePath, sig);
+    const epoch = getRegistrationEpoch();
+    const prev = _workerEpoch.get(servicePath);
+    if (prev !== undefined && prev !== epoch) forceCreate = true;
+    _workerEpoch.set(servicePath, epoch);
   }
 
   const options: any = {
