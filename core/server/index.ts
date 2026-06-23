@@ -820,16 +820,30 @@ try {
 // and the native source-attach selects the Admin one — so the table must allow one
 // credential per (databaseId, username, userScope), not per (databaseId, username).
 // Replace the legacy unique constraint with a (db, username, userScope) index so the
-// /trex/db upserts (ON CONFLICT on those columns) keep both scopes. Idempotent.
+// /trex/db upserts (ON CONFLICT on those columns) keep both scopes. Guarded by cheap
+// catalog lookups so a restart, once migrated, takes no ACCESS EXCLUSIVE lock on the
+// table (which could otherwise block boot behind an active connection).
 try {
-  await pool.query(
-    `ALTER TABLE trexdb.database_credential
-       DROP CONSTRAINT IF EXISTS "database_credential_databaseId_username_key"`,
+  const oldCon = await pool.query(
+    `SELECT 1 FROM pg_constraint
+      WHERE conname = 'database_credential_databaseId_username_key' LIMIT 1`,
   );
-  await pool.query(
-    `CREATE UNIQUE INDEX IF NOT EXISTS database_credential_db_user_scope_key
-       ON trexdb.database_credential ("databaseId", username, "userScope")`,
+  if (oldCon.rows.length > 0) {
+    await pool.query(
+      `ALTER TABLE trexdb.database_credential
+         DROP CONSTRAINT IF EXISTS "database_credential_databaseId_username_key"`,
+    );
+  }
+  const newIdx = await pool.query(
+    `SELECT 1 FROM pg_class
+      WHERE relname = 'database_credential_db_user_scope_key' LIMIT 1`,
   );
+  if (newIdx.rows.length === 0) {
+    await pool.query(
+      `CREATE UNIQUE INDEX IF NOT EXISTS database_credential_db_user_scope_key
+         ON trexdb.database_credential ("databaseId", username, "userScope")`,
+    );
+  }
 } catch (err) {
   console.error("[bootstrap] database_credential scope-constraint migration failed:", err);
 }
