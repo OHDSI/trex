@@ -22,7 +22,7 @@ def test_pgwire_server_lifecycle(node_factory):
     node = node_factory(load_pgwire=True, load_db=False)
 
     node.execute(
-        f"SELECT trex_pgwire_start('127.0.0.1', {node.pgwire_port}, '', '')"
+        f"SELECT trex_pgwire_start('127.0.0.1', {node.pgwire_port}, 'test', '')"
     )
 
     status = node.execute("SELECT * FROM trex_pgwire_status()")
@@ -173,7 +173,7 @@ def test_pgwire_server_status_after_stop(node_factory):
     node = node_factory(load_pgwire=True, load_db=False)
 
     node.execute(
-        f"SELECT trex_pgwire_start('127.0.0.1', {node.pgwire_port}, '', '')"
+        f"SELECT trex_pgwire_start('127.0.0.1', {node.pgwire_port}, 'test', '')"
     )
 
     status = node.execute("SELECT * FROM trex_pgwire_status()")
@@ -190,3 +190,22 @@ def test_pgwire_server_status_after_stop(node_factory):
         timeout=5,
     )
     assert len(status) == 0
+
+
+def test_pgwire_rejects_empty_password(node_factory):
+    """Security: starting without a password must fail and open no server.
+
+    Guards the auth-bypass fix - an empty password previously started an
+    unauthenticated server that accepted every connection.
+    """
+    node = node_factory(load_pgwire=True, load_db=False)
+
+    result = node.execute(
+        f"SELECT trex_pgwire_start('127.0.0.1', {node.pgwire_port}, '', '')"
+    )
+    assert "without a password" in result[0][0].lower(), (
+        f"expected mandatory-auth error, got {result[0][0]!r}"
+    )
+
+    status = node.execute("SELECT * FROM trex_pgwire_status()")
+    assert len(status) == 0, f"no server should be running, got {len(status)} rows"
