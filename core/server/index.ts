@@ -816,6 +816,24 @@ try {
   throw err;
 }
 
+// One-shot: d2e registers an Admin and a Read credential under the same username,
+// and the native source-attach selects the Admin one — so the table must allow one
+// credential per (databaseId, username, userScope), not per (databaseId, username).
+// Replace the legacy unique constraint with a (db, username, userScope) index so the
+// /trex/db upserts (ON CONFLICT on those columns) keep both scopes. Idempotent.
+try {
+  await pool.query(
+    `ALTER TABLE trexdb.database_credential
+       DROP CONSTRAINT IF EXISTS "database_credential_databaseId_username_key"`,
+  );
+  await pool.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS database_credential_db_user_scope_key
+       ON trexdb.database_credential ("databaseId", username, "userScope")`,
+  );
+} catch (err) {
+  console.error("[bootstrap] database_credential scope-constraint migration failed:", err);
+}
+
 // One-shot bootstrap: encrypt any database_credential rows that still hold a
 // plaintext password. Runs after core migrations so password_encrypted exists.
 try {
