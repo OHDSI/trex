@@ -41,8 +41,8 @@ export function registerStaticRoute(urlPrefix, fsPath) {
 }
 
 // Redact secrets from a string before logging. SQL we log can embed
-// connection strings — e.g. `ATTACH '... password=mypass' (TYPE postgres)`
-// or `hdbsql://user:pass@host` — and those must never reach stdout in
+// connection strings - e.g. `ATTACH '... password=mypass' (TYPE postgres)`
+// or `hdbsql://user:pass@host` - and those must never reach stdout in
 // cleartext. Mirrors the key list used by the Rust SwarmLogger::sanitize.
 const SECRET_KEYS = ['password', 'passwd', 'secret', 'token', 'credential', 'authorization'];
 export function redactSecrets(text) {
