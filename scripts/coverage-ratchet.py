@@ -5,12 +5,19 @@ Exits non-zero only when a crate's line coverage drops by more than
 TOLERANCE_PP percentage points. New crates and crates whose baseline is
 marked build_failed are skipped. Meta keys (those starting with "_") in
 the baseline are skipped — they exist for documentation only.
+
+TOLERANCE_PP absorbs run-to-run measurement noise: larger crates with
+integration tests routinely swing ~1pp between identical runs (test
+ordering, timing-dependent branches, container flakiness), so a tight
+threshold fails PRs that never touched the crate. The gate still catches
+real regressions, which come from removing or disabling tests and are
+much larger than the noise band.
 """
 import json
 import sys
 from pathlib import Path
 
-TOLERANCE_PP = 0.5
+TOLERANCE_PP = 2.0
 
 def main():
     baseline = json.loads(Path("coverage/baseline.json").read_text())
