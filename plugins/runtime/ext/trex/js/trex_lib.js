@@ -23,13 +23,40 @@ const {
 	op_req_listen,
 	op_req_next,
 	op_req_respond,
-	op_register_static_route
+	op_register_static_route,
+	op_sql_log_enabled
 } = ops;
+
+// SQL-statement logging is opt-in (env TREX__LOG__SQL=1). Default OFF because
+// SQL can carry connection strings/credentials. Read per-call so the gate
+// reflects runtime env rather than snapshot-build time.
+export function sqlLoggingEnabled() {
+	try { return op_sql_log_enabled(); } catch (_e) { return false; }
+}
 
 export { op_exit };
 
 export function registerStaticRoute(urlPrefix, fsPath) {
 	op_register_static_route(urlPrefix, fsPath);
+}
+
+// Redact secrets from a string before logging. SQL we log can embed
+// connection strings — e.g. `ATTACH '... password=mypass' (TYPE postgres)`
+// or `hdbsql://user:pass@host` — and those must never reach stdout in
+// cleartext. Mirrors the key list used by the Rust SwarmLogger::sanitize.
+const SECRET_KEYS = ['password', 'passwd', 'secret', 'token', 'credential', 'authorization'];
+export function redactSecrets(text) {
+	if (typeof text !== 'string') return text;
+	let out = text;
+	// key=value / key:value, optional quotes around the value; stop at the
+	// first whitespace/quote/delimiter so we don't over-redact the rest.
+	for (const key of SECRET_KEYS) {
+		const re = new RegExp(`(${key}\\s*[=:]\\s*)('[^']*'|"[^"]*"|[^\\s'",;)]+)`, 'gi');
+		out = out.replace(re, '$1[REDACTED]');
+	}
+	// URI userinfo: scheme://user:secret@host  ->  scheme://user:[REDACTED]@host
+	out = out.replace(/([a-z][a-z0-9+.-]*:\/\/[^:/?#\s]+:)([^@\s]+)(@)/gi, '$1[REDACTED]$3');
+	return out;
 }
 
 
@@ -312,7 +339,7 @@ export class TrexDB {
 		return new Promise((resolve, reject) => {
 			try {
 				const nparams = map_params(params);
-				console.log(`DB: ${this.__database} SQL: ${sql}`);
+				if (sqlLoggingEnabled()) console.log(`DB: ${this.__database} SQL: ${redactSecrets(sql)}`);
 				resolve(JSON.parse(op_execute_query_session(this.__session_id, this.__database, sql, nparams)));
 			} catch(e) {
 				reject(e);
@@ -376,7 +403,7 @@ export class HanaDB extends TrexDB {
 		return new Promise((resolve, reject) => {
 			try {
 				const nparams = map_params(params);
-				console.log(`DB: ${super.getdatabase()} SQL: ${sql}`);
+				if (sqlLoggingEnabled()) console.log(`DB: ${super.getdatabase()} SQL: ${redactSecrets(sql)}`);
 				const connectionUrl = this.#resolveConnectionUrl();
 				// Escape single quotes in SQL and connection URL to prevent SQL injection
 				const escapedSql = String(sql).replace(/'/g, "''");
@@ -394,7 +421,7 @@ export class HanaDB extends TrexDB {
 		return new Promise((resolve, reject) => {
 			try {
 				const nparams = map_params(params);
-				console.log(`DB(write): ${super.getdatabase()} SQL: ${sql}`);
+				if (sqlLoggingEnabled()) console.log(`DB(write): ${super.getdatabase()} SQL: ${redactSecrets(sql)}`);
 				const connectionUrl = this.#resolveConnectionUrl();
 				// Escape single quotes in SQL and connection URL to prevent SQL injection
 				const escapedSql = String(sql).replace(/'/g, "''");

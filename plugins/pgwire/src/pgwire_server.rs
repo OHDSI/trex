@@ -37,7 +37,7 @@ use pgwire::api::auth::{AuthSource, DefaultServerParameterProvider, LoginInfo, P
 use pgwire::api::query::{ExtendedQueryHandler, SimpleQueryHandler};
 use pgwire::api::stmt::NoopQueryParser;
 use pgwire::api::results::{Response, Tag, QueryResponse, DescribeStatementResponse, DescribePortalResponse, FieldInfo};
-use pgwire::api::{PgWireServerHandlers, ClientInfo, NoopHandler, Type};
+use pgwire::api::{PgWireServerHandlers, ClientInfo, Type};
 use pgwire::api::portal::{Portal, Format};
 use pgwire::api::stmt::StoredStatement;
 use pgwire::error::{ErrorInfo, PgWireError, PgWireResult};
@@ -1130,32 +1130,6 @@ impl ExtendedQueryHandler for TrexQueryHandler {
     }
 }
 
-pub struct TrexPgWireServerFactory {
-    query_handler: Arc<TrexQueryHandler>,
-}
-
-impl TrexPgWireServerFactory {
-    pub fn new(host: String, port: u16, worker_id: usize, session_id: u64) -> Self {
-        Self {
-            query_handler: Arc::new(TrexQueryHandler::new(host, port, worker_id, session_id)),
-        }
-    }
-}
-
-impl PgWireServerHandlers for TrexPgWireServerFactory {
-    fn simple_query_handler(&self) -> Arc<impl SimpleQueryHandler> {
-        self.query_handler.clone()
-    }
-
-    fn extended_query_handler(&self) -> Arc<impl ExtendedQueryHandler> {
-        self.query_handler.clone()
-    }
-
-    fn startup_handler(&self) -> Arc<impl StartupHandler> {
-        Arc::new(NoopHandler)
-    }
-}
-
 pub struct TrexPgWireServerWithAuth {
     query_handler: Arc<TrexQueryHandler>,
     password: String,
@@ -1206,13 +1180,27 @@ pub fn start_pgwire_server_capi(
         return Err(format!("Server already running on {}:{}", host, port));
     }
 
+    // Authentication is mandatory. A None/empty password previously fell back
+    // to an unauthenticated `NoopHandler` that accepted EVERY connection — a
+    // critical auth bypass, especially since the server is routinely bound to
+    // a non-loopback address (e.g. 0.0.0.0 in the d2e compose config). Refuse
+    // to start rather than silently exposing an open SQL endpoint.
+    let required_password = match password {
+        Some(p) if !p.is_empty() => p.to_string(),
+        _ => {
+            return Err(
+                "pgwire refuses to start without a password: authentication is mandatory"
+                    .to_string(),
+            )
+        }
+    };
+
     let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
 
     let server_host = host.clone();
     let server_port = port;
     let success_host = host.clone();
-    let password_opt = password.map(|s| s.to_string());
-    
+
     let thread_handle = thread::Builder::new()
         .name(format!("pgwire-server-{}:{}", host, port))
         .spawn(move || -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -1226,77 +1214,40 @@ pub fn start_pgwire_server_capi(
 
                 let worker_counter = std::sync::atomic::AtomicUsize::new(0);
 
-                // Treat empty password as no authentication
-                if let Some(required_password) = password_opt.filter(|p| !p.is_empty()) {
-                    loop {
-                        tokio::select! {
-                            _ = &mut shutdown_rx => break,
-                            result = listener.accept() => {
-                                match result {
-                                    Ok((socket, _addr)) => {
-                                        let worker_id = worker_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        let session_id = match trex_pool_client::create_session() {
-                                            Ok(id) => id,
-                                            Err(e) => {
-                                                // Surface WHY the session could not be opened (e.g.
-                                                // "no service:flight entry from a data node yet")
-                                                // rather than silently dropping the connection — the
-                                                // client only sees "server closed the connection",
-                                                // so this log is the operator's only diagnostic.
-                                                eprintln!("pgwire: refusing connection — {e}");
-                                                continue;
-                                            }
-                                        };
-                                        let handlers = Arc::new(TrexPgWireServerWithAuth::new(required_password.to_string(), server_host.clone(), server_port, worker_id, session_id));
-                                        tokio::spawn(async move {
-                                            let _ = process_socket(socket, None, handlers).await;
-                                            let _ = trex_pool_client::destroy_session(session_id);
-                                        });
-                                    }
-                                    Err(_) => break,
-                                }
-                            }
+                loop {
+                    tokio::select! {
+                        _ = &mut shutdown_rx => {
+                            log_debug("Received shutdown signal");
+                            break;
                         }
-                    }
-                } else {
-                    eprintln!("WARNING: pgwire starting without authentication — all connections will have full access");
-                    log_debug("Using no-auth mode");
-
-                    loop {
-                        tokio::select! {
-                            _ = &mut shutdown_rx => {
-                                log_debug("Received shutdown signal");
-                                break;
-                            }
-                            result = listener.accept() => {
-                                match result {
-                                    Ok((socket, addr)) => {
-                                        log_debug(&format!("New connection from {:?}", addr));
-                                        let worker_id = worker_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                                        let session_id = match trex_pool_client::create_session() {
-                                            Ok(id) => id,
-                                            Err(e) => {
-                                                // Surface WHY the session could not be opened (e.g.
-                                                // "no service:flight entry from a data node yet")
-                                                // rather than silently dropping the connection — the
-                                                // client only sees "server closed the connection",
-                                                // so this log is the operator's only diagnostic.
-                                                eprintln!("pgwire: refusing connection — {e}");
-                                                continue;
-                                            }
-                                        };
-                                        let handlers = Arc::new(TrexPgWireServerFactory::new(server_host.clone(), server_port, worker_id, session_id));
-                                        tokio::spawn(async move {
-                                            log_debug("Processing socket...");
-                                            let result = process_socket(socket, None, handlers).await;
-                                            log_debug(&format!("Socket result: {:?}", result));
-                                            let _ = trex_pool_client::destroy_session(session_id);
-                                        });
-                                    }
-                                    Err(e) => {
-                                        log_debug(&format!("Accept error: {}", e));
-                                        break;
-                                    }
+                        result = listener.accept() => {
+                            match result {
+                                Ok((socket, addr)) => {
+                                    log_debug(&format!("New connection from {:?}", addr));
+                                    let worker_id = worker_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                    let session_id = match trex_pool_client::create_session() {
+                                        Ok(id) => id,
+                                        Err(e) => {
+                                            // Surface WHY the session could not be opened (e.g.
+                                            // "no service:flight entry from a data node yet")
+                                            // rather than silently dropping the connection — the
+                                            // client only sees "server closed the connection",
+                                            // so this log is the operator's only diagnostic.
+                                            eprintln!("pgwire: refusing connection — {e}");
+                                            continue;
+                                        }
+                                    };
+                                    let handlers = Arc::new(TrexPgWireServerWithAuth::new(required_password.clone(), server_host.clone(), server_port, worker_id, session_id));
+                                    tokio::spawn(async move {
+                                        log_debug("Processing socket...");
+                                        let result = process_socket(socket, None, handlers).await;
+                                        log_debug(&format!("Socket result: {:?}", result));
+                                        let _ = trex_pool_client::destroy_session(session_id);
+                                    });
+                                }
+                                Err(e) => {
+                                    log_debug(&format!("Accept error: {}", e));
+                                    break;
                                 }
                             }
                         }

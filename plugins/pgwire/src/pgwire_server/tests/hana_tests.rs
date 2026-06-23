@@ -159,7 +159,7 @@ fn get_hana_creds_none_when_no_server_registered() {
 #[test]
 fn get_hana_creds_none_for_non_hana_dialect() {
     let payload = json!([{"id": "mydb", "dialect": "duckdb"}]);
-    let (_port, _guard) = super::common::start_test_server(None, &b64(&payload));
+    let (_port, _guard) = super::common::start_test_server(Some("test-pw"), &b64(&payload));
     let got = get_hana_credentials_if_available(
         &Some("mydb".to_string()),
         &_guard.host,
@@ -176,7 +176,7 @@ fn get_hana_creds_some_for_hana_admin() {
         "host": "h", "port": 30015, "name": "n",
         "credentials": [{"userScope": "Admin", "username": "u", "password": "p"}],
     }]);
-    let (_port, _guard) = super::common::start_test_server(None, &b64(&payload));
+    let (_port, _guard) = super::common::start_test_server(Some("test-pw"), &b64(&payload));
     let got = get_hana_credentials_if_available(
         &Some("myhana".to_string()),
         &_guard.host,
