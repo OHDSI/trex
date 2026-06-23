@@ -1410,6 +1410,26 @@
     "name": "java.text.ParseException"
   },
   {
+    "name": "java.text.Normalizer",
+    "methods": [
+      {
+        "name": "normalize",
+        "parameterTypes": [
+          "java.lang.CharSequence",
+          "java.text.Normalizer$Form"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "java.text.Normalizer$Form",
+    "fields": [
+      {
+        "name": "NFC"
+      }
+    ]
+  },
+  {
     "name": "java.text.SimpleDateFormat"
   },
   {
