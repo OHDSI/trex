@@ -13,6 +13,16 @@
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
 
+// Monotonic counter bumped on every deliberate registry sync (boot + /trex/db
+// writes, via syncTrexDatabaseManager). Function workers (plugin/function.ts) read
+// it to forceCreate a fresh worker once after a registration, so a runtime-added DB
+// becomes visible. Intentionally not derived from getCredentials() content: cache
+// attaches (/trex/attach) mutate that view mid-flow, which would churn workers.
+let _registrationEpoch = 0;
+export function getRegistrationEpoch(): number {
+  return _registrationEpoch;
+}
+
 // deno-lint-ignore no-explicit-any
 function getTrexDbm(): any {
   // deno-lint-ignore no-explicit-any
@@ -131,6 +141,8 @@ export async function syncTrexDatabaseManager(): Promise<void> {
       `[d2e-compat] syncing ${creds.length} database(s) to Trex.DatabaseManager: [${creds.map((c) => c.id).join(", ")}]`,
     );
     dbm.setCredentials(creds);
+    // Signal function workers that the registry changed so they refresh on next call.
+    _registrationEpoch++;
   } catch (e) {
     console.error(`[d2e-compat] dbm sync: setCredentials failed: ${e}`);
   }

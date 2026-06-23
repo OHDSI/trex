@@ -5,7 +5,7 @@ import { pluginAuthz } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
-import { buildDatabaseCredentials } from "../d2e-compat/dbm-sync.ts";
+import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
 
 export const ROLE_SCOPES: Record<string, string[]> = {};
 export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[] }> = [];
@@ -165,6 +165,22 @@ function substituteEnvVarsInObject(obj: any): any {
   return obj;
 }
 
+// Under D2E_COMPAT, function workers bake the DB registry (DATABASE_CREDENTIALS,
+// built from Trex.DatabaseManager) into their startup env. The runtime reuses
+// workers by servicePath, so a worker created before a database was registered at
+// runtime keeps a stale credential set — analytics-svc then 404s /alpdb/schema/exists
+// for the just-added DB ("not found in analyticsCredentials"), failing demo setup.
+// We record the registration epoch each path's worker was created at; when a later
+// deliberate registry sync bumps the epoch (getRegistrationEpoch in dbm-sync), the
+// next call to that path forceCreates a fresh worker so it re-reads the registry.
+//
+// The trigger is the sync epoch, NOT a content hash of getCredentials(): runtime
+// cache attaches (POST /trex/attach, e.g. a dataset's source DB and cache) mutate
+// the credential view mid-flow, so a content signature would churn workers during
+// long operations like DQD and crash them. Only syncTrexDatabaseManager — boot and
+// /trex/db writes — bumps the epoch, so cache attaches leave warm workers untouched.
+const _workerEpoch = new Map<string, number>();
+
 async function _callWorker(
   req: globalThis.Request,
   servicePath: string,
@@ -200,6 +216,17 @@ async function _callWorker(
     typeof myenv[k] === "string" ? myenv[k] : JSON.stringify(myenv[k]),
   ]);
 
+  // Force a fresh worker when a deliberate registry sync has bumped the epoch since
+  // the last worker was created for this path (see _workerEpoch above). First call
+  // records the epoch without forcing; only a subsequent bump triggers a recreate.
+  let forceCreate = false;
+  if (Deno.env.get("D2E_COMPAT") === "true") {
+    const epoch = getRegistrationEpoch();
+    const prev = _workerEpoch.get(servicePath);
+    if (prev !== undefined && prev !== epoch) forceCreate = true;
+    _workerEpoch.set(servicePath, epoch);
+  }
+
   const options: any = {
     servicePath,
     memoryLimitMb: fncfg.memoryLimitMb ?? 4096,
@@ -207,7 +234,7 @@ async function _callWorker(
     noModuleCache: false,
     importMapPath: imports,
     envVars: _myenv,
-    forceCreate: false,
+    forceCreate,
     netAccessDisabled: false,
     cpuTimeSoftLimitMs: fncfg.cpuTimeSoftLimitMs ?? 60_000_000,
     cpuTimeHardLimitMs: fncfg.cpuTimeHardLimitMs ?? 120_000_000,
