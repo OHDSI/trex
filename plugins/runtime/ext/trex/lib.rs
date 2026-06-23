@@ -297,6 +297,17 @@ fn set_dbc_inner(dbc: String) {
   *DB_CREDENTIALS.lock().unwrap() = dbc;
 }
 
+/// Gate for verbose SQL-statement logging. Executed SQL can embed connection
+/// strings (e.g. `ATTACH '... password=...'`), so logging it is OFF by default
+/// and must be opted into with `TREX__LOG__SQL=1` (or true/yes/on). Even when
+/// enabled, the JS layer redacts secrets before printing.
+#[op2(fast)]
+fn op_sql_log_enabled() -> bool {
+  env::var("TREX__LOG__SQL")
+    .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+    .unwrap_or(false)
+}
+
 #[op2(fast)]
 fn op_install_plugin(#[string] name: String, #[string] dir: String) {
   use tracing::{error, info};
@@ -1313,6 +1324,7 @@ deno_core::extension!(
         op_get_dbc,
         op_get_dbc2,
         op_set_dbc,
+        op_sql_log_enabled,
         op_execute_query_stream,
         op_execute_query_stream_next,
         op_req,

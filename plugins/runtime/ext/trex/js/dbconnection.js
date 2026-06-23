@@ -1,4 +1,4 @@
-import { executeQueryStream } from './trex_lib.js';
+import { executeQueryStream, sqlLoggingEnabled, redactSecrets } from './trex_lib.js';
 
 const NOVALUE = "NoValue"
 
@@ -166,14 +166,16 @@ export class TrexConnection  {
         callback
     ) {
         try {
-            console.log(`Sql: ${sql}`);
-            console.log(
-                `parameters: ${JSON.stringify(flattenParameter(parameters))}`
-            );
             let temp = sql;
             temp = this.#parseSql(temp, parameters);
-            console.log("Duckdb client created");
-            console.log(temp);
+            if (sqlLoggingEnabled()) {
+                console.log(`Sql: ${redactSecrets(sql)}`);
+                console.log(
+                    `parameters: ${redactSecrets(JSON.stringify(flattenParameter(parameters)))}`
+                );
+                console.log("Duckdb client created");
+                console.log(redactSecrets(temp));
+            }
             const result = await this.connection.execute(
                 temp, flattenParameter(parameters)
             );
@@ -190,14 +192,16 @@ export class TrexConnection  {
         callback
     ) {
         try {
-            console.log(`Sql: ${sql}`);
-            console.log(
-                `parameters: ${JSON.stringify(flattenParameter(parameters))}`
-            );
             let temp = sql;
             temp = this.#parseSql(temp, parameters);
-            console.log("Duckdb client created");
-            console.log(temp);
+            if (sqlLoggingEnabled()) {
+                console.log(`Sql: ${redactSecrets(sql)}`);
+                console.log(
+                    `parameters: ${redactSecrets(JSON.stringify(flattenParameter(parameters)))}`
+                );
+                console.log("Duckdb client created");
+                console.log(redactSecrets(temp));
+            }
             const result = await this.writeConn.executeWrite(
                 temp, flattenParameter(parameters)
             );
@@ -252,14 +256,16 @@ export class TrexConnection  {
         schemaName = ""
     ) {
         try {
-            console.log(`Stream Sql: ${sql}`);
-            console.log(
-                `Stream parameters: ${JSON.stringify(flattenParameter(parameters))}`
-            );
             let temp = sql;
             temp = this.#parseSql(temp, parameters);
-            console.log("Duckdb client created for streaming");
-            console.log(temp);
+            if (sqlLoggingEnabled()) {
+                console.log(`Stream Sql: ${redactSecrets(sql)}`);
+                console.log(
+                    `Stream parameters: ${redactSecrets(JSON.stringify(flattenParameter(parameters)))}`
+                );
+                console.log("Duckdb client created for streaming");
+                console.log(redactSecrets(temp));
+            }
 
             executeQueryStream(this.connection.__database, temp, flattenParameter(parameters))
                 .then(stream => {

@@ -34,7 +34,9 @@ impl Drop for TestServerGuard {
 /// Start a pgwire server bound to an ephemeral 127.0.0.1 port.
 /// Returns the assigned port + RAII guard.
 ///
-/// `password` of `None` or `Some("")` runs without auth.
+/// A password is mandatory: `None`/`Some("")` makes `start_pgwire_server_capi`
+/// return an error (authentication can never be disabled), so pass a non-empty
+/// password for tests that just need a booted server.
 pub fn start_test_server(
     password: Option<&str>,
     db_credentials: &str,

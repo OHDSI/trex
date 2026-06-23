@@ -215,23 +215,23 @@ fn start_stop_restart_same_port() {
     // prove that `stop_server` joins the thread before returning, so the
     // listener has been released.
     let port = free_port();
-    crate::start_pgwire_server_capi("127.0.0.1".to_string(), port, None, String::new())
+    crate::start_pgwire_server_capi("127.0.0.1".to_string(), port, Some("test-pw"), String::new())
         .expect("first start");
     crate::stop_pgwire_server("127.0.0.1", port).expect("first stop");
-    crate::start_pgwire_server_capi("127.0.0.1".to_string(), port, None, String::new())
+    crate::start_pgwire_server_capi("127.0.0.1".to_string(), port, Some("test-pw"), String::new())
         .expect("restart on same port");
     crate::stop_pgwire_server("127.0.0.1", port).expect("second stop");
 }
 
 #[test]
 fn duplicate_start_on_singleton_fails() {
-    let (port, _guard) = start_test_server(None, "");
+    let (port, _guard) = start_test_server(Some("test-pw"), "");
     // Second start on same port must fail through the singleton's duplicate
     // check (either at `is_server_running` early-out or `register_server`).
     let err = crate::start_pgwire_server_capi(
         "127.0.0.1".to_string(),
         port,
-        None,
+        Some("test-pw"),
         String::new(),
     )
     .expect_err("duplicate start should fail");
@@ -239,6 +239,37 @@ fn duplicate_start_on_singleton_fails() {
         err.contains("already running"),
         "expected 'already running' in {err:?}",
     );
+}
+
+/// SECURITY REGRESSION: an empty or absent password must NOT start the server.
+///
+/// Before this fix, `password = None` or `Some("")` silently fell back to a
+/// `NoopHandler` startup handler that accepted EVERY connection without any
+/// credential check. Combined with the d2e compose config (which sets no
+/// `password` key, so `service_functions` substitutes `''`) and a `0.0.0.0`
+/// bind, this exposed an unauthenticated SQL endpoint. Authentication is now
+/// mandatory: an empty/None password is rejected and no listener is opened.
+#[test]
+fn empty_or_missing_password_is_rejected() {
+    for password in [None, Some("")] {
+        let port = free_port();
+        let err = crate::start_pgwire_server_capi(
+            "127.0.0.1".to_string(),
+            port,
+            password,
+            String::new(),
+        )
+        .expect_err("server must refuse to start without a password");
+        assert!(
+            err.contains("without a password"),
+            "expected mandatory-auth error for {password:?}, got {err:?}",
+        );
+        // The server must never have registered / bound a listener.
+        assert!(
+            !ServerRegistry::instance().is_server_running("127.0.0.1", port),
+            "no server should be running after a rejected start for {password:?}",
+        );
+    }
 }
 
 #[test]
