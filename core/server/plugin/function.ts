@@ -181,6 +181,21 @@ function substituteEnvVarsInObject(obj: any): any {
 // /trex/db writes — bumps the epoch, so cache attaches leave warm workers untouched.
 const _workerEpoch = new Map<string, number>();
 
+// Only credential-caching services need a fresh worker when the registry changes —
+// they read Trex.databaseManager() at worker startup and cache the result, so a warm
+// one misses a runtime-registered DB. Other workers MUST NOT be recreated mid-flight:
+// the d2e demo orchestrator, for one, holds async setup progress in an in-memory Map,
+// and recreating it loses that state (its /demo/progress then 500s). Scope forceCreate
+// to an allowlist (override via D2E_COMPAT_CRED_REFRESH_SERVICES) matched against the
+// service path/dir.
+const _CRED_REFRESH_SERVICES = (Deno.env.get("D2E_COMPAT_CRED_REFRESH_SERVICES") ??
+  "analytics-svc,cdw-svc,terminology-svc,parquet-export,portal")
+  .split(",").map((s) => s.trim()).filter(Boolean);
+function _needsCredentialRefresh(servicePath: string, dir: string): boolean {
+  const hay = `${servicePath} ${dir}`;
+  return _CRED_REFRESH_SERVICES.some((s) => hay.includes(s));
+}
+
 async function _callWorker(
   req: globalThis.Request,
   servicePath: string,
@@ -220,7 +235,7 @@ async function _callWorker(
   // the last worker was created for this path (see _workerEpoch above). First call
   // records the epoch without forcing; only a subsequent bump triggers a recreate.
   let forceCreate = false;
-  if (Deno.env.get("D2E_COMPAT") === "true") {
+  if (Deno.env.get("D2E_COMPAT") === "true" && _needsCredentialRefresh(servicePath, dir)) {
     const epoch = getRegistrationEpoch();
     const prev = _workerEpoch.get(servicePath);
     if (prev !== undefined && prev !== epoch) forceCreate = true;
