@@ -160,15 +160,31 @@ export function mountD2eRoutes(app: Express): void {
     const target = `http://localhost:8080${safePath}`;
     const headers = new Headers();
     for (const [k, v] of Object.entries((req as any).headers as Record<string, string | string[]>)) {
-      if (v && k.toLowerCase() !== "host") headers.set(k, Array.isArray(v) ? v.join(", ") : String(v));
+      // Drop host and length/encoding headers: when the body was already parsed we
+      // re-serialize it below, so the original content-length no longer matches —
+      // let fetch recompute it (a stale content-length truncates/drops the body).
+      const lk = k.toLowerCase();
+      if (!v || lk === "host" || lk === "content-length" || lk === "transfer-encoding" || lk === "accept-encoding") continue;
+      headers.set(k, Array.isArray(v) ? v.join(", ") : String(v));
     }
     const tok = (req as any).webApiToken;
     if (tok) headers.set("Authorization", `Bearer ${tok}`);
-    let body: ArrayBuffer | undefined;
+    let body: BodyInit | undefined;
     if ((req as any).method !== "GET" && (req as any).method !== "HEAD") {
-      const chunks: Uint8Array[] = [];
-      for await (const c of req as any) chunks.push(typeof c === "string" ? new TextEncoder().encode(c) : c);
-      if (chunks.length) body = await new Blob(chunks as BlobPart[]).arrayBuffer();
+      // A body-parsing middleware populates req.body and consumes the raw request
+      // stream; the for-await read below would then see nothing and silently drop
+      // the body (e.g. the WebAPI cache POST's schemaName → "schemaName is
+      // required"). Re-serialize req.body when present; fall back to the raw stream
+      // for unparsed bodies.
+      const parsed = (req as any).body;
+      if (parsed && typeof parsed === "object" && Object.keys(parsed).length > 0) {
+        body = JSON.stringify(parsed);
+        if (!headers.has("content-type")) headers.set("content-type", "application/json");
+      } else {
+        const chunks: Uint8Array[] = [];
+        for await (const c of req as any) chunks.push(typeof c === "string" ? new TextEncoder().encode(c) : c);
+        if (chunks.length) body = await new Blob(chunks as BlobPart[]).arrayBuffer();
+      }
     }
     try {
       const r = await fetch(target, { method: (req as any).method, headers, body: body as BodyInit | undefined, redirect: "manual" });
