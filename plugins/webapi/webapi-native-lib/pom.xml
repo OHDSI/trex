@@ -154,6 +154,17 @@
                  disable the deadlock watchdog so a slow phase isn't mistaken for a hang. -->
             <buildArg>-H:DeadlockWatchdogInterval=0</buildArg>
             <buildArg>-H:ConfigurationFileDirectories=${project.basedir}/../graalvm-config</buildArg>
+            <!-- BouncyCastle JCE provider for WebAPI's Jasypt source-credential encryption
+                 (JASYPT_ENCRYPTOR_ENABLED uses BC's PBEWITHSHA256AND256BITAES-CBC-BC).
+                 native-image refuses to use a JCE provider it didn't verify at build time
+                 ("Trying to verify a provider that was not registered at build time: BC").
+                 BcFeature adds BC and triggers its verification at build time (via
+                 getInstance, no SecureRandom) so the verified provider is baked into the
+                 image; EncryptorUtils must then use it by name (setProviderName("BC")), as a
+                 fresh runtime `new BouncyCastleProvider()` has no algorithms (BC is build-
+                 time-initialized below). See also graalvm-config/reflect-config.json (BC
+                 $Mappings + the PBE impl classes) and java.text.Normalizer (password NFC). -->
+            <buildArg>--features=org.trex.webapi.nativelib.BcFeature</buildArg>
             <!-- Build-time-init ALL Clojure classes (trexsql is AOT-compiled Clojure; this
                  keeps clojure.lang.RT from recompiling core from source at runtime AND lets
                  trexsql's own AOT classes load from bytecode at runtime instead of being
@@ -170,7 +181,7 @@
                  as Clojure, so build-time-init them explicitly. Otherwise their <clinit> runs
                  at runtime and recompiles trexsql/api.clj from source (which a closed-world
                  native image can't do). -->
-            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector,org.trex.Trexsql,org.trex.TrexServlet,org.trex.webapi.TrexSQLPlugin,org.trex.webapi.TrexSQLSearchProvider</buildArg>
+            <buildArg>--initialize-at-build-time=com.fasterxml.jackson,ch.qos.logback,org.slf4j,org.apache.commons.logging,org.apache.commons.codec,clj_tuple__init,potemkin__init,clj_tuple$hash_map,clj_tuple$vector,org.trex.Trexsql,org.trex.TrexServlet,org.trex.webapi.TrexSQLPlugin,org.trex.webapi.TrexSQLSearchProvider,org.bouncycastle,org.jasypt</buildArg>
             <!-- clj-http stays run-time-init: it builds Apache HttpClient's SSL stack (whose
                  SSLConnectionSocketFactory + HostnameVerifiers are pinned run-time by the
                  httpclient reachability metadata), so it must not initialize at build time.
@@ -181,7 +192,12 @@
                  clj_http.*__init classes exist (plugins/bao/java project.clj :aot), and (2) drop
                  the clj_http/*.clj source resources from graalvm-config/resource-config.json so
                  RT.load falls through to Class.forName on the compiled __init class. -->
-            <buildArg>--initialize-at-run-time=clj_http</buildArg>
+            <!-- BC is build-time-initialized (above), but its DRBG SecureRandom holders must
+                 stay run-time-init: build-time init would bake a seeded Random into the image
+                 heap ("Detected an instance of Random/SplittableRandom"). Only the inner
+                 holders need this; the outer DRBG class is build-time-init (it just registers
+                 the SecureRandom service during provider setup). -->
+            <buildArg>--initialize-at-run-time=clj_http,org.bouncycastle.jcajce.provider.drbg.DRBG$Default,org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV</buildArg>
           </buildArgs>
         </configuration>
         <executions>
