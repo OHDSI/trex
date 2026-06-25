@@ -68,3 +68,20 @@ export async function applyD2eCompat(app: Express): Promise<void> {
   const m = await import("./routes.ts");
   m.mountD2eRoutes(app);
 }
+
+/**
+ * Mirror the active plugin registry into the legacy `trex.plugins` table that
+ * d2e's job plugins read. No-op unless D2E_COMPAT. Call AFTER plugin init (and
+ * any dynamic re-registration) so every active plugin is captured. A failure
+ * must never take down boot. */
+export async function syncD2ePlugins(
+  activeRegistry: Map<string, { version: string; trexConfig?: unknown }>,
+): Promise<void> {
+  if (!D2E_COMPAT) return;
+  try {
+    const { syncTrexPluginsTable } = await import("./plugins-sync.ts");
+    await syncTrexPluginsTable(activeRegistry);
+  } catch (e) {
+    console.error("[d2e-compat] plugins sync failed (continuing):", (e as Error)?.message ?? e);
+  }
+}
