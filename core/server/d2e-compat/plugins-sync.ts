@@ -31,6 +31,20 @@ export async function syncTrexPluginsTable(
        )`,
     );
 
+    // The core connects as a superuser/owner, but d2e's job plugins read this
+    // table as the lower-privileged write role (PG_USER, e.g. alp_pg_write_user).
+    // The legacy fork's table got that grant from the `trex` schema's default
+    // privileges; on a freshly-created schema those don't exist, so a fresh
+    // install fails with `permission denied for table plugins`. Grant the read
+    // role explicitly. PG_USER is the role the readers connect as.
+    const readerRole = Deno.env.get("PG_USER");
+    if (readerRole && /^[A-Za-z_][A-Za-z0-9_]*$/.test(readerRole)) {
+      await pool.query(`GRANT USAGE ON SCHEMA trex TO "${readerRole}"`);
+      await pool.query(
+        `GRANT SELECT, INSERT, UPDATE, DELETE ON trex.plugins TO "${readerRole}"`,
+      );
+    }
+
     let count = 0;
     for (const [shortName, entry] of activeRegistry) {
       // Only plugins with a `trex` config block were ever stored. The legacy
