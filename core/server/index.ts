@@ -20,7 +20,7 @@ import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
-import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot } from "./d2e-compat/index.ts";
+import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
 
 console.log("main function started");
 console.log(Deno.version);
@@ -682,6 +682,10 @@ app.all(
     }
     if (count > 0) console.log(`Re-registered ${count} devx app functions`);
   } catch { /* devx schema may not exist yet */ }
+
+  // D2E_COMPAT: mirror the active registry into the legacy `trex.plugins` table
+  // that d2e's job plugins read for flow/data-model discovery. No-op otherwise.
+  await syncD2ePlugins(Plugins.getActivePlugins());
 } catch (err) {
   console.error("Plugin system failed to initialize:", err);
 }

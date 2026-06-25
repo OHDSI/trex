@@ -14,6 +14,10 @@ interface ActivePluginEntry {
   version: string;
   source: "dev" | "npm";
   registeredAt: Date;
+  // The plugin's `trex` config block (pkg.trex). Retained so the D2E_COMPAT
+  // layer can mirror the active registry into the legacy `trex.plugins` table
+  // that d2e's jobplugins/DataModelFlowService read (payload->'flow'->'flows').
+  trexConfig?: unknown;
 }
 
 interface MigrationTarget {
@@ -92,6 +96,7 @@ export class Plugins {
         version: pkg.version,
         source,
         registeredAt: new Date(),
+        trexConfig: pkg.trex,
       });
     } catch (e) {
       console.error("Failed to register plugin:", fullName, e);
