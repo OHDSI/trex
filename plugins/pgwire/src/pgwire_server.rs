@@ -839,6 +839,15 @@ impl SimpleQueryHandler for TrexQueryHandler {
             }
         }
 
+        // HANA datasets are served through the pgwire HANA passthrough: when the
+        // connection database resolves to a HANA credential, wrap each query with
+        // trex_hana_scan/trex_hana_execute (falling back to the raw DuckDB query
+        // for metadata/pg_catalog statements HANA can't answer). This mirrors the
+        // do_describe_* handlers, which previously were the ONLY place the wrap ran.
+        let database = login_info.database().map(|s| s.to_string());
+        let hana_credentials =
+            get_hana_credentials_if_available(&database, &self.server_host, self.server_port);
+
         let queries: Vec<&str> = query
             .split(';')
             .map(|s| s.trim())
@@ -872,10 +881,19 @@ impl SimpleQueryHandler for TrexQueryHandler {
             }
 
             log_debug(&format!("Submitting query: {}", sql));
-            let sql_owned = sql.clone();
+            let (actual_sql, fallback_sql) = match &hana_credentials {
+                Some(creds) => (wrap_query_for_hana(&sql, creds), Some(sql.clone())),
+                None => (sql.clone(), None),
+            };
             let session_id = self.session_id;
             let (schema, batches): (Arc<Schema>, Vec<RecordBatch>) = tokio::task::spawn_blocking(move || {
-                trex_pool_client::session_execute(session_id, &sql_owned)
+                match trex_pool_client::session_execute(session_id, &actual_sql) {
+                    Ok(v) => Ok(v),
+                    Err(e) => match fallback_sql {
+                        Some(fb) => trex_pool_client::session_execute(session_id, &fb),
+                        None => Err(e),
+                    },
+                }
             }).await.map_err(|e| {
                 PgWireError::UserError(Box::new(ErrorInfo::new(
                     "ERROR".to_owned(),
@@ -964,9 +982,24 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             }
         }
 
+        // HANA passthrough (see SimpleQueryHandler::do_query): wrap for HANA when the
+        // connection database resolves to a HANA credential, else run as-is on DuckDB.
+        let database = login_info.database().map(|s| s.to_string());
+        let hana_credentials =
+            get_hana_credentials_if_available(&database, &self.server_host, self.server_port);
+        let (actual_query, fallback_query) = match &hana_credentials {
+            Some(creds) => (wrap_query_for_hana(&query, creds), Some(query.clone())),
+            None => (query.clone(), None),
+        };
         let session_id = self.session_id;
         let (schema, batches): (Arc<Schema>, Vec<RecordBatch>) = tokio::task::spawn_blocking(move || {
-            trex_pool_client::session_execute(session_id, &query)
+            match trex_pool_client::session_execute(session_id, &actual_query) {
+                Ok(v) => Ok(v),
+                Err(e) => match fallback_query {
+                    Some(fb) => trex_pool_client::session_execute(session_id, &fb),
+                    None => Err(e),
+                },
+            }
         }).await.map_err(|e| {
             PgWireError::UserError(Box::new(ErrorInfo::new(
                 "ERROR".to_owned(),
