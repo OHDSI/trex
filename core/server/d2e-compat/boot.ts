@@ -224,12 +224,35 @@ export async function d2eBoot(): Promise<void> {
       });
     }
 
-    // portal.dataset.cache_id is not in trex's schema — skip getCacheIdsFromPortal().
-    // Log a warning so the operator knows this feature is degraded.
-    log(
-      `[attach-startup] portal.dataset cache_id enumeration skipped — table not in trex schema (d2e degraded mode)`,
-    );
+    // d2e's getCacheIdsFromPortal() read cache_ids from portal.dataset.cache_id,
+    // which is not in trex's schema. Instead, enumerate the persisted cache .db
+    // files on disk and re-attach each as its <cacheId> catalog. The cache dir is
+    // a named volume, so the files survive a restart — but DuckDB ATTACHes do not.
+    // Without re-attaching, after `docker compose restart` a dataset's cache
+    // catalog is gone and queries against it fail with "Catalog <cacheId> does
+    // not exist" (e.g. the cohort builder's concept search). FHIR and
+    // strategus_results are attached separately (above / below), so skip them.
+    const cacheDir = "/usr/src/data/cache";
+    const systemDbNames = new Set<string>([
+      Deno.env.get("FHIR__DB_NAME") || "FHIR",
+      Deno.env.get("TREX__STRATEGUS_RESULTS_DB_NAME") || "strategus_results",
+    ]);
     const cacheIds: string[] = [];
+    try {
+      for (const entry of Deno.readDirSync(cacheDir)) {
+        if (!entry.isFile || !entry.name.endsWith(".db")) continue;
+        const cid = entry.name.slice(0, -3);
+        if (systemDbNames.has(cid)) continue;
+        cacheIds.push(cid);
+      }
+      log(
+        `[attach-startup] discovered ${cacheIds.length} dataset cache file(s) in ${cacheDir}`,
+      );
+    } catch (e) {
+      log(
+        `[attach-startup] cache file enumeration failed (${cacheDir}): ${(e as Error).message}`,
+      );
+    }
 
     const attachConn = new Trex.TrexDB("memory");
     const attachExec: ExecFn = (sql) => attachConn.execute(sql, []);
@@ -243,7 +266,7 @@ export async function d2eBoot(): Promise<void> {
     }
     for (const cid of cacheIds) {
       try {
-        await ensureAttached({ cacheIds: [cid] }, { exec: attachExec });
+        await ensureAttached({ cacheIds: [cid] }, { exec: attachExec, cacheDir });
       } catch (e) {
         log(`[attach-startup] cache ${cid} attach failed: ${(e as Error).message}`);
       }
