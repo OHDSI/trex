@@ -445,7 +445,17 @@ pub(crate) fn needs_string_cast(dt: &duckdb::arrow::datatypes::DataType) -> bool
         | DataType::FixedSizeBinary(_)
         | DataType::Map(_, _)
         | DataType::Union(_, _)
-        | DataType::RunEndEncoded(_, _) => true,
+        | DataType::RunEndEncoded(_, _)
+        // Nested/composite types: arrow-pg's encoder has no path for these
+        // and hangs on them, and the wire type is already TEXT
+        // (`arrow_type_to_pg_type` maps them via its `_ => TEXT` arm), so we
+        // stringify via `format_array_as_utf8`. FHIR tables use List<Struct>
+        // (name, address, telecom, identifier, …) and Struct (code, subject,
+        // value[x]) extensively, so plain `SELECT`s hit this path.
+        | DataType::Struct(_)
+        | DataType::List(_)
+        | DataType::LargeList(_)
+        | DataType::FixedSizeList(_, _) => true,
         DataType::Timestamp(_, Some(_)) => true,
         // Decimal128 at any precision is routed through our own i128
         // formatter because arrow-pg's encoder calls
@@ -467,6 +477,50 @@ pub(crate) fn needs_string_cast(dt: &duckdb::arrow::datatypes::DataType) -> bool
             value_type.as_ref(),
             DataType::Utf8 | DataType::LargeUtf8
         ),
+        _ => false,
+    }
+}
+
+/// Allowlist of Arrow types arrow-pg's encoder handles natively and safely.
+///
+/// `rebuild_record_batch_for_pg` stringifies every column whose type is NOT
+/// on this list (via a dedicated formatter or `format_array_as_utf8`), so an
+/// unanticipated or newly-introduced Arrow type can never reach arrow-pg and
+/// hang the process. This is deliberately deny-by-default: `needs_string_cast`
+/// enumerates types we *know* are problematic, but a type missing from both
+/// lists (e.g. `Duration`, `Decimal32`, the `*View` types) must still be
+/// treated as unsafe rather than passed through. When in doubt, not safe.
+///
+/// tz-aware `Timestamp` is intentionally excluded — it is rewritten by a
+/// dedicated formatter (`format_timestamptz_as_utf8`), not passed through.
+pub(crate) fn is_passthrough_safe(dt: &duckdb::arrow::datatypes::DataType) -> bool {
+    use duckdb::arrow::datatypes::DataType;
+    match dt {
+        DataType::Null
+        | DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Utf8
+        | DataType::LargeUtf8
+        | DataType::Date32
+        | DataType::Date64
+        | DataType::Time32(_)
+        | DataType::Time64(_)
+        | DataType::Timestamp(_, None)
+        | DataType::Binary
+        | DataType::LargeBinary => true,
+        // Dictionaries of text encode fine; other value types do not.
+        DataType::Dictionary(_, value) => {
+            matches!(value.as_ref(), DataType::Utf8 | DataType::LargeUtf8)
+        }
         _ => false,
     }
 }
@@ -692,13 +746,52 @@ pub(crate) fn format_interval_day_micros(months: i32, days: i32, micros: i64) ->
     }
 }
 
+/// Stringify any Arrow array whose type arrow-pg's encoder cannot natively
+/// handle (Union, Struct, List, Map, FixedSizeBinary, …) using arrow's own
+/// `ArrayFormatter`, honouring the validity bitmap so SQL NULLs become wire
+/// NULLs. This is the fallback for when arrow's generic `cast(col, Utf8)`
+/// does not implement the conversion (notably Union/Map/FixedSizeBinary).
+///
+/// Without it, the raw array reaches arrow-pg, whose encoder has no path for
+/// these types and hangs the whole trexsql process (pgwire shares the
+/// in-process DuckDB with the FHIR server, so the hang freezes everything and
+/// Docker restarts the container). FHIR resource tables store polymorphic
+/// `value[x]` fields as a DuckDB UNION and use List<Struct> pervasively, so
+/// this path is hit by ordinary `SELECT`s.
+pub(crate) fn format_array_as_utf8(
+    array: &dyn duckdb::arrow::array::Array,
+) -> duckdb::arrow::array::ArrayRef {
+    use duckdb::arrow::array::StringArray;
+    use duckdb::arrow::util::display::{ArrayFormatter, FormatOptions};
+
+    let options = FormatOptions::default();
+    let out: Vec<Option<String>> = match ArrayFormatter::try_new(array, &options) {
+        Ok(formatter) => (0..array.len())
+            .map(|i| {
+                if array.is_null(i) {
+                    None
+                } else {
+                    Some(formatter.value(i).to_string())
+                }
+            })
+            .collect(),
+        // Truly unformattable Arrow type — emit all-NULL Utf8 of the same
+        // length rather than hand the raw array to arrow-pg.
+        Err(_) => (0..array.len()).map(|_| None).collect(),
+    };
+    std::sync::Arc::new(StringArray::from(out))
+}
+
 pub(crate) fn rebuild_record_batch_for_pg(rb: RecordBatch) -> RecordBatch {
     use duckdb::arrow::array::ArrayRef;
     use duckdb::arrow::compute::kernels::cast::cast;
     use duckdb::arrow::datatypes::{DataType, Field, Schema};
 
     let schema = rb.schema();
-    if !schema.fields().iter().any(|f| needs_string_cast(f.data_type())) {
+    // Deny-by-default: only return the batch untouched when every column is a
+    // known-safe passthrough type. Anything else is rewritten below so it can
+    // never reach arrow-pg as a type it might hang on.
+    if schema.fields().iter().all(|f| is_passthrough_safe(f.data_type())) {
         return rb;
     }
 
@@ -744,7 +837,11 @@ pub(crate) fn rebuild_record_batch_for_pg(rb: RecordBatch) -> RecordBatch {
             ));
             continue;
         }
-        if needs_string_cast(field.data_type()) {
+        // Any non-passthrough-safe type that wasn't handled by a dedicated
+        // formatter above: try arrow's generic Utf8 cast, falling back to the
+        // ArrayFormatter-based stringifier. Deny-by-default — covers Union,
+        // Map, Struct, List, and any unanticipated type alike.
+        if !is_passthrough_safe(field.data_type()) {
             match cast(rb.column(i), &DataType::Utf8) {
                 Ok(casted) => {
                     new_columns.push(casted);
@@ -756,7 +853,18 @@ pub(crate) fn rebuild_record_batch_for_pg(rb: RecordBatch) -> RecordBatch {
                     continue;
                 }
                 Err(_) => {
-                    // Cast failed — leave column as-is and let arrow-pg decide.
+                    // arrow's generic cast has no Utf8 conversion for this
+                    // type (Union, Map, FixedSizeBinary, Struct, List, …).
+                    // Stringify via arrow's ArrayFormatter instead of handing
+                    // the raw array to arrow-pg, whose encoder hangs on these.
+                    let formatted = format_array_as_utf8(rb.column(i).as_ref());
+                    new_columns.push(formatted);
+                    new_fields.push(Field::new(
+                        field.name(),
+                        DataType::Utf8,
+                        field.is_nullable(),
+                    ));
+                    continue;
                 }
             }
         }
@@ -1476,16 +1584,12 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_record_batch_fixed_size_binary_passthrough() {
+    fn rebuild_record_batch_fixed_size_binary_becomes_utf8() {
         // FixedSizeBinary is flagged as needing a string cast, but arrow's
-        // generic `cast` kernel does not implement FixedSizeBinary→Utf8.
-        // `rebuild_record_batch_for_pg` falls back to passthrough in that
-        // case (see the `Err(_)` arm in the cast match), so the column
-        // reaches arrow-pg with its original type. This test pins that
-        // current behavior; if a dedicated FixedSizeBinary formatter is
-        // added later (mirroring Decimal128/Interval), flip the assertion
-        // to expect Utf8.
-        use duckdb::arrow::array::FixedSizeBinaryArray;
+        // generic `cast` kernel does not implement FixedSizeBinary→Utf8, so
+        // it routes through the `format_array_as_utf8` fallback. The column
+        // must reach arrow-pg as Utf8, never as a raw FixedSizeBinary.
+        use duckdb::arrow::array::{FixedSizeBinaryArray, StringArray};
         use duckdb::arrow::datatypes::{DataType, Field, Schema};
         let arr =
             FixedSizeBinaryArray::try_from_iter(vec![vec![0xDEu8, 0xAD]].into_iter())
@@ -1497,11 +1601,14 @@ mod tests {
         )]));
         let rb = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
         let casted = rebuild_record_batch_for_pg(rb);
-        assert_eq!(
-            casted.schema().field(0).data_type(),
-            &DataType::FixedSizeBinary(2)
-        );
+        assert_eq!(casted.schema().field(0).data_type(), &DataType::Utf8);
         assert_eq!(casted.num_rows(), 1);
+        let col = casted
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(!col.value(0).is_empty());
     }
 
     #[test]
@@ -1521,5 +1628,135 @@ mod tests {
         let rebuilt = rebuild_record_batch_for_pg(original.clone());
         assert_eq!(rebuilt.schema().field(0).data_type(), &DataType::Int32);
         assert_eq!(rebuilt.num_rows(), 1);
+    }
+
+    #[test]
+    fn needs_string_cast_flags_nested_types() {
+        use duckdb::arrow::datatypes::{DataType, Field, Fields, UnionFields, UnionMode};
+        let int = Arc::new(Field::new("x", DataType::Int32, false));
+        assert!(needs_string_cast(&DataType::Struct(Fields::from(vec![
+            int.clone()
+        ]))));
+        assert!(needs_string_cast(&DataType::List(int.clone())));
+        assert!(needs_string_cast(&DataType::LargeList(int.clone())));
+        assert!(needs_string_cast(&DataType::FixedSizeList(int.clone(), 2)));
+        let ufields: UnionFields = [(0i8, int.clone())].into_iter().collect();
+        assert!(needs_string_cast(&DataType::Union(ufields, UnionMode::Dense)));
+    }
+
+    #[test]
+    fn rebuild_record_batch_struct_becomes_utf8() {
+        use duckdb::arrow::array::{Array, ArrayRef, Int32Array, StringArray, StructArray};
+        use duckdb::arrow::datatypes::{DataType, Field, Schema};
+        let struct_arr = StructArray::from(vec![(
+            Arc::new(Field::new("x", DataType::Int32, false)),
+            Arc::new(Int32Array::from(vec![7])) as ArrayRef,
+        )]);
+        let dt = struct_arr.data_type().clone();
+        let schema = Arc::new(Schema::new(vec![Field::new("s", dt, true)]));
+        let rb = RecordBatch::try_new(schema, vec![Arc::new(struct_arr)]).unwrap();
+        let casted = rebuild_record_batch_for_pg(rb);
+        assert_eq!(casted.schema().field(0).data_type(), &DataType::Utf8);
+        let col = casted
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(col.value(0).contains('7'), "got {:?}", col.value(0));
+    }
+
+    #[test]
+    fn rebuild_record_batch_list_becomes_utf8() {
+        use duckdb::arrow::array::{Array, ListArray, StringArray};
+        use duckdb::arrow::datatypes::{DataType, Field, Int32Type, Schema};
+        let list = ListArray::from_iter_primitive::<Int32Type, _, _>(vec![Some(vec![
+            Some(1),
+            Some(2),
+            Some(3),
+        ])]);
+        let dt = list.data_type().clone();
+        let schema = Arc::new(Schema::new(vec![Field::new("l", dt, true)]));
+        let rb = RecordBatch::try_new(schema, vec![Arc::new(list)]).unwrap();
+        let casted = rebuild_record_batch_for_pg(rb);
+        assert_eq!(casted.schema().field(0).data_type(), &DataType::Utf8);
+        let col = casted
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(col.value(0).contains('1'), "got {:?}", col.value(0));
+    }
+
+    #[test]
+    fn rebuild_record_batch_union_becomes_utf8() {
+        use duckdb::arrow::array::{Array, ArrayRef, Int32Array, StringArray, UnionArray};
+        use duckdb::arrow::buffer::ScalarBuffer;
+        use duckdb::arrow::datatypes::{DataType, Field, Schema};
+        let ufields = [(0i8, Arc::new(Field::new("a", DataType::Int32, false)))]
+            .into_iter()
+            .collect();
+        let type_ids = ScalarBuffer::<i8>::from(vec![0i8]);
+        let offsets = ScalarBuffer::<i32>::from(vec![0i32]);
+        let children: Vec<ArrayRef> = vec![Arc::new(Int32Array::from(vec![99]))];
+        let union = UnionArray::try_new(ufields, type_ids, Some(offsets), children).unwrap();
+        let dt = union.data_type().clone();
+        let schema = Arc::new(Schema::new(vec![Field::new("v", dt, false)]));
+        let rb = RecordBatch::try_new(schema, vec![Arc::new(union)]).unwrap();
+        let casted = rebuild_record_batch_for_pg(rb);
+        assert_eq!(casted.schema().field(0).data_type(), &DataType::Utf8);
+        let col = casted
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(col.value(0).contains("99"), "got {:?}", col.value(0));
+    }
+
+    #[test]
+    fn rebuild_record_batch_unanticipated_type_becomes_utf8() {
+        // Deny-by-default: a type that the known-bad `needs_string_cast` list
+        // never enumerated (here Duration) must still be stringified rather
+        // than handed to arrow-pg, which could hang on it. This guards future
+        // / unknown Arrow types — the column must never reach arrow-pg raw.
+        use duckdb::arrow::array::{Array, DurationMicrosecondArray, StringArray};
+        use duckdb::arrow::datatypes::{DataType, Field, Schema};
+        let arr = DurationMicrosecondArray::from(vec![1_500_000i64]);
+        // Sanity: this is exactly the gap — not on the known-bad list...
+        assert!(!needs_string_cast(arr.data_type()));
+        // ...but it is NOT passthrough-safe either, so it gets stringified.
+        assert!(!is_passthrough_safe(arr.data_type()));
+        let dt = arr.data_type().clone();
+        let schema = Arc::new(Schema::new(vec![Field::new("d", dt, false)]));
+        let rb = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        let casted = rebuild_record_batch_for_pg(rb);
+        assert_eq!(casted.schema().field(0).data_type(), &DataType::Utf8);
+        let col = casted
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert!(!col.value(0).is_empty());
+    }
+
+    #[test]
+    fn is_passthrough_safe_allowlist() {
+        use duckdb::arrow::datatypes::{DataType, Field, TimeUnit};
+        // Known-safe scalar types pass straight through to arrow-pg.
+        assert!(is_passthrough_safe(&DataType::Int32));
+        assert!(is_passthrough_safe(&DataType::Utf8));
+        assert!(is_passthrough_safe(&DataType::Boolean));
+        assert!(is_passthrough_safe(&DataType::Timestamp(TimeUnit::Microsecond, None)));
+        // tz-aware timestamp is NOT a safe passthrough (custom formatter).
+        assert!(!is_passthrough_safe(&DataType::Timestamp(
+            TimeUnit::Microsecond,
+            Some("UTC".into())
+        )));
+        // Nested + unknown types are never safe.
+        assert!(!is_passthrough_safe(&DataType::List(Arc::new(Field::new(
+            "x",
+            DataType::Int32,
+            true
+        )))));
+        assert!(!is_passthrough_safe(&DataType::Duration(TimeUnit::Second)));
     }
 }
