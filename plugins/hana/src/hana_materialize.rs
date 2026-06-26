@@ -41,6 +41,37 @@ fn json_scalar_to_hdb(item: &serde_json::Value) -> Result<HdbValue<'static>, Box
     })
 }
 
+fn validate_schema_identifier(schema: &str) -> Result<(), Box<dyn Error>> {
+    let s = schema.trim();
+    if s.is_empty() {
+        return Err(Box::new(HanaError::new("results_schema must not be empty")));
+    }
+    // Allow a bare HANA identifier or a double-quoted identifier; no whitespace,
+    // semicolons, or quotes that could break out of the statement.
+    let inner = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    };
+    let ok = !inner.is_empty()
+        && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+    if !ok {
+        return Err(Box::new(HanaError::new(&format!(
+            "Invalid results_schema identifier: {}",
+            schema
+        ))));
+    }
+    Ok(())
+}
+
+fn build_insert_sql(results_schema: &str, cohort_definition_id: i64) -> Result<String, Box<dyn Error>> {
+    validate_schema_identifier(results_schema)?;
+    Ok(format!(
+        "INSERT INTO {}.COHORT (COHORT_DEFINITION_ID, SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE) VALUES ({}, ?, ?, ?)",
+        results_schema, cohort_definition_id
+    ))
+}
+
 pub struct HanaMaterializeCohortScalar;
 
 impl VScalar for HanaMaterializeCohortScalar {
@@ -96,5 +127,27 @@ mod tests {
     fn test_parse_params_not_array_errors() {
         assert!(parse_source_params(r#"{"a":1}"#).is_err());
         assert!(parse_source_params("not json").is_err());
+    }
+
+    #[test]
+    fn test_build_insert_sql_ok() {
+        let sql = build_insert_sql("CACHEDB", 7).unwrap();
+        assert_eq!(
+            sql,
+            "INSERT INTO CACHEDB.COHORT (COHORT_DEFINITION_ID, SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE) VALUES (7, ?, ?, ?)"
+        );
+    }
+
+    #[test]
+    fn test_build_insert_sql_allows_quoted_and_dotted() {
+        assert!(build_insert_sql("MY_SCHEMA", 1).is_ok());
+        assert!(build_insert_sql("\"My.Schema\"", 1).is_ok());
+    }
+
+    #[test]
+    fn test_build_insert_sql_rejects_injection() {
+        assert!(build_insert_sql("CACHEDB; DROP TABLE X", 1).is_err());
+        assert!(build_insert_sql("a b", 1).is_err());
+        assert!(build_insert_sql("", 1).is_err());
     }
 }
