@@ -42,9 +42,18 @@ fn make_test_db() -> Connection {
     db
 }
 
+/// Escape single quotes for safe embedding inside a SQL string literal.
+fn esc(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 /// Run a HANA DDL/DML statement through `trex_hana_execute`; panics on error.
 fn exec_hana(db: &Connection, con: &str, hana_sql: &str) {
-    let sql = format!("SELECT trex_hana_execute('{con}', '{hana_sql}')");
+    let sql = format!(
+        "SELECT trex_hana_execute('{}', '{}')",
+        esc(con),
+        esc(hana_sql)
+    );
     let _: String = db
         .query_row(&sql, [], |row| row.get(0))
         .unwrap_or_else(|e| panic!("trex_hana_execute failed for [{hana_sql}]: {e}"));
@@ -52,7 +61,11 @@ fn exec_hana(db: &Connection, con: &str, hana_sql: &str) {
 
 /// Like `exec_hana` but silently ignores errors (used for best-effort cleanup).
 fn try_exec_hana(db: &Connection, con: &str, hana_sql: &str) {
-    let sql = format!("SELECT trex_hana_execute('{con}', '{hana_sql}')");
+    let sql = format!(
+        "SELECT trex_hana_execute('{}', '{}')",
+        esc(con),
+        esc(hana_sql)
+    );
     let _ = db.query_row::<String, _, _>(&sql, [], |row| row.get(0));
 }
 
@@ -74,7 +87,9 @@ fn materialize_cohort_end_to_end() {
     }
 
     let con = config.connection_url.clone();
-    let schema = "TREX_MAT_TEST";
+    // Per-process unique schema so concurrent/parallel runs (and debris from a
+    // previously crashed run) don't collide.
+    let schema = format!("TREX_MAT_TEST_{}", std::process::id());
 
     let db = make_test_db();
 
@@ -135,11 +150,12 @@ fn materialize_cohort_end_to_end() {
     // Source query matches the REAL d2e generated shape: 4 columns, COHORT_DEFINITION_ID first.
     // The session_vars JSON `{"APPLICATION":"project-cohorts"}` contains
     // double quotes; embed it with Rust-escaped \" inside the SQL literal.
+    let con_esc = esc(&con);
     let processed: i64 = db
         .query_row(
             &format!(
                 "SELECT trex_hana_materialize_cohort(\
-                    '{con}', \
+                    '{con_esc}', \
                     'SELECT COHORT_DEFINITION_ID, SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE FROM {schema}.SRC', \
                     '[]', \
                     '{schema}', \

@@ -35,8 +35,16 @@ fn json_scalar_to_hdb(item: &serde_json::Value) -> Result<HdbValue<'static>, Box
         Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 HdbValue::BIGINT(i)
+            } else if let Some(f) = n.as_f64() {
+                HdbValue::DOUBLE(f)
             } else {
-                HdbValue::DOUBLE(n.as_f64().unwrap_or(0.0))
+                // A JSON number that fits neither i64 nor f64 (e.g. an integer
+                // beyond f64 range). Silently substituting 0.0 would corrupt the
+                // bound parameter, so reject it instead.
+                return Err(Box::new(HanaError::new(&format!(
+                    "Unsupported numeric source parameter (out of i64/f64 range): {}",
+                    n
+                ))));
             }
         }
         other => HdbValue::STRING(other.to_string()),
@@ -49,14 +57,18 @@ fn validate_schema_identifier(schema: &str) -> Result<(), Box<dyn Error>> {
         return Err(Box::new(HanaError::new("results_schema must not be empty")));
     }
     // Allow a bare HANA identifier or a double-quoted identifier; no whitespace,
-    // semicolons, or quotes that could break out of the statement.
-    let inner = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        &s[1..s.len() - 1]
+    // semicolons, or quotes that could break out of the statement. A `.` is only
+    // permitted inside a quoted identifier — in an unquoted name it would turn
+    // `<schema>.COHORT` into an unintended 3-part name.
+    let (inner, quoted) = if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+        (&s[1..s.len() - 1], true)
     } else {
-        s
+        (s, false)
     };
     let ok = !inner.is_empty()
-        && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.');
+        && inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || (quoted && c == '.'));
     if !ok {
         return Err(Box::new(HanaError::new(&format!(
             "Invalid results_schema identifier: {}",
@@ -243,8 +255,16 @@ impl VScalar for HanaMaterializeCohortScalar {
         input: &mut DataChunkHandle,
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if input.len() == 0 {
-            return Err("No input provided".into());
+        // This scalar performs side effects (streams rows into HANA) and writes a
+        // single BIGINT result. It is only ever invoked with the constant scalar
+        // arguments of a `SELECT trex_hana_materialize_cohort(...)`, i.e. one row.
+        // Reject any vectorized call so we never silently ignore extra rows or
+        // leave output entries uninitialized.
+        if input.len() != 1 {
+            return Err(Box::new(HanaError::new(&format!(
+                "trex_hana_materialize_cohort expects exactly one input row, got {}",
+                input.len()
+            ))));
         }
 
         let read_varchar = |idx: usize| -> String {
@@ -296,6 +316,7 @@ mod tests {
     use hdbconnect::HdbValue;
 
     #[test]
+    #[allow(deprecated)] // std::env::set_var/remove_var are deprecated-as-unsafe in newer toolchains
     fn test_batch_size_default_and_override() {
         std::env::remove_var("HANA_MATERIALIZE_BATCH_SIZE");
         assert_eq!(batch_size_from_env(), 30000);
@@ -353,6 +374,7 @@ mod tests {
     #[test]
     fn test_build_insert_sql_allows_quoted_and_dotted() {
         assert!(build_insert_sql("MY_SCHEMA", 1).is_ok());
+        // A `.` is only valid inside a quoted identifier.
         assert!(build_insert_sql("\"My.Schema\"", 1).is_ok());
     }
 
@@ -361,5 +383,7 @@ mod tests {
         assert!(build_insert_sql("CACHEDB; DROP TABLE X", 1).is_err());
         assert!(build_insert_sql("a b", 1).is_err());
         assert!(build_insert_sql("", 1).is_err());
+        // An unquoted dotted name would produce an unintended 3-part table name.
+        assert!(build_insert_sql("A.B", 1).is_err());
     }
 }
