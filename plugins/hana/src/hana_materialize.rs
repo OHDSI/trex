@@ -4,8 +4,10 @@ use duckdb::{
     vscalar::{VScalar, ScalarFunctionSignature},
 };
 use hdbconnect::HdbValue;
+use std::collections::BTreeMap;
 use std::error::Error;
-use crate::HanaError;
+use std::panic::{self, AssertUnwindSafe};
+use crate::{HanaConnection, HanaError, redact_url_password};
 
 fn parse_source_params(json: &str) -> Result<Vec<HdbValue<'static>>, Box<dyn Error>> {
     let trimmed = json.trim();
@@ -72,6 +74,122 @@ fn build_insert_sql(results_schema: &str, cohort_definition_id: i64) -> Result<S
     ))
 }
 
+fn batch_size_from_env() -> usize {
+    std::env::var("HANA_MATERIALIZE_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(30000)
+}
+
+fn fetch_size_from_env() -> u32 {
+    std::env::var("HANA_MATERIALIZE_FETCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(100_000)
+}
+
+fn parse_session_vars(json: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| HanaError::new(&format!("Invalid session_vars_json: {}", e)))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| HanaError::new("session_vars_json must be a JSON object"))?;
+    let mut map = BTreeMap::new();
+    for (k, v) in obj {
+        if let Some(s) = v.as_str() {
+            map.insert(k.clone(), s.to_string());
+        } else {
+            map.insert(k.clone(), v.to_string());
+        }
+    }
+    Ok(map)
+}
+
+fn apply_session_vars(conn: &HanaConnection, vars: &BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
+    for (k, v) in vars {
+        match k.as_str() {
+            "APPLICATION" => { conn.set_application(v)?; }
+            "APPLICATIONUSER" => { conn.set_application_user(v)?; }
+            _ => { /* unknown client-info key: ignore */ }
+        }
+    }
+    Ok(())
+}
+
+fn connect(connection_string: &str) -> Result<HanaConnection, Box<dyn Error>> {
+    match panic::catch_unwind(AssertUnwindSafe(|| HanaConnection::new(connection_string.to_string()))) {
+        Ok(Ok(c)) => Ok(c),
+        Ok(Err(e)) => Err(HanaError::new(&format!(
+            "Connection failed ({}): {}",
+            redact_url_password(connection_string),
+            e
+        ))),
+        Err(_) => Err(HanaError::new("Connection panicked")),
+    }
+}
+
+fn run_materialize(
+    connection_string: &str,
+    source_sql: &str,
+    source_params_json: &str,
+    results_schema: &str,
+    cohort_definition_id: i64,
+    session_vars_json: &str,
+) -> Result<i64, Box<dyn Error>> {
+    let params = parse_source_params(source_params_json)?;
+    let insert_sql = build_insert_sql(results_schema, cohort_definition_id)?;
+    let session_vars = parse_session_vars(session_vars_json)?;
+    let batch_size = batch_size_from_env();
+
+    let read_conn = connect(connection_string)?;
+    let insert_conn = connect(connection_string)?;
+    apply_session_vars(&read_conn, &session_vars)?;
+    apply_session_vars(&insert_conn, &session_vars)?;
+    read_conn.set_fetch_size(fetch_size_from_env())?;
+
+    // Read side: streaming ResultSet.
+    // Use query() for empty params (no bind values), prepared execute_row() when params present.
+    let result_set = if params.is_empty() {
+        read_conn.query(source_sql)?
+    } else {
+        let mut stmt = read_conn.prepare(source_sql)?;
+        stmt.execute_row(params)?.into_result_set()?
+    };
+
+    let mut insert_stmt = insert_conn.prepare(&insert_sql)?;
+    let mut processed: i64 = 0;
+    let mut pending: usize = 0;
+
+    for row_res in result_set {
+        let row = row_res?;
+        if row.len() < 3 {
+            return Err(Box::new(*HanaError::new(
+                "source query must return at least 3 columns (SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE)",
+            )));
+        }
+        let mut vals: Vec<HdbValue<'static>> = row.into_iter().collect();
+        vals.truncate(3);
+        insert_stmt.add_row_to_batch(vals)?;
+        pending += 1;
+        if pending >= batch_size {
+            insert_stmt.execute_batch()?;
+            processed += pending as i64;
+            pending = 0;
+        }
+    }
+    if pending > 0 {
+        insert_stmt.execute_batch()?;
+        processed += pending as i64;
+    }
+    Ok(processed)
+}
+
 pub struct HanaMaterializeCohortScalar;
 
 impl VScalar for HanaMaterializeCohortScalar {
@@ -104,6 +222,28 @@ impl VScalar for HanaMaterializeCohortScalar {
 mod tests {
     use super::*;
     use hdbconnect::HdbValue;
+
+    #[test]
+    fn test_batch_size_default_and_override() {
+        std::env::remove_var("HANA_MATERIALIZE_BATCH_SIZE");
+        assert_eq!(batch_size_from_env(), 30000);
+        std::env::set_var("HANA_MATERIALIZE_BATCH_SIZE", "5000");
+        assert_eq!(batch_size_from_env(), 5000);
+        std::env::set_var("HANA_MATERIALIZE_BATCH_SIZE", "0");
+        assert_eq!(batch_size_from_env(), 30000); // 0/invalid falls back to default
+        std::env::remove_var("HANA_MATERIALIZE_BATCH_SIZE");
+    }
+
+    #[test]
+    fn test_apply_session_vars_rejects_non_object() {
+        // A live connection isn't needed: parsing happens before any connection use.
+        assert!(parse_session_vars("[1,2,3]").is_err());
+        let m = parse_session_vars(r#"{"APPLICATION":"x","APPLICATIONUSER":"u"}"#).unwrap();
+        assert_eq!(m.get("APPLICATION").map(String::as_str), Some("x"));
+        assert_eq!(m.get("APPLICATIONUSER").map(String::as_str), Some("u"));
+        assert!(parse_session_vars("{}").unwrap().is_empty());
+        assert!(parse_session_vars("").unwrap().is_empty());
+    }
 
     #[test]
     fn test_parse_params_empty() {
