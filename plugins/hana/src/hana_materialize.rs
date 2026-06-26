@@ -197,10 +197,39 @@ impl VScalar for HanaMaterializeCohortScalar {
 
     unsafe fn invoke(
         _state: &Self::State,
-        _input: &mut DataChunkHandle,
-        _output: &mut dyn WritableVector,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        Err(Box::new(*HanaError::new("trex_hana_materialize_cohort not implemented")))
+        if input.len() == 0 {
+            return Err("No input provided".into());
+        }
+
+        let read_varchar = |idx: usize| -> String {
+            let v = input.flat_vector(idx);
+            let slice = v.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            let mut binding = slice[0];
+            duckdb::types::DuckString::new(&mut binding).as_str().to_string()
+        };
+
+        let connection_string = read_varchar(0);
+        let source_sql = read_varchar(1);
+        let source_params_json = read_varchar(2);
+        let results_schema = read_varchar(3);
+        let cohort_definition_id = input.flat_vector(4).as_slice_with_len::<i64>(input.len())[0];
+        let session_vars_json = read_varchar(5);
+
+        let processed = run_materialize(
+            &connection_string,
+            &source_sql,
+            &source_params_json,
+            &results_schema,
+            cohort_definition_id,
+            &session_vars_json,
+        )?;
+
+        let mut out = output.flat_vector();
+        out.as_mut_slice::<i64>()[0] = processed;
+        Ok(())
     }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
