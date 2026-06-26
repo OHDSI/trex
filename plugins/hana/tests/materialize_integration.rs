@@ -7,10 +7,13 @@
 //
 // When HANA is available the test:
 //   1. Creates a scratch schema (TREX_MAT_TEST) with a COHORT target table and
-//      a SRC source table containing 5 explicit rows.
+//      a SRC source table with the REAL 4-column shape produced by d2e's
+//      query-gen-svc: (COHORT_DEFINITION_ID, SUBJECT_ID, COHORT_START_DATE,
+//      COHORT_END_DATE).  This verifies that the by-name column extraction
+//      correctly ignores COHORT_DEFINITION_ID and picks the right 3 columns.
 //   2. Calls trex_hana_materialize_cohort with HANA_MATERIALIZE_BATCH_SIZE=2
-//      so that the flush-at-batch-size code path is exercised (batches of 2, 2,
-//      then the trailing partial batch of 1).
+//      AND HANA_MATERIALIZE_FETCH_SIZE=2 so that both the insert-batch flush
+//      boundary and the read-fetch boundary are crossed.
 //   3. Asserts the returned processed-row count == 5.
 //   4. Verifies the rows actually landed in HANA by querying COHORT directly
 //      via HanaConnection and counting rows.
@@ -91,33 +94,45 @@ fn materialize_cohort_end_to_end() {
              COHORT_END_DATE DATE)"
         ),
     );
+    // SRC uses the REAL 4-column shape from d2e's query-gen-svc:
+    // COHORT_DEFINITION_ID is projected first, matching what analytics-svc
+    // sends as `source_sql`.  The by-name extraction must pick SUBJECT_ID,
+    // COHORT_START_DATE, COHORT_END_DATE and ignore COHORT_DEFINITION_ID.
     exec_hana(
         &db,
         &con,
         &format!(
             "CREATE COLUMN TABLE {schema}.SRC (\
+             COHORT_DEFINITION_ID INTEGER, \
              SUBJECT_ID INTEGER, \
              COHORT_START_DATE DATE, \
              COHORT_END_DATE DATE)"
         ),
     );
 
-    // 5 explicit rows with SUBJECT_ID 1..5.
+    // 5 explicit rows with SUBJECT_ID 1..5; COHORT_DEFINITION_ID is 99
+    // (distinct from the target cohort id 42) to verify it is ignored.
     for i in 1i64..=5 {
         exec_hana(
             &db,
             &con,
-            &format!("INSERT INTO {schema}.SRC VALUES ({i}, CURRENT_DATE, CURRENT_DATE)"),
+            &format!(
+                "INSERT INTO {schema}.SRC VALUES (99, {i}, CURRENT_DATE, CURRENT_DATE)"
+            ),
         );
     }
 
-    // Force a tiny batch so that multiple flush cycles are exercised:
-    // rows 1-2 → flush (processed=2), rows 3-4 → flush (processed=4),
-    // row 5 → final partial flush (processed=5).
+    // Force tiny batch AND tiny fetch so that both the insert-batch flush
+    // boundary and the read-fetch boundary are crossed:
+    //   fetch: rows land in chunks of 2 → 3 round-trips
+    //   batch: rows 1-2 → flush, rows 3-4 → flush, row 5 → partial flush
     #[allow(deprecated)]
     std::env::set_var("HANA_MATERIALIZE_BATCH_SIZE", "2");
+    #[allow(deprecated)]
+    std::env::set_var("HANA_MATERIALIZE_FETCH_SIZE", "2");
 
     // --- Exercise trex_hana_materialize_cohort ---
+    // Source query matches the REAL d2e generated shape: 4 columns, COHORT_DEFINITION_ID first.
     // The session_vars JSON `{"APPLICATION":"project-cohorts"}` contains
     // double quotes; embed it with Rust-escaped \" inside the SQL literal.
     let processed: i64 = db
@@ -125,7 +140,7 @@ fn materialize_cohort_end_to_end() {
             &format!(
                 "SELECT trex_hana_materialize_cohort(\
                     '{con}', \
-                    'SELECT SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE FROM {schema}.SRC', \
+                    'SELECT COHORT_DEFINITION_ID, SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE FROM {schema}.SRC', \
                     '[]', \
                     '{schema}', \
                     42, \
@@ -166,6 +181,8 @@ fn materialize_cohort_end_to_end() {
     try_exec_hana(&db, &con, &format!("DROP SCHEMA {schema} CASCADE"));
     #[allow(deprecated)]
     std::env::remove_var("HANA_MATERIALIZE_BATCH_SIZE");
+    #[allow(deprecated)]
+    std::env::remove_var("HANA_MATERIALIZE_FETCH_SIZE");
 
     println!("✓ materialize_cohort_end_to_end PASSED");
 }

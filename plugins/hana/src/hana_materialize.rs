@@ -3,7 +3,7 @@ use duckdb::{
     vtab::arrow::WritableVector,
     vscalar::{VScalar, ScalarFunctionSignature},
 };
-use hdbconnect::HdbValue;
+use hdbconnect::{HdbValue, ResultSetMetadata};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
@@ -122,6 +122,22 @@ fn apply_session_vars(conn: &HanaConnection, vars: &BTreeMap<String, String>) ->
     Ok(())
 }
 
+/// Find the index of a column in result-set metadata by name (case-insensitive).
+/// Prefers `displayname()` (the projected/aliased label) over `columnname()`,
+/// matching how the original Node service read columns by name (`row.SUBJECT_ID` etc.).
+fn find_column_index(metadata: &ResultSetMetadata, name: &str) -> Option<usize> {
+    let upper = name.to_ascii_uppercase();
+    // Prefer displayname (the label as projected/aliased in the SELECT list)
+    metadata
+        .iter()
+        .position(|fm| fm.displayname().to_ascii_uppercase() == upper)
+        .or_else(|| {
+            metadata
+                .iter()
+                .position(|fm| fm.columnname().to_ascii_uppercase() == upper)
+        })
+}
+
 fn connect(connection_string: &str) -> Result<HanaConnection, Box<dyn Error>> {
     match panic::catch_unwind(AssertUnwindSafe(|| HanaConnection::new(connection_string.to_string()))) {
         Ok(Ok(c)) => Ok(c),
@@ -162,20 +178,47 @@ fn run_materialize(
         stmt.execute_row(params)?.into_result_set()?
     };
 
+    // Resolve the three required column indices by name (case-insensitive), not by position.
+    // This mirrors the original Node service (row.SUBJECT_ID, row.COHORT_START_DATE,
+    // row.COHORT_END_DATE) and is robust to COHORT_DEFINITION_ID being projected first
+    // in d2e's real generated query (SELECT COHORT_DEFINITION_ID, SUBJECT_ID, ...).
+    let metadata = result_set.metadata();
+    let required = ["SUBJECT_ID", "COHORT_START_DATE", "COHORT_END_DATE"];
+    let mut col_indices = [0usize; 3];
+    for (slot, name) in col_indices.iter_mut().zip(required.iter()) {
+        *slot = find_column_index(&metadata, name).ok_or_else(|| {
+            let available: Vec<&str> = metadata.iter().map(|fm| fm.displayname()).collect();
+            HanaError::new(&format!(
+                "source query missing required column '{}'; available columns: {}",
+                name,
+                available.join(", ")
+            ))
+        })?;
+    }
+    let [idx_subject, idx_start, idx_end] = col_indices;
+
     let mut insert_stmt = insert_conn.prepare(&insert_sql)?;
     let mut processed: i64 = 0;
     let mut pending: usize = 0;
 
     for row_res in result_set {
         let row = row_res?;
-        if row.len() < 3 {
-            return Err(Box::new(*HanaError::new(
-                "source query must return at least 3 columns (SUBJECT_ID, COHORT_START_DATE, COHORT_END_DATE)",
-            )));
+        let mut slots: [Option<HdbValue<'static>>; 3] = [None, None, None];
+        for (i, val) in row.into_iter().enumerate() {
+            if i == idx_subject {
+                slots[0] = Some(val);
+            } else if i == idx_start {
+                slots[1] = Some(val);
+            } else if i == idx_end {
+                slots[2] = Some(val);
+            }
         }
-        let mut vals: Vec<HdbValue<'static>> = row.into_iter().collect();
-        vals.truncate(3);
-        insert_stmt.add_row_to_batch(vals)?;
+        let [subject, start, end] = slots;
+        insert_stmt.add_row_to_batch(vec![
+            subject.ok_or_else(|| HanaError::new("internal: SUBJECT_ID value missing in row"))?,
+            start.ok_or_else(|| HanaError::new("internal: COHORT_START_DATE value missing in row"))?,
+            end.ok_or_else(|| HanaError::new("internal: COHORT_END_DATE value missing in row"))?,
+        ])?;
         pending += 1;
         if pending >= batch_size {
             insert_stmt.execute_batch()?;
