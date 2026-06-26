@@ -306,7 +306,8 @@ async function _callInit(
   fnEnv: string,
   xenv: any,
   eszip: string | null,
-  dir: string
+  dir: string,
+  fncfg: any = {}
 ) {
   const myenv = Object.assign(
     {},
@@ -346,6 +347,18 @@ async function _callInit(
     netAccessDisabled: false,
     cpuTimeSoftLimitMs: 100000,
     cpuTimeHardLimitMs: 200000,
+    // Init functions run DB migrations whose knex MigrationSource enumerates a
+    // migrations/ directory via Deno.readDir; without host fs access that throws
+    // `NotSupported` and the migration never runs (e.g. the usermgmt schema is
+    // missing, so getMe 500s and DQD flow runs fail). _callWorker already grants
+    // this to every regular worker, matching the d2e fork which granted host fs
+    // access to ALL workers. Read it from the init config like _callWorker reads
+    // fncfg — default ON, so an init entry can opt out via package.json
+    // ("allowHostFsAccess": false) without changing the core.
+    allowHostFsAccess: fncfg.allowHostFsAccess !== false,
+    // Match _callWorker: emit decorator metadata so NestJS-style init functions
+    // instantiate. Harmless for non-decorator functions.
+    decoratorType: fncfg.decoratorType ?? "typescript_with_metadata",
     context: {
       useReadSyncFileAPI: true,
       unstableSloppyImports: true,
@@ -537,7 +550,8 @@ export async function addPlugin(
           r.env,
           xenv,
           r.eszip || null,
-          dir
+          dir,
+          r
         );
 
         if (r.delay) {
