@@ -39,6 +39,7 @@ import { logtoAuthn, requireAdmin } from "./auth.ts";
 import { pool } from "../db.ts";
 import { getPluginsJson } from "../plugin/ui.ts";
 import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
+import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
 import { encryptSecret } from "../auth/crypto.ts";
 import { decryptD2eCredentialPassword, isD2eEncryptedCredential } from "./credential-crypto.ts";
 
@@ -524,6 +525,9 @@ export function mountD2eRoutes(app: Express): void {
         // Push the updated registry into the trex-native DatabaseManager so the
         // source DB is attached/queryable (the d2e main did this on every write).
         await syncTrexDatabaseManager();
+        // Re-seed the Prefect `database-credentials` block so flows can resolve this
+        // database by code (the d2e main did this too; the port had skipped it).
+        await syncPrefectDatabaseCredentials();
         (res as any).json({ id: code });
       } finally {
         client.release();
@@ -575,6 +579,9 @@ export function mountD2eRoutes(app: Express): void {
         // Push the updated registry into the trex-native DatabaseManager so the
         // source DB is attached/queryable (the d2e main did this on every write).
         await syncTrexDatabaseManager();
+        // Re-seed the Prefect `database-credentials` block so flows can resolve this
+        // database by code (the d2e main did this too; the port had skipped it).
+        await syncPrefectDatabaseCredentials();
         (res as any).json({ id: code });
       } finally {
         client.release();
@@ -597,6 +604,9 @@ export function mountD2eRoutes(app: Express): void {
       try {
         await client.query("DELETE FROM trexdb.database WHERE id = $1", [name]);
         await syncTrexDatabaseManager();
+        // Re-seed the Prefect `database-credentials` block so the removed database is
+        // dropped from what flows resolve.
+        await syncPrefectDatabaseCredentials();
         (res as any).json({ id: name });
       } finally {
         client.release();
