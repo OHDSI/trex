@@ -214,6 +214,16 @@ export async function addPlugin(value: any) {
         tags: f.tags,
       };
 
+      // If the flow declares a deployment command, apply it to job_variables so the
+      // Prefect docker worker runs it instead of the image's default CMD. d2e's HANA
+      // flows rely on this to `uv pip install sqlalchemy-hana` at runtime before
+      // executing; without it they fail with
+      //   sqlalchemy.exc.NoSuchModuleError: Can't load plugin: sqlalchemy.dialects:hana.hdbcli
+      // (Ported from the pre-migration d2e flow deploy — OHDSI/d2e #2488.)
+      if (f.command) {
+        body.job_variables.command = f.command;
+      }
+
       if (f.parameter_openapi_schema) {
         body.parameter_openapi_schema = f.parameter_openapi_schema;
       }
