@@ -224,6 +224,17 @@ pub fn session_execute_params_local(
         dirty.store(true, Ordering::Relaxed);
     }
     let result = panic::catch_unwind(AssertUnwindSafe(|| run_query(&conn, sql, params)));
+    // A failed statement can leave the leased DuckDB connection in an aborted
+    // transaction; without clearing it, every later statement on this session
+    // fails with "Current transaction is aborted (please ROLLBACK)". That turns
+    // one bad statement into a session-wide cascade — e.g. an OHDSI DQD run
+    // where a single check on a CDM table absent from the source poisons all
+    // remaining checks. Roll back on error to restore Postgres autocommit
+    // semantics (each statement independent); ROLLBACK with no active
+    // transaction is a harmless no-op whose error we ignore.
+    if matches!(result, Ok(Err(_)) | Err(_)) {
+        let _ = conn.execute_batch("ROLLBACK");
+    }
     return_conn(session_id, conn);
     match result {
         Ok(r) => r,
