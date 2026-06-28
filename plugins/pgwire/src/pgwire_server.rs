@@ -180,6 +180,30 @@ pub(crate) fn get_hana_credentials_if_available(
     }
 }
 
+/// Strip leading whitespace and SQL comments (`--` line and `/* */` block) so the
+/// read-vs-write detection sees the first real keyword. SqlRender-generated SQL
+/// (e.g. OHDSI DQD checks) prefixes every statement with a `/* ... */` header, so
+/// without this a `SELECT` is misclassified as a write and never wrapped as a
+/// `trex_hana_scan` read.
+fn strip_leading_sql_noise(query: &str) -> &str {
+    let mut rest = query.trim_start();
+    loop {
+        if let Some(after) = rest.strip_prefix("--") {
+            rest = match after.find('\n') {
+                Some(nl) => after[nl + 1..].trim_start(),
+                None => "",
+            };
+        } else if let Some(after) = rest.strip_prefix("/*") {
+            rest = match after.find("*/") {
+                Some(end) => after[end + 2..].trim_start(),
+                None => "",
+            };
+        } else {
+            return rest;
+        }
+    }
+}
+
 pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> String {
     let escaped_query = query.replace("'", "''");
     let escaped_username = hana_creds.username.replace("'", "''");
@@ -187,7 +211,8 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> 
     let escaped_host = hana_creds.host.replace("'", "''");
     let escaped_name = hana_creds.name.replace("'", "''");
 
-    if query.to_uppercase().starts_with("SELECT") || query.to_uppercase().starts_with("WITH") {
+    let leading = strip_leading_sql_noise(query).to_uppercase();
+    if leading.starts_with("SELECT") || leading.starts_with("WITH") {
         // Read path: trex_hana_scan(query, url) returns a result set.
         format!(
             "SELECT * FROM trex_hana_scan('{}', 'hdbsql://{}:{}@{}:{}/{}')",
@@ -222,11 +247,137 @@ where
 {
     let result = operation(primary_query);
 
-    if result.is_err() && fallback_query.is_some() {
-        operation(fallback_query.unwrap())
-    } else {
-        result
+    if let Err(ref primary_err) = result {
+        if let Some(fb) = fallback_query {
+            // For HANA writes/DDL (`trex_hana_execute`) the raw fallback only masks
+            // the real failure behind a misleading "Schema does not exist" error,
+            // so propagate the primary error.
+            if primary_query.contains("trex_hana_execute") {
+                return result;
+            }
+            // For the HANA read wrap (`trex_hana_scan`) the raw fallback is only
+            // legitimate for system-catalog/metadata statements the JDBC driver
+            // issues against pg_catalog/information_schema, which DuckDB can answer.
+            // For a real table read (e.g. an OHDSI DQD check), falling back to raw
+            // DuckDB just replaces the actual HANA error with a misleading
+            // "Table does not exist", so propagate the primary error instead.
+            if primary_query.contains("trex_hana_scan") && !is_metadata_query(fb) {
+                return result;
+            }
+            log_debug(&format!(
+                "HANA passthrough primary query failed, falling back: {primary_err} | query: {primary_query}"
+            ));
+            return operation(fb);
+        }
     }
+    result
+}
+
+/// Heuristic: does this statement target Postgres system catalogs / metadata
+/// (the views the JDBC driver and clients introspect), as opposed to a user
+/// table read? Used to decide whether a failed HANA read wrap may legitimately
+/// fall back to raw DuckDB.
+fn is_metadata_query(sql: &str) -> bool {
+    let lower = sql.to_lowercase();
+    lower.contains("pg_catalog")
+        || lower.contains("information_schema")
+        || lower.contains("pg_class")
+        || lower.contains("pg_namespace")
+        || lower.contains("pg_type")
+        || lower.contains("pg_attribute")
+}
+
+/// Split a (possibly multi-statement) query on `;`, ignoring separators that
+/// fall inside single-/double-quoted literals or `--` / `/* */` comments. A
+/// plain `query.split(';')` would cut a statement that contains `;` inside a
+/// string literal or comment. Mirrors the splitter in the hana plugin
+/// (`plugins/hana/src/hana_execute.rs`); kept local because the pgwire crate
+/// does not depend on the hana crate. Trims each statement and drops empties.
+pub(crate) fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current_statement = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+
+    while let Some(c) = chars.next() {
+        if in_single_quote {
+            current_statement.push(c);
+            if c == '\'' {
+                if chars.peek() == Some(&'\'') {
+                    current_statement.push(chars.next().unwrap());
+                } else {
+                    in_single_quote = false;
+                }
+            }
+            continue;
+        }
+        if in_double_quote {
+            current_statement.push(c);
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    current_statement.push(chars.next().unwrap());
+                } else {
+                    in_double_quote = false;
+                }
+            }
+            continue;
+        }
+        match c {
+            '-' if chars.peek() == Some(&'-') => {
+                chars.next();
+                for c2 in chars.by_ref() {
+                    if c2 == '\n' {
+                        current_statement.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                let mut depth = 1u32;
+                while depth > 0 {
+                    match chars.next() {
+                        Some('*') if chars.peek() == Some(&'/') => {
+                            chars.next();
+                            depth -= 1;
+                        }
+                        Some('/') if chars.peek() == Some(&'*') => {
+                            chars.next();
+                            depth += 1;
+                        }
+                        None => break,
+                        _ => {}
+                    }
+                }
+            }
+            '\'' => {
+                current_statement.push(c);
+                in_single_quote = true;
+            }
+            '"' => {
+                current_statement.push(c);
+                in_double_quote = true;
+            }
+            ';' => {
+                let trimmed = current_statement.trim();
+                if !trimmed.is_empty() {
+                    statements.push(trimmed.to_string());
+                }
+                current_statement.clear();
+            }
+            _ => {
+                current_statement.push(c);
+            }
+        }
+    }
+
+    let trimmed = current_statement.trim();
+    if !trimmed.is_empty() {
+        statements.push(trimmed.to_string());
+    }
+
+    statements
 }
 
 /// Postgres-only session parameters that libpq, the JDBC driver, and other
@@ -956,11 +1107,7 @@ impl SimpleQueryHandler for TrexQueryHandler {
         let hana_credentials =
             get_hana_credentials_if_available(&database, &self.server_host, self.server_port);
 
-        let queries: Vec<&str> = query
-            .split(';')
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let queries: Vec<String> = split_sql_statements(query);
 
         let mut responses = Vec::new();
 
@@ -998,8 +1145,17 @@ impl SimpleQueryHandler for TrexQueryHandler {
                 match trex_pool_client::session_execute(session_id, &actual_sql) {
                     Ok(v) => Ok(v),
                     Err(e) => match fallback_sql {
-                        Some(fb) => trex_pool_client::session_execute(session_id, &fb),
-                        None => Err(e),
+                        // Only fall back to raw DuckDB for the HANA read/metadata
+                        // wrap (`trex_hana_scan`). For HANA writes/DDL
+                        // (`trex_hana_execute`) propagate the real error instead of
+                        // masking it behind a raw-DuckDB "Schema does not exist".
+                        Some(fb) if !actual_sql.contains("trex_hana_execute") => {
+                            log_debug(&format!(
+                                "HANA passthrough primary query failed, falling back: {e} | query: {actual_sql}"
+                            ));
+                            trex_pool_client::session_execute(session_id, &fb)
+                        }
+                        _ => Err(e),
                     },
                 }
             }).await.map_err(|e| {
@@ -1104,8 +1260,17 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             match trex_pool_client::session_execute(session_id, &actual_query) {
                 Ok(v) => Ok(v),
                 Err(e) => match fallback_query {
-                    Some(fb) => trex_pool_client::session_execute(session_id, &fb),
-                    None => Err(e),
+                    // Only fall back to raw DuckDB for the HANA read/metadata wrap
+                    // (`trex_hana_scan`). For HANA writes/DDL (`trex_hana_execute`)
+                    // propagate the real error instead of masking it behind a
+                    // raw-DuckDB "Schema does not exist".
+                    Some(fb) if !actual_query.contains("trex_hana_execute") => {
+                        log_debug(&format!(
+                            "HANA passthrough primary query failed, falling back: {e} | query: {actual_query}"
+                        ));
+                        trex_pool_client::session_execute(session_id, &fb)
+                    }
+                    _ => Err(e),
                 },
             }
         }).await.map_err(|e| {
@@ -1491,6 +1656,43 @@ mod tests {
         assert!(!is_postgres_only_set("RESET extra_float_digits"));
         // SETOF is not a SET statement (would be inside e.g. CREATE FUNCTION).
         assert!(!is_postgres_only_set("SETOF integer"));
+    }
+
+    // -------- split_sql_statements --------
+
+    #[test]
+    fn split_basic_and_trailing_semicolon() {
+        assert_eq!(split_sql_statements("SELECT 1"), vec!["SELECT 1"]);
+        assert_eq!(split_sql_statements("SELECT 1;"), vec!["SELECT 1"]);
+        assert_eq!(
+            split_sql_statements("SELECT 1; SELECT 2"),
+            vec!["SELECT 1", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn split_drops_empty_and_whitespace_statements() {
+        assert_eq!(
+            split_sql_statements("SELECT 1;;  ; SELECT 2"),
+            vec!["SELECT 1", "SELECT 2"]
+        );
+        assert!(split_sql_statements("   \n\t ").is_empty());
+    }
+
+    #[test]
+    fn split_ignores_semicolons_in_literals_and_comments() {
+        assert_eq!(
+            split_sql_statements("SELECT 'a;b'; SELECT 2"),
+            vec!["SELECT 'a;b'", "SELECT 2"]
+        );
+        assert_eq!(
+            split_sql_statements(r#"SELECT * FROM "t;n"; SELECT 2"#),
+            vec![r#"SELECT * FROM "t;n""#, "SELECT 2"]
+        );
+        assert_eq!(
+            split_sql_statements("SELECT 1; -- a; comment\nSELECT 2"),
+            vec!["SELECT 1", "SELECT 2"]
+        );
     }
 
     // -------- needs_string_cast / rebuild_*_for_pg --------

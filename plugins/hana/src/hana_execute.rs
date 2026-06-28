@@ -186,12 +186,37 @@ fn execute_hana_statement(connection_string: &str, sql_statement: &str) -> Resul
                     Ok(_) => {
                         total_affected += 1;
                     }
-                    Err(e) => return Err(Box::new(HanaError::query(
-                        &format!("Failed to execute statement {} of {}: {}", idx + 1, statements.len(), e),
-                        Some(stmt),
-                        None,
-                        "execute_hana_statement"
-                    )))
+                    Err(e) => {
+                        let msg = e.to_string();
+                        // hdbconnect 0.31's prepare().execute() (and .statement()/
+                        // .dml()/.exec()) reject any statement HANA answers with an
+                        // affected-row-count — e.g. CREATE TABLE ... AS SELECT — with
+                        // the client-side error "found an affected-row-count > 0,
+                        // expected a single Success", even though the statement DID
+                        // execute on HANA. Treat that specific client-side limitation
+                        // as a successful execution.
+                        if msg.contains("affected-row-count")
+                            && msg.contains("expected a single Success")
+                        {
+                            crate::HanaLogger::warn(
+                                "execute_hana_statement",
+                                &format!(
+                                    "Statement {} of {} returned an affected-row-count; hdbconnect 0.31 reports this as an error but HANA executed it — treating as success: {}",
+                                    idx + 1,
+                                    statements.len(),
+                                    msg
+                                ),
+                            );
+                            total_affected += 1;
+                        } else {
+                            return Err(Box::new(HanaError::query(
+                                &format!("Failed to execute statement {} of {}: {}", idx + 1, statements.len(), e),
+                                Some(stmt),
+                                None,
+                                "execute_hana_statement"
+                            )));
+                        }
+                    }
                 }
             }
             Err(e) => return Err(Box::new(HanaError::query(
