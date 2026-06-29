@@ -905,4 +905,39 @@ mod tests {
         assert_eq!(bytes, b"boom");
         trex_pool_arrow_result_free(r);
     }
+
+    // --- session_execute rolls back on error so one failure can't poison
+    //     the whole session (the OHDSI DQD "everything fails after the first
+    //     bad check" cascade) ---
+
+    #[test]
+    fn failed_statement_does_not_poison_session() {
+        use duckdb::Connection;
+        // One shared in-memory engine, mirroring how the pool clones a single
+        // base connection. Seed a table, then prove a statement that fails
+        // inside an explicit transaction does not wedge the leased session.
+        let base = Connection::open_in_memory().expect("open in-memory duckdb");
+        base.execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY); INSERT INTO t VALUES (1);")
+            .expect("seed table");
+        init_from_connection(&base, 1).expect("init pool");
+
+        let sid = create_local_session().expect("create session");
+        session_execute_local(sid, "BEGIN").expect("begin");
+        // A constraint violation inside the transaction aborts it (runtime
+        // error, not a prepare error) — this is what wedges the session.
+        assert!(
+            session_execute_local(sid, "INSERT INTO t VALUES (1)").is_err(),
+            "expected the duplicate-key insert to fail"
+        );
+        // Without rollback-on-error the session would be stuck with
+        // "current transaction is aborted"; it must instead serve the next query.
+        let res = session_execute_local(sid, "SELECT COUNT(*) FROM t");
+        assert!(
+            res.is_ok(),
+            "session poisoned after a failed statement: {:?}",
+            res.err()
+        );
+        destroy_local_session(sid);
+        drop(base);
+    }
 }

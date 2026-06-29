@@ -237,6 +237,27 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> 
     }
 }
 
+/// Transaction- and session-control statements manage the local DuckDB session
+/// (and the pgwire connection's transaction/settings state), so they must run on
+/// DuckDB directly and never be shipped to HANA through the passthrough wrap.
+/// Drivers emit these implicitly — e.g. the Postgres JDBC driver sends `BEGIN`
+/// on connect and Achilles issues `SET memory_limit = ...` — and HANA rejects
+/// them. Matched after stripping leading whitespace/comments.
+pub(crate) fn is_local_session_statement(sql: &str) -> bool {
+    let upper = strip_leading_sql_noise(sql).trim_start().to_uppercase();
+    const KEYWORDS: &[&str] = &[
+        "BEGIN", "START TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT",
+        "SAVEPOINT", "RELEASE", "SET", "RESET", "SHOW", "DISCARD", "DEALLOCATE",
+        "PRAGMA", "USE",
+    ];
+    KEYWORDS.iter().any(|kw| {
+        upper == *kw
+            || upper.strip_prefix(*kw).is_some_and(|rest| {
+                rest.starts_with([' ', '\t', '\n', '\r', ';'])
+            })
+    })
+}
+
 pub(crate) fn execute_with_fallback<F, R>(
     primary_query: &str,
     fallback_query: Option<&str>,
@@ -1137,8 +1158,10 @@ impl SimpleQueryHandler for TrexQueryHandler {
 
             log_debug(&format!("Submitting query: {}", sql));
             let (actual_sql, fallback_sql) = match &hana_credentials {
-                Some(creds) => (wrap_query_for_hana(&sql, creds), Some(sql.clone())),
-                None => (sql.clone(), None),
+                Some(creds) if !is_local_session_statement(&sql) => {
+                    (wrap_query_for_hana(&sql, creds), Some(sql.clone()))
+                }
+                _ => (sql.clone(), None),
             };
             let session_id = self.session_id;
             let (schema, batches): (Arc<Schema>, Vec<RecordBatch>) = tokio::task::spawn_blocking(move || {
@@ -1252,8 +1275,10 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         let hana_credentials =
             get_hana_credentials_if_available(&database, &self.server_host, self.server_port);
         let (actual_query, fallback_query) = match &hana_credentials {
-            Some(creds) => (wrap_query_for_hana(&query, creds), Some(query.clone())),
-            None => (query.clone(), None),
+            Some(creds) if !is_local_session_statement(&query) => {
+                (wrap_query_for_hana(&query, creds), Some(query.clone()))
+            }
+            _ => (query.clone(), None),
         };
         let session_id = self.session_id;
         let (schema, batches): (Arc<Schema>, Vec<RecordBatch>) = tokio::task::spawn_blocking(move || {

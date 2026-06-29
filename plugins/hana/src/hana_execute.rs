@@ -143,6 +143,16 @@ impl VScalar for HanaExecuteScalar {
     }
 }
 
+/// hdbconnect 0.31's `prepare().execute()` (and `.statement()`/`.dml()`/`.exec()`)
+/// reject any statement HANA answers with an affected-row-count — e.g.
+/// `CREATE TABLE ... AS SELECT` — with the client-side error "found an
+/// affected-row-count > 0, expected a single Success", even though the statement
+/// DID execute on HANA. This identifies that specific client-side limitation so
+/// it can be treated as a successful execution rather than a real failure.
+fn is_benign_affected_rowcount_error(msg: &str) -> bool {
+    msg.contains("affected-row-count") && msg.contains("expected a single Success")
+}
+
 fn execute_hana_statement(connection_string: &str, sql_statement: &str) -> Result<usize, Box<dyn Error>> {
     let connection = match panic::catch_unwind(AssertUnwindSafe(|| {
         HanaConnection::new(connection_string.to_string())
@@ -188,16 +198,7 @@ fn execute_hana_statement(connection_string: &str, sql_statement: &str) -> Resul
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        // hdbconnect 0.31's prepare().execute() (and .statement()/
-                        // .dml()/.exec()) reject any statement HANA answers with an
-                        // affected-row-count — e.g. CREATE TABLE ... AS SELECT — with
-                        // the client-side error "found an affected-row-count > 0,
-                        // expected a single Success", even though the statement DID
-                        // execute on HANA. Treat that specific client-side limitation
-                        // as a successful execution.
-                        if msg.contains("affected-row-count")
-                            && msg.contains("expected a single Success")
-                        {
+                        if is_benign_affected_rowcount_error(&msg) {
                             crate::HanaLogger::warn(
                                 "execute_hana_statement",
                                 &format!(
@@ -415,5 +416,25 @@ mod tests {
         let sql = "-- just a comment\n/* another comment */";
         let result = split_sql_statements(sql);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn benign_affected_rowcount_error_detected() {
+        // The exact hdbconnect 0.31 message for CREATE TABLE AS SELECT etc.
+        assert!(is_benign_affected_rowcount_error(
+            "Implementation error: found an affected-row-count > 0, expected a single Success"
+        ));
+    }
+
+    #[test]
+    fn real_hana_errors_not_treated_as_benign() {
+        assert!(!is_benign_affected_rowcount_error(
+            "invalid table name: Could not find table/view FOO in schema BAR"
+        ));
+        assert!(!is_benign_affected_rowcount_error("syntax error near 'SELCT'"));
+        assert!(!is_benign_affected_rowcount_error(""));
+        // Must require BOTH markers, not just one.
+        assert!(!is_benign_affected_rowcount_error("affected-row-count was 5"));
+        assert!(!is_benign_affected_rowcount_error("expected a single Success row"));
     }
 }
