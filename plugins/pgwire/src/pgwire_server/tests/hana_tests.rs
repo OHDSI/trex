@@ -320,3 +320,135 @@ fn execute_with_fallback_uses_fallback_on_primary_error() {
     assert_eq!(r.unwrap(), "FB");
     assert_eq!(calls.get(), 2);
 }
+
+// ---------- read detection past leading comments ----------
+
+#[test]
+fn wrap_query_behind_leading_comment_still_uses_scan() {
+    // Regression: SqlRender (OHDSI DQD/DC) prefixes every statement with a
+    // `/* ... */` header. The read-vs-write detection must skip leading
+    // comments/whitespace, or the SELECT is misrouted to the write path
+    // (trex_hana_execute) and never runs on HANA as a scan.
+    let block = "/*********\nMEASURE\n*********/\nSELECT 1";
+    assert!(
+        wrap_query_for_hana(block, &sample_creds()).starts_with("SELECT * FROM trex_hana_scan("),
+        "block-comment-prefixed read must wrap as scan"
+    );
+    let line = "-- header\nSELECT 1";
+    assert!(
+        wrap_query_for_hana(line, &sample_creds()).starts_with("SELECT * FROM trex_hana_scan("),
+        "line-comment-prefixed read must wrap as scan"
+    );
+    let ws = "   \n\t SELECT 1";
+    assert!(
+        wrap_query_for_hana(ws, &sample_creds()).starts_with("SELECT * FROM trex_hana_scan(")
+    );
+}
+
+#[test]
+fn strip_leading_sql_noise_skips_comments_and_whitespace() {
+    assert_eq!(strip_leading_sql_noise("/* c */ SELECT 1"), "SELECT 1");
+    assert_eq!(strip_leading_sql_noise("-- c\nSELECT 1"), "SELECT 1");
+    assert_eq!(strip_leading_sql_noise("   \n SELECT 1"), "SELECT 1");
+    assert_eq!(strip_leading_sql_noise("/* a */ -- b\n\tSELECT 1"), "SELECT 1");
+    assert_eq!(strip_leading_sql_noise("SELECT 1"), "SELECT 1");
+}
+
+// ---------- is_local_session_statement (run on DuckDB, never wrap to HANA) ----------
+
+#[test]
+fn local_session_statements_detected() {
+    // Drivers emit BEGIN on connect; Achilles issues SET memory_limit. These
+    // must run on the local DuckDB session, never ship to HANA.
+    for sql in [
+        "BEGIN",
+        "begin",
+        "BEGIN;",
+        "START TRANSACTION",
+        "COMMIT",
+        "ROLLBACK",
+        "ABORT",
+        "SET memory_limit = '15GB'",
+        "SET search_path TO demo",
+        "RESET ALL",
+        "SHOW tables",
+        "PRAGMA database_list",
+        "USE demo_hana",
+        "/* hdr */ BEGIN",
+        "  \n rollback",
+    ] {
+        assert!(is_local_session_statement(sql), "should be local: {sql:?}");
+    }
+}
+
+#[test]
+fn data_statements_are_not_local_session() {
+    for sql in [
+        "SELECT 1",
+        "SELECT * FROM CDM.PERSON",
+        "WITH x AS (SELECT 1) SELECT * FROM x",
+        "INSERT INTO t VALUES (1)",
+        "CREATE TABLE t (a INT)",
+        "UPDATE t SET a = 1",
+        "DELETE FROM t",
+        "SETOF integer",
+        "USER_TABLE",
+        "",
+    ] {
+        assert!(!is_local_session_statement(sql), "should NOT be local: {sql:?}");
+    }
+}
+
+// ---------- read fallback only for metadata, never masking real reads/writes ----------
+
+#[test]
+fn is_metadata_query_detection() {
+    assert!(is_metadata_query("SELECT * FROM pg_catalog.pg_class"));
+    assert!(is_metadata_query("select relname from pg_class"));
+    assert!(is_metadata_query("SELECT * FROM information_schema.tables"));
+    assert!(!is_metadata_query("SELECT * FROM CDM.PERSON"));
+    assert!(!is_metadata_query("SELECT COUNT(*) FROM condition_occurrence"));
+}
+
+// Engine stand-in: any wrapped HANA query fails; the raw fallback succeeds.
+fn fallback_outcome(primary: &str, fallback: Option<&str>) -> (bool, usize) {
+    let calls = Cell::new(0usize);
+    let res: Result<(), duckdb::Error> = execute_with_fallback(primary, fallback, |q| {
+        calls.set(calls.get() + 1);
+        if q.contains("trex_hana_scan") || q.contains("trex_hana_execute") {
+            Err(duckdb::Error::QueryReturnedNoRows)
+        } else {
+            Ok(())
+        }
+    });
+    (res.is_ok(), calls.get())
+}
+
+#[test]
+fn fallback_only_for_metadata_reads_not_real_reads() {
+    // Failed real-table read must propagate the HANA error, not mask it.
+    let (ok, calls) = fallback_outcome(
+        "SELECT * FROM trex_hana_scan('SELECT * FROM CDM.PERSON', 'url')",
+        Some("SELECT * FROM CDM.PERSON"),
+    );
+    assert!(!ok, "real read must surface the HANA error");
+    assert_eq!(calls, 1, "real read must not retry on raw DuckDB");
+
+    // Failed metadata read MAY fall back to raw DuckDB (which can answer it).
+    let (ok, calls) = fallback_outcome(
+        "SELECT * FROM trex_hana_scan('SELECT * FROM pg_catalog.pg_class', 'url')",
+        Some("SELECT * FROM pg_catalog.pg_class"),
+    );
+    assert!(ok, "metadata read should fall back and succeed");
+    assert_eq!(calls, 2, "metadata read should retry on raw DuckDB");
+}
+
+#[test]
+fn fallback_never_masks_hana_writes() {
+    let (ok, calls) = fallback_outcome(
+        "SELECT trex_hana_execute('url', 'CREATE TABLE t AS SELECT 1')",
+        Some("CREATE TABLE t AS SELECT 1"),
+    );
+    assert!(!ok, "write failure must propagate");
+    assert_eq!(calls, 1, "write must not retry on raw DuckDB");
+}
