@@ -327,3 +327,98 @@ fn test_hana_error_handling() {
         }
     }
 }
+
+/// Run a write/DDL statement, tolerating hdbconnect 0.31's
+/// "affected-row-count > 0, expected a single Success" non-error
+/// (the same quirk handled in hana_execute.rs).
+fn run_write(conn: &HanaConnection, sql: &str) -> Result<(), String> {
+    let mut prepared = conn.prepare(sql).map_err(|e| e.to_string())?;
+    match prepared.execute(&()) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let m = e.to_string();
+            if m.contains("affected-row-count") && m.contains("expected a single Success") {
+                Ok(())
+            } else {
+                Err(m)
+            }
+        }
+    }
+}
+
+fn count_rows(conn: &HanaConnection, sql: &str) -> Result<usize, String> {
+    let rs = conn.query(sql).map_err(|e| e.to_string())?;
+    let mut n = 0usize;
+    for row in rs {
+        row.map_err(|e| e.to_string())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+#[test]
+fn test_hana_anonymous_block_executes_whole() {
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let conn = HanaConnection::new(config.connection_url.clone()).expect("connect");
+    // The shape SqlRender's hana dialect emits for DROP TABLE IF EXISTS:
+    // a `DO BEGIN … ; … ; END;` block whose inner `;` must NOT be split.
+    let block = "DO BEGIN IF EXISTS (SELECT * FROM (SELECT SCHEMA_NAME || '.' || TABLE_NAME \
+                 AS combined_name, SCHEMA_NAME, TABLE_NAME FROM TABLES) \
+                 WHERE combined_name=UPPER('ZZZ_NOPE.zzz_nope')) \
+                 THEN DROP TABLE ZZZ_NOPE.zzz_nope; END IF; END;";
+    run_write(&conn, block).expect("HANA must accept the whole anonymous block");
+}
+
+#[test]
+fn test_hana_permanent_table_persists_across_connections() {
+    // Phase 2B premise: permanent scratch tables survive the passthrough's
+    // fresh-connection-per-statement model (each statement = new HANA session).
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    // Unique schema per process so concurrent CI runners on a shared HANA don't collide.
+    let schema = format!("ZZZ_ACH_IT_{}", std::process::id());
+    let c1 = HanaConnection::new(url.clone()).expect("conn1");
+    let _ = run_write(&c1, &format!("DROP SCHEMA {} CASCADE", schema)); // best-effort pre-clean
+    run_write(&c1, &format!("CREATE SCHEMA {}", schema)).expect("create schema");
+    run_write(&c1, &format!("CREATE TABLE {}.t (id INTEGER)", schema)).expect("create table");
+    run_write(&c1, &format!("INSERT INTO {}.t VALUES (1)", schema)).expect("insert");
+    drop(c1);
+
+    let c2 = HanaConnection::new(url.clone()).expect("conn2"); // separate HANA session
+    let n = count_rows(&c2, &format!("SELECT id FROM {}.t", schema)).expect("select");
+    assert_eq!(n, 1, "permanent table must be visible from a separate connection");
+
+    let _ = run_write(&c2, &format!("DROP SCHEMA {} CASCADE", schema)); // cleanup
+}
+
+#[test]
+fn test_hana_local_temp_table_lost_across_connections() {
+    // Root cause of Gap 2, at the HANA level: a LOCAL TEMPORARY TABLE created on
+    // one connection is invisible to another — which is exactly why temp tables
+    // cannot be used through the per-statement passthrough.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    let c1 = HanaConnection::new(url.clone()).expect("conn1");
+    run_write(&c1, "CREATE LOCAL TEMPORARY TABLE #zz_it (id INTEGER)").expect("create temp");
+    run_write(&c1, "INSERT INTO #zz_it VALUES (1)").expect("insert temp");
+    assert_eq!(count_rows(&c1, "SELECT id FROM #zz_it").unwrap(), 1, "visible on its own session");
+
+    let c2 = HanaConnection::new(url.clone()).expect("conn2");
+    let res = count_rows(&c2, "SELECT id FROM #zz_it");
+    assert!(res.is_err(), "temp table must NOT be visible from a separate connection, got {res:?}");
+}

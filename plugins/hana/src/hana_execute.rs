@@ -7,12 +7,53 @@ use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
 use crate::{HanaConnection, HanaError};
 
-fn split_sql_statements(sql: &str) -> Vec<String> {
+/// Word-boundary keywords used to keep `BEGIN…END` blocks intact while splitting.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Resolve a completed word against block state.
+/// `pending_end` means the previous word was a bare `END` whose role
+/// (block-close vs `END IF`/`END WHILE`/…) was not yet known.
+///
+/// Known limitation: only `BEGIN`/`END` are tracked. A `CASE` expression
+/// (which ends in a bare `END`) inside a block, or a bare transaction
+/// `BEGIN` in a multi-statement string, can mis-track depth. Neither occurs
+/// in the SqlRender HANA output this guards (`DO BEGIN IF EXISTS … END IF; END;`).
+fn classify_word(word: &str, block_depth: &mut u32, pending_end: &mut bool) {
+    if word.is_empty() {
+        return;
+    }
+    if *pending_end {
+        // The previous token was `END`. This word decides its meaning.
+        const CONTROL_TERMINATORS: &[&str] = &["if", "case", "loop", "while", "for"];
+        *pending_end = false;
+        if CONTROL_TERMINATORS.contains(&word) {
+            // `END IF` / `END WHILE` / … — closes a control structure, not the block.
+            return;
+        }
+        // The previous `END` closed a BEGIN block.
+        *block_depth = block_depth.saturating_sub(1);
+        // Fall through: this word may itself be BEGIN/END.
+    }
+    match word {
+        "begin" => *block_depth += 1,
+        "end" => *pending_end = true,
+        _ => {}
+    }
+}
+
+pub fn split_sql_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current_statement = String::new();
     let mut chars = sql.chars().peekable();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
+
+    // BEGIN…END block tracking so inner `;` (HANA `DO BEGIN … END;`) never splits.
+    let mut block_depth: u32 = 0;
+    let mut word = String::new();
+    let mut pending_end = false;
 
     while let Some(c) = chars.next() {
         if in_single_quote {
@@ -37,6 +78,17 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
             }
             continue;
         }
+
+        // Accumulate words for BEGIN/END detection; flush at any non-word char.
+        if is_word_char(c) {
+            word.push(c.to_ascii_lowercase());
+            current_statement.push(c);
+            continue;
+        }
+        // Non-word char: finish the pending word first.
+        classify_word(&word, &mut block_depth, &mut pending_end);
+        word.clear();
+
         match c {
             '-' if chars.peek() == Some(&'-') => {
                 chars.next();
@@ -74,17 +126,30 @@ fn split_sql_statements(sql: &str) -> Vec<String> {
                 in_double_quote = true;
             }
             ';' => {
-                let trimmed = current_statement.trim();
-                if !trimmed.is_empty() {
-                    statements.push(trimmed.to_string());
+                // A bare `END` immediately before `;` (e.g. `END;`) resolves here.
+                if pending_end {
+                    block_depth = block_depth.saturating_sub(1);
+                    pending_end = false;
                 }
-                current_statement.clear();
+                if block_depth > 0 {
+                    // Inside a BEGIN…END block: keep the semicolon, don't split.
+                    current_statement.push(';');
+                } else {
+                    let trimmed = current_statement.trim();
+                    if !trimmed.is_empty() {
+                        statements.push(trimmed.to_string());
+                    }
+                    current_statement.clear();
+                }
             }
             _ => {
                 current_statement.push(c);
             }
         }
     }
+
+    // Flush any trailing word (does not affect output, only block state).
+    classify_word(&word, &mut block_depth, &mut pending_end);
 
     let trimmed = current_statement.trim();
     if !trimmed.is_empty() {
@@ -436,5 +501,45 @@ mod tests {
         // Must require BOTH markers, not just one.
         assert!(!is_benign_affected_rowcount_error("affected-row-count was 5"));
         assert!(!is_benign_affected_rowcount_error("expected a single Success row"));
+    }
+
+    #[test]
+    fn keeps_hana_anonymous_block_intact() {
+        let sql = "DO BEGIN IF EXISTS (SELECT 1 FROM tables WHERE x=UPPER('s.t')) \
+                   THEN DROP TABLE s.t; END IF; END;";
+        let out = split_sql_statements(sql);
+        assert_eq!(out.len(), 1, "block must stay one statement, got {out:?}");
+        assert!(out[0].contains("END IF") && out[0].trim_end().ends_with("END"));
+    }
+
+    #[test]
+    fn keeps_block_then_splits_following_statement() {
+        let sql = "DO BEGIN DECLARE v INT = 1; END;\nCREATE TABLE s.t (id INT);";
+        let out = split_sql_statements(sql);
+        assert_eq!(out.len(), 2, "got {out:?}");
+        assert!(out[0].starts_with("DO BEGIN"));
+        assert!(out[1].starts_with("CREATE TABLE"));
+    }
+
+    #[test]
+    fn handles_nested_begin_end() {
+        let sql = "DO BEGIN BEGIN INSERT INTO a VALUES (1); END; INSERT INTO b VALUES (2); END;";
+        let out = split_sql_statements(sql);
+        assert_eq!(out.len(), 1, "got {out:?}");
+    }
+
+    #[test]
+    fn plain_statements_still_split() {
+        assert_eq!(
+            split_sql_statements("SELECT 1; SELECT 2"),
+            vec!["SELECT 1", "SELECT 2"]
+        );
+    }
+
+    #[test]
+    fn semicolon_in_string_inside_block_is_safe() {
+        let sql = "DO BEGIN INSERT INTO a VALUES ('x;y'); END;";
+        let out = split_sql_statements(sql);
+        assert_eq!(out.len(), 1, "got {out:?}");
     }
 }
