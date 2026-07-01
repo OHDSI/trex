@@ -470,3 +470,33 @@ fn test_hana_temp_table_absent_without_session() {
     let res = count_rows(&b, "SELECT id FROM #nosess");
     assert!(res.is_err(), "fresh (session 0) connection must not see the prior #temp, got {res:?}");
 }
+
+#[test]
+fn test_hana_scan_reads_session_temp_table() {
+    // trex_hana_scan runs its schema probe (bind) and its data pull (init) on the
+    // same pooled connection for a session. This exercises that pooled reuse: a
+    // #temp created on the session's connection is visible to a second pooled
+    // handle for the same session, mirroring what bind+init rely on.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    let session_id: u64 = 910_000 + std::process::id() as u64;
+    hana_scan::hana_session_pool::evict(session_id);
+
+    let c = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn");
+    let _ = run_write(&c, "DROP TABLE #scan_probe"); // best-effort pre-clean
+    run_write(&c, "CREATE LOCAL TEMPORARY TABLE #scan_probe (id INTEGER)").expect("create temp");
+    run_write(&c, "INSERT INTO #scan_probe VALUES (1)").expect("insert 1");
+    run_write(&c, "INSERT INTO #scan_probe VALUES (2)").expect("insert 2");
+
+    let c2 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn2");
+    let n = count_rows(&c2, "SELECT id FROM #scan_probe")
+        .expect("#temp must be visible to a second pooled handle for the same session");
+    assert_eq!(n, 2, "trex_hana_scan's bind+init must see the session's #temp rows");
+
+    hana_scan::hana_session_pool::evict(session_id);
+}
