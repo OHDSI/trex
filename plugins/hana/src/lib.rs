@@ -8,6 +8,7 @@ mod hana_materialize;
 mod hana_attach;
 mod hana_state;
 mod hana_replacement;
+pub mod hana_session_pool;
 
 pub use hana_scan::{
     validate_hana_connection, parse_hana_url, safe_hana_connect, redact_url_password,
