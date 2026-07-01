@@ -5,7 +5,7 @@ use duckdb::{
 };
 use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
-use crate::{HanaConnection, HanaError};
+use crate::HanaError;
 
 /// Word-boundary keywords used to keep `BEGIN…END` blocks intact while splitting.
 fn is_word_char(c: char) -> bool {
@@ -188,8 +188,20 @@ impl VScalar for HanaExecuteScalar {
             let mut binding = sql_statement_slice[0];
             duckdb::types::DuckString::new(&mut binding).as_str().to_string()
         };
-        
-        let statements_executed = execute_hana_statement(&connection_string, &sql_statement)?;
+
+        let session_id = if input.num_columns() > 2 {
+            let session_id_vector = input.flat_vector(2);
+            let session_id_slice = session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            let session_id_str = {
+                let mut binding = session_id_slice[0];
+                duckdb::types::DuckString::new(&mut binding).as_str().to_string()
+            };
+            crate::hana_session_pool::parse_session_id(&session_id_str)
+        } else {
+            0
+        };
+
+        let statements_executed = execute_hana_statement(&connection_string, &sql_statement, session_id)?;
         let result = format!("{} statement(s) executed", statements_executed);
 
         let flat_vector = output.flat_vector();
@@ -198,13 +210,23 @@ impl VScalar for HanaExecuteScalar {
     }
 
     fn signatures() -> Vec<ScalarFunctionSignature> {
-        vec![ScalarFunctionSignature::exact(
-            vec![
-                LogicalTypeId::Varchar.into(),
-                LogicalTypeId::Varchar.into(),
-            ],
-            LogicalTypeId::Varchar.into()
-        )]
+        vec![
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeId::Varchar.into()
+            ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeId::Varchar.into()
+            ),
+        ]
     }
 }
 
@@ -218,9 +240,9 @@ fn is_benign_affected_rowcount_error(msg: &str) -> bool {
     msg.contains("affected-row-count") && msg.contains("expected a single Success")
 }
 
-fn execute_hana_statement(connection_string: &str, sql_statement: &str) -> Result<usize, Box<dyn Error>> {
+fn execute_hana_statement(connection_string: &str, sql_statement: &str, session_id: u64) -> Result<usize, Box<dyn Error>> {
     let connection = match panic::catch_unwind(AssertUnwindSafe(|| {
-        HanaConnection::new(connection_string.to_string())
+        crate::hana_session_pool::get_or_create(session_id, connection_string)
     })) {
         Ok(Ok(conn)) => conn,
         Ok(Err(e)) => return Err(Box::new(HanaError::connection(

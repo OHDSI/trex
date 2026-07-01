@@ -422,3 +422,51 @@ fn test_hana_local_temp_table_lost_across_connections() {
     let res = count_rows(&c2, "SELECT id FROM #zz_it");
     assert!(res.is_err(), "temp table must NOT be visible from a separate connection, got {res:?}");
 }
+
+#[test]
+fn test_hana_temp_table_persists_within_session() {
+    // Session affinity: reusing the same session_id returns the same pooled HANA
+    // connection, so a LOCAL TEMPORARY TABLE created via one handle is visible
+    // through another handle for the same session.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    let session_id: u64 = 900_000 + std::process::id() as u64;
+
+    hana_scan::hana_session_pool::evict(session_id);
+    let c1 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn1");
+    let _ = run_write(&c1, "DROP TABLE #sess_probe"); // best-effort pre-clean
+    run_write(&c1, "CREATE LOCAL TEMPORARY TABLE #sess_probe (id INTEGER)").expect("create temp");
+    run_write(&c1, "INSERT INTO #sess_probe VALUES (7)").expect("insert temp");
+
+    let c2 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn2");
+    let n = count_rows(&c2, "SELECT id FROM #sess_probe")
+        .expect("#temp table must persist across get_or_create in same session");
+    assert_eq!(n, 1, "#temp table must persist across get_or_create in same session");
+
+    hana_scan::hana_session_pool::evict(session_id);
+}
+
+#[test]
+fn test_hana_temp_table_absent_without_session() {
+    // session_id 0 => a fresh connection (new HANA session) each call => the
+    // LOCAL TEMPORARY TABLE created on the first handle is not visible on the second.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+
+    let a = hana_scan::hana_session_pool::get_or_create(0, &url).expect("conn a");
+    run_write(&a, "CREATE LOCAL TEMPORARY TABLE #nosess (id INTEGER)").expect("create temp");
+
+    let b = hana_scan::hana_session_pool::get_or_create(0, &url).expect("conn b");
+    let res = count_rows(&b, "SELECT id FROM #nosess");
+    assert!(res.is_err(), "fresh (session 0) connection must not see the prior #temp, got {res:?}");
+}
