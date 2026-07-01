@@ -1,6 +1,11 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
+use duckdb::{
+    core::{DataChunkHandle, Inserter, LogicalTypeId},
+    vscalar::{ScalarFunctionSignature, VScalar},
+    vtab::arrow::WritableVector,
+};
 use hdbconnect::HdbError;
 
 use crate::HanaConnection;
@@ -56,6 +61,47 @@ pub fn evict(session_id: u64) -> usize {
     let before = pool.len();
     pool.retain(|(sid, _url), _conn| *sid != session_id);
     before - pool.len()
+}
+
+/// DuckDB scalar `trex_hana_evict_session(session_id VARCHAR) -> VARCHAR`.
+/// Lets the pgwire layer close a session's pooled HANA connection (dropping its
+/// `#temp` tables) via SQL, without depending on the `hana` crate directly.
+pub struct HanaEvictSessionScalar;
+
+impl VScalar for HanaEvictSessionScalar {
+    type State = ();
+
+    unsafe fn invoke(
+        _state: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if input.len() == 0 {
+            return Err("No input provided".into());
+        }
+
+        let session_id_vector = input.flat_vector(0);
+        let session_id_slice =
+            session_id_vector.as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+
+        let flat_vector = output.flat_vector();
+        for row in 0..input.len() {
+            let session_id_str = {
+                let mut binding = session_id_slice[row];
+                duckdb::types::DuckString::new(&mut binding).as_str().to_string()
+            };
+            let n = evict(parse_session_id(&session_id_str));
+            flat_vector.insert(row, &format!("evicted {}", n));
+        }
+        Ok(())
+    }
+
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        vec![ScalarFunctionSignature::exact(
+            vec![LogicalTypeId::Varchar.into()],
+            LogicalTypeId::Varchar.into(),
+        )]
+    }
 }
 
 #[cfg(test)]

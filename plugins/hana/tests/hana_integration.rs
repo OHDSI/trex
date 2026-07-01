@@ -500,3 +500,31 @@ fn test_hana_scan_reads_session_temp_table() {
 
     hana_scan::hana_session_pool::evict(session_id);
 }
+
+#[test]
+fn test_evict_drops_session_temp_tables() {
+    // trex_hana_evict_session (via the pool's evict) closes the session's HANA
+    // connection. After eviction a fresh get_or_create opens a new HANA session,
+    // so the prior LOCAL TEMPORARY TABLE is gone.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    let session_id: u64 = 920_000 + std::process::id() as u64;
+    hana_scan::hana_session_pool::evict(session_id);
+
+    let c = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn");
+    let _ = run_write(&c, "DROP TABLE #evict_probe"); // best-effort pre-clean
+    run_write(&c, "CREATE LOCAL TEMPORARY TABLE #evict_probe (id INTEGER)").expect("create temp");
+    let removed = hana_scan::hana_session_pool::evict(session_id);
+    assert_eq!(removed, 1, "the session's pooled connection must be evicted");
+
+    let c2 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn2");
+    let res = count_rows(&c2, "SELECT id FROM #evict_probe");
+    assert!(res.is_err(), "after eviction a new HANA session must not see the #temp, got {res:?}");
+
+    hana_scan::hana_session_pool::evict(session_id);
+}
