@@ -35,20 +35,25 @@ pub fn get_or_create(session_id: u64, url: &str) -> Result<HanaConnection, HdbEr
     }
 
     let key = (session_id, url.to_string());
-    let mut pool = pool().lock().expect("HANA session pool mutex poisoned");
 
-    if let Some(conn) = pool.get(&key) {
-        // is_broken() -> HdbResult<bool>; treat an error as broken.
-        let broken = conn.is_broken().unwrap_or(true);
-        if !broken {
-            return Ok(conn.clone());
+    // Fast path: return a live cached connection. is_broken() is a local check,
+    // safe to run under the lock; a broken entry is dropped so we reconnect below.
+    {
+        let mut pool = pool().lock().expect("HANA session pool mutex poisoned");
+        if let Some(conn) = pool.get(&key) {
+            if !conn.is_broken().unwrap_or(true) {
+                return Ok(conn.clone());
+            }
+            pool.remove(&key);
         }
-        pool.remove(&key);
     }
 
+    // Connect without holding the lock so a slow HANA handshake never blocks other
+    // sessions or disconnect-time eviction. Re-lock only to publish; if another
+    // thread published first, keep theirs and drop our duplicate.
     let conn = HanaConnection::new(url.to_string())?;
-    pool.insert(key, conn.clone());
-    Ok(conn)
+    let mut pool = pool().lock().expect("HANA session pool mutex poisoned");
+    Ok(pool.entry(key).or_insert(conn).clone())
 }
 
 /// Drop every cached connection for this session. Returns how many were removed.
