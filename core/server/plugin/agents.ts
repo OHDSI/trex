@@ -38,12 +38,22 @@ export async function buildAgentWorkerConfig(
   // Fail registration early with a clear message rather than at first request.
   // Presence-only check: the loader (agents/loader.ts) accepts instructions.md
   // OR instructions.edn and owns full parsing/precedence at worker start.
+  // NotFound falls through to the next check/the "missing" error below;
+  // anything else (permissions, I/O) is a real failure and must surface
+  // with its own cause rather than being swallowed into a misleading
+  // "missing" message — matches loader.ts's readEdn/instructions.md handling.
   try {
     await Deno.stat(`${agentDir}/instructions.md`);
-  } catch {
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) {
+      throw new Error(`agents: failed to stat ${agentDir}/instructions.md: ${e instanceof Error ? e.message : e} (plugin ${pluginFullName})`);
+    }
     try {
       await Deno.stat(`${agentDir}/instructions.edn`);
-    } catch {
+    } catch (e2) {
+      if (!(e2 instanceof Deno.errors.NotFound)) {
+        throw new Error(`agents: failed to stat ${agentDir}/instructions.edn: ${e2 instanceof Error ? e2.message : e2} (plugin ${pluginFullName})`);
+      }
       throw new Error(`agents: ${agentDir}/instructions.md (or instructions.edn) is required but missing (plugin ${pluginFullName})`);
     }
   }
@@ -72,6 +82,18 @@ export async function buildAgentWorkerConfig(
   const importMapPath = `${tmp}/import_map.json`;
   await Deno.writeTextFile(importMapPath, JSON.stringify({ imports }, null, 2));
 
+  // The runtime's worker pool keys workers by servicePath and reuses the
+  // FIRST worker created for a given path (env vars and the import map are
+  // creation-time only, baked in at worker start) — see
+  // trex-runtime/crates/base's servicePath-keyed pool. If every agent
+  // shared the core service dir as servicePath, every agent after the
+  // first would silently run with the first agent's TREX_AGENT_DIR/env.
+  // Give each agent its own servicePath (this temp dir, alongside its
+  // import_map.json) whose index.ts just imports the real, shared service
+  // entrypoint — mirrors how each function plugin already gets its own dir.
+  const serviceEntryUrl = new URL("../agents/service/index.ts", import.meta.url).href;
+  await Deno.writeTextFile(`${tmp}/index.ts`, `import "${serviceEntryUrl}";\n`);
+
   const env: Record<string, string> = {
     TREX_AGENT_DIR: agentDir,
     TREX_AGENT_NAME: entry.name,
@@ -84,10 +106,20 @@ export async function buildAgentWorkerConfig(
 
   return {
     source: `/${entry.name}`,
-    servicePath: new URL("../agents/service", import.meta.url).pathname,
+    servicePath: tmp,
     importMapPath,
     env,
   };
+}
+
+// _addFunction (function.ts) only applies [authContext, pluginAuthz] to
+// plugins named `@trex/...` — d2e/legacy function plugins authenticate
+// themselves inside the worker using the forwarded Logto header, which an
+// agents worker doesn't do. Until worker-side auth exists for agents,
+// anything outside the @trex scope would mount a completely
+// unauthenticated HTTP surface (session create, chat, tool execution).
+export function isTrexScopedAgentsPlugin(name: string): boolean {
+  return name.startsWith("@trex/");
 }
 
 export async function addAgentsPlugin(
@@ -96,6 +128,12 @@ export async function addAgentsPlugin(
   dir: string,
   name: string,
 ): Promise<void> {
+  if (!isTrexScopedAgentsPlugin(name)) {
+    // Log and skip, don't throw: one misconfigured/malicious plugin must
+    // not take down boot for every other plugin.
+    console.error(`agents: plugin ${name} skipped — agents plugins must be published under the @trex scope (auth requirement)`);
+    return;
+  }
   for (const entry of normalizeAgentsValue(value)) {
     const cfg = await buildAgentWorkerConfig(dir, entry, name);
     console.log(`add agent ${entry.name} @ ${cfg.env.TREX_AGENT_DIR}`);
