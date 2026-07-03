@@ -52,6 +52,22 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
 
   let text = "";
   let finishReason = "unknown";
+  let textPersisted = false;
+  // Persist the final assistant text exactly once. Called from the "finish"
+  // case BEFORE the "finish" step so the stored seq order (text → finish)
+  // matches the live emit order (message.completed → turn.completed) —
+  // stepToEvent replays steps in seq order, and eve clients depend on
+  // message.completed arriving before the turn boundary (see events.ts).
+  // The finally-block call is the error/early-exit fallback for turns that
+  // streamed text but never reached a "finish" part.
+  const persistText = async () => {
+    if (textPersisted || !text) return;
+    textPersisted = true;
+    // finishReason travels with the persisted text so a replayed session can
+    // reconstruct message.completed's finishReason (see handler.ts's
+    // stepToEvent) the same way the live tail does above.
+    await persist("text", null, { text, finishReason });
+  };
   try {
     for await (const part of result.fullStream) {
       switch (part.type) {
@@ -98,22 +114,28 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
           }
           emit({ type: "turn.completed", data: { turnId, usage, finishReason } });
+          // Persist text BEFORE finish so replay (seq-ordered) preserves the
+          // live message.completed → turn.completed order (see persistText).
+          await persistText();
           await persist("finish", null, { finishReason }, usage);
           break;
         }
         case "error": {
           const message = String((part as any).error ?? "unknown model error");
-          emit({ type: "turn.failed", data: { turnId, message } });
+          // No turn.failed emit here: handler.ts's startTurn catch owns the
+          // turn-lifecycle events (it emits exactly one turn.failed +
+          // session.failed per failed turn); emitting here too produced a
+          // duplicate turn.failed on the wire. The error *step* is still
+          // persisted here so replay reconstructs the failure.
           await persist("error", null, { message });
           throw new Error(message);
         }
       }
     }
   } finally {
-    // finishReason travels with the persisted text so a replayed session can
-    // reconstruct message.completed's finishReason (see handler.ts's
-    // stepToEvent) the same way the live tail does above.
-    if (text) await persist("text", null, { text, finishReason });
+    // Error/early-exit fallback only — a normal turn already persisted its
+    // text in the "finish" case above (persistText is idempotent).
+    await persistText();
   }
   return { text, finishReason };
 }

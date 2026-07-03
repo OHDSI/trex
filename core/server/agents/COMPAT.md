@@ -105,7 +105,16 @@ live-tail by event shape.
    `instructions`, `tools` (with `clientOnly`/`needsApproval` flags),
    `skills`, `subagents` are real; `channels`, `schedules`, `connections`,
    `hooks`, `sandbox`, `workflow` are always empty/`null` because we don't
-   implement those authored slots (see "What we ignore" below).
+   implement those authored slots (see "What we ignore" below). Within
+   `tools`, a zod-authored `inputSchema` is reported as `{}` — eve's
+   `AgentInfoResultSchema` requires the key to be present, and we don't
+   JSON-serialize zod schemas in v1 (no zod→JSON-Schema conversion wired;
+   `handler.ts`'s `toolInfo` falls back to `{}` for anything with a
+   `safeParse`). Tools authored with a raw JSON Schema object — which is
+   what the CLJS/Pythia authoring path uses (spec §8) — are reported
+   faithfully. Introspection-only divergence: execution-side input
+   validation uses the real schema either way (`toolset.ts`'s
+   `authoredTool`).
 8. **`clientOnly` is additive**, carried on `actions.requested` so a frontend
    can tell a client-rendered tool call (e.g. a `propose_card`-style UI
    action, never executed server-side) from one the server actually ran. Not

@@ -4,6 +4,8 @@ import { createHandler } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
+import { subscribe } from "./stream.ts";
+import type { AgentEvent } from "./events.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 const BASE = "http://local/plugins/trex/toy";
@@ -198,6 +200,29 @@ Deno.test("GET /stream replays persisted events as NDJSON after the turn ran", a
   }
 });
 
+Deno.test("replay preserves live event order: message.completed before turn.completed", async () => {
+  // Live order (asserted in runner.test.ts) is message.completed →
+  // turn.completed; replay is seq-ordered over agents.steps, so the "text"
+  // step must be persisted BEFORE the "finish" step (runner.ts's
+  // persistText) or replay inverts the order eve clients depend on
+  // (extractCompletedMessage reads the reply before the turn boundary).
+  const { handler, db } = await makeHandler();
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?replayOnly=1`));
+  const types = (await res.text()).split("\n").filter((l) => l !== "")
+    .map((l) => (JSON.parse(l) as { type: string }).type);
+  const completedIdx = types.indexOf("message.completed");
+  const finishIdx = types.indexOf("turn.completed");
+  assert(completedIdx >= 0, `no message.completed in replay: [${types.join(", ")}]`);
+  assert(finishIdx >= 0, `no turn.completed in replay: [${types.join(", ")}]`);
+  assert(completedIdx < finishIdx, `replay order inverted: [${types.join(", ")}]`);
+});
+
 Deno.test("unknown session 404s; unknown route 404s; healthz/eve-info list tools", async () => {
   const { handler } = await makeHandler();
   assertEquals((await handler(new Request(`${BASE}/eve/v1/session/nope/stream`))).status, 404);
@@ -313,6 +338,11 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
     doStream: () => Promise.reject(new Error("model exploded")),
   });
   const { handler, db } = await makeHandler({ model: failing });
+  // The fake DB ids are deterministic (first session is always "s-1"), so we
+  // can subscribe to the live stream registry BEFORE the POST — no race with
+  // the fire-and-forget turn — and count lifecycle events on the wire.
+  const live: AgentEvent[] = [];
+  const unsub = subscribe("s-1", (e) => live.push(e));
   // streamText's default onError logs the stream error via console.error;
   // capture it so the expected diagnostic becomes an assertion instead of
   // noise in the test output.
@@ -328,11 +358,17 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
     await until(() => settled(db));
   } finally {
     console.error = origError;
+    unsub();
   }
   assertEquals(db.turns[0].status, "failed");
   assert(db.turns[0].error && db.turns[0].error.includes("model exploded"));
   assert(db.steps.some((s) => s.kind === "error"));
   assert(logged.some((l) => l.includes("model exploded")));
+  // Exactly ONE turn.failed on the wire: handler.ts's startTurn catch owns
+  // turn-lifecycle events; runner.ts's error case must not emit a second
+  // one (it only persists the error step).
+  assertEquals(live.filter((e) => e.type === "turn.failed").length, 1);
+  assertEquals(live.filter((e) => e.type === "session.failed").length, 1);
   // No unhandled rejection / leaked timer: the test failing on Deno's default
   // sanitizers or an uncaught-error crash IS the assertion here.
 });
