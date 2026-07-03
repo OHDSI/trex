@@ -1,0 +1,93 @@
+// Thin persistence layer over the agents.* tables. Takes an injected query
+// function (pg Pool.query-compatible) so unit tests run without Postgres.
+// deno-lint-ignore-file no-explicit-any
+
+export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
+
+export function createStore(query: QueryFn) {
+  return {
+    async createSession(plugin: string, agent: string, createdBy?: string): Promise<string> {
+      const r = await query(
+        `INSERT INTO agents.sessions (plugin, agent, created_by) VALUES ($1, $2, $3) RETURNING id`,
+        [plugin, agent, createdBy ?? null],
+      );
+      return r.rows[0].id;
+    },
+
+    async getSession(id: string) {
+      const r = await query(`SELECT id, status FROM agents.sessions WHERE id = $1`, [id]);
+      return r.rows[0] ?? null;
+    },
+
+    async addTurn(sessionId: string, message: unknown, metadata?: unknown) {
+      const r = await query(
+        `INSERT INTO agents.turns (session_id, seq, message, metadata)
+         SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3 FROM agents.turns WHERE session_id = $1
+         RETURNING id, seq`,
+        [sessionId, JSON.stringify(message), metadata ? JSON.stringify(metadata) : null],
+      );
+      return { id: r.rows[0].id, seq: r.rows[0].seq };
+    },
+
+    async finishTurn(turnId: string, status: "completed" | "failed", error?: string) {
+      await query(
+        `UPDATE agents.turns SET status = $2, error = $3, finished_at = NOW() WHERE id = $1`,
+        [turnId, status, error ?? null],
+      );
+    },
+
+    async addStep(turnId: string, seq: number, kind: string, name: string | null, payload: unknown, usage?: unknown) {
+      await query(
+        `INSERT INTO agents.steps (turn_id, seq, kind, name, payload, usage, finished_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+        [turnId, seq, kind, name, payload == null ? null : JSON.stringify(payload), usage == null ? null : JSON.stringify(usage)],
+      );
+    },
+
+    async listEvents(sessionId: string) {
+      const r = await query(
+        `SELECT s.kind, s.name, s.payload FROM agents.steps s
+         JOIN agents.turns t ON t.id = s.turn_id
+         WHERE t.session_id = $1 ORDER BY t.seq, s.seq`,
+        [sessionId],
+      );
+      return r.rows;
+    },
+
+    async getHistory(sessionId: string) {
+      const r = await query(
+        `SELECT t.message, t.metadata,
+                COALESCE(jsonb_agg(jsonb_build_object('kind', s.kind, 'name', s.name, 'payload', s.payload)
+                         ORDER BY s.seq) FILTER (WHERE s.id IS NOT NULL), '[]') AS steps
+         FROM agents.turns t LEFT JOIN agents.steps s ON s.turn_id = t.id
+         WHERE t.session_id = $1 GROUP BY t.id ORDER BY t.seq`,
+        [sessionId],
+      );
+      return r.rows;
+    },
+
+    async createApproval(sessionId: string, turnId: string, tool: string, input: unknown): Promise<string> {
+      const r = await query(
+        `INSERT INTO agents.approvals (session_id, turn_id, tool, input) VALUES ($1, $2, $3, $4) RETURNING request_id`,
+        [sessionId, turnId, tool, JSON.stringify(input)],
+      );
+      return r.rows[0].request_id;
+    },
+
+    async resolveApproval(requestId: string, decision: "approve" | "deny"): Promise<boolean> {
+      const r = await query(
+        `UPDATE agents.approvals SET decision = $2, decided_at = NOW()
+         WHERE request_id = $1 AND decision IS NULL RETURNING request_id`,
+        [requestId, decision],
+      );
+      return r.rows.length > 0;
+    },
+
+    async getApprovalDecision(requestId: string): Promise<string | null> {
+      const r = await query(`SELECT decision FROM agents.approvals WHERE request_id = $1`, [requestId]);
+      return r.rows[0]?.decision ?? null;
+    },
+  };
+}
+
+export type AgentStore = ReturnType<typeof createStore>;
