@@ -1,5 +1,13 @@
 {
   "nodeModulesDir": "manual",
+  "imports": {
+    "ai": "npm:ai@^6",
+    "ai/test": "npm:ai@^6/test",
+    "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@latest",
+    "@ai-sdk/openai": "npm:@ai-sdk/openai@latest",
+    "@ai-sdk/google": "npm:@ai-sdk/google@latest",
+    "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115"
+  },
   "tasks": {
     "test": "deno test --allow-all",
     "coverage": "rm -rf coverage && deno test --allow-all --coverage=coverage && deno coverage coverage --lcov --output=coverage/lcov.info"

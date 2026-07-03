@@ -35,7 +35,9 @@ Deno.test("defineTool rejects executable tool without execute unless clientOnly 
 });
 
 Deno.test("isZodSchema distinguishes zod from JSON Schema", async () => {
-  const { z } = await import("npm:zod@^4");
+  // Bare "zod" resolves to the project's zod via node_modules. isZodSchema
+  // duck-types on `safeParse`, so it works for zod v3 and v4 alike (eve uses v4).
+  const { z } = await import("zod");
   assert(isZodSchema(z.object({ a: z.string() })));
   assert(!isZodSchema({ type: "object", properties: {} }));
 });
