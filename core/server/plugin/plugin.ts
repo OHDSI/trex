@@ -3,6 +3,7 @@ import { addPlugin as addFlowPlugin } from "./flow.ts";
 import { addPlugin as addFunctionPlugin } from "./function.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
+import { addAgentsPlugin, agentsCoreMigrationTarget } from "./agents.ts";
 import { scanPluginDirectory } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
 import { waitForAttachedDatabase } from "../lib/db-wait.ts";
@@ -34,7 +35,7 @@ export class Plugins {
   // GraphQL mutation so the admin "run migrations" action covers plugins too.
   static migrationTargets: MigrationTarget[] = [];
 
-  private static addPlugin(
+  private static async addPlugin(
     app: Express,
     dir: string,
     pkg: any,
@@ -64,6 +65,7 @@ export class Plugins {
           case "transform": return 1;
           case "functions": return 2;
           case "flow": return 3;
+          case "agents": return 4;
           default: return 5;
         }
       };
@@ -86,6 +88,12 @@ export class Plugins {
             break;
           case "migrations":
             Plugins.registerMigrations(dir, shortName, value);
+            break;
+          case "agents":
+            await addAgentsPlugin(app, value, dir, fullName);
+            if (!Plugins.migrationTargets.some((t) => t.name === "agents-core")) {
+              Plugins.migrationTargets.push(agentsCoreMigrationTarget());
+            }
             break;
           default:
             console.log(`Unknown plugin type: ${key}`);
@@ -121,7 +129,7 @@ export class Plugins {
         `Found plugin ${shortName} (v${pkg.version}) [${source}] in ${pluginDir}`
       );
       const fullName = pkg.name || shortName;
-      Plugins.addPlugin(app, pluginDir, pkg, shortName, fullName, source);
+      await Plugins.addPlugin(app, pluginDir, pkg, shortName, fullName, source);
       console.log(`Registered plugin ${shortName} [${source}]`);
     }
   }
@@ -248,7 +256,7 @@ export class Plugins {
 
       const fullName = pkg.name || shortName;
       console.log(`Dynamic register: ${shortName} from ${dir}`);
-      Plugins.addPlugin(app, dir, pkg, shortName, fullName, "dev");
+      await Plugins.addPlugin(app, dir, pkg, shortName, fullName, "dev");
       console.log(`Registered dynamic plugin ${shortName}`);
       return { ok: true, name: shortName };
     } catch (e) {

@@ -1,4 +1,5 @@
 import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
+import { Buffer } from "node:buffer";
 import type { Express, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
 import { pluginAuthz } from "../middleware/plugin-authz.ts";
@@ -286,7 +287,7 @@ async function _callWorker(
     const controller = new AbortController();
     return await worker.fetch(req, { signal: controller.signal });
   } catch (e: any) {
-    if (e instanceof Deno.errors.WorkerRequestCancelled) {
+    if (e instanceof (Deno.errors as any).WorkerRequestCancelled) {
       // deno-lint-ignore no-explicit-any
       const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
       const controller = new AbortController();
@@ -382,7 +383,7 @@ async function _callInit(
   }
 }
 
-function _addFunction(
+export function _addFunction(
   app: Express,
   url: string,
   path: string,
@@ -473,7 +474,7 @@ function _addFunction(
           } catch {
             // Stream may not be async iterable in some environments
           }
-          if (chunks.length > 0) body = new Blob(chunks);
+          if (chunks.length > 0) body = new Blob(chunks as BlobPart[]);
         }
       }
 
