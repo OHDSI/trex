@@ -157,28 +157,68 @@ function pluginScope(plugin: string): string {
   return match ? match[1] : plugin;
 }
 
+// Payload fields live under `event.data` on the wire (see the AgentEvent
+// union in core/server/agents/service/events.ts and the recorded traces in
+// plugins-dev/toy-agent/.eve/evals/*/evals/echo.events.ndjson, e.g.
+// {"type":"message.appended","data":{"turnId":...,"messageDelta":...}}).
+// Fall back to top-level fields defensively for forward compat.
+function eventField(event: LiveStreamEvent, key: string): unknown {
+  const data = event.data;
+  if (data && typeof data === "object" && key in (data as Record<string, unknown>)) {
+    return (data as Record<string, unknown>)[key];
+  }
+  return event[key];
+}
+
+function eventString(event: LiveStreamEvent, key: string): string | null {
+  const value = eventField(event, key);
+  return typeof value === "string" ? value : null;
+}
+
 function summarizeLiveEvent(event: LiveStreamEvent): string {
   switch (event.type) {
-    case "message.appended":
-      return typeof event.messageDelta === "string" && event.messageDelta.length > 0
-        ? event.messageDelta
-        : "…";
+    case "message.appended": {
+      const delta = eventString(event, "messageDelta");
+      return delta && delta.length > 0 ? delta : "…";
+    }
     case "message.completed":
-      return typeof event.message === "string" ? event.message : "message completed";
-    case "actions.requested":
-      return `requested ${typeof event.toolName === "string" ? event.toolName : "tool"}`;
-    case "action.result":
-      return `${typeof event.toolName === "string" ? event.toolName : "tool"} result`;
+      return eventString(event, "message") ?? "message completed";
+    case "actions.requested": {
+      // data.actions: ActionRequestItem[] — each { toolName, callId, input }
+      const actions = eventField(event, "actions");
+      if (Array.isArray(actions) && actions.length > 0) {
+        const names = actions
+          .map((a) =>
+            a && typeof a === "object" && typeof (a as Record<string, unknown>).toolName === "string"
+              ? ((a as Record<string, unknown>).toolName as string)
+              : "tool",
+          )
+          .join(", ");
+        return `requested ${names}`;
+      }
+      return "requested tool";
+    }
+    case "action.result": {
+      // data.result: ActionResultData — { toolName, callId, output }; data.status: completed|failed
+      const result = eventField(event, "result");
+      const toolName =
+        result && typeof result === "object" && typeof (result as Record<string, unknown>).toolName === "string"
+          ? ((result as Record<string, unknown>).toolName as string)
+          : "tool";
+      const status = eventString(event, "status");
+      return `${toolName} result${status === "failed" ? " (failed)" : ""}`;
+    }
     case "input.requested":
       return "waiting for input";
     case "turn.completed":
       return "turn completed";
     case "turn.failed":
-      return typeof event.error === "string" ? event.error : "turn failed";
+      // events.ts: turn.failed carries data.message (not data.error)
+      return eventString(event, "message") ?? eventString(event, "error") ?? "turn failed";
     case "session.waiting":
       return "session waiting";
     case "session.failed":
-      return "session failed";
+      return eventString(event, "message") ?? "session failed";
     default:
       return event.type;
   }
@@ -351,6 +391,12 @@ export default function AgentRunDetail() {
     const url = `${window.location.origin}/plugins/${scope}/${session.agent}/eve/v1/session/${session.id}/stream`;
     const controller = new AbortController();
     let stopped = false;
+    // Set only by this effect instance's cleanup. Under React StrictMode the
+    // effect mounts, is torn down, and mounts again immediately — the first
+    // (aborted) instance's async `finally` would otherwise run AFTER the
+    // second instance set liveTailActive(true) and wrongly clear its badge.
+    // A superseded instance must not touch shared state anymore.
+    let superseded = false;
 
     setLiveEvents([]);
     setLiveTailActive(true);
@@ -391,6 +437,7 @@ export default function AgentRunDetail() {
               continue;
             }
             const event = parsed as LiveStreamEvent;
+            if (superseded) break;
             setLiveEvents((prev) => {
               const next = [...prev, event];
               return next.length > 300 ? next.slice(next.length - 300) : next;
@@ -411,11 +458,14 @@ export default function AgentRunDetail() {
           console.warn("agent session live tail unavailable, falling back to polling", err);
         }
       } finally {
-        setLiveTailActive(false);
+        // Only this instance may clear the badge — if it was superseded, a
+        // newer instance owns liveTailActive now (StrictMode double-mount).
+        if (!superseded) setLiveTailActive(false);
       }
     })();
 
     return () => {
+      superseded = true;
       stopped = true;
       controller.abort();
       setLiveTailActive(false);
