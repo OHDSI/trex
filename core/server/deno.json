@@ -6,7 +6,11 @@
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@latest",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@latest",
     "@ai-sdk/google": "npm:@ai-sdk/google@latest",
-    "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115"
+    "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",
+    "eve": "./agents/eve-shim/mod.ts",
+    "eve/tools": "./agents/eve-shim/tools.ts",
+    "eve/evals": "./agents/eve-shim/evals.ts",
+    "edn-data": "npm:edn-data@^1"
   },
   "tasks": {
     "test": "deno test --allow-all",

@@ -1,0 +1,187 @@
+// Loads an eve-layout agent directory into a runtime description.
+// Layout (spec §3): instructions.md (required), agent.ts (optional),
+// tools/*.ts|*.js (one tool per file, filename = tool name),
+// skills/<name>.md or skills/<name>/SKILL.md (metadata parsed here, content
+// loaded on demand by the built-in skill tool), subagents/<name>/ (each an
+// eve-layout dir, ONE level deep). Unsupported eve dirs (channels/,
+// connections/, sandbox/) are ignored with a log line so real eve projects
+// still load.
+//
+// EDN alternatives (trex extension for CLJS-authored agents, spec §3): the
+// eve-native file always wins when both exist, so directories stay portable
+// to real eve. agent.edn {:model "..." :max-steps N}; instructions.edn (EDN
+// string or {:instructions "..."}); skills/<name>.edn {:description "..."
+// :content "..."}.
+import { parseEDNString } from "edn-data";
+import type { AgentConfig, ToolDef } from "./eve-shim/types.ts";
+
+export interface SkillMeta {
+  name: string;
+  description: string;
+  path: string;
+  content?: string; // pre-extracted for EDN skills; md skills read from path
+}
+
+// deno-lint-ignore no-explicit-any
+async function readEdn(path: string): Promise<any | null> {
+  try {
+    const text = await Deno.readTextFile(path);
+    // keywordAs/mapAs make {:model "x"} arrive as {model: "x"}.
+    return parseEDNString(text, { mapAs: "object", keywordAs: "string" });
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return null;
+    throw new Error(`agents: failed to parse ${path}: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
+export interface LoadedAgent {
+  dir: string;
+  instructions: string;
+  config: AgentConfig;
+  tools: Record<string, ToolDef>;
+  skills: SkillMeta[];
+  subagents: Record<string, LoadedAgent>;
+}
+
+const IGNORED_DIRS = ["channels", "connections", "sandbox"];
+
+// Description = frontmatter `description:` if a leading YAML block exists,
+// else the first non-empty, non-heading line.
+export function parseSkillDescription(markdown: string): string {
+  const fm = markdown.match(/^---\n([\s\S]*?)\n---/);
+  if (fm) {
+    const d = fm[1].match(/^description:\s*(.+)$/m);
+    if (d) return d[1].trim();
+  }
+  const body = fm ? markdown.slice(fm[0].length) : markdown;
+  for (const line of body.split("\n")) {
+    const t = line.trim();
+    if (t && !t.startsWith("#")) return t;
+  }
+  return "";
+}
+
+export async function loadAgent(dir: string, opts: { depth?: number } = {}): Promise<LoadedAgent> {
+  const depth = opts.depth ?? 0;
+  let instructions: string | null = null;
+  try {
+    instructions = await Deno.readTextFile(`${dir}/instructions.md`);
+  } catch { /* fall through to EDN alternative */ }
+  if (instructions == null) {
+    const edn = await readEdn(`${dir}/instructions.edn`);
+    if (typeof edn === "string") instructions = edn;
+    else if (edn && typeof edn.instructions === "string") instructions = edn.instructions;
+  }
+  if (instructions == null) {
+    throw new Error(`agents: ${dir}/instructions.md is required but missing (or instructions.edn)`);
+  }
+
+  let config: AgentConfig = { maxSteps: 25 };
+  let configLoaded = false;
+  for (const f of ["agent.ts", "agent.js"]) {
+    try {
+      await Deno.stat(`${dir}/${f}`);
+      const mod = await import(`file://${dir}/${f}`);
+      if (mod.default) config = { maxSteps: 25, ...mod.default };
+      configLoaded = true;
+      break;
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw new Error(`agents: failed to load ${dir}/${f}: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+  if (!configLoaded) {
+    const edn = await readEdn(`${dir}/agent.edn`);
+    if (edn && typeof edn === "object") {
+      config = {
+        maxSteps: typeof edn["max-steps"] === "number" ? edn["max-steps"] : 25,
+        ...(typeof edn.model === "string" ? { model: edn.model } : {}),
+      };
+    }
+  }
+
+  const tools: Record<string, ToolDef> = {};
+  try {
+    for await (const entry of Deno.readDir(`${dir}/tools`)) {
+      if (!entry.isFile) continue;
+      const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
+      if (!m) continue;
+      const name = m[1];
+      const mod = await import(`file://${dir}/tools/${entry.name}`);
+      const def = mod.default;
+      if (!def || !(def as { __trexTool?: boolean }).__trexTool) {
+        throw new Error(`agents: ${dir}/tools/${entry.name} must default-export defineTool(...)`);
+      }
+      tools[name] = def as ToolDef;
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+
+  const skills: SkillMeta[] = [];
+  try {
+    for await (const entry of Deno.readDir(`${dir}/skills`)) {
+      if (entry.isFile && entry.name.endsWith(".md")) {
+        const path = `${dir}/skills/${entry.name}`;
+        skills.push({
+          name: entry.name.slice(0, -3),
+          description: parseSkillDescription(await Deno.readTextFile(path)),
+          path,
+        });
+      } else if (entry.isFile && entry.name.endsWith(".edn")) {
+        const name = entry.name.slice(0, -4);
+        // md wins when both exist (eve-native precedence)
+        try {
+          await Deno.stat(`${dir}/skills/${name}.md`);
+          continue;
+        } catch { /* no md twin */ }
+        const path = `${dir}/skills/${entry.name}`;
+        const edn = await readEdn(path);
+        if (edn && typeof edn === "object" && typeof edn.content === "string") {
+          skills.push({
+            name,
+            description: typeof edn.description === "string" ? edn.description : "",
+            path,
+            content: edn.content,
+          });
+        } else {
+          console.log(`agents: ${path} skipped — expected {:description :content}`);
+        }
+      } else if (entry.isDirectory) {
+        try {
+          await Deno.stat(`${dir}/skills/${entry.name}/SKILL.md`);
+          const path = `${dir}/skills/${entry.name}/SKILL.md`;
+          skills.push({
+            name: entry.name,
+            description: parseSkillDescription(await Deno.readTextFile(path)),
+            path,
+          });
+        } catch { /* dir without SKILL.md — skip */ }
+      }
+    }
+  } catch { /* no skills dir */ }
+  skills.sort((a, b) => a.name.localeCompare(b.name));
+
+  const subagents: Record<string, LoadedAgent> = {};
+  try {
+    for await (const entry of Deno.readDir(`${dir}/subagents`)) {
+      if (!entry.isDirectory) continue;
+      if (depth >= 1) {
+        console.log(`agents: ${dir}/subagents ignored — subagents are one level deep only`);
+        break;
+      }
+      subagents[entry.name] = await loadAgent(`${dir}/subagents/${entry.name}`, { depth: depth + 1 });
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+
+  for (const d of IGNORED_DIRS) {
+    try {
+      await Deno.stat(`${dir}/${d}`);
+      console.log(`agents: ${dir}/${d} present but not supported in v1 — ignored`);
+    } catch { /* absent */ }
+  }
+
+  return { dir, instructions, config, tools, skills, subagents };
+}
