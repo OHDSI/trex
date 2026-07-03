@@ -5,9 +5,12 @@ import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
-import { buildSdkTools, buildSystemPrompt } from "./toolset.ts";
-import { resolveModel } from "./model.ts";
+import { buildSdkTools, resolveInstructions } from "./toolset.ts";
+import { resolveModelForTurn } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
+import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
+
+type EnvFn = (k: string) => string | undefined;
 
 interface Deps {
   agent: LoadedAgent;
@@ -16,7 +19,18 @@ interface Deps {
   agentName: string;
   basePath: string;
   model?: any;
+  // The worker's pg pool query fn, threaded through to hookCtx.sql (H1) —
+  // index.ts passes the real pool query; tests inject a fake. Optional so
+  // existing createHandler callers/tests that never configure a hook keep
+  // working; a hook that actually calls ctx.sql without one configured
+  // fails loudly at call time instead of silently no-oping.
+  sql?: QueryFn;
+  env?: EnvFn;
 }
+
+const defaultEnv: EnvFn = (k) => Deno.env.get(k);
+const unconfiguredSql: QueryFn = () =>
+  Promise.reject(new Error("agents: hookCtx.sql used but no sql query fn was configured for this handler"));
 
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
@@ -69,18 +83,31 @@ function stepToEvent(row: { turn_id: string; kind: string; name: string | null; 
   }
 }
 
-function startTurn(deps: Deps, sessionId: string, message: unknown, metadata: unknown, bearerToken?: string) {
+// Per-request context for the agent's resolveModel/buildInstructions hooks
+// (H1) — built fresh on every call, never cached. `userId` must come from
+// the caller's x-user-id-derived value only (never metadata, which is
+// client-supplied request payload) — see createHandler's createdBy.
+function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerToken: string | undefined, userId: string | undefined): HookCtx {
+  return {
+    sessionId, bearerToken, userId, metadata,
+    env: deps.env ?? defaultEnv,
+    sql: deps.sql ?? unconfiguredSql,
+  };
+}
+
+function startTurn(deps: Deps, sessionId: string, message: unknown, metadata: unknown, bearerToken?: string, userId?: string) {
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
     const history = await historyForModel(deps.store, sessionId);
     const turn = await deps.store.addTurn(sessionId, message, metadata);
     publish(sessionId, { type: "turn.started", data: { turnId: turn.id, sequence: turn.seq } });
+    const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message, metadata,
         store: deps.store, emit: (e) => publish(sessionId, e),
-        model: deps.model, bearerToken,
+        model: deps.model, bearerToken, userId, hookCtx,
       });
       await deps.store.finishTurn(turn.id, "completed");
       // eve's client (t.send()/MessageResponse.result()) ends its per-turn
@@ -212,7 +239,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
     if (req.method === "POST" && path === "/eve/v1/session") {
       const body = await req.json().catch(() => ({}));
       const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
-      if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken);
+      if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken, createdBy);
       // eve returns separate sessionId/continuationToken handles (one owned by
       // the channel, one by the runtime — see COMPAT.md). We have no channel
       // layer, so continuationToken is the sessionId.
@@ -238,7 +265,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           await store.resolveApproval(r.requestId, r.optionId, sessionId);
         }
       }
-      if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken);
+      if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken, createdBy);
       else if (!Array.isArray(body.inputResponses)) return json({ error: "message or inputResponses required" }, 400);
       return json({ accepted: true }, 202);
     }
@@ -329,12 +356,17 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!Array.isArray(body.messages) || body.messages.length === 0) return json({ error: "messages[] required" }, 400);
       const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
       const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
-      const model = deps.model ?? resolveModel(agent.config.model);
+      // Same hooks as the session path (H1): built fresh per request, never
+      // cached — resolveModelForTurn/resolveInstructions apply
+      // config.resolveModel/buildInstructions when configured.
+      const hookCtx = buildHookCtx(deps, sessionId, body.metadata, bearerToken, createdBy);
+      const model = deps.model ?? await resolveModelForTurn(agent.config, hookCtx);
+      const system = await resolveInstructions(agent, body.metadata, hookCtx);
       // Shared tool builder (same as the session runner). No emit/turnId here,
       // so needsApproval tools answer with an "use the session API" error
       // instead of hanging a stateless request.
       const tools = buildSdkTools({
-        agent, sessionId, metadata: body.metadata, bearerToken, model, store,
+        agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store,
       });
       // ai@6's convertToModelMessages is async (Promise<ModelMessage[]>) —
       // the brief assumed the v2-era sync signature. `deno check` rejected
@@ -342,7 +374,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // the only change, no effect on the endpoint contract.
       const result = streamText({
         model,
-        system: buildSystemPrompt(agent, body.metadata),
+        system,
         messages: await convertToModelMessages(body.messages),
         tools,
         stopWhen: stepCountIs(agent.config.maxSteps ?? 25),

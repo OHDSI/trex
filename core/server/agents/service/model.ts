@@ -6,6 +6,7 @@ import { createAnthropic } from "@ai-sdk/anthropic";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "@ai-sdk/google";
 import { createAmazonBedrock } from "@ai-sdk/amazon-bedrock";
+import type { AgentConfig, HookCtx, ModelSpec } from "../eve-shim/types.ts";
 
 export function parseModelString(s: string): { provider: string; modelId: string } {
   const i = s.indexOf("/");
@@ -17,8 +18,10 @@ export function parseModelString(s: string): { provider: string; modelId: string
 
 type EnvFn = (k: string) => string | undefined;
 
+const defaultEnv: EnvFn = (k) => Deno.env.get(k);
+
 // deno-lint-ignore no-explicit-any
-export function resolveModel(modelString?: string, env: EnvFn = (k) => Deno.env.get(k)): any {
+export function resolveModel(modelString?: string, env: EnvFn = defaultEnv): any {
   const s = modelString || env("TREX_AGENTS_DEFAULT_MODEL");
   if (!s) {
     throw new Error(
@@ -26,27 +29,74 @@ export function resolveModel(modelString?: string, env: EnvFn = (k) => Deno.env.
     );
   }
   const { provider, modelId } = parseModelString(s);
+  return buildModel(provider, modelId, {}, env);
+}
+
+// Same provider constructors as resolveModel, but credentials come from the
+// spec when present, env otherwise. Used by the resolveModel hook's
+// ModelSpec-returning path (see resolveModelForTurn below) — kept separate
+// from resolveModel because a ModelSpec is already parsed (no "provider/id"
+// string to split) and never falls back to TREX_AGENTS_DEFAULT_MODEL.
+// deno-lint-ignore no-explicit-any
+export function resolveModelSpec(spec: ModelSpec, env: EnvFn = defaultEnv): any {
+  return buildModel(spec.provider, spec.modelId, { apiKey: spec.apiKey, baseURL: spec.baseURL }, env);
+}
+
+interface Creds {
+  apiKey?: string;
+  baseURL?: string;
+}
+
+// deno-lint-ignore no-explicit-any
+function buildModel(provider: string, modelId: string, creds: Creds, env: EnvFn): any {
   switch (provider) {
     case "anthropic":
-      return createAnthropic({ apiKey: env("ANTHROPIC_API_KEY") })(modelId);
+      return createAnthropic({
+        apiKey: creds.apiKey ?? env("ANTHROPIC_API_KEY"),
+        ...(creds.baseURL ? { baseURL: creds.baseURL } : {}),
+      })(modelId);
     case "google":
-      return createGoogleGenerativeAI({ apiKey: env("GOOGLE_GENERATIVE_AI_API_KEY") })(modelId);
+      return createGoogleGenerativeAI({
+        apiKey: creds.apiKey ?? env("GOOGLE_GENERATIVE_AI_API_KEY"),
+        ...(creds.baseURL ? { baseURL: creds.baseURL } : {}),
+      })(modelId);
     case "bedrock":
-      return bedrockModel(modelId, env);
+      // A spec apiKey is used as the bearer token (bedrock has no plain
+      // apiKey concept — see bedrockModel's bearer-token auth path).
+      return bedrockModel(modelId, env, creds.apiKey);
     case "openai":
     default: {
       // openai and openai-compatible (custom base url)
-      const baseURL = env("OPENAI_BASE_URL");
-      return createOpenAI({ apiKey: env("OPENAI_API_KEY"), ...(baseURL ? { baseURL } : {}) })(modelId);
+      const baseURL = creds.baseURL ?? env("OPENAI_BASE_URL");
+      return createOpenAI({ apiKey: creds.apiKey ?? env("OPENAI_API_KEY"), ...(baseURL ? { baseURL } : {}) })(modelId);
     }
   }
 }
 
+// Resolution order for a single turn/chat request (spec H1): config.resolveModel
+// hook wins when present — its rejection propagates (never falls back to
+// config.model / env credentials, a wrong-account risk) — else the existing
+// config.model → resolveModel(...) path. Called per request, never cached.
+export async function resolveModelForTurn(
+  config: AgentConfig,
+  hookCtx?: HookCtx,
+  // deno-lint-ignore no-explicit-any
+): Promise<any> {
+  if (config.resolveModel) {
+    if (!hookCtx) {
+      throw new Error("agents: resolveModel hook configured but no request context (hookCtx) available");
+    }
+    const result = await config.resolveModel(hookCtx);
+    return typeof result === "string" ? resolveModel(result, hookCtx.env) : resolveModelSpec(result, hookCtx.env);
+  }
+  return resolveModel(config.model, hookCtx?.env);
+}
+
 // deno-lint-ignore no-explicit-any
-function bedrockModel(modelId: string, env: EnvFn): any {
+function bedrockModel(modelId: string, env: EnvFn, bearerTokenOverride?: string): any {
   // deno-lint-ignore no-explicit-any
   const config: Record<string, any> = { region: env("AWS_REGION") || "us-east-1" };
-  const bearerToken = env("AWS_BEARER_TOKEN_BEDROCK") || "";
+  const bearerToken = bearerTokenOverride || env("AWS_BEARER_TOKEN_BEDROCK") || "";
   if (bearerToken) {
     // Bearer-token auth: dummy static credentials bypass SigV4, a custom fetch
     // injects the Authorization header. Bedrock also rejects assistant messages

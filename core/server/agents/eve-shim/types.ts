@@ -3,15 +3,52 @@
 // Keep this file dependency-free: agent tool files import it transitively
 // and must stay portable to real eve.
 
+// The worker's pg pool query fn, threaded through to hooks as `HookCtx.sql`
+// (matches store.ts's `QueryFn` — redeclared here, not imported, to keep
+// this file dependency-free per the header comment).
+export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
+
+// Per-request context handed to an agent's `resolveModel`/`buildInstructions`
+// hooks. `userId` is sourced ONLY from the x-user-id header the control-server
+// proxy injects (see handler.ts) — never from client-supplied `metadata`,
+// which is untrusted request payload.
+export interface HookCtx {
+  sessionId: string;
+  bearerToken?: string;
+  userId?: string;
+  metadata?: unknown;
+  env: (k: string) => string | undefined;
+  sql: QueryFn;
+}
+
+// A resolved model + credentials, returned by `resolveModel` in place of an
+// eve/AI-Gateway model string when per-request credentials are needed (e.g.
+// a per-tenant API key). `apiKey` for the bedrock provider is used as the
+// bearer token (see model.ts's resolveModelSpec).
+export interface ModelSpec {
+  provider: "anthropic" | "openai" | "google" | "bedrock";
+  modelId: string;
+  apiKey?: string;
+  baseURL?: string;
+}
+
 export interface AgentConfig {
   model?: string; // eve/AI-Gateway format: "provider/model-id"
   maxSteps?: number;
+  // Additive hooks (eve ignores unknown defineAgent fields): called on EVERY
+  // turn/chat request, never cached at agent-load time. A thrown/rejected
+  // hook must fail the request rather than silently falling back to
+  // env-configured credentials (wrong-account risk) — see model.ts's
+  // resolveModelForTurn and toolset.ts's resolveInstructions.
+  resolveModel?: (ctx: HookCtx) => Promise<string | ModelSpec>;
+  buildInstructions?: (base: string, ctx: HookCtx) => Promise<string>;
 }
 
 export interface ToolContext {
   bearerToken?: string;
   sessionId: string;
   metadata?: unknown;
+  userId?: string;
 }
 
 // deno-lint-ignore no-explicit-any

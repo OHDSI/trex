@@ -6,6 +6,7 @@
 import { streamText, tool, jsonSchema, stepCountIs } from "ai";
 import { resolveModel } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
+import type { HookCtx } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
@@ -15,6 +16,7 @@ export interface ToolBuildCtx {
   sessionId: string;
   metadata?: unknown;
   bearerToken?: string;
+  userId?: string;
   model?: any;
   store?: AgentStore;
   turnId?: string;
@@ -32,6 +34,22 @@ export function buildSystemPrompt(agent: LoadedAgent, metadata?: unknown): strin
   }
   if (metadata) prompt += `\n\n<context>\n${JSON.stringify(metadata)}\n</context>`;
   return prompt;
+}
+
+// Per-request system prompt resolution (H1): buildSystemPrompt's result is
+// the BASE handed to the buildInstructions hook (instructions + skills
+// section + <context> metadata block, per the brief); the hook's return
+// value is used verbatim when present. A configured hook with no hookCtx
+// available (a caller that never wired one) fails loudly rather than
+// silently skipping the hook — same never-fall-back-silently posture as
+// resolveModelForTurn.
+export async function resolveInstructions(agent: LoadedAgent, metadata: unknown, hookCtx?: HookCtx): Promise<string> {
+  const base = buildSystemPrompt(agent, metadata);
+  if (!agent.config.buildInstructions) return base;
+  if (!hookCtx) {
+    throw new Error("agents: buildInstructions hook configured but no request context (hookCtx) available");
+  }
+  return await agent.config.buildInstructions(base, hookCtx);
 }
 
 function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
@@ -66,7 +84,7 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
           return { error: decision === "deny" ? "denied by user" : "approval timed out" };
         }
       }
-      return await def.execute!(input, { bearerToken: ctx.bearerToken, sessionId: ctx.sessionId, metadata: ctx.metadata });
+      return await def.execute!(input, { bearerToken: ctx.bearerToken, sessionId: ctx.sessionId, metadata: ctx.metadata, userId: ctx.userId });
     },
   });
 }

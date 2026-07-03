@@ -4,12 +4,12 @@
 // plugins/devx/functions/agent.ts.
 // deno-lint-ignore-file no-explicit-any
 import { streamText, stepCountIs } from "ai";
-import { resolveModel } from "./model.ts";
-import type { ToolDef } from "../eve-shim/types.ts";
+import { resolveModelForTurn } from "./model.ts";
+import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
-import { buildSdkTools, buildSystemPrompt } from "./toolset.ts";
+import { buildSdkTools, resolveInstructions } from "./toolset.ts";
 
 interface RunTurnOpts {
   agent: LoadedAgent;
@@ -22,13 +22,26 @@ interface RunTurnOpts {
   emit: (e: AgentEvent) => void;
   model?: any;
   bearerToken?: string;
+  userId?: string;
+  // Per-request context for the agent's resolveModel/buildInstructions
+  // hooks (H1). Optional so existing callers/tests that never touch hooks
+  // (no agent.config.resolveModel/buildInstructions) keep working unchanged
+  // — resolveModelForTurn/resolveInstructions only require it when a hook
+  // is actually configured.
+  hookCtx?: HookCtx;
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {
   const { agent, store, emit, turnId } = opts;
-  const model = opts.model ?? resolveModel(agent.config.model);
+  // opts.model is a test/deps override and always wins; otherwise resolution
+  // order is config.resolveModel(hookCtx) → config.model → env (see
+  // model.ts's resolveModelForTurn). A rejecting hook propagates here,
+  // uncaught — the caller (handler.ts's startTurn) turns that into a
+  // turn.failed/session.failed pair, same as any other pre-stream failure.
+  const model = opts.model ?? await resolveModelForTurn(agent.config, opts.hookCtx);
+  const system = await resolveInstructions(agent, opts.metadata, opts.hookCtx);
   const userContent = typeof opts.message === "string" ? opts.message : JSON.stringify(opts.message);
   const messages = [...opts.history, { role: "user" as const, content: userContent }];
 
@@ -44,7 +57,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
 
   const result = streamText({
     model,
-    system: buildSystemPrompt(agent, opts.metadata),
+    system,
     messages,
     tools: buildSdkTools({ ...opts, model }),
     stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
