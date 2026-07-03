@@ -10,7 +10,8 @@
     "eve": "./agents/eve-shim/mod.ts",
     "eve/tools": "./agents/eve-shim/tools.ts",
     "eve/evals": "./agents/eve-shim/evals.ts",
-    "edn-data": "npm:edn-data@^1"
+    "edn-data": "npm:edn-data@^1",
+    "pg": "npm:pg@^8.13.0"
   },
   "tasks": {
     "test": "deno test --allow-all",
