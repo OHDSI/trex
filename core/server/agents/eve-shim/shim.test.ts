@@ -1,0 +1,41 @@
+import { assertEquals, assert } from "jsr:@std/assert";
+import { defineAgent } from "./mod.ts";
+import { defineTool } from "./tools.ts";
+import { isZodSchema } from "./types.ts";
+
+Deno.test("defineAgent returns config with defaults applied", () => {
+  const a = defineAgent({ model: "anthropic/claude-sonnet-5" });
+  assertEquals(a.model, "anthropic/claude-sonnet-5");
+  assertEquals(a.maxSteps, 25);
+});
+
+Deno.test("defineAgent without model leaves model undefined (resolver falls back to env)", () => {
+  const a = defineAgent({});
+  assertEquals(a.model, undefined);
+});
+
+Deno.test("defineTool brands the definition and validates required fields", () => {
+  const t = defineTool({
+    description: "echo",
+    inputSchema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
+    execute: (input) => Promise.resolve(input),
+  });
+  assert((t as { __trexTool?: boolean }).__trexTool);
+});
+
+Deno.test("defineTool rejects executable tool without execute unless clientOnly or needsApproval", () => {
+  let threw = false;
+  try {
+    defineTool({ description: "bad", inputSchema: { type: "object" } });
+  } catch { threw = true; }
+  assert(threw);
+  // clientOnly without execute is valid (proposal-card pattern)
+  const t = defineTool({ description: "card", inputSchema: { type: "object" }, clientOnly: true });
+  assert((t as { __trexTool?: boolean }).__trexTool);
+});
+
+Deno.test("isZodSchema distinguishes zod from JSON Schema", async () => {
+  const { z } = await import("npm:zod@^4");
+  assert(isZodSchema(z.object({ a: z.string() })));
+  assert(!isZodSchema({ type: "object", properties: {} }));
+});
