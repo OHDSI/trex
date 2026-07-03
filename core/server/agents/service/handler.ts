@@ -63,7 +63,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
     let path = url.pathname;
-    if (path.startsWith(basePath)) path = path.slice(basePath.length);
+    // Anchor on basePath: the control server only proxies prefixed paths to
+    // this worker, so an unprefixed path is never one of our routes.
+    if (basePath) {
+      if (!path.startsWith(basePath)) return json({ error: "not found" }, 404);
+      path = path.slice(basePath.length);
+    }
     if (!path.startsWith("/")) path = `/${path}`;
     const bearerToken = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || undefined;
 
@@ -103,15 +108,19 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (action === "stream" && req.method === "GET") {
         const replayOnly = url.searchParams.get("replayOnly") === "1";
         const past = await store.listEvents(sessionId);
+        // Hoisted so the abort listener and the stream's cancel() (consumer
+        // detached without an abort event) share the same unsubscribe.
+        let unsub: (() => void) | undefined;
         const stream = new ReadableStream({
           start(controller) {
             for (const ev of past) controller.enqueue(sseEncode({ type: ev.kind, name: ev.name, ...(ev.payload as object ?? {}) }));
             if (replayOnly) { controller.close(); return; }
-            const unsub = subscribe(sessionId, (e) => {
-              try { controller.enqueue(sseEncode(e)); } catch { unsub(); }
+            unsub = subscribe(sessionId, (e) => {
+              try { controller.enqueue(sseEncode(e)); } catch { unsub?.(); }
             });
-            req.signal.addEventListener("abort", () => { unsub(); try { controller.close(); } catch { /* closed */ } });
+            req.signal.addEventListener("abort", () => { unsub?.(); try { controller.close(); } catch { /* closed */ } });
           },
+          cancel() { unsub?.(); },
         });
         return new Response(stream, {
           headers: { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
@@ -123,7 +132,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // Stateless UIMessage chat for useChat frontends (Pythia). Persists a
       // session per request for observability, but history comes from the client.
       const body = await req.json().catch(() => ({}));
-      if (!Array.isArray(body.messages)) return json({ error: "messages[] required" }, 400);
+      if (!Array.isArray(body.messages) || body.messages.length === 0) return json({ error: "messages[] required" }, 400);
       const sessionId = await store.createSession(deps.plugin, deps.agentName, undefined);
       const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
       const model = deps.model ?? resolveModel(agent.config.model);
@@ -144,8 +153,10 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         tools,
         stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
         onFinish: async ({ text, totalUsage }) => {
-          await store.addStep(turn.id, 1, "text", null, { text }, totalUsage).catch(() => {});
-          await store.finishTurn(turn.id, "completed").catch(() => {});
+          await store.addStep(turn.id, 1, "text", null, { text }, totalUsage)
+            .catch((e) => console.error("agents: chat persist failed:", e));
+          await store.finishTurn(turn.id, "completed")
+            .catch((e) => console.error("agents: chat persist failed:", e));
         },
       });
       return result.toUIMessageStreamResponse();

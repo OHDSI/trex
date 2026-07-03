@@ -2,18 +2,22 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { createHandler } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
+import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 const BASE = "http://local/plugins/trex/toy";
 
-function inMemoryQuery() {
+function inMemoryDb() {
   // Minimal in-memory impl of the SQL the store issues, keyed by table.
+  // Exposed state (turns/steps/approvals) lets tests assert on persistence
+  // and drive approval decisions without Postgres.
   const sessions = new Map<string, { status: string }>();
-  const turns: Array<{ id: string; session_id: string; seq: number }> = [];
+  const turns: Array<{ id: string; session_id: string; seq: number; status: string; error: string | null }> = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown }> = [];
+  const approvals = new Map<string, { decision: string | null }>();
   let n = 0;
-  return (sql: string, params: unknown[] = []) => {
+  const query = (sql: string, params: unknown[] = []) => {
     if (sql.includes("INSERT INTO agents.sessions")) {
       const id = `s-${++n}`;
       sessions.set(id, { status: "active" });
@@ -25,13 +29,36 @@ function inMemoryQuery() {
     }
     if (sql.includes("INSERT INTO agents.turns")) {
       const seq = turns.filter((t) => t.session_id === params[0]).length + 1;
-      const t = { id: `t-${++n}`, session_id: params[0] as string, seq };
+      const t = { id: `t-${++n}`, session_id: params[0] as string, seq, status: "running", error: null };
       turns.push(t);
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
+    }
+    if (sql.includes("UPDATE agents.turns")) {
+      const t = turns.find((t) => t.id === params[0]);
+      if (t) {
+        t.status = params[1] as string;
+        t.error = (params[2] as string | null) ?? null;
+      }
+      return Promise.resolve({ rows: [] });
     }
     if (sql.includes("INSERT INTO agents.steps")) {
       steps.push({ turn_id: params[0] as string, seq: params[1] as number, kind: params[2] as string, name: params[3] as string | null, payload: params[4] });
       return Promise.resolve({ rows: [] });
+    }
+    if (sql.includes("INSERT INTO agents.approvals")) {
+      const id = `r-${++n}`;
+      approvals.set(id, { decision: null });
+      return Promise.resolve({ rows: [{ request_id: id }] });
+    }
+    if (sql.includes("UPDATE agents.approvals")) {
+      const a = approvals.get(params[0] as string);
+      if (!a || a.decision !== null) return Promise.resolve({ rows: [] });
+      a.decision = params[1] as string;
+      return Promise.resolve({ rows: [{ request_id: params[0] }] });
+    }
+    if (sql.includes("SELECT decision")) {
+      const a = approvals.get(params[0] as string);
+      return Promise.resolve({ rows: a ? [{ decision: a.decision }] : [] });
     }
     if (sql.includes("FROM agents.steps")) {
       const sid = params[0] as string;
@@ -42,43 +69,85 @@ function inMemoryQuery() {
     }
     return Promise.resolve({ rows: [] });
   };
+  return { query, turns, steps, approvals };
 }
 
 // See runner.test.ts's FINISH/sequencedModel comment: ai@6's raw doStream
 // "finish" chunk nests usage under inputTokens.total/outputTokens.total and
 // finishReason under {unified, raw} (was flat in the v2 shape the brief was
 // drafted against); doStream itself must return a Promise, not a bare
-// object. `chunks` is typed `any[]` (matching runner.test.ts's
-// `sequencedModel` precedent) so the literal isn't structurally checked
+// object. Chunk arrays are typed `any[]` (matching runner.test.ts's
+// `sequencedModel` precedent) so the literals aren't structurally checked
 // against the full LanguageModelV3StreamPart union field-by-field.
-function model(text: string) {
-  // deno-lint-ignore no-explicit-any
-  const chunks: any[] = [
-    { type: "text-start", id: "1" },
-    { type: "text-delta", id: "1", delta: text },
-    { type: "text-end", id: "1" },
-    {
-      type: "finish",
-      finishReason: { unified: "stop", raw: "stop" },
-      usage: { inputTokens: { total: 1 }, outputTokens: { total: 2 } },
-    },
-  ];
+// deno-lint-ignore no-explicit-any
+const textChunks = (text: string): any[] => [
+  { type: "text-start", id: "1" },
+  { type: "text-delta", id: "1", delta: text },
+  { type: "text-end", id: "1" },
+  {
+    type: "finish",
+    finishReason: { unified: "stop", raw: "stop" },
+    usage: { inputTokens: { total: 1 }, outputTokens: { total: 2 } },
+  },
+];
+// deno-lint-ignore no-explicit-any
+const toolCallChunks = (toolName: string, input: unknown): any[] => [
+  { type: "tool-call", toolCallId: "c-1", toolName, input: JSON.stringify(input) },
+  {
+    type: "finish",
+    finishReason: { unified: "tool-calls", raw: "tool-calls" },
+    usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
+  },
+];
+
+// Multi-step conversations call doStream once per step; cycle through the
+// given responses (last one repeats) — same pattern as runner.test.ts.
+// deno-lint-ignore no-explicit-any
+function sequencedModel(...responses: any[][]) {
+  let call = 0;
   return new MockLanguageModelV3({
-    doStream: () => Promise.resolve({ stream: simulateReadableStream({ chunks }) }),
+    doStream: () => {
+      const chunks = responses[Math.min(call++, responses.length - 1)];
+      return Promise.resolve({ stream: simulateReadableStream({ chunks }) });
+    },
   });
 }
 
-async function makeHandler() {
-  const agent = await loadAgent(TOY);
-  return createHandler({
-    agent, store: createStore(inMemoryQuery() as never),
-    plugin: "toy-agent", agentName: "toy",
-    basePath: "/plugins/trex/toy", model: model("hello from toy"),
-  });
+function model(text: string) {
+  return sequencedModel(textChunks(text));
 }
+
+async function makeHandler(opts: { model?: unknown; mutate?: (agent: LoadedAgent) => void } = {}) {
+  const agent = await loadAgent(TOY);
+  opts.mutate?.(agent);
+  const db = inMemoryDb();
+  const handler = createHandler({
+    agent, store: createStore(db.query as never),
+    plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: opts.model ?? model("hello from toy"),
+  });
+  return { handler, db };
+}
+
+// Poll until the fire-and-forget turn work settles. Draining background work
+// inside the test that starts it (rather than disabling sanitizeOps /
+// sanitizeResources) keeps Deno's sanitizer defaults meaningful — ai@6's
+// simulateReadableStream schedules real setTimeout(...,0) timers per chunk,
+// and returning before the async turn resolves would leak them into the
+// next test.
+async function until(cond: () => boolean, ms = 5000) {
+  const deadline = Date.now() + ms;
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error("timed out waiting for condition");
+    await new Promise((r) => setTimeout(r, 25));
+  }
+}
+
+const settled = (db: ReturnType<typeof inMemoryDb>) =>
+  db.turns.length > 0 && db.turns.every((t) => t.status !== "running");
 
 Deno.test("POST /eve/v1/session creates a session and returns the id header", async () => {
-  const handler = await makeHandler();
+  const { handler, db } = await makeHandler();
   const res = await handler(new Request(`${BASE}/eve/v1/session`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -89,41 +158,134 @@ Deno.test("POST /eve/v1/session creates a session and returns the id header", as
   assert(sid);
   const body = await res.json();
   assertEquals(body.sessionId, sid);
-  // The response returns before the fire-and-forget turn resolves (that's
-  // the point of the async start), but the mock model's simulated stream
-  // still schedules real setTimeout(...,0) timers per chunk internally
-  // (ai@6's simulateReadableStream default delay). If this test function
-  // returns before those settle, Deno's leak sanitizer flags a timer that
-  // "completes during" a later test. Draining that background work here
-  // (rather than disabling sanitizeOps/sanitizeResources) keeps the
-  // sanitizer defaults meaningful instead of silencing them.
-  await new Promise((r) => setTimeout(r, 200));
+  await until(() => settled(db)); // drain the fire-and-forget turn (see until())
+  assertEquals(db.turns[0].status, "completed");
 });
 
 Deno.test("GET /stream replays persisted events as SSE after the turn ran", async () => {
-  const handler = await makeHandler();
+  const { handler, db } = await makeHandler();
   const create = await handler(new Request(`${BASE}/eve/v1/session`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ message: "hi" }),
   }));
   const sid = create.headers.get("x-eve-session-id")!;
-  await new Promise((r) => setTimeout(r, 200)); // let the async turn finish (mock model is instant)
+  await until(() => settled(db)); // let the async turn finish (mock model is instant)
   const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?replayOnly=1`));
   assertEquals(res.headers.get("content-type"), "text/event-stream");
   const text = await res.text();
   assert(text.includes('"finish"') || text.includes("turn-finish"));
+  // SSE framing (sseEncode contract): every non-blank line is a single-line
+  // `data: {json}` frame, and frames are separated by blank lines.
+  const lines = text.split("\n").filter((l) => l !== "");
+  assert(lines.length > 0);
+  for (const line of lines) {
+    assert(/^data: \{.*\}$/.test(line), `bad SSE frame: ${JSON.stringify(line)}`);
+  }
+  assert(text.includes("\n\n"));
 });
 
 Deno.test("unknown session 404s; unknown route 404s; healthz lists tools", async () => {
-  const handler = await makeHandler();
+  const { handler } = await makeHandler();
   assertEquals((await handler(new Request(`${BASE}/eve/v1/session/nope/stream`))).status, 404);
   assertEquals((await handler(new Request(`${BASE}/bogus`))).status, 404);
+  // basePath is anchored: unprefixed paths never hit our routes.
+  assertEquals((await handler(new Request(`http://local/healthz`))).status, 404);
   const health = await (await handler(new Request(`${BASE}/healthz`))).json();
   assertEquals(health.tools.sort(), ["echo", "propose_card"]);
 });
 
+Deno.test("POST /message on an existing session accepts and records a turn", async () => {
+  const { handler, db } = await makeHandler();
+  // Create the session without a first message — no turn starts.
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  assertEquals(db.turns.length, 0);
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/message`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => settled(db));
+  assertEquals(db.turns.length, 1);
+  assertEquals(db.turns[0].status, "completed");
+  assert(db.steps.some((s) => s.turn_id === db.turns[0].id));
+});
+
+Deno.test("POST /approval resolves a pending approval and unblocks the turn; unknown requestId 404s", async () => {
+  // Toy agent + an in-memory needsApproval tool (same pattern as runner.test.ts).
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  // The turn blocks inside the guarded tool until an approval decision lands.
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  // Unknown requestId → 404 (checked while the real one is still pending).
+  const missing = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId: "nope", decision: "approve" }),
+  }));
+  assertEquals(missing.status, 404);
+
+  const ok = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId, decision: "approve" }),
+  }));
+  assertEquals(ok.status, 200);
+  assertEquals(await ok.json(), { resolved: true });
+
+  // Toolset default poll is 500ms; give the turn time to observe the decision.
+  await until(() => settled(db), 10_000);
+  assertEquals(db.turns[0].status, "completed");
+  assert(db.steps.some((s) => s.kind === "tool-result" && s.name === "guarded"));
+});
+
+Deno.test("model failure marks the turn failed and persists an error event (no unhandled rejection)", async () => {
+  const failing = new MockLanguageModelV3({
+    doStream: () => Promise.reject(new Error("model exploded")),
+  });
+  const { handler, db } = await makeHandler({ model: failing });
+  // streamText's default onError logs the stream error via console.error;
+  // capture it so the expected diagnostic becomes an assertion instead of
+  // noise in the test output.
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "hi" }),
+    }));
+    assertEquals(res.status, 200); // the failure is async — session creation still succeeds
+    await until(() => settled(db));
+  } finally {
+    console.error = origError;
+  }
+  assertEquals(db.turns[0].status, "failed");
+  assert(db.turns[0].error && db.turns[0].error.includes("model exploded"));
+  assert(db.steps.some((s) => s.kind === "error"));
+  assert(logged.some((l) => l.includes("model exploded")));
+  // No unhandled rejection / leaked timer: the test failing on Deno's default
+  // sanitizers or an uncaught-error crash IS the assertion here.
+});
+
 Deno.test("POST /chat returns a UIMessage stream", async () => {
-  const handler = await makeHandler();
+  const { handler } = await makeHandler();
   const res = await handler(new Request(`${BASE}/chat`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
@@ -132,4 +294,16 @@ Deno.test("POST /chat returns a UIMessage stream", async () => {
   assert((res.headers.get("content-type") || "").includes("text/event-stream"));
   const body = await res.text();
   assert(body.length > 0);
+});
+
+Deno.test("POST /chat rejects a missing or empty messages array with 400", async () => {
+  const { handler } = await makeHandler();
+  for (const payload of [{}, { messages: [] }]) {
+    const res = await handler(new Request(`${BASE}/chat`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify(payload),
+    }));
+    assertEquals(res.status, 400);
+    assertEquals(await res.json(), { error: "messages[] required" });
+  }
 });
