@@ -24,12 +24,23 @@ export interface SkillMeta {
 
 // deno-lint-ignore no-explicit-any
 async function readEdn(path: string): Promise<any | null> {
+  let text: string;
   try {
-    const text = await Deno.readTextFile(path);
-    // keywordAs/mapAs make {:model "x"} arrive as {model: "x"}.
-    return parseEDNString(text, { mapAs: "object", keywordAs: "string" });
+    text = await Deno.readTextFile(path);
   } catch (e) {
     if (e instanceof Deno.errors.NotFound) return null;
+    throw new Error(`agents: failed to read ${path}: ${e instanceof Error ? e.message : e}`);
+  }
+  try {
+    // keywordAs/mapAs make {:model "x"} arrive as {model: "x"}.
+    const parsed = parseEDNString(text, { mapAs: "object", keywordAs: "string" });
+    // edn-data is lenient and yields null for malformed input instead of
+    // throwing — treat that as a parse failure unless the file really says nil.
+    if (parsed === null && text.trim() !== "" && text.trim() !== "nil") {
+      throw new Error("invalid EDN");
+    }
+    return parsed;
+  } catch (e) {
     throw new Error(`agents: failed to parse ${path}: ${e instanceof Error ? e.message : e}`);
   }
 }
@@ -66,7 +77,12 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
   let instructions: string | null = null;
   try {
     instructions = await Deno.readTextFile(`${dir}/instructions.md`);
-  } catch { /* fall through to EDN alternative */ }
+  } catch (e) {
+    // NotFound falls through to the EDN alternative; anything else is real.
+    if (!(e instanceof Deno.errors.NotFound)) {
+      throw new Error(`agents: failed to read ${dir}/instructions.md: ${e instanceof Error ? e.message : e}`);
+    }
+  }
   if (instructions == null) {
     const edn = await readEdn(`${dir}/instructions.edn`);
     if (typeof edn === "string") instructions = edn;
@@ -159,7 +175,10 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
         } catch { /* dir without SKILL.md — skip */ }
       }
     }
-  } catch { /* no skills dir */ }
+  } catch (e) {
+    // Missing skills/ dir is fine; EDN parse failures etc. must fail loudly.
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
   skills.sort((a, b) => a.name.localeCompare(b.name));
 
   const subagents: Record<string, LoadedAgent> = {};

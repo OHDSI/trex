@@ -59,6 +59,25 @@ Deno.test("loadAgent loads subagents one level deep", async () => {
   assertEquals(Object.keys(a.subagents.shouter.subagents).length, 0);
 });
 
+Deno.test("loadAgent surfaces malformed skill EDN as an error", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/skills`);
+  await Deno.writeTextFile(`${tmp}/skills/bad.edn`, `{:description "x" :content`);
+  await assertRejects(() => loadAgent(tmp), Error, "bad.edn");
+});
+
+Deno.test("nested subagents beyond one level are ignored with a log", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/subagents/inner/subagents/deep`, { recursive: true });
+  await Deno.writeTextFile(`${tmp}/subagents/inner/instructions.md`, "inner agent");
+  await Deno.writeTextFile(`${tmp}/subagents/inner/subagents/deep/instructions.md`, "too deep");
+  const a = await loadAgent(tmp);
+  assertEquals(Object.keys(a.subagents), ["inner"]);
+  assertEquals(Object.keys(a.subagents.inner.subagents).length, 0);
+});
+
 Deno.test("loadAgent fails without instructions.md", async () => {
   const tmp = await Deno.makeTempDir();
   await assertRejects(() => loadAgent(tmp), Error, "instructions.md");
