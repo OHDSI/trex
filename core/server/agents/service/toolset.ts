@@ -132,7 +132,15 @@ function agentTool(ctx: ToolBuildCtx): any {
     // inference without changing runtime behavior.
     execute: (input: unknown): Promise<unknown> => {
       const { agent: name, prompt } = input as { agent?: string; prompt: string };
-      const target = name ? ctx.agent.subagents[name] : ctx.agent;
+      // Object.hasOwn guards against a model-supplied "__proto__" or
+      // "constructor" resolving through the prototype chain instead of a
+      // real subagent entry — a plain `ctx.agent.subagents[name]` lookup
+      // would return Object.prototype/Function itself for those names and
+      // crash the turn (e.g. `.instructions` access downstream) instead of
+      // falling into the ordinary "unknown subagent" result.
+      const target = name
+        ? (Object.hasOwn(ctx.agent.subagents, name) ? ctx.agent.subagents[name] : undefined)
+        : ctx.agent;
       if (!target) {
         return Promise.resolve({ error: `unknown subagent "${name}"`, available: names });
       }

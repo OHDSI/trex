@@ -87,11 +87,17 @@ export function createStore(query: QueryFn) {
       return r.rows[0].request_id;
     },
 
-    async resolveApproval(requestId: string, decision: "approve" | "deny"): Promise<boolean> {
+    // sessionId-scoped: without it, a requestId leaked or guessed from
+    // another session could resolve a pending approval it doesn't own —
+    // request_id alone is not treated as a capability token anywhere else
+    // in this API (session ownership is always checked first via
+    // getSession). A wrong-session requestId is indistinguishable from an
+    // unknown one to the caller (both return false / 404 upstream).
+    async resolveApproval(requestId: string, decision: "approve" | "deny", sessionId: string): Promise<boolean> {
       const r = await query(
         `UPDATE agents.approvals SET decision = $2, decided_at = NOW()
-         WHERE request_id = $1 AND decision IS NULL RETURNING request_id`,
-        [requestId, decision],
+         WHERE request_id = $1 AND session_id = $3 AND decision IS NULL RETURNING request_id`,
+        [requestId, decision, sessionId],
       );
       return r.rows.length > 0;
     },

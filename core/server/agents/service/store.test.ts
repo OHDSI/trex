@@ -96,7 +96,7 @@ Deno.test("getHistory returns rows", async () => {
 });
 
 Deno.test("approval round trip", async () => {
-  const { fn } = fakeQuery([
+  const { fn, calls } = fakeQuery([
     { rows: [{ request_id: "r-1" }] },      // createApproval
     { rows: [{ request_id: "r-1" }] },      // resolveApproval returning row
     { rows: [{ decision: "approve" }] },    // getApprovalDecision
@@ -104,6 +104,14 @@ Deno.test("approval round trip", async () => {
   const store = createStore(fn as never);
   const rid = await store.createApproval("s-1", "t-1", "dangerous_tool", { x: 1 });
   assertEquals(rid, "r-1");
-  assertEquals(await store.resolveApproval("r-1", "approve"), true);
+  assertEquals(await store.resolveApproval("r-1", "approve", "s-1"), true);
+  assert(calls[1].sql.includes("session_id = $3"));
+  assertEquals(calls[1].params, ["r-1", "approve", "s-1"]);
   assertEquals(await store.getApprovalDecision("r-1"), "approve");
+});
+
+Deno.test("resolveApproval is session-scoped: a requestId for another session resolves nothing", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]); // WHERE session_id = $3 excludes the row
+  const store = createStore(fn as never);
+  assertEquals(await store.resolveApproval("r-1", "approve", "wrong-session"), false);
 });

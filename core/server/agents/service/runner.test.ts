@@ -217,3 +217,18 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   assert("agent" in top);
   assert("skill" in top);
 });
+
+Deno.test("built-in agent tool guards subagent lookup against prototype-polluting names", async () => {
+  // "__proto__"/"constructor" resolve through the prototype chain on a
+  // plain `subagents[name]` lookup (returning Object.prototype/Function
+  // itself, not undefined) — must fall into the ordinary "unknown
+  // subagent" result instead of crashing the turn on a bogus target.
+  const agent = await loadAgent(TOY);
+  const { buildSdkTools } = await import("./toolset.ts");
+  const tools = buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
+  const agentTool = tools.agent as { execute: (input: unknown) => Promise<unknown> };
+  for (const bogus of ["__proto__", "constructor"]) {
+    const result = await agentTool.execute({ agent: bogus, prompt: "hi" });
+    assertEquals(result, { error: `unknown subagent "${bogus}"`, available: Object.keys(agent.subagents) });
+  }
+});

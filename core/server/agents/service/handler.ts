@@ -7,6 +7,7 @@ import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
 import { buildSdkTools, buildSystemPrompt } from "./toolset.ts";
 import { resolveModel } from "./model.ts";
+import type { AgentEvent } from "./events.ts";
 
 interface Deps {
   agent: LoadedAgent;
@@ -111,6 +112,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
     }
     if (!path.startsWith("/")) path = `/${path}`;
     const bearerToken = (req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "") || undefined;
+    // The control-server proxy (plugin/function.ts) injects x-user-id from
+    // the auth-context middleware for @trex-scoped plugins; carry it into
+    // created_by so a session's owner is recoverable. Absent for
+    // unauthenticated/d2e-style requests — createSession treats undefined
+    // as NULL.
+    const createdBy = req.headers.get("x-user-id") || undefined;
 
     // Pre-eve alias, kept for back-compat with existing callers/tests —
     // /eve/v1/health below is the eve-documented route (Targets: "the
@@ -204,7 +211,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
 
     if (req.method === "POST" && path === "/eve/v1/session") {
       const body = await req.json().catch(() => ({}));
-      const sessionId = await store.createSession(deps.plugin, deps.agentName, undefined);
+      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
       if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken);
       // eve returns separate sessionId/continuationToken handles (one owned by
       // the channel, one by the runtime — see COMPAT.md). We have no channel
@@ -228,7 +235,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           if (!r?.requestId || !["approve", "deny"].includes(r.optionId)) {
             return json({ error: "inputResponses[].requestId and optionId (approve|deny) required" }, 400);
           }
-          await store.resolveApproval(r.requestId, r.optionId);
+          await store.resolveApproval(r.requestId, r.optionId, sessionId);
         }
       }
       if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken);
@@ -248,7 +255,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!body.requestId || !["approve", "deny"].includes(body.decision)) {
         return json({ error: "requestId and decision (approve|deny) required" }, 400);
       }
-      const ok = await store.resolveApproval(body.requestId, body.decision);
+      const ok = await store.resolveApproval(body.requestId, body.decision, sessionId);
       return ok ? json({ resolved: true }) : json({ error: "unknown or already-decided request" }, 404);
     }
 
@@ -262,17 +269,39 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // the eval-runner fallback) as an additive extension. See COMPAT.md.
       const startIndex = Number(url.searchParams.get("startIndex") ?? "0") || 0;
       const replayOnly = url.searchParams.get("replayOnly") === "1";
-      const past = (await store.listEvents(sessionId)).slice(startIndex);
       // Hoisted so the abort listener and the stream's cancel() (consumer
       // detached without an abort event) share the same unsubscribe.
       let unsub: (() => void) | undefined;
       const body = new ReadableStream({
-        start(controller) {
+        async start(controller) {
+          // Subscribe to the live tail BEFORE awaiting listEvents(): if we
+          // replayed first and subscribed after, an event published in
+          // that window (between the listEvents query and the subscribe
+          // call) would be lost — neither in the replay snapshot nor seen
+          // live. Subscribing first means such an event lands in `buffer`
+          // instead; it's flushed right after replay so output order stays
+          // replay-then-live. See COMPAT.md's durability section for the
+          // resulting (rare, harmless) at-least-once double-delivery case.
+          let buffering = !replayOnly;
+          const buffer: AgentEvent[] = [];
+          if (!replayOnly) {
+            unsub = subscribe(sessionId, (e) => {
+              try {
+                if (buffering) buffer.push(e);
+                else controller.enqueue(ndjsonEncode(e));
+              } catch { unsub?.(); }
+            });
+          }
+          const past = (await store.listEvents(sessionId)).slice(startIndex);
           for (const ev of past) controller.enqueue(ndjsonEncode(stepToEvent(ev)));
           if (replayOnly) { controller.close(); return; }
-          unsub = subscribe(sessionId, (e) => {
-            try { controller.enqueue(ndjsonEncode(e)); } catch { unsub?.(); }
-          });
+          // Flush anything that arrived live while we were awaiting
+          // listEvents() — buffered events come after the replay snapshot,
+          // preserving chronological order for the common case.
+          buffering = false;
+          for (const e of buffer) {
+            try { controller.enqueue(ndjsonEncode(e)); } catch { unsub?.(); break; }
+          }
           req.signal.addEventListener("abort", () => { unsub?.(); try { controller.close(); } catch { /* closed */ } });
         },
         cancel() { unsub?.(); },
@@ -287,7 +316,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // session per request for observability, but history comes from the client.
       const body = await req.json().catch(() => ({}));
       if (!Array.isArray(body.messages) || body.messages.length === 0) return json({ error: "messages[] required" }, 400);
-      const sessionId = await store.createSession(deps.plugin, deps.agentName, undefined);
+      const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
       const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
       const model = deps.model ?? resolveModel(agent.config.model);
       // Shared tool builder (same as the session runner). No emit/turnId here,

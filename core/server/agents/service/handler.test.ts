@@ -4,7 +4,7 @@ import { createHandler } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
-import { subscribe } from "./stream.ts";
+import { publish, subscribe } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
@@ -17,9 +17,14 @@ function inMemoryDb() {
   const sessions = new Map<string, { status: string }>();
   const turns: Array<{ id: string; session_id: string; seq: number; status: string; error: string | null }> = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
-  const approvals = new Map<string, { decision: string | null }>();
+  const approvals = new Map<string, { decision: string | null; sessionId: string }>();
+  // Every call the store issues, in order — lets tests assert on the exact
+  // params a route handed to the store (e.g. created_by, session-scoping)
+  // without needing a real Postgres.
+  const calls: Array<{ sql: string; params: unknown[] }> = [];
   let n = 0;
   const query = (sql: string, params: unknown[] = []) => {
+    calls.push({ sql, params });
     if (sql.includes("INSERT INTO agents.sessions")) {
       const id = `s-${++n}`;
       sessions.set(id, { status: "active" });
@@ -52,12 +57,14 @@ function inMemoryDb() {
     }
     if (sql.includes("INSERT INTO agents.approvals")) {
       const id = `r-${++n}`;
-      approvals.set(id, { decision: null });
+      approvals.set(id, { decision: null, sessionId: params[0] as string });
       return Promise.resolve({ rows: [{ request_id: id }] });
     }
     if (sql.includes("UPDATE agents.approvals")) {
+      // params: [requestId, decision, sessionId] — mirrors store.ts's
+      // `WHERE request_id = $1 AND session_id = $3 AND decision IS NULL`.
       const a = approvals.get(params[0] as string);
-      if (!a || a.decision !== null) return Promise.resolve({ rows: [] });
+      if (!a || a.decision !== null || a.sessionId !== params[2]) return Promise.resolve({ rows: [] });
       a.decision = params[1] as string;
       return Promise.resolve({ rows: [{ request_id: params[0] }] });
     }
@@ -80,7 +87,7 @@ function inMemoryDb() {
     }
     return Promise.resolve({ rows: [] });
   };
-  return { query, turns, steps, approvals };
+  return { query, turns, steps, approvals, calls };
 }
 
 // See runner.test.ts's FINISH/sequencedModel comment: ai@6's raw doStream
@@ -337,6 +344,50 @@ Deno.test("POST /approval resolves a pending approval and unblocks the turn; unk
   assert(db.steps.some((s) => s.kind === "tool-result" && s.name === "guarded"));
 });
 
+Deno.test("POST /approval 404s a requestId that belongs to a different session", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  // A second, unrelated session — the pending approval belongs to `sid`,
+  // not this one.
+  const otherCreate = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }));
+  const otherSid = otherCreate.headers.get("x-eve-session-id")!;
+
+  const wrongSession = await handler(new Request(`${BASE}/eve/v1/session/${otherSid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId, decision: "approve" }),
+  }));
+  assertEquals(wrongSession.status, 404);
+
+  // The real session can still resolve it — proves the 404 above was
+  // session-scoping, not the approval being consumed/expired.
+  const ok = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId, decision: "approve" }),
+  }));
+  assertEquals(ok.status, 200);
+  await until(() => settled(db), 10_000);
+  assertEquals(db.turns[0].status, "completed");
+});
+
 Deno.test("model failure marks the turn failed and persists an error event (no unhandled rejection)", async () => {
   const failing = new MockLanguageModelV3({
     doStream: () => Promise.reject(new Error("model exploded")),
@@ -399,4 +450,139 @@ Deno.test("POST /chat rejects a missing or empty messages array with 400", async
     assertEquals(res.status, 400);
     assertEquals(await res.json(), { error: "messages[] required" });
   }
+});
+
+// The proxy (plugin/function.ts) injects x-user-id from auth-context
+// middleware into the worker request headers; handler.ts must read it back
+// off and pass it through as created_by so a session's owner is
+// recoverable — it was previously always NULL regardless of who created it.
+Deno.test("x-user-id header populates created_by on session creation (POST /eve/v1/session)", async () => {
+  const { handler, db } = await makeHandler();
+  await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-user-id": "user-42" },
+    body: JSON.stringify({}),
+  }));
+  const insert = db.calls.find((c) => c.sql.includes("INSERT INTO agents.sessions"));
+  assert(insert, "expected an agents.sessions insert");
+  assertEquals(insert!.params, ["toy-agent", "toy", "user-42"]);
+});
+
+Deno.test("created_by is null when x-user-id header is absent (POST /eve/v1/session)", async () => {
+  const { handler, db } = await makeHandler();
+  await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }));
+  const insert = db.calls.find((c) => c.sql.includes("INSERT INTO agents.sessions"));
+  assert(insert, "expected an agents.sessions insert");
+  assertEquals(insert!.params, ["toy-agent", "toy", null]);
+});
+
+Deno.test("x-user-id header populates created_by on the /chat endpoint's session", async () => {
+  const { handler, db } = await makeHandler();
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-user-id": "user-7" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+  }));
+  // Drain the UIMessage stream (same as "POST /chat returns a UIMessage
+  // stream" below) — simulateReadableStream schedules real setTimeout(...)
+  // timers per chunk; leaving the body unread leaks them into later tests.
+  await res.text();
+  const insert = db.calls.find((c) => c.sql.includes("INSERT INTO agents.sessions"));
+  assert(insert, "expected an agents.sessions insert");
+  assertEquals(insert!.params, ["toy-agent", "toy", "user-7"]);
+});
+
+Deno.test("GET /stream (live tail) delivers events published after replay completes", async () => {
+  const { handler, db } = await makeHandler();
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream`));
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  const readUntil = async (needle: string, ms = 5000) => {
+    const deadline = Date.now() + ms;
+    while (!text.includes(needle)) {
+      if (Date.now() > deadline) throw new Error(`timed out waiting for ${needle}: ${text}`);
+      const { value, done } = await reader.read();
+      if (done) break;
+      text += decoder.decode(value);
+    }
+  };
+  await readUntil('"turn.completed"'); // the replay snapshot
+  publish(sid, { type: "session.waiting", data: { wait: "next-user-message" } });
+  await readUntil('"session.waiting"'); // the live event, published well after replay
+  await reader.cancel();
+});
+
+Deno.test("GET /stream subscribes before replay: an event published during the replay window is not lost, and buffered events flush after the replay snapshot", async () => {
+  // Regression test for the replay/live gap: previously the route did
+  // listEvents() → replay → subscribe(), so anything published in that
+  // window was neither in the replay snapshot nor caught live — genuinely
+  // lost. Now it subscribes first (buffering into memory), replays, then
+  // flushes the buffer — so a same-window event is delivered exactly once
+  // more than it would have been (after the replay snapshot), never zero.
+  const { handler, db } = await makeHandler();
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+
+  // A store wrapper whose listEvents() blocks on `gate` — simulates the
+  // window between "start replaying" and "replay snapshot ready" during
+  // which a live event can land.
+  const baseStore = createStore(db.query as never);
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  const gatedStore = {
+    ...baseStore,
+    listEvents: async (id: string) => {
+      await gate;
+      return baseStore.listEvents(id);
+    },
+  };
+  const agent = await loadAgent(TOY);
+  const gatedHandler = createHandler({
+    agent, store: gatedStore, plugin: "toy-agent", agentName: "toy", basePath: "/plugins/trex/toy",
+  });
+
+  const streamPromise = gatedHandler(new Request(`${BASE}/eve/v1/session/${sid}/stream`));
+  // Let microtasks run: the route's async start() calls subscribe()
+  // synchronously before its first await (on the gated listEvents()), so by
+  // the time this resolves, the subscription is already live.
+  await new Promise((r) => setTimeout(r, 10));
+  // Published "during the replay window" — subscribe() already happened,
+  // listEvents() has not resolved yet.
+  publish(sid, { type: "session.waiting", data: { wait: "next-user-message" } });
+  releaseGate();
+
+  const res = await streamPromise;
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + 5000;
+  while (!text.includes('"session.waiting"') && Date.now() < deadline) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    text += decoder.decode(value);
+  }
+  await reader.cancel();
+
+  const types = text.split("\n").filter((l) => l !== "").map((l) => (JSON.parse(l) as { type: string }).type);
+  assert(types.includes("message.completed"), `no message.completed in output: [${types.join(", ")}]`);
+  assert(types.includes("session.waiting"), `buffered event was lost: [${types.join(", ")}]`);
+  // Buffer flush ordering: the replay snapshot (message.completed /
+  // turn.completed) precedes the buffered live event in the output.
+  const lastReplayedIdx = Math.max(types.lastIndexOf("message.completed"), types.lastIndexOf("turn.completed"));
+  const waitingIdx = types.indexOf("session.waiting");
+  assert(lastReplayedIdx < waitingIdx, `replay/buffer order inverted: [${types.join(", ")}]`);
 });

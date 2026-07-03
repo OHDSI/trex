@@ -224,6 +224,14 @@ implemented today:
   fallback, so replaying it synthesizes a `message.completed` event that
   never occurred live (a failed turn never reaches the "finish" branch that
   emits it).
+- **`GET .../stream` subscribes to the live tail before running the replay
+  query** (`handler.ts`), buffering anything published in between and
+  flushing it right after the replay snapshot, specifically so an event
+  published during that window is never silently dropped (the gap the
+  previous ordering — replay then subscribe — had); the cost is that such an
+  event can, rarely, be delivered twice (once buffered live, once again if
+  it also landed in `agents.steps` before the replay query ran) — an
+  at-least-once, not exactly-once, guarantee at this reconnect boundary.
 
 ## AI SDK version skew
 
