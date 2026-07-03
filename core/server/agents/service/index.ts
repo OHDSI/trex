@@ -1,6 +1,10 @@
 // Edge-runtime worker entry for an agents-type plugin. One worker per agent;
 // the control server proxies all HTTP for the agent's base path here.
-import pg from "pg";
+// npm: specifier on purpose — a bare "pg" entry in core/server's import map
+// would remap existing production imports of "pg" (e.g. plugin/function.ts's
+// dynamic import resolving via node_modules), which is off-limits. The worker
+// resolves npm: specifiers natively, same convention as devx functions.
+import pg from "npm:pg@^8";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { createHandler } from "./handler.ts";
