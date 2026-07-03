@@ -20,13 +20,26 @@ export function createStore(query: QueryFn) {
     },
 
     async addTurn(sessionId: string, message: unknown, metadata?: unknown) {
-      const r = await query(
-        `INSERT INTO agents.turns (session_id, seq, message, metadata)
-         SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3 FROM agents.turns WHERE session_id = $1
-         RETURNING id, seq`,
-        [sessionId, JSON.stringify(message), metadata ? JSON.stringify(metadata) : null],
-      );
-      return { id: r.rows[0].id, seq: r.rows[0].seq };
+      // Next seq is computed in SQL; the UNIQUE (session_id, seq) constraint
+      // plus a small retry loop provides the no-duplicate-seq guarantee under
+      // concurrent turns on the same session.
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const r = await query(
+            `INSERT INTO agents.turns (session_id, seq, message, metadata)
+             SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3 FROM agents.turns WHERE session_id = $1
+             RETURNING id, seq`,
+            [sessionId, JSON.stringify(message), metadata == null ? null : JSON.stringify(metadata)],
+          );
+          return { id: r.rows[0].id, seq: r.rows[0].seq };
+        } catch (e) {
+          lastError = e;
+          const msg = e instanceof Error ? e.message : String(e);
+          if (!msg.includes("duplicate key") && !msg.includes("unique")) throw e;
+        }
+      }
+      throw lastError;
     },
 
     async finishTurn(turnId: string, status: "completed" | "failed", error?: string) {
@@ -69,7 +82,7 @@ export function createStore(query: QueryFn) {
     async createApproval(sessionId: string, turnId: string, tool: string, input: unknown): Promise<string> {
       const r = await query(
         `INSERT INTO agents.approvals (session_id, turn_id, tool, input) VALUES ($1, $2, $3, $4) RETURNING request_id`,
-        [sessionId, turnId, tool, JSON.stringify(input)],
+        [sessionId, turnId, tool, input == null ? null : JSON.stringify(input)],
       );
       return r.rows[0].request_id;
     },

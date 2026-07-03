@@ -27,6 +27,74 @@ Deno.test("addTurn computes next seq atomically in SQL", async () => {
   assert(calls[0].sql.includes("COALESCE(MAX(seq), 0) + 1"));
 });
 
+Deno.test("addTurn retries on unique violation", async () => {
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  let attempt = 0;
+  const fn = (sql: string, params?: unknown[]) => {
+    calls.push({ sql, params });
+    attempt++;
+    if (attempt === 1) {
+      return Promise.reject(
+        new Error(`duplicate key value violates unique constraint "agents_turns_session_id_seq_key"`),
+      );
+    }
+    return Promise.resolve({ rows: [{ id: "t-2", seq: 2 }] });
+  };
+  const store = createStore(fn as never);
+  const t = await store.addTurn("s-1", { role: "user", content: "hi" });
+  assertEquals(t, { id: "t-2", seq: 2 });
+  assertEquals(calls.length, 2);
+});
+
+Deno.test("getSession returns row when found", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ id: "s-1", status: "active" }] }]);
+  const store = createStore(fn as never);
+  const s = await store.getSession("s-1");
+  assertEquals(s, { id: "s-1", status: "active" });
+  assert(calls[0].sql.includes("FROM agents.sessions"));
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
+Deno.test("getSession returns null when not found", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getSession("missing"), null);
+});
+
+Deno.test("finishTurn updates status and error", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.finishTurn("t-1", "failed", "boom");
+  assert(calls[0].sql.includes("UPDATE agents.turns"));
+  assertEquals(calls[0].params, ["t-1", "failed", "boom"]);
+});
+
+Deno.test("addStep inserts with null payload/usage passthrough", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.addStep("t-1", 1, "text", "chunk", null);
+  assert(calls[0].sql.includes("INSERT INTO agents.steps"));
+  assertEquals(calls[0].params, ["t-1", 1, "text", "chunk", null, null]);
+});
+
+Deno.test("listEvents returns rows", async () => {
+  const rows = [{ kind: "text", name: null, payload: { text: "hi" } }];
+  const { fn, calls } = fakeQuery([{ rows }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.listEvents("s-1"), rows);
+  assert(calls[0].sql.includes("FROM agents.steps"));
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
+Deno.test("getHistory returns rows", async () => {
+  const rows = [{ message: { role: "user" }, metadata: null, steps: [] }];
+  const { fn, calls } = fakeQuery([{ rows }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getHistory("s-1"), rows);
+  assert(calls[0].sql.includes("FROM agents.turns"));
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
 Deno.test("approval round trip", async () => {
   const { fn } = fakeQuery([
     { rows: [{ request_id: "r-1" }] },      // createApproval
