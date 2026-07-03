@@ -25,6 +25,15 @@ Deno.test("buildAgentWorkerConfig produces worker env and generated import map",
   assertEquals(map.imports["ai"], "npm:ai@^6");
 });
 
+Deno.test("buildAgentWorkerConfig accepts EDN-only agent dirs (instructions.edn)", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.mkdir(`${tmp}/agent`);
+  await Deno.writeTextFile(`${tmp}/agent/instructions.edn`, `"You are an EDN-configured agent."`);
+  const cfg = await buildAgentWorkerConfig(tmp, { name: "ednagent", dir: "agent" }, "@trex/edn-agent");
+  assertEquals(cfg.source, "/ednagent");
+  assertEquals(cfg.env.TREX_AGENT_DIR, `${tmp}/agent`);
+});
+
 Deno.test("buildAgentWorkerConfig fails fast when instructions.md missing", async () => {
   const tmp = await Deno.makeTempDir();
   await Deno.mkdir(`${tmp}/agent`);

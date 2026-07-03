@@ -36,10 +36,16 @@ export async function buildAgentWorkerConfig(
 ): Promise<{ source: string; servicePath: string; importMapPath: string; env: Record<string, string> }> {
   const agentDir = `${pluginDir}/${entry.dir}`;
   // Fail registration early with a clear message rather than at first request.
+  // Presence-only check: the loader (agents/loader.ts) accepts instructions.md
+  // OR instructions.edn and owns full parsing/precedence at worker start.
   try {
     await Deno.stat(`${agentDir}/instructions.md`);
   } catch {
-    throw new Error(`agents: ${agentDir}/instructions.md is required but missing (plugin ${pluginFullName})`);
+    try {
+      await Deno.stat(`${agentDir}/instructions.edn`);
+    } catch {
+      throw new Error(`agents: ${agentDir}/instructions.md (or instructions.edn) is required but missing (plugin ${pluginFullName})`);
+    }
   }
 
   const shimBase = new URL("../agents/eve-shim/", import.meta.url);
