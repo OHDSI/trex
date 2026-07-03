@@ -1,11 +1,78 @@
-// Stream event vocabulary. Provisional names — Task 9 reconciles these with
-// eve's actual session-stream event names so `eve eval --url` can consume our
-// stream, and updates this file plus dependent tests in a single commit.
+// Stream event vocabulary, reconciled against real eve (npm `eve@0.19.0`,
+// see COMPAT.md). Verified two ways: eve's *public* docs
+// (docs/concepts/sessions-runs-and-streaming.md — event names, high-level
+// semantics) AND, because the docs undersell how strict the wire shape
+// actually is, eve's bundled client source
+// (dist/src/protocol/message.js's create*Event() builders and
+// dist/src/evals/runner/derive-run-facts.js, which is what `eve eval`'s
+// `t.calledTool()`/`t.succeeded()` actually read off the stream) — live
+// end-to-end against the real `eve eval` CLI (see COMPAT.md's e2e section).
+//
+// Every eve event is `{ type, data }` — NOT flat fields on the event
+// itself. This file mirrors that envelope and the `data` shapes eve's own
+// client code destructures (`actions[].kind/callId/toolName/input`,
+// `result.kind/callId/toolName/output`, `messageSoFar`, etc.), not just the
+// prose event names. We implement the core turn/message/action/session
+// lifecycle eve documents, and additively extend `actions.requested`'s
+// action items with `clientOnly` so a frontend can tell a client-rendered
+// proposal card from a server-executed tool call. We do NOT implement eve's
+// full vocabulary (subagent.*, compaction.*, authorization.*, reasoning.*,
+// step.*) — see COMPAT.md for the exact list and why.
+//
+// message.completed IS implemented (added after a live `eve eval --url` run
+// against a real eve target proved it load-bearing, not cosmetic): eve's own
+// client (`#client/session-utils.js`'s `extractCompletedMessage`, which
+// backs `t.reply` and the `includes()`/`messageIncludes` eval assertion)
+// only reads the final assistant text off a `message.completed` event whose
+// `finishReason !== "tool-calls"` — it never falls back to
+// `message.appended`'s `messageSoFar`. Without it, `t.reply` is always
+// `null` and any eval asserting on reply text fails even though the turn
+// completed successfully and the text was streamed. See COMPAT.md's
+// eve-eval section for the exact run that surfaced this.
+//
+// session.waiting / session.failed ARE included despite the smaller
+// vocabulary, even though we have no multi-turn "parked" durability: eve's
+// own client (`MessageResponse.result()`) ends its per-turn read
+// specifically on session.waiting, session.completed, or session.failed —
+// NOT on turn.completed/turn.failed (confirmed in derive-run-facts.js's
+// `TURN_EPILOGUE_EVENT_TYPES`). Without one of those three, a real eve
+// client (including `eve eval`) hangs forever after a turn finishes. We
+// emit session.waiting right after a successful turn.completed (our "turn
+// ended, ready for the next message" is eve's "session parked between
+// turns") and session.failed right after turn.failed. We never emit
+// session.completed (no concept of a session reaching a terminal,
+// non-resumable end).
+
+export interface ActionRequestItem {
+  kind: "tool-call";
+  callId: string;
+  toolName: string;
+  input: unknown;
+  clientOnly?: boolean; // additive, not part of eve's shape — see COMPAT.md
+}
+
+export interface ActionResultData {
+  kind: "tool-result";
+  callId: string;
+  toolName: string;
+  output: unknown;
+}
+
+export interface InputRequestItem {
+  requestId: string;
+  action: { kind: "tool-call"; callId: string; toolName: string; input: unknown };
+}
+
 export type AgentEvent =
-  | { type: "turn-start"; turnId: string; seq: number }
-  | { type: "text-delta"; delta: string }
-  | { type: "tool-call"; toolCallId: string; toolName: string; input: unknown; clientOnly?: boolean }
-  | { type: "tool-result"; toolCallId: string; toolName: string; output: unknown }
-  | { type: "approval-request"; requestId: string; toolName: string; input: unknown }
-  | { type: "turn-finish"; usage: { inputTokens?: number; outputTokens?: number }; finishReason: string }
-  | { type: "error"; message: string };
+  | { type: "turn.started"; data: { turnId: string; sequence: number } }
+  | { type: "message.appended"; data: { turnId: string; messageDelta: string; messageSoFar: string } }
+  | { type: "message.completed"; data: { turnId: string; message: string; finishReason: string } }
+  | { type: "actions.requested"; data: { turnId: string; actions: ActionRequestItem[] } }
+  | { type: "action.result"; data: { turnId: string; result: ActionResultData; status: "completed" | "failed" } }
+  | { type: "input.requested"; data: { turnId: string; requests: InputRequestItem[] } }
+  // usage/finishReason are additive here (eve puts them on step.completed,
+  // which we don't implement — see COMPAT.md) rather than turn.completed.
+  | { type: "turn.completed"; data: { turnId: string; usage?: { inputTokens?: number; outputTokens?: number }; finishReason?: string } }
+  | { type: "turn.failed"; data: { turnId: string; message: string } }
+  | { type: "session.waiting"; data: { wait: "next-user-message" } }
+  | { type: "session.failed"; data: { sessionId: string; message: string } };

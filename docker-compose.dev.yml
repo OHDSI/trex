@@ -68,6 +68,7 @@ services:
       - ./plugins/notebook/dist:/usr/src/plugins-dev/notebook/dist
       - ./plugins/prometheus/dist:/usr/src/plugins-dev/prometheus/dist
       - ./plugins/storage:/usr/src/plugins-dev/storage
+      - ./plugins-dev/toy-agent:/usr/src/plugins-dev/toy-agent
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
     depends_on:

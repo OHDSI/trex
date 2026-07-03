@@ -59,7 +59,7 @@ export function createStore(query: QueryFn) {
 
     async listEvents(sessionId: string) {
       const r = await query(
-        `SELECT s.kind, s.name, s.payload FROM agents.steps s
+        `SELECT s.turn_id, s.kind, s.name, s.payload, s.usage FROM agents.steps s
          JOIN agents.turns t ON t.id = s.turn_id
          WHERE t.session_id = $1 ORDER BY t.seq, s.seq`,
         [sessionId],

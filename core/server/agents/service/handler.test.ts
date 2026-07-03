@@ -14,7 +14,7 @@ function inMemoryDb() {
   // and drive approval decisions without Postgres.
   const sessions = new Map<string, { status: string }>();
   const turns: Array<{ id: string; session_id: string; seq: number; status: string; error: string | null }> = [];
-  const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown }> = [];
+  const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
   const approvals = new Map<string, { decision: string | null }>();
   let n = 0;
   const query = (sql: string, params: unknown[] = []) => {
@@ -42,7 +42,10 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("INSERT INTO agents.steps")) {
-      steps.push({ turn_id: params[0] as string, seq: params[1] as number, kind: params[2] as string, name: params[3] as string | null, payload: params[4] });
+      steps.push({
+        turn_id: params[0] as string, seq: params[1] as number, kind: params[2] as string,
+        name: params[3] as string | null, payload: params[4], usage: params[5],
+      });
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("INSERT INTO agents.approvals")) {
@@ -62,9 +65,15 @@ function inMemoryDb() {
     }
     if (sql.includes("FROM agents.steps")) {
       const sid = params[0] as string;
+      // store.addStep JSON.stringifies payload/usage before the "insert" (it
+      // targets a jsonb column on real Postgres, which parses the text back
+      // into an object on SELECT) — parse them back here too, or every
+      // consumer of listEvents() sees strings instead of objects, unlike
+      // production.
+      const parse = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v);
       const rows = steps
         .filter((s) => turns.some((t) => t.id === s.turn_id && t.session_id === sid))
-        .map((s) => ({ kind: s.kind, name: s.name, payload: s.payload }));
+        .map((s) => ({ turn_id: s.turn_id, kind: s.kind, name: s.name, payload: parse(s.payload), usage: parse(s.usage) }));
       return Promise.resolve({ rows });
     }
     return Promise.resolve({ rows: [] });
@@ -162,7 +171,7 @@ Deno.test("POST /eve/v1/session creates a session and returns the id header", as
   assertEquals(db.turns[0].status, "completed");
 });
 
-Deno.test("GET /stream replays persisted events as SSE after the turn ran", async () => {
+Deno.test("GET /stream replays persisted events as NDJSON after the turn ran", async () => {
   const { handler, db } = await makeHandler();
   const create = await handler(new Request(`${BASE}/eve/v1/session`, {
     method: "POST", headers: { "content-type": "application/json" },
@@ -171,30 +180,40 @@ Deno.test("GET /stream replays persisted events as SSE after the turn ran", asyn
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => settled(db)); // let the async turn finish (mock model is instant)
   const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?replayOnly=1`));
-  assertEquals(res.headers.get("content-type"), "text/event-stream");
+  assertEquals(res.headers.get("content-type"), "application/x-ndjson");
   const text = await res.text();
-  assert(text.includes('"finish"') || text.includes("turn-finish"));
-  // SSE framing (sseEncode contract): every non-blank line is a single-line
-  // `data: {json}` frame, and frames are separated by blank lines.
+  assert(text.includes('"turn.completed"'));
+  // Replay of the persisted "text" step maps to message.completed, not
+  // message.appended (see handler.ts's stepToEvent) — that's the event
+  // eve's own client reads the final reply off (see events.ts).
+  assert(text.includes('"message.completed"'));
+  assert(text.includes('"hello from toy"'));
+  // NDJSON framing (ndjsonEncode contract): every non-blank line is exactly
+  // one JSON object, no SSE "data: " prefix or blank-line separators.
   const lines = text.split("\n").filter((l) => l !== "");
   assert(lines.length > 0);
   for (const line of lines) {
-    assert(/^data: \{.*\}$/.test(line), `bad SSE frame: ${JSON.stringify(line)}`);
+    assert(/^\{.*\}$/.test(line), `bad NDJSON line: ${JSON.stringify(line)}`);
+    JSON.parse(line); // throws if malformed
   }
-  assert(text.includes("\n\n"));
 });
 
-Deno.test("unknown session 404s; unknown route 404s; healthz lists tools", async () => {
+Deno.test("unknown session 404s; unknown route 404s; healthz/eve-info list tools", async () => {
   const { handler } = await makeHandler();
   assertEquals((await handler(new Request(`${BASE}/eve/v1/session/nope/stream`))).status, 404);
+  assertEquals((await handler(new Request(`${BASE}/eve/v1/session/nope`, { method: "POST", body: "{}" }))).status, 404);
   assertEquals((await handler(new Request(`${BASE}/bogus`))).status, 404);
   // basePath is anchored: unprefixed paths never hit our routes.
   assertEquals((await handler(new Request(`http://local/healthz`))).status, 404);
   const health = await (await handler(new Request(`${BASE}/healthz`))).json();
   assertEquals(health.tools.sort(), ["echo", "propose_card"]);
+  assertEquals((await handler(new Request(`${BASE}/eve/v1/health`))).status, 200);
+  const info = await (await handler(new Request(`${BASE}/eve/v1/info`))).json();
+  assertEquals(info.kind, "eve-agent-info");
+  assertEquals(info.tools.authored.map((t: { name: string }) => t.name).sort(), ["echo", "propose_card"]);
 });
 
-Deno.test("POST /message on an existing session accepts and records a turn", async () => {
+Deno.test("POST /eve/v1/session/:id (bare) on an existing session accepts and records a turn", async () => {
   const { handler, db } = await makeHandler();
   // Create the session without a first message — no turn starts.
   const create = await handler(new Request(`${BASE}/eve/v1/session`, {
@@ -203,7 +222,7 @@ Deno.test("POST /message on an existing session accepts and records a turn", asy
   }));
   const sid = create.headers.get("x-eve-session-id")!;
   assertEquals(db.turns.length, 0);
-  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/message`, {
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ message: "hi" }),
   }));
@@ -212,6 +231,40 @@ Deno.test("POST /message on an existing session accepts and records a turn", asy
   assertEquals(db.turns.length, 1);
   assertEquals(db.turns[0].status, "completed");
   assert(db.steps.some((s) => s.turn_id === db.turns[0].id));
+});
+
+Deno.test("POST /eve/v1/session/:id with inputResponses resolves a pending approval", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const bad = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "ask_question" }] }),
+  }));
+  assertEquals(bad.status, 400);
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "approve" }] }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => settled(db), 10_000);
+  assertEquals(db.turns[0].status, "completed");
 });
 
 Deno.test("POST /approval resolves a pending approval and unblocks the turn; unknown requestId 404s", async () => {

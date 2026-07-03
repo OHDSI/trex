@@ -51,7 +51,10 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
           return { error: "approval required — use the session API" };
         }
         const requestId = await store.createApproval(ctx.sessionId, turnId, name, input);
-        emit({ type: "approval-request", requestId, toolName: name, input });
+        emit({
+          type: "input.requested",
+          data: { turnId, requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName: name, input } }] },
+        });
         const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 300_000);
         let decision: string | null = null;
         while (Date.now() < deadline) {

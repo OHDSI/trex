@@ -78,10 +78,37 @@ Deno.test("runTurn streams text deltas and a finish event, persists steps", asyn
     model: sequencedModel(textChunks("hi there")),
   });
   assertEquals(res.text, "hi there");
-  assert(events.some((e) => e.type === "text-delta"));
-  const finish = events.find((e) => e.type === "turn-finish");
-  assert(finish && (finish as { usage: { outputTokens?: number } }).usage.outputTokens === 1);
+  assert(events.some((e) => e.type === "message.appended"));
+  // message.completed is what eve's own client reads the final reply off
+  // (see events.ts) — verified missing via a live `eve eval --url` run
+  // before this was added; regression-guard it here.
+  const completed = events.find((e) => e.type === "message.completed");
+  assert(completed, "expected a message.completed event carrying the final reply");
+  assertEquals((completed as { data: { message: string; finishReason: string } }).data.message, "hi there");
+  assertEquals((completed as { data: { message: string; finishReason: string } }).data.finishReason, "stop");
+  // message.completed must come before turn.completed — eve's client treats
+  // it as part of the same turn's epilogue, read before the boundary event.
+  const completedIdx = events.indexOf(completed);
+  const finishIdx = events.findIndex((e) => e.type === "turn.completed");
+  assert(completedIdx >= 0 && finishIdx >= 0 && completedIdx < finishIdx);
+  const finish = events.find((e) => e.type === "turn.completed");
+  assert(finish && (finish as { data: { usage: { outputTokens?: number } } }).data.usage.outputTokens === 1);
   assert(calls.some((c) => c.startsWith("INSERT INTO agents.steps")));
+});
+
+Deno.test("runTurn does not emit message.completed for a clientOnly tool-call turn (no trailing text)", async () => {
+  // clientOnly tools have no `execute` (toolset.ts), so the AI SDK ends the
+  // turn right after the tool call with finishReason "tool-calls" and no
+  // model text at all — same shape as the existing clientOnly test above.
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "propose", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("propose_card", { title: "Diabetes cohort" })),
+  });
+  assert(!events.some((e) => e.type === "message.completed"));
 });
 
 Deno.test("runTurn emits clientOnly tool call and does not execute it", async () => {
@@ -93,11 +120,12 @@ Deno.test("runTurn emits clientOnly tool call and does not execute it", async ()
     message: "propose", store, emit: (e) => events.push(e),
     model: sequencedModel(toolCallChunks("propose_card", { title: "Diabetes cohort" })),
   });
-  const call = events.find((e) => e.type === "tool-call") as { clientOnly?: boolean; toolName: string };
-  assert(call);
+  const ev = events.find((e) => e.type === "actions.requested") as { data: { actions: Array<{ clientOnly?: boolean; toolName: string }> } };
+  assert(ev);
+  const call = ev.data.actions[0];
   assertEquals(call.toolName, "propose_card");
   assertEquals(call.clientOnly, true);
-  assert(!events.some((e) => e.type === "tool-result")); // never executed
+  assert(!events.some((e) => e.type === "action.result")); // never executed
 });
 
 Deno.test("needsApproval tool waits for approval before executing", async () => {
@@ -126,8 +154,8 @@ Deno.test("needsApproval tool waits for approval before executing", async () => 
   // approve shortly after the approval-request lands
   setTimeout(() => { decisions["r-1"] = "approve"; }, 50);
   await p;
-  assert(events.some((e) => e.type === "approval-request"));
-  assert(events.some((e) => e.type === "tool-result"));
+  assert(events.some((e) => e.type === "input.requested"));
+  assert(events.some((e) => e.type === "action.result"));
 });
 
 Deno.test("built-in skill tool loads skill content on demand", async () => {
@@ -139,10 +167,10 @@ Deno.test("built-in skill tool loads skill content on demand", async () => {
     message: "how should you greet?", store, emit: (e) => events.push(e),
     model: sequencedModel(toolCallChunks("skill", { name: "greeting-style" }), textChunks("Ahoy!")),
   });
-  const result = events.find((e) => e.type === "tool-result") as { output?: { content?: string } };
-  assert(result, "skill tool should have executed");
-  assert(String((result as { output: unknown }).output).includes("Ahoy") ||
-    JSON.stringify((result as { output: unknown }).output).includes("Ahoy"));
+  const ev = events.find((e) => e.type === "action.result") as { data: { result: { output: unknown } } };
+  assert(ev, "skill tool should have executed");
+  const output = ev.data.result.output;
+  assert(String(output).includes("Ahoy") || JSON.stringify(output).includes("Ahoy"));
 });
 
 Deno.test("built-in skill tool returns available list for unknown skill", async () => {
@@ -154,8 +182,8 @@ Deno.test("built-in skill tool returns available list for unknown skill", async 
     message: "load bogus", store, emit: (e) => events.push(e),
     model: sequencedModel(toolCallChunks("skill", { name: "bogus" }), textChunks("ok")),
   });
-  const result = events.find((e) => e.type === "tool-result");
-  assert(JSON.stringify((result as { output: unknown }).output).includes("greeting-style"));
+  const ev = events.find((e) => e.type === "action.result") as { data: { result: { output: unknown } } };
+  assert(JSON.stringify(ev.data.result.output).includes("greeting-style"));
 });
 
 Deno.test("built-in agent tool runs a named subagent and returns its text", async () => {
@@ -173,11 +201,11 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
     agent, sessionId: "s-1", turnId: "t-1", history: [],
     message: "delegate", store, emit: (e) => events.push(e), model,
   });
-  const result = events.find(
-    (e) => e.type === "tool-result" && (e as { toolName: string }).toolName === "agent",
-  ) as { output?: { text?: string } };
-  assert(result, "agent tool should have executed");
-  assertEquals(result.output?.text, "BANANA");
+  const ev = events.find(
+    (e) => e.type === "action.result" && (e as { data: { result: { toolName: string } } }).data.result.toolName === "agent",
+  ) as { data: { result: { output?: { text?: string } } } };
+  assert(ev, "agent tool should have executed");
+  assertEquals(ev.data.result.output?.text, "BANANA");
 });
 
 Deno.test("subagent runs do not get a nested agent tool (one level only)", async () => {
