@@ -3,22 +3,27 @@
 // (core/server/agents/service). Routing/auth/SSE piping reuse the function
 // plugin proxy (_addFunction).
 import type { Express } from "express";
-import { _addFunction } from "./function.ts";
+import { _addFunction, substituteEnvVarsInObject } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 
 export interface AgentEntry {
   name: string;
   dir: string;
+  env?: Record<string, string>;
 }
 
 export function normalizeAgentsValue(value: unknown): AgentEntry[] {
   const arr = Array.isArray(value) ? value : [value];
   return arr.map((e) => {
-    const entry = e as { name?: string; dir?: string };
+    const entry = e as { name?: string; dir?: string; env?: unknown };
     if (!entry?.name || !/^[a-z0-9][a-z0-9_-]*$/i.test(entry.name)) {
       throw new Error(`agents: each entry needs a name ([a-zA-Z0-9_-]), got ${JSON.stringify(e)}`);
     }
-    return { name: entry.name, dir: entry.dir ?? "agent" };
+    const result: AgentEntry = { name: entry.name, dir: entry.dir ?? "agent" };
+    if (entry.env && typeof entry.env === "object" && !Array.isArray(entry.env)) {
+      result.env = entry.env as Record<string, string>;
+    }
+    return result;
   });
 }
 
@@ -94,15 +99,25 @@ export async function buildAgentWorkerConfig(
   const serviceEntryUrl = new URL("../agents/service/index.ts", import.meta.url).href;
   await Deno.writeTextFile(`${tmp}/index.ts`, `import "${serviceEntryUrl}";\n`);
 
-  const env: Record<string, string> = {
-    TREX_AGENT_DIR: agentDir,
-    TREX_AGENT_NAME: entry.name,
-    TREX_PLUGIN_NAME: pluginFullName,
-  };
+  const env: Record<string, string> = {};
+
+  // Passthrough env vars from the host (if set)
   for (const k of PASSTHROUGH_ENV) {
     const v = Deno.env.get(k);
     if (v) env[k] = v;
   }
+
+  // Entry-specific env (substituted), can override passthrough
+  const entryEnv = substituteEnvVarsInObject(entry.env ?? {});
+  Object.assign(env, entryEnv);
+
+  // Reserved keys must not be overridden
+  const reserved: Record<string, string> = {
+    TREX_AGENT_DIR: agentDir,
+    TREX_AGENT_NAME: entry.name,
+    TREX_PLUGIN_NAME: pluginFullName,
+  };
+  Object.assign(env, reserved);
 
   return {
     source: `/${entry.name}`,

@@ -153,7 +153,7 @@ function substituteVariable(varExpression: string): string {
   return envValue !== undefined ? envValue : "";
 }
 
-function substituteEnvVarsInObject(obj: any): any {
+export function substituteEnvVarsInObject(obj: any): any {
   if (typeof obj === "string") return substituteEnvVars(obj);
   if (Array.isArray(obj)) return obj.map(substituteEnvVarsInObject);
   if (obj !== null && typeof obj === "object") {

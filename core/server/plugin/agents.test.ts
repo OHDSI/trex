@@ -104,3 +104,43 @@ Deno.test("addAgentsPlugin skips registration for a non-@trex plugin name withou
     "@evil/agent",
   );
 });
+
+Deno.test("buildAgentWorkerConfig resolves entry env with ${VAR:-default} substitution", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+
+  // Test with unset var — should use fallback
+  const cfgUnset = await buildAgentWorkerConfig(
+    toyPlugin,
+    { name: "a", dir: "agent", env: { FOO: "${__AGENTS_TEST_VAR:-fallback}" } },
+    "@trex/toy-agent"
+  );
+  assertEquals(cfgUnset.env.FOO, "fallback");
+
+  // Test with set var — should use live value
+  Deno.env.set("__AGENTS_TEST_VAR", "live");
+  try {
+    const cfgSet = await buildAgentWorkerConfig(
+      toyPlugin,
+      { name: "b", dir: "agent", env: { FOO: "${__AGENTS_TEST_VAR:-fallback}" } },
+      "@trex/toy-agent"
+    );
+    assertEquals(cfgSet.env.FOO, "live");
+  } finally {
+    Deno.env.delete("__AGENTS_TEST_VAR");
+  }
+});
+
+Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  const realDir = `${toyPlugin}/agent`;
+
+  const cfg = await buildAgentWorkerConfig(
+    toyPlugin,
+    { name: "a", dir: "agent", env: { TREX_AGENT_DIR: "/evil" } },
+    "@trex/toy-agent"
+  );
+
+  // Reserved key must retain its real value, not the evil override
+  assertEquals(cfg.env.TREX_AGENT_DIR, realDir);
+  assertEquals(cfg.env.TREX_AGENT_NAME, "a");
+});
