@@ -55,10 +55,35 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).clientOnly).map(([n]) => n),
   );
 
+  // H3: ToolContext.emit's session-path channel. A tool's execute() calls
+  // this synchronously (fire-and-forget — see eve-shim/types.ts's
+  // ToolContext.emit); it publishes the same live `tool.event` a subscriber
+  // to the session stream gets, and persists a `custom` step through the
+  // SAME stepSeq counter `persist` (above) closes over — the `++stepSeq`
+  // assignment happens synchronously at call time, so seq numbers stay
+  // unique/monotonic regardless of exactly when this fires
+  // (V2__custom_steps.sql widens agents.steps.kind's CHECK to allow
+  // 'custom'). NOT guaranteed to land seq-between the tool-call and
+  // tool-result step of the SAME tool invocation: the AI SDK invokes
+  // tool.execute() as part of its own internal step processing, which can
+  // run concurrently with — and finish ahead of — this loop's `await
+  // persist("tool-call", ...)` for the very call that triggered it (verified
+  // empirically: a synchronous mock tool's emit can land at a lower seq than
+  // its own tool-call step). Replay is still correct either way (seq order
+  // IS call order, whatever that turns out to be) — just not intuitively
+  // "nested inside" the tool-call/tool-result pair. Not awaited by design —
+  // persist() already swallows/logs its own failures, so a slow or failing
+  // write here never blocks the tool or leaks an unhandled rejection into
+  // the turn.
+  const toolEmit = (name: string, data: unknown) => {
+    emit({ type: "tool.event", data: { name, payload: data } });
+    persist("custom", name, data);
+  };
+
   // H2: async now that a top-level dynamic-tools.ts provider may need to run
   // (opts already carries hookCtx — see RunTurnOpts — so ToolBuildCtx picks
   // it up via the spread).
-  const tools = await buildSdkTools({ ...opts, model });
+  const tools = await buildSdkTools({ ...opts, model, toolEmit });
   const result = streamText({
     model,
     system,

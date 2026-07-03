@@ -218,6 +218,76 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   assert("skill" in top);
 });
 
+// H3: ToolContext.emit — see task-h3-brief.md. The session path publishes a
+// live tool.event and persists a `custom` step through the SAME stepSeq
+// counter as every other step (asserted via the raw insert params here), so
+// every persisted step this turn — including this one — has a unique,
+// monotonically assigned seq and replays in real call order.
+Deno.test("ToolContext.emit publishes a live tool.event and persists a custom step", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.emitter = {
+    description: "emits a custom progress event",
+    inputSchema: { type: "object", properties: {} },
+    execute: (_input: unknown, ctx?: { emit?: (name: string, data: unknown) => void }) => {
+      ctx?.emit?.("progress", { step: 1 });
+      return Promise.resolve({ ok: true });
+    },
+  };
+  const inserted: Array<{ seq: number; kind: string; name: string | null; payload: unknown }> = [];
+  const fn = (sql: string, params: unknown[] = []) => {
+    if (sql.includes("RETURNING id, seq")) return Promise.resolve({ rows: [{ id: "t-1", seq: 1 }] });
+    if (sql.includes("INSERT INTO agents.steps")) {
+      inserted.push({ seq: params[1] as number, kind: params[2] as string, name: params[3] as string | null, payload: params[4] });
+      return Promise.resolve({ rows: [] });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  const store = createStore(fn as never);
+  const events: AgentEvent[] = [];
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "go", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("emitter", {}), textChunks("done")),
+  });
+
+  const live = events.find((e) => e.type === "tool.event") as { data: { name: string; payload: unknown } } | undefined;
+  assert(live, "expected a live tool.event");
+  assertEquals(live.data, { name: "progress", payload: { step: 1 } });
+
+  const persisted = inserted.find((s) => s.kind === "custom");
+  assert(persisted, "expected a persisted custom step");
+  assertEquals(persisted!.name, "progress");
+  assertEquals(persisted!.payload, JSON.stringify({ step: 1 }));
+
+  // toolEmit shares the runner's single stepSeq counter, not a side
+  // channel: every persisted step this turn has a distinct seq (no
+  // collision with the surrounding tool-call/tool-result/text/finish
+  // steps). NOTE: the custom step's seq is NOT guaranteed to fall between
+  // its own tool-call and tool-result — the AI SDK invokes tool.execute()
+  // as part of its own internal step processing, which can complete before
+  // this loop's `await persist("tool-call", ...)` for the very call that
+  // triggered it (verified empirically with this synchronous mock tool);
+  // only seq-uniqueness/monotonicity is a runner.ts guarantee (see
+  // runner.ts's toolEmit comment).
+  const seqs = inserted.map((s) => s.seq);
+  assertEquals(new Set(seqs).size, seqs.length, `duplicate seq: [${inserted.map((s) => `${s.kind}#${s.seq}`).join(", ")}]`);
+});
+
+// A tool that never calls ctx.emit (every other toy-agent tool, and the toy
+// agent's own eve-eval-covered echo tool) must not produce a tool.event —
+// the channel is opt-in per tool, not automatic.
+Deno.test("a tool that never calls ctx.emit produces no tool.event", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "echo", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("echo", { text: "hi" }), textChunks("done")),
+  });
+  assert(!events.some((e) => e.type === "tool.event"));
+});
+
 Deno.test("built-in agent tool guards subagent lookup against prototype-polluting names", async () => {
   // "__proto__"/"constructor" resolve through the prototype chain on a
   // plain `subagents[name]` lookup (returning Object.prototype/Function

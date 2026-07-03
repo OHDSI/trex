@@ -21,6 +21,20 @@ export interface ToolBuildCtx {
   store?: AgentStore;
   turnId?: string;
   emit?: (e: AgentEvent) => void;
+  // H3: wired per-endpoint (session runner: publish `tool.event` + persist a
+  // `custom` step, see runner.ts's toolEmit; /chat: write an interleaved
+  // `data-${name}` UIMessage part, see handler.ts) and handed to every
+  // authored tool's execute() as ToolContext.emit (see authoredTool below).
+  // Distinct from `emit` above, which carries the session-lifecycle
+  // AgentEvent channel (approvals etc.) — toolEmit is the tool-authored
+  // (name, data) channel. Undefined when the caller never wired one;
+  // authoredTool passes it through as-is, matching ToolContext.emit's "safe
+  // no-op when unwired" contract (eve-shim/types.ts) since an absent field
+  // makes `ctx?.emit?.(...)` a no-op at the call site, not a throw here.
+  // Inherited by subagent runs (depth 1) via runSubagent's `{ ...ctx }`
+  // spread below — a subagent's tool.event lands on the SAME channel
+  // (session stream / chat writer) as its parent's, not a distinct one.
+  toolEmit?: (name: string, data: unknown) => void;
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
   depth?: number;
@@ -91,7 +105,13 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
           return { error: decision === "deny" ? "denied by user" : "approval timed out" };
         }
       }
-      return await def.execute!(input, { bearerToken: ctx.bearerToken, sessionId: ctx.sessionId, metadata: ctx.metadata, userId: ctx.userId });
+      return await def.execute!(input, {
+        bearerToken: ctx.bearerToken,
+        sessionId: ctx.sessionId,
+        metadata: ctx.metadata,
+        userId: ctx.userId,
+        emit: ctx.toolEmit,
+      });
     },
   });
 }

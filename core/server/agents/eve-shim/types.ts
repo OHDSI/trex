@@ -67,6 +67,16 @@ export interface ToolContext {
   sessionId: string;
   metadata?: unknown;
   userId?: string;
+  // H3: fire-and-forget custom tool events. A tool's execute() calls this to
+  // surface arbitrary progress/telemetry to whichever client is watching —
+  // the session API's live stream (as a `tool.event` AgentEvent, also
+  // persisted as an `agents.steps` row with `kind: 'custom'`, see
+  // runner.ts's toolEmit) or the /chat UIMessage stream (as an interleaved
+  // `data-${name}` part, see handler.ts). Optional and safe to call or skip:
+  // an endpoint that hasn't wired an emit channel (e.g. toolset.ts's
+  // buildSdkTools called with no toolEmit) simply omits this field, so a
+  // tool must guard with `ctx?.emit?.(...)` — never assume it's present.
+  emit?: (name: string, data: unknown) => void;
 }
 
 // deno-lint-ignore no-explicit-any

@@ -230,6 +230,41 @@ Deno.test("replay preserves live event order: message.completed before turn.comp
   assert(completedIdx < finishIdx, `replay order inverted: [${types.join(", ")}]`);
 });
 
+// H3: replay maps a persisted `custom` step (from ToolContext.emit on the
+// session path — runner.test.ts covers the live side) back to the same
+// `tool.event` a live subscriber would have seen, same as every other step
+// kind (see handler.ts's stepToEvent).
+Deno.test("GET /stream replays a persisted custom step as tool.event", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("emitter", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.emitter = {
+        description: "emits a custom progress event",
+        inputSchema: { type: "object", properties: {} },
+        execute: (_input: unknown, ctx?: { emit?: (name: string, data: unknown) => void }) => {
+          ctx?.emit?.("progress", { step: 1 });
+          return Promise.resolve({ ok: true });
+        },
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  assert(db.steps.some((s) => s.kind === "custom"), "expected a persisted custom step");
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?replayOnly=1`));
+  const text = await res.text();
+  assert(text.includes('"tool.event"'), `no tool.event in replay: ${text}`);
+  const lines = text.split("\n").filter((l) => l !== "").map((l) => JSON.parse(l));
+  const toolEvent = lines.find((l) => l.type === "tool.event");
+  assert(toolEvent, `no tool.event line: ${text}`);
+  assertEquals(toolEvent.data.name, "progress");
+  assertEquals(toolEvent.data.payload, { step: 1 });
+});
+
 Deno.test("unknown session 404s; unknown route 404s; healthz/eve-info list tools", async () => {
   const { handler } = await makeHandler();
   assertEquals((await handler(new Request(`${BASE}/eve/v1/session/nope/stream`))).status, 404);
@@ -438,6 +473,47 @@ Deno.test("POST /chat returns a UIMessage stream", async () => {
   assert((res.headers.get("content-type") || "").includes("text/event-stream"));
   const body = await res.text();
   assert(body.length > 0);
+});
+
+// H3: ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part
+// into the SAME stream useChat consumes (createUIMessageStream +
+// writer.merge — see handler.ts and task-h3-report.md for the v6 API
+// verification). No agents.steps write on this path (unlike the session
+// path) — /chat never persisted tool-call/tool-result steps either.
+Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", async () => {
+  const { handler } = await makeHandler({
+    model: sequencedModel(toolCallChunks("emitter", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.emitter = {
+        description: "emits a custom progress event",
+        inputSchema: { type: "object", properties: {} },
+        execute: (_input: unknown, ctx?: { emit?: (name: string, data: unknown) => void }) => {
+          ctx?.emit?.("progress", { step: 1 });
+          return Promise.resolve({ ok: true });
+        },
+      };
+    },
+  });
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "go" }] }] }),
+  }));
+  assertEquals(res.status, 200);
+  const text = await res.text();
+  assert(text.includes('"type":"data-progress"'), `no data-progress part in stream: ${text}`);
+  assert(text.includes('"step":1'), `emitted payload missing from stream: ${text}`);
+});
+
+// A tool that never calls ctx.emit must not add any data-* part — same
+// no-op-when-unused posture as the session path (runner.test.ts).
+Deno.test("POST /chat: a tool that never calls ctx.emit adds no data-* part", async () => {
+  const { handler } = await makeHandler();
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+  }));
+  const text = await res.text();
+  assert(!/"type":"data-/.test(text), `unexpected data-* part: ${text}`);
 });
 
 Deno.test("POST /chat rejects a missing or empty messages array with 400", async () => {

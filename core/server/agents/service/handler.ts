@@ -1,6 +1,6 @@
 // HTTP surface per spec §6: eve session API (compat) + AI SDK chat endpoint.
 // deno-lint-ignore-file no-explicit-any
-import { convertToModelMessages, streamText, stepCountIs } from "ai";
+import { convertToModelMessages, streamText, stepCountIs, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
@@ -75,6 +75,13 @@ function stepToEvent(row: { turn_id: string; kind: string; name: string | null; 
       return { type: "turn.failed", data: { turnId, message: p.message } };
     case "text":
       return { type: "message.completed", data: { turnId, message: p.text, finishReason: p.finishReason ?? "stop" } };
+    case "custom":
+      // H3: ToolContext.emit's persisted step (runner.ts's toolEmit) — the
+      // payload IS the data a tool passed to emit(name, data), not
+      // necessarily an object, so read `row.payload` raw rather than the
+      // `p` fallback above (which coerces null to `{}`, wrong for a tool
+      // that legitimately emitted `null`/a primitive/an array).
+      return { type: "tool.event", data: { name: row.name, payload: row.payload } };
     default:
       // "model" / "approval-request" steps are not currently persisted by
       // runner.ts — fall back to a passthrough so an unexpected kind is
@@ -362,32 +369,61 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       const hookCtx = buildHookCtx(deps, sessionId, body.metadata, bearerToken, createdBy);
       const model = deps.model ?? await resolveModelForTurn(agent.config, hookCtx);
       const system = await resolveInstructions(agent, body.metadata, hookCtx);
-      // Shared tool builder (same as the session runner). No emit/turnId here,
-      // so needsApproval tools answer with an "use the session API" error
-      // instead of hanging a stateless request. H2: async (dynamic-tools.ts
-      // provider); hookCtx is the same one just used for
-      // resolveModelForTurn/resolveInstructions above.
-      const tools = await buildSdkTools({
-        agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx,
-      });
       // ai@6's convertToModelMessages is async (Promise<ModelMessage[]>) —
       // the brief assumed the v2-era sync signature. `deno check` rejected
       // passing the bare Promise as streamText's `messages`; awaiting it is
       // the only change, no effect on the endpoint contract.
-      const result = streamText({
-        model,
-        system,
-        messages: await convertToModelMessages(body.messages),
-        tools,
-        stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
-        onFinish: async ({ text, totalUsage }) => {
-          await store.addStep(turn.id, 1, "text", null, { text }, totalUsage)
-            .catch((e) => console.error("agents: chat persist failed:", e));
-          await store.finishTurn(turn.id, "completed")
-            .catch((e) => console.error("agents: chat persist failed:", e));
+      const modelMessages = await convertToModelMessages(body.messages);
+      // H3: switched from the bare `result.toUIMessageStreamResponse()` to
+      // createUIMessageStream + writer.merge so ToolContext.emit has
+      // somewhere to write on this path — a plain streamText UIMessage
+      // stream has no way to interleave extra parts into itself; wrapping it
+      // in a writer-driven stream does (confirmed against the installed
+      // ai@6.0.219 package: `createUIMessageStream`/`createUIMessageStreamResponse`
+      // and `UIMessageStreamWriter.write`/`.merge` — see task-h3-report.md).
+      // Building `tools` here (inside execute, not above) is required: the
+      // per-tool toolEmit closes over `writer`, which only exists once
+      // execute() runs.
+      const uiStream = createUIMessageStream({
+        execute: async ({ writer }) => {
+          // H3: /chat's emit channel — writes a `data-${name}` UIMessage
+          // part interleaved into the SAME stream useChat consumes,
+          // AI SDK v6's documented convention for custom data parts. Unlike
+          // the session path (runner.ts's toolEmit), this is stream-only:
+          // no agents.steps write, matching /chat's existing behavior of
+          // never persisting tool-call/tool-result steps either (only the
+          // final "text" step, in onFinish below) — /chat is the stateless
+          // per-request endpoint (history comes from the client, not
+          // replay), so there is nothing to replay a custom event into.
+          const toolEmit = (name: string, data: unknown) => {
+            writer.write({ type: `data-${name}`, data });
+          };
+          // Shared tool builder (same as the session runner). No emit/turnId
+          // here for the approval AgentEvent channel, so needsApproval tools
+          // answer with an "use the session API" error instead of hanging a
+          // stateless request. H2: async (dynamic-tools.ts provider);
+          // hookCtx is the same one just used for
+          // resolveModelForTurn/resolveInstructions above.
+          const tools = await buildSdkTools({
+            agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
+          });
+          const result = streamText({
+            model,
+            system,
+            messages: modelMessages,
+            tools,
+            stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
+            onFinish: async ({ text, totalUsage }) => {
+              await store.addStep(turn.id, 1, "text", null, { text }, totalUsage)
+                .catch((e) => console.error("agents: chat persist failed:", e));
+              await store.finishTurn(turn.id, "completed")
+                .catch((e) => console.error("agents: chat persist failed:", e));
+            },
+          });
+          writer.merge(result.toUIMessageStream());
         },
       });
-      return result.toUIMessageStreamResponse();
+      return createUIMessageStreamResponse({ stream: uiStream });
     }
 
     return json({ error: "not found" }, 404);

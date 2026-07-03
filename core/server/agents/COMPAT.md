@@ -32,7 +32,9 @@ Stream event vocabulary (subset of eve's documented set — see
 `docs/concepts/sessions-runs-and-streaming.md` in the packed eve tarball):
 `turn.started`, `message.appended`, `message.completed`, `actions.requested`,
 `action.result`, `input.requested`, `turn.completed`, `turn.failed`,
-`session.waiting`, `session.failed`. `session.waiting`/`session.failed`
+`session.waiting`, `session.failed`, plus one additive trex extension not in
+eve's vocabulary at all: `tool.event` (see divergence 10 below).
+`session.waiting`/`session.failed`
 matter more than they look: eve's own client (`eve/client`'s
 `MessageResponse.result()`) ends its per-turn read on
 `session.waiting`/`session.completed`/`session.failed`, NOT on
@@ -122,6 +124,52 @@ live-tail by event shape.
 9. **`GET /healthz`** is a pre-existing, non-eve alias kept for backward
    compatibility with earlier tests/tooling; `GET /eve/v1/health` is the
    eve-documented route and is what a real eve target-check hits.
+10. **`tool.event` (H3) is a trex-only extension, entirely additive** — not
+    in eve's documented vocabulary at all (eve has no equivalent
+    author-a-custom-event tool primitive). `eve-shim/types.ts`'s
+    `ToolContext.emit?: (name, data) => void` is handed to every authored
+    tool's `execute()`; calling it is fire-and-forget and a safe no-op on an
+    endpoint that hasn't wired a channel (`ctx?.emit?.(...)`). Two
+    independent wirings, both built on the SAME `ToolBuildCtx.toolEmit`
+    plumbing (`toolset.ts`):
+    - **Session API** (`runner.ts`'s `toolEmit`): publishes
+      `{ type: "tool.event", data: { name, payload } }` on the live stream
+      (the same channel every other event uses) AND persists an
+      `agents.steps` row with `kind: 'custom'`, sharing the turn's single
+      `stepSeq` counter with every other step — `migrations/V2__custom_steps.sql`
+      widens the `steps.kind` CHECK constraint to allow it. Replay
+      (`handler.ts`'s `stepToEvent`) maps a `custom` step straight back to
+      `tool.event`, so — unlike `turn.started`/`input.requested`/
+      `session.waiting`/`session.failed` (see "Durability" below) — this one
+      IS reconstructable from a reconnect. Not ordering-guaranteed relative
+      to its own tool's `tool-call`/`tool-result` steps: the AI SDK invokes
+      `tool.execute()` as part of its own internal step processing, which
+      can complete (and call `emit`) before this loop's own
+      `persist("tool-call", ...)` for the triggering call — seq numbers are
+      still unique/monotonic (real call order), just not "nested between"
+      in the way you'd read the stream part order (see `runner.ts`'s
+      `toolEmit` comment).
+    - **`/chat`** (`handler.ts`): writes an interleaved `data-${name}`
+      UIMessage part into the SAME stream `useChat` consumes — AI SDK v6's
+      documented convention for custom data parts
+      (`UIMessageChunk`'s `{ type: \`data-${string}\`, data, id?, transient? }`
+      variant, confirmed against the installed `ai@6.0.219` package's
+      `dist/index.d.ts`). This required switching `/chat` from the bare
+      `result.toUIMessageStreamResponse()` shortcut to
+      `createUIMessageStream({ execute: async ({ writer }) => { ...;
+      writer.merge(result.toUIMessageStream()); } })` +
+      `createUIMessageStreamResponse({ stream })` — a plain `streamText`
+      UIMessage-stream response has no way to interleave extra parts into
+      itself; a writer-driven `createUIMessageStream` does. No
+      `agents.steps` write on this path: `/chat` is the stateless
+      per-request endpoint (history comes from the client, not replay) and
+      has never persisted `tool-call`/`tool-result` steps either — only the
+      final `text` step, in `onFinish`.
+    - **Subagents** (depth 1, `toolset.ts`'s `runSubagent`) inherit the
+      parent's `toolEmit` unchanged via the existing `{ ...ctx }` spread — a
+      subagent's `ctx.emit(...)` call lands on the SAME channel (session
+      stream or chat writer) as its parent's, not a distinct one; there is
+      no per-subagent tagging of a `tool.event`'s origin.
 
 ## What we ignore entirely
 
@@ -219,6 +267,12 @@ implemented today:
   `CHECK` constraint doesn't allow without a new migration file — treated as
   out of scope for this reconciliation pass (see "do not rewrite the whole
   streaming layer" in the task brief); flagged here as a concrete follow-up.
+  (A later migration, `V2__custom_steps.sql`, DID add a new
+  `agents.steps.kind` value — `'custom'`, for `tool.event`/`ToolContext.emit`
+  (divergence 10 above) — but that widening is unrelated to this gap: it
+  gives an *authored tool* a durable step kind to persist through, not these
+  four *runtime-lifecycle* events, which still have no `agents.steps` row of
+  their own and remain exactly as non-replayable as described above.)
   Related replay quirk in the other direction: a turn that failed after
   streaming partial text persists that text via `runner.ts`'s `finally`
   fallback, so replaying it synthesizes a `message.completed` event that
