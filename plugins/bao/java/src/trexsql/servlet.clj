@@ -27,12 +27,32 @@
        :handler (atom nil)
        :config (atom {})}])
 
+(defn- matching-agent-proxy-prefix
+  "If uri starts with one of webapi/agent-proxy-external-prefixes, return
+   that prefix; otherwise nil. Matches the exact prefix or the prefix
+   followed by '/' so e.g. '/WebAPI/trex/pythia-foo' doesn't false-match
+   '/WebAPI/trex/pythia'."
+  [uri]
+  (some (fn [prefix]
+          (when (or (= uri prefix) (str/starts-with? uri (str prefix "/")))
+            prefix))
+        webapi/agent-proxy-external-prefixes))
+
 (defn- wrap-strip-context
-  "Middleware to strip /WebAPI/trexsql prefix from URI for Reitit routing."
+  "Middleware to strip /WebAPI/trexsql prefix from URI for Reitit routing.
+
+   Also normalizes the Pythia agent-proxy prefixes (both the canonical
+   /WebAPI/trex/pythia mount and the /WebAPI/trexsql/agent back-compat
+   alias — see webapi/agent-proxy-external-prefixes) onto the internal
+   /agent/*path route, ahead of the generic strip, so a single Reitit route
+   and handler (trexsql.webapi/agent-proxy-handler) serves both."
   [handler]
   (fn [request]
     (let [uri (:uri request)
-          stripped (str/replace uri #"^/WebAPI/trexsql" "")]
+          agent-prefix (matching-agent-proxy-prefix uri)
+          stripped (if agent-prefix
+                     (str "/agent" (subs uri (count agent-prefix)))
+                     (str/replace uri #"^/WebAPI/trexsql" ""))]
       (handler (assoc request :uri (if (str/blank? stripped) "/" stripped))))))
 
 (defn- wrap-db
