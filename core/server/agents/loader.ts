@@ -146,11 +146,15 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
         });
       } else if (entry.isFile && entry.name.endsWith(".edn")) {
         const name = entry.name.slice(0, -4);
-        // md wins when both exist (eve-native precedence)
+        // eve-native wins when both exist: flat md twin or SKILL.md dir form
         try {
           await Deno.stat(`${dir}/skills/${name}.md`);
           continue;
         } catch { /* no md twin */ }
+        try {
+          await Deno.stat(`${dir}/skills/${name}/SKILL.md`);
+          continue;
+        } catch { /* no SKILL.md dir twin */ }
         const path = `${dir}/skills/${entry.name}`;
         const edn = await readEdn(path);
         if (edn && typeof edn === "object" && typeof edn.content === "string") {

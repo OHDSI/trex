@@ -199,23 +199,31 @@ implemented today:
   workflow-run id wiring despite the schema's nullable `workflow_run_id`
   column reserved for it (spec §5's "designed once, for both outcomes").
 - **Not every wire event is replayable — only the ones with a matching
-  `agents.steps` row are.** `turn.started`, `session.waiting`, and
-  `session.failed` are `publish()`-only (live pub/sub, see `stream.ts`); they
+  `agents.steps` row are.** `turn.started`, `input.requested`,
+  `session.waiting`, and `session.failed` are `publish()`-only (live pub/sub,
+  see `stream.ts`; `input.requested` is emitted from `toolset.ts`'s approval
+  wait and never persisted as a step — the pending `agents.approvals` row is
+  durable but has no replay mapping); they
   are never written via `store.addStep`, so `handler.ts`'s replay path
   (`stepToEvent`, driven by `store.listEvents`) can never reconstruct them.
   A client that reconnects with `?startIndex=<n>` after missing one of these
-  three live will never see it — not "replayed late," genuinely gone. This
+  four live will never see it — not "replayed late," genuinely gone. This
   contradicts eve's stated guarantee ("every event is recorded before a step
   completes, so the whole stream is replayable" —
   `docs/concepts/sessions-runs-and-streaming.md`) and is a real gap, not a
   cosmetic one: `session.waiting` is exactly the event a client needs to know
   a turn ended (see above), so a client that subscribes to the stream a beat
   too late after `POST /eve/v1/session` can end up waiting forever even
-  though the turn already finished successfully. Persisting these three as
+  though the turn already finished successfully. Persisting these as
   steps would need a new `agents.steps.kind` value, which the migration's
   `CHECK` constraint doesn't allow without a new migration file — treated as
   out of scope for this reconciliation pass (see "do not rewrite the whole
   streaming layer" in the task brief); flagged here as a concrete follow-up.
+  Related replay quirk in the other direction: a turn that failed after
+  streaming partial text persists that text via `runner.ts`'s `finally`
+  fallback, so replaying it synthesizes a `message.completed` event that
+  never occurred live (a failed turn never reaches the "finish" branch that
+  emits it).
 
 ## AI SDK version skew
 

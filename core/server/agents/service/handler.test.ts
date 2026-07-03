@@ -236,6 +236,10 @@ Deno.test("unknown session 404s; unknown route 404s; healthz/eve-info list tools
   const info = await (await handler(new Request(`${BASE}/eve/v1/info`))).json();
   assertEquals(info.kind, "eve-agent-info");
   assertEquals(info.tools.authored.map((t: { name: string }) => t.name).sort(), ["echo", "propose_card"]);
+  // trex extension: /info surfaces clientOnly (always present as a boolean).
+  const byName = Object.fromEntries(info.tools.authored.map((t: { name: string; clientOnly: boolean }) => [t.name, t.clientOnly]));
+  assertEquals(byName.propose_card, true);
+  assertEquals(byName.echo, false);
 });
 
 Deno.test("POST /eve/v1/session/:id (bare) on an existing session accepts and records a turn", async () => {

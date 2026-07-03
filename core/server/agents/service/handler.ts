@@ -147,6 +147,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           hasAuth: false, hasExecute: !!d.execute, hasModelOutputProjection: false,
           hasOutputSchema: false, origin: "authored" as const,
           replacesFrameworkTool: false, requiresApproval: !!d.needsApproval,
+          // trex extension (additive, not in eve's AgentInfoResultSchema):
+          // lets a frontend tell a client-rendered tool from a
+          // server-executed one via /info, matching the clientOnly flag
+          // carried on actions.requested (COMPAT.md divergence 8).
+          clientOnly: !!d.clientOnly,
         };
       };
       const tools = Object.entries(agent.tools).map(([name, def]) => toolInfo(name, def));

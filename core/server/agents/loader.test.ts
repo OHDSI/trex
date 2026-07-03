@@ -50,6 +50,19 @@ Deno.test("loadAgent accepts EDN alternatives, with eve-native files winning", a
   assertEquals(b.skills[0].description, "MD tips.");
 });
 
+Deno.test("SKILL.md dir form wins over an EDN skill twin", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/skills/foo`, { recursive: true });
+  await Deno.writeTextFile(`${tmp}/skills/foo/SKILL.md`, "From SKILL.md dir form.\n");
+  await Deno.writeTextFile(`${tmp}/skills/foo.edn`, `{:description "from edn" :content "edn body"}`);
+  const a = await loadAgent(tmp);
+  assertEquals(a.skills.length, 1);
+  assertEquals(a.skills[0].name, "foo");
+  assertEquals(a.skills[0].description, "From SKILL.md dir form.");
+  assert(a.skills[0].path.endsWith("skills/foo/SKILL.md"));
+});
+
 Deno.test("loadAgent loads subagents one level deep", async () => {
   const a = await loadAgent(TOY);
   assertEquals(Object.keys(a.subagents), ["shouter"]);

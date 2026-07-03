@@ -25,8 +25,8 @@ Add a `trex.agents` array to the plugin's `package.json`:
 }
 ```
 
-- `name` — required, `[a-zA-Z0-9_-]+`. Becomes the mount point: the agent is served at
-  `/<plugin-scope>/<name>/...`.
+- `name` — required. First character must be alphanumeric, the rest `[a-zA-Z0-9_-]*`. Becomes the
+  mount point: the agent is served at `/<plugin-scope>/<name>/...`.
 - `dir` — the agent directory relative to the plugin root. Defaults to `"agent"` if omitted.
 
 Each entry gets its own worker, started with a generated import map that maps `eve` / `eve/tools`
@@ -247,8 +247,9 @@ curl -s https://<trex>/plugins/<scope>/<agent>/eve/v1/health   # -> {"status": "
 curl -s https://<trex>/plugins/<scope>/<agent>/eve/v1/info     # -> full AgentInfoResultSchema (see below)
 ```
 
-`GET /eve/v1/info` reports `model`, `instructions`, `tools` (with their `clientOnly`/
-`needsApproval` flags), `skills`, and `subagents` faithfully; `channels`, `schedules`,
+`GET /eve/v1/info` reports `model`, `instructions`, `tools` (each entry carries a
+`requiresApproval` key for `needsApproval` tools, plus a `clientOnly` key — the latter a trex
+addition to eve's info shape), `skills`, and `subagents` faithfully; `channels`, `schedules`,
 `connections`, `hooks`, `sandbox`, and `workflow` are always empty/`null` because those authored
 slots aren't implemented (see "What we ignore" in COMPAT.md).
 
@@ -343,9 +344,9 @@ consequences:
   The `agents.approvals` row itself survives a restart (the decision is durable once made), but if
   the worker restarts while a decision is still pending, nothing is left running to observe it —
   that turn is stranded.
-- Not every wire event is replayable: `turn.started`, `session.waiting`, and `session.failed` are
-  published live only (no matching `agents.steps` row), so a client that reconnects with
-  `?startIndex=<n>` after missing one of those three will never see it.
+- Not every wire event is replayable: `turn.started`, `input.requested`, `session.waiting`, and
+  `session.failed` are published live only (no matching `agents.steps` row), so a client that
+  reconnects with `?startIndex=<n>` after missing one of those four will never see it.
 
 See COMPAT.md's "Durability" section for the full detail and the spike writeup at
 `specs/006-agents-plugin-type/spike-workflow.md`.
