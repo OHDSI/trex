@@ -32,7 +32,10 @@ Add a `trex.agents` array to the plugin's `package.json`:
 Each entry gets its own worker, started with a generated import map that maps `eve` / `eve/tools`
 / `eve/evals` to trex's shim (see "Authoring API" below) and forwards a fixed set of environment
 variables (see "Models and credentials"). Registration fails fast at plugin-load time if
-`instructions.md` (or `instructions.edn`) is missing — not at first request.
+`instructions.md` (or `instructions.edn`) is missing — not at first request. Each registration
+writes a small per-agent scratch directory (`trex-agents-*` under the system temp dir, holding the
+generated import map and worker entry file); these accumulate across server boots and are safe to
+clean up whenever the server is stopped.
 
 ## Directory layout
 

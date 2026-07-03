@@ -4,7 +4,7 @@ import { createHandler } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
-import { publish, subscribe } from "./stream.ts";
+import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
@@ -585,4 +585,48 @@ Deno.test("GET /stream subscribes before replay: an event published during the r
   const lastReplayedIdx = Math.max(types.lastIndexOf("message.completed"), types.lastIndexOf("turn.completed"));
   const waitingIdx = types.indexOf("session.waiting");
   assert(lastReplayedIdx < waitingIdx, `replay/buffer order inverted: [${types.join(", ")}]`);
+});
+
+Deno.test("GET /stream releases the subscriber when replay (listEvents) fails", async () => {
+  // subscribe() now runs BEFORE the awaited listEvents(); if that query
+  // rejects, the subscriber must be released (unsub + controller.error) or
+  // it leaks permanently in buffering mode — buffer growing on every
+  // publish, with the abort listener never attached and cancel() never
+  // firing on an errored stream.
+  const { handler: _seed, db } = await makeHandler();
+  await _seed(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sid = "s-1"; // deterministic fake-DB id (see model-failure test)
+  await until(() => settled(db));
+
+  const baseStore = createStore(db.query as never);
+  const failingStore = {
+    ...baseStore,
+    listEvents: () => Promise.reject(new Error("replay query exploded")),
+  };
+  const agent = await loadAgent(TOY);
+  const failingHandler = createHandler({
+    agent, store: failingStore, plugin: "toy-agent", agentName: "toy", basePath: "/plugins/trex/toy",
+  });
+
+  const before = subscriberCount(sid);
+  const res = await failingHandler(new Request(`${BASE}/eve/v1/session/${sid}/stream`));
+  // The rejection surfaces through the errored stream body, not the
+  // (already-sent) 200 response head.
+  let errored = false;
+  try {
+    const reader = res.body!.getReader();
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+  } catch (e) {
+    errored = true;
+    assert(String(e).includes("replay query exploded"));
+  }
+  assert(errored, "stream body should error when replay fails");
+  // No leaked subscriber: the registry is back to its pre-request count.
+  assertEquals(subscriberCount(sid), before);
 });

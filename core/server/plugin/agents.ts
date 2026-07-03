@@ -139,11 +139,10 @@ export async function addAgentsPlugin(
     console.log(`add agent ${entry.name} @ ${cfg.env.TREX_AGENT_DIR}`);
     // _addFunction computes servicePath as `${dir}${fncfg.function}` and the
     // mounted URL from `source` + plugin scope; TREX_AGENT_BASE tells the
-    // worker its mount point so it can strip the prefix.
-    const scope = name.startsWith("@") ? `/${name.slice(1, name.indexOf("/"))}` : "";
-    const basePath = name.startsWith("@trex/")
-      ? `${PLUGINS_BASE_PATH}${scope}${cfg.source}`
-      : cfg.source;
+    // worker its mount point so it can strip the prefix. Always the
+    // @trex-scoped mount — the guard above rejects everything else.
+    const scope = `/${name.slice(1, name.indexOf("/"))}`;
+    const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
     _addFunction(
       app,
       cfg.source,

@@ -27,3 +27,9 @@ export function subscribe(sessionId: string, fn: (e: AgentEvent) => void): () =>
 export function ndjsonEncode(e: unknown): Uint8Array {
   return new TextEncoder().encode(`${JSON.stringify(e)}\n`);
 }
+
+// Test helper: lets tests assert a stream route released its subscription
+// (e.g. after a replay failure) without reaching into the private map.
+export function subscriberCount(sessionId: string): number {
+  return subscribers.get(sessionId)?.size ?? 0;
+}

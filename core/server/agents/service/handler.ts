@@ -292,8 +292,19 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
               } catch { unsub?.(); }
             });
           }
-          const past = (await store.listEvents(sessionId)).slice(startIndex);
-          for (const ev of past) controller.enqueue(ndjsonEncode(stepToEvent(ev)));
+          try {
+            const past = (await store.listEvents(sessionId)).slice(startIndex);
+            for (const ev of past) controller.enqueue(ndjsonEncode(stepToEvent(ev)));
+          } catch (e) {
+            // If replay fails, the subscriber registered above would leak
+            // permanently in buffering mode (buffer growing on every
+            // publish; the abort listener isn't attached yet and cancel()
+            // never fires on an errored stream) — release it first, then
+            // surface the failure to the consumer.
+            unsub?.();
+            controller.error(e);
+            return;
+          }
           if (replayOnly) { controller.close(); return; }
           // Flush anything that arrived live while we were awaiting
           // listEvents() — buffered events come after the replay snapshot,
