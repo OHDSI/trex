@@ -335,59 +335,120 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
   }
 });
 
-// PostgREST proxy — before authContext since PostgREST handles its own JWT verification
+// PostgREST — before authContext since PostgREST handles its own JWT verification.
+// POSTGREST_MODE selects the implementation: "sidecar" (default) proxies to the
+// external postgrest container; "plugin" calls the @trex/postgrest worker directly.
+const POSTGREST_MODE = Deno.env.get("POSTGREST_MODE") || "sidecar";
 const POSTGREST_HOST = Deno.env.get("POSTGREST_HOST") || "postgrest";
 const POSTGREST_PORT = Deno.env.get("POSTGREST_PORT") || "3000";
 
-app.all(`${BASE_PATH}/rest/v1/*`, (req, res) => {
-  const targetPath = req.originalUrl.replace(`${BASE_PATH}/rest/v1`, "") || "/";
+if (POSTGREST_MODE === "plugin") {
+  // Use express.raw() to capture the raw body before any middleware consumes it
+  // (same caveat as the /storage/v1 route below).
+  app.all(
+    [`${BASE_PATH}/rest/v1`, `${BASE_PATH}/rest/v1/*`],
+    express.raw({ type: "*/*", limit: "50mb" }),
+    async (req, res) => {
+      const handler = fnmap["@trex/postgrest/functions"];
+      if (!handler) {
+        res.status(503).json({ error: "postgrest plugin not loaded" });
+        return;
+      }
+      try {
+        const host = req.get("host") || "localhost";
+        const protocol = req.protocol || "http";
+        // Rewrite /trex/rest/v1/... to the plugin's /postgrest/... mount.
+        const pluginPath = req.originalUrl.replace(`${BASE_PATH}/rest/v1`, "/postgrest") || "/postgrest/";
+        const requestUrl = `${protocol}://${host}${pluginPath}`;
 
-  const headers: Record<string, string> = {};
-  const forwardHeaders = [
-    "authorization", "apikey", "prefer", "range", "content-type",
-    "accept", "content-profile", "accept-profile", "x-client-info",
-  ];
-  for (const h of forwardHeaders) {
-    if (req.headers[h]) {
-      headers[h] = Array.isArray(req.headers[h]) ? req.headers[h].join(", ") : req.headers[h] as string;
-    }
-  }
+        const headers = new Headers();
+        for (const [key, val] of Object.entries(req.headers)) {
+          if (val) {
+            const lower = key.toLowerCase();
+            if (lower === "accept-encoding" || lower === "content-length") continue;
+            headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
+          }
+        }
+        // supabase-js sends apikey header + Authorization header.
+        // If no Authorization header, use apikey as Bearer token so the plugin can determine the role.
+        const apikey = headers.get("apikey");
+        if (!headers.has("authorization") && apikey) {
+          headers.set("authorization", `Bearer ${apikey}`);
+        }
 
-  // supabase-js sends apikey header + Authorization header.
-  // If no Authorization header, use apikey as Bearer token so PostgREST can determine the role.
-  if (!headers["authorization"] && headers["apikey"]) {
-    headers["authorization"] = `Bearer ${headers["apikey"]}`;
-  }
+        let body: Blob | undefined;
+        if (req.method !== "GET" && req.method !== "HEAD") {
+          // req.body may already be a parsed object: cliLoginRouter's express.json() short-circuits express.raw().
+          if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+            body = new Blob([req.body]);
+          } else if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
+            body = new Blob([JSON.stringify(req.body)], { type: "application/json" });
+          }
+        }
 
-  const proxyReq = httpRequest(
-    {
-      hostname: POSTGREST_HOST,
-      port: parseInt(POSTGREST_PORT),
-      path: targetPath,
-      method: req.method,
-      headers,
-    },
-    (proxyRes) => {
-      res.status(proxyRes.statusCode || 500);
-      const skipHeaders = new Set(["transfer-encoding"]);
-      for (const [key, value] of Object.entries(proxyRes.headers)) {
-        if (!skipHeaders.has(key) && value !== undefined) {
-          res.setHeader(key, value);
+        const webReq = new globalThis.Request(requestUrl, { method: req.method, headers, body });
+        const workerResponse = await handler(webReq);
+        // Stream the response — CSV/binary bodies must not be text()-mangled.
+        await pipeWorkerResponse(workerResponse, res);
+      } catch (err) {
+        console.error("[postgrest-plugin] Error:", err);
+        if (!res.headersSent) {
+          res.status(500).json({ error: "Internal server error" });
         }
       }
-      proxyRes.pipe(res);
     },
   );
+} else {
+  app.all(`${BASE_PATH}/rest/v1/*`, (req, res) => {
+    const targetPath = req.originalUrl.replace(`${BASE_PATH}/rest/v1`, "") || "/";
 
-  proxyReq.on("error", (err) => {
-    console.error("[postgrest-proxy] Error:", err.message);
-    if (!res.headersSent) {
-      res.status(502).json({ error: "PostgREST unavailable" });
+    const headers: Record<string, string> = {};
+    const forwardHeaders = [
+      "authorization", "apikey", "prefer", "range", "content-type",
+      "accept", "content-profile", "accept-profile", "x-client-info",
+    ];
+    for (const h of forwardHeaders) {
+      if (req.headers[h]) {
+        headers[h] = Array.isArray(req.headers[h]) ? req.headers[h].join(", ") : req.headers[h] as string;
+      }
     }
-  });
 
-  req.pipe(proxyReq);
-});
+    // supabase-js sends apikey header + Authorization header.
+    // If no Authorization header, use apikey as Bearer token so PostgREST can determine the role.
+    if (!headers["authorization"] && headers["apikey"]) {
+      headers["authorization"] = `Bearer ${headers["apikey"]}`;
+    }
+
+    const proxyReq = httpRequest(
+      {
+        hostname: POSTGREST_HOST,
+        port: parseInt(POSTGREST_PORT),
+        path: targetPath,
+        method: req.method,
+        headers,
+      },
+      (proxyRes) => {
+        res.status(proxyRes.statusCode || 500);
+        const skipHeaders = new Set(["transfer-encoding"]);
+        for (const [key, value] of Object.entries(proxyRes.headers)) {
+          if (!skipHeaders.has(key) && value !== undefined) {
+            res.setHeader(key, value);
+          }
+        }
+        proxyRes.pipe(res);
+      },
+    );
+
+    proxyReq.on("error", (err) => {
+      console.error("[postgrest-proxy] Error:", err.message);
+      if (!res.headersSent) {
+        res.status(502).json({ error: "PostgREST unavailable" });
+      }
+    });
+
+    req.pipe(proxyReq);
+  });
+}
 
 // Realtime proxy — HTTP only. Path rewrite matches Supabase Kong:
 // /realtime/v1/* -> realtime:4000/socket/*. WebSocket upgrades are handled

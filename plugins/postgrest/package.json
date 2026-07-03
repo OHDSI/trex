@@ -1,0 +1,43 @@
+{
+  "name": "@trex/postgrest",
+  "version": "0.1.0",
+  "description": "PostgREST-compatible REST API served as a trex function plugin",
+  "trex": {
+    "functions": {
+      "env": {
+        "_shared": {
+          "PGRST_DB_URI": "${PGRST_DB_URI}",
+          "PGRST_DB_SCHEMAS": "${PGRST_DB_SCHEMAS:-public}",
+          "PGRST_DB_ANON_ROLE": "${PGRST_DB_ANON_ROLE:-anon}",
+          "PGRST_DB_PRE_REQUEST": "${PGRST_DB_PRE_REQUEST:-public.postgrest_pre_request}",
+          "PGRST_DB_MAX_ROWS": "${PGRST_DB_MAX_ROWS}",
+          "PGRST_DB_EXTRA_SEARCH_PATH": "${PGRST_DB_EXTRA_SEARCH_PATH:-public}",
+          "PGRST_JWT_SECRET": "${PGRST_JWT_SECRET}",
+          "PGRST_JWT_SECRET_IS_BASE64": "${PGRST_JWT_SECRET_IS_BASE64:-false}",
+          "PGRST_JWT_AUD": "${PGRST_JWT_AUD}",
+          "PGRST_JWT_ROLE_CLAIM_KEY": "${PGRST_JWT_ROLE_CLAIM_KEY:-.role}",
+          "PGRST_OPENAPI_SERVER_PROXY_URI": "${PGRST_OPENAPI_SERVER_PROXY_URI}",
+          "PGRST_OPENAPI_MODE": "${PGRST_OPENAPI_MODE:-follow-privileges}",
+          "PGRST_DB_AGGREGATES_ENABLED": "${PGRST_DB_AGGREGATES_ENABLED:-false}",
+          "PGRST_DB_PLAN_ENABLED": "${PGRST_DB_PLAN_ENABLED:-false}",
+          "PGRST_DB_CHANNEL": "${PGRST_DB_CHANNEL:-pgrst}",
+          "PGRST_DB_CHANNEL_ENABLED": "${PGRST_DB_CHANNEL_ENABLED:-true}",
+          "PGRST_DB_POOL": "${PGRST_DB_POOL:-10}",
+          "PGRST_DB_TX_END": "${PGRST_DB_TX_END:-commit}"
+        }
+      },
+      "api": [
+        {
+          "source": "/postgrest",
+          "function": "/functions",
+          "imports": "/functions/deno.json",
+          "allowHostFsAccess": true
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "pg": "^8.13.1",
+    "jose": "^5.9.6"
+  }
+}
