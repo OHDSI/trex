@@ -4,7 +4,8 @@ import { useQuery } from "urql";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { ArrowLeftIcon, ChevronDownIcon, ChevronRightIcon, RefreshCwIcon } from "lucide-react";
+import { ArrowLeftIcon, ChevronDownIcon, ChevronRightIcon, RadioIcon, RefreshCwIcon } from "lucide-react";
+import { authClient } from "@/lib/auth-client";
 
 const AGENT_SESSION_QUERY = `
   query AgentSession($id: ID!) {
@@ -134,6 +135,52 @@ function parseUsage(raw: string | null): { inputTokens?: number; outputTokens?: 
     return null;
   } catch {
     return null;
+  }
+}
+
+// Wire event shape from GET /eve/v1/session/:id/stream (NDJSON, one object
+// per line). Vocabulary documented in core/server/agents/COMPAT.md.
+interface LiveStreamEvent {
+  type: string;
+  [key: string]: unknown;
+}
+
+// A turn's live tail ends at one of these — see COMPAT.md's note that
+// session.waiting/session.failed (not these) are what a *replaying* eve
+// client keys off, but turn.completed/turn.failed are sufficient here since
+// we stop the live tail and fall back to a full GraphQL refetch, which is
+// itself authoritative for session/turn status.
+const TERMINAL_EVENT_TYPES = new Set(["turn.completed", "turn.failed"]);
+
+function pluginScope(plugin: string): string {
+  const match = /^@([^/]+)\//.exec(plugin);
+  return match ? match[1] : plugin;
+}
+
+function summarizeLiveEvent(event: LiveStreamEvent): string {
+  switch (event.type) {
+    case "message.appended":
+      return typeof event.messageDelta === "string" && event.messageDelta.length > 0
+        ? event.messageDelta
+        : "…";
+    case "message.completed":
+      return typeof event.message === "string" ? event.message : "message completed";
+    case "actions.requested":
+      return `requested ${typeof event.toolName === "string" ? event.toolName : "tool"}`;
+    case "action.result":
+      return `${typeof event.toolName === "string" ? event.toolName : "tool"} result`;
+    case "input.requested":
+      return "waiting for input";
+    case "turn.completed":
+      return "turn completed";
+    case "turn.failed":
+      return typeof event.error === "string" ? event.error : "turn failed";
+    case "session.waiting":
+      return "session waiting";
+    case "session.failed":
+      return "session failed";
+    default:
+      return event.type;
   }
 }
 
@@ -283,6 +330,99 @@ export default function AgentRunDetail() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shouldPoll]);
 
+  // Live tail (Task D4, stretch): while a turn is running, attach to the
+  // agent's own NDJSON stream for near-real-time events, in addition to (not
+  // instead of) the 5s poll above — belt and braces. Auth: same Bearer token
+  // graphql-client.ts uses (authClient.getAccessToken()); the stream route
+  // goes through the same authContext + pluginAuthz middleware as GraphQL
+  // (core/server/plugin/function.ts _addFunction for @trex-scoped plugins),
+  // and pluginAuthz has no registered scope requirement for this path, so
+  // any authenticated user's bearer token passes. Same-origin (PLUGINS_BASE_PATH
+  // "/plugins" is proxied alongside BASE_PATH in dev, same host in prod), so
+  // no CORS wrinkle either.
+  const [liveEvents, setLiveEvents] = useState<LiveStreamEvent[]>([]);
+  const [liveTailActive, setLiveTailActive] = useState(false);
+  const sessionKey = detail ? `${detail.session.id}:${detail.session.plugin}:${detail.session.agent}` : null;
+
+  useEffect(() => {
+    if (!shouldPoll || !detail) return;
+    const { session } = detail;
+    const scope = pluginScope(session.plugin);
+    const url = `${window.location.origin}/plugins/${scope}/${session.agent}/eve/v1/session/${session.id}/stream`;
+    const controller = new AbortController();
+    let stopped = false;
+
+    setLiveEvents([]);
+    setLiveTailActive(true);
+
+    (async () => {
+      try {
+        const token = authClient.getAccessToken();
+        const headers: Record<string, string> = {};
+        if (token) headers["Authorization"] = `Bearer ${token}`;
+        const res = await fetch(url, {
+          method: "GET",
+          headers,
+          credentials: "include",
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) {
+          throw new Error(`live tail request failed (${res.status})`);
+        }
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (!stopped) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+            let parsed: unknown;
+            try {
+              parsed = JSON.parse(trimmed);
+            } catch {
+              continue;
+            }
+            if (!parsed || typeof parsed !== "object" || typeof (parsed as LiveStreamEvent).type !== "string") {
+              continue;
+            }
+            const event = parsed as LiveStreamEvent;
+            setLiveEvents((prev) => {
+              const next = [...prev, event];
+              return next.length > 300 ? next.slice(next.length - 300) : next;
+            });
+            if (TERMINAL_EVENT_TYPES.has(event.type)) {
+              stopped = true;
+              controller.abort();
+              refetch();
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        // Graceful fallback: any stream error (auth hiccup, network drop,
+        // non-ok response) just leaves the 5s poll above as the source of
+        // truth — no retry/backoff machinery here by design.
+        if ((err as Error)?.name !== "AbortError") {
+          console.warn("agent session live tail unavailable, falling back to polling", err);
+        }
+      } finally {
+        setLiveTailActive(false);
+      }
+    })();
+
+    return () => {
+      stopped = true;
+      controller.abort();
+      setLiveTailActive(false);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [shouldPoll, sessionKey]);
+
   if (result.fetching && !detail) {
     return (
       <div className="flex items-center justify-center py-20">
@@ -346,6 +486,24 @@ export default function AgentRunDetail() {
           turns.map((turn) => <TurnCard key={turn.id} turn={turn} />)
         )}
       </div>
+
+      {(liveTailActive || liveEvents.length > 0) && (
+        <div className="rounded-lg border p-4 space-y-2">
+          <div className="flex items-center gap-2">
+            <RadioIcon className={`h-3.5 w-3.5 ${liveTailActive ? "text-green-500 animate-pulse" : "text-muted-foreground"}`} />
+            <span className="text-sm font-semibold">Live tail</span>
+            {liveTailActive && <Badge variant="success">streaming</Badge>}
+          </div>
+          <div className="space-y-1 max-h-72 overflow-auto font-mono text-xs">
+            {liveEvents.map((event, i) => (
+              <div key={i} className="flex items-start gap-2 rounded border bg-background/40 px-2 py-1">
+                <span className="text-muted-foreground shrink-0">{event.type}</span>
+                <span className="truncate">{summarizeLiveEvent(event)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
