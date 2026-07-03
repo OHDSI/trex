@@ -6,7 +6,7 @@
 import { streamText, tool, jsonSchema, stepCountIs } from "ai";
 import { resolveModel } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
-import type { HookCtx } from "../eve-shim/types.ts";
+import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
@@ -24,6 +24,13 @@ export interface ToolBuildCtx {
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
   depth?: number;
+  // H2: threaded through so buildSdkTools can call agent.toolProvider and
+  // agent.config.filterTools with the same per-request context
+  // resolveModel/buildInstructions already get (see handler.ts's
+  // buildHookCtx). Reusing HookCtx here — instead of adding a parallel
+  // "dynamic tools ctx" shape — keeps one request-context type across every
+  // agent.ts/dynamic-tools.ts hook.
+  hookCtx?: HookCtx;
 }
 
 export function buildSystemPrompt(agent: LoadedAgent, metadata?: unknown): string {
@@ -118,11 +125,17 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
   const model = target.config.model
     ? resolveModel(target.config.model)
     : ctx.model ?? resolveModel(ctx.agent.config.model);
+  // H2: depth: 1 suppresses the target's own dynamic-tools.ts provider (a
+  // top-level-only concern, same rationale as skill/agent built-ins being
+  // top-level-only — see buildSdkTools) but NOT target.config.filterTools,
+  // which still runs against depth-1's (smaller) tool set using the same
+  // hookCtx carried in via the ...ctx spread.
+  const tools = await buildSdkTools({ ...ctx, agent: target, depth: 1 });
   const result = streamText({
     model,
     system: buildSystemPrompt(target, ctx.metadata),
     messages: [{ role: "user" as const, content: prompt }],
-    tools: buildSdkTools({ ...ctx, agent: target, depth: 1 }),
+    tools,
     stopWhen: stepCountIs(target.config.maxSteps ?? 25),
   });
   return { text: await result.text };
@@ -167,18 +180,95 @@ function agentTool(ctx: ToolBuildCtx): any {
   });
 }
 
-export function buildSdkTools(ctx: ToolBuildCtx): Record<string, any> {
-  const out: Record<string, any> = {};
+// Synthetic ToolDefs for the two built-ins, used ONLY as the `def` argument
+// handed to filterTools (H2) — not the real SDK tool (skillTool/agentTool
+// build those directly, closing over `ctx`, since their description text is
+// agent-specific). A filter deciding solely on `toolName` (the expected
+// common case, e.g. devx's plan mode dropping "skill"/"agent" outright)
+// never needs more than this; description/inputSchema here are placeholders.
+const BUILTIN_SKILL_DEF: ToolDef = { description: "Load an on-demand skill by name (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built-in).", inputSchema: { type: "object" } };
+
+// Builds the AI SDK tool set for one buildSdkTools call. Order (H2, spec
+// task-h2-brief.md):
+//  1. authored tools/*.ts (static, from the loader)
+//  2. merge in agent.toolProvider's (dynamic-tools.ts) output — TOP LEVEL
+//     (depth 0) ONLY; a provider error (thrown/rejected) or a missing
+//     hookCtx is logged and the static set is used as-is, never failing the
+//     turn (a broken MCP-backed provider must not be able to take down every
+//     turn). Authored tools/*.ts win on a name collision — logged, not
+//     silently dropped.
+//  3. add the built-in `skill`/`agent` tools — also top-level only — unless
+//     an authored or dynamic tool already claims that name.
+//  4. apply agent.config.filterTools, if configured, to the FULL merged set
+//     from steps 1-3 (built-ins included, per the brief — e.g. devx's plan
+//     mode needs to be able to drop `agent`/`skill` themselves). Unlike step
+//     2, a missing hookCtx here is a hard failure (thrown, not logged) and a
+//     throwing filter propagates uncaught: filterTools is an authored
+//     AgentConfig hook like resolveModel/buildInstructions, and shares their
+//     posture of never silently keeping/dropping a tool the author didn't
+//     actually decide on. See runSubagent for why step 2 is skipped but
+//     step 4 still runs at subagent depth (1).
+export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, any>> {
+  const { agent } = ctx;
   const depth = ctx.depth ?? 0;
-  for (const [name, def] of Object.entries(ctx.agent.tools)) {
+
+  // Step 1+2: merge static + dynamic ToolDefs before building any SDK tool
+  // objects, so a dynamic tool goes through the same authoredTool() path
+  // (needsApproval/clientOnly honored) as a static one.
+  const defs: Record<string, ToolDef> = { ...agent.tools };
+  if (depth === 0 && agent.toolProvider) {
+    if (!ctx.hookCtx) {
+      console.log(`agents: ${agent.dir}/dynamic-tools.ts is configured but no request hookCtx was available — skipping dynamic tools for this turn`);
+    } else {
+      try {
+        const dynamic = await agent.toolProvider(ctx.hookCtx);
+        for (const [name, def] of Object.entries(dynamic)) {
+          if (Object.hasOwn(defs, name)) {
+            console.log(`agents: dynamic tool "${name}" from ${agent.dir}/dynamic-tools.ts shadowed by the authored tools/${name} file`);
+            continue;
+          }
+          defs[name] = def;
+        }
+      } catch (e) {
+        console.log(`agents: ${agent.dir}/dynamic-tools.ts threw — continuing with static tools only: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  const out: Record<string, any> = {};
+  const filterDefs: Record<string, ToolDef> = { ...defs };
+  for (const [name, def] of Object.entries(defs)) {
     out[name] = authoredTool(name, def, ctx);
   }
-  // Built-ins at top level only; authored tools of the same name win.
+
+  // Step 3: built-ins at top level only; authored/dynamic tools of the same
+  // name win (already merged into `out`/`defs` above).
   if (depth === 0) {
-    if (ctx.agent.skills.length > 0 && !out.skill) out.skill = skillTool(ctx);
-    else if (out.skill) console.log("agents: authored tools/skill.ts overrides the built-in skill tool");
-    if (!out.agent) out.agent = agentTool(ctx);
-    else console.log("agents: authored tools/agent.ts overrides the built-in agent tool");
+    if (agent.skills.length > 0 && !out.skill) {
+      out.skill = skillTool(ctx);
+      filterDefs.skill = BUILTIN_SKILL_DEF;
+    } else if (out.skill) {
+      console.log("agents: a tool named \"skill\" overrides the built-in skill tool");
+    }
+    if (!out.agent) {
+      out.agent = agentTool(ctx);
+      filterDefs.agent = BUILTIN_AGENT_DEF;
+    } else {
+      console.log("agents: a tool named \"agent\" overrides the built-in agent tool");
+    }
   }
+
+  // Step 4: filterTools sees the complete merged set, built-ins included.
+  if (agent.config.filterTools) {
+    if (!ctx.hookCtx) {
+      throw new Error("agents: filterTools hook configured but no request context (hookCtx) available");
+    }
+    const hookCtx = ctx.hookCtx;
+    for (const name of Object.keys(out)) {
+      if (!agent.config.filterTools(name, filterDefs[name], hookCtx)) delete out[name];
+    }
+  }
+
   return out;
 }

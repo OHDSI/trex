@@ -211,9 +211,9 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
 Deno.test("subagent runs do not get a nested agent tool (one level only)", async () => {
   const agent = await loadAgent(TOY);
   const { buildSdkTools } = await import("./toolset.ts");
-  const nested = buildSdkTools({ agent: agent.subagents.shouter, sessionId: "s-1", depth: 1 });
+  const nested = await buildSdkTools({ agent: agent.subagents.shouter, sessionId: "s-1", depth: 1 });
   assert(!("agent" in nested));
-  const top = buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
+  const top = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
   assert("agent" in top);
   assert("skill" in top);
 });
@@ -225,7 +225,7 @@ Deno.test("built-in agent tool guards subagent lookup against prototype-pollutin
   // subagent" result instead of crashing the turn on a bogus target.
   const agent = await loadAgent(TOY);
   const { buildSdkTools } = await import("./toolset.ts");
-  const tools = buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
   const agentTool = tools.agent as { execute: (input: unknown) => Promise<unknown> };
   for (const bogus of ["__proto__", "constructor"]) {
     const result = await agentTool.execute({ agent: bogus, prompt: "hi" });

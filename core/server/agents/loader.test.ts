@@ -106,6 +106,67 @@ Deno.test("loadAgent tolerates missing agent.ts, tools, skills and subagents dir
   assertEquals(Object.keys(a.subagents).length, 0);
 });
 
+// H2: agent-dir-root dynamic-tools.ts|js discovery (task-h2-brief.md).
+// The provider function is written directly as branded (Object.assign(...,
+// { __trexToolProvider: true })) rather than imported from eve-shim/tools.ts,
+// so these fixtures don't need a resolvable import path from inside a temp
+// dir — matches how the loader itself only checks the brand, never the
+// factory's identity.
+
+Deno.test("loadAgent discovers a root-level dynamic-tools.ts and exposes it as toolProvider", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.writeTextFile(
+    `${tmp}/dynamic-tools.ts`,
+    `export default Object.assign(
+      (ctx) => Promise.resolve({ greet: { description: "hi " + ctx.sessionId, inputSchema: { type: "object" } } }),
+      { __trexToolProvider: true },
+    );`,
+  );
+  const a = await loadAgent(tmp);
+  assert(a.toolProvider, "expected loadAgent to expose the root dynamic-tools.ts as toolProvider");
+  const out = await a.toolProvider!({ sessionId: "s-1", env: () => undefined, sql: () => Promise.resolve({ rows: [] }) });
+  assertEquals(out.greet.description, "hi s-1");
+});
+
+Deno.test("loadAgent discovers dynamic-tools.js the same as dynamic-tools.ts", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.writeTextFile(
+    `${tmp}/dynamic-tools.js`,
+    `export default Object.assign(() => Promise.resolve({}), { __trexToolProvider: true });`,
+  );
+  const a = await loadAgent(tmp);
+  assert(a.toolProvider);
+});
+
+Deno.test("loadAgent tolerates a directory with no dynamic-tools.ts|js (toolProvider stays undefined)", async () => {
+  const a = await loadAgent(TOY);
+  assertEquals(a.toolProvider, undefined);
+});
+
+Deno.test("loadAgent rejects a root dynamic-tools.ts that doesn't default-export defineToolProvider(...)", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.writeTextFile(`${tmp}/dynamic-tools.ts`, `export default () => Promise.resolve({});`); // unbranded
+  await assertRejects(() => loadAgent(tmp), Error, "defineToolProvider");
+});
+
+Deno.test("loadAgent never discovers a dynamic-tools.ts placed INSIDE tools/ as a provider — it hits the ordinary tools/ brand error instead", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/tools`);
+  // Correctly branded as a tool PROVIDER, not a tool — tools/ only accepts
+  // __trexTool-branded defineTool() results, so this must fail the same way
+  // any other non-defineTool default export in tools/ does, not silently
+  // get picked up as the agent's dynamic-tools.ts.
+  await Deno.writeTextFile(
+    `${tmp}/tools/dynamic-tools.ts`,
+    `export default Object.assign(() => Promise.resolve({}), { __trexToolProvider: true });`,
+  );
+  await assertRejects(() => loadAgent(tmp), Error, "must default-export defineTool");
+});
+
 Deno.test("loadAgent ignores eve dirs we don't support, without failing", async () => {
   const tmp = await Deno.makeTempDir();
   await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");

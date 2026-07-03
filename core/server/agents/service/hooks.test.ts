@@ -14,6 +14,7 @@ import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { resolveModelForTurn } from "./model.ts";
 import { runTurn } from "./runner.ts";
 import { createHandler } from "./handler.ts";
+import { buildSdkTools } from "./toolset.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
@@ -237,6 +238,108 @@ Deno.test("runTurn: ToolContext.userId comes from the header-sourced opts.userId
   assert(result, "expected the whoami tool to have executed");
   assertEquals(result.data.result.output.userId, "user-42");
   assertEquals(result.data.result.output.metadataHadConflictingUserId, "attacker-supplied-id");
+});
+
+// ---------------------------------------------------------------------------
+// buildSdkTools (toolset.ts): H2 — filterTools hook + dynamic-tools.ts
+// provider. See .superpowers/sdd/task-h2-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("buildSdkTools: filterTools drops a tool, INCLUDING the built-in skill/agent tools", async () => {
+  const agent = await loadAgent(TOY);
+  assert(agent.skills.length > 0, "toy agent fixture must have a skill for this test to be meaningful");
+  agent.config.filterTools = (name) => name !== "echo" && name !== "skill";
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  assert(!("echo" in tools), "filterTools should have dropped the authored echo tool");
+  assert(!("skill" in tools), "filterTools should have dropped the built-in skill tool too");
+  assert("agent" in tools, "agent tool was not targeted by the filter and should remain");
+  assert("propose_card" in tools, "propose_card was not targeted by the filter and should remain");
+});
+
+Deno.test("buildSdkTools: a configured filterTools hook without a hookCtx fails loudly", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.filterTools = () => true;
+  await assertRejects(
+    () => buildSdkTools({ agent, sessionId: "s-1", depth: 0 }), // no hookCtx
+    Error,
+    "hookCtx",
+  );
+});
+
+Deno.test("buildSdkTools: dynamic-tools.ts provider merges tools in; authored tools win on name collision", async () => {
+  const agent = await loadAgent(TOY);
+  const seenCtx: HookCtx[] = [];
+  agent.toolProvider = (ctx) => {
+    seenCtx.push(ctx);
+    return Promise.resolve({
+      // Collides with the authored tools/echo.ts — the authored file must win.
+      echo: {
+        description: "dynamic echo (must be shadowed by the authored tool)",
+        inputSchema: { type: "object" },
+        execute: () => Promise.resolve({ from: "dynamic" }),
+      },
+      weather: {
+        description: "dynamic-only tool",
+        inputSchema: { type: "object" },
+        execute: () => Promise.resolve({ from: "dynamic" }),
+      },
+    });
+  };
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx({ sessionId: "s-99" }) });
+  assert("weather" in tools, "the dynamic-only tool must be merged into the tool set");
+  assertEquals(seenCtx.length, 1);
+  assertEquals(seenCtx[0].sessionId, "s-99", "the provider must receive the real per-request hookCtx");
+  const echoResult = await (tools.echo as { execute: (input: unknown) => Promise<unknown> }).execute({ text: "hi" });
+  assertEquals(echoResult, { echoed: "hi" }, "the authored echo tool must run, not the shadowed dynamic one");
+});
+
+Deno.test("buildSdkTools: a throwing dynamic-tools.ts provider is logged and the turn continues with static tools only", async () => {
+  const agent = await loadAgent(TOY);
+  agent.toolProvider = () => Promise.reject(new Error("MCP server unreachable"));
+  const logged: string[] = [];
+  const origLog = console.log;
+  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  let tools: Record<string, unknown>;
+  try {
+    tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  } finally {
+    console.log = origLog;
+  }
+  assert("echo" in tools, "static authored tools must still be present");
+  assert("agent" in tools, "built-in tools must still be present");
+  assert(logged.some((l) => l.includes("MCP server unreachable")), "the provider's failure must be logged, not swallowed silently");
+});
+
+Deno.test("buildSdkTools: dynamic-tools.ts provider is skipped (not called) when no hookCtx is available — logged, never thrown", async () => {
+  const agent = await loadAgent(TOY);
+  let providerCalls = 0;
+  agent.toolProvider = () => {
+    providerCalls++;
+    return Promise.resolve({});
+  };
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 }); // no hookCtx
+  assertEquals(providerCalls, 0);
+  assert("echo" in tools, "static tools must still build fine with no hookCtx and no filterTools configured");
+});
+
+Deno.test("buildSdkTools: a subagent's own dynamic-tools.ts provider does NOT run at depth 1 (top-level-only), but its filterTools still does", async () => {
+  const agent = await loadAgent(TOY);
+  const shouter = agent.subagents.shouter;
+  let providerCalls = 0;
+  shouter.toolProvider = () => {
+    providerCalls++;
+    return Promise.resolve({ weather: { description: "d", inputSchema: { type: "object" }, execute: () => Promise.resolve({}) } });
+  };
+  let filterCalls = 0;
+  shouter.config.filterTools = (name) => {
+    filterCalls++;
+    return name !== "shout";
+  };
+  const nested = await buildSdkTools({ agent: shouter, sessionId: "s-1", depth: 1, hookCtx: fakeHookCtx() });
+  assertEquals(providerCalls, 0, "a subagent's own dynamic-tools.ts provider must not run — dynamic tools are a top-level-only concern");
+  assert(filterCalls > 0, "filterTools must still run at subagent depth 1, unlike the provider");
+  assert(!("weather" in nested), "the provider never ran, so its tool must be absent");
+  assert(!("shout" in nested), "filterTools dropped the subagent's own shout tool");
 });
 
 // ---------------------------------------------------------------------------

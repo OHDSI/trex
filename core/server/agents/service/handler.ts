@@ -364,9 +364,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       const system = await resolveInstructions(agent, body.metadata, hookCtx);
       // Shared tool builder (same as the session runner). No emit/turnId here,
       // so needsApproval tools answer with an "use the session API" error
-      // instead of hanging a stateless request.
-      const tools = buildSdkTools({
-        agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store,
+      // instead of hanging a stateless request. H2: async (dynamic-tools.ts
+      // provider); hookCtx is the same one just used for
+      // resolveModelForTurn/resolveInstructions above.
+      const tools = await buildSdkTools({
+        agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx,
       });
       // ai@6's convertToModelMessages is async (Promise<ModelMessage[]>) —
       // the brief assumed the v2-era sync signature. `deno check` rejected

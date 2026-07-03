@@ -55,11 +55,15 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).clientOnly).map(([n]) => n),
   );
 
+  // H2: async now that a top-level dynamic-tools.ts provider may need to run
+  // (opts already carries hookCtx — see RunTurnOpts — so ToolBuildCtx picks
+  // it up via the spread).
+  const tools = await buildSdkTools({ ...opts, model });
   const result = streamText({
     model,
     system,
     messages,
-    tools: buildSdkTools({ ...opts, model }),
+    tools,
     stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
   });
 

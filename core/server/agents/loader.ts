@@ -13,7 +13,7 @@
 // string or {:instructions "..."}); skills/<name>.edn {:description "..."
 // :content "..."}.
 import { parseEDNString } from "edn-data";
-import type { AgentConfig, ToolDef } from "./eve-shim/types.ts";
+import type { AgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
 
 export interface SkillMeta {
   name: string;
@@ -52,6 +52,12 @@ export interface LoadedAgent {
   tools: Record<string, ToolDef>;
   skills: SkillMeta[];
   subagents: Record<string, LoadedAgent>;
+  // H2: agent-dir-ROOT `dynamic-tools.ts`/`dynamic-tools.js` only (never
+  // discovered inside tools/ — that dir is scanned separately and a
+  // dynamic-tools.ts placed there is just an ordinary tools/ entry, which
+  // throws the __trexTool brand-mismatch error like any other non-defineTool
+  // default export). toolset.ts's buildSdkTools calls this at depth 0 only.
+  toolProvider?: ToolProviderFn;
 }
 
 const IGNORED_DIRS = ["channels", "connections", "sandbox"];
@@ -134,6 +140,29 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     if (!(e instanceof Deno.errors.NotFound)) throw e;
   }
 
+  // H2: agent-dir-ROOT dynamic-tools.ts|js only — a separate stat/import
+  // from the tools/ scan above, so a dynamic-tools.ts placed *inside*
+  // tools/ is never discovered here (it just hits the tools/ loop's
+  // __trexTool brand-mismatch error like any other stray file there).
+  let toolProvider: ToolProviderFn | undefined;
+  for (const f of ["dynamic-tools.ts", "dynamic-tools.js"]) {
+    try {
+      await Deno.stat(`${dir}/${f}`);
+    } catch (e) {
+      if (e instanceof Deno.errors.NotFound) continue;
+      throw new Error(`agents: failed to read ${dir}/${f}: ${e instanceof Error ? e.message : e}`);
+    }
+    // Import/brand errors below propagate as-is (not re-wrapped), same as
+    // the tools/ loop's brand-mismatch error a few lines up.
+    const mod = await import(`file://${dir}/${f}`);
+    const fn = mod.default;
+    if (!fn || !(fn as { __trexToolProvider?: boolean }).__trexToolProvider) {
+      throw new Error(`agents: ${dir}/${f} must default-export defineToolProvider(...)`);
+    }
+    toolProvider = fn as ToolProviderFn;
+    break;
+  }
+
   const skills: SkillMeta[] = [];
   try {
     for await (const entry of Deno.readDir(`${dir}/skills`)) {
@@ -206,5 +235,5 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     } catch { /* absent */ }
   }
 
-  return { dir, instructions, config, tools, skills, subagents };
+  return { dir, instructions, config, tools, skills, subagents, toolProvider };
 }

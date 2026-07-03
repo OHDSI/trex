@@ -42,7 +42,25 @@ export interface AgentConfig {
   // resolveModelForTurn and toolset.ts's resolveInstructions.
   resolveModel?: (ctx: HookCtx) => Promise<string | ModelSpec>;
   buildInstructions?: (base: string, ctx: HookCtx) => Promise<string>;
+  // H2: applied to the MERGED tool set (authored + dynamic-tools.ts provider
+  // output + built-in `skill`/`agent`) by toolset.ts's buildSdkTools —
+  // returning false drops the tool. Synchronous by design (a per-tool
+  // yes/no decision, not an I/O call); a thrown filter propagates uncaught,
+  // same posture as buildInstructions/resolveModel (fail the turn rather
+  // than silently keep a tool that should have been dropped).
+  filterTools?: (toolName: string, def: ToolDef, ctx: HookCtx) => boolean;
 }
+
+// A dynamic tool source, authored as an agent-dir-root `dynamic-tools.ts`
+// default export (via eve-shim/tools.ts's defineToolProvider) and loaded by
+// loader.ts into LoadedAgent.toolProvider. Called fresh per top-level
+// buildSdkTools invocation (never at subagent depth — see toolset.ts) with
+// the same per-request HookCtx as resolveModel/buildInstructions. A
+// rejecting provider must NOT fail the turn (unlike resolveModel/
+// buildInstructions above) — a flaky MCP server or similar backing source is
+// an operational hazard, not a trust-boundary one; toolset.ts logs and
+// continues with the static tool set instead.
+export type ToolProviderFn = (ctx: HookCtx) => Promise<Record<string, ToolDef>>;
 
 export interface ToolContext {
   bearerToken?: string;
