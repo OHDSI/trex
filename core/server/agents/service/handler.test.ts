@@ -844,6 +844,23 @@ Deno.test("POST /chat returns a UIMessage stream", async () => {
   assert(body.length > 0);
 });
 
+// task-u1: usage must reach the wire via the finish part's messageMetadata —
+// toUIMessageStream() previously ran with no options, so totalUsage was only
+// persisted to agents.steps (observability) and never sent to the client.
+Deno.test("POST /chat: finish part carries usage in messageMetadata", async () => {
+  const { handler } = await makeHandler();
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+  }));
+  const text = await res.text();
+  assert(text.includes('"type":"finish"'), `no finish part in stream: ${text}`);
+  assert(text.includes('"messageMetadata"'), `finish part missing messageMetadata: ${text}`);
+  // model("hello from toy") -> textChunks' usage: inputTokens.total=1, outputTokens.total=2
+  assert(text.includes('"inputTokens"'), `messageMetadata missing usage.inputTokens: ${text}`);
+  assert(text.includes('"outputTokens"'), `messageMetadata missing usage.outputTokens: ${text}`);
+});
+
 // H3: ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part
 // into the SAME stream useChat consumes (createUIMessageStream +
 // writer.merge — see handler.ts and task-h3-report.md for the v6 API

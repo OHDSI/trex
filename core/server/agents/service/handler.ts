@@ -493,7 +493,17 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
                 .catch((e) => console.error("agents: chat persist failed:", e));
             },
           });
-          writer.merge(result.toUIMessageStream());
+          // task-u1: attach usage to the finish part's messageMetadata so
+          // /chat's stateless clients (useChat) can read token counts —
+          // previously toUIMessageStream() was called with no options, so
+          // the finish part shipped as bare {type:"finish",finishReason}
+          // and totalUsage never reached the wire (it was only persisted to
+          // agents.steps above, for observability). messageMetadata is
+          // called on both "start" and "finish" TextStreamParts (ai@6's
+          // UIMessageStreamOptions); only "finish" carries totalUsage.
+          writer.merge(result.toUIMessageStream({
+            messageMetadata: ({ part }) => part.type === "finish" ? { usage: part.totalUsage } : undefined,
+          }));
         },
       });
       return createUIMessageStreamResponse({ stream: uiStream });
