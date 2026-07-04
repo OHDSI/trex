@@ -246,9 +246,13 @@ live-tail by event shape.
     `devx.provider_configs`/`devx.settings` row's JSON `api_key`); IAM-shaped
     credentials (`{accessKeyId, secretAccessKey}`) throw rather than silently
     losing auth, unlike the legacy AI-SDK loop's `createModel`, which
-    supports both. `useEffectiveLoop.ts` detects the IAM shape client-side
-    and forces those users onto the legacy loop before `/chat` is ever
-    called — see `plugins/devx/agent/README.md`'s "Bedrock auth" section.
+    supports both. devx's GET `/provider-configs` and `/settings` responses
+    mask `api_key`, so the shape cannot be detected client-side — the server
+    derives a non-secret `auth_shape` hint from the unmasked key
+    (`plugins/devx/functions/auth_shape.ts`) and `useEffectiveLoop.ts` forces
+    `bedrock` + `auth_shape === "iam"` users onto the legacy loop before
+    `/chat` is ever called; the `resolveModel` throw is the backstop — see
+    `plugins/devx/agent/README.md`'s "Bedrock auth" section.
 
 ## What we ignore entirely
 

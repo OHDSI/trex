@@ -130,6 +130,26 @@ Deno.test("resolveModel: bedrock with a non-JSON api_key drops it (falls through
   assertEquals(spec, { provider: "bedrock", modelId: "anthropic.claude-3-5-sonnet", apiKey: undefined, baseURL: undefined });
 });
 
+Deno.test("resolveModel: bedrock with valid-JSON-but-neither-shape api_key treats it as absent, never forwards the raw JSON", async () => {
+  for (const apiKey of [JSON.stringify({ bearerToken: "" }), JSON.stringify({ unrelated: true }), "{}"]) {
+    const ctx = fakeHookCtx({
+      activeProvider: { provider: "bedrock", model: "anthropic.claude-3-5-sonnet", api_key: apiKey, base_url: null },
+    });
+    const spec = await resolveModel(ctx);
+    assertEquals(spec, { provider: "bedrock", modelId: "anthropic.claude-3-5-sonnet", apiKey: undefined, baseURL: undefined });
+  }
+});
+
+Deno.test("resolveModel: bedrock with a JSON-scalar api_key ('null', numbers, bare strings) treats it as absent without throwing", async () => {
+  for (const apiKey of ["null", "42", '"bare-string"']) {
+    const ctx = fakeHookCtx({
+      activeProvider: { provider: "bedrock", model: "anthropic.claude-3-5-sonnet", api_key: apiKey, base_url: null },
+    });
+    const spec = await resolveModel(ctx);
+    assertEquals(spec, { provider: "bedrock", modelId: "anthropic.claude-3-5-sonnet", apiKey: undefined, baseURL: undefined });
+  }
+});
+
 Deno.test("resolveModel: no ctx.userId throws a clear error", async () => {
   const ctx = fakeHookCtx({}, { userId: undefined });
   await assertRejects(() => resolveModel(ctx), Error, "devx agent requires an authenticated user");

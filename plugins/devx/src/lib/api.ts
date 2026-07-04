@@ -146,7 +146,10 @@ export async function getProviderConfigs(): Promise<ProviderConfigRecord[]> {
 
 export interface ActiveProviderConfig {
   provider: string;
-  api_key: string | null;
+  // Server-derived credential-shape hint (see types.ts's AuthShape) — the
+  // masked api_key in GET responses can never be shape-sniffed client-side.
+  // undefined on older server builds that don't emit the field yet.
+  auth_shape?: "bearer" | "iam" | "plain" | "none";
 }
 
 // task-u1: mirrors plugins/devx/agent/agent.ts's resolveModel fallback chain
@@ -156,17 +159,17 @@ export interface ActiveProviderConfig {
 // providers (eve/agents has no sidecar-process equivalent), which /chat
 // surfaces as a bare uncaught 500, not a parseable error. Read-only; never
 // used for anything security-sensitive, same posture as the server-side
-// fallback it mirrors. Also carries `api_key` (final-007 review finding #4)
-// so useEffectiveLoop.ts can additionally detect IAM-shaped bedrock
-// credentials — resolveModel throws for those too (agents loop is
+// fallback it mirrors. Also carries `auth_shape` (final-007 review finding
+// #4 + merge-gate re-review) so useEffectiveLoop.ts can detect IAM-shaped
+// bedrock credentials — resolveModel throws for those too (agents loop is
 // bearer-token-only), the exact same "gate it before /chat" reasoning as the
 // claude-code/copilot case above.
 export async function getActiveProviderConfig(): Promise<ActiveProviderConfig> {
   const configs = await getProviderConfigs().catch(() => [] as ProviderConfigRecord[]);
   const active = configs.find((c) => c.is_active);
-  if (active) return { provider: active.provider, api_key: active.api_key ?? null };
+  if (active) return { provider: active.provider, auth_shape: active.auth_shape };
   const settings = await getSettings();
-  return { provider: settings?.provider || "anthropic", api_key: settings?.api_key ?? null };
+  return { provider: settings?.provider || "anthropic", auth_shape: settings?.auth_shape };
 }
 
 export async function getActiveProvider(): Promise<string> {

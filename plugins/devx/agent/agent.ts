@@ -111,29 +111,38 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   // posture as every other error path in this file).
   let apiKey: string | undefined = row.api_key ?? undefined;
   if (provider === "bedrock" && row.api_key) {
+    let parsed: unknown;
+    let parseable = true;
     try {
-      const creds = JSON.parse(row.api_key) as {
-        bearerToken?: string;
-        accessKeyId?: string;
-        secretAccessKey?: string;
-      };
-      if (creds.bearerToken) {
+      parsed = JSON.parse(row.api_key);
+    } catch {
+      // Not JSON — legacy's own createModel silently falls through to the
+      // AWS_BEARER_TOKEN_BEDROCK env var in this case (its catch{} is
+      // empty); core's bedrockModel does the same env fallback when
+      // ModelSpec.apiKey is undefined, so drop the unparseable value
+      // rather than forwarding it as a bogus apiKey.
+      parseable = false;
+    }
+    if (!parseable || typeof parsed !== "object" || parsed === null) {
+      // Unparseable, or a valid-JSON scalar ("null", numbers, bare
+      // strings): no recognizable credential structure — treat as absent
+      // (env fallback). The property access below is guarded by the
+      // object/null check so a stored "null" can't TypeError here
+      // (merge-gate re-review ride-along a).
+      apiKey = undefined;
+    } else {
+      const creds = parsed as { bearerToken?: unknown; accessKeyId?: unknown; secretAccessKey?: unknown };
+      if (creds.bearerToken && typeof creds.bearerToken === "string") {
         apiKey = creds.bearerToken;
       } else if (creds.accessKeyId || creds.secretAccessKey) {
         throw new Error(
           "bedrock IAM credentials are not supported on the agents loop yet — use bearer token or the legacy loop",
         );
-      }
-    } catch (err) {
-      if (err instanceof SyntaxError) {
-        // Not JSON — legacy's own createModel silently falls through to the
-        // AWS_BEARER_TOKEN_BEDROCK env var in this case (its catch{} is
-        // empty); core's bedrockModel does the same env fallback when
-        // ModelSpec.apiKey is undefined, so drop the unparseable value
-        // rather than forwarding it as a bogus apiKey.
-        apiKey = undefined;
       } else {
-        throw err;
+        // Valid JSON object but NEITHER shape (e.g. {"bearerToken": ""} or
+        // unrelated keys): never forward the raw JSON blob as a bearer
+        // token — treat as absent, same env fallback as above.
+        apiKey = undefined;
       }
     }
   }

@@ -13,25 +13,18 @@
 // for a bedrock row whose api_key JSON is IAM-shaped (accessKeyId/
 // secretAccessKey, no bearerToken) — the agents loop only implements
 // bearer-token bedrock auth (see agent.ts's resolveModel comment). Same
-// "gate it before /chat ever sees it" posture as claude-code/copilot:
-// `isBedrockIamShaped` below mirrors SettingsPage.tsx's OWN api_key JSON
-// unpacking (the "Unpack Bedrock credentials from api_key JSON" effect) so
-// the detection is honest — it recognizes exactly the shape the Settings
-// page itself writes, not a guess at the wire format.
+// "gate it before /chat ever sees it" posture as claude-code/copilot.
+// Detection uses the server-derived `auth_shape` hint (merge-gate re-review:
+// every GET response MASKS api_key — LEFT(...,8)||'...'||RIGHT(...,4) — so
+// client-side JSON sniffing of it can never match; the server computes the
+// shape from the RAW key before masking, see functions/auth_shape.ts). The
+// server-side resolveModel throw remains the backstop for anything that
+// slips past this gate (e.g. an older server build that doesn't emit
+// auth_shape yet, where this hook can't detect IAM and falls through).
 import { useEffect, useState } from "react";
 import * as api from "@/lib/api";
 
 export type EffectiveLoop = "legacy" | "agents";
-
-function isBedrockIamShaped(apiKey: string | null): boolean {
-  if (!apiKey) return false;
-  try {
-    const creds = JSON.parse(apiKey) as { bearerToken?: string; accessKeyId?: string; secretAccessKey?: string };
-    return !creds.bearerToken && !!(creds.accessKeyId || creds.secretAccessKey);
-  } catch {
-    return false;
-  }
-}
 
 export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
   const [state, setState] = useState<{ loop: EffectiveLoop; resolved: boolean }>({
@@ -48,7 +41,7 @@ export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
         const providerForcesLegacy =
           active.provider === "claude-code" ||
           active.provider === "copilot" ||
-          (active.provider === "bedrock" && isBedrockIamShaped(active.api_key));
+          (active.provider === "bedrock" && active.auth_shape === "iam");
         setState({ loop: wantsAgents && !providerForcesLegacy ? "agents" : "legacy", resolved: true });
       })
       .catch((err) => {

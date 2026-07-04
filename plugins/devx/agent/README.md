@@ -61,12 +61,17 @@ so `resolveModel` throws a clear error (`"bedrock IAM credentials are not suppor
 agents loop yet — use bearer token or the legacy loop"`) instead of silently losing auth or
 falling back to whatever `AWS_BEARER_TOKEN_BEDROCK` happens to be set in the environment.
 
-The devx UI never lets a user reach that throw in practice: `useEffectiveLoop.ts` mirrors
-`SettingsPage.tsx`'s own `api_key` JSON unpacking client-side and forces `loop: "legacy"`
-whenever the active provider is `bedrock` and its stored credentials are IAM-shaped — the
-same "gate it before `/chat`/session-create ever sees it" posture already used for the
-`claude-code`/`copilot` sidecar providers. See `core/server/agents/COMPAT.md`'s
-`ToolContext.sql` divergence entry for the cross-reference from the core side.
+The devx UI keeps IAM users off this loop via a server-derived hint: every `GET
+/provider-configs` and `GET /settings` response MASKS `api_key`
+(`LEFT(...,8)||'...'||RIGHT(...,4)`), so the credential shape cannot be sniffed client-side —
+instead the server computes a non-secret `auth_shape` field (`bearer`/`iam`/`plain`/`none`,
+derived from the UNMASKED key before masking; see `functions/auth_shape.ts`) and
+`useEffectiveLoop.ts` forces `loop: "legacy"` whenever the active provider is `bedrock` and
+`auth_shape === "iam"` — the same "gate it before `/chat`/session-create ever sees it"
+posture already used for the `claude-code`/`copilot` sidecar providers. The `resolveModel`
+throw remains the backstop for anything that slips past the gate (e.g. an older server build
+that doesn't emit `auth_shape` yet). See `core/server/agents/COMPAT.md`'s `ToolContext.sql`
+divergence entry for the cross-reference from the core side.
 
 ## Running the tests
 

@@ -701,6 +701,10 @@ export function useAgentsChat(
         if (epoch !== streamEpochRef.current) return; // stale: chat switched while the POST was in flight
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
+          // Re-check after the (async) body read too — a chat switch can
+          // land between the response headers and the body settling
+          // (merge-gate re-review ride-along b).
+          if (epoch !== streamEpochRef.current) return;
           setConsentError(body?.error ?? `approval failed (${res.status})`);
           return;
         }

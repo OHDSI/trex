@@ -1,5 +1,6 @@
 // @ts-nocheck - Deno edge function, not compiled by tsc
 import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
+import { deriveAuthShape } from "./auth_shape.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -1158,8 +1159,13 @@ Deno.serve(async (req: Request) => {
       if (result.rows.length === 0) {
         return Response.json(null, { headers: corsHeaders });
       }
-      // Mask API key
+      // Mask API key. auth_shape is a derived, NON-SECRET hint (bearer/iam/
+      // plain/none) computed from the raw key BEFORE masking — the masked
+      // api_key is never valid JSON, so a client cannot derive the shape
+      // itself (useEffectiveLoop.ts gates bedrock-IAM users onto the legacy
+      // loop with it; see functions/auth_shape.ts).
       const row = result.rows[0];
+      row.auth_shape = deriveAuthShape(row.api_key);
       if (row.api_key) {
         row.api_key = row.api_key.substring(0, 8) + "..." + row.api_key.slice(-4);
       }
