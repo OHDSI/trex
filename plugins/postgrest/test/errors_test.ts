@@ -223,6 +223,10 @@ Deno.test("pgErrorStatus mapping table", () => {
     ["42501", "", true, 403],
     ["42501", "", false, 401],
     ["PT402", "Payment Required", false, 402],
+    // Error.hs: 'P':'T':n -> fromMaybe status500 (mkStatus <$> readMaybe n ...)
+    // an unparsable status (readMaybe fails) falls back to 500
+    ["PT40A", "Wrong", false, 500],
+    ["PT", "", false, 500],
     ["22P02", "", false, 400], // default: other SQLSTATEs are client errors
   ];
   for (const [code, message, authed, expected] of cases) {

@@ -429,9 +429,11 @@ export function pgErrorStatus(authed: boolean, code: string, message: string): n
   if (code === "42P01") return 404; // undefined table
   if (code === "42P17") return 500; // infinite recursion
   if (code === "42501") return authed ? 403 : 401; // insufficient privilege
-  if (/^PT\d{3}$/.test(code)) {
-    const n = parseInt(code.slice(2), 10);
-    return Number.isNaN(n) ? 500 : n;
+  if (code.startsWith("PT")) {
+    // Error.hs: 'P':'T':n -> fromMaybe status500 (mkStatus <$> readMaybe n ...)
+    // readMaybe @Int fails on any non-numeric rest (e.g. "PT40A" -> 500).
+    const rest = code.slice(2);
+    return /^-?\d+$/.test(rest) ? Number.parseInt(rest, 10) : 500;
   }
   return 400;
 }

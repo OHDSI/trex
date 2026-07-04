@@ -118,11 +118,19 @@ function ftsOperator(op: FtsOperator): string {
  * OnePosParam RPC call, cast to the parameter's type.
  *
  * Deviation from upstream: Hasql special-cases bytea with a typed encoder
- * (HE.bytea) because HE.unknown fails on it; node-postgres always sends text
- * parameters, so bytea goes through the same `$n::bytea` text cast (the body
- * must be in pg's hex/escape input format — raw octet-stream is phase 8).
+ * (HE.bytea) taking the raw body bytes because HE.unknown fails on it;
+ * node-postgres always sends text parameters, so the raw bytes are rendered
+ * in pg's bytea hex input format ('\x...') and go through the same
+ * `$n::bytea` cast. Text-ish types receive the UTF-8 decoding of the bytes,
+ * like HE.unknown does for a UTF-8 client.
  */
-export function singleParameter(body: string | null, typ: string): Snippet {
+export function singleParameter(body: string | Uint8Array | null, typ: string): Snippet {
+  if (body instanceof Uint8Array) {
+    const value = typ === "bytea"
+      ? `\\x${[...body].map((b) => b.toString(16).padStart(2, "0")).join("")}`
+      : new TextDecoder().decode(body);
+    return snip(param(value), "::", typ);
+  }
   return snip(param(body), "::", typ);
 }
 

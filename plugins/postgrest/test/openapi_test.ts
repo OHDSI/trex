@@ -298,6 +298,24 @@ Deno.test("openapi: rpc paths — GET query params (incl. variadic) and POST arg
   assertEquals((args.schema.properties as Record<string, unknown>).a, { format: "integer", type: "integer" });
 });
 
+Deno.test("openapi: empty properties/parameters are omitted (swagger2 omits mempty fields)", () => {
+  // swagger2's sopSwaggerGenericToJSON drops fields equal to their mempty
+  // default: a column-less relation has NO "properties" key and a paramless
+  // routine's GET operation has NO "parameters" key.
+  const bare: Table = { ...stats, name: "bare", columns: [] };
+  const noArgs: Routine = { ...addThem, name: "no_args", description: null, params: [] };
+  const doc = JSON.parse(encodeOpenApi(conf(), rels, [bare], [noArgs], null));
+  const defs = doc.definitions as Record<string, Record<string, unknown>>;
+  assertEquals("properties" in defs.bare, false);
+  assertEquals(defs.bare.type, "object");
+  const rpc = (doc.paths as Record<string, Record<string, Record<string, unknown>>>)["/rpc/no_args"];
+  assertEquals("parameters" in rpc.get, false);
+  // POST still carries the args body + preferParams, with an empty schema
+  const postParams = rpc.post.parameters as { schema?: Record<string, unknown> }[];
+  assertEquals(postParams.length, 2);
+  assertEquals("properties" in (postParams[0].schema as Record<string, unknown>), false);
+});
+
 // --------------------------------------------------------------------------
 // OPTIONS Allow headers (Response.hs info*Response)
 // --------------------------------------------------------------------------

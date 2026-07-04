@@ -411,3 +411,59 @@ export function infoProcResponse(proc: Routine): Response {
 export function infoRootResponse(): Response {
   return respondInfo("OPTIONS,GET,HEAD");
 }
+
+// --------------------------------------------------------------------------
+// CORS preflight (Cors.hs corsPolicy + Network.Wai.Middleware.Cors)
+// --------------------------------------------------------------------------
+
+/**
+ * Ports the wai-cors middleware's preflight handling with PostgREST's policy
+ * (Cors.hs corsPolicy). A preflight request (OPTIONS + Origin +
+ * Access-Control-Request-Method) is answered by the middleware itself — a
+ * 200 with the CORS headers, empty body and, notably, NO Allow header (the
+ * OPTIONS info responses never run). Returns null when the request is not a
+ * preflight or when the policy check fails (corsIgnoreFailures = True passes
+ * the request through to the app untouched).
+ */
+export function corsPreflightResponse(
+  corsAllowedOrigins: string[] | null,
+  req: { method: string; headers: Headers },
+): Response | null {
+  if (req.method !== "OPTIONS") return null;
+  const origin = req.headers.get("Origin");
+  const requestMethod = req.headers.get("Access-Control-Request-Method");
+  if (origin === null || requestMethod === null) return null;
+
+  // corsOrigins: Nothing allows any origin and answers "*"; a configured
+  // list must contain the request origin (failures pass through).
+  let allowOrigin: string;
+  if (corsAllowedOrigins === null) {
+    allowOrigin = "*";
+  } else if (corsAllowedOrigins.includes(origin)) {
+    allowOrigin = origin;
+  } else {
+    return null;
+  }
+
+  // corsMethods ∪ simpleMethods (GET/HEAD/POST); the requested method must
+  // be among them, otherwise the failure is ignored (pass through).
+  const allowedMethods = ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS", "HEAD"];
+  if (!allowedMethods.includes(requestMethod.toUpperCase())) return null;
+
+  // corsRequestHeaders = "Authorization" : requested headers (Cors.hs), so
+  // the wai-cors allowed-headers check always passes; the response echoes
+  // the policy list plus the simple headers without Content-Type.
+  const acrh = req.headers.get("Access-Control-Request-Headers");
+  const requested = acrh === null ? [] : acrh.split(",").map((h) => h.trim()).filter((h) => h !== "");
+  const allowHeaders = ["Authorization", ...requested, "Accept", "Accept-Language", "Content-Language"];
+
+  return new Response(null, {
+    status: 200,
+    headers: {
+      "Access-Control-Allow-Origin": allowOrigin,
+      "Access-Control-Allow-Methods": allowedMethods.join(", "),
+      "Access-Control-Allow-Headers": allowHeaders.join(", "),
+      "Access-Control-Max-Age": "86400",
+    },
+  });
+}

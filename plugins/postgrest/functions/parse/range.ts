@@ -3,9 +3,10 @@
 //
 // Upstream models ranges with Data.Ranged. All ranges here are closed integer
 // intervals whose boundaries may be absent: `lower: null` is BoundaryBelowAll
-// and `upper: null` is BoundaryAboveAll. The Data.Ranged adjacency quirk is
-// preserved: [n, n-1] (upper exactly one below lower) is NOT considered empty
-// — that's what makes the limitZeroRange ([0, -1]) trick work upstream.
+// and `upper: null` is BoundaryAboveAll. A range [l, u] is empty when u < l
+// (Data.Ranged's adjacency rule makes [n, n-1] compare empty too); the
+// limitZeroRange ([0, -1]) is such an empty range and only bypasses the
+// empty-range validation through the hasLimitZero special case.
 
 import { invalidRange, type PgrstError, type RangeError } from "../errors.ts";
 
@@ -31,17 +32,20 @@ export function rangeLeq(n: number): NonnegRange {
 
 /**
  * Special case to allow limit 0 queries (upstream issue #1121): 0 <= x <= -1,
- * an "empty" range that Data.Ranged's adjacency rule does not flag as empty.
+ * an empty range that bypasses validations via hasLimitZero (its identity is
+ * carried by the -1 upper bound, not by non-emptiness).
  */
 export const limitZeroRange: NonnegRange = { lower: 0, upper: -1 };
 
 /**
- * Data.Ranged rangeIsEmpty (upper <= lower on boundaries): with closed
- * integer boundaries this means upper < lower - 1; adjacent boundaries
- * ([n, n-1]) compare as non-empty.
+ * Data.Ranged rangeIsEmpty (rangeUpper <= rangeLower on boundaries): for a
+ * closed integer range [l, u] this is BoundaryAbove u <= BoundaryBelow l,
+ * which holds exactly when u < l (adjacent boundaries — u == l - 1 — compare
+ * EQUAL under DiscreteOrdered, so [n, n-1] IS empty; limit=0 only survives
+ * the ApiRequest.hs empty-range check via the hasLimitZero special case).
  */
 export function rangeIsEmpty(r: NonnegRange): boolean {
-  return r.lower !== null && r.upper !== null && r.upper < r.lower - 1;
+  return r.lower !== null && r.upper !== null && r.upper < r.lower;
 }
 
 /** Range equality (Data.Ranged: equal boundaries, or both empty). */

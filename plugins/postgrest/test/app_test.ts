@@ -3,6 +3,7 @@ import { assertEquals } from "std/assert/mod.ts";
 import { handle, shutdownForTests } from "../functions/app.ts";
 import { resetConfigForTests } from "../functions/config.ts";
 import { closePoolForTests } from "../functions/db.ts";
+import { corsPreflightResponse } from "../functions/response.ts";
 import { stripMount } from "../functions/state.ts";
 
 const hasDb = !!Deno.env.get("PGRST_DB_URI");
@@ -69,6 +70,58 @@ Deno.test("unknown mount is a 404", async () => {
   } finally {
     await cleanup();
   }
+});
+
+Deno.test("CORS preflight is answered by the middleware, without an Allow header", async () => {
+  // Cors.hs/wai-cors: OPTIONS + Origin + Access-Control-Request-Method is a
+  // preflight — answered before auth and planning, so the OPTIONS info
+  // responses (and their Allow header) never run. Works without a database.
+  try {
+    const res = await handle(
+      new Request("http://localhost/postgrest/", {
+        method: "OPTIONS",
+        headers: {
+          Origin: "http://example.com",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Headers": "Foo,Bar",
+        },
+      }),
+    );
+    assertEquals(res.status, 200);
+    assertEquals(res.headers.get("Allow"), null);
+    assertEquals(res.headers.get("Access-Control-Allow-Origin"), "*");
+    assertEquals(res.headers.get("Access-Control-Allow-Methods"), "GET, POST, PATCH, PUT, DELETE, OPTIONS, HEAD");
+    assertEquals(
+      res.headers.get("Access-Control-Allow-Headers"),
+      "Authorization, Foo, Bar, Accept, Accept-Language, Content-Language",
+    );
+    assertEquals(res.headers.get("Access-Control-Max-Age"), "86400");
+    assertEquals(await res.text(), "");
+  } finally {
+    await cleanup();
+  }
+});
+
+Deno.test("OPTIONS without Access-Control-Request-Method is NOT a preflight", () => {
+  // wai-cors only intercepts real preflights; a plain OPTIONS (even with an
+  // Origin) falls through to the info responses.
+  const noPreflight = corsPreflightResponse(null, {
+    method: "OPTIONS",
+    headers: new Headers({ Origin: "http://example.com" }),
+  });
+  assertEquals(noPreflight, null);
+  // a configured origin allowlist rejects unknown origins (corsIgnoreFailures
+  // passes the request through instead of failing it)
+  const rejected = corsPreflightResponse(["http://ok.com"], {
+    method: "OPTIONS",
+    headers: new Headers({ Origin: "http://evil.com", "Access-Control-Request-Method": "GET" }),
+  });
+  assertEquals(rejected, null);
+  const allowed = corsPreflightResponse(["http://ok.com"], {
+    method: "OPTIONS",
+    headers: new Headers({ Origin: "http://ok.com", "Access-Control-Request-Method": "GET" }),
+  });
+  assertEquals(allowed?.headers.get("Access-Control-Allow-Origin"), "http://ok.com");
 });
 
 Deno.test("API requests without a token and without an anon role are 401 PGRST302", async () => {

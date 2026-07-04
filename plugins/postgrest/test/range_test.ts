@@ -64,12 +64,18 @@ Deno.test("rangeGeq / rangeLeq / allRange", () => {
   assertEquals(allRange, { lower: 0, upper: null });
 });
 
-Deno.test("Data.Ranged emptiness: adjacent boundaries are NOT empty", () => {
-  // [0,-1] (limit zero) is not "empty" — the upstream trick relies on this
-  assertEquals(rangeIsEmpty(limitZeroRange), false);
-  assertEquals(rangeIsEmpty({ lower: 5, upper: 4 }), false); // adjacent
+Deno.test("Data.Ranged emptiness: upper < lower is empty (adjacent boundaries compare EQ)", () => {
+  // Data.Ranged: rangeIsEmpty = rangeUpper <= rangeLower; for closed integer
+  // bounds BoundaryAbove u <= BoundaryBelow l holds exactly when u < l —
+  // adjacent boundaries (u == l - 1, e.g. Range "1-0" or the [0,-1] limit
+  // zero range) compare EQUAL under DiscreteOrdered, so they ARE empty.
+  // limit=0 only bypasses the ApiRequest.hs 416 check via hasLimitZero.
+  assertEquals(rangeIsEmpty(limitZeroRange), true);
+  assertEquals(rangeIsEmpty({ lower: 5, upper: 4 }), true); // adjacent
+  assertEquals(rangeIsEmpty({ lower: 1, upper: 0 }), true); // Range: 1-0 -> 416 PGRST103
   assertEquals(rangeIsEmpty({ lower: 5, upper: 3 }), true);
   assertEquals(rangeIsEmpty({ lower: 0, upper: -2 }), true); // limit=-1
+  assertEquals(rangeIsEmpty({ lower: 5, upper: 5 }), false); // single row
   assertEquals(rangeIsEmpty(allRange), false);
   assertEquals(rangeIsEmpty({ lower: null, upper: -5 }), false);
 });

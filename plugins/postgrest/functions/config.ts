@@ -112,6 +112,8 @@ export interface AppConfig {
   openApiMode: OpenApiMode;
   openApiSecurityActive: boolean;
   openApiServerProxyUri: string | null;
+  /** server-cors-allowed-origins: null allows any origin (wai-cors corsOrigins Nothing). */
+  serverCorsAllowedOrigins: string[] | null;
   /** server-host/server-port only feed the OpenAPI host here (the plugin does not listen itself). */
   serverHost: string;
   serverPort: number;
@@ -239,6 +241,12 @@ export function resolveConfig(sources: ConfigSources): AppConfig {
     ),
     openApiSecurityActive: bool("openapi-security-active", false),
     openApiServerProxyUri: str("openapi-server-proxy-uri") ?? null,
+    // Config.hs parseCORSAllowedOrigins: unset -> Nothing (any origin);
+    // otherwise split on commas and strip whitespace.
+    serverCorsAllowedOrigins: (() => {
+      const orig = str("server-cors-allowed-origins");
+      return orig === undefined ? null : orig.split(",").map((s) => s.trim());
+    })(),
     serverHost: str("server-host") ?? "!4",
     serverPort: int("server-port") ?? 3000,
     serverTimingEnabled: bool("server-timing-enabled", false),

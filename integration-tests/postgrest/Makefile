@@ -47,6 +47,9 @@ serve: serve-stop
 serve-stop:
 	@mkdir -p report
 	@-test -f $(PLUGIN_PID) && kill $$(cat $(PLUGIN_PID)) 2>/dev/null; rm -f $(PLUGIN_PID)
+	@# the deno node-shim spawns the real deno as a child that can survive
+	@# killing the recorded pid — make sure no leftover server holds the port
+	@-pkill -f "deno run.*serve_plugin\.ts" 2>/dev/null; sleep 0.3; true
 
 diff:
 	$(PYTHON_BIN) run_diff.py --buckets $(BUCKETS) $(DIFF_ARGS)

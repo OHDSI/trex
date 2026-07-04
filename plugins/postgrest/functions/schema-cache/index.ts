@@ -24,6 +24,7 @@ import {
   type DataRepresentation,
   type FkRelationship,
   type FuncVolatility,
+  type PgType,
   qiEq,
   qiKey,
   type QualifiedIdentifier,
@@ -34,6 +35,7 @@ import {
   type RetType,
   type Routine,
   type RoutineMap,
+  type RoutineParam,
   type SchemaCache,
   type Table,
   type TablesMap,
@@ -204,6 +206,78 @@ function toIsolationLevel(level: string | null): Routine["isolationLvl"] {
   return level === "repeatable read" || level === "serializable" ? level : "read committed";
 }
 
+/** Haskell Text/String Ord: lexicographic by Unicode code point. */
+function cmpText(a: string, b: string): number {
+  let i = 0;
+  let j = 0;
+  while (i < a.length && j < b.length) {
+    const ca = a.codePointAt(i) as number;
+    const cb = b.codePointAt(j) as number;
+    if (ca !== cb) return ca - cb;
+    i += ca > 0xffff ? 2 : 1;
+    j += cb > 0xffff ? 2 : 1;
+  }
+  return (a.length - i) - (b.length - j);
+}
+
+/** Haskell Maybe Ord: Nothing < Just. */
+function cmpNullable<T>(cmp: (a: T, b: T) => number, a: T | null, b: T | null): number {
+  if (a === null) return b === null ? 0 : -1;
+  if (b === null) return 1;
+  return cmp(a, b);
+}
+
+/** Haskell list Ord: lexicographic, shorter prefix first. */
+function cmpList<T>(cmp: (a: T, b: T) => number, a: T[], b: T[]): number {
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const c = cmp(a[i], b[i]);
+    if (c !== 0) return c;
+  }
+  return a.length - b.length;
+}
+
+const cmpBool = (a: boolean, b: boolean): number => Number(a) - Number(b); // False < True
+
+/** Derived RoutineParam Ord: (ppName, ppType, ppTypeMaxLength, ppReq, ppVariadic). */
+function cmpParam(a: RoutineParam, b: RoutineParam): number {
+  return cmpText(a.name, b.name) || cmpText(a.type, b.type) || cmpText(a.typeMaxLength, b.typeMaxLength) ||
+    cmpBool(a.required, b.required) || cmpBool(a.variadic, b.variadic);
+}
+
+/** Derived RetType/PgType Ord: Single < SetOf; Scalar qi < Composite qi alias. */
+function cmpRetType(a: RetType, b: RetType): number {
+  const kindIdx = (k: RetType["kind"]): number => (k === "single" ? 0 : 1);
+  const pg = (t: PgType, u: PgType): number =>
+    cmpBool(t.composite, u.composite) || cmpText(t.qi.schema, u.qi.schema) || cmpText(t.qi.name, u.qi.name) ||
+    (t.composite ? cmpBool(t.compositeAlias, u.compositeAlias) : 0);
+  return (kindIdx(a.kind) - kindIdx(b.kind)) || pg(a.pgType, b.pgType);
+}
+
+const VOLATILITY_ORD: Record<FuncVolatility, number> = { volatile: 0, stable: 1, immutable: 2 };
+const ISOLVL_ORD = { "read committed": 0, "repeatable read": 1, serializable: 2 } as const;
+
+/**
+ * Ports the Routine.hs Ord instance: same-named overloads order by least
+ * number of params first; ties (and unrelated routines) fall back to the
+ * derived tuple compare over all fields. The OpenAPI output depends on this
+ * order (paths are an insert-ordered map where the LAST overload wins).
+ */
+export function compareRoutines(a: Routine, b: Routine): number {
+  if (a.schema === b.schema && a.name === b.name && a.params.length !== b.params.length) {
+    return a.params.length - b.params.length;
+  }
+  return cmpText(a.schema, b.schema) ||
+    cmpText(a.name, b.name) ||
+    cmpNullable(cmpText, a.description, b.description) ||
+    cmpList(cmpParam, a.params, b.params) ||
+    cmpRetType(a.returnType, b.returnType) ||
+    (VOLATILITY_ORD[a.volatility] - VOLATILITY_ORD[b.volatility]) ||
+    cmpBool(a.hasVariadic, b.hasVariadic) ||
+    cmpNullable((x: string, y: string) => ISOLVL_ORD[x as keyof typeof ISOLVL_ORD] - ISOLVL_ORD[y as keyof typeof ISOLVL_ORD], a.isolationLvl, b.isolationLvl) ||
+    cmpList((x: [string, string], y: [string, string]) => cmpText(x[0], y[0]) || cmpText(x[1], y[1]), a.funcSettings, b.funcSettings);
+}
+
 export function decodeFuncs(rows: FuncRow[]): RoutineMap {
   const funcs: RoutineMap = new Map();
   for (const row of rows) {
@@ -231,8 +305,9 @@ export function decodeFuncs(rows: FuncRow[]): RoutineMap {
     if (overloads) overloads.push(routine);
     else funcs.set(key, [routine]);
   }
-  // Overloads ordered by least params first (Routine.hs Ord instance).
-  for (const overloads of funcs.values()) overloads.sort((a, b) => a.params.length - b.params.length);
+  // decodeFuncs: `map sort` — overloads ordered by the Routine.hs Ord
+  // instance (least params first, full tuple compare on ties).
+  for (const overloads of funcs.values()) overloads.sort(compareRoutines);
   return funcs;
 }
 

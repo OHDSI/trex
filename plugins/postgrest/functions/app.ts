@@ -23,6 +23,7 @@ import { inspectQuery } from "./query/openapi.ts";
 import { readQuery } from "./query/read.ts";
 import { writeQuery } from "./query/write.ts";
 import {
+  corsPreflightResponse,
   createResponse,
   deleteResponse,
   infoIdentResponse,
@@ -92,9 +93,18 @@ export async function handle(req: Request): Promise<Response> {
     // App.hs postgrestResponse: auth middleware → userApiRequest →
     // actionPlan → runQuery → actionResponse.
     const config = await getConfig();
+
+    // Cors.hs middleware runs before everything else: CORS preflights are
+    // answered directly (no auth, no Allow header, no info response).
+    const preflight = corsPreflightResponse(config.serverCorsAllowedOrigins, req);
+    if (preflight !== null) return preflight;
+
     const authResult = await authenticate(req.headers.get("Authorization"), config);
     const sCache = await getSchemaCache();
-    const apiReq = userApiRequest(config, req, path, sCache.timezones, await req.text());
+    // The raw bytes are kept alongside the lossy UTF-8 decoding: RawPay
+    // bodies for bytea single-unnamed-param RPCs must stay byte-faithful.
+    const bodyBytes = new Uint8Array(await req.arrayBuffer());
+    const apiReq = userApiRequest(config, req, path, sCache.timezones, new TextDecoder().decode(bodyBytes), bodyBytes);
 
     const act = apiReq.iAction;
     if (act.kind === "ActDb" && act.db.kind === "ActRelationRead") {

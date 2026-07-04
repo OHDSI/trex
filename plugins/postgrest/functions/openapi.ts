@@ -30,6 +30,16 @@ function obj(entries: Json): Json {
   return out;
 }
 
+/**
+ * swagger2's ToJSON (sopSwaggerGenericToJSON) omits fields whose value equals
+ * their mempty default: an empty `properties` InsOrdHashMap or an empty
+ * `parameters` list is not serialized at all.
+ */
+function omitEmpty<T extends object>(v: T): T | undefined {
+  const isEmpty = Array.isArray(v) ? v.length === 0 : Object.keys(v).length === 0;
+  return isEmpty ? undefined : v;
+}
+
 // --------------------------------------------------------------------------
 // Swagger types (OpenAPI.hs toSwaggerType and friends)
 // --------------------------------------------------------------------------
@@ -109,7 +119,7 @@ export function makeTableDef(rels: RelationshipsMap, t: Table): [string, Json] {
     obj({
       description: t.description ?? undefined,
       required: required.length > 0 ? required : undefined,
-      properties: Object.fromEntries(t.columns.map((c) => makeProperty(t, rels, c))),
+      properties: omitEmpty(Object.fromEntries(t.columns.map((c) => makeProperty(t, rels, c)))),
       type: "object",
     }),
   ];
@@ -167,7 +177,7 @@ function makeProcSchema(pd: Routine): Json {
   return obj({
     description: pd.description ?? undefined,
     required: required.length > 0 ? required : undefined,
-    properties: Object.fromEntries(pd.params.map(makeProcProperty)),
+    properties: omitEmpty(Object.fromEntries(pd.params.map(makeProcProperty))),
     type: "object",
   });
 }
@@ -355,8 +365,8 @@ export function makeProcPathItem(pd: Routine): [string, Json] {
   return [
     `/rpc/${pd.name}`,
     {
-      get: obj({ ...procOp, parameters: pd.params.map(makeProcGetParam) }),
-      post: obj({ ...procOp, parameters: makeProcPostParams(pd) }),
+      get: obj({ ...procOp, parameters: omitEmpty(pd.params.map(makeProcGetParam)) }),
+      post: obj({ ...procOp, parameters: omitEmpty(makeProcPostParams(pd)) }),
     },
   ];
 }

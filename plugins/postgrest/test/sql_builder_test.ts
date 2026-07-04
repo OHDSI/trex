@@ -11,7 +11,15 @@ import { type MutateReadPlan, mutateReadPlan } from "../functions/plan/mutate-pl
 import { type WrappedReadPlan, wrappedReadPlan } from "../functions/plan/read-plan.ts";
 import { renderSnippet } from "../functions/sql/builder.ts";
 import { callPlanToQuery, limitedQuery, mutatePlanToQuery, readPlanToCountQuery, readPlanToQuery } from "../functions/sql/query-builder.ts";
-import { prepareCall, preparePlanRows, prepareRead, prepareWrite } from "../functions/sql/statements.ts";
+import { singleParameter } from "../functions/sql/fragment.ts";
+import {
+  decodeCustomBody,
+  prepareCall,
+  preparePlanRows,
+  prepareRead,
+  prepareWrite,
+  xmlOutInternal,
+} from "../functions/sql/statements.ts";
 import {
   type Column,
   type Relationship,
@@ -1142,4 +1150,74 @@ Deno.test("prepareCall: HEAD negotiates NoAgg (empty body aggregation)", () => {
     plan.crHandler,
   ));
   assertStringIncludes(normalize(text), "(''::text)::text AS body");
+});
+
+// --------------------------------------------------------------------------
+// singleParameter (SqlFragment.hs) — raw bodies for OnePosParam RPCs
+// --------------------------------------------------------------------------
+
+Deno.test("singleParameter: raw body bytes reach a bytea param as pg hex input", () => {
+  // Upstream binds the raw request bytes with a typed HE.bytea encoder; the
+  // text-protocol equivalent is the '\x...' hex input form + the ::bytea cast.
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff]);
+  const { text, values } = renderSnippet(singleParameter(bytes, "bytea"));
+  assertEquals(text, "$1::bytea");
+  assertEquals(values, ["\\x89504e4700ff"]);
+});
+
+Deno.test("singleParameter: byte bodies for text-ish params decode as UTF-8; strings pass through", () => {
+  const utf8 = new TextEncoder().encode("héllo");
+  assertEquals(renderSnippet(singleParameter(utf8, "text")).values, ["héllo"]);
+  assertEquals(renderSnippet(singleParameter("plain", "text")), { text: "$1::text", values: ["plain"] });
+});
+
+// --------------------------------------------------------------------------
+// decodeCustomBody (Statements.hs HD.bytea emulation per domain base type)
+// --------------------------------------------------------------------------
+
+const customHandler = (baseType: string) =>
+  ({ kind: "CustomFunc", funcQi: { schema: "test", name: "h" }, target: { kind: "RelId", qi: { schema: "test", name: "t" } }, baseType }) as Parameters<typeof decodeCustomBody>[0];
+
+const rsWithBody = (rsBody: string) => ({
+  kind: "RSStandard",
+  rsTableTotal: null,
+  rsQueryTotal: 1,
+  rsLocation: [],
+  rsBody,
+  rsGucHeaders: null,
+  rsGucStatus: null,
+  rsInserted: null,
+}) as Parameters<typeof decodeCustomBody>[1];
+
+Deno.test("decodeCustomBody: jsonb-based domains keep the jsonb binary version byte 0x01", () => {
+  // Hasql reads the body column in binary format: jsonb_send = 0x01 + text.
+  const out = decodeCustomBody(customHandler("jsonb"), rsWithBody('{"a": 1}')).rsBody;
+  assertEquals(out, new Uint8Array([0x01, ...new TextEncoder().encode('{"a": 1}')]));
+  // an empty result set sent no jsonb value — no version byte
+  assertEquals(decodeCustomBody(customHandler("jsonb"), rsWithBody("")).rsBody, "");
+});
+
+Deno.test("decodeCustomBody: bytea-based domains hex-decode; other base types pass through", () => {
+  assertEquals(decodeCustomBody(customHandler("bytea"), rsWithBody("\\x0102ff")).rsBody, new Uint8Array([1, 2, 0xff]));
+  assertEquals(decodeCustomBody(customHandler("text"), rsWithBody("\nhi")).rsBody, "\nhi");
+  assertEquals(decodeCustomBody(customHandler("json"), rsWithBody('{"a":1}')).rsBody, '{"a":1}');
+});
+
+Deno.test("decodeCustomBody: xml-based domains run xml_out_internal", () => {
+  assertEquals(decodeCustomBody(customHandler("xml"), rsWithBody("\n<html>x</html>")).rsBody, "<html>x</html>");
+});
+
+Deno.test("xmlOutInternal ports pg's xml.c for a UTF-8 client", () => {
+  // no declaration: eat exactly one leading newline
+  assertEquals(xmlOutInternal("\n<a/>"), "<a/>");
+  assertEquals(xmlOutInternal("\n\n<a/>"), "\n<a/>");
+  assertEquals(xmlOutInternal("<a/>"), "<a/>");
+  // a version-1.0 declaration without standalone is dropped (print_xml_decl
+  // returns false for a UTF-8 target encoding), eating the following newline
+  assertEquals(xmlOutInternal('<?xml version="1.0"?>\n<a/>'), "<a/>");
+  assertEquals(xmlOutInternal('<?xml version="1.0" encoding="UTF-8"?><a/>'), "<a/>");
+  // a standalone attribute forces the declaration to be re-printed
+  assertEquals(xmlOutInternal('<?xml version="1.0" standalone="yes"?>\n<a/>'), '<?xml version="1.0" standalone="yes"?>\n<a/>');
+  // <?xml-stylesheet is a PI, not a declaration
+  assertEquals(xmlOutInternal("<?xml-stylesheet href='x'?><a/>"), "<?xml-stylesheet href='x'?><a/>");
 });

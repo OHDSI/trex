@@ -9,6 +9,7 @@ import {
   addM2MRels,
   addViewM2OAndO2ORels,
   addViewPrimaryKeys,
+  compareRoutines,
   expandKeyDepCols,
   type FkRelationship,
   funcReturnsScalar,
@@ -20,6 +21,7 @@ import {
   type Relationship,
   relsMapKey,
   repKey,
+  type Routine,
   type Table,
   type TablesMap,
   type ViewKeyDependency,
@@ -370,4 +372,40 @@ Deno.test({
       await pool.end();
     }
   },
+});
+
+// --------------------------------------------------------------------------
+// Routine.hs Ord instance (compareRoutines)
+// --------------------------------------------------------------------------
+
+Deno.test("compareRoutines: overloads sort by param count, then the derived field tuple", () => {
+  const mkRoutine = (params: [string, string][]): Routine => ({
+    schema: "test",
+    name: "overloaded_default",
+    description: null,
+    params: params.map(([name, type]) => ({
+      name,
+      type,
+      typeMaxLength: type,
+      required: true,
+      variadic: false,
+    })),
+    returnType: { kind: "setof", pgType: { qi: qi("test", "tasks"), composite: true, compositeAlias: false } },
+    volatility: "volatile",
+    hasVariadic: false,
+    isolationLvl: null,
+    funcSettings: [],
+  });
+  const aOpt = mkRoutine([["a", "integer"], ["opt_param", "text"]]);
+  const aMust = mkRoutine([["a", "integer"], ["must_param", "integer"]]);
+  const opt = mkRoutine([["opt_param", "text"]]);
+  const must = mkRoutine([["must_param", "integer"]]);
+  const sorted = [aOpt, opt, aMust, must].sort(compareRoutines);
+  // least params first; ties break on the params list (ppName first) — the
+  // OpenAPI paths map is built last-wins, so (a, opt_param) must sort last
+  // for /rpc/overloaded_default to document that overload (like upstream).
+  assertEquals(
+    sorted.map((r) => r.params.map((p) => p.name).join(",")),
+    ["must_param", "opt_param", "a,must_param", "a,opt_param"],
+  );
 });

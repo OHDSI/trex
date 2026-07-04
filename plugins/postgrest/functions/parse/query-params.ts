@@ -197,17 +197,20 @@ export function parseQueryString(qs: string): QParam[] {
 }
 
 // Network.HTTP.Base urlEncode reserved set (plus controls and >= 0x7F).
-const HTTP_BASE_RESERVED = new Set([...';/?:@&=+,${}|\\^[]`<>#%"'].map((c) => c.charCodeAt(0)));
-
-/** Network.HTTP.Base urlEncode (lowercase hex, byte-wise). */
+/**
+ * Network.HTTP.Base urlEncode (HTTP-4000.4+, the version PostgREST builds
+ * with): keeps only ASCII alphanumerics and "-_.~"; everything else is
+ * percent-encoded byte-wise (UTF-8) with UPPERCASE hex digits.
+ */
 function httpBaseUrlEncode(s: string): string {
   let out = "";
   for (const b of utf8Encoder.encode(s)) {
     const isAlnum = (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a);
-    if (!isAlnum && (b <= 0x20 || b >= 0x7f || HTTP_BASE_RESERVED.has(b))) {
-      out += `%${b.toString(16).padStart(2, "0")}`;
-    } else {
+    const isUnreservedMark = b === 0x2d || b === 0x5f || b === 0x2e || b === 0x7e; // - _ . ~
+    if (isAlnum || isUnreservedMark) {
       out += String.fromCharCode(b);
+    } else {
+      out += `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
     }
   }
   return out;

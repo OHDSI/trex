@@ -337,7 +337,8 @@ export function callPlanToQuery(plan: CallPlan): Snippet {
     ? snip("FROM ", callIt(emptySnippet))
     : snip(
       fromJsonBodyF(
-        args,
+        // named-param calls always carry a json(-encodable) body, never raw bytes
+        args instanceof Uint8Array ? new TextDecoder().decode(args) : args,
         params.params.map((p): CoercibleField => ({
           cfName: p.name,
           cfJsonPath: [],

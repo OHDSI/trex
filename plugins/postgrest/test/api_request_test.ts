@@ -211,6 +211,17 @@ Deno.test("Range header with lower > upper → PGRST103 LowerGTUpper", () => {
   assertEquals(e.body.details, "The lower boundary must be lower than or equal to the upper boundary in the Range header.");
 });
 
+Deno.test("Range header 1-0 (adjacent boundaries) is empty too → 416 LowerGTUpper", () => {
+  // Data.Ranged adjacency: BoundaryAbove 0 == BoundaryBelow 1, so [1,0] is
+  // an empty range upstream — unlike limit=0, no hasLimitZero escape applies.
+  const e = apiThrows("GET", "/projects", { Range: "1-0" });
+  assertEquals(e.status, 416);
+  assertEquals(e.body.code, "PGRST103");
+  assertEquals(e.body.details, "The lower boundary must be lower than or equal to the upper boundary in the Range header.");
+  // the Range header is ignored for non-GET methods (RFC 9110)
+  assertEquals(api("POST", "/projects", { Range: "1-0" }, undefined, "{}").iTopLevelRange, allRange);
+});
+
 Deno.test("PATCH/DELETE with limit but no order → PGRST109", () => {
   assertEquals(apiThrows("PATCH", "/projects?limit=5").body.code, "PGRST109");
   assertEquals(apiThrows("DELETE", "/projects?limit=5").body.code, "PGRST109");

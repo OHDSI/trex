@@ -45,7 +45,8 @@ export type CallParams =
 export interface CallPlan {
   funCQi: QualifiedIdentifier;
   funCParams: CallParams;
-  funCArgs: string | null;
+  /** Bytes for raw (octet-stream/plain/xml) bodies — upstream args are a ByteString. */
+  funCArgs: string | Uint8Array | null;
   funCScalar: boolean;
   funCSetOfScalar: boolean;
   funCRetCompositeAlias: boolean;
@@ -105,11 +106,14 @@ export interface CallReadPlan {
   crQi: QualifiedIdentifier;
 }
 
-/** ApiRequest.hs payRaw — partial selector, like upstream. */
-function payRaw(payload: NonNullable<ApiRequest["iPayload"]>): string {
+/** ApiRequest.hs payRaw — partial selector, like upstream. Upstream carries
+ * the raw ByteString; RawPay bodies keep their undecoded bytes when
+ * available (needed for bytea single-unnamed-param RPCs). */
+function payRaw(payload: NonNullable<ApiRequest["iPayload"]>): string | Uint8Array {
   if (payload.kind === "ProcessedUrlEncoded") {
     throw new Error("no payRaw on an urlencoded payload");
   }
+  if (payload.kind === "RawPay" && payload.payBin !== undefined) return payload.payBin;
   return payload.payRaw;
 }
 
@@ -330,7 +334,7 @@ export function callPlan(
   proc: Routine,
   apiRequest: ApiRequest,
   paramKeys: Set<FieldName>,
-  args: string,
+  args: string | Uint8Array,
   readReq: ReadPlanTree,
 ): CallPlan {
   const paramsAsSingleObject = apiRequest.iPreferences.preferParameters === "SingleObject";

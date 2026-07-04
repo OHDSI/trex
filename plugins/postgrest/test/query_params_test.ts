@@ -758,3 +758,17 @@ Deno.test("canonical groups repeated keys with commas and percent-encodes", () =
   assertEquals(parseQueryParams("b=2&a=1&a=3", true).qsCanonical, "a=1,3&b=2");
   assertEquals(parseQueryParams("a=%22x%20y%22", true).qsCanonical, "a=%22x%20y%22");
 });
+
+Deno.test("canonical uses Network.HTTP.Base urlEncode: only alnum and -_.~ survive, uppercase hex", () => {
+  // Content-Location echoes qsCanonical; PostgREST (HTTP >= 4000.4) keeps
+  // only ASCII alphanumerics plus "-_.~" and encodes the rest byte-wise
+  // with UPPERCASE hex — including *, (, ), and commas.
+  assertEquals(parseQueryParams("k=like.*yx", false).qsCanonical, "k=like.%2Ayx");
+  assertEquals(
+    parseQueryParams("or=(id.eq.1,id.eq.2)&select=id", false).qsCanonical,
+    "or=%28id.eq.1%2Cid.eq.2%29&select=id",
+  );
+  assertEquals(parseQueryParams("a=-_.~", true).qsCanonical, "a=-_.~");
+  // non-ASCII goes through UTF-8 bytes
+  assertEquals(parseQueryParams("a=%C3%A9", true).qsCanonical, "a=%C3%A9");
+});

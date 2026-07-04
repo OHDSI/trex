@@ -224,21 +224,69 @@ export function decodePlanResult(res: QueryResult): RSPlan {
 }
 
 /**
- * Upstream reads the aggregated body as raw bytes (HD.bytea, binary
- * protocol); over the text protocol a bytea-based custom media handler body
- * arrives hex-encoded ('\x...'), so it is decoded back into bytes here.
+ * PostgreSQL's xml output function (xml.c xml_out_internal), which the xml
+ * binary send format also goes through: when the value carries no XML
+ * declaration (or one that does not need re-printing for a UTF-8 client —
+ * version "1.0", no standalone attribute), the declaration is dropped and a
+ * single newline right after it is eaten. Our `::text` cast bypasses xml_out
+ * (xml -> text is binary-coercible), so it is emulated here.
+ */
+export function xmlOutInternal(str: string): string {
+  if (!str.startsWith("<?xml")) {
+    return str.startsWith("\n") ? str.slice(1) : str;
+  }
+  // <?xml followed by a name char is a PI (e.g. <?xml-stylesheet?>), not a decl.
+  if (!/^<\?xml[\s]/.test(str)) {
+    return str.startsWith("\n") ? str.slice(1) : str;
+  }
+  const decl = /^<\?xml\s+version\s*=\s*(?:'([^']*)'|"([^"]*)")(?:\s+encoding\s*=\s*(?:'[^']*'|"[^"]*"))?(?:\s+standalone\s*=\s*(?:'(yes|no)'|"(yes|no)"))?\s*\?>/
+    .exec(str);
+  if (decl === null) return str; // malformed decl: pg returns the string verbatim
+  const version = decl[1] ?? decl[2];
+  const standalone = decl[3] ?? decl[4] ?? null;
+  const rest = str.slice(decl[0].length);
+  // print_xml_decl: re-print when version /= "1.0" or standalone is present
+  // (the target/client encoding is UTF-8, so the encoding never forces it).
+  if (version !== "1.0" || standalone !== null) {
+    const sa = standalone === null ? "" : ` standalone="${standalone}"`;
+    return `<?xml version="${version}"${sa}?>${rest}`;
+  }
+  return rest.startsWith("\n") ? rest.slice(1) : rest;
+}
+
+/**
+ * Upstream reads the aggregated body as raw bytes (HD.bytea over Hasql's
+ * binary protocol), i.e. the SEND format of the handler's result type; the
+ * plugin gets the body over the text protocol with a `::text` cast, so the
+ * wire differences are emulated here per media-type-domain base type:
+ *   - bytea: text protocol renders hex ('\x...') — decode back into bytes
+ *   - jsonb: jsonb_send prepends the version byte 0x01 to the canonical text
+ *   - xml:   xml_send runs xml_out_internal (the ::text cast bypasses it)
+ * json/text/composite base types send their text verbatim — no change.
  */
 export function decodeCustomBody(handler: MediaHandler, rs: RSStandard): RSStandard {
-  if (
-    handler.kind !== "CustomFunc" || handler.baseType !== "bytea" ||
-    typeof rs.rsBody !== "string" || !rs.rsBody.startsWith("\\x")
-  ) {
-    return rs;
+  if (handler.kind !== "CustomFunc" || typeof rs.rsBody !== "string") return rs;
+  switch (handler.baseType) {
+    case "bytea": {
+      if (!rs.rsBody.startsWith("\\x")) return rs;
+      const hex = rs.rsBody.slice(2);
+      const bytes = new Uint8Array(hex.length >> 1);
+      for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+      return { ...rs, rsBody: bytes };
+    }
+    case "jsonb": {
+      if (rs.rsBody === "") return rs; // empty result set: no jsonb value was sent
+      const text = new TextEncoder().encode(rs.rsBody);
+      const bytes = new Uint8Array(text.length + 1);
+      bytes[0] = 0x01;
+      bytes.set(text, 1);
+      return { ...rs, rsBody: bytes };
+    }
+    case "xml":
+      return { ...rs, rsBody: xmlOutInternal(rs.rsBody) };
+    default:
+      return rs;
   }
-  const hex = rs.rsBody.slice(2);
-  const bytes = new Uint8Array(hex.length >> 1);
-  for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
-  return { ...rs, rsBody: bytes };
 }
 
 interface ReadRow {

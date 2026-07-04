@@ -38,7 +38,10 @@ export type Payload =
   | { kind: "ProcessedJSON"; payRaw: string; payKeys: Set<string> }
   | { kind: "ProcessedUrlEncoded"; payArray: [string, string][]; payKeys: Set<string> }
   | { kind: "RawJSON"; payRaw: string }
-  | { kind: "RawPay"; payRaw: string };
+  /** payBin carries the undecoded body bytes — upstream RawPay is a
+   * ByteString and the exact bytes matter for bytea single-unnamed-param
+   * RPCs (payRaw is the lossy UTF-8 text decoding of the same body). */
+  | { kind: "RawPay"; payRaw: string; payBin?: Uint8Array };
 
 // --------------------------------------------------------------------------
 // Actions
@@ -133,6 +136,7 @@ export function userApiRequest(
   path: string,
   timezones: Set<string>,
   reqBody = "",
+  reqBodyBytes?: Uint8Array,
 ): ApiRequest {
   const url = new URL(req.url, "http://localhost");
   const method = req.method;
@@ -150,7 +154,7 @@ export function userApiRequest(
   const cookieHeader = req.headers.get("cookie");
   const contentMediaType = contentType === null ? MTApplicationJSON : decodeMediaType(contentType);
 
-  const [payload, columns] = getPayload(reqBody, contentMediaType, qPrms.qsColumns, act);
+  const [payload, columns] = getPayload(reqBody, contentMediaType, qPrms.qsColumns, act, reqBodyBytes);
 
   return {
     iAction: act,

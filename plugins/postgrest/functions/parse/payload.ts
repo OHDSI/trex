@@ -26,6 +26,7 @@ export function getPayload(
   contentMediaType: MediaType,
   qsColumns: Set<FieldName> | null,
   action: Action,
+  reqBodyBytes?: Uint8Array,
 ): [Payload | null, Set<FieldName>] {
   const shouldParsePayload = action.kind === "ActDb" &&
     ((action.db.kind === "ActRelationMut" && action.db.mutation !== "MutationDelete") ||
@@ -81,7 +82,11 @@ export function getPayload(
       case "MTTextPlain":
       case "MTTextXML":
       case "MTOctetStream":
-        if (isProc) return { kind: "RawPay", payRaw: reqBody };
+        if (isProc) {
+          return reqBodyBytes === undefined
+            ? { kind: "RawPay", payRaw: reqBody }
+            : { kind: "RawPay", payRaw: reqBody, payBin: reqBodyBytes };
+        }
         throw invalidBody(`Content-Type not acceptable: ${toMime(contentMediaType)}`);
       default:
         throw invalidBody(`Content-Type not acceptable: ${toMime(contentMediaType)}`);
