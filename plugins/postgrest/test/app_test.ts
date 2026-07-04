@@ -71,11 +71,18 @@ Deno.test("unknown mount is a 404", async () => {
   }
 });
 
-Deno.test("API endpoints are stubbed with 501 until implemented", async () => {
+Deno.test("API requests without a token and without an anon role are 401 PGRST302", async () => {
+  // Auth runs before everything else (App.hs middleware order), so this
+  // holds with and without a database.
+  const savedAnon = Deno.env.get("PGRST_DB_ANON_ROLE");
+  Deno.env.delete("PGRST_DB_ANON_ROLE");
   try {
     const res = await handle(new Request("http://localhost/postgrest/projects?select=*"));
-    assertEquals(res.status, 501);
+    assertEquals(res.status, 401);
+    const body = await res.json();
+    assertEquals(body.code, "PGRST302");
   } finally {
+    if (savedAnon !== undefined) Deno.env.set("PGRST_DB_ANON_ROLE", savedAnon);
     await cleanup();
   }
 });

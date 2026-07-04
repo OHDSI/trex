@@ -268,7 +268,9 @@ Deno.test({
         assertEquals(mood.enumVals, ["happy", "sad"]);
         const title = cache.tables.get(`${SCHEMA}.books`)?.columns.find((c) => c.name === "title");
         assertEquals(title?.default, "'untitled'::text");
-        assertEquals(cache.tables.get(`${SCHEMA}.book_tags`)?.pkCols, ["book_id", "tag_id"]);
+        // pk_cols comes from an ORDER BY-less array_agg (verbatim upstream
+        // SQL), so the composite-PK column order is plan-dependent.
+        assertEquals([...(cache.tables.get(`${SCHEMA}.book_tags`)?.pkCols ?? [])].sort(), ["book_id", "tag_id"]);
       });
 
       await t.step("M2O and inverted O2M relationships", () => {

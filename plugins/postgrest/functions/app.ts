@@ -1,16 +1,21 @@
 // Ports src/PostgREST/App.hs — the request pipeline.
 //
-// Pipeline (built out across phases):
-//   parse ApiRequest → verify JWT → plan → build SQL → execute → respond
+// Pipeline: verify JWT → parse ApiRequest → plan → build SQL → execute →
+// respond (upstream runs auth as a middleware before userApiRequest, so JWT
+// errors win over parse errors).
 //
-// Phase 3: startup wiring (config + LISTEN channel) and the admin surface.
-// API requests still get a 501 stub (never reachable in production until
-// POSTGREST_MODE=plugin).
+// Phase 4b: GET/HEAD on tables/views (no embedded resources). Mutations,
+// RPC, OpenAPI root and OPTIONS keep the 501 stub.
 
 import { handleAdmin } from "./admin.ts";
+import { authenticate } from "./auth/jwt.ts";
 import { getConfig, reloadConfig } from "./config.ts";
 import { PgrstError } from "./errors.ts";
-import { type SchemaCacheListener, startListener } from "./schema-cache/index.ts";
+import { userApiRequest } from "./parse/api-request.ts";
+import { wrappedReadPlan } from "./plan/read-plan.ts";
+import { readQuery } from "./query/read.ts";
+import { readResponse } from "./response.ts";
+import { getSchemaCache, type SchemaCacheListener, startListener } from "./schema-cache/index.ts";
 import { stripMount } from "./state.ts";
 
 let startPromise: Promise<void> | null = null;
@@ -65,7 +70,21 @@ export async function handle(req: Request): Promise<Response> {
       if (adminResponse) return adminResponse;
     }
 
-    // TODO(phase 4+): ApiRequest parse → auth → plan → query → response.
+    // App.hs postgrestResponse: auth middleware → userApiRequest →
+    // actionPlan → runQuery → actionResponse.
+    const config = await getConfig();
+    const authResult = await authenticate(req.headers.get("Authorization"), config);
+    const sCache = await getSchemaCache();
+    const apiReq = userApiRequest(config, req, path, sCache.timezones);
+
+    const act = apiReq.iAction;
+    if (act.kind === "ActDb" && act.db.kind === "ActRelationRead") {
+      const plan = wrappedReadPlan(act.db.qi, config, sCache, apiReq, act.db.headersOnly);
+      const resultSet = await readQuery(plan, config, apiReq, authResult);
+      return readResponse(resultSet, apiReq, plan);
+    }
+
+    // TODO(phase 6+): mutations, RPC, OpenAPI root, OPTIONS.
     return new Response(
       JSON.stringify({ message: "PostgREST plugin: endpoint not implemented yet" }),
       { status: 501, headers: { "Content-Type": "application/json" } },
