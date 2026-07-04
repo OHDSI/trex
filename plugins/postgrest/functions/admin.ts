@@ -3,28 +3,39 @@
 // PostgREST serves these on a separate admin port; here they live under
 // /admin/* on the authenticated plugin mount (/plugins/trex/postgrest/admin/*).
 
+import { getConfig } from "./config.ts";
+import { getSchemaCache } from "./schema-cache/index.ts";
+
 /**
  * Handles /admin/* paths. `path` is the in-API path (e.g. "/admin/live").
  * Returns null for unknown admin paths.
  */
-export function handleAdmin(path: string, method: string): Response | null {
+export async function handleAdmin(path: string, method: string): Promise<Response | null> {
   if (method !== "GET" && method !== "HEAD") return null;
   switch (path) {
     case "/admin/live":
       // The worker responding at all means the event loop is alive.
       return new Response(null, { status: 200 });
     case "/admin/ready":
-      // TODO(phase 2): report 503 until the schema cache has loaded and the
-      // database connection is established, like Admin.hs `isReady`.
-      return new Response(null, { status: 200 });
-    case "/admin/config":
-      // TODO(phase 3): dump effective config (secrets redacted).
-      return new Response(JSON.stringify({ error: "not implemented" }), {
-        status: 501,
+      // Admin.hs isReady: 503 until the schema cache has loaded.
+      try {
+        await getSchemaCache();
+        return new Response(null, { status: 200 });
+      } catch {
+        return new Response(null, { status: 503 });
+      }
+    case "/admin/config": {
+      // Admin.hs config reply (Config.hs toText dump) — effective config as
+      // JSON with the JWT secret redacted.
+      const config = await getConfig();
+      const redacted = { ...config, jwtSecret: config.jwtSecret === null ? null : "<redacted>" };
+      return new Response(JSON.stringify(redacted, null, 2), {
+        status: 200,
         headers: { "Content-Type": "application/json" },
       });
+    }
     case "/admin/schema_cache":
-      // TODO(phase 2): dump the loaded schema cache.
+      // TODO(phase 4+): dump the loaded schema cache (needs JSON encoders).
       return new Response(JSON.stringify({ error: "not implemented" }), {
         status: 501,
         headers: { "Content-Type": "application/json" },

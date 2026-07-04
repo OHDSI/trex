@@ -71,3 +71,12 @@ export function getPool(): Pool {
   pool = createPool(connectionString, Number.isNaN(max) ? 10 : max);
   return pool;
 }
+
+/** Test hook: drains and clears the singleton pool. */
+export async function closePoolForTests(): Promise<void> {
+  if (pool) {
+    const p = pool;
+    pool = null;
+    await p.end();
+  }
+}
