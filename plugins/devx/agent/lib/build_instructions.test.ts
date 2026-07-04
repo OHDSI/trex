@@ -1,12 +1,15 @@
-// Unit tests for agent.ts's buildInstructions hook (task-v3-brief.md): AI_RULES
-// (devx.settings) + workspace project rules (TREX.md/AI_RULES.md via
-// workspace.ts's readProjectRules), both appended AFTER the static base —
-// see agent.ts's own header comment for why V3 appends both instead of
-// mirroring legacy's override-only behavior.
+// Unit tests for agent.ts's buildInstructions hook (task-v3-brief.md, revised
+// per the V3 review adjudication): legacy single-winner override chain
+// (functions/agent.ts:171-177 + prompts.ts's wrapAiRules) reproduced exactly —
+// project rules (appId-gated) || devx.settings.ai_rules || DEFAULT_AI_RULES,
+// exactly ONE rules section appended after the static base. A user/project
+// winner arrives wrapped in <user_defined_ai_rules>; the DEFAULT_AI_RULES
+// fallback arrives unwrapped, per wrapAiRules.
 import { assert, assertEquals } from "jsr:@std/assert";
 import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import agentConfig from "../agent.ts";
-import { ensureAppWorkspace } from "../../functions/tools/workspace.ts";
+import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
+import { DEFAULT_AI_RULES } from "../../functions/prompts.ts";
 
 const buildInstructions = agentConfig.buildInstructions!;
 
@@ -31,56 +34,72 @@ function fakeHookCtx(overrides: Partial<HookCtx> & { aiRules?: string | null } =
   };
 }
 
-Deno.test("buildInstructions: base stays first, unchanged, when neither AI_RULES nor project rules exist", async () => {
-  const ctx = fakeHookCtx({ metadata: { chatId: "c-1" } });
-  const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, "BASE PROMPT");
-});
+function wrapped(rules: string): string {
+  return `<user_defined_ai_rules>\n${rules}\n</user_defined_ai_rules>`;
+}
 
-Deno.test("buildInstructions: appends devx.settings AI_RULES after base", async () => {
-  const ctx = fakeHookCtx({ metadata: { chatId: "c-1" }, aiRules: "Always use TypeScript." });
-  const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, "BASE PROMPT\n\n<user_defined_ai_rules>\nAlways use TypeScript.\n</user_defined_ai_rules>");
-});
-
-Deno.test("buildInstructions: appends workspace project rules (TREX.md) after AI_RULES, in that order", async () => {
-  const userId = "u-project-rules";
+Deno.test("buildInstructions: project rules win when appId is set and a rules file exists (user ai_rules discarded, single section)", async () => {
+  const userId = "u-project-wins";
   const appId = "app-1";
   const wsPath = await ensureAppWorkspace(userId, appId);
   await Deno.writeTextFile(`${wsPath}/TREX.md`, "Use 2-space indentation.");
 
   const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1", appId }, aiRules: "Always use TypeScript." });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(
-    result,
-    "BASE PROMPT" +
-      "\n\n<user_defined_ai_rules>\nAlways use TypeScript.\n</user_defined_ai_rules>" +
-      "\n\n<project_rules>\nUse 2-space indentation.\n</project_rules>",
-  );
+  assertEquals(result, `BASE PROMPT\n\n${wrapped("Use 2-space indentation.")}`);
+  // Loser must NOT appear anywhere — override, not append.
+  assert(!result.includes("Always use TypeScript."), "user ai_rules must be overridden, not appended alongside");
 });
 
-Deno.test("buildInstructions: project rules alone (no devx.settings AI_RULES) still append after base", async () => {
-  const userId = "u-project-rules-only";
+Deno.test("buildInstructions: user ai_rules win when appId is set but no project rules file exists", async () => {
+  const userId = "u-user-wins-no-file";
   const appId = "app-2";
-  const wsPath = await ensureAppWorkspace(userId, appId);
-  await Deno.writeTextFile(`${wsPath}/AI_RULES.md`, "Legacy rules file.");
+  await ensureAppWorkspace(userId, appId); // exists, but carries no TREX.md/AI_RULES.md
 
-  const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1", appId } });
+  const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1", appId }, aiRules: "Always use TypeScript." });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, "BASE PROMPT" + "\n\n<project_rules>\nLegacy rules file.\n</project_rules>");
+  assertEquals(result, `BASE PROMPT\n\n${wrapped("Always use TypeScript.")}`);
 });
 
-Deno.test("buildInstructions: no ctx.userId returns base unchanged (no throw)", async () => {
-  const ctx = fakeHookCtx({ userId: undefined, metadata: { chatId: "c-1" } });
+Deno.test("buildInstructions: user ai_rules win when there is no appId", async () => {
+  const ctx = fakeHookCtx({ metadata: { chatId: "c-1" }, aiRules: "Always use TypeScript." });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, "BASE PROMPT");
+  assertEquals(result, `BASE PROMPT\n\n${wrapped("Always use TypeScript.")}`);
 });
 
-Deno.test("buildInstructions: no appId uses the per-user workspace (ensureWorkspace), not an app workspace", async () => {
-  const userId = "u-no-app";
-  const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1" } });
+Deno.test("buildInstructions: DEFAULT_AI_RULES (unwrapped) when neither project rules nor user ai_rules exist", async () => {
+  const ctx = fakeHookCtx({ metadata: { chatId: "c-1" } });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  // No TREX.md/AI_RULES.md written to this user's bare workspace -> nothing appended.
-  assertEquals(result, "BASE PROMPT");
-  assert((await Deno.stat(`${SCRATCH}/${userId}`)).isDirectory);
+  assertEquals(result, `BASE PROMPT\n\n${DEFAULT_AI_RULES}`);
+  // A distinctive substring of the real constant, and NOT wrapAiRules's
+  // user-rules wrapper (the default goes in unwrapped, per wrapAiRules).
+  assert(result.includes("ALWAYS try to use the shadcn/ui library."), "expected a distinctive DEFAULT_AI_RULES substring");
+  assert(!result.includes("<user_defined_ai_rules>"), "DEFAULT_AI_RULES must not be wrapped");
+});
+
+Deno.test("buildInstructions: readProjectRules is NOT consulted without an appId (legacy gate) — a rules file in the bare user workspace is ignored", async () => {
+  const userId = "u-no-app-gate";
+  const wsPath = await ensureWorkspace(userId);
+  await Deno.writeTextFile(`${wsPath}/TREX.md`, "Rules that must stay invisible.");
+
+  const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1" }, aiRules: "Always use TypeScript." });
+  const result = await buildInstructions("BASE PROMPT", ctx);
+  assertEquals(result, `BASE PROMPT\n\n${wrapped("Always use TypeScript.")}`);
+  assert(!result.includes("Rules that must stay invisible."), "project rules must not be read without an appId");
+});
+
+Deno.test("buildInstructions: empty-string user ai_rules falls through to DEFAULT_AI_RULES (legacy `|| undefined` falsiness)", async () => {
+  const ctx = fakeHookCtx({ metadata: { chatId: "c-1" }, aiRules: "" });
+  const result = await buildInstructions("BASE PROMPT", ctx);
+  assertEquals(result, `BASE PROMPT\n\n${DEFAULT_AI_RULES}`);
+});
+
+Deno.test("buildInstructions: no ctx.userId appends DEFAULT_AI_RULES (no settings/workspace lookup possible, no throw)", async () => {
+  const ctx = fakeHookCtx({
+    userId: undefined,
+    metadata: { chatId: "c-1" },
+    sql: () => Promise.reject(new Error("should not query without a userId")),
+  });
+  const result = await buildInstructions("BASE PROMPT", ctx);
+  assertEquals(result, `BASE PROMPT\n\n${DEFAULT_AI_RULES}`);
 });
