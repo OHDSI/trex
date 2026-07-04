@@ -103,36 +103,3 @@ services:
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
       # Register prometheus in the web shell's top nav (consumed by plugins/web).
       TREX_WEB_NAV_EXTRA: '[{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
-
-  realtime:
-    image: supabase/realtime:v2.93.3
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
-      PORT: "4000"
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_NAME: testdb
-      DB_USER: supabase_admin
-      DB_PASSWORD: ${REALTIME_DB_PASSWORD:-realtime_admin_pass}
-      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
-      # DB_ENC_KEY, API_JWT_SECRET, METRICS_JWT_SECRET, SECRET_KEY_BASE come
-      # from ./secrets/derived.env (see env_file above).
-      ERL_AFLAGS: -proto_dist inet_tcp
-      DNS_NODES: "''"
-      RLIMIT_NOFILE: "10000"
-      APP_NAME: realtime
-      SEED_SELF_HOST: "true"
-      RUN_JANITOR: "true"
-    healthcheck:
-      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "http://localhost:4000/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
