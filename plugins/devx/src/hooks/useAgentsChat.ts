@@ -111,6 +111,34 @@ export function useAgentsChat(
   const [consentError, setConsentError] = useState<string | null>(null);
   const [sessionState, setSessionState] = useState<SessionChatState>(() => initialSessionState([]));
 
+  // Fix (final-007 review finding #2): a plain mirror of `sessionState`,
+  // updated SYNCHRONOUSLY by `updateState` below — never only by React's
+  // commit. consumeStream's per-line loop needs to read-then-write the
+  // "current" state and act on the result (deciding whether to persist a
+  // just-finished assistant message) entirely within one synchronous pass
+  // through the NDJSON reader loop; it cannot wait for React to actually
+  // apply a `setSessionState` updater, because stream continuations are
+  // ordinary async callbacks, not batched React events — React may defer
+  // running the updater function itself, so code that assigned a variable
+  // FROM INSIDE the updater and read it right after (the old shape here)
+  // would routinely see a stale/unset value and skip persisting the
+  // assistant's reply entirely. `stateRef.current` is always up to date the
+  // instant `updateState` returns, synchronously, regardless of React's
+  // scheduling.
+  const stateRef = useRef(sessionState);
+
+  // Every state transition in this hook goes through here instead of the
+  // raw `setSessionState` setter, so `stateRef` can never drift from what
+  // was actually requested — any code that needs the LATEST state
+  // synchronously (see consumeStream below) reads `stateRef.current`
+  // instead of relying on a setState updater's `prev` argument.
+  const updateState = useCallback((next: SessionChatState | ((prev: SessionChatState) => SessionChatState)): SessionChatState => {
+    const resolved = typeof next === "function" ? (next as (prev: SessionChatState) => SessionChatState)(stateRef.current) : next;
+    stateRef.current = resolved;
+    setSessionState(resolved);
+    return resolved;
+  }, []);
+
   // History: devx.messages (read here via the existing REST, same as
   // useMessages.ts) is still the single source of truth for chat history
   // across BOTH loops, and how this hook seeds its local state on chat
@@ -120,26 +148,26 @@ export function useAgentsChat(
   // see agentsSession.ts's session-id-cache comment).
   useEffect(() => {
     let cancelled = false;
-    setSessionState(initialSessionState([]));
+    updateState(initialSessionState([]));
     setPersistError(null);
     if (!chatId) return;
     setLoading(true);
     Promise.all([api.listMessages(chatId), api.getTodos(chatId).catch(() => [] as AgentTodo[])])
       .then(([msgs, chatTodos]) => {
         if (cancelled) return;
-        setSessionState((prev) => ({ ...initialSessionState(storedMessagesToUIMessages(msgs)), todos: chatTodos, pendingApproval: prev.pendingApproval }));
+        updateState((prev) => ({ ...initialSessionState(storedMessagesToUIMessages(msgs)), todos: chatTodos, pendingApproval: prev.pendingApproval }));
         setLoading(false);
       })
       .catch((err) => {
         console.error("useAgentsChat: failed to load history:", err);
         if (cancelled) return;
-        setSessionState(initialSessionState([]));
+        updateState(initialSessionState([]));
         setLoading(false);
       });
     return () => {
       cancelled = true;
     };
-  }, [chatId]);
+  }, [chatId, updateState]);
 
   // metadata: a ref, not a dependency of send/ensureStream — mode/appId can
   // change without needing to tear down an in-flight turn.
@@ -245,9 +273,9 @@ export function useAgentsChat(
           optionsRef.current?.onBuildAction?.({ action: "file_change" });
         }
       }
-      if (usage) setSessionState((prev) => ({ ...prev, tokenUsage: usage }));
+      if (usage) updateState((prev) => ({ ...prev, tokenUsage: usage }));
     },
-    [chatId],
+    [chatId, updateState],
   );
 
   // Consumes one session's NDJSON tail until it ends/errors/is aborted.
@@ -280,17 +308,27 @@ export function useAgentsChat(
             if (isStale()) return;
             const event = parseSessionEvent(line);
             if (!event) continue;
-            let finishedMessage: DevxUIMessage | null = null;
-            setSessionState((prev) => {
-              const { state: next, effects } = reduceSessionEvent(prev, event);
-              if (effects.appCommand) optionsRef.current?.onAppCommand?.(effects.appCommand);
-              if (effects.buildAction) optionsRef.current?.onBuildAction?.(effects.buildAction);
-              if (effects.modeChange) optionsRef.current?.onModeChange?.(effects.modeChange);
-              if (event.type === "turn.completed") {
-                finishedMessage = next.messages.find((m) => m.id === event.data.turnId) ?? null;
-              }
-              return next;
-            });
+            // Fix (final-007 review finding #2): the reduction is computed
+            // OUTSIDE the setState call, against `stateRef.current` (always
+            // synchronously current — see stateRef's header comment), not
+            // against whatever `prev` a deferred React updater eventually
+            // receives. `finishedMessage` used to be assigned INSIDE the
+            // updater and read right after — correct only if React ran the
+            // updater synchronously before this line, which it is not
+            // obligated to do for updates originating outside a React event
+            // handler (exactly what every stream-continuation callback is).
+            // The practical failure mode: `next.messages.find(...)` ran
+            // against a state that hadn't been produced yet, so
+            // `finishedMessage` was `null` far more often than intended and
+            // `persistAssistantMessage` below was simply never called —
+            // assistant replies silently never made it into devx.messages.
+            const { state: next, effects } = reduceSessionEvent(stateRef.current, event);
+            updateState(next);
+            if (effects.appCommand) optionsRef.current?.onAppCommand?.(effects.appCommand);
+            if (effects.buildAction) optionsRef.current?.onBuildAction?.(effects.buildAction);
+            if (effects.modeChange) optionsRef.current?.onModeChange?.(effects.modeChange);
+            const finishedMessage: DevxUIMessage | null =
+              event.type === "turn.completed" ? (next.messages.find((m) => m.id === event.data.turnId) ?? null) : null;
             // Imperative gate hand-off (re-re-review #1, narrowed by the
             // final review) — see releaseSendGate's comment for the
             // React-batching false positive this closes. Epoch-guarded by
@@ -332,7 +370,7 @@ export function useAgentsChat(
         }
       }
     },
-    [persistAssistantMessage, releaseSendGate],
+    [persistAssistantMessage, releaseSendGate, updateState],
   );
 
   // `streamOpenRef` serializes concurrent callers (the eager
@@ -447,6 +485,16 @@ export function useAgentsChat(
       streamRef.current?.controller.abort();
       streamRef.current = null;
       streamOpenRef.current = null;
+      // Fix (final-007 review finding #3): clear sessionIdRef HERE, in the
+      // cleanup itself, not only in the next effect body (which re-derives
+      // it from the per-chat localStorage cache right after this runs). The
+      // window between this cleanup and that re-derivation is exactly where
+      // an approval click for the OLD chat's already-rendered pendingApproval
+      // could otherwise still read the OLD chat's sessionIdRef and resolve
+      // against the wrong session. respondToConsent is additionally
+      // epoch-guarded (see its own comment) as belt-and-braces for the async
+      // gap between capturing sessionId/pending and the POST settling.
+      sessionIdRef.current = null;
       // A pending post-turn watchdog belongs to the OLD chat's send.
       if (watchdogRef.current != null) {
         clearTimeout(watchdogRef.current);
@@ -512,7 +560,7 @@ export function useAgentsChat(
         if (isStale()) return;
         setPersistError("Message sent but failed to save to chat history.");
       });
-      setSessionState((prev) => ({
+      updateState((prev) => ({
         ...prev,
         turnError: null,
         messages: [...prev.messages, { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text }] }],
@@ -596,7 +644,7 @@ export function useAgentsChat(
             if (!sendGateRef.current.held) return;
             sendGateRef.current.release();
             setSendPending(false);
-            setSessionState((prev) => ({ ...prev, turnError: "no response from agent — try again" }));
+            updateState((prev) => ({ ...prev, turnError: "no response from agent — try again" }));
           }, TURN_ACK_WATCHDOG_MS);
         } catch (err) {
           // Superseded by a chat switch: the cleanup already released the
@@ -606,11 +654,11 @@ export function useAgentsChat(
           sendGateRef.current.release();
           setSendPending(false);
           console.error("useAgentsChat: send failed:", err);
-          setSessionState((prev) => ({ ...prev, turnError: err instanceof Error ? err.message : "send failed" }));
+          updateState((prev) => ({ ...prev, turnError: err instanceof Error ? err.message : "send failed" }));
         }
       })();
     },
-    [chatId, streaming, ensureStreamOpen],
+    [chatId, streaming, ensureStreamOpen, updateState],
   );
 
   // No server-side turn-cancellation endpoint exists on the session API
@@ -625,14 +673,23 @@ export function useAgentsChat(
     // right after the POST was accepted) — the cancel button is reachable
     // precisely because sendPending keeps `streaming` true in that state.
     releaseSendGate();
-    setSessionState((prev) => ({ ...prev, turnActive: false }));
-  }, [releaseSendGate]);
+    updateState((prev) => ({ ...prev, turnActive: false }));
+  }, [releaseSendGate, updateState]);
 
   const respondToConsent = useCallback(
     async (decision: "allow" | "deny" | "always") => {
       const sessionId = sessionIdRef.current;
       const pending = sessionState.pendingApproval;
       if (!sessionId || !pending) return;
+      // Epoch-guard (fix, final-007 review finding #3): capture the epoch
+      // BEFORE the POST. A fast chat switch between this click and the
+      // response settling bumps streamEpochRef (see the chat-switch cleanup
+      // effect) and — as of this same fix — clears sessionIdRef too, but
+      // `sessionId`/`pending` above are already captured by value, so
+      // without this guard a stale response could still surface the OLD
+      // chat's approval outcome (or its error) into whatever chat is
+      // visible now.
+      const epoch = streamEpochRef.current;
       const wire = decision === "allow" ? "approve" : decision;
       setConsentError(null);
       try {
@@ -641,6 +698,7 @@ export function useAgentsChat(
           headers: authHeaders(),
           body: JSON.stringify({ requestId: pending.requestId, decision: wire }),
         });
+        if (epoch !== streamEpochRef.current) return; // stale: chat switched while the POST was in flight
         if (!res.ok) {
           const body = await res.json().catch(() => ({}));
           setConsentError(body?.error ?? `approval failed (${res.status})`);
@@ -650,6 +708,7 @@ export function useAgentsChat(
         // pendingApproval (see reduceSessionEvent) — no local mutation
         // needed here beyond letting the live tail do its job.
       } catch (err) {
+        if (epoch !== streamEpochRef.current) return;
         console.error("useAgentsChat: approval decision failed:", err);
         setConsentError(err instanceof Error ? err.message : "approval failed");
       }
@@ -662,14 +721,14 @@ export function useAgentsChat(
       if (!chatId || !sessionState.questionnaire) return;
       try {
         await api.answerQuestionnaire(chatId, sessionState.questionnaire.requestId, answers);
-        setSessionState((prev) => ({ ...prev, questionnaire: null }));
+        updateState((prev) => ({ ...prev, questionnaire: null }));
       } catch (err) {
         console.error("useAgentsChat: failed to send questionnaire answers:", err);
-        setSessionState((prev) => ({ ...prev, questionnaire: null }));
+        updateState((prev) => ({ ...prev, questionnaire: null }));
         throw err;
       }
     },
-    [chatId, sessionState.questionnaire],
+    [chatId, sessionState.questionnaire, updateState],
   );
 
   // Legacy-shaped Message[] mirror — ChatInput's useTokenCount only needs
