@@ -401,3 +401,36 @@ Deno.test("built-in agent tool guards subagent lookup against prototype-pollutin
     assertEquals(result, { error: `unknown subagent "${bogus}"`, available: Object.keys(agent.subagents) });
   }
 });
+
+// Adjudicated core fix: ToolContext.sql must be restricted to authored
+// (static agent.tools) tools. A provider-sourced (dynamic-tools.ts/MCP) tool
+// is less trusted than a static, code-reviewed authored tool, so it must not
+// get a live Postgres query function — see authoredTool's `isAuthored` param
+// in toolset.ts.
+Deno.test("authored tools get ToolContext.sql; provider-sourced (dynamic-tools) tools do not", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.authoredEcho = {
+    description: "authored tool reporting whether ctx.sql is wired",
+    inputSchema: { type: "object", properties: {} },
+    execute: (_input: unknown, ctx?: { sql?: unknown }) => Promise.resolve({ hasSql: typeof ctx?.sql === "function" }),
+  };
+  agent.toolProvider = () =>
+    Promise.resolve({
+      dynamicEcho: {
+        description: "provider-sourced tool reporting whether ctx.sql is wired",
+        inputSchema: { type: "object", properties: {} },
+        execute: (_input: unknown, ctx?: { sql?: unknown }) => Promise.resolve({ hasSql: typeof ctx?.sql === "function" }),
+      },
+    });
+  const { buildSdkTools } = await import("./toolset.ts");
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0,
+    hookCtx: { sessionId: "s-1", env: () => undefined, sql: (_q: string) => Promise.resolve({ rows: [] }) },
+  });
+
+  const authoredResult = await (tools.authoredEcho as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(authoredResult, { hasSql: true });
+
+  const dynamicResult = await (tools.dynamicEcho as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(dynamicResult, { hasSql: false });
+});

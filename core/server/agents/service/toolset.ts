@@ -84,7 +84,7 @@ export async function resolveInstructions(agent: LoadedAgent, metadata: unknown,
   return await agent.config.buildInstructions(base, hookCtx);
 }
 
-function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
+function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boolean): any {
   const schema = isZodSchema(def.inputSchema) ? def.inputSchema : jsonSchema(def.inputSchema);
   if (def.clientOnly) {
     // No execute: the AI SDK surfaces the call and the turn ends with
@@ -137,11 +137,15 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
         userId: ctx.userId,
         emit: ctx.toolEmit,
         // H1 follow-up: expose the same sql fn resolveModel/buildInstructions
-        // get via HookCtx.sql, so an authored tool can query Postgres without
-        // its own ambient pool. hookCtx is optional on ToolBuildCtx (some
-        // callers never wire one), so this is undefined rather than a throw
-        // when absent — same "safe to omit" posture as emit/userId above.
-        sql: ctx.hookCtx?.sql,
+        // get via HookCtx.sql, so an authored (static, agent.tools) tool can
+        // query Postgres without its own ambient pool. hookCtx is optional on
+        // ToolBuildCtx (some callers never wire one), so this is undefined
+        // rather than a throw when absent — same "safe to omit" posture as
+        // emit/userId above. Provider-sourced (dynamic-tools.ts/MCP) tools
+        // NEVER get sql — they're less trusted (arbitrary MCP servers), so
+        // raw Postgres access is withheld; emit/userId/bearerToken stay
+        // available to them since those are lower-privilege by design.
+        sql: isAuthored ? ctx.hookCtx?.sql : undefined,
       });
     },
   });
@@ -268,6 +272,10 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   // objects, so a dynamic tool goes through the same authoredTool() path
   // (needsApproval/clientOnly honored) as a static one.
   const defs: Record<string, ToolDef> = { ...agent.tools };
+  // Tracks which merged `defs` entries came from the dynamic provider (vs.
+  // static agent.tools) so authoredTool can withhold ToolContext.sql from
+  // provider-sourced tools — see authoredTool's `isAuthored` parameter.
+  const dynamicNames = new Set<string>();
   if (depth === 0 && agent.toolProvider) {
     if (!ctx.hookCtx) {
       console.log(`agents: ${agent.dir}/dynamic-tools.ts is configured but no request hookCtx was available — skipping dynamic tools for this turn`);
@@ -280,6 +288,7 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
             continue;
           }
           defs[name] = def;
+          dynamicNames.add(name);
         }
       } catch (e) {
         console.error(`agents: ${agent.dir}/dynamic-tools.ts threw — continuing with static tools only: ${e instanceof Error ? e.message : String(e)}`);
@@ -290,7 +299,7 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   const out: Record<string, any> = {};
   const filterDefs: Record<string, ToolDef> = { ...defs };
   for (const [name, def] of Object.entries(defs)) {
-    out[name] = authoredTool(name, def, ctx);
+    out[name] = authoredTool(name, def, ctx, !dynamicNames.has(name));
   }
 
   // Step 3: built-ins at top level only; authored/dynamic tools of the same
