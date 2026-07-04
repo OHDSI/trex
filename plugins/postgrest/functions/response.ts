@@ -22,11 +22,31 @@ import type { QualifiedIdentifier, Routine, SchemaCache } from "./schema-cache/t
 import { funcReturnsVoid, qiKey } from "./schema-cache/types.ts";
 import type { ResultSet, RSPlan, RSStandard } from "./sql/statements.ts";
 
+/**
+ * Upstream emits header values as raw UTF-8 bytes (Response.hs builds them
+ * with `toUtf8`, warp writes them verbatim). The Fetch API only carries
+ * ByteStrings (code points <= 0xFF), so non-ASCII values (unicode table names
+ * in Content-Location/Location, GUC response headers, ...) are re-encoded:
+ * every UTF-8 byte becomes one char — the same bytes go on the wire.
+ */
+export function headerBytes(value: string): string {
+  // deno-lint-ignore no-control-regex
+  if (/^[\x00-\x7F]*$/.test(value)) return value;
+  let out = "";
+  for (const b of new TextEncoder().encode(value)) out += String.fromCharCode(b);
+  return out;
+}
+
+/** Headers.append with upstream's UTF-8-bytes header value semantics. */
+export function appendHeader(headers: Headers, name: string, value: string): void {
+  headers.append(name, headerBytes(value));
+}
+
 /** Ports the `RSPlan plan -> ...` branches of Response.hs actionResponse:
  * a 200 with the EXPLAIN output and the negotiated plan Content-Type. */
 function planResponse(resultSet: RSPlan, media: MediaType, apiReq: ApiRequest): Response {
   const headers = new Headers();
-  for (const [k, v] of contentTypeHeaders(media, apiReq)) headers.append(k, v);
+  for (const [k, v] of contentTypeHeaders(media, apiReq)) appendHeader(headers, k, v);
   return new Response(resultSet.rsPlan, { status: 200, headers });
 }
 
@@ -110,7 +130,7 @@ function finishResponse(
 ): Response {
   const [ovStatus, ovHeaders] = overrideStatusHeaders(resultSet.rsGucStatus, resultSet.rsGucHeaders, status, headers);
   const responseHeaders = new Headers();
-  for (const [k, v] of ovHeaders) responseHeaders.append(k, v);
+  for (const [k, v] of ovHeaders) appendHeader(responseHeaders, k, v);
   // a null body is mandatory on 204/304 (Fetch API), where upstream sends mempty
   const bod = ovStatus === 204 || ovStatus === 304 ? null : body;
   return new Response(bod, { status: ovStatus, headers: responseHeaders });
@@ -365,7 +385,7 @@ function addHeadersIfNotIncluded(newHeaders: [string, string][], initialHeaders:
  */
 export function openApiResponse(body: string | null, headersOnly: boolean, apiReq: ApiRequest): Response {
   const headers = new Headers();
-  for (const [k, v] of contentTypeHeaders({ kind: "MTOpenAPI" }, apiReq)) headers.append(k, v);
+  for (const [k, v] of contentTypeHeaders({ kind: "MTOpenAPI" }, apiReq)) appendHeader(headers, k, v);
   return new Response(body === null || headersOnly ? "" : body, { status: 200, headers });
 }
 

@@ -296,7 +296,11 @@ export function makeParamDefs(ti: Table[]): Json {
 // Path items (OpenAPI.hs makePathItem / makeProcPathItem / makeRootPathItem)
 // --------------------------------------------------------------------------
 
-/** OpenAPI.hs breakOn "\n": (summary, description) from an SQL comment. */
+/** OpenAPI.hs breakOn "\n": (summary, description) from an SQL comment.
+ * The description is Just "" (not Nothing) for a comment without a newline —
+ * the path items filter that out with `mfilter (/="")`, but the top-level
+ * info.description does NOT (a schema comment yields description "", never
+ * the "dynamic API" fallback). */
 function splitDescription(text: string | null): [string | undefined, string | undefined] {
   if (text === null) return [undefined, undefined];
   const nl = text.indexOf("\n");
@@ -304,7 +308,12 @@ function splitDescription(text: string | null): [string | undefined, string | un
   // We strip leading newlines from description so that users can include a
   // blank line between summary and description.
   const rest = nl === -1 ? "" : text.slice(nl).replace(/^\n+/, "");
-  return [summary, rest === "" ? undefined : rest];
+  return [summary, rest];
+}
+
+/** OpenAPI.hs `mfilter (/="")` on the description part. */
+function nonEmpty(desc: string | undefined): string | undefined {
+  return desc === "" ? undefined : desc;
 }
 
 const ref = (name: string): Json => ({ $ref: `#/parameters/${name}` });
@@ -313,7 +322,7 @@ const ref = (name: string): Json => ({ $ref: `#/parameters/${name}` });
 export function makePathItem(t: Table): [string, Json] {
   const tn = t.name;
   const [tSum, tDesc] = splitDescription(t.description);
-  const tOp = obj({ tags: [tn], summary: tSum, description: tDesc });
+  const tOp = obj({ tags: [tn], summary: tSum, description: nonEmpty(tDesc) });
   const rs = t.columns.map((c) => `rowFilter.${tn}.${c.name}`);
   const getOp = obj({
     ...tOp,
@@ -354,7 +363,7 @@ export function makeProcPathItem(pd: Routine): [string, Json] {
   const procOp = obj({
     tags: [`(rpc) ${pd.name}`],
     summary: pSum,
-    description: pDesc,
+    description: nonEmpty(pDesc),
     produces: [
       "application/json",
       "application/vnd.pgrst.object+json;nulls=stripped",
@@ -493,7 +502,8 @@ export function postgrestSpec(
       url: `https://postgrest.org/en/${docs}/references/api.html`,
     },
     host: `${escapeHostName(h)}:${p}`,
-    definitions: Object.fromEntries(ti.map((t) => makeTableDef(rels, t))),
+    // swagger2 omits an empty definitions map (nonexistent schema -> no key)
+    definitions: omitEmpty(Object.fromEntries(ti.map((t) => makeTableDef(rels, t)))),
     parameters: makeParamDefs(ti),
     paths: makePathItems(pds, ti),
     produces: TOP_LEVEL_MEDIA_TYPES,

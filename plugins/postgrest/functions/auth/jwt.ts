@@ -9,8 +9,9 @@
 //    feasible ("JWT expired", "JWSError (CompactDecodeError ...)")
 //  - exp/nbf validated with 30s leeway (Auth.hs: allowedSkew 30); iat in the
 //    future is rejected like Haskell jose does (npm jose omits that check)
-//  - audience: only checked when jwt-aud is configured (string-or-array
-//    membership, which npm jose implements identically)
+//  - audience: only checked when jwt-aud is configured AND the token carries
+//    an aud claim (Haskell jose checkAudClaim skips missing claims; npm
+//    jose's `audience` option would require them, so the check is manual)
 //  - the resolved role is inserted into the claims ("role" key), so
 //    request.jwt.claims always carries it
 
@@ -166,6 +167,20 @@ async function verifyWithJwks(token: string, jwks: JSONWebKeySet, options: JWTVe
   throw jwtTokenInvalid("JWSError JWSInvalidSignature");
 }
 
+/**
+ * Ports Haskell jose's checkAudClaim (via Auth.hs audienceCheck): the aud
+ * claim is only validated when it is PRESENT in the token — a token without
+ * an aud claim passes even with jwt-aud configured (AudienceJwtSecretSpec
+ * "succeeds with jwt token that does not contain an audience claim"). npm
+ * jose's `audience` option would instead require the claim, so the check
+ * lives here.
+ */
+function checkAudience(payload: JWTPayload, jwtAud: string | null): void {
+  if (jwtAud === null || payload.aud === undefined || payload.aud === null) return;
+  const values = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
+  if (!values.includes(jwtAud)) throw jwtTokenInvalid("JWTNotInAudience");
+}
+
 /** Ports Auth.hs parseToken's verification (validation settings + skew). */
 async function verifyClaims(
   token: string,
@@ -175,7 +190,6 @@ async function verifyClaims(
 ): Promise<Record<string, unknown>> {
   const options: JWTVerifyOptions = {
     clockTolerance: ALLOWED_SKEW_SECONDS,
-    ...(config.jwtAud !== null ? { audience: config.jwtAud } : {}),
     ...(currentDate !== undefined ? { currentDate } : {}),
   };
   let payload: JWTPayload;
@@ -191,6 +205,7 @@ async function verifyClaims(
     if (err instanceof PgrstError) throw err;
     throw jwtTokenInvalid(joseErrorMessage(err, token));
   }
+  checkAudience(payload, config.jwtAud);
   // Haskell jose rejects iat in the future; npm jose does not check it.
   const nowSecs = (currentDate ?? new Date()).getTime() / 1000;
   if (typeof payload.iat === "number" && payload.iat > nowSecs + ALLOWED_SKEW_SECONDS) {

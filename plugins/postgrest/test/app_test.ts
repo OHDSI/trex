@@ -3,7 +3,7 @@ import { assertEquals } from "std/assert/mod.ts";
 import { handle, shutdownForTests } from "../functions/app.ts";
 import { resetConfigForTests } from "../functions/config.ts";
 import { closePoolForTests } from "../functions/db.ts";
-import { corsPreflightResponse } from "../functions/response.ts";
+import { corsPreflightResponse, headerBytes } from "../functions/response.ts";
 import { stripMount } from "../functions/state.ts";
 
 const hasDb = !!Deno.env.get("PGRST_DB_URI");
@@ -25,6 +25,22 @@ Deno.test("stripMount handles both mounts", () => {
   assertEquals(stripMount("/plugins/trex/postgrest/admin/live"), "/admin/live");
   assertEquals(stripMount("/postgrestx/projects"), null);
   assertEquals(stripMount("/other"), null);
+});
+
+Deno.test("headerBytes re-encodes non-ASCII header values as UTF-8 bytes", () => {
+  // Upstream builds header values with toUtf8 and warp writes the raw bytes
+  // (e.g. Content-Location: /موارد in UnicodeSpec). The Fetch API only takes
+  // ByteStrings, so every UTF-8 byte must become one <=0xFF char.
+  assertEquals(headerBytes("/projects?select=*"), "/projects?select=*"); // ASCII untouched
+  const bytes = headerBytes("/\u0645\u0648\u0627\u0631\u062f"); // "/موارد"
+  assertEquals(
+    [...bytes].map((c) => c.charCodeAt(0)),
+    [0x2f, ...new TextEncoder().encode("\u0645\u0648\u0627\u0631\u062f")],
+  );
+  // and Headers accepts the result (it rejected the raw unicode string)
+  const h = new Headers();
+  h.append("Content-Location", bytes);
+  assertEquals(h.get("Content-Location"), bytes);
 });
 
 Deno.test("admin live responds 200", async () => {

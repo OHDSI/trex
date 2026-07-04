@@ -73,7 +73,7 @@ export async function writeQuery(
     schema: apiReq.iSchema,
     timezone: preferTimezone ?? undefined,
     preferTx: preferTransaction === null ? undefined : preferTransaction === "Commit" ? "commit" : "rollback",
-    mainQuery: { ...renderSnippet(statement), rawTypes: isPlan },
+    mainQuery: { ...renderSnippet(statement), rawTypes: true },
     postRunner: (_client, main) => {
       if (isPlan) return Promise.resolve(decodePlanResult(main));
       const resultSet = decodeCustomBody(plan.mrHandler, decodeWriteResult(main));

@@ -378,7 +378,7 @@ Deno.test("prepareRead: json wrapper (no count)", () => {
   assertEquals(
     wrapperSql("?select=id"),
     `WITH pgrst_source AS ( SELECT ${P}."id" FROM ${P} ) SELECT null::bigint AS total_result_set, ` +
-      RESULT_COLUMNS.replace("%BODY%", `(coalesce(json_agg(_postgrest_t), '[]'))::text`),
+      RESULT_COLUMNS.replace("%BODY%", `coalesce(json_agg(_postgrest_t), '[]')`),
   );
 });
 
@@ -387,14 +387,14 @@ Deno.test("prepareRead: exact count adds the count CTE", () => {
     wrapperSql("?select=id", {}, true),
     `WITH pgrst_source AS ( SELECT ${P}."id" FROM ${P} ) , pgrst_source_count AS (SELECT 1 FROM ${P}) ` +
       `SELECT (SELECT pg_catalog.count(*) FROM pgrst_source_count) AS total_result_set, ` +
-      RESULT_COLUMNS.replace("%BODY%", `(coalesce(json_agg(_postgrest_t), '[]'))::text`),
+      RESULT_COLUMNS.replace("%BODY%", `coalesce(json_agg(_postgrest_t), '[]')`),
   );
 });
 
 Deno.test("prepareRead: csv wrapper ports asCsvF exactly", () => {
-  const csvBody = `((SELECT coalesce(string_agg(a.k, ','), '') FROM ( SELECT json_object_keys(r)::text as k ` +
+  const csvBody = `(SELECT coalesce(string_agg(a.k, ','), '') FROM ( SELECT json_object_keys(r)::text as k ` +
     `FROM ( SELECT row_to_json(hh) as r from pgrst_source as hh limit 1 ) s ) a) || '\n' || ` +
-    `coalesce(string_agg(substring(_postgrest_t::text, 2, length(_postgrest_t::text) - 2), '\n'), ''))::text`;
+    `coalesce(string_agg(substring(_postgrest_t::text, 2, length(_postgrest_t::text) - 2), '\n'), '')`;
   assertEquals(
     wrapperSql("?select=id", { headers: { Accept: "text/csv" } }),
     `WITH pgrst_source AS ( SELECT ${P}."id" FROM ${P} ) SELECT null::bigint AS total_result_set, ` +
@@ -405,23 +405,23 @@ Deno.test("prepareRead: csv wrapper ports asCsvF exactly", () => {
 Deno.test("prepareRead: singular object wrapper", () => {
   assertStringIncludes(
     wrapperSql("?select=id", { headers: { Accept: "application/vnd.pgrst.object+json" } }),
-    `(coalesce(json_agg(_postgrest_t)->0, 'null'))::text AS body`,
+    `coalesce(json_agg(_postgrest_t)->0, 'null') AS body`,
   );
   assertStringIncludes(
     wrapperSql("?select=id", { headers: { Accept: "application/vnd.pgrst.object+json;nulls=stripped" } }),
-    `(coalesce(json_strip_nulls(json_agg(_postgrest_t)->0), 'null'))::text AS body`,
+    `coalesce(json_strip_nulls(json_agg(_postgrest_t)->0), 'null') AS body`,
   );
 });
 
 Deno.test("prepareRead: array+json nulls=stripped wrapper", () => {
   assertStringIncludes(
     wrapperSql("?select=id", { headers: { Accept: "application/vnd.pgrst.array+json;nulls=stripped" } }),
-    `(coalesce(json_strip_nulls(json_agg(_postgrest_t)), '[]'))::text AS body`,
+    `coalesce(json_strip_nulls(json_agg(_postgrest_t)), '[]') AS body`,
   );
 });
 
 Deno.test("prepareRead: HEAD gets the NoAgg body", () => {
-  assertStringIncludes(wrapperSql("?select=id", { method: "HEAD" }), `(''::text)::text AS body`);
+  assertStringIncludes(wrapperSql("?select=id", { method: "HEAD" }), `''::text AS body`);
 });
 
 // --------------------------------------------------------------------------
@@ -1089,7 +1089,7 @@ Deno.test("prepareCall: scalar body aggregates pgrst_scalar and page_total is 1"
   const t = normalize(text);
   assertStringIncludes(t, "WITH pgrst_source AS (SELECT pgrst_call.pgrst_scalar FROM");
   assertStringIncludes(t, "null::bigint AS total_result_set, 1 AS page_total");
-  assertStringIncludes(t, "(coalesce(json_agg(_postgrest_t.pgrst_scalar)->0, 'null'))::text AS body");
+  assertStringIncludes(t, "coalesce(json_agg(_postgrest_t.pgrst_scalar)->0, 'null') AS body");
   assertStringIncludes(t, `FROM (SELECT "add".* FROM "pgrst_source" AS "add" ) _postgrest_t`);
 });
 
@@ -1107,7 +1107,7 @@ Deno.test("prepareCall: setof composite counts rows and aggregates whole rows", 
   assertStringIncludes(t, ", pgrst_source_count AS (SELECT 1 FROM");
   assertStringIncludes(t, "(SELECT pg_catalog.count(*) FROM pgrst_source_count) AS total_result_set");
   assertStringIncludes(t, "pg_catalog.count(_postgrest_t) AS page_total");
-  assertStringIncludes(t, "(coalesce(json_agg(_postgrest_t), '[]'))::text AS body");
+  assertStringIncludes(t, "coalesce(json_agg(_postgrest_t), '[]') AS body");
 });
 
 Deno.test("prepareCall: setof scalar aggregates pgrst_scalar as an array", () => {
@@ -1120,7 +1120,7 @@ Deno.test("prepareCall: setof scalar aggregates pgrst_scalar as an array", () =>
     false,
     plan.crHandler,
   ));
-  assertStringIncludes(normalize(text), "(coalesce(json_agg(_postgrest_t.pgrst_scalar), '[]'))::text AS body");
+  assertStringIncludes(normalize(text), "coalesce(json_agg(_postgrest_t.pgrst_scalar), '[]') AS body");
 });
 
 Deno.test("prepareCall: singular accept aggregates the first scalar (asJsonSingleF)", () => {
@@ -1136,7 +1136,7 @@ Deno.test("prepareCall: singular accept aggregates the first scalar (asJsonSingl
     false,
     plan.crHandler,
   ));
-  assertStringIncludes(normalize(text), "(coalesce(json_agg(_postgrest_t.pgrst_scalar)->0, 'null'))::text AS body");
+  assertStringIncludes(normalize(text), "coalesce(json_agg(_postgrest_t.pgrst_scalar)->0, 'null') AS body");
 });
 
 Deno.test("prepareCall: HEAD negotiates NoAgg (empty body aggregation)", () => {
@@ -1149,7 +1149,7 @@ Deno.test("prepareCall: HEAD negotiates NoAgg (empty body aggregation)", () => {
     false,
     plan.crHandler,
   ));
-  assertStringIncludes(normalize(text), "(''::text)::text AS body");
+  assertStringIncludes(normalize(text), "''::text AS body");
 });
 
 // --------------------------------------------------------------------------

@@ -3,10 +3,11 @@
 // RPC wrapper (prepareCall), the row decoding into ResultSet and the EXPLAIN
 // plan-rows statement (preparePlanRows).
 //
-// Deviation from upstream: the body aggregation is wrapped in `(...)::text`
-// so node-postgres returns the body as raw text — Hasql decodes the json
-// column as bytes (HD.bytea), but node-postgres would parse json columns
-// into JS objects and re-serialization would not be byte-faithful.
+// The generated wrapper SQL is byte-identical to upstream's (PlanSpec EXPLAINs
+// it, so even a stray cast shows up); the main statement always runs with raw
+// type parsing (executor rawTypes) so node-postgres hands every column back
+// as its wire text — upstream reads the body as raw bytes via Hasql, and
+// parsing/re-serializing json here would not be byte-faithful.
 
 import type { QueryResult } from "pg";
 import { internalError } from "../errors.ts";
@@ -104,9 +105,8 @@ export function prepareWrite(
     "pg_catalog.count(_postgrest_t) AS page_total, ",
     locF,
     " AS header, ",
-    "(",
     handlerF(null, handler),
-    ")::text AS body, ",
+    " AS body, ",
     responseHeadersF,
     " AS response_headers, ",
     responseStatusF,
@@ -139,9 +139,8 @@ export function prepareRead(
     countResultF,
     " AS total_result_set, ",
     "pg_catalog.count(_postgrest_t) AS page_total, ",
-    "(",
     handlerF(null, handler),
-    ")::text AS body, ",
+    " AS body, ",
     responseHeadersF,
     " AS response_headers, ",
     responseStatusF,
@@ -180,9 +179,8 @@ export function prepareCall(
     " AS total_result_set, ",
     funcReturnsSingle(rout) ? "1" : "pg_catalog.count(_postgrest_t)",
     " AS page_total, ",
-    "(",
     handlerF(rout, handler),
-    ")::text AS body, ",
+    " AS body, ",
     responseHeadersF,
     " AS response_headers, ",
     responseStatusF,

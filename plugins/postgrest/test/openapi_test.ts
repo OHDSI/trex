@@ -146,6 +146,29 @@ Deno.test("openapi: defaults for title/description when there is no schema comme
   });
 });
 
+Deno.test("openapi: single-line schema comment yields an EMPTY info.description", () => {
+  // OpenAPI.hs: breakOn "\n" gives (title, Just "") — so the "dynamic API"
+  // fallback does NOT apply (MultipleSchemaSpec "builds openapi for a valid
+  // schema": COMMENT ON SCHEMA v1 IS 'v1 schema' -> description "").
+  const doc = spec({}, "v1 schema");
+  assertEquals(doc.info, { description: "", title: "v1 schema", version: prettyVersion });
+  // ...while path items filter the empty description out (mfilter (/=""))
+  const single = JSON.parse(
+    encodeOpenApi(conf(), rels, [{ ...projects, description: "one liner" }], [], "v1 schema"),
+  );
+  const getOp = (single.paths as Record<string, Record<string, Record<string, unknown>>>)["/projects"].get;
+  assertEquals(getOp.summary, "one liner");
+  assertEquals("description" in getOp, false);
+});
+
+Deno.test("openapi: an empty schema omits the definitions key entirely", () => {
+  // swagger2's ToJSON omits mempty maps; the oracle's nonexistent-schema
+  // OpenAPI output has no "definitions" key at all (ErrorSpec.nonExistentSchema).
+  const doc = JSON.parse(encodeOpenApi(conf(), new Map(), [], [], null));
+  assertEquals("definitions" in doc, false);
+  assertEquals(Object.keys(doc.paths as Record<string, unknown>), ["/"]);
+});
+
 Deno.test("openapi: proxy uri drives scheme/host/port/basePath", () => {
   const doc = spec({ PGRST_OPENAPI_SERVER_PROXY_URI: "https://postgrest.com:8443/openapi" });
   assertEquals(doc.schemes, ["https"]);

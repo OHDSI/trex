@@ -73,7 +73,7 @@ export async function invokeQuery(
     funcSettings: plan.crProc.funcSettings,
     timezone: preferTimezone ?? undefined,
     preferTx: preferTransaction === null ? undefined : preferTransaction === "Commit" ? "commit" : "rollback",
-    mainQuery: { ...renderSnippet(statement), rawTypes: isPlan },
+    mainQuery: { ...renderSnippet(statement), rawTypes: true },
     postRunner: (_client, main) => {
       if (isPlan) return Promise.resolve(decodePlanResult(main));
       const resultSet = decodeCustomBody(plan.crHandler, decodeCallResult(main));

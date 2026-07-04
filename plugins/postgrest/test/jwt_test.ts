@@ -127,6 +127,15 @@ Deno.test("aud is only validated when jwt-aud is configured", async () => {
   await expectPgrst(authenticate(`Bearer ${bad}`, cfg), 401, "PGRST301", "JWTNotInAudience");
   // no jwt-aud configured → token aud ignored (Auth.hs: const True)
   assertEquals((await authenticate(`Bearer ${bad}`, config())).role, "webuser");
+  // a token WITHOUT an aud claim passes even with jwt-aud configured —
+  // Haskell jose's checkAudClaim only validates a present claim
+  // (AudienceJwtSecretSpec "succeeds with jwt token that does not contain
+  // an audience claim")
+  const noAud = await sign({ role: "webuser" });
+  assertEquals((await authenticate(`Bearer ${noAud}`, cfg)).role, "webuser");
+  // ...but an empty aud array is a present-and-not-matching claim
+  const emptyAud = await sign({ role: "webuser" }, { aud: [] });
+  await expectPgrst(authenticate(`Bearer ${emptyAud}`, cfg), 401, "PGRST301", "JWTNotInAudience");
 });
 
 Deno.test("custom jwt-role-claim-key JSPath", async () => {

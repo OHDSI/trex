@@ -3,9 +3,10 @@
 #
 # Workflow:
 #   make corpus POSTGREST_SRC=/path/to/postgrest-12.2.3   # extract requests
-#   make up                                               # db + oracle
+#   make up                                               # db + oracle (DEFAULT env)
 #   make serve                                            # plugin server (bg)
-#   make diff                                             # replay + report
+#   make diff                                             # replay DEFAULT + report
+#   make diff-variants                                    # ALL config buckets (manages stack itself)
 #   make serve-stop down                                  # teardown
 
 REPO_ROOT=$(shell cd ../.. && pwd)
@@ -20,13 +21,18 @@ PLUGIN_PID=.serve_plugin.pid
 BUCKETS?=DEFAULT
 DIFF_ARGS?=
 
-.PHONY: corpus up wait serve serve-stop diff down clean
+.PHONY: corpus up wait serve serve-stop diff diff-variants oracle-env down clean
 
 corpus:
 	@test -n "$(POSTGREST_SRC)" || (echo "Set POSTGREST_SRC to a PostgREST v12.2.3 checkout" && exit 1)
 	$(PYTHON_BIN) extract_corpus.py --spec-root "$(POSTGREST_SRC)" --out corpus
 
-up:
+# (re)generates the oracle's env file for one bucket (default: DEFAULT)
+oracle-env:
+	@mkdir -p report
+	$(PYTHON_BIN) bucket_config.py --bucket $(firstword $(BUCKETS)) --side oracle --out report/oracle.env
+
+up: oracle-env
 	$(COMPOSE) up -d --wait
 	@echo "waiting for oracle to answer..."
 	@for i in $$(seq 1 60); do \
@@ -34,8 +40,12 @@ up:
 	done
 	@curl -sf -o /dev/null $(ORACLE_URL)/ && echo "oracle up at $(ORACLE_URL)" || (echo "oracle did not come up"; docker logs pgrst-diff-oracle | tail -20; exit 1)
 
+# plugin server env: same bucket_config source of truth (DEFAULT bucket).
+# Values are single-quoted where needed, which both the compose env-file
+# parser and POSIX shell sourcing understand.
 serve: serve-stop
-	@set -a; . ./plugin.env; set +a; \
+	@$(PYTHON_BIN) bucket_config.py --bucket $(firstword $(BUCKETS)) --side plugin --out report/plugin.env
+	@set -a; . ./report/plugin.env; PLUGIN_PORT=13001; set +a; \
 	  nohup $(DENO_BIN) run --allow-net --allow-env --allow-read \
 	    serve_plugin.ts > report/serve_plugin.log 2>&1 & \
 	  echo $$! > $(PLUGIN_PID)
@@ -53,6 +63,11 @@ serve-stop:
 
 diff:
 	$(PYTHON_BIN) run_diff.py --buckets $(BUCKETS) $(DIFF_ARGS)
+
+# full sweep over every config bucket: restarts the oracle container and the
+# plugin server with each bucket's env (needs db up: `make up`)
+diff-variants: serve-stop
+	$(PYTHON_BIN) run_diff.py --buckets ALL --orchestrate $(DIFF_ARGS)
 
 down: serve-stop
 	$(COMPOSE) down -v

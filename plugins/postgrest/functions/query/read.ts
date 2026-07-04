@@ -71,7 +71,7 @@ export async function readQuery(
     schema: apiReq.iSchema,
     timezone: preferTimezone ?? undefined,
     preferTx: preferTransaction === null ? undefined : preferTransaction === "Commit" ? "commit" : "rollback",
-    mainQuery: { ...renderSnippet(statement), rawTypes: isPlan },
+    mainQuery: { ...renderSnippet(statement), rawTypes: true },
     postRunner: async (client, main) => {
       if (isPlan) return decodePlanResult(main);
       const resultSet = decodeCustomBody(plan.wrHandler, decodeReadResult(main));

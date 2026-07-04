@@ -581,6 +581,10 @@ ANCHOR_RE = re.compile(
     r"(?<![\w'.\"])(?:(get|post|put|patch|delete|options)(?=[ \t\n]+[\"(\[$])|request[ \t\n]+method([A-Z][a-zA-Z]*))"
 )
 TOPLEVEL_RE = re.compile(r"^([a-z][A-Za-z0-9_']*)\s*(?:::|=|\s)", re.M)
+# hspec `it "..."` blocks: requests between two `it`s belong to the first one.
+# Used to group multi-request blocks that contain a `Prefer: tx=commit` step,
+# so the runner can replay the whole block as one sequence per side.
+IT_RE = re.compile(r"(?<![\w'])it[ \t\n]+[\"$(]")
 
 
 def toplevel_defs(masked: str) -> list[tuple[int, str]]:
@@ -612,7 +616,18 @@ def scan_file(path: Path, rel: str, module: str, fixtures_dir: Path):
     masked = mask_source(text)
     defs = toplevel_defs(masked)
     bindings = [(bm.start(1), bm.group(1), bm.end()) for bm in BINDING_RE.finditer(masked)]
+    it_positions = [m.start() for m in IT_RE.finditer(masked)]
     entries, skipped = [], []
+
+    def it_block_of(pos: int) -> int:
+        """Index of the nearest preceding `it` block (-1 if none)."""
+        idx = -1
+        for i, off in enumerate(it_positions):
+            if off <= pos:
+                idx = i
+            else:
+                break
+        return idx
 
     def span_at(pos: int) -> tuple[int, int]:
         lo, hi = 0, len(text)
@@ -673,12 +688,157 @@ def scan_file(path: Path, rel: str, module: str, fixtures_dir: Path):
             else:
                 record["body"] = body.text or ""
             record["config"] = config_for(module, func)
+            record["_it"] = it_block_of(m.start())
             entries.append(record)
         except Unresolvable as exc:
             record["reason"] = str(exc)
             record["config"] = config_for(module, func)
             skipped.append(record)
+
+    # Group the entries of any `it` block that contains a tx=commit request:
+    # those blocks are request SEQUENCES whose later steps observe the earlier
+    # commits (e.g. InsertSpec inserts + verify-GET + rpc/reset_table). The
+    # runner replays a group in order per side, with a full data reset before
+    # each side (run_diff.py commit phase).
+    commit_blocks = set()
+    for e in entries:
+        prefer = " ".join(v for k, v in e["headers"].items() if k.lower() == "prefer")
+        if "tx=commit" in prefer and e["_it"] >= 0:
+            commit_blocks.add((e["config"], e["_it"]))
+    short = module.split(".")[-1]
+    for e in entries:
+        if (e["config"], e["_it"]) in commit_blocks:
+            e["group"] = f"{short}-it{e['_it']:03d}"
+        del e["_it"]
     return entries, skipped
+
+
+# ---------------------------------------------------------------------------
+# Feature.RollbackSpec — hand-ported corpus
+#
+# RollbackSpec's requests live in helper functions parameterized by the Prefer
+# headers (`shouldRespondToReads reqHeaders ...`), which the scanner cannot
+# resolve. The spec is small and stable, so it is ported by hand: the
+# describe-blocks of `allowed` (runs under baseCfg -> DEFAULT), `disallowed`
+# (testCfgDisallowRollback) and `forced` (testCfgForceRollback) are expanded
+# into concrete entries mirroring test/spec/Feature/RollbackSpec.hs verbatim.
+#
+# Mutation helpers are request SEQUENCES (setup postItem / verify GETs /
+# cleanup deleteItems); each `it` block becomes one replay group.
+# ---------------------------------------------------------------------------
+
+ROLLBACK_PREFERS = {
+    "default": [("Prefer", "return=representation")],
+    "commit": [("Prefer", "return=representation"), ("Prefer", "tx=commit")],
+    "rollback": [("Prefer", "return=representation"), ("Prefer", "tx=rollback")],
+}
+
+# postItem / deleteItems (RollbackSpec.hs top of file)
+_POST_ITEM = ("POST", "/items", [("Prefer", "tx=commit"), ("Prefer", "resolution=ignore-duplicates")], '{"id":0}')
+_DELETE_ITEMS = ("DELETE", "/items?id=lte.0", [("Prefer", "tx=commit")], "")
+
+
+def _rollback_blocks(hdrs, persist: bool):
+    """The `it` blocks of shouldRespondToReads / shouldRaiseExceptions /
+    should(Not)PersistMutations, as (block-name, grouped?, [requests])."""
+    reads = [
+        ("reads-get", False, [("GET", "/items?id=eq.1", hdrs, "")]),
+        ("reads-head", False, [("HEAD", "/items?id=eq.1", hdrs, "")]),
+        ("reads-get-rpc", False, [("GET", "/rpc/search?id=1", hdrs, "")]),
+        ("reads-post-rpc", False, [("POST", "/rpc/search", hdrs, '{"id":1}')]),
+    ]
+    if persist:
+        mutations = [
+            ("persist-post", True, [
+                ("POST", "/items", hdrs, '{"id":0}'),
+                ("GET", "/items?id=eq.0", [], ""),
+                _DELETE_ITEMS,
+            ]),
+            ("persist-put", True, [
+                ("PUT", "/items?id=eq.0", hdrs, '{"id":0}'),
+                ("GET", "/items?id=eq.0", [], ""),
+                _DELETE_ITEMS,
+            ]),
+            ("persist-patch", True, [
+                _POST_ITEM,
+                ("PATCH", "/items?id=eq.0", hdrs, '{"id":-1}'),
+                ("GET", "/items?id=eq.0", [], ""),
+                ("GET", "/items?id=eq.-1", [], ""),
+                _DELETE_ITEMS,
+            ]),
+            ("persist-delete", True, [
+                _POST_ITEM,
+                ("DELETE", "/items?id=eq.0", hdrs, ""),
+                ("GET", "/items?id=eq.0", [], ""),
+            ]),
+        ]
+    else:
+        mutations = [
+            ("nopersist-post", True, [
+                ("POST", "/items", hdrs, '{"id":0}'),
+                ("GET", "/items?id=eq.0", [], ""),
+            ]),
+            ("nopersist-put", True, [
+                ("PUT", "/items?id=eq.0", hdrs, '{"id":0}'),
+                ("GET", "/items?id=eq.0", [], ""),
+            ]),
+            ("nopersist-patch", True, [
+                ("PATCH", "/items?id=eq.1", hdrs, '{"id":0}'),
+                ("GET", "/items?id=eq.0", [], ""),
+                # upstream says `get "items?id=eq.1"` (no leading slash) —
+                # hspec-wai tolerates it, a real HTTP request line does not
+                ("GET", "/items?id=eq.1", [], ""),
+            ]),
+            ("nopersist-delete", True, [
+                ("DELETE", "/items?id=eq.1", hdrs, ""),
+                ("GET", "/items?id=eq.1", [], ""),
+            ]),
+        ]
+    raises = [
+        ("raises-immediate", False, [("POST", "/rpc/raise_constraint", hdrs, "")]),
+        ("raises-deferred", False, [("POST", "/rpc/raise_constraint", hdrs, '{"deferred": true}')]),
+    ]
+    return reads + mutations + raises
+
+
+def rollback_corpus(module: str):
+    """All RollbackSpec entries: (function, prefer-variant, persist?) matrix
+    exactly as the allowed/disallowed/forced describes compose the helpers."""
+    matrix = [
+        # RollbackSpec.hs `allowed` (Main.hs: before withApp -> baseCfg)
+        ("allowed", "default", False),
+        ("allowed", "commit", True),
+        ("allowed", "rollback", False),
+        # `disallowed` (tx-end=commit): everything persists
+        ("disallowed", "default", True),
+        ("disallowed", "commit", True),
+        ("disallowed", "rollback", True),
+        # `forced` (tx-end=rollback): nothing persists
+        ("forced", "default", False),
+        ("forced", "commit", False),
+        ("forced", "rollback", False),
+    ]
+    entries = []
+    for func, prefer, persist in matrix:
+        for block, grouped, requests in _rollback_blocks(ROLLBACK_PREFERS[prefer], persist):
+            for method, path, headers, body in requests:
+                hdrs: dict[str, str] = {}
+                for k, v in headers:
+                    hdrs[k] = f"{hdrs[k]}, {v}" if k in hdrs else v
+                e = {
+                    "source": f"Feature/RollbackSpec.hs ({func}/{prefer}/{block}, hand-ported)",
+                    "module": module,
+                    "function": func,
+                    "method": method,
+                    "path": path,
+                    "headers": hdrs,
+                    "body": body,
+                    "config": config_for(module, func),
+                }
+                if grouped:
+                    e["group"] = f"RollbackSpec-{func}-{prefer}-{block}"
+                entries.append(e)
+    return entries, []
 
 
 # ---------------------------------------------------------------------------
@@ -866,7 +1026,10 @@ def main() -> int:
     for path in sorted(feature_dir.rglob("*.hs")):
         rel = str(path.relative_to(spec_root / "test" / "spec"))
         module = rel[:-3].replace("/", ".")
-        entries, skipped = scan_file(path, rel, module, fixtures_dir)
+        if module == "Feature.RollbackSpec":
+            entries, skipped = rollback_corpus(module)
+        else:
+            entries, skipped = scan_file(path, rel, module, fixtures_dir)
         for i, e in enumerate(entries, 1):
             e["id"] = f"{module.split('.')[-1]}-{i:04d}"
         short = module.split(".")[-1]
