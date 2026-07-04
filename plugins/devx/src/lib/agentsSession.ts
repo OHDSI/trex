@@ -357,3 +357,50 @@ export function saveCachedSessionId(chatId: string, sessionId: string): void {
     // ignore — worst case, the next turn starts a fresh session
   }
 }
+
+/** Drops a chat's cached session id — used when the server 404s it (the
+ * agents.sessions row no longer exists, e.g. a wiped/rotated database behind
+ * a browser that kept its localStorage). The next send() then creates a
+ * fresh session transparently instead of failing. */
+export function clearCachedSessionId(chatId: string): void {
+  try {
+    localStorage.removeItem(SESSION_ID_PREFIX + chatId);
+  } catch {
+    // ignore
+  }
+}
+
+// --- synchronous in-flight gate -----------------------------------------
+// Extracted as a pure closure (rather than inlined ref juggling in
+// useAgentsChat.ts) so the double-submit guard's core invariant — acquire is
+// CHECK-AND-SET in one synchronous step, so two same-tick callers can never
+// both proceed — lives in an independently testable unit. React state
+// (`streaming`) cannot provide this guarantee: it only flips after the
+// server's turn.started round-trips, leaving the whole session-create +
+// stream-open + follow-up-POST window open to double-click/double-Enter
+// (useChat's synchronous `status` used to close this on the U1 transport).
+
+export interface InFlightGate {
+  /** Returns true and takes the gate if it was free; false if already held.
+   * Check-and-set is a single synchronous step — no awaits, no state lag. */
+  tryAcquire(): boolean;
+  release(): void;
+  readonly held: boolean;
+}
+
+export function createInFlightGate(): InFlightGate {
+  let held = false;
+  return {
+    tryAcquire() {
+      if (held) return false;
+      held = true;
+      return true;
+    },
+    release() {
+      held = false;
+    },
+    get held() {
+      return held;
+    },
+  };
+}
