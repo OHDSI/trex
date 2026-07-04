@@ -47,7 +47,14 @@ export interface DevxMetadata {
   appId?: string;
 }
 
-function readMetadata(metadata: unknown): DevxMetadata {
+// Exported for agent.ts's buildInstructions hook (V3), which needs the same
+// chatId/appId extraction to derive a workspacePath — reused as-is rather
+// than duplicated. NOTE: filterTools (agent.ts) does NOT reuse this for its
+// own mode reading — this function's "unset -> build" default is right for
+// workspace routing (some concrete mode must be picked) but wrong for
+// filterTools's "no mode -> allow everything" contract, so that hook reads
+// ctx.metadata.mode directly instead. See agent.ts's own readMode.
+export function readMetadata(metadata: unknown): DevxMetadata {
   const m = (metadata ?? {}) as Partial<DevxMetadata>;
   return {
     mode: m.mode === "ask" || m.mode === "plan" ? m.mode : "build",
