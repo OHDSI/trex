@@ -30,7 +30,12 @@ import type {
   SpreadSelectField,
 } from "../plan/types.ts";
 import { unknownField } from "../plan/types.ts";
-import type { QualifiedIdentifier } from "../schema-cache/types.ts";
+import type { QualifiedIdentifier, Routine } from "../schema-cache/types.ts";
+import {
+  funcReturnsScalar,
+  funcReturnsSetOfScalar,
+  funcReturnsSingleComposite,
+} from "../schema-cache/types.ts";
 import { escapeIdent } from "../query/fragments.ts";
 import { allRange, type NonnegRange, rangeEq, rangeLimit, rangeOffset } from "../parse/range.ts";
 import { emptySnippet, intercalateSnippet, param, snip, Snippet, sql } from "./builder.ts";
@@ -106,6 +111,19 @@ function ftsOperator(op: FtsOperator): string {
     case "FilterFtsWebsearch":
       return "@@ websearch_to_tsquery";
   }
+}
+
+/**
+ * SqlFragment.hs singleParameter — the single positional argument of an
+ * OnePosParam RPC call, cast to the parameter's type.
+ *
+ * Deviation from upstream: Hasql special-cases bytea with a typed encoder
+ * (HE.bytea) because HE.unknown fails on it; node-postgres always sends text
+ * parameters, so bytea goes through the same `$n::bytea` text cast (the body
+ * must be in pg's hex/escape input format — raw octet-stream is phase 8).
+ */
+export function singleParameter(body: string | null, typ: string): Snippet {
+  return snip(param(body), "::", typ);
 }
 
 /** SqlFragment.hs trimNullChars. */
@@ -572,13 +590,29 @@ function addNullsToSnip(strip: boolean, s: Snippet): Snippet {
   return strip ? snip("json_strip_nulls(", s, ")") : s;
 }
 
-/** SqlFragment.hs asJsonSingleF (reads have no Routine, so no pgrst_scalar case). */
-function asJsonSingleF(strip: boolean): Snippet {
-  return snip("coalesce(", addNullsToSnip(strip, sql("json_agg(_postgrest_t)->0")), ", 'null')");
+/** SqlFragment.hs asJsonSingleF — a scalar-returning RPC aggregates the
+ * pgrst_scalar wrapper column instead of the whole row. */
+function asJsonSingleF(rout: Routine | null, strip: boolean): Snippet {
+  const returnsScalar = rout !== null && funcReturnsScalar(rout);
+  return returnsScalar
+    ? snip("coalesce(", addNullsToSnip(strip, sql("json_agg(_postgrest_t.pgrst_scalar)->0")), ", 'null')")
+    : snip("coalesce(", addNullsToSnip(strip, sql("json_agg(_postgrest_t)->0")), ", 'null')");
 }
 
-/** SqlFragment.hs asJsonF (reads have no Routine, so no scalar/composite cases). */
-function asJsonF(strip: boolean): Snippet {
+/** SqlFragment.hs asJsonF — RPC scalar/single-composite/setof-scalar cases. */
+function asJsonF(rout: Routine | null, strip: boolean): Snippet {
+  const returnsSingleComposite = rout !== null && funcReturnsSingleComposite(rout);
+  const returnsScalar = rout !== null && funcReturnsScalar(rout);
+  const returnsSetOfScalar = rout !== null && funcReturnsSetOfScalar(rout);
+  if (returnsSingleComposite) {
+    return snip("coalesce(", addNullsToSnip(strip, sql("json_agg(_postgrest_t)->0")), ", 'null')");
+  }
+  if (returnsScalar) {
+    return snip("coalesce(", addNullsToSnip(strip, sql("json_agg(_postgrest_t.pgrst_scalar)->0")), ", 'null')");
+  }
+  if (returnsSetOfScalar) {
+    return snip("coalesce(", addNullsToSnip(strip, sql("json_agg(_postgrest_t.pgrst_scalar)")), ", '[]')");
+  }
   return snip("coalesce(", addNullsToSnip(strip, sql("json_agg(_postgrest_t)")), ", '[]')");
 }
 
@@ -587,15 +621,16 @@ const asGeoJsonF: Snippet = sql(
   "json_build_object('type', 'FeatureCollection', 'features', coalesce(json_agg(ST_AsGeoJSON(_postgrest_t)::json), '[]'))",
 );
 
-/** SqlFragment.hs handlerF — the body aggregation per resolved media handler. */
-export function handlerF(handler: MediaHandler): Snippet {
+/** SqlFragment.hs handlerF — the body aggregation per resolved media handler
+ * (`rout` is the called Routine on RPC, null on reads/mutations). */
+export function handlerF(rout: Routine | null, handler: MediaHandler): Snippet {
   switch (handler.kind) {
     case "BuiltinAggArrayJsonStrip":
-      return asJsonF(true);
+      return asJsonF(rout, true);
     case "BuiltinAggSingleJson":
-      return asJsonSingleF(handler.stripNulls);
+      return asJsonSingleF(rout, handler.stripNulls);
     case "BuiltinOvAggJson":
-      return asJsonF(false);
+      return asJsonF(rout, false);
     case "BuiltinOvAggGeoJson":
       return asGeoJsonF;
     case "BuiltinOvAggCsv":

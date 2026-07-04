@@ -1,7 +1,7 @@
 // Ports src/PostgREST/Query/Statements.hs (PostgREST v12.2.3): the mainRead
 // statement wrapper (prepareRead), the mutation wrapper (prepareWrite), the
-// row decoding into ResultSet and the EXPLAIN plan-rows statement
-// (preparePlanRows).
+// RPC wrapper (prepareCall), the row decoding into ResultSet and the EXPLAIN
+// plan-rows statement (preparePlanRows).
 //
 // Deviation from upstream: the body aggregation is wrapped in `(...)::text`
 // so node-postgres returns the body as raw text — Hasql decodes the json
@@ -11,6 +11,8 @@
 import type { QueryResult } from "pg";
 import { internalError } from "../errors.ts";
 import type { MediaHandler } from "../plan/types.ts";
+import type { Routine } from "../schema-cache/types.ts";
+import { funcReturnsSingle } from "../schema-cache/types.ts";
 import type { PreferRepresentation, PreferResolution } from "../parse/preferences.ts";
 import {
   countF,
@@ -92,7 +94,7 @@ export function prepareWrite(
     locF,
     " AS header, ",
     "(",
-    handlerF(handler),
+    handlerF(null, handler),
     ")::text AS body, ",
     responseHeadersF,
     " AS response_headers, ",
@@ -127,7 +129,7 @@ export function prepareRead(
     " AS total_result_set, ",
     "pg_catalog.count(_postgrest_t) AS page_total, ",
     "(",
-    handlerF(handler),
+    handlerF(null, handler),
     ")::text AS body, ",
     responseHeadersF,
     " AS response_headers, ",
@@ -138,6 +140,47 @@ export function prepareRead(
     "FROM ( SELECT * FROM ",
     sourceCTE,
     " ) _postgrest_t",
+  );
+}
+
+/**
+ * Statements.hs prepareCall — the RPC statement wrapper: the function call
+ * runs as the pgrst_source CTE and the outer select aggregates the (read
+ * pipeline shaped) rows. Single-returning functions report page_total = 1.
+ */
+export function prepareCall(
+  rout: Routine,
+  callProcQuery: Snippet,
+  selectQuery: Snippet,
+  countQuery: Snippet,
+  countTotal: boolean,
+  handler: MediaHandler,
+): Snippet {
+  const [countCTEF, countResultF] = countF(countQuery, countTotal);
+  return snip(
+    "WITH ",
+    sourceCTE,
+    " AS (",
+    callProcQuery,
+    ") ",
+    countCTEF,
+    "SELECT ",
+    countResultF,
+    " AS total_result_set, ",
+    funcReturnsSingle(rout) ? "1" : "pg_catalog.count(_postgrest_t)",
+    " AS page_total, ",
+    "(",
+    handlerF(rout, handler),
+    ")::text AS body, ",
+    responseHeadersF,
+    " AS response_headers, ",
+    responseStatusF,
+    " AS response_status, ",
+    "''",
+    " AS response_inserted ",
+    "FROM (",
+    selectQuery,
+    ") _postgrest_t",
   );
 }
 
@@ -248,6 +291,36 @@ export function decodeWriteResult(res: QueryResult): ResultSet {
     rsGucHeaders: row.response_headers,
     rsGucStatus: row.response_status,
     rsInserted: row.response_inserted === null ? null : row.response_inserted === "" ? 0 : Number(row.response_inserted),
+  };
+}
+
+/**
+ * Statements.hs prepareCall decoding (HD.rowMaybe + the
+ * `RSStandard (Just 0) 0 ...` default — note the Just 0 table total, unlike
+ * prepareWrite's Nothing). The '' filler columns decode like postgresql-binary:
+ * total '' behaves as no count, NULL stays null.
+ */
+export function decodeCallResult(res: QueryResult): ResultSet {
+  if (res.rows.length === 0) {
+    return {
+      rsTableTotal: 0,
+      rsQueryTotal: 0,
+      rsLocation: [],
+      rsBody: "",
+      rsGucHeaders: null,
+      rsGucStatus: null,
+      rsInserted: null,
+    };
+  }
+  const row = res.rows[0] as ReadRow;
+  return {
+    rsTableTotal: row.total_result_set === null || row.total_result_set === "" ? null : Number(row.total_result_set),
+    rsQueryTotal: Number(row.page_total),
+    rsLocation: [],
+    rsBody: row.body ?? "",
+    rsGucHeaders: row.response_headers,
+    rsGucStatus: row.response_status,
+    rsInserted: null,
   };
 }
 

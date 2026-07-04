@@ -1,10 +1,11 @@
 // Ports src/PostgREST/Response.hs (PostgREST v12.2.3): actionResponse for
 // WrappedReadPlan (status via rangeStatusHeader, Content-Range /
-// Content-Location / Content-Type / Preference-Applied headers) and for
+// Content-Location / Content-Type / Preference-Applied headers), for
 // MutateReadPlan (create/update/singleUpsert/delete responses: 201-vs-200
 // via the pgrst.inserted counter, the Location header of inserts,
-// Content-Range for mutations), plus the response.status / response.headers
-// GUC overrides (Response/GucHeader.hs).
+// Content-Range for mutations) and for CallReadPlan (RPC: 204 for
+// void-returning functions, empty body on HEAD), plus the response.status /
+// response.headers GUC overrides (Response/GucHeader.hs).
 
 import { gucHeadersError, gucStatusError, invalidRange } from "./errors.ts";
 import type { ApiRequest } from "./parse/api-request.ts";
@@ -13,6 +14,8 @@ import { prefAppliedHeader, shouldCount } from "./parse/preferences.ts";
 import { contentRangeH, rangeOffset, rangeStatusHeader } from "./parse/range.ts";
 import type { WrappedReadPlan } from "./plan/read-plan.ts";
 import type { MutateReadPlan } from "./plan/mutate-plan.ts";
+import type { CallReadPlan } from "./plan/call-plan.ts";
+import { funcReturnsVoid } from "./schema-cache/types.ts";
 import type { ResultSet } from "./sql/statements.ts";
 
 /** Ports Response.hs actionResponse (DbCrudResult WrappedReadPlan ...). */
@@ -225,6 +228,52 @@ export function deleteResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: M
     full ? 200 : 204,
     full ? [...headers, ...contentTypeHeaders(plan.mrMedia, apiReq)] : headers,
     full ? rsBody : null,
+  );
+}
+
+/** Ports Response.hs actionResponse (DbCallResult CallReadPlan). */
+export function invokeResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: CallReadPlan): Response {
+  const p = apiReq.iPreferences;
+  const { iTopLevelRange } = apiReq;
+  const { rsTableTotal, rsQueryTotal, rsBody } = resultSet;
+
+  const { status, header: contentRange } = rangeStatusHeader(iTopLevelRange, rsQueryTotal, rsTableTotal);
+  const rsOrErrBody = status === 416
+    ? JSON.stringify(
+      invalidRange({
+        kind: "OutOfBounds",
+        lower: String(rangeOffset(iTopLevelRange)),
+        total: rsTableTotal === null ? "0" : String(rsTableTotal),
+      }).body,
+    )
+    : rsBody;
+  const prefHeader = prefAppliedHeader({
+    preferResolution: null,
+    preferRepresentation: null,
+    preferParameters: p.preferParameters,
+    preferCount: p.preferCount,
+    preferTransaction: p.preferTransaction,
+    preferMissing: null,
+    preferHandling: p.preferHandling,
+    preferTimezone: p.preferTimezone,
+    preferMaxAffected: p.preferMaxAffected,
+    invalidPrefs: [],
+  });
+  const headers: [string, string][] = [
+    contentRange,
+    ...(prefHeader === null ? [] : [["Preference-Applied", prefHeader] as [string, string]]),
+  ];
+
+  // funcReturnsVoid → 204 without body; HEAD (InvRead True) keeps headers only
+  if (funcReturnsVoid(plan.crProc)) {
+    return finishResponse(resultSet, 204, headers, null);
+  }
+  const headersOnly = plan.crInvMthd.kind === "InvRead" && plan.crInvMthd.headersOnly;
+  return finishResponse(
+    resultSet,
+    status,
+    [...headers, ...contentTypeHeaders(plan.crMedia, apiReq)],
+    headersOnly ? null : rsOrErrBody,
   );
 }
 

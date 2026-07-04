@@ -6,16 +6,19 @@ import { assertEquals, assertStringIncludes, assertThrows } from "std/assert/mod
 import { resolveConfig } from "../functions/config.ts";
 import { PgrstError } from "../functions/errors.ts";
 import { userApiRequest } from "../functions/parse/api-request.ts";
+import { type CallReadPlan, callReadPlan } from "../functions/plan/call-plan.ts";
 import { type MutateReadPlan, mutateReadPlan } from "../functions/plan/mutate-plan.ts";
 import { type WrappedReadPlan, wrappedReadPlan } from "../functions/plan/read-plan.ts";
 import { renderSnippet } from "../functions/sql/builder.ts";
-import { limitedQuery, mutatePlanToQuery, readPlanToCountQuery, readPlanToQuery } from "../functions/sql/query-builder.ts";
-import { preparePlanRows, prepareRead, prepareWrite } from "../functions/sql/statements.ts";
+import { callPlanToQuery, limitedQuery, mutatePlanToQuery, readPlanToCountQuery, readPlanToQuery } from "../functions/sql/query-builder.ts";
+import { prepareCall, preparePlanRows, prepareRead, prepareWrite } from "../functions/sql/statements.ts";
 import {
   type Column,
   type Relationship,
   relsMapKey,
   repKey,
+  type Routine,
+  type RoutineParam,
   type SchemaCache,
   type Table,
 } from "../functions/schema-cache/types.ts";
@@ -913,4 +916,230 @@ Deno.test("mutations negotiate NoAgg unless return=representation", () => {
     mutPlanFor("", { body: "{}", headers: { Accept: "application/vnd.pgrst.object+json" } }).mrMedia.kind,
     "MTVndSingularJSON",
   );
+});
+
+// --------------------------------------------------------------------------
+// RPC — callPlanToQuery / prepareCall (phase 7)
+// --------------------------------------------------------------------------
+
+const rpcParam = (name: string, type: string, opts: Partial<RoutineParam> = {}): RoutineParam => ({
+  name,
+  type,
+  typeMaxLength: opts.typeMaxLength ?? type,
+  required: opts.required ?? true,
+  variadic: opts.variadic ?? false,
+});
+
+function rpcRoutine(name: string, params: RoutineParam[], opts: Partial<Routine> = {}): Routine {
+  return {
+    schema: "test",
+    name,
+    description: null,
+    params,
+    returnType: {
+      kind: "single",
+      pgType: { qi: { schema: "pg_catalog", name: "int4" }, composite: false, compositeAlias: false },
+    },
+    volatility: "immutable",
+    hasVariadic: params.some((p) => p.variadic),
+    isolationLvl: null,
+    funcSettings: [],
+    ...opts,
+  };
+}
+
+const setofProjects: Routine["returnType"] = {
+  kind: "setof",
+  pgType: { qi: { schema: "test", name: "projects" }, composite: true, compositeAlias: false },
+};
+const setofTextRet: Routine["returnType"] = {
+  kind: "setof",
+  pgType: { qi: { schema: "pg_catalog", name: "text" }, composite: false, compositeAlias: false },
+};
+
+const rpcRoutines: Routine[] = [
+  rpcRoutine("add", [rpcParam("a", "integer"), rpcParam("b", "integer")]),
+  rpcRoutine("getprojs", [rpcParam("min_id", "integer", { required: false })], { returnType: setofProjects, volatility: "stable" }),
+  rpcRoutine("getnames", [], { returnType: setofTextRet, volatility: "stable" }),
+  rpcRoutine("vconcat", [rpcParam("v", "text[]", { variadic: true })]),
+  rpcRoutine("jecho", [rpcParam("", "json")]),
+  rpcRoutine("techo", [rpcParam("", "text")]),
+];
+
+const rpcCache: SchemaCache = {
+  ...cache,
+  routines: new Map(
+    rpcRoutines.map((r): [string, Routine[]] => [`${r.schema}.${r.name}`, [r]]),
+  ),
+};
+
+interface RpcOpts {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
+function callPlanFor(fn: string, query: string, opts: RpcOpts = {}): CallReadPlan {
+  const conf = resolveConfig({ env: { PGRST_DB_SCHEMAS: "test" } });
+  const method = opts.method ?? "POST";
+  const headers = new Headers(opts.headers ?? {});
+  if (opts.body !== undefined && !headers.has("content-type")) headers.set("Content-Type", "application/json");
+  const apiReq = userApiRequest(
+    conf,
+    { method, url: `http://localhost/rpc/${fn}${query}`, headers },
+    `/rpc/${fn}`,
+    new Set(),
+    opts.body ?? "",
+  );
+  const act = apiReq.iAction;
+  if (act.kind !== "ActDb" || act.db.kind !== "ActRoutine") throw new Error("not a routine action");
+  return callReadPlan(act.db.qi, conf, rpcCache, apiReq, act.db.invMethod);
+}
+
+function callSql(fn: string, query: string, opts: RpcOpts = {}): [string, (string | null)[]] {
+  const { text, values } = renderSnippet(callPlanToQuery(callPlanFor(fn, query, opts).crCallPlan));
+  return [normalize(text), values];
+}
+
+Deno.test("callPlanToQuery: named key params build the args CTE + LATERAL `:=` call", () => {
+  assertEquals(callSql("add", "", { body: '{"a":1,"b":2}' }), [
+    `SELECT pgrst_call.pgrst_scalar FROM (SELECT $1::json AS json_data) pgrst_payload, ` +
+    `LATERAL (SELECT "a", "b" FROM json_to_record(pgrst_payload.json_data) AS _("a" integer, "b" integer) LIMIT 1) pgrst_body , ` +
+    `LATERAL (SELECT "test"."add"("a" := pgrst_body."a", "b" := pgrst_body."b") pgrst_scalar) pgrst_call`,
+    ['{"a":1,"b":2}'],
+  ]);
+});
+
+Deno.test("callPlanToQuery: GET args go through jsonRpcParams into the same shape", () => {
+  const [text, values] = callSql("add", "?a=1&b=2", { method: "GET" });
+  assertStringIncludes(text, `LATERAL (SELECT "test"."add"("a" := pgrst_body."a", "b" := pgrst_body."b") pgrst_scalar) pgrst_call`);
+  assertEquals(values, ['{"a":"1","b":"2"}']);
+});
+
+Deno.test("callPlanToQuery: only the specified optional params are passed", () => {
+  // no args: KeyParams [] → bare call (the default select=* returns pgrst_call.*)
+  assertEquals(callSql("getprojs", "", { body: "{}" }), [
+    `SELECT "pgrst_call".* FROM "test"."getprojs"() pgrst_call`,
+    [],
+  ]);
+  const [text, values] = callSql("getprojs", "?min_id=1", { method: "GET" });
+  assertEquals(text,
+    `SELECT "pgrst_call".* FROM (SELECT $1::json AS json_data) pgrst_payload, ` +
+    `LATERAL (SELECT "min_id" FROM json_to_record(pgrst_payload.json_data) AS _("min_id" integer) LIMIT 1) pgrst_body , ` +
+    `LATERAL "test"."getprojs"("min_id" := pgrst_body."min_id") pgrst_call`);
+  assertEquals(values, ['{"min_id":"1"}']);
+});
+
+Deno.test("callPlanToQuery: select columns become pgrst_call returnings", () => {
+  const [text] = callSql("getprojs", "?select=id,name", { body: "{}" });
+  assertEquals(text, `SELECT "pgrst_call"."id", "pgrst_call"."name" FROM "test"."getprojs"() pgrst_call`);
+});
+
+Deno.test("callPlanToQuery: embeds add FK columns to the returnings", () => {
+  const [text] = callSql("getprojs", "?select=name,clients(name)", { body: "{}" });
+  assertEquals(text, `SELECT "pgrst_call"."client_id", "pgrst_call"."name" FROM "test"."getprojs"() pgrst_call`);
+});
+
+Deno.test("callPlanToQuery: variadic params use the VARIADIC form", () => {
+  const [text, values] = callSql("vconcat", "?v=x&v=y", { method: "GET" });
+  assertStringIncludes(text, `LATERAL (SELECT "test"."vconcat"(VARIADIC "v" := pgrst_body."v") pgrst_scalar) pgrst_call`);
+  assertStringIncludes(text, `AS _("v" text[]) LIMIT 1) pgrst_body`);
+  assertEquals(values, ['{"v":["x","y"]}']);
+});
+
+Deno.test("callPlanToQuery: setof scalar wraps in pgrst_scalar", () => {
+  assertEquals(callSql("getnames", "", { method: "GET" }), [
+    `SELECT pgrst_call.pgrst_scalar FROM (SELECT "test"."getnames"() pgrst_scalar) pgrst_call`,
+    [],
+  ]);
+});
+
+Deno.test("callPlanToQuery: single unnamed json param calls positionally with the raw body", () => {
+  assertEquals(callSql("jecho", "", { body: '{"x":[1,2]}' }), [
+    `SELECT pgrst_call.pgrst_scalar FROM (SELECT "test"."jecho"($1::json) pgrst_scalar) pgrst_call`,
+    ['{"x":[1,2]}'],
+  ]);
+});
+
+Deno.test("callPlanToQuery: single unnamed text param binds the raw body with a ::text cast", () => {
+  assertEquals(callSql("techo", "", { headers: { "Content-Type": "text/plain" }, body: "hello" }), [
+    `SELECT pgrst_call.pgrst_scalar FROM (SELECT "test"."techo"($1::text) pgrst_scalar) pgrst_call`,
+    ["hello"],
+  ]);
+});
+
+Deno.test("prepareCall: scalar body aggregates pgrst_scalar and page_total is 1", () => {
+  const plan = callPlanFor("add", "", { body: '{"a":1,"b":2}' });
+  const { text } = renderSnippet(prepareCall(
+    plan.crProc,
+    callPlanToQuery(plan.crCallPlan),
+    readPlanToQuery(plan.crReadPlan),
+    readPlanToCountQuery(plan.crReadPlan),
+    false,
+    plan.crHandler,
+  ));
+  const t = normalize(text);
+  assertStringIncludes(t, "WITH pgrst_source AS (SELECT pgrst_call.pgrst_scalar FROM");
+  assertStringIncludes(t, "null::bigint AS total_result_set, 1 AS page_total");
+  assertStringIncludes(t, "(coalesce(json_agg(_postgrest_t.pgrst_scalar)->0, 'null'))::text AS body");
+  assertStringIncludes(t, `FROM (SELECT "add".* FROM "pgrst_source" AS "add" ) _postgrest_t`);
+});
+
+Deno.test("prepareCall: setof composite counts rows and aggregates whole rows", () => {
+  const plan = callPlanFor("getprojs", "", { method: "GET", headers: { Prefer: "count=exact" } });
+  const { text } = renderSnippet(prepareCall(
+    plan.crProc,
+    callPlanToQuery(plan.crCallPlan),
+    readPlanToQuery(plan.crReadPlan),
+    readPlanToCountQuery(plan.crReadPlan),
+    true,
+    plan.crHandler,
+  ));
+  const t = normalize(text);
+  assertStringIncludes(t, ", pgrst_source_count AS (SELECT 1 FROM");
+  assertStringIncludes(t, "(SELECT pg_catalog.count(*) FROM pgrst_source_count) AS total_result_set");
+  assertStringIncludes(t, "pg_catalog.count(_postgrest_t) AS page_total");
+  assertStringIncludes(t, "(coalesce(json_agg(_postgrest_t), '[]'))::text AS body");
+});
+
+Deno.test("prepareCall: setof scalar aggregates pgrst_scalar as an array", () => {
+  const plan = callPlanFor("getnames", "", { method: "GET" });
+  const { text } = renderSnippet(prepareCall(
+    plan.crProc,
+    callPlanToQuery(plan.crCallPlan),
+    readPlanToQuery(plan.crReadPlan),
+    readPlanToCountQuery(plan.crReadPlan),
+    false,
+    plan.crHandler,
+  ));
+  assertStringIncludes(normalize(text), "(coalesce(json_agg(_postgrest_t.pgrst_scalar), '[]'))::text AS body");
+});
+
+Deno.test("prepareCall: singular accept aggregates the first scalar (asJsonSingleF)", () => {
+  const plan = callPlanFor("add", "", {
+    body: '{"a":1,"b":2}',
+    headers: { Accept: "application/vnd.pgrst.object+json" },
+  });
+  const { text } = renderSnippet(prepareCall(
+    plan.crProc,
+    callPlanToQuery(plan.crCallPlan),
+    readPlanToQuery(plan.crReadPlan),
+    readPlanToCountQuery(plan.crReadPlan),
+    false,
+    plan.crHandler,
+  ));
+  assertStringIncludes(normalize(text), "(coalesce(json_agg(_postgrest_t.pgrst_scalar)->0, 'null'))::text AS body");
+});
+
+Deno.test("prepareCall: HEAD negotiates NoAgg (empty body aggregation)", () => {
+  const plan = callPlanFor("getprojs", "", { method: "HEAD" });
+  const { text } = renderSnippet(prepareCall(
+    plan.crProc,
+    callPlanToQuery(plan.crCallPlan),
+    readPlanToQuery(plan.crReadPlan),
+    readPlanToCountQuery(plan.crReadPlan),
+    false,
+    plan.crHandler,
+  ));
+  assertStringIncludes(normalize(text), "(''::text)::text AS body");
 });

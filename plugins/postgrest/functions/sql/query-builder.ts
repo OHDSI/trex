@@ -3,13 +3,21 @@
 // getJoinSelects), readPlanToCountQuery (incl. the EXISTS semi-joins for
 // inner-joined embeds and null-embed filters), mutatePlanToQuery
 // (INSERT/upsert/PUT, UPDATE incl. the limited pgrst_affected_rows variant,
-// DELETE) and limitedQuery.
+// DELETE), callPlanToQuery (RPC) and limitedQuery.
 
 import type { Alias } from "../types.ts";
-import type { CoercibleLogicTree, CoercibleOrderTerm, CoercibleSelectField, ReadPlanTree, RelSelectField } from "../plan/types.ts";
+import type {
+  CoercibleField,
+  CoercibleLogicTree,
+  CoercibleOrderTerm,
+  CoercibleSelectField,
+  ReadPlanTree,
+  RelSelectField,
+} from "../plan/types.ts";
 import { unknownField } from "../plan/types.ts";
 import type { MutatePlan } from "../plan/mutate-plan.ts";
-import type { QualifiedIdentifier, Relationship } from "../schema-cache/types.ts";
+import type { CallPlan } from "../plan/call-plan.ts";
+import type { QualifiedIdentifier, Relationship, RoutineParam } from "../schema-cache/types.ts";
 import { internalError } from "../errors.ts";
 import { allRange, rangeEq } from "../parse/range.ts";
 import {
@@ -29,6 +37,7 @@ import {
   pgFmtSelectItem,
   pgFmtSpreadSelectItem,
   returningF,
+  singleParameter,
 } from "./fragment.ts";
 import { emptySnippet, snip, type Snippet, sql } from "./builder.ts";
 
@@ -282,6 +291,76 @@ export function mutatePlanToQuery(plan: MutatePlan): Snippet {
       );
     }
   }
+}
+
+/**
+ * QueryBuilder.hs callPlanToQuery — the pgrst_source CTE body of an RPC call:
+ * the function call (optionally LATERAL over the fromJsonBodyF args CTE for
+ * named parameters) with scalar/setof-scalar returns wrapped in a
+ * pgrst_scalar column.
+ *
+ * Deviation from upstream: the `pgVer < pgVersion130 && pgVer >= pgVersion110
+ * && returnsCompositeAlias` callIt branch (`(SELECT (fn(..)).*) pgrst_call`)
+ * is dropped — trex targets modern PostgreSQL (>= 13), like the schema-cache
+ * introspection queries.
+ */
+export function callPlanToQuery(plan: CallPlan): Snippet {
+  const {
+    funCQi: qi,
+    funCParams: params,
+    funCArgs: args,
+    funCScalar: returnsScalar,
+    funCSetOfScalar: returnsSetOfScalar,
+    funCReturning: returnings,
+  } = plan;
+
+  const callIt = (argument: Snippet): Snippet =>
+    returnsScalar || returnsSetOfScalar
+      ? snip("(SELECT ", fromQi(qi), "(", argument, ") pgrst_scalar) pgrst_call")
+      : snip(fromQi(qi), "(", argument, ") pgrst_call");
+
+  const fmtParams = (prms: RoutineParam[]): Snippet =>
+    intercalateSnippet(
+      ", ",
+      prms.map((a) =>
+        snip(a.variadic ? "VARIADIC " : "", pgFmtIdent(a.name), " := pgrst_body.", pgFmtIdent(a.name))
+      ),
+    );
+
+  const returnedColumns: Snippet = returnings.length === 0
+    ? sql("*")
+    : intercalateSnippet(", ", returnings.map((r) => pgFmtColumn({ schema: "", name: "pgrst_call" }, r)));
+
+  const fromCall: Snippet = params.kind === "OnePosParam"
+    ? snip("FROM ", callIt(singleParameter(args, params.param.type)))
+    : params.params.length === 0
+    ? snip("FROM ", callIt(emptySnippet))
+    : snip(
+      fromJsonBodyF(
+        args,
+        params.params.map((p): CoercibleField => ({
+          cfName: p.name,
+          cfJsonPath: [],
+          cfToJson: false,
+          cfIRType: p.typeMaxLength,
+          cfTransform: null,
+          cfDefault: null,
+        })),
+        false,
+        true,
+        false,
+      ),
+      ", ",
+      "LATERAL ",
+      callIt(fmtParams(params.params)),
+    );
+
+  return snip(
+    "SELECT ",
+    returnsScalar || returnsSetOfScalar ? sql("pgrst_call.pgrst_scalar") : returnedColumns,
+    " ",
+    fromCall,
+  );
 }
 
 /**

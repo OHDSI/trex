@@ -978,5 +978,12 @@ export function negotiateContent(
   if (act.kind === "ActDb" && act.db.kind === "ActRelationRead" && act.db.headersOnly) {
     return [{ kind: "NoAgg" }, firstAcceptedPick[1]];
   }
+  // idem for HEAD /rpc/fn (ActRoutine _ (InvRead True))
+  if (
+    act.kind === "ActDb" && act.db.kind === "ActRoutine" &&
+    act.db.invMethod.kind === "InvRead" && act.db.invMethod.headersOnly
+  ) {
+    return [{ kind: "NoAgg" }, firstAcceptedPick[1]];
+  }
   return firstAcceptedPick;
 }

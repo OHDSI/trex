@@ -4,20 +4,22 @@
 // respond (upstream runs auth as a middleware before userApiRequest, so JWT
 // errors win over parse errors).
 //
-// Phases 5–6: GET/HEAD on tables/views including resource embedding, and
-// mutations (POST/PATCH/PUT/DELETE incl. upserts). RPC, OpenAPI root and
-// OPTIONS keep the 501 stub.
+// Phases 5–7: GET/HEAD on tables/views including resource embedding,
+// mutations (POST/PATCH/PUT/DELETE incl. upserts) and stored procedures
+// (GET/HEAD/POST /rpc/fn). OpenAPI root and OPTIONS keep the 501 stub.
 
 import { handleAdmin } from "./admin.ts";
 import { authenticate } from "./auth/jwt.ts";
 import { getConfig, reloadConfig } from "./config.ts";
 import { PgrstError } from "./errors.ts";
 import { userApiRequest } from "./parse/api-request.ts";
+import { callReadPlan } from "./plan/call-plan.ts";
 import { mutateReadPlan } from "./plan/mutate-plan.ts";
 import { wrappedReadPlan } from "./plan/read-plan.ts";
+import { invokeQuery } from "./query/call.ts";
 import { readQuery } from "./query/read.ts";
 import { writeQuery } from "./query/write.ts";
-import { createResponse, deleteResponse, readResponse, singleUpsertResponse, updateResponse } from "./response.ts";
+import { createResponse, deleteResponse, invokeResponse, readResponse, singleUpsertResponse, updateResponse } from "./response.ts";
 import { getSchemaCache, type SchemaCacheListener, startListener } from "./schema-cache/index.ts";
 import { stripMount } from "./state.ts";
 
@@ -102,7 +104,14 @@ export async function handle(req: Request): Promise<Response> {
       }
     }
 
-    // TODO(phase 7+): RPC, OpenAPI root, OPTIONS.
+    // Bad RPC methods (PATCH/PUT/DELETE) already threw PGRST101 in getAction.
+    if (act.kind === "ActDb" && act.db.kind === "ActRoutine") {
+      const plan = callReadPlan(act.db.qi, config, sCache, apiReq, act.db.invMethod);
+      const resultSet = await invokeQuery(plan, config, apiReq, authResult);
+      return invokeResponse(resultSet, apiReq, plan);
+    }
+
+    // TODO(phase 8+): OpenAPI root, OPTIONS.
     return new Response(
       JSON.stringify({ message: "PostgREST plugin: endpoint not implemented yet" }),
       { status: 501, headers: { "Content-Type": "application/json" } },
