@@ -32,8 +32,9 @@ Deno.serve(
     try {
       return await handle(inner);
     } catch (err) {
+      // Log the detail to the harness console; keep it out of the response body.
       console.error("[serve_plugin] handle() threw:", err);
-      return new Response(JSON.stringify({ message: String(err), harness: "serve_plugin crash" }), {
+      return new Response(JSON.stringify({ harness: "serve_plugin crash" }), {
         status: 599,
         headers: { "Content-Type": "application/json" },
       });

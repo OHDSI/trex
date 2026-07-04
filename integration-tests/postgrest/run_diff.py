@@ -134,7 +134,7 @@ class DbResetter:
     def has_dump(self) -> bool:
         return subprocess.run(
             ["docker", "exec", self.container, "test", "-f", self.DUMP],
-            capture_output=True,
+            capture_output=True, check=False,
         ).returncode == 0
 
     def ensure_dump(self) -> bool:
@@ -149,7 +149,7 @@ class DbResetter:
             ["docker", "exec", self.container, "pg_dump", "-U", "postgres", "-d", "postgres",
              "--data-only", "--disable-triggers", "--exclude-table=*.spatial_ref_sys",
              "-f", self.DUMP],
-            capture_output=True, text=True,
+            capture_output=True, text=True, check=False,
         )
         if r.returncode != 0:
             print(f"[reset] pg_dump failed: {r.stderr.strip()}")
@@ -541,6 +541,7 @@ class Stack:
         self.args = args
         self.report_dir = report_dir
         self.plugin_proc: subprocess.Popen | None = None
+        self.plugin_log = None
         self.o_host, self.o_port = split_hostport(args.oracle)
         self.p_host, self.p_port = split_hostport(args.plugin)
 
@@ -558,10 +559,10 @@ class Stack:
         env = {k: v for k, v in os.environ.items() if not k.startswith("PGRST_")}
         env.update(bucket_env(bucket, "plugin"))
         env["PLUGIN_PORT"] = str(self.p_port)
-        log = open(self.report_dir / f"serve_plugin.{bucket}.log", "w")
+        self.plugin_log = open(self.report_dir / f"serve_plugin.{bucket}.log", "w")
         self.plugin_proc = subprocess.Popen(
             [self.args.deno, "run", "--allow-net", "--allow-env", "--allow-read", "serve_plugin.ts"],
-            cwd=HERE, env=env, stdout=log, stderr=log,
+            cwd=HERE, env=env, stdout=self.plugin_log, stderr=self.plugin_log,
         )
         wait_http(self.p_host, self.p_port, f"plugin[{bucket}]")
 
@@ -573,8 +574,11 @@ class Stack:
             except subprocess.TimeoutExpired:
                 self.plugin_proc.kill()
             self.plugin_proc = None
+        if self.plugin_log is not None:
+            self.plugin_log.close()
+            self.plugin_log = None
         # leftovers from `make serve` (the deno node-shim can detach children)
-        subprocess.run(["pkill", "-f", r"deno run.*serve_plugin\.ts"], capture_output=True)
+        subprocess.run(["pkill", "-f", r"deno run.*serve_plugin\.ts"], capture_output=True, check=False)
         time.sleep(0.3)
 
 

@@ -160,9 +160,11 @@ export async function handle(req: Request): Promise<Response> {
     return infoRootResponse();
   } catch (err) {
     if (err instanceof PgrstError) return err.response();
+    // Unexpected internal error: log the detail server-side, but never leak it
+    // (e.g. a stack trace) into the response body.
     console.error("[postgrest] unhandled error:", err);
     return new Response(
-      JSON.stringify({ code: "PGRSTX00", message: String(err), details: null, hint: null }),
+      JSON.stringify({ code: "PGRSTX00", message: "Internal server error", details: null, hint: null }),
       { status: 500, headers: { "Content-Type": "application/json" } },
     );
   }

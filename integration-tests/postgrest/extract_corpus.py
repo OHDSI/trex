@@ -568,7 +568,7 @@ def resolve_body(kind: str, payload, fixtures_dir: Path, ctx: "Ctx | None" = Non
         try:
             return BodyResult(text=resolve_string_expr(inner))
         except Unresolvable:
-            raise Unresolvable(f"body expression ({inner[:60]!r})")
+            raise Unresolvable(f"body expression ({inner[:60]!r})") from None
     raise Unresolvable(f"body kind {kind}")
 
 
