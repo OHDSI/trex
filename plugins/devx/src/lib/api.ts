@@ -144,6 +144,11 @@ export async function getProviderConfigs(): Promise<ProviderConfigRecord[]> {
   return apiFetch("/provider-configs");
 }
 
+export interface ActiveProviderConfig {
+  provider: string;
+  api_key: string | null;
+}
+
 // task-u1: mirrors plugins/devx/agent/agent.ts's resolveModel fallback chain
 // (active devx.provider_configs row, else the legacy devx.settings row, else
 // "anthropic") so the UI can gate claude-code/copilot away from the agents
@@ -151,13 +156,21 @@ export async function getProviderConfigs(): Promise<ProviderConfigRecord[]> {
 // providers (eve/agents has no sidecar-process equivalent), which /chat
 // surfaces as a bare uncaught 500, not a parseable error. Read-only; never
 // used for anything security-sensitive, same posture as the server-side
-// fallback it mirrors.
-export async function getActiveProvider(): Promise<string> {
+// fallback it mirrors. Also carries `api_key` (final-007 review finding #4)
+// so useEffectiveLoop.ts can additionally detect IAM-shaped bedrock
+// credentials — resolveModel throws for those too (agents loop is
+// bearer-token-only), the exact same "gate it before /chat" reasoning as the
+// claude-code/copilot case above.
+export async function getActiveProviderConfig(): Promise<ActiveProviderConfig> {
   const configs = await getProviderConfigs().catch(() => [] as ProviderConfigRecord[]);
   const active = configs.find((c) => c.is_active);
-  if (active) return active.provider;
+  if (active) return { provider: active.provider, api_key: active.api_key ?? null };
   const settings = await getSettings();
-  return settings?.provider || "anthropic";
+  return { provider: settings?.provider || "anthropic", api_key: settings?.api_key ?? null };
+}
+
+export async function getActiveProvider(): Promise<string> {
+  return (await getActiveProviderConfig()).provider;
 }
 
 export async function createProviderConfig(config: {

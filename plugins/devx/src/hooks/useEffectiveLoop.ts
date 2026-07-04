@@ -1,17 +1,37 @@
 // task-u1: resolves the per-user devx.settings.loop flag into the actual
-// loop ChatPanel.tsx should render, applying the one override the brief
-// calls out: claude-code/copilot providers force legacy regardless of the
-// flag, because plugins/devx/agent/agent.ts's resolveModel throws for them
+// loop ChatPanel.tsx should render, applying the overrides the brief calls
+// out: claude-code/copilot providers force legacy regardless of the flag,
+// because plugins/devx/agent/agent.ts's resolveModel throws for them
 // ("sidecar providers use the legacy endpoint") and /chat has no try/catch
 // around that setup-phase call — an uncaught throw there surfaces as a bare
 // 500 with no parseable error shape (confirmed against
 // core/server/agents/service/handler.ts's /chat route), not something a
 // frontend can gracefully detect and fall back from. So: never send those
 // users down this path in the first place.
+//
+// final-007 review finding #4 (bedrock IAM parity): resolveModel ALSO throws
+// for a bedrock row whose api_key JSON is IAM-shaped (accessKeyId/
+// secretAccessKey, no bearerToken) — the agents loop only implements
+// bearer-token bedrock auth (see agent.ts's resolveModel comment). Same
+// "gate it before /chat ever sees it" posture as claude-code/copilot:
+// `isBedrockIamShaped` below mirrors SettingsPage.tsx's OWN api_key JSON
+// unpacking (the "Unpack Bedrock credentials from api_key JSON" effect) so
+// the detection is honest — it recognizes exactly the shape the Settings
+// page itself writes, not a guess at the wire format.
 import { useEffect, useState } from "react";
 import * as api from "@/lib/api";
 
 export type EffectiveLoop = "legacy" | "agents";
+
+function isBedrockIamShaped(apiKey: string | null): boolean {
+  if (!apiKey) return false;
+  try {
+    const creds = JSON.parse(apiKey) as { bearerToken?: string; accessKeyId?: string; secretAccessKey?: string };
+    return !creds.bearerToken && !!(creds.accessKeyId || creds.secretAccessKey);
+  } catch {
+    return false;
+  }
+}
 
 export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
   const [state, setState] = useState<{ loop: EffectiveLoop; resolved: boolean }>({
@@ -21,11 +41,14 @@ export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
 
   useEffect(() => {
     let cancelled = false;
-    Promise.all([api.getSettings(), api.getActiveProvider()])
-      .then(([settings, provider]) => {
+    Promise.all([api.getSettings(), api.getActiveProviderConfig()])
+      .then(([settings, active]) => {
         if (cancelled) return;
         const wantsAgents = settings?.loop === "agents";
-        const providerForcesLegacy = provider === "claude-code" || provider === "copilot";
+        const providerForcesLegacy =
+          active.provider === "claude-code" ||
+          active.provider === "copilot" ||
+          (active.provider === "bedrock" && isBedrockIamShaped(active.api_key));
         setState({ loop: wantsAgents && !providerForcesLegacy ? "agents" : "legacy", resolved: true });
       })
       .catch((err) => {

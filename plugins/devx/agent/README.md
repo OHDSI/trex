@@ -48,6 +48,26 @@ Mounted path: `/plugins/trex/devx-agent/` (see `core/server/plugin/agents.ts`:
 See `core/server/agents/README.md` and `COMPAT.md` for the full HTTP surface and where it
 deliberately diverges from real eve.
 
+## Bedrock auth: bearer token only (final-007 review finding #4)
+
+`agent.ts`'s `resolveModel` unpacks a `devx.provider_configs`/`devx.settings` bedrock row's
+JSON `api_key` the same way legacy's `functions/agent.ts` `createModel` does — but it only
+implements the **bearer-token** half of that unpacking. A `{bearerToken}`-shaped `api_key`
+maps straight onto `ModelSpec.apiKey` (core's `resolveModelSpec`/`bedrockModel` treats that
+as a bearer token via a SigV4-bypass custom `fetch`, matching legacy's own bearer path). An
+IAM-shaped `api_key` (`{accessKeyId, secretAccessKey}`, no `bearerToken`) has **no
+equivalent here** — core never implemented the SigV4 access-key/secret-key credential path —
+so `resolveModel` throws a clear error (`"bedrock IAM credentials are not supported on the
+agents loop yet — use bearer token or the legacy loop"`) instead of silently losing auth or
+falling back to whatever `AWS_BEARER_TOKEN_BEDROCK` happens to be set in the environment.
+
+The devx UI never lets a user reach that throw in practice: `useEffectiveLoop.ts` mirrors
+`SettingsPage.tsx`'s own `api_key` JSON unpacking client-side and forces `loop: "legacy"`
+whenever the active provider is `bedrock` and its stored credentials are IAM-shaped — the
+same "gate it before `/chat`/session-create ever sees it" posture already used for the
+`claude-code`/`copilot` sidecar providers. See `core/server/agents/COMPAT.md`'s
+`ToolContext.sql` divergence entry for the cross-reference from the core side.
+
 ## Running the tests
 
 devx suite (fakes only, no live model, no Postgres, no docker):

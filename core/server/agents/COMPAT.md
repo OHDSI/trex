@@ -231,6 +231,24 @@ live-tail by event shape.
     (`created_by IS NULL`) keep the pre-existing behavior: anyone who has the
     ids can resolve. This has no eve equivalent to diverge from — eve
     documents no approval-resolution authorization model at all.
+15. **`ToolContext.sql` is additive/trex-only** (`eve-shim/types.ts`) — real
+    eve's `ToolContext` has no `sql` field at all. It's the worker's pg pool
+    query fn, threaded straight from `HookCtx.sql` (`toolset.ts`'s
+    `authoredTool`) so a tool's `execute()` can run SQL without reaching for
+    a separate ambient pool; a tool must guard with `ctx?.sql?.(...)`, same
+    posture as `emit`/`userId`. **devx consumer note**: `plugins/devx/agent/
+    lib/context.ts`'s `toDevxCtx` adapter both (a) requires `ToolContext.sql`
+    non-negotiably (throws if unwired) to run its chat-ownership check before
+    letting client-supplied `metadata.chatId` reach any ported tool, and (b)
+    relies on it being the SAME pool `resolveModel`'s `HookCtx.sql` used —
+    which is where the parity gap lives: `agent.ts`'s `resolveModel` only
+    implements bearer-token bedrock auth (unpacks `{bearerToken}` from a
+    `devx.provider_configs`/`devx.settings` row's JSON `api_key`); IAM-shaped
+    credentials (`{accessKeyId, secretAccessKey}`) throw rather than silently
+    losing auth, unlike the legacy AI-SDK loop's `createModel`, which
+    supports both. `useEffectiveLoop.ts` detects the IAM shape client-side
+    and forces those users onto the legacy loop before `/chat` is ever
+    called — see `plugins/devx/agent/README.md`'s "Bedrock auth" section.
 
 ## What we ignore entirely
 

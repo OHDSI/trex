@@ -88,6 +88,48 @@ Deno.test("resolveModel: bedrock with no api_key configured returns apiKey undef
   assertEquals(spec, { provider: "bedrock", modelId: "anthropic.claude-3-5-sonnet", apiKey: undefined, baseURL: undefined });
 });
 
+Deno.test("resolveModel: bedrock with bearer-token-shaped api_key JSON unpacks the bearer token onto ModelSpec.apiKey", async () => {
+  const ctx = fakeHookCtx({
+    activeProvider: {
+      provider: "bedrock",
+      model: "anthropic.claude-3-5-sonnet",
+      api_key: JSON.stringify({ bearerToken: "bt-123" }),
+      base_url: "us-east-1",
+    },
+  });
+  const spec = await resolveModel(ctx);
+  assertEquals(spec, { provider: "bedrock", modelId: "anthropic.claude-3-5-sonnet", apiKey: "bt-123", baseURL: "us-east-1" });
+});
+
+Deno.test("resolveModel: bedrock with IAM-shaped api_key JSON (accessKeyId/secretAccessKey) throws a clear, actionable error", async () => {
+  const ctx = fakeHookCtx({
+    activeProvider: {
+      provider: "bedrock",
+      model: "anthropic.claude-3-5-sonnet",
+      api_key: JSON.stringify({ accessKeyId: "AKIA...", secretAccessKey: "shh" }),
+      base_url: null,
+    },
+  });
+  await assertRejects(
+    () => resolveModel(ctx),
+    Error,
+    "bedrock IAM credentials are not supported on the agents loop yet",
+  );
+});
+
+Deno.test("resolveModel: bedrock with a non-JSON api_key drops it (falls through to core's env-based bearer fallback)", async () => {
+  const ctx = fakeHookCtx({
+    activeProvider: {
+      provider: "bedrock",
+      model: "anthropic.claude-3-5-sonnet",
+      api_key: "not-json-at-all",
+      base_url: null,
+    },
+  });
+  const spec = await resolveModel(ctx);
+  assertEquals(spec, { provider: "bedrock", modelId: "anthropic.claude-3-5-sonnet", apiKey: undefined, baseURL: undefined });
+});
+
 Deno.test("resolveModel: no ctx.userId throws a clear error", async () => {
   const ctx = fakeHookCtx({}, { userId: undefined });
   await assertRejects(() => resolveModel(ctx), Error, "devx agent requires an authenticated user");

@@ -89,15 +89,59 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   const provider: ModelSpec["provider"] =
     row.provider === "anthropic" || row.provider === "google" || row.provider === "bedrock" ? row.provider : "openai";
 
-  // For bedrock, row.api_key may be null/absent (no key configured) — we
-  // deliberately do NOT parse it as packed JSON credentials or fall back to
-  // AWS_BEARER_TOKEN_BEDROCK here (functions/agent.ts:56-75's job); core's
-  // resolveModelSpec/bedrockModel (model.ts) already does the env-based
-  // bearer-token fallback when ModelSpec.apiKey is undefined.
+  // Bedrock credentials are packed as JSON in api_key (functions/agent.ts's
+  // createModel, :56-75's "Credentials are packed as JSON in api_key"
+  // branch) — unlike anthropic/google/openai, where api_key is used
+  // verbatim, a bedrock row's api_key must be unpacked to tell a bearer
+  // token apart from IAM access-key/secret-key credentials before it can be
+  // handed to core's ModelSpec.apiKey (which core's resolveModelSpec/
+  // bedrockModel treats as a bearer token ONLY — see eve-shim/types.ts's
+  // ModelSpec doc comment). IAM creds have NO equivalent on this loop: core
+  // never implemented the SigV4 accessKeyId/secretAccessKey path, only the
+  // bearer-token custom-fetch one legacy's own createModel used for bearer
+  // auth (see COMPAT.md's ToolContext.sql divergence entry, which also notes
+  // this bedrock=bearer-only gap). Silently dropping IAM creds would swap in
+  // whatever AWS_BEARER_TOKEN_BEDROCK happens to be set (or nothing at all,
+  // producing a confusing downstream auth failure) — throw a clear,
+  // actionable error instead; useEffectiveLoop.ts routes IAM-shaped bedrock
+  // users to the legacy loop before this hook is ever reached, so reaching
+  // this throw in production means that client-side gate was bypassed or is
+  // out of sync, and failing loud here is strictly better than a silent
+  // wrong-credential turn (same "a thrown resolveModel fails the turn"
+  // posture as every other error path in this file).
+  let apiKey: string | undefined = row.api_key ?? undefined;
+  if (provider === "bedrock" && row.api_key) {
+    try {
+      const creds = JSON.parse(row.api_key) as {
+        bearerToken?: string;
+        accessKeyId?: string;
+        secretAccessKey?: string;
+      };
+      if (creds.bearerToken) {
+        apiKey = creds.bearerToken;
+      } else if (creds.accessKeyId || creds.secretAccessKey) {
+        throw new Error(
+          "bedrock IAM credentials are not supported on the agents loop yet — use bearer token or the legacy loop",
+        );
+      }
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        // Not JSON — legacy's own createModel silently falls through to the
+        // AWS_BEARER_TOKEN_BEDROCK env var in this case (its catch{} is
+        // empty); core's bedrockModel does the same env fallback when
+        // ModelSpec.apiKey is undefined, so drop the unparseable value
+        // rather than forwarding it as a bogus apiKey.
+        apiKey = undefined;
+      } else {
+        throw err;
+      }
+    }
+  }
+
   return {
     provider,
     modelId: row.model,
-    apiKey: row.api_key ?? undefined,
+    apiKey,
     baseURL: row.base_url ?? undefined,
   };
 }
