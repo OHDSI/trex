@@ -194,8 +194,27 @@ export function useAgentsChat(
   // a time is enough: the gate guarantees at most one pre-ack send exists.
   const watchdogRef = useRef<number | null>(null);
 
+  // Imperative send-gate hand-off (fix, re-re-review #1): releasing the gate
+  // must NOT depend on the [turnActive, turnError] effect below — when
+  // turn.started and turn.completed arrive in ONE NDJSON chunk, React
+  // batches both reducer updates into a single render where turnActive is
+  // false before AND after (net no-op), the effect never fires, the gate
+  // stays held, and the watchdog later surfaces a false "no response" error
+  // after a turn that actually SUCCEEDED. This helper is called imperatively
+  // from consumeStream's per-line loop (already epoch-guarded there) the
+  // moment an ack-class event is processed; it's idempotent, so the effect
+  // stays as a harmless fallback for any path that renders normally.
+  const releaseSendGate = useCallback(() => {
+    if (watchdogRef.current != null) {
+      clearTimeout(watchdogRef.current);
+      watchdogRef.current = null;
+    }
+    sendGateRef.current.release();
+    setSendPending(false);
+  }, []);
+
   const persistAssistantMessage = useCallback(
-    (message: DevxUIMessage) => {
+    (message: DevxUIMessage, isStale: () => boolean) => {
       if (!chatId) return;
       const usage = extractUsage(message);
       const content = uiMessageText(message);
@@ -204,6 +223,12 @@ export function useAgentsChat(
         .createMessage(chatId, { role: "assistant", content, tool_calls: toolCalls.length > 0 ? toolCalls : undefined })
         .catch((err) => {
           console.error("useAgentsChat: failed to persist assistant message:", err);
+          // The .catch resolves asynchronously — a chat switch may have
+          // happened since the (epoch-guarded) event that triggered this
+          // persist. A stale chat's persistence failure logs to the console
+          // only; it must not surface in the NEW chat's UI (fix, re-re-review
+          // #2 — same invariant as every other late write in this hook).
+          if (isStale()) return;
           setPersistError("Reply generated but failed to save to chat history.");
         });
       // FILE_MUTATING_TOOLS heuristic (parity with useMessages.ts/U1): fire
@@ -266,7 +291,31 @@ export function useAgentsChat(
               }
               return next;
             });
-            if (finishedMessage) persistAssistantMessage(finishedMessage);
+            // Imperative gate hand-off (fix, re-re-review #1) — see
+            // releaseSendGate's comment for the React-batching false
+            // positive this closes. Epoch-guarded by the `isStale()` check
+            // at the top of this iteration (no await between it and here,
+            // so staleness cannot develop mid-iteration).
+            //  - turn.started: the ack the gate is waiting for. Live-only
+            //    (handler.ts's stepToEvent never replays it — turn starts
+            //    aren't persisted steps), so a replayed history can never
+            //    release a held gate prematurely through this branch.
+            //  - turn.completed/turn.failed/session.failed: belt and braces
+            //    for an ack that got lost, but ONLY while the watchdog is
+            //    armed (i.e. this send's POST was accepted and we are
+            //    specifically awaiting its ack). turn.completed/turn.failed
+            //    ARE replayable, and without the watchdog condition a
+            //    replayed old turn's epilogue arriving during a send's
+            //    stream-open phase would re-enable the composer mid-send —
+            //    reopening the double-submit window the gate exists for.
+            if (
+              event.type === "turn.started" ||
+              ((event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.failed") &&
+                watchdogRef.current != null)
+            ) {
+              releaseSendGate();
+            }
+            if (finishedMessage) persistAssistantMessage(finishedMessage, isStale);
           }
         }
       } catch (err) {
@@ -275,7 +324,7 @@ export function useAgentsChat(
         }
       }
     },
-    [persistAssistantMessage],
+    [persistAssistantMessage, releaseSendGate],
   );
 
   // `streamOpenRef` serializes concurrent callers (the eager
@@ -410,23 +459,18 @@ export function useAgentsChat(
   // round-trip later.
   const streaming = sessionState.turnActive || sendPending;
 
-  // Gate hand-off: once the server acknowledges the turn (turn.started →
-  // turnActive) the gate's job passes to `turnActive`; release it so the gate
-  // reflects only the pre-ack window. A failed pre-ack send releases in its
-  // own catch below; turnError (turn.failed/session.failed) also releases,
-  // covering "POST accepted but the turn died before/without turn.started".
+  // Gate hand-off FALLBACK only (re-re-review #1): the authoritative release
+  // is the imperative call in consumeStream's per-line loop — this effect
+  // cannot be relied on because React batching can collapse a same-chunk
+  // turn.started + turn.completed into a render where turnActive never
+  // appears true (see releaseSendGate's comment). Kept because it is free,
+  // idempotent, and still covers state transitions that arrive via renders
+  // (e.g. send()'s own catch setting turnError).
   useEffect(() => {
     if (sessionState.turnActive || sessionState.turnError) {
-      // The turn showed a sign of life (or definitively failed) — the
-      // watchdog's "silently hung" scenario is off the table.
-      if (watchdogRef.current != null) {
-        clearTimeout(watchdogRef.current);
-        watchdogRef.current = null;
-      }
-      sendGateRef.current.release();
-      setSendPending(false);
+      releaseSendGate();
     }
-  }, [sessionState.turnActive, sessionState.turnError]);
+  }, [sessionState.turnActive, sessionState.turnError, releaseSendGate]);
 
   const send = useCallback(
     (prompt: string, context?: { visualEdit?: VisualEditContext; selectedComponents?: SelectedComponent[] }) => {
@@ -453,6 +497,11 @@ export function useAgentsChat(
       setPersistError(null);
       api.createMessage(chatId, { role: "user", content: text }).catch((err) => {
         console.error("useAgentsChat: failed to persist user message:", err);
+        // Epoch-guarded like every other late write in this pipeline (fix,
+        // re-re-review #2): if the user switched chats before this persist
+        // settled, the failure belongs to the OLD chat — console only, never
+        // the new chat's UI.
+        if (isStale()) return;
         setPersistError("Message sent but failed to save to chat history.");
       });
       setSessionState((prev) => ({
@@ -564,17 +613,12 @@ export function useAgentsChat(
   const cancel = useCallback(() => {
     streamRef.current?.controller.abort();
     streamRef.current = null;
-    if (watchdogRef.current != null) {
-      clearTimeout(watchdogRef.current);
-      watchdogRef.current = null;
-    }
     // Also frees a send whose turn.started never arrived (e.g. stream died
     // right after the POST was accepted) — the cancel button is reachable
     // precisely because sendPending keeps `streaming` true in that state.
-    sendGateRef.current.release();
-    setSendPending(false);
+    releaseSendGate();
     setSessionState((prev) => ({ ...prev, turnActive: false }));
-  }, []);
+  }, [releaseSendGate]);
 
   const respondToConsent = useCallback(
     async (decision: "allow" | "deny" | "always") => {
