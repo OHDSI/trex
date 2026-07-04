@@ -43,9 +43,12 @@ export function AgentsChatPanel({
     questionnaire,
     planContent,
     tokenUsage,
+    consentRequest,
+    consentError,
     send,
     cancel,
     answerQuestionnaire,
+    respondToConsent,
   } = useAgentsChat(chatId, mode, appId, {
     onAppCommand,
     onBuildAction,
@@ -99,15 +102,14 @@ export function AgentsChatPanel({
         streaming={streaming}
         disabled={!chatId}
         todos={todos}
-        // U1 scope: needsApproval tools on the stateless /chat endpoint run
-        // to completion and return an "approval required" tool-result
-        // instead of pausing for a decision (no session to attach an
-        // approval request to) — surfaced inline on the tool call itself
-        // (agentsChat.ts's APPROVAL_DEFERRED_MESSAGE), not via this modal.
-        // The interactive consent flow (this banner) is U2's job, once
-        // devx switches to the session-scoped API.
-        consentRequest={null}
-        onConsentDecision={() => {}}
+        // U2: needsApproval tools now run through the session API
+        // (useAgentsChat.ts), which pauses the turn and surfaces an
+        // `input.requested` event instead of erroring the tool call out —
+        // this banner drives the real approve/deny/always decision via
+        // POST .../eve/v1/session/:id/approval.
+        consentRequest={consentRequest}
+        consentError={consentError}
+        onConsentDecision={respondToConsent}
         messages={legacyMessages}
         tokenUsage={tokenUsage}
         visualEditContext={visualEditContext}
