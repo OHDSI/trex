@@ -1,0 +1,109 @@
+# Differential conformance stack for the PostgREST-replacement plugin.
+#
+#   db      postgres 16 + postgis (schema.sql needs the postgis, file_fdw,
+#           ltree, isn and pgcrypto extensions), loaded with the verbatim
+#           PostgREST v12.2.3 spec fixtures via initdb/zz-load-fixtures.sh.
+#   oracle  the real postgrest/postgrest:v12.2.3, configured to mirror
+#           test/spec/SpecHelper.hs baseCfg key by key (see comments).
+#
+# The plugin side is NOT a container: it is a thin Deno server on the host
+# (serve_plugin.ts, started by `make serve`) pointing at the same db, so both
+# sides share one database. db-tx-end=rollback-allow-override keeps the data
+# pristine; entries carrying `Prefer: tx=commit` are skipped by the runner.
+
+services:
+  db:
+    # postgres:16 + postgis; plain postgres:16 cannot load schema.sql
+    # ("create extension if not exists postgis with schema extensions").
+    image: postgis/postgis:16-3.4
+    container_name: pgrst-diff-db
+    ports:
+      - "15433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      # Upstream loads fixtures over a trust-auth unix socket; mirror that for
+      # the TCP connections of the oracle and the plugin.
+      POSTGRES_HOST_AUTH_METHOD: trust
+      # Upstream withTools.nix: initdb --no-locale --encoding=UTF8, PGTZ=utc.
+      POSTGRES_INITDB_ARGS: "--no-locale --encoding=UTF8"
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - ./fixtures:/fixtures:ro
+      # Mounted as a single file so the postgis image's own
+      # 10_postgis.sh initdb script keeps running first.
+      - ./initdb/zz-load-fixtures.sh:/docker-entrypoint-initdb.d/zz-load-fixtures.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres && psql -U postgres -d postgres -tAc \"select 1 from pg_roles where rolname='postgrest_test_authenticator'\" | grep -q 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  oracle:
+    image: postgrest/postgrest:v12.2.3
+    container_name: pgrst-diff-oracle
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "13000:3000"
+    environment:
+      # ---- SpecHelper.hs baseCfg, key by key -------------------------------
+      # configDbUri (upstream connects as the postgrest_test_authenticator
+      # login role created by withTools.nix; roles.sql grants it the
+      # impersonated roles)
+      PGRST_DB_URI: postgres://postgrest_test_authenticator@db:5432/postgres
+      # configAppSettings
+      PGRST_APP_SETTINGS_app_host: localhost
+      PGRST_APP_SETTINGS_external_api_secret: 0123456789abcdef
+      # configDbAggregates = False
+      PGRST_DB_AGGREGATES_ENABLED: "false"
+      # configDbAnonRole
+      PGRST_DB_ANON_ROLE: postgrest_test_anonymous
+      # configDbChannelEnabled = True (configDbChannel mempty is only
+      # reachable through the hspec harness; the default channel is inert)
+      PGRST_DB_CHANNEL_ENABLED: "true"
+      # configDbExtraSearchPath = [] (empty env value parses to [""], which
+      # postgres treats as no extra schema — see Config.hs optValue)
+      PGRST_DB_EXTRA_SEARCH_PATH: ""
+      # configDbHoistedTxSettings (the built-in default, set explicitly)
+      PGRST_DB_HOISTED_TX_SETTINGS: "default_transaction_isolation,plan_filter.statement_cost_limit,statement_timeout"
+      # configDbMaxRows = Nothing -> leave unset
+      # configDbPlanEnabled = False
+      PGRST_DB_PLAN_ENABLED: "false"
+      # configDbPoolSize / acquisition timeout
+      PGRST_DB_POOL: "10"
+      PGRST_DB_POOL_ACQUISITION_TIMEOUT: "10"
+      # configDbPreRequest = test.switch_role
+      PGRST_DB_PRE_REQUEST: test.switch_role
+      # configDbPreparedStatements = True
+      PGRST_DB_PREPARED_STATEMENTS: "true"
+      # configDbRootSpec = Nothing -> unset
+      # configDbSchemas = ["test"]
+      PGRST_DB_SCHEMAS: test
+      # configDbConfig = False (do not read in-db pgrst.* settings)
+      PGRST_DB_CONFIG: "false"
+      # configJwtSecret
+      PGRST_JWT_SECRET: reallyreallyreallyreallyverysafe
+      PGRST_JWT_SECRET_IS_BASE64: "false"
+      # configJwtRoleClaimKey = .role (default, set explicitly)
+      PGRST_JWT_ROLE_CLAIM_KEY: .role
+      # configJwtCacheMaxLifetime = 0
+      PGRST_JWT_CACHE_MAX_LIFETIME: "0"
+      # configLogLevel = LogCrit
+      PGRST_LOG_LEVEL: crit
+      # configOpenApiMode = OAFollowPriv
+      PGRST_OPENAPI_MODE: follow-privileges
+      # configOpenApiSecurityActive = False
+      PGRST_OPENAPI_SECURITY_ACTIVE: "false"
+      # configServerCorsAllowedOrigins = Nothing -> unset
+      # configServerHost/Port: baseCfg says localhost:3000; these only feed
+      # the OpenAPI output host, and must match the plugin server env.
+      PGRST_SERVER_HOST: "*4"
+      PGRST_SERVER_PORT: "3000"
+      # configDbTxAllowOverride = True, configDbTxRollbackAll = True
+      PGRST_DB_TX_END: rollback-allow-override
+      # configServerTimingEnabled = True
+      PGRST_SERVER_TIMING_ENABLED: "true"
