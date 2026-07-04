@@ -130,6 +130,37 @@ Deno.test("buildAgentWorkerConfig resolves entry env with ${VAR:-default} substi
   }
 });
 
+// task-v1-brief.md: plugins/devx's real "agents" trex-block entry
+// ({ name: "devx-agent", dir: "agent" }) loads through the same
+// buildAgentWorkerConfig path as any other agents-type plugin — run here
+// (not under plugins/devx itself) because loader.ts's agent.ts import ("eve")
+// and buildAgentWorkerConfig's own express/pg/edn-data deps only resolve
+// inside core/server's own configured Deno workspace member. This
+// deliberately stops at buildAgentWorkerConfig, not a direct in-process
+// loadAgent(devxAgentDir) call: plugins/devx isn't itself a workspace
+// member, so a same-process dynamic import() of its agent.ts resolves "eve"
+// against the OUTER repo-root workspace config (no "imports" of its own)
+// rather than core/server's — a same-process-testing artifact, not a real
+// production gap, since a real agent worker always runs as its own process
+// launched with buildAgentWorkerConfig's generated --import-map (verified
+// below), never via an ambient workspace-discovered config.
+// plugins/devx/agent/lib/context.test.ts covers the adapter unit tests.
+Deno.test("manifest: buildAgentWorkerConfig succeeds for the devx-agent trex.agents entry", async () => {
+  const devxPlugin = new URL("../../../plugins/devx", import.meta.url).pathname;
+  const cfg = await buildAgentWorkerConfig(devxPlugin, { name: "devx-agent", dir: "agent" }, "@trex/devx");
+  assertEquals(cfg.source, "/devx-agent");
+  assertEquals(cfg.env.TREX_AGENT_DIR, `${devxPlugin}/agent`);
+  assertEquals(cfg.env.TREX_AGENT_NAME, "devx-agent");
+  assertEquals(cfg.env.TREX_PLUGIN_NAME, "@trex/devx");
+  // No plugins/devx/agent/deno.json is checked in (see task-v1 report):
+  // buildAgentWorkerConfig's own generated import map already resolves
+  // "eve"/"eve/tools" to absolute file:// URLs regardless of which plugin
+  // declares the agent — this is what makes that unnecessary.
+  const generated = JSON.parse(await Deno.readTextFile(cfg.importMapPath));
+  assert(String(generated.imports.eve).endsWith("eve-shim/mod.ts"));
+  assert(String(generated.imports["eve/tools"]).endsWith("eve-shim/tools.ts"));
+});
+
 Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async () => {
   const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
   const realDir = `${toyPlugin}/agent`;

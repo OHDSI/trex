@@ -45,7 +45,13 @@
     "migrations": {
       "schema": "devx",
       "database": "_config"
-    }
+    },
+    "agents": [
+      {
+        "name": "devx-agent",
+        "dir": "agent"
+      }
+    ]
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.2.8",
