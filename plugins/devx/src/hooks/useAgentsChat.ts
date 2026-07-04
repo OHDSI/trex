@@ -91,6 +91,15 @@ function authHeaders(): Record<string, string> {
   };
 }
 
+// How long after an ACCEPTED follow-up POST (202) to wait for the turn's
+// first sign of life on the stream (turn.started/turn.failed, which release
+// the send gate) before concluding the stream silently hung and freeing the
+// composer with a retriable error. Generous on purpose: turn.started is
+// emitted before any model call (handler.ts's startTurn emits it right after
+// the agents.turns insert), so even a cold worker should beat this by two
+// orders of magnitude — this only fires on genuinely broken plumbing.
+const TURN_ACK_WATCHDOG_MS = 30_000;
+
 export function useAgentsChat(
   chatId: string | null,
   mode: ChatMode,
@@ -147,18 +156,25 @@ export function useAgentsChat(
   // opening a second concurrent tail for the same session (send() and the
   // eager reconnect-on-load effect below could otherwise race).
   const sessionIdRef = useRef<string | null>(null);
-  const streamControllerRef = useRef<AbortController | null>(null);
+  // The open live tail, WITH the session it belongs to (fix, re-review #3):
+  // the "already open" short-circuit in ensureStreamOpen must verify the
+  // existing connection is for the REQUESTED session — after a 404-retry
+  // swaps sessions, a bare controller ref would happily return "open" for
+  // the wrong session's stream.
+  const streamRef = useRef<{ sessionId: string; controller: AbortController } | null>(null);
   const seenFileMutationsRef = useRef<Set<string>>(new Set());
   const optionsRef = useRef(options);
   optionsRef.current = options;
 
   // Fix (review): stale-stream supersede. Mirrors AgentRunDetail.tsx's
   // per-instance `superseded` flag, generation-counter style: every
-  // ensureStreamOpen invocation captures the epoch at start; the chat-switch
+  // ensureStreamOpen caller captures the epoch at start; the chat-switch
   // cleanup bumps it. A superseded instance (its initial GET fetch resolving
   // AFTER the chat switched, when the cleanup's abort was a no-op because
-  // streamControllerRef wasn't assigned yet) must neither claim
-  // streamControllerRef nor reduce a single event into the NEW chat's state.
+  // streamRef wasn't assigned yet) must neither claim streamRef nor reduce
+  // a single event into the NEW chat's state. Re-review #1: send() shares
+  // the same epoch for its ENTIRE pipeline (session create, stream open,
+  // message POST, watchdog) — every success-path ref write checks it.
   const streamEpochRef = useRef(0);
 
   // Fix (review): synchronous double-submit guard. See agentsSession.ts's
@@ -168,6 +184,15 @@ export function useAgentsChat(
   // the UI (`streaming` below) disables the send button for the same window.
   const sendGateRef = useRef(createInFlightGate());
   const [sendPending, setSendPending] = useState(false);
+
+  // Fix (re-review #2): post-turn watchdog. The follow-up POST returning 202
+  // proves the server ACCEPTED the turn, but the gate is only handed off
+  // when `turn.started` (or turn.failed/session.failed) arrives on the
+  // stream — a silently-hung stream (reader.read() never resolving, no
+  // events at all) would otherwise leave the gate held and the composer
+  // disabled forever, with manual Cancel as the only way out. One timer at
+  // a time is enough: the gate guarantees at most one pre-ack send exists.
+  const watchdogRef = useRef<number | null>(null);
 
   const persistAssistantMessage = useCallback(
     (message: DevxUIMessage) => {
@@ -253,50 +278,72 @@ export function useAgentsChat(
     [persistAssistantMessage],
   );
 
-  // `streamOpenPromiseRef` serializes concurrent callers (the eager
+  // `streamOpenRef` serializes concurrent callers (the eager
   // reconnect-on-load effect below and `send()` can both call this for the
   // same session): without it, two callers racing before either's `fetch`
-  // resolves would each see `streamControllerRef.current` still null and
-  // open a SECOND parallel connection — not just wasteful, but a
-  // correctness bug, since every event would then be reduced twice (once
-  // per connection) into session state.
-  const streamOpenPromiseRef = useRef<Promise<void> | null>(null);
+  // resolves would each see `streamRef.current` still null and open a
+  // SECOND parallel connection — not just wasteful, but a correctness bug,
+  // since every event would then be reduced twice (once per connection)
+  // into session state. Tracks sessionId (fix, re-review #3) and a
+  // per-instance cancel so a pending open for the WRONG session can be
+  // superseded without staling the whole epoch.
+  const streamOpenRef = useRef<{ sessionId: string; promise: Promise<void>; cancel: () => void } | null>(null);
 
   const ensureStreamOpen = useCallback(
-    (sessionId: string): Promise<void> => {
-      if (streamControllerRef.current) return Promise.resolve();
-      if (streamOpenPromiseRef.current) return streamOpenPromiseRef.current;
-      // Captured synchronously, before any await — this instance's
-      // `superseded` flag (see streamEpochRef's comment). The chat-switch
-      // cleanup bumps the epoch, staling every in-flight instance at once.
-      const epoch = streamEpochRef.current;
-      const isStale = () => epoch !== streamEpochRef.current;
+    (sessionId: string, epoch: number): Promise<void> => {
+      // `epoch` is the CALLER's captured epoch (fix, re-review #1), not
+      // self-captured: a stale send() calling in here after a chat switch
+      // must produce a stale stream instance that refuses to attach — if
+      // this function captured a fresh epoch itself, a stale caller could
+      // open a fresh-looking stream that feeds the new chat's state.
+      if (streamRef.current) {
+        if (streamRef.current.sessionId === sessionId) return Promise.resolve();
+        // Open stream belongs to a DIFFERENT session (e.g. after a
+        // 404-retry swapped sessions) — replace it (fix, re-review #3).
+        streamRef.current.controller.abort();
+        streamRef.current = null;
+      }
+      if (streamOpenRef.current) {
+        if (streamOpenRef.current.sessionId === sessionId) return streamOpenRef.current.promise;
+        streamOpenRef.current.cancel();
+        streamOpenRef.current = null;
+      }
+      let cancelledByReplacement = false;
+      const isStale = () => cancelledByReplacement || epoch !== streamEpochRef.current;
       const opening = (async () => {
         const controller = new AbortController();
         const token = getAuthToken();
         const headers: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
         const res = await fetch(`${AGENTS_SESSION_URL}/${sessionId}/stream`, { headers, signal: controller.signal });
         if (isStale()) {
-          // Chat switched while the fetch was pending — the cleanup's abort
-          // was a no-op (controller wasn't published yet). Kill the late
-          // connection and refuse to feed the new chat's state.
+          // Chat switched (or this open was replaced) while the fetch was
+          // pending — the cleanup's abort was a no-op (controller wasn't
+          // published yet). Kill the late connection and refuse to feed
+          // the current chat's state.
           controller.abort();
-          throw new HttpError("session stream superseded by chat switch", 0);
+          throw new HttpError("session stream superseded", 0);
         }
         if (!res.ok || !res.body) throw new HttpError(`session stream failed (${res.status})`, res.status);
-        streamControllerRef.current = controller;
+        streamRef.current = { sessionId, controller };
         void consumeStream(sessionId, res, isStale).finally(() => {
-          if (streamControllerRef.current === controller) streamControllerRef.current = null;
+          if (streamRef.current?.controller === controller) streamRef.current = null;
         });
       })();
-      // Same self-identity check as streamControllerRef above: an old
-      // instance's finally must not null out a NEWER instance's pending
-      // promise (possible after a chat switch already replaced it).
-      const published: Promise<void> = opening.finally(() => {
-        if (streamOpenPromiseRef.current === published) streamOpenPromiseRef.current = null;
+      // Same self-identity check as streamRef above: an old instance's
+      // finally must not null out a NEWER instance's pending entry
+      // (possible after a chat switch/replacement already replaced it).
+      const entry = {
+        sessionId,
+        cancel: () => {
+          cancelledByReplacement = true;
+        },
+        promise: undefined as unknown as Promise<void>,
+      };
+      entry.promise = opening.finally(() => {
+        if (streamOpenRef.current === entry) streamOpenRef.current = null;
       });
-      streamOpenPromiseRef.current = published;
-      return published;
+      streamOpenRef.current = entry;
+      return entry.promise;
     },
     [consumeStream],
   );
@@ -317,7 +364,7 @@ export function useAgentsChat(
       const cached = loadCachedSessionId(chatId);
       if (cached) {
         sessionIdRef.current = cached;
-        ensureStreamOpen(cached).catch((err) => {
+        ensureStreamOpen(cached, streamEpochRef.current).catch((err) => {
           if (err instanceof HttpError && err.status === 404) {
             // Stale cache (session row gone server-side): drop it now so the
             // next send() goes straight to fresh-session creation instead of
@@ -340,11 +387,16 @@ export function useAgentsChat(
       // rule's stale-snapshot concern is exactly the behavior wanted here).
       // eslint-disable-next-line react-hooks/exhaustive-deps
       streamEpochRef.current++;
-      streamControllerRef.current?.abort();
-      streamControllerRef.current = null;
-      streamOpenPromiseRef.current = null;
+      streamRef.current?.controller.abort();
+      streamRef.current = null;
+      streamOpenRef.current = null;
+      // A pending post-turn watchdog belongs to the OLD chat's send.
+      if (watchdogRef.current != null) {
+        clearTimeout(watchdogRef.current);
+        watchdogRef.current = null;
+      }
       // A send() in flight for the OLD chat must not keep the NEW chat's
-      // input disabled (its own catch skips state writes once stale).
+      // input disabled (its own paths skip state writes once stale).
       gate.release();
       setSendPending(false);
     };
@@ -365,6 +417,12 @@ export function useAgentsChat(
   // covering "POST accepted but the turn died before/without turn.started".
   useEffect(() => {
     if (sessionState.turnActive || sessionState.turnError) {
+      // The turn showed a sign of life (or definitively failed) — the
+      // watchdog's "silently hung" scenario is off the table.
+      if (watchdogRef.current != null) {
+        clearTimeout(watchdogRef.current);
+        watchdogRef.current = null;
+      }
       sendGateRef.current.release();
       setSendPending(false);
     }
@@ -382,8 +440,14 @@ export function useAgentsChat(
       setSendPending(true);
       // This send's `superseded` marker (same epoch as the stream instances):
       // if the user switches chats while this send's network work is in
-      // flight, its failure paths must not write into the NEW chat's state.
+      // flight, NO path — success or failure — may touch the shared refs
+      // (sessionIdRef/streamRef) or write into the NEW chat's state
+      // (fix, re-review #1: the first version only checked in the outer
+      // catch, so a stale send's success path could claim sessionIdRef for
+      // chat A's session while chat B was showing, streaming A's turn into
+      // B's UI and pointing B's next send at A's session).
       const epoch = streamEpochRef.current;
+      const isStale = () => epoch !== streamEpochRef.current;
       const note = buildContextNote(context);
       const text = note ? `${note}${prompt}` : prompt;
       setPersistError(null);
@@ -406,12 +470,26 @@ export function useAgentsChat(
         if (!res.ok) throw new HttpError(`session create failed (${res.status})`, res.status);
         const body = await res.json();
         const id = body.sessionId as string;
+        // Epoch check BEFORE the ref writes (fix, re-review #1): a chat
+        // switch during the fetch must not let the OLD chat's new session
+        // claim sessionIdRef (and be cached under the OLD chatId while the
+        // refs now serve the new chat). The just-created row is an orphan —
+        // harmless server-side (no turn ran, nothing streams client-side;
+        // same footprint as /chat's per-request observability sessions).
+        if (isStale()) throw new HttpError("send superseded by chat switch", 0);
         sessionIdRef.current = id;
         saveCachedSessionId(chatId, id);
         return id;
       };
       const postTurn = async (sessionId: string): Promise<void> => {
-        await ensureStreamOpen(sessionId);
+        // Pass OUR epoch (fix, re-review #1): a stale send must not let
+        // ensureStreamOpen self-capture a fresh epoch and open a stream
+        // that considers itself current.
+        await ensureStreamOpen(sessionId, epoch);
+        // Re-check before the message POST: past this point the server
+        // starts a real turn — a stale send must not commit the OLD chat's
+        // message to a turn nobody is watching from the visible chat.
+        if (isStale()) throw new HttpError("send superseded by chat switch", 0);
         const res = await fetch(`${AGENTS_SESSION_URL}/${sessionId}`, {
           method: "POST",
           headers: authHeaders(),
@@ -431,11 +509,15 @@ export function useAgentsChat(
               // gone server-side, e.g. wiped DB behind a browser that kept
               // localStorage) — recover transparently with ONE retry on a
               // fresh session instead of surfacing "send failed (404)".
-              if (err instanceof HttpError && err.status === 404) {
+              // Staleness gates the retry too (fix, re-review #1): a
+              // superseded send must not clear the cache / abort the stream
+              // / create a session on behalf of a chat it no longer serves
+              // — rethrow instead, the outer catch bails silently.
+              if (!isStale() && err instanceof HttpError && err.status === 404) {
                 clearCachedSessionId(chatId);
                 sessionIdRef.current = null;
-                streamControllerRef.current?.abort();
-                streamControllerRef.current = null;
+                streamRef.current?.controller.abort();
+                streamRef.current = null;
                 await postTurn(await createSession());
               } else {
                 throw err;
@@ -444,11 +526,26 @@ export function useAgentsChat(
           } else {
             await postTurn(await createSession());
           }
+          // Fix (re-review #2): the POST was accepted — arm the watchdog
+          // for the turn's first sign of life. Cleared by the
+          // turnActive/turnError effect, cancel(), and the chat-switch
+          // cleanup; checks the gate at fire time because a released gate
+          // means turn.started/turn.failed already handled the hand-off.
+          if (isStale()) return;
+          if (watchdogRef.current != null) clearTimeout(watchdogRef.current);
+          watchdogRef.current = window.setTimeout(() => {
+            watchdogRef.current = null;
+            if (epoch !== streamEpochRef.current) return;
+            if (!sendGateRef.current.held) return;
+            sendGateRef.current.release();
+            setSendPending(false);
+            setSessionState((prev) => ({ ...prev, turnError: "no response from agent — try again" }));
+          }, TURN_ACK_WATCHDOG_MS);
         } catch (err) {
           // Superseded by a chat switch: the cleanup already released the
           // gate for the new chat; don't write this stale send's error into
           // the new chat's state.
-          if (epoch !== streamEpochRef.current) return;
+          if (isStale()) return;
           sendGateRef.current.release();
           setSendPending(false);
           console.error("useAgentsChat: send failed:", err);
@@ -465,8 +562,12 @@ export function useAgentsChat(
   // itself. Documented gap, not a bug: see task-u2-report.md's evidence
   // table ("risk" row).
   const cancel = useCallback(() => {
-    streamControllerRef.current?.abort();
-    streamControllerRef.current = null;
+    streamRef.current?.controller.abort();
+    streamRef.current = null;
+    if (watchdogRef.current != null) {
+      clearTimeout(watchdogRef.current);
+      watchdogRef.current = null;
+    }
     // Also frees a send whose turn.started never arrived (e.g. stream died
     // right after the POST was accepted) — the cancel button is reachable
     // precisely because sendPending keeps `streaming` true in that state.
