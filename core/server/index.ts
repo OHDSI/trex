@@ -335,10 +335,37 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
   }
 });
 
+// Streams a worker Response into an express response — CSV/binary bodies must
+// not be text()-mangled. Defined BEFORE the routes that call it: in the
+// unbundled dev-mode module evaluation, later top-level function declarations
+// are not hoisted into earlier route closures (calling one throws
+// ReferenceError at request time).
+async function pipeWorkerResponse(workerResponse: globalThis.Response, res: any) {
+  res.status(workerResponse.status);
+  workerResponse.headers.forEach((value: string, key: string) => {
+    const lower = key.toLowerCase();
+    if (lower === "content-encoding" || lower === "content-length" || lower === "transfer-encoding") return;
+    res.setHeader(key, value);
+  });
+  if (!workerResponse.body) { res.end(); return; }
+  const reader = workerResponse.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) res.write(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+    try { res.end(); } catch { /* ignore */ }
+  }
+}
+
 // PostgREST — before authContext since PostgREST handles its own JWT verification.
-// POSTGREST_MODE selects the implementation: "sidecar" (default) proxies to the
-// external postgrest container; "plugin" calls the @trex/postgrest worker directly.
-const POSTGREST_MODE = Deno.env.get("POSTGREST_MODE") || "sidecar";
+// POSTGREST_MODE selects the implementation: "plugin" (default) calls the
+// @trex/postgrest worker directly; "sidecar" proxies to the legacy external
+// postgrest container (run it via `--profile postgrest-sidecar`).
+const POSTGREST_MODE = Deno.env.get("POSTGREST_MODE") || "plugin";
 const POSTGREST_HOST = Deno.env.get("POSTGREST_HOST") || "postgrest";
 const POSTGREST_PORT = Deno.env.get("POSTGREST_PORT") || "3000";
 
@@ -636,27 +663,6 @@ function buildWorkerRequest(req: any, rewrittenPath?: string): globalThis.Reques
     body = new Blob([new Uint8Array(req.body as Buffer)]);
   }
   return new globalThis.Request(requestUrl, { method: req.method, headers, body });
-}
-
-async function pipeWorkerResponse(workerResponse: globalThis.Response, res: any) {
-  res.status(workerResponse.status);
-  workerResponse.headers.forEach((value: string, key: string) => {
-    const lower = key.toLowerCase();
-    if (lower === "content-encoding" || lower === "content-length" || lower === "transfer-encoding") return;
-    res.setHeader(key, value);
-  });
-  if (!workerResponse.body) { res.end(); return; }
-  const reader = workerResponse.body.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) res.write(value);
-    }
-  } finally {
-    try { reader.releaseLock(); } catch { /* ignore */ }
-    try { res.end(); } catch { /* ignore */ }
-  }
 }
 
 // Best-effort JSON-body redaction — secrets must not hit stdout.

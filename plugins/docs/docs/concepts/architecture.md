@@ -48,7 +48,7 @@ flowchart TD
     subgraph Data["Data Layer"]
         PostgreSQL["PostgreSQL (metadata)"]
         Engine["Trex Engine"]
-        PostgREST["PostgREST"]
+        PostgREST["@trex/postgrest (REST)"]
     end
 
     subgraph SqlExtensions["SQL Extensions"]
@@ -105,9 +105,10 @@ for the infrastructure ones.
 The core server (`core/server/`, Deno + Express + PostGraphile) hosts the
 application surface: auth, GraphQL, REST, MCP, edge functions, the plugin
 loader, and a Supabase-CLI-compatible management API. The REST surface at
-`/trex/rest/v1` is a reverse proxy: the core server forwards those requests to
-an external **PostgREST** service (a `postgrest` container in the default
-compose stack) that connects directly to PostgreSQL. PostgreSQL (separate from
+`/trex/rest/v1` is a PostgREST-compatible API served **in-process** by the
+`@trex/postgrest` function plugin, which connects directly to PostgreSQL
+(setting `POSTGREST_MODE=sidecar` reverts to reverse-proxying a legacy external
+`postgrest` container). PostgreSQL (separate from
 the Trex engine) backs auth and configuration state. See
 [APIs](../apis/graphql) for endpoint references and [Concepts → Auth Model](auth-model)
 for the auth narrative.

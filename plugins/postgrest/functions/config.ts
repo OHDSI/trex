@@ -412,24 +412,39 @@ const TREX_SETTING_KEYS: Record<string, string> = {
 };
 
 /** Maps trexdb.setting rows to a ConfigSources.trex record (dashed keys). */
-export function trexSettingsToSource(rows: { key: string; value: string }[]): Record<string, string> {
+export function trexSettingsToSource(rows: { key: string; value: unknown }[]): Record<string, string> {
   const out: Record<string, string> = {};
   for (const row of rows) {
     const key = TREX_SETTING_KEYS[row.key];
-    if (key !== undefined) out[key] = row.value;
+    // trexdb.setting.value is jsonb; node-postgres hands scalars back as JS
+    // numbers/strings, so coerce to the string form resolveConfig expects.
+    if (key !== undefined && row.value != null) out[key] = String(row.value);
   }
   return out;
 }
 
-/** Reads trexdb.setting; tolerates the table/schema not existing. */
+/** Reads the trexdb.setting postgrest.* rows; tolerates a non-trex database. */
 export async function queryTrexSettings(pool: Pool): Promise<Record<string, string>> {
+  // trexdb.setting is RLS'd and revoked (it holds secrets) and the plugin
+  // connects as `authenticator`, so read through the narrow SECURITY DEFINER
+  // function from core/schema/V4__postgrest_settings_read.sql.
+  try {
+    const res = await pool.query("select key, value from trexdb.postgrest_settings()");
+    return trexSettingsToSource(res.rows as { key: string; value: unknown }[]);
+  } catch (err) {
+    // 42883 undefined_function / 3F000 invalid_schema_name: V4 not applied
+    // (e.g. a plain PostgREST test database) — fall through to a direct read.
+    const code = (err as { code?: string }).code;
+    if (code !== "42883" && code !== "3F000") throw err;
+  }
   try {
     const res = await pool.query("select key, value from trexdb.setting where key like 'postgrest.%'");
-    return trexSettingsToSource(res.rows as { key: string; value: string }[]);
+    return trexSettingsToSource(res.rows as { key: string; value: unknown }[]);
   } catch (err) {
-    // 42P01 undefined_table / 3F000 invalid_schema_name: not a trex Studio db
+    // 42P01 undefined_table / 3F000 invalid_schema_name: not a trex Studio db;
+    // 42501 insufficient_privilege: table locked down and no reader function.
     const code = (err as { code?: string }).code;
-    if (code === "42P01" || code === "3F000") return {};
+    if (code === "42P01" || code === "3F000" || code === "42501") return {};
     throw err;
   }
 }

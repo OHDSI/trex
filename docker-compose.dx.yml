@@ -184,6 +184,17 @@ services:
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
       PLUGINS_DEV_PATH: /usr/src/plugins-dev
+      # REST is served in-process by the @trex/postgrest plugin (POSTGREST_MODE
+      # defaults to "plugin"). These PGRST_* values mirror what the legacy
+      # postgrest sidecar consumed; PGRST_JWT_SECRET comes from
+      # ./secrets/derived.env (see env_file above).
+      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
+      # Only used when POSTGREST_MODE=sidecar (legacy proxy to the postgrest
+      # container below).
       POSTGREST_HOST: postgrest
       POSTGREST_PORT: "3000"
       # Register devx and prometheus in the web shell's top nav (consumed by plugins/web).
@@ -199,7 +210,11 @@ services:
       retries: 30
       start_period: 60s
 
+  # Legacy sidecar — REST is served in-process by the @trex/postgrest plugin
+  # now. Only needed with POSTGREST_MODE=sidecar on trex:
+  #   POSTGREST_MODE=sidecar docker compose -f docker-compose.dx.yml --profile postgrest-sidecar up
   postgrest:
+    profiles: ["postgrest-sidecar"]
     image: postgrest/postgrest:v12.2.3
     # The `authenticator` role is created by trex's schema migrations, not by
     # postgres or trex-init. Gate on trex healthy (migrations done) and restart

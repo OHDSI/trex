@@ -14,8 +14,8 @@ services. The repository ships several compose files for different scenarios.
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus PostgREST, Studio, and Realtime. Uses the published image. |
-| `docker-compose.dev.yml` | Development overlay. Collapses to a single-node `trex` service and live-mounts `core/server`, `core/event`, `functions`, and the prebuilt `plugins/web/dist`, `plugins/notebook/dist`, and `plugins/storage` directories so changes take effect without rebuilding. |
+| `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus Studio and Realtime. The REST API is served in-process by the `@trex/postgrest` plugin; the legacy `postgrest` sidecar sits behind the `postgrest-sidecar` profile. Uses the published image. |
+| `docker-compose.dev.yml` | Development overlay. Collapses to a single-node `trex` service and live-mounts `core/server`, `core/event`, `functions`, and the prebuilt `plugins/web/dist`, `plugins/notebook/dist`, `plugins/storage`, and `plugins/postgrest` directories so changes take effect without rebuilding. |
 | `docker-compose.dx.yml` | Standalone devx stack: a single-node trex with the devx plugin and `devx_ext` extension baked into a dedicated image (`ghcr.io/ohdsi/trexsql-dx:latest`). Runs alongside the default stack (ports offset +1000 on HTTP / +20 on pg). |
 | `docker-compose.pg-trex.yml` | Replaces vanilla Postgres with the `pg-trex` image (Postgres + the Trex extensions co-located in one process). Uses gossip port `7946`. |
 
@@ -51,11 +51,19 @@ This starts:
 - **trex-server** — the non-data node. Serves the web/MCP/REST/GraphQL HTTP
   surface on `8001`, the TLS variant on `8000`, and the pgwire endpoint on
   `5433`. Opens remote sessions to `trex-data`.
-- **postgrest** (`postgrest:v12.2.3`) — auto-generated REST API over Postgres,
-  reverse-proxied through Trex at `${BASE_PATH}/rest/v1/*`.
 - **studio** — the Supabase Studio sidecar (internal only; Trex proxies
   `/plugins/trex/studio/**` to it).
 - **realtime** (`supabase/realtime:v2.93.3`) — the Realtime server.
+
+The PostgREST-compatible REST API at `${BASE_PATH}/rest/v1/*` is served
+**in-process** on `trex-server` by the `@trex/postgrest` plugin (configured via
+the `PGRST_*` environment variables on the server container). The legacy
+`postgrest` sidecar container is kept behind the `postgrest-sidecar` compose
+profile for fallback:
+
+```bash
+POSTGREST_MODE=sidecar docker compose --profile postgrest-sidecar up -d
+```
 
 The two nodes auto-converge: gossip seeds are derived from the `nodes` map in
 `SWARM_CONFIG`. `trex-data` advertises Flight under its gossip host so the server
@@ -130,8 +138,16 @@ services:
       <<: *swarm-config
       SWARM_NODE: server
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
+      # Consumed by the in-process @trex/postgrest plugin (POSTGREST_MODE
+      # defaults to "plugin"); PGRST_JWT_SECRET comes from derived.env.
+      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
 
+  # Legacy sidecar — only started with --profile postgrest-sidecar
+  # (and POSTGREST_MODE=sidecar on trex-server).
   postgrest:
+    profiles: ["postgrest-sidecar"]
     image: postgrest/postgrest:v12.2.3
     env_file:
       - path: ./secrets/derived.env   # supplies PGRST_JWT_SECRET
@@ -158,8 +174,8 @@ docker compose -f docker-compose.yml -f docker-compose.dev.yml up
 
 The overlay defines a single-node `trex` service and bind-mounts `./core/server`,
 `./core/event`, `./functions`, and the prebuilt `./plugins/web/dist`,
-`./plugins/notebook/dist`, and `./plugins/storage` into the container so edits on
-the host take effect without rebuilding.
+`./plugins/notebook/dist`, `./plugins/storage`, and `./plugins/postgrest` into
+the container so edits on the host take effect without rebuilding.
 
 ## Services Started by Default
 
@@ -206,7 +222,7 @@ pin the upstream native libraries.
 | GraphiQL | http://localhost:8001/trex/graphiql (set `ENABLE_GRAPHIQL=true`) |
 | Documentation | http://localhost:8001/trex/docs/ |
 | MCP | http://localhost:8001/trex/mcp |
-| REST (PostgREST proxy) | http://localhost:8001/trex/rest/v1 |
+| REST (PostgREST-compatible, served by `@trex/postgrest`) | http://localhost:8001/trex/rest/v1 |
 | Postgres metadata | `postgresql://postgres:mypass@localhost:65433/testdb` |
 | pgwire (analytical engine) | `postgresql://localhost:5433/main` |
 | HTTPS (self-signed) | https://localhost:8000/trex/ |

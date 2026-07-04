@@ -1,5 +1,7 @@
 {
   "imports": {
-    "std/": "https://deno.land/std@0.224.0/"
+    "std/": "https://deno.land/std@0.224.0/",
+    "pg": "npm:pg@^8.13.1",
+    "jose": "npm:jose@^5.9.6"
   }
 }
