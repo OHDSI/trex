@@ -90,16 +90,11 @@ except ImportError:  # pragma: no cover - environment-dependent
 
 try:
     import psycopg
-
-    PSYCOPG_VERSION = 3
 except ImportError:  # pragma: no cover - environment-dependent
     try:
         import psycopg2 as psycopg
-
-        PSYCOPG_VERSION = 2
     except ImportError:
         psycopg = None
-        PSYCOPG_VERSION = None
 
 
 BASE_URL = os.environ.get("TREX_BASE_URL", "http://localhost:8001")
