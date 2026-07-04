@@ -79,6 +79,7 @@ export default function SettingsPage() {
 
   // General fields
   const [defaultChatMode, setDefaultChatMode] = useState<ChatMode>("agent");
+  const [loop, setLoop] = useState<"legacy" | "agents">("legacy");
   const [language, setLang] = useState(getLanguage());
 
   // Add provider form
@@ -109,6 +110,7 @@ export default function SettingsPage() {
       setMaxSteps(settings.max_steps ?? 100);
       setMaxToolSteps(settings.max_tool_steps ?? 10);
       setAutoFixProblems(settings.auto_fix_problems ?? false);
+      setLoop(settings.loop ?? "legacy");
 
       // Unpack Bedrock credentials from api_key JSON
       if (settings.provider === "bedrock" && settings.api_key) {
@@ -167,6 +169,7 @@ export default function SettingsPage() {
         max_steps: maxSteps,
         max_tool_steps: maxToolSteps,
         auto_fix_problems: autoFixProblems,
+        loop,
       });
       toast.success("Settings saved");
     } catch (err) {
@@ -287,6 +290,29 @@ export default function SettingsPage() {
                     </option>
                   ))}
                 </select>
+              </div>
+
+              {/* task-u1: devx.settings.loop coexistence flag — 'legacy' is
+                  the hand-rolled SSE loop (functions/agent.ts), 'agents' is
+                  the ported eve/agents runtime (plugins/devx/agent/). Forced
+                  back to legacy regardless of this setting when the active
+                  provider is claude-code/copilot (see useEffectiveLoop.ts) -
+                  noted inline since the toggle would otherwise look like a
+                  no-op for those users. */}
+              <div className="space-y-2">
+                <Label>Chat Engine (experimental)</Label>
+                <select
+                  value={loop}
+                  onChange={(e) => setLoop(e.target.value as "legacy" | "agents")}
+                  className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                >
+                  <option value="legacy">Legacy</option>
+                  <option value="agents">Agents (experimental)</option>
+                </select>
+                <p className="text-xs text-muted-foreground">
+                  Agents mode is forced back to Legacy for the Claude Code and Copilot providers.
+                  Takes effect on your next chat open.
+                </p>
               </div>
             </div>
           )}

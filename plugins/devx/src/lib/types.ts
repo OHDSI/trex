@@ -41,6 +41,10 @@ export interface DevxSettings {
   max_steps?: number;
   max_tool_steps?: number;
   auto_fix_problems?: boolean;
+  // task-u1 (V11__loop_flag.sql): per-user coexistence flag between the
+  // legacy AI-SDK loop and the ported eve/agents runtime. Defaults to
+  // 'legacy' server-side (DB column default) when unset/absent.
+  loop?: "legacy" | "agents";
 }
 
 export interface ProviderConfigRecord {

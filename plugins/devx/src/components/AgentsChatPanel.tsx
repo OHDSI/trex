@@ -1,21 +1,21 @@
+// task-u1: chat panel for the ported eve/agents runtime, rendered by
+// ChatPanel.tsx's flag branch point when devx.settings.loop === 'agents'.
+// Structurally parallel to ChatPanel.tsx's legacy body (same ChatInput,
+// same PlanQuestionnaire, same "no chat selected" empty state) but wired to
+// useAgentsChat + AgentsMessagesList instead of useMessages + MessagesList.
 import { useEffect } from "react";
 import { MessageSquarePlus } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { MessagesList } from "./chat/MessagesList";
+import { AgentsMessagesList } from "./chat/AgentsMessagesList";
 import { ChatInput } from "./chat/ChatInput";
 import { PlanQuestionnaire } from "./chat/PlanQuestionnaire";
-import { useMessages } from "@/hooks/useMessages";
-import { useEffectiveLoop } from "@/hooks/useEffectiveLoop";
-import { AgentsChatPanel } from "./AgentsChatPanel";
+import { useAgentsChat } from "@/hooks/useAgentsChat";
 import type { ChatMode } from "@/lib/types";
 import type { VisualEditContext, SelectedComponent } from "@/lib/visual-editing-types";
 
-interface ChatPanelProps {
+interface AgentsChatPanelProps {
   chatId: string | null;
-  // task-u1: only consumed by the agents-loop branch below (metadata.mode/
-  // appId for the stateless /chat endpoint) — the legacy loop derives mode
-  // server-side from the chat row and never needed these client-side.
-  mode?: ChatMode;
+  mode: ChatMode;
   appId?: string | null;
   onModeChange: (mode: ChatMode) => void;
   onPlanContentChange?: (content: string | null) => void;
@@ -30,60 +30,32 @@ interface ChatPanelProps {
   onNewChat?: () => void;
 }
 
-// task-u1: the single flag branch point (task-u1-brief.md's Requirement 4).
-// devx.settings.loop === 'agents' (and no claude-code/copilot provider
-// override — see useEffectiveLoop.ts) renders AgentsChatPanel; everything
-// else renders LegacyChatPanel below, whose body is byte-for-byte what
-// ChatPanel used to be before this task (see git history) — same hook
-// (useMessages), same components, same behavior. `resolved` gates against a
-// one-render flash of the legacy UI before the settings/provider fetch
-// completes: renders nothing (same posture as the loading gate every other
-// devx page already uses) rather than mount-then-possibly-remount into the
-// agents loop, which would otherwise start a stream against the wrong
-// endpoint for a moment on every chat open.
-export function ChatPanel(props: ChatPanelProps) {
-  const { loop, resolved } = useEffectiveLoop();
-  if (!resolved) return null;
-  if (loop === "agents") {
-    return (
-      <AgentsChatPanel
-        {...props}
-        mode={props.mode ?? "agent"}
-        appId={props.appId}
-      />
-    );
-  }
-  return <LegacyChatPanel {...props} />;
-}
-
-function LegacyChatPanel({ chatId, onModeChange, onPlanContentChange, visualEditContext, onClearVisualEditContext, selectedComponents, onRemoveSelectedComponent, onClearSelectedComponents, onAppCommand, onBuildAction, sendRef, onNewChat }: ChatPanelProps) {
+export function AgentsChatPanel({
+  chatId, mode, appId, onModeChange, onPlanContentChange, visualEditContext, onClearVisualEditContext,
+  selectedComponents, onRemoveSelectedComponent, onClearSelectedComponents, onAppCommand, onBuildAction,
+  sendRef, onNewChat,
+}: AgentsChatPanelProps) {
   const {
-    messages,
+    uiMessages,
+    legacyMessages,
     streaming,
-    streamingContent,
-    error: _error,
     todos,
-    toolCalls,
-    completedToolCalls,
-    completedBuildTags,
-    buildActions,
-    consentRequest,
-    consentError,
     questionnaire,
     planContent,
     tokenUsage,
     send,
     cancel,
-    resolveConsent,
     answerQuestionnaire,
-  } = useMessages(chatId, { onAppCommand, onBuildAction, onModeChange: (m) => onModeChange(m as ChatMode) });
+  } = useAgentsChat(chatId, mode, appId, {
+    onAppCommand,
+    onBuildAction,
+    onModeChange: (m) => onModeChange(m as ChatMode),
+  });
 
-  // Propagate plan content to parent for preview panel
   useEffect(() => {
     onPlanContentChange?.(planContent ?? null);
   }, [planContent, onPlanContentChange]);
 
-  // Expose send function to parent for fix prompts
   useEffect(() => {
     if (sendRef) sendRef.current = send;
     return () => { if (sendRef) sendRef.current = null; };
@@ -106,16 +78,7 @@ function LegacyChatPanel({ chatId, onModeChange, onPlanContentChange, visualEdit
 
   return (
     <div className="flex h-full flex-col">
-      <MessagesList
-        messages={messages}
-        streaming={streaming}
-        streamingContent={streamingContent}
-        toolCalls={toolCalls}
-        completedToolCalls={completedToolCalls}
-        completedBuildTags={completedBuildTags}
-        buildActions={buildActions}
-        onAction={(msg) => send(msg)}
-      />
+      <AgentsMessagesList messages={uiMessages} streaming={streaming} onAction={(msg) => send(msg)} />
       {questionnaire && (
         <PlanQuestionnaire
           questionnaire={questionnaire}
@@ -136,10 +99,16 @@ function LegacyChatPanel({ chatId, onModeChange, onPlanContentChange, visualEdit
         streaming={streaming}
         disabled={!chatId}
         todos={todos}
-        consentRequest={consentRequest}
-        consentError={consentError}
-        onConsentDecision={resolveConsent}
-        messages={messages}
+        // U1 scope: needsApproval tools on the stateless /chat endpoint run
+        // to completion and return an "approval required" tool-result
+        // instead of pausing for a decision (no session to attach an
+        // approval request to) — surfaced inline on the tool call itself
+        // (agentsChat.ts's APPROVAL_DEFERRED_MESSAGE), not via this modal.
+        // The interactive consent flow (this banner) is U2's job, once
+        // devx switches to the session-scoped API.
+        consentRequest={null}
+        onConsentDecision={() => {}}
+        messages={legacyMessages}
         tokenUsage={tokenUsage}
         visualEditContext={visualEditContext}
         onClearVisualEditContext={onClearVisualEditContext}

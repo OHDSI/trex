@@ -12,7 +12,12 @@ import type {
   D2EConfig,
 } from "./types";
 
-function getAuthToken(): string | null {
+// task-u1: exported so useAgentsChat.ts can build the Authorization header
+// for the eve/agents runtime's /chat endpoint (a different plugin mount than
+// API_BASE/apiFetch below, so it can't just call apiFetch). No behavior
+// change for any existing (legacy) caller — this function's body/callers
+// are otherwise untouched.
+export function getAuthToken(): string | null {
   try {
     const raw = localStorage.getItem("trex.auth.session");
     if (raw) {
@@ -82,6 +87,25 @@ export async function listMessages(chatId: string): Promise<Message[]> {
   return apiFetch(`/chats/${chatId}/messages`);
 }
 
+// task-u1: the stateless eve/agents /chat endpoint never writes to
+// devx.messages itself (history is client-provided; agents.sessions/turns
+// records the run for the dashboard in parallel — see agent/lib/context.ts's
+// header comment on the dual-write). This is the client-side persistence
+// call the new chat client makes after each turn so devx's own chat history
+// (read via listMessages above, shared with the legacy loop) stays complete
+// across both loops. Mirrors the shape functions/index.ts's /stream handler
+// already inserts server-side for the legacy loop (chat_id, role, content,
+// model, tool_calls).
+export async function createMessage(
+  chatId: string,
+  message: { role: "user" | "assistant"; content: string; model?: string; tool_calls?: ToolCall[] },
+): Promise<Message> {
+  return apiFetch(`/chats/${chatId}/messages`, {
+    method: "POST",
+    body: JSON.stringify(message),
+  });
+}
+
 // Todos
 export async function getTodos(chatId: string): Promise<AgentTodo[]> {
   return apiFetch(`/chats/${chatId}/todos`);
@@ -118,6 +142,22 @@ export async function saveSettings(settings: Partial<DevxSettings>): Promise<Dev
 // Provider Configs (multi-provider)
 export async function getProviderConfigs(): Promise<ProviderConfigRecord[]> {
   return apiFetch("/provider-configs");
+}
+
+// task-u1: mirrors plugins/devx/agent/agent.ts's resolveModel fallback chain
+// (active devx.provider_configs row, else the legacy devx.settings row, else
+// "anthropic") so the UI can gate claude-code/copilot away from the agents
+// loop BEFORE ever calling /chat — resolveModel throws for those two
+// providers (eve/agents has no sidecar-process equivalent), which /chat
+// surfaces as a bare uncaught 500, not a parseable error. Read-only; never
+// used for anything security-sensitive, same posture as the server-side
+// fallback it mirrors.
+export async function getActiveProvider(): Promise<string> {
+  const configs = await getProviderConfigs().catch(() => [] as ProviderConfigRecord[]);
+  const active = configs.find((c) => c.is_active);
+  if (active) return active.provider;
+  const settings = await getSettings();
+  return settings?.provider || "anthropic";
 }
 
 export async function createProviderConfig(config: {
