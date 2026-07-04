@@ -77,5 +77,39 @@ Deno.test({
 
     assertEquals(agent.config.maxSteps, 25);
     assert(agent.instructions.length > 0);
+
+    // Part 4 (task-v3-brief.md): plugins/devx/agent/skills is a relative
+    // symlink (`skills -> ../skills`) to the canonical plugins/devx/skills
+    // directory — the two pre-existing consumers (functions/skills/sync.ts,
+    // fn-claude-code/server.js) both resolve plugins/devx/skills directly
+    // and are untouched by this symlink; it exists purely so core's loader
+    // (which only scans <agent-dir>/skills) discovers the same skills.
+    // Verified empirically: loadAgent (the real loader, via a real
+    // Deno.readDir on the symlinked dir) surfaces a non-trivial set of
+    // skills here, matching plugins/devx/skills' known contents.
+    assert(agent.skills.length > 5, `expected multiple skills discovered through the skills/ symlink, got ${agent.skills.length}`);
+    for (const name of ["brainstorming", "d2e", "writing-plans", "using-git-worktrees"]) {
+      assert(agent.skills.some((s) => s.name === name), `expected skill "${name}" to be discovered through the skills/ symlink`);
+    }
+
+    // Part 5 (task-v3-brief.md): code-reviewer/code-explorer subagents load
+    // as full agent dirs (loadAgent's own one-level-deep subagents/ scan —
+    // see loader.ts), each with the ported max-steps and exactly the tools
+    // named in the legacy agents/*.md frontmatter's allowed-tools list.
+    const EXPECTED_SUBAGENT_TOOLS = ["Read", "Glob", "Grep", "CodeSearch", "GitLog", "GitDiff"];
+    for (const name of ["code-reviewer", "code-explorer"]) {
+      const sub = agent.subagents[name];
+      assert(sub, `expected subagent "${name}" to be loaded`);
+      assertEquals(sub.config.maxSteps, 15, `${name}: max-steps should be ported from the legacy frontmatter`);
+      assert(sub.instructions.length > 0, `${name}: instructions.md body should be non-empty`);
+      assertEquals(
+        Object.keys(sub.tools).sort(),
+        [...EXPECTED_SUBAGENT_TOOLS].sort(),
+        `${name}: tool set should match the legacy allowed-tools list exactly`,
+      );
+      for (const [toolName, def] of Object.entries(sub.tools)) {
+        assertEquals((def as { __trexTool?: boolean }).__trexTool, true, `${name}/${toolName} not branded`);
+      }
+    }
   },
 });
