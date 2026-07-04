@@ -14,7 +14,15 @@ import { rangeLimit } from "../parse/range.ts";
 import type { MutateReadPlan } from "../plan/mutate-plan.ts";
 import { renderSnippet } from "../sql/builder.ts";
 import { mutatePlanToQuery, readPlanToQuery } from "../sql/query-builder.ts";
-import { decodeWriteResult, prepareWrite, type ResultSet } from "../sql/statements.ts";
+import {
+  decodeCustomBody,
+  decodePlanResult,
+  decodeWriteResult,
+  mtSnippet,
+  prepareWrite,
+  type ResultSet,
+  type RSStandard,
+} from "../sql/statements.ts";
 import { runQuery } from "./executor.ts";
 
 /**
@@ -29,11 +37,8 @@ export async function writeQuery(
   apiReq: ApiRequest,
   authResult: AuthResult,
 ): Promise<ResultSet> {
-  if (plan.mrMedia.kind === "MTVndPlan") {
-    // TODO(phase 8): explainF-wrapped statements + RSPlan decoding.
-    throw internalError("application/vnd.pgrst.plan is not implemented yet — phase 8");
-  }
   const { preferTransaction, preferTimezone, preferRepresentation, preferResolution, preferMaxAffected, preferHandling } = apiReq.iPreferences;
+  const isPlan = plan.mrMedia.kind === "MTVndPlan";
 
   // Query.hs writeQuery: (isPut, isInsert, pkCols)
   const mp = plan.mrMutatePlan;
@@ -41,15 +46,19 @@ export async function writeQuery(
   const isPut = mp.kind === "Insert" && mp.where_.length > 0;
   const pkCols = mp.kind === "Insert" ? mp.insPkCols : [];
 
-  const statement = prepareWrite(
-    readPlanToQuery(plan.mrReadPlan),
-    mutatePlanToQuery(mp),
-    isInsert,
-    isPut,
-    plan.mrHandler,
-    preferRepresentation,
-    preferResolution,
-    pkCols,
+  // Statements.hs mtSnippet: a plan accept EXPLAIN-wraps the whole statement.
+  const statement = mtSnippet(
+    plan.mrMedia,
+    prepareWrite(
+      readPlanToQuery(plan.mrReadPlan),
+      mutatePlanToQuery(mp),
+      isInsert,
+      isPut,
+      plan.mrHandler,
+      preferRepresentation,
+      preferResolution,
+      pkCols,
+    ),
   );
 
   const outcome = await runQuery<ResultSet>({
@@ -64,9 +73,10 @@ export async function writeQuery(
     schema: apiReq.iSchema,
     timezone: preferTimezone ?? undefined,
     preferTx: preferTransaction === null ? undefined : preferTransaction === "Commit" ? "commit" : "rollback",
-    mainQuery: renderSnippet(statement),
+    mainQuery: { ...renderSnippet(statement), rawTypes: isPlan },
     postRunner: (_client, main) => {
-      const resultSet = decodeWriteResult(main);
+      if (isPlan) return Promise.resolve(decodePlanResult(main));
+      const resultSet = decodeCustomBody(plan.mrHandler, decodeWriteResult(main));
       switch (plan.mrMutation) {
         case "MutationCreate":
           failNotSingular(plan.mrMedia, resultSet);
@@ -94,13 +104,13 @@ export async function writeQuery(
  * {"id":2,..} is rejected. If the condition is not satisfied then nothing is
  * inserted (see the WHERE on the PUT INSERT in the QueryBuilder).
  */
-function failPut(resultSet: ResultSet): void {
+function failPut(resultSet: RSStandard): void {
   if (resultSet.rsQueryTotal !== 1) throw putMatchingPkError();
 }
 
 /** Ports Query.hs failNotSingular (mutation side): fail if a single JSON
  * object was requested and not exactly one row was affected. */
-function failNotSingular(mediaType: MediaType, resultSet: ResultSet): void {
+function failNotSingular(mediaType: MediaType, resultSet: RSStandard): void {
   if (mediaType.kind === "MTVndSingularJSON" && resultSet.rsQueryTotal !== 1) {
     throw singularityError(resultSet.rsQueryTotal);
   }
@@ -111,7 +121,7 @@ function failNotSingular(mediaType: MediaType, resultSet: ResultSet): void {
 function failExceedsMaxAffectedPref(
   preferMaxAffected: number | null,
   preferHandling: PreferHandling | null,
-  resultSet: ResultSet,
+  resultSet: RSStandard,
 ): void {
   if (preferMaxAffected === null) return;
   if (resultSet.rsQueryTotal > preferMaxAffected && preferHandling === "Strict") {
@@ -121,7 +131,7 @@ function failExceedsMaxAffectedPref(
 
 /** Ports Query.hs failsChangesOffLimits — a limited UPDATE/DELETE must not
  * change more rows than the limit. */
-function failsChangesOffLimits(maxChanges: number | null, resultSet: ResultSet): void {
+function failsChangesOffLimits(maxChanges: number | null, resultSet: RSStandard): void {
   if (maxChanges === null) return;
   if (resultSet.rsQueryTotal > maxChanges) {
     throw offLimitsChangesError(resultSet.rsQueryTotal, maxChanges);

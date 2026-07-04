@@ -4,22 +4,36 @@
 // respond (upstream runs auth as a middleware before userApiRequest, so JWT
 // errors win over parse errors).
 //
-// Phases 5–7: GET/HEAD on tables/views including resource embedding,
-// mutations (POST/PATCH/PUT/DELETE incl. upserts) and stored procedures
-// (GET/HEAD/POST /rpc/fn). OpenAPI root and OPTIONS keep the 501 stub.
+// Phases 5–8: GET/HEAD on tables/views including resource embedding,
+// mutations (POST/PATCH/PUT/DELETE incl. upserts), stored procedures
+// (GET/HEAD/POST /rpc/fn), the OpenAPI root (GET/HEAD /, or the db-root-spec
+// routine) and OPTIONS (Allow headers per table/routine/root).
 
 import { handleAdmin } from "./admin.ts";
 import { authenticate } from "./auth/jwt.ts";
 import { getConfig, reloadConfig } from "./config.ts";
+import { encodeOpenApi } from "./openapi.ts";
 import { PgrstError } from "./errors.ts";
 import { userApiRequest } from "./parse/api-request.ts";
 import { callReadPlan } from "./plan/call-plan.ts";
 import { mutateReadPlan } from "./plan/mutate-plan.ts";
-import { wrappedReadPlan } from "./plan/read-plan.ts";
+import { inspectPlan, wrappedReadPlan } from "./plan/read-plan.ts";
 import { invokeQuery } from "./query/call.ts";
+import { inspectQuery } from "./query/openapi.ts";
 import { readQuery } from "./query/read.ts";
 import { writeQuery } from "./query/write.ts";
-import { createResponse, deleteResponse, invokeResponse, readResponse, singleUpsertResponse, updateResponse } from "./response.ts";
+import {
+  createResponse,
+  deleteResponse,
+  infoIdentResponse,
+  infoProcResponse,
+  infoRootResponse,
+  invokeResponse,
+  openApiResponse,
+  readResponse,
+  singleUpsertResponse,
+  updateResponse,
+} from "./response.ts";
 import { getSchemaCache, type SchemaCacheListener, startListener } from "./schema-cache/index.ts";
 import { stripMount } from "./state.ts";
 
@@ -111,11 +125,29 @@ export async function handle(req: Request): Promise<Response> {
       return invokeResponse(resultSet, apiReq, plan);
     }
 
-    // TODO(phase 8+): OpenAPI root, OPTIONS.
-    return new Response(
-      JSON.stringify({ message: "PostgREST plugin: endpoint not implemented yet" }),
-      { status: 501, headers: { "Content-Type": "application/json" } },
-    );
+    // GET/HEAD / — the OpenAPI root (db-root-spec roots route as ActRoutine).
+    if (act.kind === "ActDb" && act.db.kind === "ActSchemaRead") {
+      const plan = inspectPlan(apiReq, act.db.headersOnly, act.db.schema);
+      const result = await inspectQuery(plan, config, apiReq, authResult, sCache);
+      const body = result === null ? null : encodeOpenApi(
+        config,
+        sCache.relationships,
+        [...result.tables.values()],
+        [...result.routines.values()].flat(),
+        result.schemaDescription,
+      );
+      return openApiResponse(body, plan.ipHdrsOnly, apiReq);
+    }
+
+    // OPTIONS — the NoDb info plans (Response.hs info*Response).
+    if (act.kind === "ActRelationInfo") return infoIdentResponse(act.qi, sCache);
+    if (act.kind === "ActRoutineInfo") {
+      // Upstream plans OPTIONS /rpc/fn through callReadPlan (RoutineInfoPlan),
+      // so unknown functions 404 and overload resolution applies.
+      const plan = callReadPlan(act.qi, config, sCache, apiReq, act.invMethod);
+      return infoProcResponse(plan.crProc);
+    }
+    return infoRootResponse();
   } catch (err) {
     if (err instanceof PgrstError) return err.response();
     console.error("[postgrest] unhandled error:", err);

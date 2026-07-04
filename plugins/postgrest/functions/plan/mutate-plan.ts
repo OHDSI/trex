@@ -10,6 +10,7 @@ import type { AppConfig } from "../config.ts";
 import { columnNotFound, internalError, invalidFilters, invalidPreferences, notFound } from "../errors.ts";
 import type { QualifiedIdentifier, SchemaCache, Table } from "../schema-cache/types.ts";
 import { qiKey } from "../schema-cache/types.ts";
+import { dbMediaHandlers } from "../schema-cache/media-handlers.ts";
 import type { FieldName } from "../types.ts";
 import type {
   CoercibleField,
@@ -95,7 +96,14 @@ export function mutateReadPlan(
   const mPlan = mutatePlan(mutation, identifier, apiRequest, sCache, rPlan);
   const { invalidPrefs, preferHandling } = apiRequest.iPreferences;
   if (invalidPrefs.length > 0 && preferHandling === "Strict") throw invalidPreferences(invalidPrefs);
-  const [handler, mediaType] = negotiateContent(conf, apiRequest, apiRequest.iAcceptMediaType, hasDefaultSelect(rPlan));
+  const [handler, mediaType] = negotiateContent(
+    conf,
+    apiRequest,
+    identifier,
+    apiRequest.iAcceptMediaType,
+    dbMediaHandlers(sCache),
+    hasDefaultSelect(rPlan),
+  );
   return { mrReadPlan: rPlan, mrMutatePlan: mPlan, mrHandler: handler, mrMedia: mediaType, mrMutation: mutation, crudQi: identifier };
 }
 

@@ -116,7 +116,7 @@ interface KeyDepRow {
   column_dependencies: { f1: string; f2: string[] }[];
 }
 
-interface FuncRow {
+export interface FuncRow {
   proc_schema: string;
   proc_name: string;
   proc_description: string | null;
@@ -204,7 +204,7 @@ function toIsolationLevel(level: string | null): Routine["isolationLvl"] {
   return level === "repeatable read" || level === "serializable" ? level : "read committed";
 }
 
-function decodeFuncs(rows: FuncRow[]): RoutineMap {
+export function decodeFuncs(rows: FuncRow[]): RoutineMap {
   const funcs: RoutineMap = new Map();
   for (const row of rows) {
     const returnType: RetType = {
@@ -603,7 +603,8 @@ export async function loadSchemaCache(
     routines: decodeFuncs(funcRows),
     representations: decodeRepresentations(repRows),
     mediaHandlers: mediaRows.map((row) => {
-      const [hSchema, hName, tSchema, tName, mediaType, resolvedMediaType] = row as [
+      const [hSchema, hName, tSchema, tName, mediaType, resolvedMediaType, baseType] = row as [
+        string,
         string,
         string,
         string,
@@ -616,6 +617,7 @@ export async function loadSchemaCache(
         target: { schema: tSchema, name: tName },
         mediaType,
         resolvedMediaType,
+        baseType,
       };
     }),
     timezones: new Set(tzRows.map((row) => row[0] as string)),

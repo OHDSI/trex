@@ -628,6 +628,9 @@ export const DATA_REPRESENTATIONS_SQL = `
 // over a composite/anyelement returning a media-type domain, or scalar
 // functions returning one. Parameters: $1 text[] — exposed schemas.
 // Version conditional taken: `prokind = 'f'` (pgVersion110).
+// Deviation from upstream: each branch also selects media_types.basetypname
+// (the domain's base type) — the text protocol renders bytea-based domains
+// hex-encoded, so the body decoder needs to know the base type.
 export const MEDIA_HANDLERS_SQL = `
       with
       all_relations as (
@@ -662,7 +665,8 @@ export const MEDIA_HANDLERS_SQL = `
         arg_schema.nspname::text      as target_schema,
         arg_name.typname::text        as target_name,
         media_types.typname           as media_type,
-        media_types.resolved_media_type
+        media_types.resolved_media_type,
+        media_types.basetypname       as base_type
       from media_types
         join pg_proc      proc         on proc.prorettype = media_types.oid
         join pg_namespace proc_schema  on proc_schema.oid = proc.pronamespace
@@ -680,7 +684,8 @@ export const MEDIA_HANDLERS_SQL = `
           pro_sch.nspname as target_schema,
           proname         as target_name,
           mtype.typname   as media_type,
-          mtype.resolved_media_type
+          mtype.resolved_media_type,
+          mtype.basetypname as base_type
       from pg_proc proc
         join pg_namespace pro_sch on pro_sch.oid = proc.pronamespace
         join media_types mtype on proc.prorettype = mtype.oid

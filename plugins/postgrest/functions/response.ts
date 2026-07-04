@@ -3,11 +3,14 @@
 // Content-Location / Content-Type / Preference-Applied headers), for
 // MutateReadPlan (create/update/singleUpsert/delete responses: 201-vs-200
 // via the pgrst.inserted counter, the Location header of inserts,
-// Content-Range for mutations) and for CallReadPlan (RPC: 204 for
-// void-returning functions, empty body on HEAD), plus the response.status /
+// Content-Range for mutations), for CallReadPlan (RPC: 204 for
+// void-returning functions, empty body on HEAD), the RSPlan responses
+// (EXPLAIN output for application/vnd.pgrst.plan), the OpenAPI/inspect
+// response (MaybeDbResult) and the OPTIONS info responses (RelInfoPlan /
+// RoutineInfoPlan / SchemaInfoPlan Allow headers), plus the response.status /
 // response.headers GUC overrides (Response/GucHeader.hs).
 
-import { gucHeadersError, gucStatusError, invalidRange } from "./errors.ts";
+import { gucHeadersError, gucStatusError, invalidRange, notFound } from "./errors.ts";
 import type { ApiRequest } from "./parse/api-request.ts";
 import { type MediaType, toContentType } from "./parse/media-type.ts";
 import { prefAppliedHeader, shouldCount } from "./parse/preferences.ts";
@@ -15,11 +18,21 @@ import { contentRangeH, rangeOffset, rangeStatusHeader } from "./parse/range.ts"
 import type { WrappedReadPlan } from "./plan/read-plan.ts";
 import type { MutateReadPlan } from "./plan/mutate-plan.ts";
 import type { CallReadPlan } from "./plan/call-plan.ts";
-import { funcReturnsVoid } from "./schema-cache/types.ts";
-import type { ResultSet } from "./sql/statements.ts";
+import type { QualifiedIdentifier, Routine, SchemaCache } from "./schema-cache/types.ts";
+import { funcReturnsVoid, qiKey } from "./schema-cache/types.ts";
+import type { ResultSet, RSPlan, RSStandard } from "./sql/statements.ts";
+
+/** Ports the `RSPlan plan -> ...` branches of Response.hs actionResponse:
+ * a 200 with the EXPLAIN output and the negotiated plan Content-Type. */
+function planResponse(resultSet: RSPlan, media: MediaType, apiReq: ApiRequest): Response {
+  const headers = new Headers();
+  for (const [k, v] of contentTypeHeaders(media, apiReq)) headers.append(k, v);
+  return new Response(resultSet.rsPlan, { status: 200, headers });
+}
 
 /** Ports Response.hs actionResponse (DbCrudResult WrappedReadPlan ...). */
 export function readResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: WrappedReadPlan): Response {
+  if (resultSet.kind === "RSPlan") return planResponse(resultSet, plan.wrMedia, apiReq);
   const { iPreferences, iTopLevelRange, iQueryParams, iSchema, iNegotiatedByProfile } = apiReq;
   const { rsTableTotal, rsQueryTotal, rsBody } = resultSet;
 
@@ -90,10 +103,10 @@ function renderSimpleQuery(kvs: [string, string][]): string {
 
 /** Applies the GUC status/header overrides and builds the final Response. */
 function finishResponse(
-  resultSet: Pick<ResultSet, "rsGucStatus" | "rsGucHeaders">,
+  resultSet: Pick<RSStandard, "rsGucStatus" | "rsGucHeaders">,
   status: number,
   headers: [string, string][],
-  body: string | null,
+  body: string | Uint8Array<ArrayBuffer> | null,
 ): Response {
   const [ovStatus, ovHeaders] = overrideStatusHeaders(resultSet.rsGucStatus, resultSet.rsGucHeaders, status, headers);
   const responseHeaders = new Headers();
@@ -105,6 +118,7 @@ function finishResponse(
 
 /** Ports Response.hs actionResponse (MutateReadPlan MutationCreate). */
 export function createResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  if (resultSet.kind === "RSPlan") return planResponse(resultSet, plan.mrMedia, apiReq);
   const p = apiReq.iPreferences;
   const { rsQueryTotal, rsLocation, rsInserted, rsBody } = resultSet;
   const pkCols = plan.mrMutatePlan.kind === "Insert" ? plan.mrMutatePlan.insPkCols : [];
@@ -145,6 +159,7 @@ export function createResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: M
 
 /** Ports Response.hs actionResponse (MutateReadPlan MutationUpdate). */
 export function updateResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  if (resultSet.kind === "RSPlan") return planResponse(resultSet, plan.mrMedia, apiReq);
   const p = apiReq.iPreferences;
   const { rsQueryTotal, rsBody } = resultSet;
   const contentRangeHeader = contentRangeH(0, rsQueryTotal - 1, shouldCount(p.preferCount) ? rsQueryTotal : null);
@@ -175,6 +190,7 @@ export function updateResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: M
 
 /** Ports Response.hs actionResponse (MutateReadPlan MutationSingleUpsert). */
 export function singleUpsertResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  if (resultSet.kind === "RSPlan") return planResponse(resultSet, plan.mrMedia, apiReq);
   const p = apiReq.iPreferences;
   const { rsInserted, rsBody } = resultSet;
   const prefHeader = prefAppliedHeader({
@@ -203,6 +219,7 @@ export function singleUpsertResponse(resultSet: ResultSet, apiReq: ApiRequest, p
 
 /** Ports Response.hs actionResponse (MutateReadPlan MutationDelete). */
 export function deleteResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  if (resultSet.kind === "RSPlan") return planResponse(resultSet, plan.mrMedia, apiReq);
   const p = apiReq.iPreferences;
   const { rsQueryTotal, rsBody } = resultSet;
   const contentRangeHeader = contentRangeH(1, 0, shouldCount(p.preferCount) ? rsQueryTotal : null);
@@ -233,6 +250,7 @@ export function deleteResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: M
 
 /** Ports Response.hs actionResponse (DbCallResult CallReadPlan). */
 export function invokeResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: CallReadPlan): Response {
+  if (resultSet.kind === "RSPlan") return planResponse(resultSet, plan.crMedia, apiReq);
   const p = apiReq.iPreferences;
   const { iTopLevelRange } = apiReq;
   const { rsTableTotal, rsQueryTotal, rsBody } = resultSet;
@@ -333,4 +351,63 @@ function decodeGucStatus(raw: string | null): number | null {
 function addHeadersIfNotIncluded(newHeaders: [string, string][], initialHeaders: [string, string][]): [string, string][] {
   const initialNames = new Set(initialHeaders.map(([k]) => k.toLowerCase()));
   return [...newHeaders.filter(([k]) => !initialNames.has(k.toLowerCase())), ...initialHeaders];
+}
+
+// --------------------------------------------------------------------------
+// OpenAPI response (Response.hs actionResponse for MaybeDbResult)
+// --------------------------------------------------------------------------
+
+/**
+ * Ports Response.hs actionResponse (MaybeDbResult InspectPlan ...): always a
+ * 200 with the application/openapi+json Content-Type; the body is empty on
+ * HEAD (and when openapi-mode=disabled, where upstream carries Nothing —
+ * unreachable here because getResource already 404s in that mode).
+ */
+export function openApiResponse(body: string | null, headersOnly: boolean, apiReq: ApiRequest): Response {
+  const headers = new Headers();
+  for (const [k, v] of contentTypeHeaders({ kind: "MTOpenAPI" }, apiReq)) headers.append(k, v);
+  return new Response(body === null || headersOnly ? "" : body, { status: 200, headers });
+}
+
+// --------------------------------------------------------------------------
+// OPTIONS info responses (Response.hs actionResponse for NoDbResult)
+// --------------------------------------------------------------------------
+
+/** Ports Response.hs respondInfo. */
+function respondInfo(allowHeader: string): Response {
+  return new Response(null, {
+    status: 200,
+    headers: { "Access-Control-Allow-Origin": "*", Allow: allowHeader },
+  });
+}
+
+/**
+ * Ports Response.hs actionResponse (NoDbResult (RelInfoPlan ...)) — the
+ * per-table Allow header: GET/HEAD always; POST when insertable; PUT when
+ * insertable, updatable and a PK exists; PATCH when updatable; DELETE when
+ * deletable. 404 for unknown relations.
+ */
+export function infoIdentResponse(qi: QualifiedIdentifier, sCache: SchemaCache): Response {
+  const table = sCache.tables.get(qiKey(qi));
+  if (table === undefined) throw notFound();
+  const hasPK = table.pkCols.length > 0;
+  const allow = [
+    "OPTIONS,GET,HEAD",
+    ...(table.insertable ? ["POST"] : []),
+    ...(table.insertable && table.updatable && hasPK ? ["PUT"] : []),
+    ...(table.updatable ? ["PATCH"] : []),
+    ...(table.deletable ? ["DELETE"] : []),
+  ].join(",");
+  return respondInfo(allow);
+}
+
+/** Ports Response.hs actionResponse (NoDbResult (RoutineInfoPlan ...)) —
+ * volatile functions only allow POST; stable/immutable also GET/HEAD. */
+export function infoProcResponse(proc: Routine): Response {
+  return respondInfo(proc.volatility === "volatile" ? "OPTIONS,POST" : "OPTIONS,GET,HEAD,POST");
+}
+
+/** Ports Response.hs actionResponse (NoDbResult SchemaInfoPlan) — OPTIONS /. */
+export function infoRootResponse(): Response {
+  return respondInfo("OPTIONS,GET,HEAD");
 }

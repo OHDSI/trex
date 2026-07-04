@@ -23,7 +23,7 @@ import type {
   OrderNulls,
 } from "../types.ts";
 import type { MediaType } from "../parse/media-type.ts";
-import type { QualifiedIdentifier, Relationship } from "../schema-cache/types.ts";
+import type { QualifiedIdentifier, Relationship, RelIdentifier } from "../schema-cache/types.ts";
 import type { NonnegRange } from "../parse/range.ts";
 
 /** Plan/Types.hs TransformerProc — a data representation function name. */
@@ -144,8 +144,11 @@ export interface ReadPlanTree {
 // --------------------------------------------------------------------------
 
 /**
- * Ports Routine.hs MediaHandler. The CustomFunc constructor (user-defined
- * handlers from the schema cache) is deferred to phase 8/9.
+ * Ports Routine.hs MediaHandler: a media handler can be an aggregate over a
+ * composite type or a function over a scalar. `baseType` on CustomFunc is a
+ * plugin extension (see MediaHandlerRow.baseType) — upstream reads the body
+ * as raw bytes over the binary protocol, the plugin's text protocol needs to
+ * know when the aggregated body arrives hex-encoded (bytea-based domains).
  */
 export type MediaHandler =
   | { kind: "BuiltinAggSingleJson"; stripNulls: boolean }
@@ -153,6 +156,7 @@ export type MediaHandler =
   | { kind: "BuiltinOvAggJson" }
   | { kind: "BuiltinOvAggGeoJson" }
   | { kind: "BuiltinOvAggCsv" }
+  | { kind: "CustomFunc"; funcQi: QualifiedIdentifier; target: RelIdentifier; baseType: string }
   | { kind: "NoAgg" };
 
 /** Ports Routine.hs ResolvedHandler — MTAny resolves to a concrete media type. */

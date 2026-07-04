@@ -14,6 +14,14 @@ export interface QualifiedIdentifier {
   name: string;
 }
 
+/** Ports Identifiers.hs RelIdentifier — media handlers can target a relation or anyelement. */
+export type RelIdentifier = { kind: "RelId"; qi: QualifiedIdentifier } | { kind: "RelAnyElement" };
+
+/** Ports Identifiers.hs isAnyElement. */
+export function isAnyElement(qi: QualifiedIdentifier): boolean {
+  return qi.schema === "pg_catalog" && qi.name === "anyelement";
+}
+
 /** Ports Identifiers.hs dumpQi — also used as the Map key for tables/routines. */
 export function qiKey(qi: QualifiedIdentifier): string {
   return (qi.schema === "" ? "" : `${qi.schema}.`) + qi.name;
@@ -254,14 +262,21 @@ export interface ViewKeyDependency {
 
 /**
  * Custom media-type handler row (mediaHandlers query). Resolution into
- * upstream's MediaHandlerMap (builtins, MTAny fallback) is deferred to the
- * media-type phase; we keep the raw introspection result.
+ * upstream's MediaHandlerMap (builtins, MTAny fallback) lives in
+ * ./media-handlers.ts; the cache keeps the raw introspection result.
  */
 export interface MediaHandlerRow {
   handler: QualifiedIdentifier;
   target: QualifiedIdentifier;
   mediaType: string;
   resolvedMediaType: string;
+  /**
+   * Base type of the media-type domain (media_types.basetypname). Not in the
+   * upstream query: Hasql reads the aggregated body as raw bytes over the
+   * binary protocol, while node-postgres' text protocol renders bytea-based
+   * domains hex-encoded — the decoder needs to know when to hex-decode.
+   */
+  baseType: string;
 }
 
 export interface SchemaCache {

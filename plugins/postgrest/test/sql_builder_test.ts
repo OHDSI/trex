@@ -661,7 +661,7 @@ Deno.test("negotiation: media types resolve to handlers; unsupported is PGRST107
   assertEquals(errCode(() => planFor("", { headers: { Accept: "text/xml" } })), "PGRST107");
   // vnd.pgrst.plan is refused while db-plan-enabled=false (matches upstream)
   assertEquals(errCode(() => planFor("", { headers: { Accept: "application/vnd.pgrst.plan+json" } })), "PGRST107");
-  // ...and negotiates when enabled (execution is stubbed until phase 8)
+  // ...and negotiates when enabled
   assertEquals(
     planFor("", { headers: { Accept: "application/vnd.pgrst.plan+json" }, env: { PGRST_DB_PLAN_ENABLED: "true" } }).wrMedia.kind,
     "MTVndPlan",

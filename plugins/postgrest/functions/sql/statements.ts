@@ -10,6 +10,7 @@
 
 import type { QueryResult } from "pg";
 import { internalError } from "../errors.ts";
+import type { MediaType } from "../parse/media-type.ts";
 import type { MediaHandler } from "../plan/types.ts";
 import type { Routine } from "../schema-cache/types.ts";
 import { funcReturnsSingle } from "../schema-cache/types.ts";
@@ -26,8 +27,9 @@ import {
 } from "./fragment.ts";
 import { snip, Snippet } from "./builder.ts";
 
-/** Statements.hs ResultSet (RSStandard; RSPlan is deferred to phase 8). */
-export interface ResultSet {
+/** Statements.hs ResultSet — the RSStandard constructor. */
+export interface RSStandard {
+  kind: "RSStandard";
   /** Count of all the table rows (total_result_set). */
   rsTableTotal: number | null;
   /** Count of the query rows (page_total). */
@@ -35,8 +37,9 @@ export interface ResultSet {
   /** The Location header (only used for inserts): a list of key/value
    * bindings like ["k1", "eq.42"], or empty when there is no location. */
   rsLocation: [string, string][];
-  /** The aggregated body of the query. */
-  rsBody: string;
+  /** The aggregated body of the query. Bytes when a bytea-based custom media
+   * handler produced it (upstream reads every body as raw bytes). */
+  rsBody: string | Uint8Array<ArrayBuffer>;
   /** The HTTP headers to be added to the response (response.headers GUC). */
   rsGucHeaders: string | null;
   /** The HTTP status to be added to the response (response.status GUC). */
@@ -44,6 +47,14 @@ export interface ResultSet {
   /** The number of rows inserted (only used for upserts / PUT). */
   rsInserted: number | null;
 }
+
+/** Statements.hs ResultSet — the RSPlan constructor (the EXPLAIN output). */
+export interface RSPlan {
+  kind: "RSPlan";
+  rsPlan: string;
+}
+
+export type ResultSet = RSStandard | RSPlan;
 
 /**
  * Statements.hs prepareWrite — the mutation statement wrapper: the mutation
@@ -189,6 +200,47 @@ export function preparePlanRows(countQuery: Snippet): Snippet {
   return explainF("PlanJSON", [], countQuery);
 }
 
+/**
+ * Statements.hs mtSnippet: an application/vnd.pgrst.plan accept wraps the
+ * main statement in EXPLAIN with the requested format/options. (Upstream
+ * threads the media type through prepareRead/prepareWrite/prepareCall; the
+ * plugin applies it at the query layer to keep the wrappers SQL-only.)
+ */
+export function mtSnippet(mediaType: MediaType, snippet: Snippet): Snippet {
+  if (mediaType.kind === "MTVndPlan") return explainF(mediaType.format, mediaType.options, snippet);
+  return snippet;
+}
+
+/**
+ * Statements.hs planRow decoding: EXPLAIN (FORMAT TEXT) yields many
+ * single-column rows, FORMAT JSON one — BS.unlines joins them (with a
+ * trailing newline). The query must run with raw type parsing so FORMAT JSON
+ * output stays byte-faithful (node-postgres would parse the json column).
+ */
+export function decodePlanResult(res: QueryResult): RSPlan {
+  const rows = res.rows as Record<string, unknown>[];
+  const lines = rows.map((row) => String(Object.values(row)[0] ?? ""));
+  return { kind: "RSPlan", rsPlan: lines.map((line) => `${line}\n`).join("") };
+}
+
+/**
+ * Upstream reads the aggregated body as raw bytes (HD.bytea, binary
+ * protocol); over the text protocol a bytea-based custom media handler body
+ * arrives hex-encoded ('\x...'), so it is decoded back into bytes here.
+ */
+export function decodeCustomBody(handler: MediaHandler, rs: RSStandard): RSStandard {
+  if (
+    handler.kind !== "CustomFunc" || handler.baseType !== "bytea" ||
+    typeof rs.rsBody !== "string" || !rs.rsBody.startsWith("\\x")
+  ) {
+    return rs;
+  }
+  const hex = rs.rsBody.slice(2);
+  const bytes = new Uint8Array(hex.length >> 1);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = Number.parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return { ...rs, rsBody: bytes };
+}
+
 interface ReadRow {
   total_result_set: string | number | null;
   page_total: string | number;
@@ -198,12 +250,13 @@ interface ReadRow {
 }
 
 /** Statements.hs standardRow decoding (HD.singleRow — exactly one row). */
-export function decodeReadResult(res: QueryResult): ResultSet {
+export function decodeReadResult(res: QueryResult): RSStandard {
   if (res.rows.length !== 1) {
     throw internalError(`read statement returned ${res.rows.length} rows, expected 1`);
   }
   const row = res.rows[0] as ReadRow;
   return {
+    kind: "RSStandard",
     rsTableTotal: row.total_result_set === null ? null : Number(row.total_result_set),
     rsQueryTotal: Number(row.page_total),
     rsLocation: [],
@@ -265,9 +318,10 @@ function parseTextArray(raw: string): string[] {
  * behaves as no count; response_inserted '' folds to int 0 (which is what
  * makes plain inserts respond 201 upstream); NULL stays null.
  */
-export function decodeWriteResult(res: QueryResult): ResultSet {
+export function decodeWriteResult(res: QueryResult): RSStandard {
   if (res.rows.length === 0) {
     return {
+      kind: "RSStandard",
       rsTableTotal: null,
       rsQueryTotal: 0,
       rsLocation: [],
@@ -284,6 +338,7 @@ export function decodeWriteResult(res: QueryResult): ResultSet {
     ? parseTextArray(row.header)
     : row.header;
   return {
+    kind: "RSStandard",
     rsTableTotal: row.total_result_set === null || row.total_result_set === "" ? null : Number(row.total_result_set),
     rsQueryTotal: Number(row.page_total),
     rsLocation: header.map(splitKeyValue),
@@ -300,9 +355,10 @@ export function decodeWriteResult(res: QueryResult): ResultSet {
  * prepareWrite's Nothing). The '' filler columns decode like postgresql-binary:
  * total '' behaves as no count, NULL stays null.
  */
-export function decodeCallResult(res: QueryResult): ResultSet {
+export function decodeCallResult(res: QueryResult): RSStandard {
   if (res.rows.length === 0) {
     return {
+      kind: "RSStandard",
       rsTableTotal: 0,
       rsQueryTotal: 0,
       rsLocation: [],
@@ -314,6 +370,7 @@ export function decodeCallResult(res: QueryResult): ResultSet {
   }
   const row = res.rows[0] as ReadRow;
   return {
+    kind: "RSStandard",
     rsTableTotal: row.total_result_set === null || row.total_result_set === "" ? null : Number(row.total_result_set),
     rsQueryTotal: Number(row.page_total),
     rsLocation: [],

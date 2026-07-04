@@ -14,7 +14,17 @@ import { shouldCount } from "../parse/preferences.ts";
 import type { WrappedReadPlan } from "../plan/read-plan.ts";
 import { renderSnippet, type Snippet } from "../sql/builder.ts";
 import { limitedQuery, readPlanToCountQuery, readPlanToQuery } from "../sql/query-builder.ts";
-import { decodePlanRows, decodeReadResult, preparePlanRows, prepareRead, type ResultSet } from "../sql/statements.ts";
+import {
+  decodeCustomBody,
+  decodePlanResult,
+  decodePlanRows,
+  decodeReadResult,
+  mtSnippet,
+  preparePlanRows,
+  prepareRead,
+  type ResultSet,
+  type RSStandard,
+} from "../sql/statements.ts";
 import { runQuery } from "./executor.ts";
 
 /**
@@ -31,21 +41,22 @@ export async function readQuery(
   apiReq: ApiRequest,
   authResult: AuthResult,
 ): Promise<ResultSet> {
-  if (plan.wrMedia.kind === "MTVndPlan") {
-    // TODO(phase 8): explainF-wrapped statements + RSPlan decoding.
-    throw internalError("application/vnd.pgrst.plan is not implemented yet — phase 8");
-  }
   const { preferCount, preferTransaction, preferTimezone } = apiReq.iPreferences;
+  const isPlan = plan.wrMedia.kind === "MTVndPlan";
 
   const countQuery = readPlanToCountQuery(plan.wrReadPlan);
-  const statement = prepareRead(
-    readPlanToQuery(plan.wrReadPlan),
-    preferCount === "EstimatedCount"
-      // LIMIT maxRows + 1 so we can determine below that maxRows was surpassed
-      ? limitedQuery(countQuery, config.dbMaxRows === null ? null : config.dbMaxRows + 1)
-      : countQuery,
-    shouldCount(preferCount),
-    plan.wrHandler,
+  // Statements.hs mtSnippet: a plan accept EXPLAIN-wraps the whole statement.
+  const statement = mtSnippet(
+    plan.wrMedia,
+    prepareRead(
+      readPlanToQuery(plan.wrReadPlan),
+      preferCount === "EstimatedCount"
+        // LIMIT maxRows + 1 so we can determine below that maxRows was surpassed
+        ? limitedQuery(countQuery, config.dbMaxRows === null ? null : config.dbMaxRows + 1)
+        : countQuery,
+      shouldCount(preferCount),
+      plan.wrHandler,
+    ),
   );
 
   const outcome = await runQuery<ResultSet>({
@@ -60,9 +71,10 @@ export async function readQuery(
     schema: apiReq.iSchema,
     timezone: preferTimezone ?? undefined,
     preferTx: preferTransaction === null ? undefined : preferTransaction === "Commit" ? "commit" : "rollback",
-    mainQuery: renderSnippet(statement),
+    mainQuery: { ...renderSnippet(statement), rawTypes: isPlan },
     postRunner: async (client, main) => {
-      const resultSet = decodeReadResult(main);
+      if (isPlan) return decodePlanResult(main);
+      const resultSet = decodeCustomBody(plan.wrHandler, decodeReadResult(main));
       failNotSingular(plan.wrMedia, resultSet);
       return await resultSetWTotal(client, config, preferCount, resultSet, countQuery);
     },
@@ -76,7 +88,7 @@ export async function readQuery(
  * and not exactly one row was found. Thrown inside the transaction, so the
  * executor rolls it back (upstream SQL.condemn).
  */
-function failNotSingular(mediaType: MediaType, resultSet: ResultSet): void {
+function failNotSingular(mediaType: MediaType, resultSet: RSStandard): void {
   if (mediaType.kind === "MTVndSingularJSON" && resultSet.rsQueryTotal !== 1) {
     throw singularityError(resultSet.rsQueryTotal);
   }
@@ -91,9 +103,9 @@ async function resultSetWTotal(
   client: PoolClient,
   config: AppConfig,
   preferCount: PreferCount | null,
-  resultSet: ResultSet,
+  resultSet: RSStandard,
   countQuery: Snippet,
-): Promise<ResultSet> {
+): Promise<RSStandard> {
   if (preferCount === "PlannedCount") {
     return { ...resultSet, rsTableTotal: await explain(client, countQuery) };
   }

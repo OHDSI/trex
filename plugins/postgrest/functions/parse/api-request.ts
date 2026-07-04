@@ -112,7 +112,7 @@ export interface ApiRequestConf {
   dbSchemas: string[];
   openApiMode: "follow-privileges" | "ignore-privileges" | "disabled";
   dbTxEnd: string;
-  /** db-root-spec (not yet surfaced in the plugin's AppConfig). */
+  /** db-root-spec: routes the root path to a routine instead of the OpenAPI output. */
   dbRootSpec?: QualifiedIdentifier | null;
 }
 

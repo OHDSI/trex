@@ -32,6 +32,13 @@ export interface RequestContext {
 export interface MainQuery {
   text: string;
   values?: unknown[];
+  /**
+   * Disable node-postgres' type parsers for the main query's result values —
+   * every column arrives as its raw wire text. Used for EXPLAIN statements
+   * (application/vnd.pgrst.plan), where FORMAT JSON output must stay
+   * byte-faithful instead of being parsed into JS objects.
+   */
+  rawTypes?: boolean;
 }
 
 export interface RunQueryOptions<T = void> {
@@ -177,7 +184,11 @@ export async function runQuery<T = void>(opts: RunQueryOptions<T>): Promise<RunQ
     }
     if (opts.preRunner) await opts.preRunner(client);
 
-    const main = await client.query({ text: opts.mainQuery.text, values: opts.mainQuery.values ?? [] });
+    const main = await client.query({
+      text: opts.mainQuery.text,
+      values: opts.mainQuery.values ?? [],
+      ...(opts.mainQuery.rawTypes ? { types: { getTypeParser: () => (v: string) => v } } : {}),
+    });
     const extra = opts.postRunner ? await opts.postRunner(client, main) : undefined;
 
     const rollsBack = txRollsBack(config, opts.preferTx);

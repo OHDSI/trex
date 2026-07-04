@@ -30,7 +30,7 @@ import type {
   SpreadSelectField,
 } from "../plan/types.ts";
 import { unknownField } from "../plan/types.ts";
-import type { QualifiedIdentifier, Routine } from "../schema-cache/types.ts";
+import type { QualifiedIdentifier, RelIdentifier, Routine } from "../schema-cache/types.ts";
 import {
   funcReturnsScalar,
   funcReturnsSetOfScalar,
@@ -621,6 +621,16 @@ const asGeoJsonF: Snippet = sql(
   "json_build_object('type', 'FeatureCollection', 'features', coalesce(json_agg(ST_AsGeoJSON(_postgrest_t)::json), '[]'))",
 );
 
+/** SqlFragment.hs customFuncF — a custom media handler call: on a scalar
+ * function the handler is the media-type domain cast of pgrst_scalar; on an
+ * anyelement aggregate the row is passed as-is; on a relation-specific
+ * aggregate the row is cast to the target relation's composite type. */
+function customFuncF(rout: Routine | null, funcQi: QualifiedIdentifier, target: RelIdentifier): Snippet {
+  if (rout !== null && funcReturnsScalar(rout)) return snip(fromQi(funcQi), "(_postgrest_t.pgrst_scalar)");
+  if (target.kind === "RelAnyElement") return snip(fromQi(funcQi), "(_postgrest_t)");
+  return snip(fromQi(funcQi), "(_postgrest_t::", fromQi(target.qi), ")");
+}
+
 /** SqlFragment.hs handlerF — the body aggregation per resolved media handler
  * (`rout` is the called Routine on RPC, null on reads/mutations). */
 export function handlerF(rout: Routine | null, handler: MediaHandler): Snippet {
@@ -635,6 +645,8 @@ export function handlerF(rout: Routine | null, handler: MediaHandler): Snippet {
       return asGeoJsonF;
     case "BuiltinOvAggCsv":
       return asCsvF;
+    case "CustomFunc":
+      return customFuncF(rout, handler.funcQi, handler.target);
     case "NoAgg":
       return sql("''::text");
   }

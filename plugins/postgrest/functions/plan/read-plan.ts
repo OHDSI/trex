@@ -10,7 +10,8 @@ import type { ApiRequest } from "../parse/api-request.ts";
 import type { Action } from "../parse/api-request.ts";
 import { pRequestRange } from "../parse/query-params.ts";
 import type { MediaType } from "../parse/media-type.ts";
-import { MTApplicationJSON, toMime } from "../parse/media-type.ts";
+import { mediaTypeEq, MTAny, toMime } from "../parse/media-type.ts";
+import { dbMediaHandlers, type MediaHandlerMap, mhKey } from "../schema-cache/media-handlers.ts";
 import type { NonnegRange } from "../parse/range.ts";
 import { allRange, convertToLimitZeroRange, restrictRange } from "../parse/range.ts";
 import type { AppConfig } from "../config.ts";
@@ -32,6 +33,7 @@ import type {
   QualifiedIdentifier,
   Relationship,
   RelationshipsMap,
+  RelIdentifier,
   RepresentationsMap,
   SchemaCache,
   Table,
@@ -90,10 +92,38 @@ export function wrappedReadPlan(
   headersOnly: boolean,
 ): WrappedReadPlan {
   const rPlan = readPlan(identifier, conf, sCache, apiRequest);
-  const [handler, mediaType] = negotiateContent(conf, apiRequest, apiRequest.iAcceptMediaType, hasDefaultSelect(rPlan));
+  const [handler, mediaType] = negotiateContent(
+    conf,
+    apiRequest,
+    identifier,
+    apiRequest.iAcceptMediaType,
+    dbMediaHandlers(sCache),
+    hasDefaultSelect(rPlan),
+  );
   const { invalidPrefs, preferHandling } = apiRequest.iPreferences;
   if (invalidPrefs.length > 0 && preferHandling === "Strict") throw invalidPreferences(invalidPrefs);
   return { wrReadPlan: rPlan, wrHandler: handler, wrMedia: mediaType, wrHdrsOnly: headersOnly, crudQi: identifier };
+}
+
+// --------------------------------------------------------------------------
+// Plan.hs InspectPlan (the OpenAPI root)
+// --------------------------------------------------------------------------
+
+/** Ports Plan.hs InspectPlan. ipMedia is always MTOpenAPI; ipTxmode is Read. */
+export interface InspectPlan {
+  ipMedia: MediaType;
+  ipHdrsOnly: boolean;
+  ipSchema: string;
+}
+
+/** Ports Plan.hs inspectPlan. Throws PGRST107 when nothing acceptable. */
+export function inspectPlan(apiRequest: ApiRequest, headersOnly: boolean, schema: string): InspectPlan {
+  const producedMTs: MediaType[] = [{ kind: "MTOpenAPI" }, { kind: "MTApplicationJSON" }, MTAny];
+  const accepts = apiRequest.iAcceptMediaType;
+  if (!accepts.some((mt) => producedMTs.some((p) => mediaTypeEq(mt, p)))) {
+    throw mediaTypeError(accepts.map(toMime));
+  }
+  return { ipMedia: { kind: "MTOpenAPI" }, ipHdrsOnly: headersOnly, ipSchema: schema };
 }
 
 /** Ports Plan.hs hasDefaultSelect. */
@@ -904,34 +934,26 @@ function treeRestrictRange(maxRows: number | null, action: Action, tree: ReadPla
 // --------------------------------------------------------------------------
 
 /**
- * Ports SchemaCache.hs initialMediaHandlers via Plan.hs's lookupHandler.
- * Custom media handlers (CustomFunc, from the mediaHandlers introspection)
- * are deferred to phase 8/9 — `defaultSelect` only affects those lookups.
- */
-function lookupHandler(mt: MediaType, _defaultSelect: boolean): ResolvedHandler | null {
-  switch (mt.kind) {
-    case "MTAny":
-    case "MTApplicationJSON":
-      return [{ kind: "BuiltinOvAggJson" }, MTApplicationJSON];
-    case "MTTextCSV":
-      return [{ kind: "BuiltinOvAggCsv" }, mt];
-    case "MTGeoJSON":
-      return [{ kind: "BuiltinOvAggGeoJson" }, mt];
-    default:
-      return null;
-  }
-}
-
-/**
  * Ports Plan.hs negotiateContent: choose a media type from the intersection
  * of accepted/produced media types. Throws PGRST107 (406) when none matches.
+ * `produces` is the schema cache's MediaHandlerMap (custom handlers over the
+ * initial builtins); the RelId lookups only apply on a default `select=*`.
  */
 export function negotiateContent(
   conf: AppConfig,
   apiRequest: ApiRequest,
+  identifier: QualifiedIdentifier,
   accepts: MediaType[],
+  produces: MediaHandlerMap,
   defaultSelect: boolean,
 ): ResolvedHandler {
+  const relId: RelIdentifier = { kind: "RelId", qi: identifier };
+  const when = (cond: boolean, x: ResolvedHandler | undefined): ResolvedHandler | undefined => (cond ? x : undefined);
+  const lookupHandler = (mt: MediaType): ResolvedHandler | null =>
+    when(defaultSelect, produces.get(mhKey(relId, MTAny))) ?? // lookup for identifier and `*/*`
+      when(defaultSelect, produces.get(mhKey(relId, mt))) ?? // lookup for identifier and a particular media type
+      produces.get(mhKey({ kind: "RelAnyElement" }, mt)) ?? // lookup for anyelement and a particular media type
+      null;
   const mtPlanToNothing = (x: ResolvedHandler | null): ResolvedHandler | null => (conf.dbPlanEnabled ? x : null);
   const matchMT = (mt: MediaType): ResolvedHandler | null => {
     switch (mt.kind) {
@@ -949,11 +971,12 @@ export function negotiateContent(
         if (inner.kind === "MTVndArrayJSONStrip") {
           return mtPlanToNothing([{ kind: "BuiltinAggArrayJsonStrip" }, mt]);
         }
-        const handler = lookupHandler(inner, defaultSelect);
+        // TODO(upstream): the plan should have its own MediaHandler instead of relying on MediaType
+        const handler = lookupHandler(inner);
         return mtPlanToNothing(handler === null ? null : [handler[0], mt]);
       }
       default:
-        return lookupHandler(mt, defaultSelect);
+        return lookupHandler(mt);
     }
   };
   // If there are multiple accepted media types, pick the first.

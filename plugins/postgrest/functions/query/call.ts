@@ -16,7 +16,15 @@ import { shouldCount } from "../parse/preferences.ts";
 import type { CallReadPlan } from "../plan/call-plan.ts";
 import { renderSnippet } from "../sql/builder.ts";
 import { callPlanToQuery, readPlanToCountQuery, readPlanToQuery } from "../sql/query-builder.ts";
-import { decodeCallResult, prepareCall, type ResultSet } from "../sql/statements.ts";
+import {
+  decodeCallResult,
+  decodeCustomBody,
+  decodePlanResult,
+  mtSnippet,
+  prepareCall,
+  type ResultSet,
+  type RSStandard,
+} from "../sql/statements.ts";
 import { runQuery } from "./executor.ts";
 
 /**
@@ -33,19 +41,20 @@ export async function invokeQuery(
   apiReq: ApiRequest,
   authResult: AuthResult,
 ): Promise<ResultSet> {
-  if (plan.crMedia.kind === "MTVndPlan") {
-    // TODO(phase 8): explainF-wrapped statements + RSPlan decoding.
-    throw internalError("application/vnd.pgrst.plan is not implemented yet — phase 8");
-  }
   const { preferCount, preferTransaction, preferTimezone, preferMaxAffected, preferHandling } = apiReq.iPreferences;
+  const isPlan = plan.crMedia.kind === "MTVndPlan";
 
-  const statement = prepareCall(
-    plan.crProc,
-    callPlanToQuery(plan.crCallPlan),
-    readPlanToQuery(plan.crReadPlan),
-    readPlanToCountQuery(plan.crReadPlan),
-    shouldCount(preferCount),
-    plan.crHandler,
+  // Statements.hs mtSnippet: a plan accept EXPLAIN-wraps the whole statement.
+  const statement = mtSnippet(
+    plan.crMedia,
+    prepareCall(
+      plan.crProc,
+      callPlanToQuery(plan.crCallPlan),
+      readPlanToQuery(plan.crReadPlan),
+      readPlanToCountQuery(plan.crReadPlan),
+      shouldCount(preferCount),
+      plan.crHandler,
+    ),
   );
 
   const outcome = await runQuery<ResultSet>({
@@ -64,9 +73,10 @@ export async function invokeQuery(
     funcSettings: plan.crProc.funcSettings,
     timezone: preferTimezone ?? undefined,
     preferTx: preferTransaction === null ? undefined : preferTransaction === "Commit" ? "commit" : "rollback",
-    mainQuery: renderSnippet(statement),
+    mainQuery: { ...renderSnippet(statement), rawTypes: isPlan },
     postRunner: (_client, main) => {
-      const resultSet = decodeCallResult(main);
+      if (isPlan) return Promise.resolve(decodePlanResult(main));
+      const resultSet = decodeCustomBody(plan.crHandler, decodeCallResult(main));
       failNotSingular(plan.crMedia, resultSet);
       failExceedsMaxAffectedPref(preferMaxAffected, preferHandling, resultSet);
       return Promise.resolve(resultSet);
@@ -77,7 +87,7 @@ export async function invokeQuery(
 }
 
 /** Ports Query.hs failNotSingular (RPC side). */
-function failNotSingular(mediaType: MediaType, resultSet: ResultSet): void {
+function failNotSingular(mediaType: MediaType, resultSet: RSStandard): void {
   if (mediaType.kind === "MTVndSingularJSON" && resultSet.rsQueryTotal !== 1) {
     throw singularityError(resultSet.rsQueryTotal);
   }
@@ -87,7 +97,7 @@ function failNotSingular(mediaType: MediaType, resultSet: ResultSet): void {
 function failExceedsMaxAffectedPref(
   preferMaxAffected: number | null,
   preferHandling: PreferHandling | null,
-  resultSet: ResultSet,
+  resultSet: RSStandard,
 ): void {
   if (preferMaxAffected === null) return;
   if (resultSet.rsQueryTotal > preferMaxAffected && preferHandling === "Strict") {

@@ -99,6 +99,8 @@ export interface AppConfig {
   dbPreRequest: QualifiedIdentifier | null;
   /** Parsed for parity; node-postgres has no session prepared-statement mode. */
   dbPreparedStatements: boolean;
+  /** db-root-spec: a function whose result replaces the OpenAPI root. */
+  dbRootSpec: QualifiedIdentifier | null;
   /** Non-empty; the first schema is the default one. */
   dbSchemas: string[];
   dbTxEnd: DbTxEnd;
@@ -110,6 +112,9 @@ export interface AppConfig {
   openApiMode: OpenApiMode;
   openApiSecurityActive: boolean;
   openApiServerProxyUri: string | null;
+  /** server-host/server-port only feed the OpenAPI host here (the plugin does not listen itself). */
+  serverHost: string;
+  serverPort: number;
   serverTimingEnabled: boolean;
   roleSettings: RoleSettings;
   roleIsolationLvl: RoleIsolationLvl;
@@ -195,6 +200,7 @@ export function resolveConfig(sources: ConfigSources): AppConfig {
 
   const preRequest = str("db-pre-request", "pre-request");
   const preConfig = str("db-pre-config");
+  const rootSpec = str("db-root-spec", "root-spec");
   const roleClaimKey = str("jwt-role-claim-key", "role-claim-key");
 
   return {
@@ -213,6 +219,7 @@ export function resolveConfig(sources: ConfigSources): AppConfig {
     dbPreConfig: preConfig !== undefined ? toQi(preConfig) : null,
     dbPreRequest: preRequest !== undefined ? toQi(preRequest) : null,
     dbPreparedStatements: bool("db-prepared-statements", true),
+    dbRootSpec: rootSpec !== undefined ? toQi(rootSpec) : null,
     dbSchemas: list("db-schemas", ["public"], "db-schema"),
     dbTxEnd: enumStr(
       "db-tx-end",
@@ -232,6 +239,8 @@ export function resolveConfig(sources: ConfigSources): AppConfig {
     ),
     openApiSecurityActive: bool("openapi-security-active", false),
     openApiServerProxyUri: str("openapi-server-proxy-uri") ?? null,
+    serverHost: str("server-host") ?? "!4",
+    serverPort: int("server-port") ?? 3000,
     serverTimingEnabled: bool("server-timing-enabled", false),
     roleSettings: {},
     roleIsolationLvl: {},

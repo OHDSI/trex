@@ -24,6 +24,7 @@ import {
   qiKey,
   toQi,
 } from "../schema-cache/types.ts";
+import { dbMediaHandlers } from "../schema-cache/media-handlers.ts";
 import type { FieldName } from "../types.ts";
 import type { MediaHandler, ReadPlanTree } from "./types.ts";
 import { hasDefaultSelect, negotiateContent, readPlan } from "./read-plan.ts";
@@ -150,7 +151,14 @@ export function callReadPlan(
     ? "Write"
     : "Read";
   const cPlan = callPlan(proc, apiRequest, paramKeys, args, rPlan);
-  const [handler, mediaType] = negotiateContent(conf, apiRequest, apiRequest.iAcceptMediaType, hasDefaultSelect(rPlan));
+  const [handler, mediaType] = negotiateContent(
+    conf,
+    apiRequest,
+    relIdentifier,
+    apiRequest.iAcceptMediaType,
+    dbMediaHandlers(sCache),
+    hasDefaultSelect(rPlan),
+  );
   const { invalidPrefs, preferHandling } = iPreferences;
   if (invalidPrefs.length > 0 && preferHandling === "Strict") throw invalidPreferences(invalidPrefs);
   return {
