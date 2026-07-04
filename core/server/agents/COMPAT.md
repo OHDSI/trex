@@ -164,7 +164,12 @@ live-tail by event shape.
       `agents.steps` write on this path: `/chat` is the stateless
       per-request endpoint (history comes from the client, not replay) and
       has never persisted `tool-call`/`tool-result` steps either — only the
-      final `text` step, in `onFinish`.
+      final `text` step, in `onFinish`. Setup-phase failures on `/chat`
+      (model/instructions resolution, tool building — including a throwing
+      `filterTools` hook) still return HTTP errors as they did pre-H3
+      (`buildSdkTools` runs before the UIMessage stream is created, with
+      the writer late-bound into `toolEmit`); failures after streaming
+      begins surface as in-stream error frames, inherent to SSE.
     - **Subagents** (depth 1, `toolset.ts`'s `runSubagent`) inherit the
       parent's `toolEmit` unchanged via the existing `{ ...ctx }` spread — a
       subagent's `ctx.emit(...)` call lands on the SAME channel (session

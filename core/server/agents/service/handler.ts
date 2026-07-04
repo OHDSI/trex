@@ -374,6 +374,39 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // passing the bare Promise as streamText's `messages`; awaiting it is
       // the only change, no effect on the endpoint contract.
       const modelMessages = await convertToModelMessages(body.messages);
+      // H3: /chat's emit channel — writes a `data-${name}` UIMessage part
+      // interleaved into the SAME stream useChat consumes, AI SDK v6's
+      // documented convention for custom data parts. Unlike the session
+      // path (runner.ts's toolEmit), this is stream-only: no agents.steps
+      // write, matching /chat's existing behavior of never persisting
+      // tool-call/tool-result steps either (only the final "text" step, in
+      // onFinish below) — /chat is the stateless per-request endpoint
+      // (history comes from the client, not replay), so there is nothing to
+      // replay a custom event into.
+      //
+      // Late-bound writer indirection: tools are built HERE, in the setup
+      // phase, so a setup-time throw (a throwing filterTools hook, a broken
+      // tool build) still rejects this route with an HTTP error exactly as
+      // it did pre-H3 — moving buildSdkTools inside the stream's execute()
+      // would demote those to a 200 + in-stream SSE error frame. But the
+      // writer toolEmit needs only exists inside execute() — so toolEmit
+      // targets this rebindable slot instead, and execute() points it at
+      // the real writer before any tool can run. An emit fired before the
+      // stream opens is dropped silently — same fire-and-forget posture as
+      // the rest of ToolContext.emit.
+      let writeData: ((part: { type: `data-${string}`; data: unknown }) => void) | undefined;
+      const toolEmit = (name: string, data: unknown) => {
+        writeData?.({ type: `data-${name}`, data });
+      };
+      // Shared tool builder (same as the session runner). No emit/turnId
+      // here for the approval AgentEvent channel, so needsApproval tools
+      // answer with an "use the session API" error instead of hanging a
+      // stateless request. H2: async (dynamic-tools.ts provider); hookCtx
+      // is the same one just used for
+      // resolveModelForTurn/resolveInstructions above.
+      const tools = await buildSdkTools({
+        agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
+      });
       // H3: switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has
       // somewhere to write on this path — a plain streamText UIMessage
@@ -381,32 +414,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // in a writer-driven stream does (confirmed against the installed
       // ai@6.0.219 package: `createUIMessageStream`/`createUIMessageStreamResponse`
       // and `UIMessageStreamWriter.write`/`.merge` — see task-h3-report.md).
-      // Building `tools` here (inside execute, not above) is required: the
-      // per-tool toolEmit closes over `writer`, which only exists once
-      // execute() runs.
+      // streamText stays inside execute() (it IS the streaming phase); only
+      // the setup calls above run before the stream so their failures keep
+      // pre-H3 HTTP-error semantics.
       const uiStream = createUIMessageStream({
-        execute: async ({ writer }) => {
-          // H3: /chat's emit channel — writes a `data-${name}` UIMessage
-          // part interleaved into the SAME stream useChat consumes,
-          // AI SDK v6's documented convention for custom data parts. Unlike
-          // the session path (runner.ts's toolEmit), this is stream-only:
-          // no agents.steps write, matching /chat's existing behavior of
-          // never persisting tool-call/tool-result steps either (only the
-          // final "text" step, in onFinish below) — /chat is the stateless
-          // per-request endpoint (history comes from the client, not
-          // replay), so there is nothing to replay a custom event into.
-          const toolEmit = (name: string, data: unknown) => {
-            writer.write({ type: `data-${name}`, data });
-          };
-          // Shared tool builder (same as the session runner). No emit/turnId
-          // here for the approval AgentEvent channel, so needsApproval tools
-          // answer with an "use the session API" error instead of hanging a
-          // stateless request. H2: async (dynamic-tools.ts provider);
-          // hookCtx is the same one just used for
-          // resolveModelForTurn/resolveInstructions above.
-          const tools = await buildSdkTools({
-            agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
-          });
+        execute: ({ writer }) => {
+          writeData = (p) => writer.write(p);
           const result = streamText({
             model,
             system,

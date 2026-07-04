@@ -1,4 +1,4 @@
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { createHandler } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
@@ -265,6 +265,45 @@ Deno.test("GET /stream replays a persisted custom step as tool.event", async () 
   assertEquals(toolEvent.data.payload, { step: 1 });
 });
 
+// H3 regression guard for replay ordering: a custom step (persisted through
+// the shared stepSeq counter during the tool phase) must replay BEFORE the
+// text step's message.completed, which in turn must replay BEFORE finish's
+// turn.completed — the eve-client ordering fix (persistText before the
+// finish step, see runner.ts) that a future persist-sequencing change could
+// silently break.
+Deno.test("replay orders tool.event before message.completed before turn.completed", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("emitter", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.emitter = {
+        description: "emits a custom progress event",
+        inputSchema: { type: "object", properties: {} },
+        execute: (_input: unknown, ctx?: { emit?: (name: string, data: unknown) => void }) => {
+          ctx?.emit?.("progress", { step: 1 });
+          return Promise.resolve({ ok: true });
+        },
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}/stream?replayOnly=1`));
+  const types = (await res.text()).split("\n").filter((l) => l !== "")
+    .map((l) => (JSON.parse(l) as { type: string }).type);
+  const toolEventIdx = types.indexOf("tool.event");
+  const completedIdx = types.indexOf("message.completed");
+  const finishIdx = types.indexOf("turn.completed");
+  assert(toolEventIdx >= 0, `no tool.event in replay: [${types.join(", ")}]`);
+  assert(completedIdx >= 0, `no message.completed in replay: [${types.join(", ")}]`);
+  assert(finishIdx >= 0, `no turn.completed in replay: [${types.join(", ")}]`);
+  assert(toolEventIdx < completedIdx, `tool.event after message.completed: [${types.join(", ")}]`);
+  assert(completedIdx < finishIdx, `message.completed after turn.completed: [${types.join(", ")}]`);
+});
+
 Deno.test("unknown session 404s; unknown route 404s; healthz/eve-info list tools", async () => {
   const { handler } = await makeHandler();
   assertEquals((await handler(new Request(`${BASE}/eve/v1/session/nope/stream`))).status, 404);
@@ -502,6 +541,32 @@ Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", 
   const text = await res.text();
   assert(text.includes('"type":"data-progress"'), `no data-progress part in stream: ${text}`);
   assert(text.includes('"step":1'), `emitted payload missing from stream: ${text}`);
+});
+
+// H3 review fix: /chat setup-phase failures must keep pre-H3 HTTP-error
+// semantics. buildSdkTools (and its filterTools hook) runs BEFORE
+// createUIMessageStream, so a throwing hook rejects the route — it must
+// NOT be demoted to a 200 response carrying an in-stream SSE error frame
+// (which is what moving tool building inside the stream's execute() would
+// have done). Matches hooks.test.ts's pre-H3 assertRejects posture for a
+// throwing resolveModel on /chat.
+Deno.test("POST /chat: a throwing filterTools hook rejects the request (setup phase, no 200+SSE-error demotion)", async () => {
+  const { handler } = await makeHandler({
+    mutate: (agent) => {
+      agent.config.filterTools = () => {
+        throw new Error("filterTools exploded");
+      };
+    },
+  });
+  await assertRejects(
+    () =>
+      handler(new Request(`${BASE}/chat`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+      })),
+    Error,
+    "filterTools exploded",
+  );
 });
 
 // A tool that never calls ctx.emit must not add any data-* part — same
