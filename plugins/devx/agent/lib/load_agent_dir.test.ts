@@ -23,30 +23,59 @@ import { loadAgent } from "../../../../core/server/agents/loader.ts";
 // path; derive it from this file's own URL to stay checkout-relative.
 const AGENT_DIR = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
-Deno.test("loadAgent: the real plugins/devx/agent dir loads end-to-end (no stray files in tools/)", async () => {
-  const agent = await loadAgent(AGENT_DIR);
+Deno.test({
+  name: "loadAgent: the real plugins/devx/agent dir loads end-to-end (no stray files in tools/)",
+  // Batch B (task-v2b): RestartApp.ts pulls in functions/tools/restart_app.ts
+  // -> functions/dev_server.ts, which registers process-wide SIGTERM/SIGINT
+  // listeners as a MODULE-LOAD side effect (dev_server.ts:452-453) — real
+  // legacy behavior, needed once per running server process, not a bug in
+  // this port. Because loadAgent()'s dynamic import of every tools/*.ts file
+  // happens INSIDE this test's body (unlike tools_batch_a/b.test.ts, which
+  // import their wrappers at module top-level before any Deno.test() runs),
+  // Deno's default resource/op sanitizers attribute that global listener
+  // registration to this test and flag it as a leak. Disabled deliberately —
+  // the loader contract this test guards (every tools/*.ts default-exports a
+  // branded tool, no stray files) is unaffected by this flag.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const agent = await loadAgent(AGENT_DIR);
 
-  // Every batch-A tool is discovered under its filename-derived name…
-  const expected = [
-    "AddDependency", "Bash", "CodeSearch", "CopyFile", "DeleteFile", "Edit",
-    "EnterWorktree", "ExitWorktree", "GitBranchCreate", "GitBranchList",
-    "GitBranchSwitch", "GitCommit", "GitDiff", "GitInit", "GitLog", "GitPull",
-    "GitPush", "GitRevert", "GitStatus", "Glob", "Grep", "Read", "RenameFile",
-    "SearchReplace", "Write",
-  ];
-  for (const name of expected) {
-    assert(name in agent.tools, `tool ${name} missing from loaded agent`);
-  }
+    // Every ported tool (batch A + batch B) is discovered under its
+    // filename-derived name…
+    const expected = [
+      // Batch A (25)
+      "AddDependency", "Bash", "CodeSearch", "CopyFile", "DeleteFile", "Edit",
+      "EnterWorktree", "ExitWorktree", "GitBranchCreate", "GitBranchList",
+      "GitBranchSwitch", "GitCommit", "GitDiff", "GitInit", "GitLog", "GitPull",
+      "GitPush", "GitRevert", "GitStatus", "Glob", "Grep", "Read", "RenameFile",
+      "SearchReplace", "Write",
+      // Batch B (41)
+      "AskUserQuestion", "BrowserClick", "BrowserEvaluate", "BrowserFill",
+      "BrowserGetText", "BrowserNavigate", "BrowserScreenshot", "CronCreate",
+      "CronDelete", "CronList", "DatabaseSchema", "EnterPlanMode",
+      "ExecuteSQL", "ExitPlanMode", "GenerateImage", "KBFindSymbols",
+      "KBInit", "KBListFiles", "KBListRepos", "KBOverview", "KBRead",
+      "KBSearch", "KBUpdate", "ReadLogs", "RefreshPreview", "RestartApp",
+      "SendMessage", "SetChatSummary", "TableData", "TaskCreate", "TaskGet",
+      "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch",
+      "TypeCheck", "WebCrawl", "WebFetch", "WebSearch", "WritePlan",
+    ];
+    for (const name of expected) {
+      assert(name in agent.tools, `tool ${name} missing from loaded agent`);
+    }
+    assertEquals(Object.keys(agent.tools).length, expected.length, "unexpected extra/missing tool in loaded agent");
 
-  // …and every discovered tool honors the loader's contract (branded,
-  // described, executable). If a non-tool file sneaks into tools/, loadAgent
-  // itself throws before we ever get here — that throw IS the guard.
-  for (const [name, def] of Object.entries(agent.tools)) {
-    assertEquals((def as { __trexTool?: boolean }).__trexTool, true, `${name} not branded`);
-    assert(typeof def.description === "string" && def.description.length > 0, `${name} has no description`);
-    assert(typeof def.execute === "function", `${name} has no execute`);
-  }
+    // …and every discovered tool honors the loader's contract (branded,
+    // described, executable). If a non-tool file sneaks into tools/, loadAgent
+    // itself throws before we ever get here — that throw IS the guard.
+    for (const [name, def] of Object.entries(agent.tools)) {
+      assertEquals((def as { __trexTool?: boolean }).__trexTool, true, `${name} not branded`);
+      assert(typeof def.description === "string" && def.description.length > 0, `${name} has no description`);
+      assert(typeof def.execute === "function", `${name} has no execute`);
+    }
 
-  assertEquals(agent.config.maxSteps, 25);
-  assert(agent.instructions.length > 0);
+    assertEquals(agent.config.maxSteps, 25);
+    assert(agent.instructions.length > 0);
+  },
 });
