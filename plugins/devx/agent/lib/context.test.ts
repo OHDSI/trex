@@ -52,7 +52,7 @@ Deno.test("toDevxCtx: workspacePath uses ensureWorkspace when metadata has no ap
   const ctx = fakeToolContext({
     userId: "u-1",
     metadata: { mode: "build", chatId: "c-1" },
-    sql: () => Promise.resolve({ rows: [] }),
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }), // c-1 owned by u-1
   });
   const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
   assertEquals(devxCtx.workspacePath, `${SCRATCH}/u-1`);
@@ -65,7 +65,7 @@ Deno.test("toDevxCtx: workspacePath uses ensureAppWorkspace when metadata carrie
   const ctx = fakeToolContext({
     userId: "u-2",
     metadata: { mode: "build", chatId: "c-2", appId: "app-9" },
-    sql: () => Promise.resolve({ rows: [] }),
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }), // c-2 owned by u-2
   });
   const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
   assertEquals(devxCtx.workspacePath, `${SCRATCH}/u-2/app-9`);
@@ -78,7 +78,7 @@ Deno.test("toDevxCtx: send routes through evectx.emit, defaulting the event name
   const ctx = fakeToolContext({
     userId: "u-3",
     metadata: { mode: "build", chatId: "c-3" },
-    sql: () => Promise.resolve({ rows: [] }),
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }), // c-3 owned by u-3
     emit: (name, data) => emitted.push([name, data]),
   });
   const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
@@ -122,6 +122,104 @@ Deno.test("toDevxCtx: throws a clear error when ToolContext.sql is missing", asy
     Error,
     "hookCtx.sql",
   );
+});
+
+// ---------------------------------------------------------------------------
+// toDevxCtx: chat-ownership verification (SECURITY, final-007 review
+// finding #1) — metadata.chatId is client-supplied and must never reach a
+// chat-scoped write (e.g. functions/tools/update_todos.ts's
+// `DELETE FROM devx.todos WHERE chat_id = $1`) unless verified against the
+// AUTHENTICATED userId. Each test uses a unique userId/chatId pair so the
+// module-level ownership cache never leaks a verdict across cases.
+// ---------------------------------------------------------------------------
+
+Deno.test("toDevxCtx: owned chat (devx.chats row matches userId) passes chatId through", async () => {
+  const queries: Array<[string, unknown[] | undefined]> = [];
+  const ctx = fakeToolContext({
+    userId: "owner-1",
+    metadata: { mode: "build", chatId: "chat-owned-1" },
+    sql: (q, params) => {
+      queries.push([q, params]);
+      return Promise.resolve({ rows: [{ "?column?": 1 }] });
+    },
+  });
+  const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(devxCtx.chatId, "chat-owned-1");
+  assertEquals(queries.length, 1);
+  assert(/devx\.chats/.test(queries[0][0]));
+  assertEquals(queries[0][1], ["chat-owned-1", "owner-1"]);
+});
+
+Deno.test("toDevxCtx: foreign chat (no matching devx.chats row) blanks chatId AND appId", async () => {
+  const ctx = fakeToolContext({
+    userId: "attacker-1",
+    metadata: { mode: "build", chatId: "victims-chat", appId: "app-should-not-leak" },
+    sql: () => Promise.resolve({ rows: [] }), // no row: not owned by attacker-1
+  });
+  const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(devxCtx.chatId, "");
+  assertEquals(devxCtx.appId, null);
+});
+
+Deno.test("toDevxCtx: no authenticated userId blanks chatId (anonymous sessions get no chat-scoped writes)", async () => {
+  let sqlCalled = false;
+  const ctx = fakeToolContext({
+    userId: undefined,
+    metadata: { mode: "build", chatId: "some-chat" },
+    sql: () => {
+      sqlCalled = true;
+      return Promise.resolve({ rows: [{ ok: true }] });
+    },
+  });
+  const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(devxCtx.chatId, "");
+  // Verification is skipped entirely (no userId to check against) rather
+  // than issuing a query that could never establish ownership anyway.
+  assertEquals(sqlCalled, false);
+});
+
+Deno.test("toDevxCtx: a sql error during ownership verification fails CLOSED (chatId blanked, not thrown)", async () => {
+  const ctx = fakeToolContext({
+    userId: "owner-2",
+    metadata: { mode: "build", chatId: "chat-db-error" },
+    sql: () => Promise.reject(new Error("connection reset")),
+  });
+  const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(devxCtx.chatId, "");
+  assertEquals(devxCtx.appId, null);
+});
+
+Deno.test("toDevxCtx: chatId absent from metadata skips ownership verification entirely (no chat-scoped claim to check)", async () => {
+  let sqlCalled = false;
+  const ctx = fakeToolContext({
+    userId: "u-9",
+    metadata: { mode: "build", chatId: "", appId: "app-9" },
+    sql: () => {
+      sqlCalled = true;
+      return Promise.resolve({ rows: [] });
+    },
+  });
+  const devxCtx = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(devxCtx.chatId, "");
+  assertEquals(devxCtx.appId, "app-9"); // untouched: no chatId claim was ever made
+  assertEquals(sqlCalled, false);
+});
+
+Deno.test("toDevxCtx: ownership verdicts are cached per (userId, chatId) — repeat calls don't re-query", async () => {
+  let calls = 0;
+  const ctx = fakeToolContext({
+    userId: "owner-cache",
+    metadata: { mode: "build", chatId: "chat-cache-1" },
+    sql: () => {
+      calls++;
+      return Promise.resolve({ rows: [{ ok: true }] });
+    },
+  });
+  const first = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  const second = await toDevxCtx(ctx as ToolContext & { sql: NonNullable<ToolContext["sql"]> });
+  assertEquals(first.chatId, "chat-cache-1");
+  assertEquals(second.chatId, "chat-cache-1");
+  assertEquals(calls, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -175,7 +273,7 @@ Deno.test("wrap: execute adapts ToolContext to DevxAgentContext and forwards arg
   const evectx = fakeToolContext({
     userId: "u-8",
     metadata: { mode: "build", chatId: "c-8" },
-    sql: () => Promise.resolve({ rows: [] }),
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }), // c-8 owned by u-8
   });
   const result = await tool.execute!({ x: 42 }, evectx);
   assertEquals(result, "x=42");

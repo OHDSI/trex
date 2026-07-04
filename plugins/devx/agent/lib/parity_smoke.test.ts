@@ -219,7 +219,7 @@ Deno.test("parity smoke (c): toDevxCtx.workspacePath === ensureAppWorkspace(user
     userId,
     // deno-lint-ignore no-explicit-any
     metadata: { chatId: "c-1", appId, appId2: "not-real" } as any,
-    sql: () => Promise.resolve({ rows: [] }),
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }), // c-1 owned by userId
   };
   const devxCtx = await toDevxCtx(evectx);
   assertEquals(devxCtx.workspacePath, await ensureAppWorkspace(userId, appId));
@@ -249,7 +249,7 @@ Deno.test("parity smoke (c): userId comes ONLY from ToolContext.userId, never fr
     userId,
     // deno-lint-ignore no-explicit-any
     metadata: { chatId: "c-1", appId, userId: "attacker-supplied-id" } as any,
-    sql: () => Promise.resolve({ rows: [] }),
+    sql: () => Promise.resolve({ rows: [{ ok: true }] }), // c-1 owned by userId
   };
   const devxCtx = await toDevxCtx(evectx);
   assertEquals(devxCtx.workspacePath, getAppWorkspacePath(userId, appId));

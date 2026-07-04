@@ -228,6 +228,10 @@ for (const { name, wrapped, legacy } of ENTRIES) {
 Deno.test("smoke [chat-meta family]: SetChatSummary.execute reaches ctx.sql and returns the summary", async () => {
   const calls: unknown[] = [];
   const ctx = fakeToolContext({
+    // No chatId: this smoke is about SetChatSummary's own ctx.sql call, not
+    // toDevxCtx's chat-ownership verification (context.test.ts covers that
+    // directly) — a chatId here would add a second, unrelated sql call.
+    metadata: { mode: "build", chatId: "" },
     sql: (q: string, params?: unknown[]) => {
       calls.push([q, params]);
       return Promise.resolve({ rows: [] });

@@ -63,6 +63,50 @@ export function readMetadata(metadata: unknown): DevxMetadata {
   };
 }
 
+// Ownership-verification cache for chatId (SECURITY fix, final-007 review
+// finding #1): keyed on `${userId}:${chatId}`, small and process-lifetime —
+// ownership of a devx.chats row is effectively immutable for our purposes
+// (chats aren't transferred between users), so caching the verdict across
+// calls in the same worker process is safe. Capped and FIFO-evicted (Map
+// preserves insertion order) purely to bound memory on a long-lived worker;
+// correctness does not depend on the cache at all; it's fine to skip it (a
+// re-verification on eviction just costs one extra query).
+const chatOwnershipCache = new Map<string, boolean>();
+const CHAT_OWNERSHIP_CACHE_MAX = 500;
+
+// Verifies that `chatId` belongs to `userId` via devx.chats.user_id — the
+// legacy route validated this at the HTTP layer (see this file's header
+// comment); the agents path has no equivalent, so tools that scope DB writes
+// by `ctx.chatId` alone (e.g. functions/tools/update_todos.ts's
+// `DELETE FROM devx.todos WHERE chat_id = $1`, which has no user_id column
+// to double-check against) would otherwise let a caller write into ANY
+// chat by simply naming it in client-supplied `metadata.chatId`. Fails
+// CLOSED on every negative signal — no row, or the query itself throwing —
+// because an unverified chatId must never flow into a chat-scoped write.
+async function verifyChatOwnership(sql: QueryFn, chatId: string, userId: string): Promise<boolean> {
+  const cacheKey = `${userId}:${chatId}`;
+  const cached = chatOwnershipCache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  let owned: boolean;
+  try {
+    const result = await sql(`SELECT 1 FROM devx.chats WHERE id = $1 AND user_id = $2`, [chatId, userId]);
+    owned = result.rows.length > 0;
+  } catch {
+    // Fail closed: a DB error is NOT evidence of ownership, and must not be
+    // treated as such. Deliberately not cached — a transient DB blip
+    // shouldn't durably poison this chat for the rest of the process.
+    return false;
+  }
+
+  if (chatOwnershipCache.size >= CHAT_OWNERSHIP_CACHE_MAX) {
+    const oldestKey = chatOwnershipCache.keys().next().value;
+    if (oldestKey !== undefined) chatOwnershipCache.delete(oldestKey);
+  }
+  chatOwnershipCache.set(cacheKey, owned);
+  return owned;
+}
+
 // Adapts eve's ToolContext (+ the worker's sql query fn) into the legacy
 // devx AgentContext shape. `evectx.sql` is required here — a ported tool
 // that needs it will fail loudly (a clear error, not a silent undefined
@@ -72,8 +116,29 @@ export async function toDevxCtx(evectx: ToolContext & { sql: QueryFn }): Promise
   if (!evectx.sql) {
     throw new Error("devx agent adapter: ToolContext.sql is required but was not provided — is hookCtx.sql wired?");
   }
-  const { chatId, appId } = readMetadata(evectx.metadata);
+  const { chatId: rawChatId, appId: rawAppId } = readMetadata(evectx.metadata);
   const userId = evectx.userId ?? "";
+
+  // SECURITY (final-007 review finding #1): metadata.chatId is client-supplied
+  // and untrusted (see this file's header comment) — a chatId is only allowed
+  // to flow into the returned ctx (and therefore into every chat-scoped tool
+  // write) once ownership is verified against the AUTHENTICATED userId. No
+  // userId at all means verification is impossible, so anonymous sessions get
+  // NO chat-scoped writes either (fail closed, not "trust it"). appId is
+  // blanked alongside chatId on failure too, even though appId-derived
+  // workspace paths are independently safe (ensureAppWorkspace always scopes
+  // by the real userId) — an unverified chatId must never reach a devxCtx
+  // consumer under ANY field name.
+  let chatId = rawChatId;
+  let appId = rawAppId;
+  if (chatId) {
+    const owned = userId ? await verifyChatOwnership(evectx.sql, chatId, userId) : false;
+    if (!owned) {
+      chatId = "";
+      appId = undefined;
+    }
+  }
+
   const workspacePath = appId ? await ensureAppWorkspace(userId, appId) : await ensureWorkspace(userId);
   return {
     chatId,
