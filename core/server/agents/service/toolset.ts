@@ -276,7 +276,7 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
           defs[name] = def;
         }
       } catch (e) {
-        console.log(`agents: ${agent.dir}/dynamic-tools.ts threw — continuing with static tools only: ${e instanceof Error ? e.message : String(e)}`);
+        console.error(`agents: ${agent.dir}/dynamic-tools.ts threw — continuing with static tools only: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
   }

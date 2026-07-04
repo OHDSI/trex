@@ -447,9 +447,10 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // tool build) still rejects this route with an HTTP error exactly as
       // it did pre-H3 — moving buildSdkTools inside the stream's execute()
       // would demote those to a 200 + in-stream SSE error frame. But the
-      // writer toolEmit needs only exists inside execute() — so toolEmit
-      // targets this rebindable slot instead, and execute() points it at
-      // the real writer before any tool can run. An emit fired before the
+      // writer that toolEmit needs to write to only exists inside execute()
+      // — so toolEmit targets this rebindable slot instead, and execute()
+      // points it at the real writer before any tool can run. An emit fired
+      // before the
       // stream opens is dropped silently — same fire-and-forget posture as
       // the rest of ToolContext.emit.
       let writeData: ((part: { type: `data-${string}`; data: unknown }) => void) | undefined;

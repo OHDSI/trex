@@ -297,13 +297,16 @@ Deno.test("buildSdkTools: a throwing dynamic-tools.ts provider is logged and the
   const agent = await loadAgent(TOY);
   agent.toolProvider = () => Promise.reject(new Error("MCP server unreachable"));
   const logged: string[] = [];
-  const origLog = console.log;
-  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  // H5 review nit: the provider-failure log uses console.error (matches the
+  // file's other error-path logging), not console.log — intercept the right
+  // stream or this test would pass vacuously.
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
   let tools: Record<string, unknown>;
   try {
     tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
   } finally {
-    console.log = origLog;
+    console.error = origError;
   }
   assert("echo" in tools, "static authored tools must still be present");
   assert("agent" in tools, "built-in tools must still be present");

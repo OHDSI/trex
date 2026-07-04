@@ -189,6 +189,134 @@ provider (so OpenAI-compatible gateways work by setting `OPENAI_BASE_URL`).
 Only the variables above are passed from the host environment into the worker — an agent's tools
 cannot read arbitrary host env vars.
 
+## Runtime hooks
+
+All of the hooks below are trex-only `AgentConfig`/`ToolContext` extensions, built and reconciled
+across tasks H1-H4 (`.superpowers/sdd/task-h{1,2,3,4}-brief.md`). Every one is called fresh
+per-request/per-turn — never cached at agent-load time — and every one is additive: real eve's
+`defineAgent`/tool-authoring API silently ignores fields it doesn't know about, so an agent
+directory that uses these still loads on real eve, just without the hook's behavior. See COMPAT.md
+divergences 11-15 for the full reconciliation.
+
+**`resolveModel`** — per-request model/credential resolution (e.g. per-tenant API keys), called
+before every turn/chat request in place of the static `model` string:
+
+```ts
+export default defineAgent({
+  resolveModel: async (ctx) => {
+    const row = await ctx.sql(`SELECT model FROM tenant_models WHERE user_id = $1`, [ctx.userId]);
+    return row.rows[0]?.model ?? "anthropic/claude-sonnet-5"; // string or a ModelSpec
+  },
+});
+```
+
+*Eve portability*: an unknown `defineAgent` field, so real eve ignores it entirely and falls back
+to its own model resolution — keep `model` set too if you want equivalent behavior there.
+
+**`buildInstructions`** — rewrites the system prompt per request; receives the same base
+(instructions + skills list + `<context>` metadata block) the default path would have sent verbatim:
+
+```ts
+export default defineAgent({
+  buildInstructions: async (base, ctx) => {
+    const t = await ctx.sql(`SELECT name FROM tenants WHERE id = $1`, [ctx.metadata?.tenantId]);
+    return `${base}\n\nYou are assisting ${t.rows[0]?.name ?? "a guest"}.`;
+  },
+});
+```
+
+*Eve portability*: same as `resolveModel` — an ignored field on real eve, which just uses
+`instructions.md` verbatim there.
+
+**`filterTools`** — a synchronous yes/no over the FULLY merged tool set (authored + dynamic-tools.ts
+output + the built-in `skill`/`agent` tools); returning `false` drops the tool:
+
+```ts
+export default defineAgent({
+  filterTools: (name, _def, ctx) =>
+    !(ctx.metadata?.mode === "plan" && ["skill", "agent"].includes(name)),
+});
+```
+
+*Eve portability*: ignored field on real eve — every tool this would have dropped stays present
+there, so don't rely on `filterTools` alone to keep a tool out of a real-eve deployment.
+
+**`dynamic-tools.ts`** — an agent-dir-ROOT file (sibling of `instructions.md`, NOT inside `tools/`)
+default-exporting `defineToolProvider(...)`; its output is merged into the static tool set on every
+top-level `buildSdkTools` call (never at subagent depth). Authored `tools/*.ts` files win on a name
+collision; a throwing/rejecting provider is logged and the turn continues with static tools only:
+
+```ts
+// dynamic-tools.ts
+import { defineToolProvider } from "eve/tools";
+
+export default defineToolProvider(async (ctx) => ({
+  search: { description: "Search the docs", inputSchema: { type: "object", properties: {} },
+    execute: (input) => fetchFromMcp(ctx.bearerToken, input) },
+}));
+```
+
+*Eve portability*: real eve has no root-level `dynamic-tools.ts` convention and never imports this
+file (it only scans `tools/*.ts`), so it's a harmless, unused file there rather than a broken one.
+
+**`ToolContext.emit`** — fire-and-forget custom events from inside a tool's `execute()`; on the
+session API it publishes a `tool.event` stream event and persists an `agents.steps` row
+(`kind: 'custom'`), on `/chat` it writes an interleaved `data-${name}` UIMessage part:
+
+```ts
+export default defineTool({
+  description: "Long-running task", inputSchema: { type: "object", properties: {} },
+  execute: async (_input, ctx) => {
+    ctx?.emit?.("progress", { pct: 50 });
+    return { done: true };
+  },
+});
+```
+
+*Eve portability*: real eve's `ToolContext` has no `emit` field, so `ctx?.emit?.(...)` (always guard
+with the optional chain — never assume it's present) is a safe no-op there; the tool runs unchanged,
+it just never surfaces the progress events.
+
+**`ToolContext.userId`** — the caller's identity, sourced ONLY from the `x-user-id` header the
+control-server's auth middleware injects (never from client-supplied `metadata`, which is untrusted
+request payload):
+
+```ts
+export default defineTool({
+  description: "Whoami", inputSchema: { type: "object", properties: {} },
+  execute: (_input, ctx) => Promise.resolve({ user: ctx?.userId ?? "anonymous" }),
+});
+```
+
+*Eve portability*: real eve's `ToolContext` has no `userId` field either; reading `ctx?.userId`
+there is `undefined`, not a crash — but tenant-scoping logic keyed on it has no real-eve-side
+equivalent to fall back to.
+
+**Sticky approvals (`always`/`never`)** — resolving a `needsApproval` request with `"always"` or
+`"never"` (instead of `"approve"`/`"deny"`) both resolves that one request AND remembers the
+decision for every future call to that SAME tool by that SAME authenticated user, in that
+plugin/agent — skipping the one-shot approval flow entirely from then on:
+
+```bash
+curl -s -X POST https://<trex>/plugins/<scope>/<agent>/eve/v1/session/<id>/approval \
+  -H 'content-type: application/json' -H 'x-user-id: u-1' \
+  -d '{"requestId": "<request-id>", "decision": "always"}'
+# future "guarded"-tool calls by u-1 in this plugin/agent skip approval entirely
+```
+
+`always`/`never` require an authenticated caller (`x-user-id`) — a 400 without one, since there's no
+identity to key the consent on. Resolving ANY decision (including plain `approve`/`deny`) additionally
+requires the caller to own the session: a session created with a known `x-user-id` (`created_by`) can
+only have its approvals resolved by that same user (403 otherwise); an anonymous session (no
+`created_by`) keeps the old behavior of anyone-with-the-id can resolve.
+
+*Eve portability*: eve's own docs describe a different mechanism for this — per-input approval
+*policies* (`always()`/`once()`/`never()` functions configured on the tool itself, see COMPAT.md's
+"what we ignore"), which trex doesn't implement. This sticky-decision verb is a trex-only,
+session-API-level extension (a `decision` value plus the `agents.tool_consents` table) with no
+automatic real-eve equivalent — porting an agent that relies on it to real eve means re-expressing
+the policy as an eve approval-policy function instead.
+
 ## HTTP surface
 
 Routes are mounted under the plugin's scoped path, e.g. `/plugins/<scope>/<agent-name>/`. Auth
@@ -229,8 +357,11 @@ curl -s -X POST https://<trex>/plugins/<scope>/<agent>/eve/v1/session/<id> \
   -d '{"inputResponses": [{"requestId": "<request-id>", "optionId": "approve"}]}'
 ```
 
-`optionId` must be `"approve"` or `"deny"` — trex only implements approval-style human input, not
-eve's `ask_question`; anything else is a 400.
+`optionId` must be `"approve"`, `"deny"`, `"always"`, or `"never"` (the latter two are sticky — see
+"Runtime hooks" above); anything else is a 400. trex only implements approval-style human input, not
+eve's `ask_question`. `"always"`/`"never"` additionally require an `x-user-id`-authenticated caller
+(400 without one), and resolving any decision requires the caller to own the session, once it has a
+known owner (403 otherwise — see "Runtime hooks" above).
 
 **Stream events** (NDJSON, one JSON object per line, resumable):
 
@@ -257,7 +388,9 @@ addition to eve's info shape), `skills`, and `subagents` faithfully; `channels`,
 slots aren't implemented (see "What we ignore" in COMPAT.md).
 
 **Additive approval convenience route** (not part of eve's documented surface — resolves one
-approval directly instead of routing it through `inputResponses`):
+approval directly instead of routing it through `inputResponses`). `decision` takes the same
+`"approve"`/`"deny"`/`"always"`/`"never"` values, with the same auth/ownership rules, as
+`inputResponses[].optionId` above:
 
 ```bash
 curl -s -X POST https://<trex>/plugins/<scope>/<agent>/eve/v1/session/<id>/approval \
@@ -305,7 +438,9 @@ plus three trex extensions, each meant to be a no-op or trivially strippable on 
   only runs after `POST .../session/:id` (with `inputResponses`) or `POST .../approval` resolves
   it `"approve"`. A `"deny"` or a timeout (default 5 minutes) makes the tool call return an error
   result instead of running. The wait is polled in-process inside the live request — see the
-  durability note below for what happens if the worker restarts mid-wait.
+  durability note below for what happens if the worker restarts mid-wait. `"always"`/`"never"`
+  sticky decisions (a trex-only extension, not eve-native) can also short-circuit this wait entirely
+  for future calls — see "Runtime hooks" above.
 - **`idempotent: true`** — an eve-native hint intended for a workflow retry policy. It is accepted
   and typed but currently a no-op: v1 has no Workflow DevKit integration and therefore no retry
   policy that reads it (see "Durability" below).

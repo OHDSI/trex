@@ -91,14 +91,15 @@ live-tail by event shape.
    model-reasoning surface wired) or eve's per-*step* `message.completed`
    semantics (we emit it once per turn, at the true final text, not once per
    model step — see divergence 3's step-granularity note).
-5. **HITL is approval-only, `approve`/`deny` only.** `ask_question` (the
-   built-in framework tool eve ships for free) is not implemented. In
-   `inputResponses`, `optionId` must be `"approve"` or `"deny"`; anything else
-   is a 400. Free-text follow-up messages that happen to read "approve" or
-   "deny" are **not** auto-resolved against a pending request the way eve's
-   docs describe (`docs/tools/human-in-the-loop.md`: "a follow-up whose text
-   matches an option ID... resolves automatically") — a client must send
-   structured `inputResponses`.
+5. **HITL is approval-only.** `ask_question` (the built-in framework tool eve
+   ships for free) is not implemented. In `inputResponses`, `optionId` must
+   be `"approve"`, `"deny"`, or (trex-only, H4 — see divergence 13)
+   `"always"`/`"never"`; anything else is a 400. Free-text follow-up messages
+   that happen to read "approve" or "deny" are **not** auto-resolved against
+   a pending request the way eve's docs describe
+   (`docs/tools/human-in-the-loop.md`: "a follow-up whose text matches an
+   option ID... resolves automatically") — a client must send structured
+   `inputResponses`.
 6. **`?replayOnly=1`** is our own addition to the stream route (skip the live
    tail after replay — used by tests and useful for a future eval-runner
    fallback). `?startIndex=<n>` is eve's documented reconnect cursor and
@@ -175,6 +176,61 @@ live-tail by event shape.
       subagent's `ctx.emit(...)` call lands on the SAME channel (session
       stream or chat writer) as its parent's, not a distinct one; there is
       no per-subagent tagging of a `tool.event`'s origin.
+11. **`resolveModel`/`buildInstructions` request hooks (H1)** are additive
+    `AgentConfig` fields real eve's `defineAgent` doesn't define — eve
+    silently ignores unknown fields, so an agent directory that uses them
+    still loads on real eve, just without per-request model/instructions
+    resolution (it falls back to eve's own `model`/`instructions.md`
+    handling). Called fresh per turn/chat request from `HookCtx`, never
+    cached at agent-load time; a thrown/rejected hook fails the request
+    rather than silently falling back to env-configured credentials (see
+    `model.ts`'s `resolveModelForTurn`, `toolset.ts`'s `resolveInstructions`)
+    — the opposite failure posture from divergence 12's `dynamic-tools.ts`
+    provider, deliberately: a broken model/instructions hook is a
+    trust-boundary risk (wrong tenant's credentials/prompt), a broken tool
+    provider is an operational one.
+12. **`filterTools` hook + `dynamic-tools.ts` provider (H2)** are also
+    additive/ignored on real eve. `filterTools` runs synchronously over the
+    FULLY merged tool set (authored + dynamic + the built-in `skill`/`agent`
+    tools) — a thrown filter propagates uncaught, same fail-loud posture as
+    divergence 11. `dynamic-tools.ts` is an agent-dir-ROOT file (a sibling of
+    `instructions.md`, never inside `tools/`) default-exporting
+    `defineToolProvider(...)`; real eve never scans for it (only
+    `tools/*.ts`), so it's a harmless unused file there, not a broken one. A
+    throwing/rejecting provider is logged (`console.error` as of this pass —
+    matches the file's other error-path logging) and the turn continues with
+    the static tool set only — never fails the turn, unlike 11.
+13. **Sticky `always`/`never` tool-consent decisions (H4)** are a trex-only,
+    session-API-level extension: resolving a `needsApproval` request with
+    `"always"`/`"never"` (via `inputResponses[].optionId` or
+    `POST .../approval`'s `decision`) both resolves that one request (as
+    `approve`/`deny` — the `agents.approvals.decision` CHECK constraint never
+    sees the sticky verbs) AND upserts a durable
+    `(user_id, plugin, agent, tool)` row in `agents.tool_consents`
+    (`V3__tool_consents.sql`), so future calls to that tool by that user skip
+    the one-shot approval flow entirely (`toolset.ts`'s `authoredTool`
+    consults `getToolConsent` before creating a new approval request).
+    Requires an `x-user-id`-authenticated caller (400 without one — there's
+    no identity to key the consent on); this is NOT eve's own per-input
+    approval-policy mechanism (`always()`/`once()`/`never()` functions
+    configured on the tool itself, see "What we ignore" below) — a real-eve
+    port needs to re-express the same intent as an eve approval-policy
+    function, there's no automatic equivalent.
+14. **Approval resolution requires session ownership (H5 ride-along)**. Both
+    approval-resolution routes (`inputResponses` and `POST .../approval`)
+    reject with `403 {"error": "approval can only be resolved by the session
+    owner"}` when the session has a known owner (`agents.sessions.created_by`,
+    set from `x-user-id` at creation) that doesn't match the resolving
+    caller's own `x-user-id`. Closes a gap that predated H4 but was sharpened
+    by it: `resolveApprovalDecision` previously verified only
+    `(requestId, sessionId)`, so anyone who learned those two ids (e.g. a
+    leaked stream URL) could resolve someone else's approval — and, once
+    sticky decisions (divergence 13) existed, durably plant an `always`/
+    `never` consent under the resolver's OWN identity by supplying it as
+    `createdBy`, not the actual session owner's. Anonymous sessions
+    (`created_by IS NULL`) keep the pre-existing behavior: anyone who has the
+    ids can resolve. This has no eve equivalent to diverge from — eve
+    documents no approval-resolution authorization model at all.
 
 ## What we ignore entirely
 
@@ -208,7 +264,10 @@ live-tail by event shape.
   which we do emit).
 - **Per-input approval policies** (`always()`/`once()`/`never()`, or a custom
   function receiving `{ toolName, toolInput, approvedTools }`) — `needsApproval`
-  is a plain boolean on the tool definition (`eve-shim/types.ts`).
+  is a plain boolean on the tool definition (`eve-shim/types.ts`). Not the
+  same thing as divergence 13's sticky `always`/`never` decision verbs, which
+  are a different, additive mechanism (a resolve-time API choice plus a
+  `tool_consents` table), not this eve-native policy-function primitive.
 - **`agent.ts` fields beyond `model` and `max-steps`**: `reasoning`,
   `modelOptions`, `compaction`, `limits`, `experimental.workflow`,
   `outputSchema`, `build` are all real `defineAgent` fields
@@ -382,6 +441,22 @@ Two real runs, both against the live probe:
 No fallback-runner decision needed: the real `eve eval --url` CLI works
 against our target as-is once `message.completed` is emitted; nothing about
 its behavior required a Deno-native fallback (`eval-runner.ts`).
+
+### H5 re-verification (post H1-H4 hooks)
+
+Re-ran the identical probe recipe after H1-H4 (per-request hooks, filterTools/
+dynamic-tools.ts, `ToolContext.emit`, sticky approval decisions) all landed,
+specifically because the toy agent fixture uses NONE of those hooks — it is
+the default/no-hooks path. Same standalone probe (real `handler.ts`/
+`store.ts`/`loader.ts`, `toy-agent-pg` on `localhost:15544`, migrated through
+`V3__tool_consents.sql`, a scripted `MockLanguageModelV3`), two independent
+runs (fresh probe process + truncated tables between them, to rule out
+mock-model call-count state leaking across runs): **3/3 gates both times**
+(`succeeded`, `calledTool(echo)`, `includes(banana)`) —
+`plugins-dev/toy-agent/.eve/evals/2026-07-04T*/summary.json`. Confirms H1-H4's
+additive hooks (all opt-in `AgentConfig`/`ToolDef`/agent-dir-root-file
+surfaces an agent must explicitly configure) introduced no regression on an
+agent that configures none of them.
 
 ## End-to-end verification status
 
