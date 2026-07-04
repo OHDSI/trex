@@ -1,4 +1,4 @@
 {
-  "workspace": ["./core", "./plugins/runtime", "./plugins/prometheus"],
+  "workspace": ["./core", "./plugins/runtime", "./plugins/prometheus", "./integration-tests/realtime_js_e2e"],
   "nodeModulesDir": "auto"
 }

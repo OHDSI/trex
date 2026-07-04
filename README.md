@@ -6,7 +6,7 @@ Trex preserves the Supabase wire contracts for Auth, REST, and Functions, so exi
 
 ## Running Trex
 
-The published image is `ghcr.io/p-hoffmann/trexsql:latest`. The easiest way to run a full stack (Trex + Postgres + PostgREST + Realtime) is via the provided compose file:
+The published image is `ghcr.io/p-hoffmann/trexsql:latest`. The easiest way to run a full stack (Trex + Postgres + PostgREST) is via the provided compose file:
 
 ```bash
 git clone https://github.com/OHDSI/trex.git
@@ -20,6 +20,13 @@ Once up, Trex listens on:
 
 - `:8001` / `:8000` (TLS): HTTP for the web UI, edge functions, GraphQL, MCP, auth
 - `:5433`: Postgres wire protocol (`psql`, JDBC, `pg_dump`)
+
+Realtime (Phoenix-channels websockets + `/realtime/v1/*`) is served natively by
+`core/server` — there is no separate Realtime container. If you bring your own
+Postgres instead of the bundled one, it must run with `wal_level = logical`
+(and `max_replication_slots` / `max_wal_senders` >= 1), and the role in your
+`DATABASE_URL` needs the `REPLICATION` attribute so trex can open its logical
+replication slot.
 
 ## What you get
 

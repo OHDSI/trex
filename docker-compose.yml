@@ -250,38 +250,3 @@ services:
       NEXT_PUBLIC_ENABLE_LOGS: "false"
       SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
-
-  realtime:
-    image: supabase/realtime:v2.93.3
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
-      PORT: "4000"
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_NAME: testdb
-      DB_USER: supabase_admin
-      DB_PASSWORD: ${REALTIME_DB_PASSWORD:-realtime_admin_pass}
-      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
-      # DB_ENC_KEY, API_JWT_SECRET, METRICS_JWT_SECRET, SECRET_KEY_BASE come
-      # from ./secrets/derived.env (see env_file above).
-      ERL_AFLAGS: -proto_dist inet_tcp
-      DNS_NODES: "''"
-      RLIMIT_NOFILE: "10000"
-      APP_NAME: realtime
-      SEED_SELF_HOST: "true"
-      RUN_JANITOR: "true"
-    healthcheck:
-      # Realtime serves an unauthenticated landing page on /; getting 200 here
-      # means Cowboy is up and the runtime booted past Ecto migrations.
-      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "http://localhost:4000/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
