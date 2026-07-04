@@ -67,6 +67,13 @@ export interface ToolContext {
   sessionId: string;
   metadata?: unknown;
   userId?: string;
+  // The worker's pg pool query fn, threaded straight from HookCtx.sql (see
+  // toolset.ts's authoredTool) so a tool's execute() can run SQL without
+  // reaching for a separate ambient pool. Additive/trex-only, like `emit`
+  // and `userId` above: real eve's ToolContext has no `sql` field, so
+  // `ctx?.sql?.(...)` there is simply unavailable, not a crash, as long as
+  // a tool guards the same way it guards `emit`/`userId`.
+  sql?: QueryFn;
   // H3: fire-and-forget custom tool events. A tool's execute() calls this to
   // surface arbitrary progress/telemetry to whichever client is watching —
   // the session API's live stream (as a `tool.event` AgentEvent, also

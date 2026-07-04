@@ -240,6 +240,51 @@ Deno.test("runTurn: ToolContext.userId comes from the header-sourced opts.userId
   assertEquals(result.data.result.output.metadataHadConflictingUserId, "attacker-supplied-id");
 });
 
+Deno.test("runTurn: ToolContext.sql is threaded from hookCtx.sql (task-v1 follow-up)", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.query = {
+    description: "run a query via ctx.sql", inputSchema: { type: "object", properties: {} },
+    // deno-lint-ignore no-explicit-any
+    execute: async (_input: unknown, ctx?: any) => ({ rows: (await ctx?.sql?.("SELECT 1"))?.rows }),
+  };
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const sql = (q: string) => Promise.resolve({ rows: [{ q }] });
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "run a query", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("query", {}), textChunks("done")),
+    hookCtx: fakeHookCtx({ sql }),
+  });
+  const result = events.find(
+    (e) => e.type === "action.result" && (e as { data: { result: { toolName: string } } }).data.result.toolName === "query",
+  ) as { data: { result: { output: { rows?: unknown[] } } } };
+  assert(result, "expected the query tool to have executed");
+  assertEquals(result.data.result.output.rows, [{ q: "SELECT 1" }]);
+});
+
+Deno.test("runTurn: ToolContext.sql is undefined (not a throw) when no hookCtx is wired", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.query = {
+    description: "run a query via ctx.sql", inputSchema: { type: "object", properties: {} },
+    // deno-lint-ignore no-explicit-any
+    execute: (_input: unknown, ctx?: any) => Promise.resolve({ hasSql: typeof ctx?.sql === "function" }),
+  };
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "run a query", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("query", {}), textChunks("done")),
+    // no hookCtx passed at all
+  });
+  const result = events.find(
+    (e) => e.type === "action.result" && (e as { data: { result: { toolName: string } } }).data.result.toolName === "query",
+  ) as { data: { result: { output: { hasSql?: boolean } } } };
+  assert(result, "expected the query tool to have executed");
+  assertEquals(result.data.result.output.hasSql, false);
+});
+
 // ---------------------------------------------------------------------------
 // buildSdkTools (toolset.ts): H2 — filterTools hook + dynamic-tools.ts
 // provider. See .superpowers/sdd/task-h2-brief.md.

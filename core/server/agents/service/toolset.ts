@@ -136,6 +136,12 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
         metadata: ctx.metadata,
         userId: ctx.userId,
         emit: ctx.toolEmit,
+        // H1 follow-up: expose the same sql fn resolveModel/buildInstructions
+        // get via HookCtx.sql, so an authored tool can query Postgres without
+        // its own ambient pool. hookCtx is optional on ToolBuildCtx (some
+        // callers never wire one), so this is undefined rather than a throw
+        // when absent — same "safe to omit" posture as emit/userId above.
+        sql: ctx.hookCtx?.sql,
       });
     },
   });
