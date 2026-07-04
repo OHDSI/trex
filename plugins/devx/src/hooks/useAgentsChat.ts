@@ -291,28 +291,36 @@ export function useAgentsChat(
               }
               return next;
             });
-            // Imperative gate hand-off (fix, re-re-review #1) — see
-            // releaseSendGate's comment for the React-batching false
-            // positive this closes. Epoch-guarded by the `isStale()` check
-            // at the top of this iteration (no await between it and here,
-            // so staleness cannot develop mid-iteration).
-            //  - turn.started: the ack the gate is waiting for. Live-only
+            // Imperative gate hand-off (re-re-review #1, narrowed by the
+            // final review) — see releaseSendGate's comment for the
+            // React-batching false positive this closes. Epoch-guarded by
+            // the `isStale()` check at the top of this iteration (no await
+            // between it and here, so staleness cannot develop
+            // mid-iteration). `turn.started` is the ONLY trigger, on
+            // purpose:
+            //  - It is the ack the gate is waiting for, and it is LIVE-ONLY
             //    (handler.ts's stepToEvent never replays it — turn starts
-            //    aren't persisted steps), so a replayed history can never
-            //    release a held gate prematurely through this branch.
-            //  - turn.completed/turn.failed/session.failed: belt and braces
-            //    for an ack that got lost, but ONLY while the watchdog is
-            //    armed (i.e. this send's POST was accepted and we are
-            //    specifically awaiting its ack). turn.completed/turn.failed
-            //    ARE replayable, and without the watchdog condition a
-            //    replayed old turn's epilogue arriving during a send's
-            //    stream-open phase would re-enable the composer mid-send —
-            //    reopening the double-submit window the gate exists for.
-            if (
-              event.type === "turn.started" ||
-              ((event.type === "turn.completed" || event.type === "turn.failed" || event.type === "session.failed") &&
-                watchdogRef.current != null)
-            ) {
+            //    are not persisted steps; ditto session.waiting/
+            //    session.failed/input.requested). A replayed session
+            //    history therefore contains no turn.started at all and can
+            //    never release a held gate through this line.
+            //  - A broader turn.completed/turn.failed belt-and-braces
+            //    trigger (watchdog-armed-gated) was tried and REMOVED:
+            //    those two ARE replayed (persisted "finish"/"error" steps),
+            //    and on stream (re)open the server replays the FULL session
+            //    history while ensureStreamOpen resolves at response
+            //    headers — so a reopen-chat-then-quick-send flow (same
+            //    chat, same epoch, nothing stale) could see an OLD turn's
+            //    replayed epilogue arrive while the NEW send's watchdog was
+            //    armed, wrongly releasing the gate (double-submit window
+            //    reopens) AND disarming the watchdog for the real turn
+            //    (silent-hang detection lost). No condition available in
+            //    this loop distinguishes that replay from a live epilogue,
+            //    and no reachable path needs one — this client never
+            //    auto-reconnects outside chat switches (which already
+            //    disarm everything), so a genuinely lost ack is the
+            //    watchdog's job (TURN_ACK_WATCHDOG_MS), not this loop's.
+            if (event.type === "turn.started") {
               releaseSendGate();
             }
             if (finishedMessage) persistAssistantMessage(finishedMessage, isStale);
