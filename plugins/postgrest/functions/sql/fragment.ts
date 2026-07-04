@@ -23,8 +23,10 @@ import type {
   CoercibleLogicTree,
   CoercibleOrderTerm,
   CoercibleSelectField,
+  JoinCondition,
   MediaHandler,
   RelSelectField,
+  SpreadSelectField,
 } from "../plan/types.ts";
 import { unknownField } from "../plan/types.ts";
 import type { QualifiedIdentifier } from "../schema-cache/types.ts";
@@ -200,6 +202,22 @@ export function pgFmtApplyAggregate(agg: AggregateFunction | null, aggCast: Cast
 export function pgFmtSelectItem(table: QualifiedIdentifier, item: CoercibleSelectField): Snippet {
   const { csField: fld, csAggFunction: agg, csAggCast: aggCast, csCast: cast, csAlias: alias } = item;
   return snip(pgFmtApplyAggregate(agg, aggCast, pgFmtApplyCast(cast, pgFmtTableCoerce(table, fld))), pgFmtAs(alias));
+}
+
+/** SqlFragment.hs pgFmtSpreadSelectItem — a spread field through the join alias. */
+export function pgFmtSpreadSelectItem(aggAlias: Alias, item: SpreadSelectField): Snippet {
+  const { ssSelName, ssSelAggFunction, ssSelAggCast, ssSelAlias } = item;
+  const fullSelName = ssSelName === "*"
+    ? snip(pgFmtIdent(aggAlias), ".*")
+    : snip(pgFmtIdent(aggAlias), ".", pgFmtIdent(ssSelName));
+  return snip(pgFmtApplyAggregate(ssSelAggFunction, ssSelAggCast, fullSelName), pgFmtAs(ssSelAlias));
+}
+
+/** SqlFragment.hs pgFmtJoinCondition. */
+export function pgFmtJoinCondition(jc: JoinCondition): Snippet {
+  const [qi1, col1] = jc.left;
+  const [qi2, col2] = jc.right;
+  return snip(pgFmtColumn(qi1, col1), " = ", pgFmtColumn(qi2, col2));
 }
 
 /** SqlFragment.hs pgFmtOrderTerm. */

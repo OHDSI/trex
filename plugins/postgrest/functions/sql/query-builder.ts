@@ -1,23 +1,27 @@
 // Ports src/PostgREST/Query/QueryBuilder.hs (PostgREST v12.2.3) — the read
-// side: readPlanToQuery, readPlanToCountQuery and limitedQuery. The code
-// keeps upstream's structure (joins/joinsSelects/subQueries slots) so phase 5
-// can add the lateral-join embedding where the Haskell does.
+// side: readPlanToQuery (incl. the LATERAL-join embedding via getJoins /
+// getJoinSelects), readPlanToCountQuery (incl. the EXISTS semi-joins for
+// inner-joined embeds and null-embed filters) and limitedQuery.
 
 import type { Alias } from "../types.ts";
-import type { CoercibleSelectField, ReadPlanTree } from "../plan/types.ts";
+import type { CoercibleLogicTree, CoercibleSelectField, ReadPlanTree, RelSelectField } from "../plan/types.ts";
 import { unknownField } from "../plan/types.ts";
 import type { QualifiedIdentifier, Relationship } from "../schema-cache/types.ts";
+import { internalError } from "../errors.ts";
 import {
   fromQi,
   groupF,
   intercalateSnippet,
   limitOffsetF,
   orderF,
+  pgFmtFilter,
   pgFmtIdent,
+  pgFmtJoinCondition,
   pgFmtLogicTree,
   pgFmtSelectItem,
+  pgFmtSpreadSelectItem,
 } from "./fragment.ts";
-import { emptySnippet, snip, type Snippet } from "./builder.ts";
+import { emptySnippet, snip, type Snippet, sql } from "./builder.ts";
 
 /** QueryBuilder.hs readPlanToQuery. */
 export function readPlanToQuery(node: ReadPlanTree): Snippet {
@@ -40,9 +44,8 @@ export function readPlanToQuery(node: ReadPlanTree): Snippet {
   const defSelect: CoercibleSelectField[] = [
     { csField: unknownField("*", []), csAggFunction: null, csAggCast: null, csCast: null, csAlias: null },
   ];
-  // TODO(phase 5): getJoins / getJoinSelects lateral-join embedding.
-  const joins: Snippet[] = [];
-  const joinsSelects: Snippet[] = [];
+  const joins = getJoins(node);
+  const joinsSelects = getJoinSelects(node);
 
   return snip(
     "SELECT ",
@@ -57,7 +60,13 @@ export function readPlanToQuery(node: ReadPlanTree): Snippet {
     " ",
     logicForest.length === 0 && relJoinConds.length === 0
       ? emptySnippet
-      : snip("WHERE ", intercalateSnippet(" AND ", logicForest.map((t) => pgFmtLogicTree(qi, t)))),
+      : snip(
+        "WHERE ",
+        intercalateSnippet(" AND ", [
+          ...logicForest.map((t) => pgFmtLogicTree(qi, t)),
+          ...relJoinConds.map(pgFmtJoinCondition),
+        ]),
+      ),
     " ",
     groupF(qi, select, relSelect),
     " ",
@@ -67,23 +76,98 @@ export function readPlanToQuery(node: ReadPlanTree): Snippet {
   );
 }
 
+/** QueryBuilder.hs getJoinSelects — the embed columns of the parent SELECT. */
+function getJoinSelects(node: ReadPlanTree): Snippet[] {
+  const out: Snippet[] = [];
+  for (const fld of node.rootLabel.relSelect) {
+    const aggAlias = pgFmtIdent(fld.rsAggAlias);
+    if (fld.kind === "JsonEmbed") {
+      if (fld.rsEmptyEmbed) continue;
+      out.push(
+        fld.rsEmbedMode === "JsonObject"
+          ? snip("row_to_json(", aggAlias, ".*)::jsonb AS ", pgFmtIdent(fld.rsSelName))
+          : snip("COALESCE( ", aggAlias, ".", aggAlias, ", '[]') AS ", pgFmtIdent(fld.rsSelName)),
+      );
+    } else {
+      out.push(intercalateSnippet(", ", fld.rsSpreadSel.map((s) => pgFmtSpreadSelectItem(fld.rsAggAlias, s))));
+    }
+  }
+  return out;
+}
+
+/** QueryBuilder.hs getJoins. */
+function getJoins(node: ReadPlanTree): Snippet[] {
+  if (node.subForest.length === 0) return [];
+  return node.rootLabel.relSelect.map((fld) => {
+    const matchingNode = node.subForest.find((n) => n.rootLabel.relAggAlias === fld.rsAggAlias);
+    if (matchingNode === undefined) throw internalError("no matching embed node for " + fld.rsAggAlias);
+    return getJoin(fld, matchingNode);
+  });
+}
+
+/** QueryBuilder.hs getJoin — one LATERAL join per embedded resource. */
+function getJoin(fld: RelSelectField, node: ReadPlanTree): Snippet {
+  const inner = node.rootLabel.relJoinType === "JTInner";
+  const correlatedSubquery = (sub: Snippet, al: Snippet, cond: Snippet): Snippet =>
+    snip(inner ? "INNER" : "LEFT", " JOIN LATERAL ( ", sub, " ) AS ", al, " ON ", cond);
+  const subquery = readPlanToQuery(node);
+  const aggAlias = pgFmtIdent(fld.rsAggAlias);
+  if (fld.kind === "Spread" || fld.rsEmbedMode === "JsonObject") {
+    return correlatedSubquery(subquery, aggAlias, sql("TRUE"));
+  }
+  // JsonArray
+  const subq = snip("SELECT json_agg(", aggAlias, ")::jsonb AS ", aggAlias, " FROM (", subquery, " ) AS ", aggAlias);
+  const condition = inner ? snip(aggAlias, " IS NOT NULL") : sql("TRUE");
+  return correlatedSubquery(subq, aggAlias, condition);
+}
+
 /**
  * QueryBuilder.hs readPlanToCountQuery — the COUNT query of the root node.
- * Takes only WHERE into account (no LIMIT/OFFSET, it would reduce the COUNT)
- * and does SELECT 1 to avoid computing expensive columns.
+ * It only takes WHERE into account and doesn't include LIMIT/OFFSET (it would
+ * reduce the COUNT); SELECT 1 avoids computing expensive columns. If the
+ * request contains INNER JOINs the COUNT of the root node changes, so a WHERE
+ * EXISTS is used instead of an INNER JOIN on the count query
+ * (PostgREST/postgrest#2009).
  */
 export function readPlanToCountQuery(node: ReadPlanTree): Snippet {
   const { from: mainQi, fromAlias: tblAlias, where_: logicForest, relToParent: rel, relJoinConds } = node.rootLabel;
+  const forest = node.subForest;
   const qi = getQualifiedIdentifier(rel, mainQi, tblAlias);
   const fromFrag = fromF(rel, mainQi, tblAlias);
-  // TODO(phase 5): EXISTS subqueries for INNER-JOINed embeds and
-  // CoercibleFilterNullEmbed handling (pgFmtLogicTreeCount).
-  const subQueries: Snippet[] = [];
+  const findNullEmbedRel = (fld: string): ReadPlanTree | undefined =>
+    forest.find((n) => n.rootLabel.relAggAlias === fld);
+
+  // https://github.com/PostgREST/postgrest/pull/2930#discussion_r1325293698
+  const pgFmtLogicTreeCount = (qiCount: QualifiedIdentifier, tree: CoercibleLogicTree): Snippet => {
+    if (tree.kind === "CoercibleExpr") {
+      const opSql = tree.op === "And" ? " AND " : " OR ";
+      return snip(
+        tree.negated ? "NOT" : "",
+        " (",
+        intercalateSnippet(opSql, tree.children.map((t) => pgFmtLogicTreeCount(qiCount, t))),
+        ")",
+      );
+    }
+    if (tree.filter.kind === "CoercibleFilterNullEmbed") {
+      const embedNode = findNullEmbedRel(tree.filter.fld);
+      if (embedNode === undefined) return emptySnippet;
+      return snip(tree.filter.hasNot ? "" : "NOT ", "EXISTS (", readPlanToCountQuery(embedNode), ")");
+    }
+    return pgFmtFilter(qiCount, tree.filter);
+  };
+
+  const subQueries = forest
+    .filter((n) => n.rootLabel.relJoinType === "JTInner")
+    .map((n) => snip("EXISTS (", readPlanToCountQuery(n), " )"));
   return snip(
     "SELECT 1 ",
     fromFrag,
     logicForest.length === 0 && relJoinConds.length === 0 && subQueries.length === 0 ? emptySnippet : " WHERE ",
-    intercalateSnippet(" AND ", [...logicForest.map((t) => pgFmtLogicTree(qi, t)), ...subQueries]),
+    intercalateSnippet(" AND ", [
+      ...logicForest.map((t) => pgFmtLogicTreeCount(qi, t)),
+      ...relJoinConds.map(pgFmtJoinCondition),
+      ...subQueries,
+    ]),
   );
 }
 

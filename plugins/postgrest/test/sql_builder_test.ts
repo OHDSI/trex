@@ -10,7 +10,14 @@ import { type WrappedReadPlan, wrappedReadPlan } from "../functions/plan/read-pl
 import { renderSnippet } from "../functions/sql/builder.ts";
 import { limitedQuery, readPlanToCountQuery, readPlanToQuery } from "../functions/sql/query-builder.ts";
 import { preparePlanRows, prepareRead } from "../functions/sql/statements.ts";
-import { repKey, type Column, type SchemaCache, type Table } from "../functions/schema-cache/types.ts";
+import {
+  type Column,
+  type Relationship,
+  relsMapKey,
+  repKey,
+  type SchemaCache,
+  type Table,
+} from "../functions/schema-cache/types.ts";
 
 // --------------------------------------------------------------------------
 // Fixture schema cache
@@ -23,6 +30,63 @@ function col(name: string, nominalType: string): Column {
 function table(name: string, columns: Column[]): Table {
   return { schema: "test", name, description: null, kind: "table", insertable: true, updatable: true, deletable: true, pkCols: ["id"], columns };
 }
+
+const qi = (name: string) => ({ schema: "test", name });
+
+const projectsClientsM2O: Relationship = {
+  kind: "fk",
+  table: qi("projects"),
+  foreignTable: qi("clients"),
+  isSelf: false,
+  cardinality: { tag: "M2O", constraint: "projects_client_id_fkey", columns: [["client_id", "id"]] },
+  tableIsView: false,
+  foreignTableIsView: false,
+};
+const clientsProjectsO2M: Relationship = {
+  kind: "fk",
+  table: qi("clients"),
+  foreignTable: qi("projects"),
+  isSelf: false,
+  cardinality: { tag: "O2M", constraint: "projects_client_id_fkey", columns: [["id", "client_id"]] },
+  tableIsView: false,
+  foreignTableIsView: false,
+};
+const projectsTasksO2M: Relationship = {
+  kind: "fk",
+  table: qi("projects"),
+  foreignTable: qi("tasks"),
+  isSelf: false,
+  cardinality: { tag: "O2M", constraint: "tasks_project_id_fkey", columns: [["id", "project_id"]] },
+  tableIsView: false,
+  foreignTableIsView: false,
+};
+const tasksProjectsM2O: Relationship = {
+  kind: "fk",
+  table: qi("tasks"),
+  foreignTable: qi("projects"),
+  isSelf: false,
+  cardinality: { tag: "M2O", constraint: "tasks_project_id_fkey", columns: [["project_id", "id"]] },
+  tableIsView: false,
+  foreignTableIsView: false,
+};
+const usersProjectsM2M: Relationship = {
+  kind: "fk",
+  table: qi("users"),
+  foreignTable: qi("projects"),
+  isSelf: false,
+  cardinality: {
+    tag: "M2M",
+    junction: {
+      table: qi("users_projects"),
+      constraint1: "users_projects_user_id_fkey",
+      constraint2: "users_projects_project_id_fkey",
+      colsSource: [["id", "user_id"]],
+      colsTarget: [["id", "project_id"]],
+    },
+  },
+  tableIsView: false,
+  foreignTableIsView: false,
+};
 
 const cache: SchemaCache = {
   tables: new Map([
@@ -38,8 +102,16 @@ const cache: SchemaCache = {
       ]),
     ],
     ["test.colors", table("colors", [col("id", "integer"), col("color", "color_type")])],
+    ["test.clients", table("clients", [col("id", "integer"), col("name", "text")])],
+    ["test.tasks", table("tasks", [col("id", "integer"), col("name", "text"), col("project_id", "integer"), col("hours", "integer")])],
+    ["test.users", table("users", [col("id", "integer"), col("name", "text")])],
   ]),
-  relationships: new Map(),
+  relationships: new Map([
+    [relsMapKey(qi("projects"), "test"), [projectsClientsM2O, projectsTasksO2M]],
+    [relsMapKey(qi("clients"), "test"), [clientsProjectsO2M]],
+    [relsMapKey(qi("tasks"), "test"), [tasksProjectsM2O]],
+    [relsMapKey(qi("users"), "test"), [usersProjectsM2M]],
+  ]),
   routines: new Map(),
   representations: new Map([
     [repKey("color_type", "json"), { sourceType: "color_type", targetType: "json", function: "test.color_to_json" }],
@@ -411,21 +483,167 @@ Deno.test("data representations: filter values parse through the text->domain tr
 });
 
 // --------------------------------------------------------------------------
-// Embedding stubs + negotiation errors
+// Embedding (QueryBuilder.hs getJoins/getJoinSelects + count EXISTS)
 // --------------------------------------------------------------------------
 
-Deno.test("embedding: relation selects error until phase 5", () => {
-  assertEquals(errCode(() => planFor("?select=*,clients(*)")), "PGRSTX00");
-  assertEquals(errCode(() => planFor("?select=...clients(*)")), "PGRSTX00");
+const CL = '"test"."clients"';
+const T = '"test"."tasks"';
+
+Deno.test("embed: to-one becomes a row_to_json LEFT JOIN LATERAL", () => {
+  assertEquals(mainSql("?select=name,clients(name)"), [
+    `SELECT ${P}."name", row_to_json("projects_clients_1".*)::jsonb AS "clients" FROM ${P} ` +
+      `LEFT JOIN LATERAL ( SELECT "clients_1"."name" FROM ${CL} AS "clients_1" ` +
+      `WHERE "clients_1"."id" = ${P}."client_id" ) AS "projects_clients_1" ON TRUE`,
+    [],
+  ]);
 });
 
-Deno.test("embed-path'd params yield NotEmbedded (PGRST108) like upstream", () => {
+Deno.test("embed: to-many becomes a json_agg subquery with COALESCE '[]'", () => {
+  assertEquals(mainSql("?select=name,projects(name)", { table: "clients" }), [
+    `SELECT ${CL}."name", COALESCE( "clients_projects_1"."clients_projects_1", '[]') AS "projects" FROM ${CL} ` +
+      `LEFT JOIN LATERAL ( SELECT json_agg("clients_projects_1")::jsonb AS "clients_projects_1" ` +
+      `FROM (SELECT "projects_1"."name" FROM ${P} AS "projects_1" ` +
+      `WHERE "projects_1"."client_id" = ${CL}."id" ) AS "clients_projects_1" ) AS "clients_projects_1" ON TRUE`,
+    [],
+  ]);
+});
+
+Deno.test("embed: per-embed filter/order/limit/offset land inside the lateral subquery", () => {
+  const [text, values] = mainSql(
+    "?select=name,projects(name)&projects.name=like.a*&projects.order=id.desc&projects.limit=2&projects.offset=1",
+    { table: "clients" },
+  );
+  assertStringIncludes(
+    text,
+    `FROM (SELECT "projects_1"."name" FROM ${P} AS "projects_1" ` +
+      `WHERE "projects_1"."name" like $1 AND "projects_1"."client_id" = ${CL}."id" ` +
+      `ORDER BY "projects_1"."id" DESC LIMIT $2 OFFSET $3 ) AS "clients_projects_1"`,
+  );
+  assertEquals(values, ["a%", "2", "1"]);
+});
+
+Deno.test("embed: nested embeds nest laterals with depth-indexed aliases", () => {
+  assertEquals(mainSql("?select=name,projects(name,tasks(name))", { table: "clients" }), [
+    `SELECT ${CL}."name", COALESCE( "clients_projects_1"."clients_projects_1", '[]') AS "projects" FROM ${CL} ` +
+      `LEFT JOIN LATERAL ( SELECT json_agg("clients_projects_1")::jsonb AS "clients_projects_1" ` +
+      `FROM (SELECT "projects_1"."name", COALESCE( "projects_tasks_2"."projects_tasks_2", '[]') AS "tasks" ` +
+      `FROM ${P} AS "projects_1" ` +
+      `LEFT JOIN LATERAL ( SELECT json_agg("projects_tasks_2")::jsonb AS "projects_tasks_2" ` +
+      `FROM (SELECT "tasks_2"."name" FROM ${T} AS "tasks_2" ` +
+      `WHERE "tasks_2"."project_id" = "projects_1"."id" ) AS "projects_tasks_2" ) AS "projects_tasks_2" ON TRUE ` +
+      `WHERE "projects_1"."client_id" = ${CL}."id" ) AS "clients_projects_1" ) AS "clients_projects_1" ON TRUE`,
+    [],
+  ]);
+});
+
+Deno.test("embed: !inner uses INNER JOIN LATERAL with IS NOT NULL; count query gets EXISTS", () => {
+  const [text] = mainSql("?select=name,projects!inner(name)", { table: "clients" });
+  assertStringIncludes(text, "INNER JOIN LATERAL (");
+  assertStringIncludes(text, `) AS "clients_projects_1" ON "clients_projects_1" IS NOT NULL`);
+  assertEquals(countSql("?select=name,projects!inner(name)&name=eq.a", { table: "clients" }), [
+    `SELECT 1 FROM ${CL} WHERE ${CL}."name" = $1 AND ` +
+      `EXISTS (SELECT 1 FROM ${P} AS "projects_1" WHERE "projects_1"."client_id" = ${CL}."id" )`,
+    ["a"],
+  ]);
+  // a to-one !inner keeps the plain lateral shape with an INNER join
+  const [toOne] = mainSql("?select=name,clients!inner(name)");
+  assertStringIncludes(toOne, `INNER JOIN LATERAL ( SELECT "clients_1"."name" FROM ${CL} AS "clients_1"`);
+  assertStringIncludes(toOne, `) AS "projects_clients_1" ON TRUE`);
+});
+
+Deno.test("embed: null-embed filters use the aggregate alias; count query flips to EXISTS", () => {
+  const [isNull] = mainSql("?select=name,projects(name)&projects=is.null", { table: "clients" });
+  assertStringIncludes(isNull, `WHERE "clients_projects_1" IS NOT DISTINCT FROM NULL`);
+  const [notNull] = mainSql("?select=name,projects(name)&projects=not.is.null", { table: "clients" });
+  assertStringIncludes(notNull, `WHERE "clients_projects_1" IS DISTINCT FROM NULL`);
+  assertEquals(countSql("?select=name,projects(name)&projects=is.null", { table: "clients" }), [
+    `SELECT 1 FROM ${CL} WHERE NOT EXISTS (SELECT 1 FROM ${P} AS "projects_1" WHERE "projects_1"."client_id" = ${CL}."id")`,
+    [],
+  ]);
+  assertEquals(countSql("?select=name,projects(name)&projects=not.is.null", { table: "clients" }), [
+    `SELECT 1 FROM ${CL} WHERE EXISTS (SELECT 1 FROM ${P} AS "projects_1" WHERE "projects_1"."client_id" = ${CL}."id")`,
+    [],
+  ]);
+});
+
+Deno.test("embed: non-null filters on an embed name pass through as column filters (v12.2.3)", () => {
+  // Upstream v12.2.3 never raises UnacceptableFilter (PGRST120) — it's dead
+  // code there: addNullEmbedFilters only rewrites `is.null` forms and leaves
+  // any other operator as a plain filter on a (non-existent) parent column,
+  // which then fails at the database with 42703.
+  const [text, values] = mainSql("?select=name,projects(name)&projects=eq.x", { table: "clients" });
+  assertStringIncludes(text, `WHERE ${CL}."projects" = $1`);
+  assertEquals(values, ["x"]);
+});
+
+Deno.test("embed: empty embed with a null filter is omitted from the select (#3093)", () => {
+  const [text] = mainSql("?select=name,projects()&projects=is.null", { table: "clients" });
+  assertEquals(text.includes(`AS "projects"`), false);
+  assertStringIncludes(text, "LEFT JOIN LATERAL (");
+});
+
+Deno.test("embed: spread select flattens the to-one columns", () => {
+  assertEquals(mainSql("?select=name,...projects(pname:name)", { table: "tasks" }), [
+    `SELECT ${T}."name", "tasks_projects_1"."pname" FROM ${T} ` +
+      `LEFT JOIN LATERAL ( SELECT "projects_1"."name" AS "pname" FROM ${P} AS "projects_1" ` +
+      `WHERE "projects_1"."id" = ${T}."project_id" ) AS "tasks_projects_1" ON TRUE`,
+    [],
+  ]);
+});
+
+Deno.test("embed: spread aggregates hoist to the parent with GROUP BY (hoistSpreadAggFunctions)", () => {
+  assertEquals(mainSql("?select=name,...projects(total:id.sum())", { table: "tasks", ...AGG }), [
+    `SELECT ${T}."name", SUM("tasks_projects_1"."total") AS "total" FROM ${T} ` +
+      `LEFT JOIN LATERAL ( SELECT "projects_1"."id" AS "total" FROM ${P} AS "projects_1" ` +
+      `WHERE "projects_1"."id" = ${T}."project_id" ) AS "tasks_projects_1" ON TRUE ` +
+      `GROUP BY ${T}."name"`,
+    [],
+  ]);
+});
+
+Deno.test("embed: M2M does the implicit junction join without aliasing", () => {
+  assertEquals(mainSql("?select=name,projects(name)", { table: "users" }), [
+    `SELECT "test"."users"."name", COALESCE( "users_projects_1"."users_projects_1", '[]') AS "projects" FROM "test"."users" ` +
+      `LEFT JOIN LATERAL ( SELECT json_agg("users_projects_1")::jsonb AS "users_projects_1" ` +
+      `FROM (SELECT ${P}."name" FROM ${P}, "test"."users_projects" ` +
+      `WHERE "test"."users_projects"."project_id" = ${P}."id" AND "test"."users_projects"."user_id" = "test"."users"."id" ) ` +
+      `AS "users_projects_1" ) AS "users_projects_1" ON TRUE`,
+    [],
+  ]);
+});
+
+Deno.test("embed: related order goes through the aggregate alias (to-one only)", () => {
+  const [text] = mainSql("?select=name,clients(name)&order=clients(name).desc.nullslast,id");
+  assertStringIncludes(text, `ORDER BY "projects_clients_1"."name" DESC NULLS LAST, ${P}."id"`);
+  // to-many related order is refused
+  assertEquals(errCode(() => planFor("?select=name,projects(id)&order=projects(id)", { table: "clients" })), "PGRST118");
+  // ordering by a non-embedded relation is refused
+  assertEquals(errCode(() => planFor("?order=clients(id)")), "PGRST108");
+});
+
+Deno.test("embed: spread of a to-many relationship is refused (PGRST119)", () => {
+  assertEquals(errCode(() => planFor("?select=...projects(*)", { table: "clients" })), "PGRST119");
+});
+
+Deno.test("embed: aliases route embed-path'd params (updateNode by relAlias)", () => {
+  const [text, values] = mainSql("?select=name,ps:projects(name)&ps.name=eq.a", { table: "clients" });
+  assertStringIncludes(text, `AS "ps"`);
+  assertStringIncludes(text, `WHERE "projects_1"."name" = $1`);
+  assertEquals(values, ["a"]);
+  assertStringIncludes(text, `"clients_ps_1"`);
+});
+
+Deno.test("embed-path'd params on non-embedded resources yield NotEmbedded (PGRST108)", () => {
   assertEquals(errCode(() => planFor("?clients.id=eq.1")), "PGRST108");
   assertEquals(errCode(() => planFor("?order=clients(id)")), "PGRST108");
   assertEquals(errCode(() => planFor("?clients.limit=3")), "PGRST108");
   assertEquals(errCode(() => planFor("?clients.order=id")), "PGRST108");
   assertEquals(errCode(() => planFor("?clients.or=(id.eq.1)")), "PGRST108");
 });
+
+// --------------------------------------------------------------------------
+// Negotiation errors
+// --------------------------------------------------------------------------
 
 Deno.test("negotiation: media types resolve to handlers; unsupported is PGRST107", () => {
   assertEquals(planFor("").wrHandler.kind, "BuiltinOvAggJson");

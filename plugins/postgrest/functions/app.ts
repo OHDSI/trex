@@ -4,7 +4,7 @@
 // respond (upstream runs auth as a middleware before userApiRequest, so JWT
 // errors win over parse errors).
 //
-// Phase 4b: GET/HEAD on tables/views (no embedded resources). Mutations,
+// Phase 5: GET/HEAD on tables/views including resource embedding. Mutations,
 // RPC, OpenAPI root and OPTIONS keep the 501 stub.
 
 import { handleAdmin } from "./admin.ts";

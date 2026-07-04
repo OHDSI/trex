@@ -132,8 +132,8 @@ export interface ReadPlan {
   depth: number;
 }
 
-/** Ports Plan/ReadPlan.hs ReadPlanTree = Tree ReadPlan. Single node in
- * phase 4b; subForest is populated by resource embedding (phase 5). */
+/** Ports Plan/ReadPlan.hs ReadPlanTree = Tree ReadPlan; the subForest holds
+ * the embedded resources. */
 export interface ReadPlanTree {
   rootLabel: ReadPlan;
   subForest: ReadPlanTree[];

@@ -299,10 +299,10 @@ Deno.test({
         assertEquals(((await jsonBody(res)) as { code: string }).code, "PGRST123");
       });
 
-      await t.step("embedding stubs: select relation 500, embed path PGRST108", async () => {
+      await t.step("embedding an unknown relation is PGRST200, embed path PGRST108", async () => {
         const emb = await get("/items?select=*,foo(*)");
-        assertEquals(emb.status, 500);
-        assertEquals(((await jsonBody(emb)) as { code: string }).code, "PGRSTX00");
+        assertEquals(emb.status, 400);
+        assertEquals(((await jsonBody(emb)) as { code: string }).code, "PGRST200");
         const flt = await get("/items?foo.id=eq.1");
         assertEquals(flt.status, 400);
         assertEquals(((await jsonBody(flt)) as { code: string }).code, "PGRST108");
