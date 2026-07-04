@@ -1,10 +1,7 @@
 // Ports src/PostgREST/ApiRequest.hs (PostgREST v12.2.3) — translating the
-// HTTP request into the ApiRequest domain type.
-//
-// Partial port (Phase 4a): action/target resolution, schema (profile)
-// negotiation, ranges, preferences, query params and media types are fully
-// ported; request-body parsing (getPayload) is stubbed until Phase 6 — the
-// Payload types below are the final shape mutations/RPC will use.
+// HTTP request into the ApiRequest domain type: action/target resolution,
+// schema (profile) negotiation, ranges, preferences, query params, media
+// types and (since Phase 6) the request-body payload via ./payload.ts.
 
 import {
   invalidRpcMethod,
@@ -18,6 +15,7 @@ import {
 import type { FieldName } from "../types.ts";
 import type { QualifiedIdentifier } from "../schema-cache/index.ts";
 import { decodeMediaType, MTAny, MTApplicationJSON, type MediaType, parseHttpAccept } from "./media-type.ts";
+import { getPayload } from "./payload.ts";
 import { fromHeaders, type Preferences } from "./preferences.ts";
 import { parseQueryParams, type QueryParams } from "./query-params.ts";
 import {
@@ -32,7 +30,7 @@ import {
 } from "./range.ts";
 
 // --------------------------------------------------------------------------
-// Payload (stub interface — Phase 6 fills the parsing in getPayload)
+// Payload (parsed in ./payload.ts getPayload)
 // --------------------------------------------------------------------------
 
 export type Payload =
@@ -83,12 +81,12 @@ export interface ApiRequest {
   iRange: Map<string, NonnegRange>;
   /** Requested range of rows from the top level. */
   iTopLevelRange: NonnegRange;
-  /** Data sent by client and used for mutation actions (Phase 6). */
+  /** Data sent by client and used for mutation actions. */
   iPayload: Payload | null;
   /** Prefer header values. */
   iPreferences: Preferences;
   iQueryParams: QueryParams;
-  /** Parsed columns from &columns parameter (payload keys merged in Phase 6). */
+  /** Parsed columns from the &columns parameter and the payload keys. */
   iColumns: Set<FieldName>;
   /** HTTP request headers (folded case, cookies excluded). */
   iHeaders: [string, string][];
@@ -125,13 +123,16 @@ export interface ApiRequestConf {
 /**
  * Ports ApiRequest.hs userApiRequest. `path` is the in-API path (mount
  * prefix already stripped); `timezones` is the schema cache's timezone list
- * for Prefer: timezone validation. Throws PgrstError on invalid requests.
+ * for Prefer: timezone validation; `reqBody` is the fully-read request body
+ * (upstream reads it strictly before parsing). Throws PgrstError on invalid
+ * requests.
  */
 export function userApiRequest(
   conf: ApiRequestConf,
   req: { method: string; url: string; headers: Headers },
   path: string,
   timezones: Set<string>,
+  reqBody = "",
 ): ApiRequest {
   const url = new URL(req.url, "http://localhost");
   const method = req.method;
@@ -147,16 +148,15 @@ export function userApiRequest(
   const accept = req.headers.get("accept");
   const contentType = req.headers.get("content-type");
   const cookieHeader = req.headers.get("cookie");
+  const contentMediaType = contentType === null ? MTApplicationJSON : decodeMediaType(contentType);
 
-  // TODO(phase 6): getPayload — parse the request body per iContentMediaType
-  // into Payload and merge its keys into iColumns.
-  const columns = shouldHaveColumns(act) ? (qPrms.qsColumns ?? new Set<string>()) : new Set<string>();
+  const [payload, columns] = getPayload(reqBody, contentMediaType, qPrms.qsColumns, act);
 
   return {
     iAction: act,
     iRange: ranges,
     iTopLevelRange: topLevelRange,
-    iPayload: null,
+    iPayload: payload,
     iPreferences: fromHeaders(allowTxDbOverride, timezones, headerList),
     iQueryParams: qPrms,
     iColumns: columns,
@@ -167,22 +167,13 @@ export function userApiRequest(
     iSchema: schema,
     iNegotiatedByProfile: negotiatedByProfile,
     iAcceptMediaType: accept === null ? [MTAny] : parseHttpAccept(accept).map(decodeMediaType),
-    iContentMediaType: contentType === null ? MTApplicationJSON : decodeMediaType(contentType),
+    iContentMediaType: contentMediaType,
   };
 }
 
 /** ApiRequest.hs actIsInvokeSafe: RPC GET/HEAD parse values as arguments. */
 function actIsInvokeSafe(act: Action): boolean {
   return act.kind === "ActDb" && act.db.kind === "ActRoutine" && act.db.invMethod.kind === "InvRead";
-}
-
-function shouldHaveColumns(act: Action): boolean {
-  if (act.kind !== "ActDb") return false;
-  if (act.db.kind === "ActRoutine") return act.db.invMethod.kind === "Inv";
-  if (act.db.kind === "ActRelationMut") {
-    return act.db.mutation === "MutationCreate" || act.db.mutation === "MutationUpdate";
-  }
-  return false;
 }
 
 /** Network.Wai pathInfo: decoded path segments (leading "/" dropped). */

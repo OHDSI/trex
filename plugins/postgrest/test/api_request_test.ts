@@ -28,9 +28,9 @@ function mkReq(method: string, pathAndQuery: string, headers: Record<string, str
   return { req: { method, url, headers: new Headers(headers) }, path };
 }
 
-function api(method: string, pathAndQuery: string, headers: Record<string, string> = {}, c: ApiRequestConf = conf) {
+function api(method: string, pathAndQuery: string, headers: Record<string, string> = {}, c: ApiRequestConf = conf, body = "") {
   const { req, path } = mkReq(method, pathAndQuery, headers);
-  return userApiRequest(c, req, path, tz);
+  return userApiRequest(c, req, path, tz, body);
 }
 
 function apiThrows(method: string, pathAndQuery: string, headers: Record<string, string> = {}, c: ApiRequestConf = conf): PgrstError {
@@ -65,7 +65,7 @@ Deno.test("HEAD /table is a headers-only read (HEAD ≡ GET semantics)", () => {
 
 Deno.test("mutation methods map to the right Mutation", () => {
   const m = (method: string) => {
-    const r = api(method, "/projects");
+    const r = api(method, "/projects", {}, conf, "{}");
     assert(r.iAction.kind === "ActDb" && r.iAction.db.kind === "ActRelationMut");
     return r.iAction.db.mutation;
   };
@@ -162,10 +162,10 @@ Deno.test("Accept-Profile picks the schema for reads", () => {
 });
 
 Deno.test("Content-Profile picks the schema for mutations", () => {
-  const r = api("POST", "/files", { "Content-Profile": "storage" }, multi);
+  const r = api("POST", "/files", { "Content-Profile": "storage" }, multi, "{}");
   assertEquals(r.iSchema, "storage");
   // Accept-Profile is ignored for POST
-  const r2 = api("POST", "/files", { "Accept-Profile": "storage" }, multi);
+  const r2 = api("POST", "/files", { "Accept-Profile": "storage" }, multi, "{}");
   assertEquals(r2.iSchema, "public");
 });
 
@@ -215,7 +215,7 @@ Deno.test("PATCH/DELETE with limit but no order → PGRST109", () => {
   assertEquals(apiThrows("PATCH", "/projects?limit=5").body.code, "PGRST109");
   assertEquals(apiThrows("DELETE", "/projects?limit=5").body.code, "PGRST109");
   // with an order it's allowed
-  assertEquals(api("PATCH", "/projects?limit=5&order=id").iTopLevelRange, { lower: 0, upper: 4 });
+  assertEquals(api("PATCH", "/projects?limit=5&order=id", {}, conf, "{}").iTopLevelRange, { lower: 0, upper: 4 });
 });
 
 Deno.test("PUT with limit/offset → PGRST114", () => {
@@ -241,9 +241,9 @@ Deno.test("iAcceptMediaType is ordered by q-weights; defaults to */*", () => {
 });
 
 Deno.test("iContentMediaType defaults to application/json", () => {
-  assertEquals(api("POST", "/projects").iContentMediaType, { kind: "MTApplicationJSON" });
+  assertEquals(api("POST", "/projects", {}, conf, "{}").iContentMediaType, { kind: "MTApplicationJSON" });
   assertEquals(
-    api("POST", "/projects", { "Content-Type": "text/csv" }).iContentMediaType,
+    api("POST", "/projects", { "Content-Type": "text/csv" }, conf, "a\n1").iContentMediaType,
     { kind: "MTTextCSV" },
   );
 });
@@ -271,8 +271,12 @@ Deno.test("iColumns comes from ?columns= for mutations and POST rpc", () => {
   assertEquals([...api("POST", "/rpc/fn?columns=x").iColumns], ["x"]);
   // reads ignore columns
   assertEquals([...api("GET", "/projects?columns=a").iColumns], []);
-  // payload is a Phase 6 stub
-  assertEquals(api("POST", "/projects").iPayload, null);
+  // ?columns= passes the body through unparsed
+  assertEquals(api("POST", "/projects?columns=a", {}, conf, "not json").iPayload, { kind: "RawJSON", payRaw: "not json" });
+  // without columns the payload keys become iColumns
+  const r = api("POST", "/projects", {}, conf, '{"b":1,"a":2}');
+  assertEquals([...r.iColumns], ["b", "a"]);
+  assertEquals(r.iPayload?.kind, "ProcessedJSON");
 });
 
 // --- unit helpers -----------------------------------------------------------------------

@@ -1,7 +1,8 @@
-// Ports src/PostgREST/Query/SqlFragment.hs (PostgREST v12.2.3) — the read
-// path: identifier/literal escaping, field/filter/logic-tree/order-term
-// formatting, the media-type body aggregations (asJsonF/asCsvF/...) and the
-// LIMIT/OFFSET and EXPLAIN helpers. Function and constructor names are kept.
+// Ports src/PostgREST/Query/SqlFragment.hs (PostgREST v12.2.3):
+// identifier/literal escaping, field/filter/logic-tree/order-term formatting,
+// the media-type body aggregations (asJsonF/asCsvF/...), the LIMIT/OFFSET and
+// EXPLAIN helpers, and the mutation fragments (fromJsonBodyF, locationF,
+// returningF, mutRangeF, addConfigPgrstInserted). Names are kept.
 
 import type {
   AggregateFunction,
@@ -41,6 +42,9 @@ export const sourceCTEName = "pgrst_source";
 
 /** SqlFragment.hs sourceCTE. */
 export const sourceCTE: Snippet = sql("pgrst_source");
+
+/** SqlFragment.hs noLocationF. */
+export const noLocationF: Snippet = sql("array[]::text[]");
 
 /** SqlFragment.hs simpleOperator — the SQL operator table. */
 function simpleOperator(op: SimpleOperator): string {
@@ -178,6 +182,15 @@ export function pgFmtField(table: QualifiedIdentifier, fld: CoercibleField): Sni
 function pgFmtTableCoerce(table: QualifiedIdentifier, fld: CoercibleField): Snippet {
   if (fld.cfTransform !== null) return pgFmtCallUnary(fld.cfTransform, pgFmtField(table, fld));
   return pgFmtField(table, fld);
+}
+
+/** SqlFragment.hs pgFmtCoerceNamed — like the previous but we just have a
+ * name, so no namespace or JSON paths. */
+export function pgFmtCoerceNamed(fld: CoercibleField): Snippet {
+  if (fld.cfTransform !== null) {
+    return snip(pgFmtCallUnary(fld.cfTransform, pgFmtIdent(fld.cfName)), " AS ", pgFmtIdent(fld.cfName));
+  }
+  return pgFmtIdent(fld.cfName);
 }
 
 /** SqlFragment.hs pgFmtAs. */
@@ -379,6 +392,131 @@ export const responseHeadersF: Snippet = currentSettingF("response.headers");
 
 /** SqlFragment.hs responseStatusF. */
 export const responseStatusF: Snippet = currentSettingF("response.status");
+
+/**
+ * SqlFragment.hs locationF — key/value bindings ("pk=eq.42" / "pk=is.null")
+ * for the Location header, read from the first row of the mutation CTE. The
+ * text (incl. whitespace) matches the upstream quasiquote; pk names come
+ * from the schema cache and are interpolated unescaped, like upstream.
+ */
+export function locationF(pKeys: string[]): Snippet {
+  const fmtPKeys = pKeys.join("','");
+  return sql(`(
+  WITH data AS (SELECT row_to_json(_) AS row FROM ${sourceCTEName} AS _ LIMIT 1)
+  SELECT array_agg(json_data.key || '=' || coalesce('eq.' || json_data.value, 'is.null'))
+  FROM data CROSS JOIN json_each_text(data.row) AS json_data
+  WHERE json_data.key IN ('${fmtPKeys}')
+)`);
+}
+
+/**
+ * SqlFragment.hs fromJsonBodyF — the pgrst_payload / pgrst_json_defs /
+ * pgrst_body CTE chain that turns the json body parameter into typed rows
+ * (json_to_record(set), or jsonb_to_record(set) with missing=default where
+ * the column defaults are jsonb-merged in first).
+ *
+ * Deviation from upstream: Hasql binds the body with a typed json(b) encoder;
+ * node-postgres sends untyped text, so the placeholder gets an explicit
+ * ::json / ::jsonb cast.
+ */
+export function fromJsonBodyF(
+  body: string | null,
+  fields: CoercibleField[],
+  includeSelect: boolean,
+  includeLimitOne: boolean,
+  includeDefaults: boolean,
+): Snippet {
+  const namedCols = intercalateSnippet(
+    ", ",
+    fields.map((f) => fromQi({ schema: "pgrst_body", name: f.cfName })),
+  );
+  const parsedCols = intercalateSnippet(", ", fields.map(pgFmtCoerceNamed));
+  const typedCols = intercalateSnippet(
+    ", ",
+    fields.map((f) => snip(pgFmtIdent(f.cfName), " ", f.cfIRType)),
+  );
+  const fieldsWDefaults = fields
+    .filter((f) => f.cfDefault !== null)
+    .map((f) => `${pgFmtLit(f.cfName)}, ${f.cfDefault}`);
+  const defsJsonb = sql(`jsonb_build_object(${fieldsWDefaults.join(",")})`);
+  const [finalBodyF, jsonArrayElementsF, jsonToRecordsetF] = includeDefaults
+    ? ["pgrst_json_defs.val", "jsonb_array_elements", isJsonObject(body) ? "jsonb_to_record" : "jsonb_to_recordset"]
+    : ["pgrst_payload.json_data", "json_array_elements", isJsonObject(body) ? "json_to_record" : "json_to_recordset"];
+  const jsonPlaceHolder = snip(param(body), includeDefaults ? "::jsonb" : "::json");
+  return snip(
+    includeSelect ? snip("SELECT ", namedCols, " ") : emptySnippet,
+    "FROM (SELECT ",
+    jsonPlaceHolder,
+    " AS json_data) pgrst_payload, ",
+    includeDefaults
+      ? (isJsonObject(body)
+        ? snip("LATERAL (SELECT ", defsJsonb, " || pgrst_payload.json_data AS val) pgrst_json_defs, ")
+        : snip(
+          "LATERAL (SELECT jsonb_agg(",
+          defsJsonb,
+          " || elem) AS val from jsonb_array_elements(pgrst_payload.json_data) elem) pgrst_json_defs, ",
+        ))
+      : emptySnippet,
+    "LATERAL (SELECT ",
+    parsedCols,
+    " FROM ",
+    fields.length === 0
+      // when json keys are empty, e.g. when payload is `{}` or `[{}, {}]`
+      ? sql(
+        isJsonObject(body)
+          ? "(values(1)) _ " // only 1 row for an empty json object '{}'
+          : `${jsonArrayElementsF}(${finalBodyF}) _ `, // extract rows of a json array of empty objects `[{}, {}]`
+      )
+      : snip(jsonToRecordsetF, "(", finalBodyF, ") AS _(", typedCols, ") ", includeLimitOne ? "LIMIT 1" : ""),
+    ") pgrst_body ",
+  );
+}
+
+/** The isJsonObject local of fromJsonBodyF: light validation — pg's
+ * json_to_record(set) validates the body; we only need to know whether it
+ * looks like an object. */
+function isJsonObject(body: string | null): boolean {
+  const insignificantWhitespace = [" ", "\t", "\n", "\r"]; // rfc8259#section-2
+  let i = 0;
+  const b = body ?? "";
+  while (i < b.length && insignificantWhitespace.includes(b[i])) i++;
+  return b[i] === "{";
+}
+
+/** SqlFragment.hs returningF. */
+export function returningF(qi: QualifiedIdentifier, returnings: string[]): Snippet {
+  if (returnings.length === 0) {
+    // For mutation cases where there's no ?select, we return 1 to know how many rows were modified
+    return sql("RETURNING 1");
+  }
+  return snip("RETURNING ", intercalateSnippet(", ", returnings.map((r) => pgFmtColumn(qi, r))));
+}
+
+/** SqlFragment.hs mutRangeF — (WHERE keys match pgrst_affected_rows, the key
+ * column list) for limited UPDATE/DELETE. */
+export function mutRangeF(mainQi: QualifiedIdentifier, rangeId: string[]): [Snippet, Snippet] {
+  return [
+    intercalateSnippet(
+      " AND ",
+      rangeId.map((col) =>
+        snip(pgFmtColumn(mainQi, col), " = ", pgFmtColumn({ schema: "", name: "pgrst_affected_rows" }, col))
+      ),
+    ),
+    intercalateSnippet(", ", rangeId.map((col) => pgFmtColumn(mainQi, col))),
+  ];
+}
+
+/** SqlFragment.hs addConfigPgrstInserted — counts upsert/PUT inserted rows in
+ * the pgrst.inserted GUC (add) and discounts updated-on-conflict rows (not
+ * add); the trailing comparison keeps the expression a valid WHERE clause. */
+export function addConfigPgrstInserted(add: boolean): Snippet {
+  const [symbol, num] = add ? ["+", "0"] : ["-", "-1"];
+  return snip(
+    "set_config('pgrst.inserted', (coalesce(",
+    currentSettingF("pgrst.inserted"),
+    `::int, 0) ${symbol} 1)::text, true) <> '${num}'`,
+  );
+}
 
 /** SqlFragment.hs orderF. */
 export function orderF(qi: QualifiedIdentifier, ordts: CoercibleOrderTerm[]): Snippet {

@@ -4,17 +4,20 @@
 // respond (upstream runs auth as a middleware before userApiRequest, so JWT
 // errors win over parse errors).
 //
-// Phase 5: GET/HEAD on tables/views including resource embedding. Mutations,
-// RPC, OpenAPI root and OPTIONS keep the 501 stub.
+// Phases 5–6: GET/HEAD on tables/views including resource embedding, and
+// mutations (POST/PATCH/PUT/DELETE incl. upserts). RPC, OpenAPI root and
+// OPTIONS keep the 501 stub.
 
 import { handleAdmin } from "./admin.ts";
 import { authenticate } from "./auth/jwt.ts";
 import { getConfig, reloadConfig } from "./config.ts";
 import { PgrstError } from "./errors.ts";
 import { userApiRequest } from "./parse/api-request.ts";
+import { mutateReadPlan } from "./plan/mutate-plan.ts";
 import { wrappedReadPlan } from "./plan/read-plan.ts";
 import { readQuery } from "./query/read.ts";
-import { readResponse } from "./response.ts";
+import { writeQuery } from "./query/write.ts";
+import { createResponse, deleteResponse, readResponse, singleUpsertResponse, updateResponse } from "./response.ts";
 import { getSchemaCache, type SchemaCacheListener, startListener } from "./schema-cache/index.ts";
 import { stripMount } from "./state.ts";
 
@@ -75,7 +78,7 @@ export async function handle(req: Request): Promise<Response> {
     const config = await getConfig();
     const authResult = await authenticate(req.headers.get("Authorization"), config);
     const sCache = await getSchemaCache();
-    const apiReq = userApiRequest(config, req, path, sCache.timezones);
+    const apiReq = userApiRequest(config, req, path, sCache.timezones, await req.text());
 
     const act = apiReq.iAction;
     if (act.kind === "ActDb" && act.db.kind === "ActRelationRead") {
@@ -84,7 +87,22 @@ export async function handle(req: Request): Promise<Response> {
       return readResponse(resultSet, apiReq, plan);
     }
 
-    // TODO(phase 6+): mutations, RPC, OpenAPI root, OPTIONS.
+    if (act.kind === "ActDb" && act.db.kind === "ActRelationMut") {
+      const plan = mutateReadPlan(act.db.mutation, apiReq, act.db.qi, config, sCache);
+      const resultSet = await writeQuery(plan, config, apiReq, authResult);
+      switch (plan.mrMutation) {
+        case "MutationCreate":
+          return createResponse(resultSet, apiReq, plan);
+        case "MutationUpdate":
+          return updateResponse(resultSet, apiReq, plan);
+        case "MutationSingleUpsert":
+          return singleUpsertResponse(resultSet, apiReq, plan);
+        case "MutationDelete":
+          return deleteResponse(resultSet, apiReq, plan);
+      }
+    }
+
+    // TODO(phase 7+): RPC, OpenAPI root, OPTIONS.
     return new Response(
       JSON.stringify({ message: "PostgREST plugin: endpoint not implemented yet" }),
       { status: 501, headers: { "Content-Type": "application/json" } },

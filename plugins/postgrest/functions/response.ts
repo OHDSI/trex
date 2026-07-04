@@ -1,20 +1,24 @@
-// Ports the read side of src/PostgREST/Response.hs (PostgREST v12.2.3):
-// actionResponse for WrappedReadPlan — status via rangeStatusHeader,
-// Content-Range/Content-Location/Content-Type/Preference-Applied headers and
-// the response.status / response.headers GUC overrides (Response/GucHeader.hs).
+// Ports src/PostgREST/Response.hs (PostgREST v12.2.3): actionResponse for
+// WrappedReadPlan (status via rangeStatusHeader, Content-Range /
+// Content-Location / Content-Type / Preference-Applied headers) and for
+// MutateReadPlan (create/update/singleUpsert/delete responses: 201-vs-200
+// via the pgrst.inserted counter, the Location header of inserts,
+// Content-Range for mutations), plus the response.status / response.headers
+// GUC overrides (Response/GucHeader.hs).
 
 import { gucHeadersError, gucStatusError, invalidRange } from "./errors.ts";
 import type { ApiRequest } from "./parse/api-request.ts";
-import { toContentType } from "./parse/media-type.ts";
-import { prefAppliedHeader } from "./parse/preferences.ts";
-import { rangeOffset, rangeStatusHeader } from "./parse/range.ts";
+import { type MediaType, toContentType } from "./parse/media-type.ts";
+import { prefAppliedHeader, shouldCount } from "./parse/preferences.ts";
+import { contentRangeH, rangeOffset, rangeStatusHeader } from "./parse/range.ts";
 import type { WrappedReadPlan } from "./plan/read-plan.ts";
+import type { MutateReadPlan } from "./plan/mutate-plan.ts";
 import type { ResultSet } from "./sql/statements.ts";
 
 /** Ports Response.hs actionResponse (DbCrudResult WrappedReadPlan ...). */
 export function readResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: WrappedReadPlan): Response {
   const { iPreferences, iTopLevelRange, iQueryParams, iSchema, iNegotiatedByProfile } = apiReq;
-  const { rsTableTotal, rsQueryTotal, rsBody, rsGucHeaders, rsGucStatus } = resultSet;
+  const { rsTableTotal, rsQueryTotal, rsBody } = resultSet;
 
   const { status, header: contentRange } = rangeStatusHeader(iTopLevelRange, rsQueryTotal, rsTableTotal);
   // Only these preferences count as applied on reads (Response.hs).
@@ -41,8 +45,6 @@ export function readResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: Wra
     ...(prefHeader === null ? [] : [["Preference-Applied", prefHeader] as [string, string]]),
   ];
 
-  const [ovStatus, ovHeaders] = overrideStatusHeaders(rsGucStatus, rsGucHeaders, status, headers);
-
   const body = status === 416
     ? JSON.stringify(
       invalidRange({
@@ -55,9 +57,175 @@ export function readResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: Wra
     ? null
     : rsBody;
 
+  return finishResponse(resultSet, status, headers, body);
+}
+
+// --------------------------------------------------------------------------
+// Mutation responses (Response.hs actionResponse for MutateReadPlan)
+// --------------------------------------------------------------------------
+
+/** Response.hs contentTypeHeaders. */
+function contentTypeHeaders(media: MediaType, apiReq: ApiRequest): [string, string][] {
+  return [
+    toContentType(media),
+    ...(apiReq.iNegotiatedByProfile ? [["Content-Profile", apiReq.iSchema] as [string, string]] : []),
+  ];
+}
+
+/** Network.HTTP.Types.URI renderSimpleQuery True — "?k=v&..." with query-string
+ * percent-encoding (unreserved characters kept verbatim). */
+function renderSimpleQuery(kvs: [string, string][]): string {
+  const enc = (s: string): string =>
+    [...new TextEncoder().encode(s)]
+      .map((b) => {
+        const c = String.fromCharCode(b);
+        return /[A-Za-z0-9_.~-]/.test(c) ? c : `%${b.toString(16).toUpperCase().padStart(2, "0")}`;
+      })
+      .join("");
+  return `?${kvs.map(([k, v]) => `${enc(k)}=${enc(v)}`).join("&")}`;
+}
+
+/** Applies the GUC status/header overrides and builds the final Response. */
+function finishResponse(
+  resultSet: Pick<ResultSet, "rsGucStatus" | "rsGucHeaders">,
+  status: number,
+  headers: [string, string][],
+  body: string | null,
+): Response {
+  const [ovStatus, ovHeaders] = overrideStatusHeaders(resultSet.rsGucStatus, resultSet.rsGucHeaders, status, headers);
   const responseHeaders = new Headers();
   for (const [k, v] of ovHeaders) responseHeaders.append(k, v);
-  return new Response(body, { status: ovStatus, headers: responseHeaders });
+  // a null body is mandatory on 204/304 (Fetch API), where upstream sends mempty
+  const bod = ovStatus === 204 || ovStatus === 304 ? null : body;
+  return new Response(bod, { status: ovStatus, headers: responseHeaders });
+}
+
+/** Ports Response.hs actionResponse (MutateReadPlan MutationCreate). */
+export function createResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  const p = apiReq.iPreferences;
+  const { rsQueryTotal, rsLocation, rsInserted, rsBody } = resultSet;
+  const pkCols = plan.mrMutatePlan.kind === "Insert" ? plan.mrMutatePlan.insPkCols : [];
+  const prefHeader = prefAppliedHeader({
+    preferResolution: pkCols.length === 0 && apiReq.iQueryParams.qsOnConflict === null ? null : p.preferResolution,
+    preferRepresentation: p.preferRepresentation,
+    preferParameters: null,
+    preferCount: p.preferCount,
+    preferTransaction: p.preferTransaction,
+    preferMissing: p.preferMissing,
+    preferHandling: p.preferHandling,
+    preferTimezone: p.preferTimezone,
+    preferMaxAffected: null,
+    invalidPrefs: [],
+  });
+  const headers: [string, string][] = [
+    ...(rsLocation.length === 0
+      ? []
+      : [["Location", `/${plan.crudQi.name}${renderSimpleQuery(rsLocation)}`] as [string, string]]),
+    contentRangeH(1, 0, shouldCount(p.preferCount) ? rsQueryTotal : null),
+    ...(prefHeader === null ? [] : [["Preference-Applied", prefHeader] as [string, string]]),
+  ];
+  // isInsertIfGTZero: '' decodes as 0 for plain inserts (→ 201); a
+  // merge-duplicates upsert that inserted nothing responds 200
+  const status = rsInserted === null
+    ? 200
+    : rsInserted <= 0 && p.preferResolution === "MergeDuplicates"
+    ? 200
+    : 201;
+  const full = p.preferRepresentation === "Full";
+  return finishResponse(
+    resultSet,
+    status,
+    full ? [...headers, ...contentTypeHeaders(plan.mrMedia, apiReq)] : headers,
+    full ? rsBody : null,
+  );
+}
+
+/** Ports Response.hs actionResponse (MutateReadPlan MutationUpdate). */
+export function updateResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  const p = apiReq.iPreferences;
+  const { rsQueryTotal, rsBody } = resultSet;
+  const contentRangeHeader = contentRangeH(0, rsQueryTotal - 1, shouldCount(p.preferCount) ? rsQueryTotal : null);
+  const prefHeader = prefAppliedHeader({
+    preferResolution: null,
+    preferRepresentation: p.preferRepresentation,
+    preferParameters: null,
+    preferCount: p.preferCount,
+    preferTransaction: p.preferTransaction,
+    preferMissing: p.preferMissing,
+    preferHandling: p.preferHandling,
+    preferTimezone: p.preferTimezone,
+    preferMaxAffected: p.preferMaxAffected,
+    invalidPrefs: [],
+  });
+  const headers: [string, string][] = [
+    contentRangeHeader,
+    ...(prefHeader === null ? [] : [["Preference-Applied", prefHeader] as [string, string]]),
+  ];
+  const full = p.preferRepresentation === "Full";
+  return finishResponse(
+    resultSet,
+    full ? 200 : 204,
+    full ? [...headers, ...contentTypeHeaders(plan.mrMedia, apiReq)] : headers,
+    full ? rsBody : null,
+  );
+}
+
+/** Ports Response.hs actionResponse (MutateReadPlan MutationSingleUpsert). */
+export function singleUpsertResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  const p = apiReq.iPreferences;
+  const { rsInserted, rsBody } = resultSet;
+  const prefHeader = prefAppliedHeader({
+    preferResolution: null,
+    preferRepresentation: p.preferRepresentation,
+    preferParameters: null,
+    preferCount: p.preferCount,
+    preferTransaction: p.preferTransaction,
+    preferMissing: null,
+    preferHandling: p.preferHandling,
+    preferTimezone: p.preferTimezone,
+    preferMaxAffected: null,
+    invalidPrefs: [],
+  });
+  const prefHeaders: [string, string][] = prefHeader === null ? [] : [["Preference-Applied", prefHeader]];
+  // upsertStatus = isInsertIfGTZero (fromJust rsInserted)
+  const upsertStatus = (rsInserted ?? 0) > 0 ? 201 : 200;
+  const full = p.preferRepresentation === "Full";
+  return finishResponse(
+    resultSet,
+    full ? upsertStatus : 204,
+    full ? [...contentTypeHeaders(plan.mrMedia, apiReq), ...prefHeaders] : prefHeaders,
+    full ? rsBody : null,
+  );
+}
+
+/** Ports Response.hs actionResponse (MutateReadPlan MutationDelete). */
+export function deleteResponse(resultSet: ResultSet, apiReq: ApiRequest, plan: MutateReadPlan): Response {
+  const p = apiReq.iPreferences;
+  const { rsQueryTotal, rsBody } = resultSet;
+  const contentRangeHeader = contentRangeH(1, 0, shouldCount(p.preferCount) ? rsQueryTotal : null);
+  const prefHeader = prefAppliedHeader({
+    preferResolution: null,
+    preferRepresentation: p.preferRepresentation,
+    preferParameters: null,
+    preferCount: p.preferCount,
+    preferTransaction: p.preferTransaction,
+    preferMissing: null,
+    preferHandling: p.preferHandling,
+    preferTimezone: p.preferTimezone,
+    preferMaxAffected: p.preferMaxAffected,
+    invalidPrefs: [],
+  });
+  const headers: [string, string][] = [
+    contentRangeHeader,
+    ...(prefHeader === null ? [] : [["Preference-Applied", prefHeader] as [string, string]]),
+  ];
+  const full = p.preferRepresentation === "Full";
+  return finishResponse(
+    resultSet,
+    full ? 200 : 204,
+    full ? [...headers, ...contentTypeHeaders(plan.mrMedia, apiReq)] : headers,
+    full ? rsBody : null,
+  );
 }
 
 /**

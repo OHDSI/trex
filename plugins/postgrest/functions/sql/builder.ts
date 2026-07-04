@@ -6,9 +6,10 @@
 // that model so the ported fragment functions read like the Haskell: they
 // concatenate snippets and never deal with parameter numbering.
 
-/** A parameter placeholder carrying its value (Hasql's encoderAndParam). */
+/** A parameter placeholder carrying its value (Hasql's encoderAndParam);
+ * null mirrors a nullable encoder's Nothing. */
 export interface SnippetParam {
-  readonly param: string;
+  readonly param: string | null;
 }
 
 export type SnippetPart = string | SnippetParam;
@@ -31,7 +32,7 @@ export function sql(text: string): Snippet {
 }
 
 /** A `$n` placeholder bound to `value` (SqlFragment.hs unknownEncoder). */
-export function param(value: string): Snippet {
+export function param(value: string | null): Snippet {
   return new Snippet([{ param: value }]);
 }
 
@@ -61,7 +62,7 @@ export function intercalateSnippet(frag: string, snippets: Snippet[]): Snippet {
 
 export interface RenderedSnippet {
   text: string;
-  values: string[];
+  values: (string | null)[];
 }
 
 /**
@@ -70,7 +71,7 @@ export interface RenderedSnippet {
  */
 export function renderSnippet(snippet: Snippet): RenderedSnippet {
   let text = "";
-  const values: string[] = [];
+  const values: (string | null)[] = [];
   for (const part of snippet.parts) {
     if (typeof part === "string") {
       text += part;

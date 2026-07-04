@@ -1,15 +1,16 @@
-// Snapshot-style tests for the read SQL generation: query string → plan →
-// SQL text + ordered params. SQL strings are asserted whitespace-normalized
-// so phase 5 diffs stay reviewable.
+// Snapshot-style tests for the read and mutation SQL generation: query
+// string (+ body) → plan → SQL text + ordered params. SQL strings are
+// asserted whitespace-normalized so diffs stay reviewable.
 
 import { assertEquals, assertStringIncludes, assertThrows } from "std/assert/mod.ts";
 import { resolveConfig } from "../functions/config.ts";
 import { PgrstError } from "../functions/errors.ts";
 import { userApiRequest } from "../functions/parse/api-request.ts";
+import { type MutateReadPlan, mutateReadPlan } from "../functions/plan/mutate-plan.ts";
 import { type WrappedReadPlan, wrappedReadPlan } from "../functions/plan/read-plan.ts";
 import { renderSnippet } from "../functions/sql/builder.ts";
-import { limitedQuery, readPlanToCountQuery, readPlanToQuery } from "../functions/sql/query-builder.ts";
-import { preparePlanRows, prepareRead } from "../functions/sql/statements.ts";
+import { limitedQuery, mutatePlanToQuery, readPlanToCountQuery, readPlanToQuery } from "../functions/sql/query-builder.ts";
+import { preparePlanRows, prepareRead, prepareWrite } from "../functions/sql/statements.ts";
 import {
   type Column,
   type Relationship,
@@ -102,6 +103,7 @@ const cache: SchemaCache = {
       ]),
     ],
     ["test.colors", table("colors", [col("id", "integer"), col("color", "color_type")])],
+    ["test.stock", table("stock", [col("id", "integer"), { ...col("qty", "integer"), default: "5" }, col("name", "text")])],
     ["test.clients", table("clients", [col("id", "integer"), col("name", "text")])],
     ["test.tasks", table("tasks", [col("id", "integer"), col("name", "text"), col("project_id", "integer"), col("hours", "integer")])],
     ["test.users", table("users", [col("id", "integer"), col("name", "text")])],
@@ -151,18 +153,18 @@ function normalize(s: string): string {
   return s.replace(/[ \t]+/g, " ").trim();
 }
 
-function mainSql(query: string, opts: PlanOpts = {}): [string, string[]] {
+function mainSql(query: string, opts: PlanOpts = {}): [string, (string | null)[]] {
   const { text, values } = renderSnippet(readPlanToQuery(planFor(query, opts).wrReadPlan));
   return [normalize(text), values];
 }
 
-function countSql(query: string, opts: PlanOpts = {}): [string, string[]] {
+function countSql(query: string, opts: PlanOpts = {}): [string, (string | null)[]] {
   const { text, values } = renderSnippet(readPlanToCountQuery(planFor(query, opts).wrReadPlan));
   return [normalize(text), values];
 }
 
 /** The WHERE..LIMIT tail of the main query (after the FROM clause). */
-function tailSql(query: string, opts: PlanOpts = {}): [string, string[]] {
+function tailSql(query: string, opts: PlanOpts = {}): [string, (string | null)[]] {
   const [text, values] = mainSql(query, opts);
   const from = `FROM "test"."${opts.table ?? "projects"}"`;
   const idx = text.indexOf(from);
@@ -660,5 +662,255 @@ Deno.test("negotiation: media types resolve to handlers; unsupported is PGRST107
   assertEquals(
     planFor("", { headers: { Accept: "application/vnd.pgrst.plan+json" }, env: { PGRST_DB_PLAN_ENABLED: "true" } }).wrMedia.kind,
     "MTVndPlan",
+  );
+});
+
+// --------------------------------------------------------------------------
+// Mutations (mutatePlanToQuery / prepareWrite)
+// --------------------------------------------------------------------------
+
+interface MutOpts extends PlanOpts {
+  body?: string;
+}
+
+function mutPlanFor(query: string, opts: MutOpts = {}): MutateReadPlan {
+  const tbl = opts.table ?? "projects";
+  const conf = resolveConfig({ env: { PGRST_DB_SCHEMAS: "test", ...opts.env } });
+  const apiReq = userApiRequest(
+    conf,
+    { method: opts.method ?? "POST", url: `http://localhost/${tbl}${query}`, headers: new Headers(opts.headers ?? {}) },
+    `/${tbl}`,
+    new Set(),
+    opts.body ?? "{}",
+  );
+  const act = apiReq.iAction;
+  if (act.kind !== "ActDb" || act.db.kind !== "ActRelationMut") throw new Error("not a mutation action");
+  return mutateReadPlan(act.db.mutation, apiReq, act.db.qi, conf, cache);
+}
+
+function mutSql(query: string, opts: MutOpts = {}): [string, (string | null)[]] {
+  const { text, values } = renderSnippet(mutatePlanToQuery(mutPlanFor(query, opts).mrMutatePlan));
+  return [normalize(text), values];
+}
+
+const SET_INS = "set_config('pgrst.inserted', (coalesce(nullif(current_setting('pgrst.inserted', true), '')::int, 0) + 1)::text, true) <> '0'";
+const SET_UPD = "set_config('pgrst.inserted', (coalesce(nullif(current_setting('pgrst.inserted', true), '')::int, 0) - 1)::text, true) <> '-1'";
+
+Deno.test("insert: single json object (columns sorted like Data.Set)", () => {
+  const body = '{"name":"n","id":1}';
+  assertEquals(mutSql("", { body }), [
+    `INSERT INTO ${P}("id", "name") SELECT "pgrst_body"."id", "pgrst_body"."name" ` +
+      `FROM (SELECT $1::json AS json_data) pgrst_payload, ` +
+      `LATERAL (SELECT "id", "name" FROM json_to_record(pgrst_payload.json_data) AS _("id" integer, "name" text) ) pgrst_body ` +
+      `RETURNING 1`,
+    [body],
+  ]);
+});
+
+Deno.test("insert: bulk json array uses json_to_recordset", () => {
+  const body = '[{"id":1},{"id":2}]';
+  assertEquals(mutSql("", { body }), [
+    `INSERT INTO ${P}("id") SELECT "pgrst_body"."id" ` +
+      `FROM (SELECT $1::json AS json_data) pgrst_payload, ` +
+      `LATERAL (SELECT "id" FROM json_to_recordset(pgrst_payload.json_data) AS _("id" integer) ) pgrst_body ` +
+      `RETURNING 1`,
+    [body],
+  ]);
+});
+
+Deno.test("insert: empty object payload rows come from (values(1))", () => {
+  assertEquals(mutSql("", { body: "{}" }), [
+    `INSERT INTO ${P} SELECT FROM (SELECT $1::json AS json_data) pgrst_payload, ` +
+      `LATERAL (SELECT FROM (values(1)) _ ) pgrst_body RETURNING 1`,
+    ["{}"],
+  ]);
+  const [arrText] = mutSql("", { body: "[{},{}]" });
+  assertStringIncludes(arrText, "LATERAL (SELECT FROM json_array_elements(pgrst_payload.json_data) _ ) pgrst_body");
+});
+
+Deno.test("insert: ?columns= restricts the columns; body passes through raw", () => {
+  const body = '{"name":"a","junk":1}';
+  const [text, values] = mutSql("?columns=name", { body });
+  assertEquals(text.startsWith(`INSERT INTO ${P}("name") SELECT "pgrst_body"."name" `), true);
+  assertStringIncludes(text, `AS _("name" text)`);
+  assertEquals(values, [body]);
+});
+
+Deno.test("insert: unknown payload key is PGRST204; unknown pk-less table has no location cols", () => {
+  assertEquals(errCode(() => mutPlanFor("", { body: '{"nope":1}' })), "PGRST204");
+});
+
+Deno.test("insert: missing=default merges the column defaults via jsonb", () => {
+  const body = '[{"id":1}]';
+  assertEquals(
+    mutSql("?columns=id,name,qty", { table: "stock", body, headers: { Prefer: "missing=default" } }),
+    [
+      `INSERT INTO "test"."stock"("id", "name", "qty") SELECT "pgrst_body"."id", "pgrst_body"."name", "pgrst_body"."qty" ` +
+        `FROM (SELECT $1::jsonb AS json_data) pgrst_payload, ` +
+        `LATERAL (SELECT jsonb_agg(jsonb_build_object('qty', 5) || elem) AS val from jsonb_array_elements(pgrst_payload.json_data) elem) pgrst_json_defs, ` +
+        `LATERAL (SELECT "id", "name", "qty" FROM jsonb_to_recordset(pgrst_json_defs.val) AS _("id" integer, "name" text, "qty" integer) ) pgrst_body ` +
+        `RETURNING 1`,
+      [body],
+    ],
+  );
+});
+
+Deno.test("upsert: merge-duplicates counts pgrst.inserted and updates on conflict", () => {
+  const body = '{"id":1,"name":"a"}';
+  const [text, values] = mutSql("", { body, headers: { Prefer: "resolution=merge-duplicates" } });
+  assertStringIncludes(text, `) pgrst_body WHERE ${SET_INS} ON CONFLICT("id") DO UPDATE SET "id" = EXCLUDED."id", "name" = EXCLUDED."name"WHERE ${SET_UPD} RETURNING 1`);
+  assertEquals(values, [body]);
+});
+
+Deno.test("upsert: ignore-duplicates does nothing on conflict", () => {
+  const [text] = mutSql("", { body: '{"id":1}', headers: { Prefer: "resolution=ignore-duplicates" } });
+  assertStringIncludes(text, `) pgrst_body ON CONFLICT("id") DO NOTHING RETURNING 1`);
+});
+
+Deno.test("upsert: ?on_conflict= picks the conflict target columns", () => {
+  const [text] = mutSql("?on_conflict=name", { body: '{"id":1,"name":"a"}', headers: { Prefer: "resolution=ignore-duplicates" } });
+  assertStringIncludes(text, `ON CONFLICT("name") DO NOTHING`);
+});
+
+Deno.test("put: insert-on-conflict-update with the pk condition on pgrst_body", () => {
+  const body = '{"id":1,"name":"a"}';
+  const [text, values] = mutSql("?id=eq.1", { method: "PUT", body });
+  assertEquals(text.startsWith(`INSERT INTO ${P}("id", "name") SELECT "pgrst_body"."id", "pgrst_body"."name" `), true);
+  assertStringIncludes(text, `) pgrst_body WHERE ${SET_INS} AND "pgrst_body"."id" = $2 ON CONFLICT("id") DO UPDATE SET "id" = EXCLUDED."id", "name" = EXCLUDED."name"WHERE ${SET_UPD} RETURNING 1`);
+  assertEquals(values, [body, "1"]);
+});
+
+Deno.test("put: filters must be exactly the pk with eq (PGRST105)", () => {
+  const body = '{"id":1,"name":"a"}';
+  assertEquals(errCode(() => mutPlanFor("", { method: "PUT", body })), "PGRST105");
+  assertEquals(errCode(() => mutPlanFor("?name=eq.a", { method: "PUT", body })), "PGRST105");
+  assertEquals(errCode(() => mutPlanFor("?id=eq.1&name=eq.a", { method: "PUT", body })), "PGRST105");
+  assertEquals(errCode(() => mutPlanFor("?id=gt.1", { method: "PUT", body })), "PGRST105");
+  assertEquals(errCode(() => mutPlanFor("?id=not.eq.1", { method: "PUT", body })), "PGRST105");
+  assertEquals(errCode(() => mutPlanFor("?id=eq.1&or=(id.eq.1)", { method: "PUT", body })), "PGRST105");
+});
+
+Deno.test("update: SET from pgrst_body with the root filters in WHERE", () => {
+  const body = '{"name":"x"}';
+  assertEquals(mutSql("?id=eq.1", { method: "PATCH", body }), [
+    `UPDATE ${P} SET "name" = "pgrst_body"."name" ` +
+      `FROM (SELECT $1::json AS json_data) pgrst_payload, ` +
+      `LATERAL (SELECT "name" FROM json_to_record(pgrst_payload.json_data) AS _("name" text) ) pgrst_body ` +
+      `WHERE ${P}."id" = $2 RETURNING 1`,
+    [body, "1"],
+  ]);
+});
+
+Deno.test("update: empty body degenerates to a no-op select", () => {
+  assertEquals(mutSql("?id=eq.1", { method: "PATCH", body: "{}" }), [
+    `SELECT NULL FROM ${P} WHERE false`,
+    [],
+  ]);
+  // with return=representation the returnings keep &select= usable
+  assertEquals(
+    mutSql("?id=eq.1&select=name", { method: "PATCH", body: "{}", headers: { Prefer: "return=representation" } }),
+    [`SELECT "projects"."id", "projects"."name" FROM ${P} WHERE false`, []],
+  );
+});
+
+Deno.test("update: limited update goes through pgrst_affected_rows", () => {
+  const body = '{"name":"x"}';
+  assertEquals(mutSql("?id=gt.0&order=id&limit=2", { method: "PATCH", body }), [
+    `WITH pgrst_update_body AS (` +
+      `SELECT "pgrst_body"."name" FROM (SELECT $1::json AS json_data) pgrst_payload, ` +
+      `LATERAL (SELECT "name" FROM json_to_record(pgrst_payload.json_data) AS _("name" text) LIMIT 1) pgrst_body ), ` +
+      `pgrst_affected_rows AS (` +
+      `SELECT ${P}."id" FROM ${P} WHERE ${P}."id" > $2 ORDER BY ${P}."id" LIMIT $3 OFFSET $4) ` +
+      `UPDATE ${P} SET "name" = (SELECT "name" FROM pgrst_update_body) FROM pgrst_affected_rows ` +
+      `WHERE ${P}."id" = "pgrst_affected_rows"."id" RETURNING 1`,
+    [body, "0", "2", "0"],
+  ]);
+});
+
+Deno.test("delete: plain and limited", () => {
+  assertEquals(mutSql("?id=eq.1", { method: "DELETE" }), [
+    `DELETE FROM ${P} WHERE ${P}."id" = $1 RETURNING 1`,
+    ["1"],
+  ]);
+  assertEquals(mutSql("?id=gt.0&order=id&limit=1", { method: "DELETE" }), [
+    `WITH pgrst_affected_rows AS (` +
+      `SELECT ${P}."id" FROM ${P} WHERE ${P}."id" > $1 ORDER BY ${P}."id" LIMIT $2 OFFSET $3) ` +
+      `DELETE FROM ${P} USING pgrst_affected_rows ` +
+      `WHERE ${P}."id" = "pgrst_affected_rows"."id" RETURNING 1`,
+    ["0", "1", "0"],
+  ]);
+});
+
+Deno.test("returning: representation returns star or the selected+pk+fk columns", () => {
+  const rep = { Prefer: "return=representation" };
+  const [star] = mutSql("", { body: '{"id":1}', headers: rep });
+  assertStringIncludes(star, `RETURNING ${P}.*`);
+  const [cols] = mutSql("?select=name", { body: '{"id":1}', headers: rep });
+  assertStringIncludes(cols, `RETURNING ${P}."id", ${P}."name"`);
+  // embeds add their fk columns so the join can succeed
+  const [emb] = mutSql("?select=name,projects(name)", { table: "tasks", body: '{"id":1}', headers: rep });
+  assertStringIncludes(emb, `RETURNING ${T}."id", ${T}."name", ${T}."project_id"`);
+});
+
+Deno.test("prepareWrite: minimal has no location/inserted tracking and selects the CTE", () => {
+  const plan = mutPlanFor("", { body: '{"id":1}' });
+  const { text } = renderSnippet(prepareWrite(
+    readPlanToQuery(plan.mrReadPlan),
+    mutatePlanToQuery(plan.mrMutatePlan),
+    true,
+    false,
+    plan.mrHandler,
+    null,
+    null,
+    ["id"],
+  ));
+  const t = normalize(text);
+  assertStringIncludes(t, "WITH pgrst_source AS (INSERT INTO");
+  assertStringIncludes(t, "'' AS total_result_set");
+  assertStringIncludes(t, "array[]::text[] AS header");
+  assertStringIncludes(t, "'' AS response_inserted");
+  assertStringIncludes(t, "FROM (SELECT * FROM pgrst_source) _postgrest_t");
+});
+
+Deno.test("prepareWrite: headers-only inserts compute the Location bindings", () => {
+  const plan = mutPlanFor("", { body: '{"id":1}', headers: { Prefer: "return=headers-only" } });
+  const { text } = renderSnippet(prepareWrite(
+    readPlanToQuery(plan.mrReadPlan),
+    mutatePlanToQuery(plan.mrMutatePlan),
+    true,
+    false,
+    plan.mrHandler,
+    "HeadersOnly",
+    null,
+    ["id"],
+  ));
+  const t = normalize(text);
+  assertStringIncludes(t, "CASE WHEN pg_catalog.count(_postgrest_t) = 1 THEN coalesce((");
+  assertStringIncludes(t, "WHERE json_data.key IN ('id')");
+  assertStringIncludes(t, "ELSE array[]::text[] END AS header");
+});
+
+Deno.test("prepareWrite: upserts/PUT read back the pgrst.inserted counter", () => {
+  const plan = mutPlanFor("", { body: '{"id":1}', headers: { Prefer: "resolution=merge-duplicates" } });
+  const { text } = renderSnippet(prepareWrite(
+    readPlanToQuery(plan.mrReadPlan),
+    mutatePlanToQuery(plan.mrMutatePlan),
+    true,
+    false,
+    plan.mrHandler,
+    null,
+    "MergeDuplicates",
+    ["id"],
+  ));
+  assertStringIncludes(normalize(text), "nullif(current_setting('pgrst.inserted', true),'')::int AS response_inserted");
+});
+
+Deno.test("mutations negotiate NoAgg unless return=representation", () => {
+  assertEquals(mutPlanFor("", { body: "{}" }).mrHandler.kind, "NoAgg");
+  assertEquals(mutPlanFor("", { body: "{}", headers: { Prefer: "return=representation" } }).mrHandler.kind, "BuiltinOvAggJson");
+  // singular media still negotiates for the failNotSingular check
+  assertEquals(
+    mutPlanFor("", { body: "{}", headers: { Accept: "application/vnd.pgrst.object+json" } }).mrMedia.kind,
+    "MTVndSingularJSON",
   );
 });

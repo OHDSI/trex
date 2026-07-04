@@ -97,7 +97,7 @@ export function wrappedReadPlan(
 }
 
 /** Ports Plan.hs hasDefaultSelect. */
-function hasDefaultSelect(rPlan: ReadPlanTree): boolean {
+export function hasDefaultSelect(rPlan: ReadPlanTree): boolean {
   return rPlan.subForest.length === 0 && rPlan.rootLabel.select.length === 1 &&
     rPlan.rootLabel.select[0].csField.cfName === "*";
 }
@@ -107,7 +107,7 @@ function hasDefaultSelect(rPlan: ReadPlanTree): boolean {
 // --------------------------------------------------------------------------
 
 /** Ports Plan.hs ResolverContext. */
-interface ResolverContext {
+export interface ResolverContext {
   tables: TablesMap;
   representations: RepresentationsMap;
   /** The table we're currently attending; changes as we recurse into joins etc. */
@@ -129,7 +129,7 @@ function resolveColumnField(col: Column): CoercibleField {
 }
 
 /** Ports Plan.hs resolveTableFieldName. */
-function resolveTableFieldName(table: Table, fieldName: string): CoercibleField {
+export function resolveTableFieldName(table: Table, fieldName: string): CoercibleField {
   const col = table.columns.find((c) => c.name === fieldName);
   return col === undefined ? unknownField(fieldName, []) : resolveColumnField(col);
 }
@@ -165,6 +165,11 @@ function withOutputFormat(ctx: ResolverContext, field: CoercibleField): Coercibl
 /** Ports Plan.hs withTextParse. */
 function withTextParse(ctx: ResolverContext, field: CoercibleField): CoercibleField {
   return withTransformer(ctx, "text", field.cfIRType, field);
+}
+
+/** Ports Plan.hs withJsonParse — mutation body values parse from json. */
+export function withJsonParse(ctx: ResolverContext, field: CoercibleField): CoercibleField {
+  return withTransformer(ctx, "json", field.cfIRType, field);
 }
 
 /** Ports Plan.hs resolveOutputField. */
@@ -307,8 +312,11 @@ function updateNode<A>(f: (a: A, tree: ReadPlanTree) => ReadPlanTree, path: Embe
 
 /** Ports Plan.hs addFilters. */
 function addFilters(ctx: ResolverContext, apiRequest: ApiRequest, tree: ReadPlanTree): ReadPlanTree {
-  // Reads take all filters (qsFilters); mutations only the non-root ones.
-  const flts = apiRequest.iQueryParams.qsFilters;
+  // Reads and routine calls take all filters (qsFilters); mutations only the
+  // non-root ones (the root filters go into the MutatePlan's WHERE).
+  const act = apiRequest.iAction;
+  const takesAllFilters = act.kind === "ActDb" && (act.db.kind === "ActRelationRead" || act.db.kind === "ActRoutine");
+  const flts = takesAllFilters ? apiRequest.iQueryParams.qsFilters : apiRequest.iQueryParams.qsFiltersNotRoot;
   // foldr: the last filter is applied first, so the first ends up outermost.
   return [...flts].reverse().reduce(
     (t, [path, flt]) =>
@@ -329,18 +337,21 @@ function addFilters(ctx: ResolverContext, apiRequest: ApiRequest, tree: ReadPlan
 }
 
 /** Ports Plan.hs addFilterToLogicForest. */
-function addFilterToLogicForest(flt: CoercibleFilter, lf: CoercibleLogicTree[]): CoercibleLogicTree[] {
+export function addFilterToLogicForest(flt: CoercibleFilter, lf: CoercibleLogicTree[]): CoercibleLogicTree[] {
   return [{ kind: "CoercibleStmnt", filter: flt }, ...lf];
 }
 
 /** Ports Plan.hs resolveFilter. */
-function resolveFilter(ctx: ResolverContext, flt: Filter): CoercibleFilter {
+export function resolveFilter(ctx: ResolverContext, flt: Filter): CoercibleFilter {
   return { kind: "CoercibleFilter", field: resolveQueryInputField(ctx, flt.field), opExpr: flt.opExpr };
 }
 
 /** Ports Plan.hs addOrders — note upstream resolves order fields against the
- * unmodified root context, not the target node's table (bug-compatible). */
+ * unmodified root context, not the target node's table (bug-compatible).
+ * Mutations skip this: their root order lives on the MutatePlan. */
 function addOrders(ctx: ResolverContext, apiRequest: ApiRequest, tree: ReadPlanTree): ReadPlanTree {
+  const act = apiRequest.iAction;
+  if (act.kind === "ActDb" && act.db.kind === "ActRelationMut") return tree;
   return [...apiRequest.iQueryParams.qsOrder].reverse().reduce(
     (t, [path, terms]) =>
       updateNode(
@@ -357,7 +368,7 @@ function addOrders(ctx: ResolverContext, apiRequest: ApiRequest, tree: ReadPlanT
 }
 
 /** Ports Plan.hs resolveOrder. */
-function resolveOrder(ctx: ResolverContext, term: OrderTerm): CoercibleOrderTerm {
+export function resolveOrder(ctx: ResolverContext, term: OrderTerm): CoercibleOrderTerm {
   if (term.kind === "OrderRelationTerm") {
     return {
       kind: "CoercibleOrderRelationTerm",
@@ -375,8 +386,10 @@ function resolveOrder(ctx: ResolverContext, term: OrderTerm): CoercibleOrderTerm
   };
 }
 
-/** Ports Plan.hs addRanges. */
+/** Ports Plan.hs addRanges — mutations skip it (mutRange is on the MutatePlan). */
 function addRanges(apiRequest: ApiRequest, tree: ReadPlanTree): ReadPlanTree {
+  const act = apiRequest.iAction;
+  if (act.kind === "ActDb" && act.db.kind === "ActRelationMut") return tree;
   const ranges: [EmbedPath, NonnegRange][] = [...apiRequest.iRange.entries()].map(([k, v]) => pRequestRange(k, v));
   return ranges.reverse().reduce(
     (t, [path, range]) =>
@@ -406,7 +419,7 @@ function addLogicTrees(ctx: ResolverContext, apiRequest: ApiRequest, tree: ReadP
 }
 
 /** Ports Plan.hs resolveLogicTree. */
-function resolveLogicTree(ctx: ResolverContext, tree: LogicTree): CoercibleLogicTree {
+export function resolveLogicTree(ctx: ResolverContext, tree: LogicTree): CoercibleLogicTree {
   if (tree.kind === "Stmnt") return { kind: "CoercibleStmnt", filter: resolveFilter(ctx, tree.filter) };
   return {
     kind: "CoercibleExpr",
@@ -954,10 +967,16 @@ export function negotiateContent(
   }
   if (firstAcceptedPick === null) throw mediaTypeError(accepts.map(toMime));
   const act = apiRequest.iAction;
+  // mutations only aggregate a body for Prefer: return=representation
+  if (act.kind === "ActDb" && act.db.kind === "ActRelationMut") {
+    return [
+      apiRequest.iPreferences.preferRepresentation === "Full" ? firstAcceptedPick[0] : { kind: "NoAgg" },
+      firstAcceptedPick[1],
+    ];
+  }
   // no need for an aggregate on HEAD (PostgREST/postgrest#2849)
   if (act.kind === "ActDb" && act.db.kind === "ActRelationRead" && act.db.headersOnly) {
     return [{ kind: "NoAgg" }, firstAcceptedPick[1]];
   }
-  // TODO(phase 6): mutations return NoAgg unless Prefer: return=representation.
   return firstAcceptedPick;
 }

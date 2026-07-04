@@ -1,25 +1,34 @@
-// Ports src/PostgREST/Query/QueryBuilder.hs (PostgREST v12.2.3) — the read
-// side: readPlanToQuery (incl. the LATERAL-join embedding via getJoins /
+// Ports src/PostgREST/Query/QueryBuilder.hs (PostgREST v12.2.3):
+// readPlanToQuery (incl. the LATERAL-join embedding via getJoins /
 // getJoinSelects), readPlanToCountQuery (incl. the EXISTS semi-joins for
-// inner-joined embeds and null-embed filters) and limitedQuery.
+// inner-joined embeds and null-embed filters), mutatePlanToQuery
+// (INSERT/upsert/PUT, UPDATE incl. the limited pgrst_affected_rows variant,
+// DELETE) and limitedQuery.
 
 import type { Alias } from "../types.ts";
-import type { CoercibleLogicTree, CoercibleSelectField, ReadPlanTree, RelSelectField } from "../plan/types.ts";
+import type { CoercibleLogicTree, CoercibleOrderTerm, CoercibleSelectField, ReadPlanTree, RelSelectField } from "../plan/types.ts";
 import { unknownField } from "../plan/types.ts";
+import type { MutatePlan } from "../plan/mutate-plan.ts";
 import type { QualifiedIdentifier, Relationship } from "../schema-cache/types.ts";
 import { internalError } from "../errors.ts";
+import { allRange, rangeEq } from "../parse/range.ts";
 import {
+  addConfigPgrstInserted,
+  fromJsonBodyF,
   fromQi,
   groupF,
   intercalateSnippet,
   limitOffsetF,
+  mutRangeF,
   orderF,
+  pgFmtColumn,
   pgFmtFilter,
   pgFmtIdent,
   pgFmtJoinCondition,
   pgFmtLogicTree,
   pgFmtSelectItem,
   pgFmtSpreadSelectItem,
+  returningF,
 } from "./fragment.ts";
 import { emptySnippet, snip, type Snippet, sql } from "./builder.ts";
 
@@ -119,6 +128,160 @@ function getJoin(fld: RelSelectField, node: ReadPlanTree): Snippet {
   const subq = snip("SELECT json_agg(", aggAlias, ")::jsonb AS ", aggAlias, " FROM (", subquery, " ) AS ", aggAlias);
   const condition = inner ? snip(aggAlias, " IS NOT NULL") : sql("TRUE");
   return correlatedSubquery(subq, aggAlias, condition);
+}
+
+/** The `cfName . coField` of QueryBuilder.hs mutRangeF's caller — upstream is
+ * a partial record selector that crashes on order-by-relation terms. */
+function coFieldName(ot: CoercibleOrderTerm): string {
+  if (ot.kind !== "CoercibleOrderTerm") {
+    throw internalError("limited mutations cannot order by a related table");
+  }
+  return ot.coField.cfName;
+}
+
+/** QueryBuilder.hs mutatePlanToQuery. */
+export function mutatePlanToQuery(plan: MutatePlan): Snippet {
+  switch (plan.kind) {
+    case "Insert": {
+      const { in_: mainQi, insCols: iCols, insBody: body, onConflict: onConflct, where_: putConditions, returning: returnings, applyDefs: applyDefaults } = plan;
+      const cols = intercalateSnippet(", ", iCols.map((f) => pgFmtIdent(f.cfName)));
+      const mergeDups = onConflct !== null && onConflct[0] === "MergeDuplicates";
+      const pgrstBody: QualifiedIdentifier = { schema: "", name: "pgrst_body" };
+      let onConflictFrag = emptySnippet;
+      if (onConflct !== null && onConflct[1].length > 0) {
+        const [oncDo, oncCols] = onConflct;
+        const doFrag = oncDo === "IgnoreDuplicates" || iCols.length === 0
+          ? sql("DO NOTHING")
+          : snip(
+            "DO UPDATE SET ",
+            intercalateSnippet(", ", iCols.map((f) => snip(pgFmtIdent(f.cfName), " = EXCLUDED.", pgFmtIdent(f.cfName)))),
+            putConditions.length === 0 && !mergeDups ? emptySnippet : snip("WHERE ", addConfigPgrstInserted(false)),
+          );
+        onConflictFrag = snip(" ON CONFLICT(", intercalateSnippet(", ", oncCols.map(pgFmtIdent)), ") ", doFrag);
+      }
+      return snip(
+        "INSERT INTO ",
+        fromQi(mainQi),
+        iCols.length === 0 ? " " : snip("(", cols, ") "),
+        fromJsonBodyF(body, iCols, true, false, applyDefaults),
+        // Only used for PUT
+        putConditions.length === 0 ? emptySnippet : snip(
+          "WHERE ",
+          addConfigPgrstInserted(true),
+          " AND ",
+          intercalateSnippet(" AND ", putConditions.map((t) => pgFmtLogicTree(pgrstBody, t))),
+        ),
+        putConditions.length === 0 && mergeDups ? snip("WHERE ", addConfigPgrstInserted(true)) : emptySnippet,
+        onConflictFrag,
+        " ",
+        returningF(mainQi, returnings),
+      );
+    }
+
+    // An update without a limit is always filtered with a WHERE
+    case "Update": {
+      const { in_: mainQi, updCols: uCols, updBody: body, where_: logicForest, mutRange: range, mutOrder: ordts, returning: returnings, applyDefs: applyDefaults } = plan;
+      const whereLogic = logicForest.length === 0
+        ? emptySnippet
+        : snip(" WHERE ", intercalateSnippet(" AND ", logicForest.map((t) => pgFmtLogicTree(mainQi, t))));
+      const mainTbl = fromQi(mainQi);
+
+      if (uCols.length === 0) {
+        // if there are no columns we cannot do UPDATE table SET {empty}, it'd be invalid syntax
+        // selecting an empty resultset from mainQi gives us the column names to prevent errors when using &select=
+        // the select has to be based on "returnings" to make computed overloaded functions not throw
+        const emptyBodyReturnedColumns = returnings.length === 0
+          ? sql("NULL")
+          : intercalateSnippet(", ", returnings.map((r) => pgFmtColumn({ schema: "", name: mainQi.name }, r)));
+        return snip("SELECT ", emptyBodyReturnedColumns, " FROM ", fromQi(mainQi), " WHERE false");
+      }
+
+      if (rangeEq(range, allRange)) {
+        const nonRangeCols = intercalateSnippet(
+          ", ",
+          uCols.map((f) => snip(pgFmtIdent(f.cfName), " = ", pgFmtColumn({ schema: "", name: "pgrst_body" }, f.cfName))),
+        );
+        return snip(
+          "UPDATE ",
+          mainTbl,
+          " SET ",
+          nonRangeCols,
+          " ",
+          fromJsonBodyF(body, uCols, false, false, applyDefaults),
+          whereLogic,
+          " ",
+          returningF(mainQi, returnings),
+        );
+      }
+
+      const rangeCols = intercalateSnippet(
+        ", ",
+        uCols.map((col) => snip(pgFmtIdent(col.cfName), " = (SELECT ", pgFmtIdent(col.cfName), " FROM pgrst_update_body) ")),
+      );
+      const [whereRangeIdF, rangeIdF] = mutRangeF(mainQi, ordts.map(coFieldName));
+      return snip(
+        "WITH ",
+        "pgrst_update_body AS (",
+        fromJsonBodyF(body, uCols, true, true, applyDefaults),
+        "), ",
+        "pgrst_affected_rows AS (",
+        "SELECT ",
+        rangeIdF,
+        " FROM ",
+        mainTbl,
+        whereLogic,
+        " ",
+        orderF(mainQi, ordts),
+        " ",
+        limitOffsetF(range),
+        ") ",
+        "UPDATE ",
+        mainTbl,
+        " SET ",
+        rangeCols,
+        "FROM pgrst_affected_rows ",
+        "WHERE ",
+        whereRangeIdF,
+        " ",
+        returningF(mainQi, returnings),
+      );
+    }
+
+    case "Delete": {
+      const { in_: mainQi, where_: logicForest, mutRange: range, mutOrder: ordts, returning: returnings } = plan;
+      const whereLogic = logicForest.length === 0
+        ? emptySnippet
+        : snip(" WHERE ", intercalateSnippet(" AND ", logicForest.map((t) => pgFmtLogicTree(mainQi, t))));
+
+      if (rangeEq(range, allRange)) {
+        return snip("DELETE FROM ", fromQi(mainQi), " ", whereLogic, " ", returningF(mainQi, returnings));
+      }
+
+      const [whereRangeIdF, rangeIdF] = mutRangeF(mainQi, ordts.map(coFieldName));
+      return snip(
+        "WITH ",
+        "pgrst_affected_rows AS (",
+        "SELECT ",
+        rangeIdF,
+        " FROM ",
+        fromQi(mainQi),
+        whereLogic,
+        " ",
+        orderF(mainQi, ordts),
+        " ",
+        limitOffsetF(range),
+        ") ",
+        "DELETE FROM ",
+        fromQi(mainQi),
+        " ",
+        "USING pgrst_affected_rows ",
+        "WHERE ",
+        whereRangeIdF,
+        " ",
+        returningF(mainQi, returnings),
+      );
+    }
+  }
 }
 
 /**
