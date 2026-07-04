@@ -196,7 +196,7 @@ across tasks H1-H4 (`.superpowers/sdd/task-h{1,2,3,4}-brief.md`). Every one is c
 per-request/per-turn — never cached at agent-load time — and every one is additive: real eve's
 `defineAgent`/tool-authoring API silently ignores fields it doesn't know about, so an agent
 directory that uses these still loads on real eve, just without the hook's behavior. See COMPAT.md
-divergences 11-15 for the full reconciliation.
+divergences 11-14 for the full reconciliation.
 
 **`resolveModel`** — per-request model/credential resolution (e.g. per-tenant API keys), called
 before every turn/chat request in place of the static `model` string:
@@ -204,8 +204,9 @@ before every turn/chat request in place of the static `model` string:
 ```ts
 export default defineAgent({
   resolveModel: async (ctx) => {
-    const row = await ctx.sql(`SELECT model FROM tenant_models WHERE user_id = $1`, [ctx.userId]);
-    return row.rows[0]?.model ?? "anthropic/claude-sonnet-5"; // string or a ModelSpec
+    const r = await ctx.sql(`SELECT model FROM tenant_models WHERE user_id = $1`, [ctx.userId]);
+    // ctx.sql rows are `unknown` — narrow before use. Return a string or a ModelSpec.
+    return (r.rows[0] as { model?: string } | undefined)?.model ?? "anthropic/claude-sonnet-5";
   },
 });
 ```
@@ -219,8 +220,10 @@ to its own model resolution — keep `model` set too if you want equivalent beha
 ```ts
 export default defineAgent({
   buildInstructions: async (base, ctx) => {
-    const t = await ctx.sql(`SELECT name FROM tenants WHERE id = $1`, [ctx.metadata?.tenantId]);
-    return `${base}\n\nYou are assisting ${t.rows[0]?.name ?? "a guest"}.`;
+    // ctx.metadata is client-supplied and typed `unknown` — narrow before use.
+    const tenantId = (ctx.metadata as { tenantId?: string } | undefined)?.tenantId;
+    const t = await ctx.sql(`SELECT name FROM tenants WHERE id = $1`, [tenantId]);
+    return `${base}\n\nYou are assisting ${(t.rows[0] as { name?: string } | undefined)?.name ?? "a guest"}.`;
   },
 });
 ```
@@ -234,7 +237,8 @@ output + the built-in `skill`/`agent` tools); returning `false` drops the tool:
 ```ts
 export default defineAgent({
   filterTools: (name, _def, ctx) =>
-    !(ctx.metadata?.mode === "plan" && ["skill", "agent"].includes(name)),
+    !((ctx.metadata as { mode?: string } | undefined)?.mode === "plan" &&
+      ["skill", "agent"].includes(name)),
 });
 ```
 
@@ -251,8 +255,9 @@ collision; a throwing/rejecting provider is logged and the turn continues with s
 import { defineToolProvider } from "eve/tools";
 
 export default defineToolProvider(async (ctx) => ({
-  search: { description: "Search the docs", inputSchema: { type: "object", properties: {} },
-    execute: (input) => fetchFromMcp(ctx.bearerToken, input) },
+  // e.g. built from an MCP server's tool listing, authenticated as the caller
+  search: { description: "Search the docs", inputSchema: { type: "object", properties: { q: { type: "string" } } },
+    execute: async (input) => ({ results: [], query: input, authed: !!ctx.bearerToken }) },
 }));
 ```
 
