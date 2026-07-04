@@ -41,8 +41,15 @@ services:
       SWARM_CONFIG: >-
         {"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:7946","extensions":[{"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server","event_worker_path":"/usr/src/core/event","tls_port":443,"tls_cert_path":"/var/lib/postgresql/data/server.crt","tls_key_path":"/var/lib/postgresql/data/server.key"}}]}}}
       SWARM_NODE: local
-      POSTGREST_HOST: postgrest
-      POSTGREST_PORT: "3000"
+      # REST is served in-process by the @trex/postgrest plugin, which
+      # consumes these PGRST_* values. This stack has no secrets/derived.env,
+      # so PGRST_JWT_SECRET is the same dev secret as BETTER_AUTH_SECRET.
+      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: dev-secret-at-least-32-characters-long!!
+      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
     volumes:
       - pg-trex-data:/var/lib/postgresql/data
     #   - ./core/schema:/usr/src/core/schema
@@ -59,20 +66,6 @@ services:
     shm_size: 256mb
     stop_grace_period: 10s
 
-
-  postgrest:
-    image: postgrest/postgrest:v12.2.3
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
-      PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: anon
-      PGRST_JWT_SECRET: dev-secret-at-least-32-characters-long!!
-      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
-      PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
 
   realtime:
     image: supabase/realtime:v2.93.3

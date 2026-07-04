@@ -184,8 +184,14 @@ services:
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
       PLUGINS_DEV_PATH: /usr/src/plugins-dev
-      POSTGREST_HOST: postgrest
-      POSTGREST_PORT: "3000"
+      # REST is served in-process by the @trex/postgrest plugin, which
+      # consumes these PGRST_* values; PGRST_JWT_SECRET comes from
+      # ./secrets/derived.env (see env_file above).
+      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
       # Register devx and prometheus in the web shell's top nav (consumed by plugins/web).
       TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"DevX","plugin":"devx"},{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
     healthcheck:
@@ -198,28 +204,3 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
-
-  postgrest:
-    image: postgrest/postgrest:v12.2.3
-    # The `authenticator` role is created by trex's schema migrations, not by
-    # postgres or trex-init. Gate on trex healthy (migrations done) and restart
-    # as a safety net — postgrest exits 1 if the role isn't there yet.
-    restart: unless-stopped
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      trex:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
-      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
-      PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: anon
-      # PGRST_JWT_SECRET comes from ./secrets/derived.env (see env_file above).
-      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
-      PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
