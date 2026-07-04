@@ -68,6 +68,7 @@ services:
       - ./plugins/notebook/dist:/usr/src/plugins-dev/notebook/dist
       - ./plugins/prometheus/dist:/usr/src/plugins-dev/prometheus/dist
       - ./plugins/storage:/usr/src/plugins-dev/storage
+      - ./plugins/postgrest:/usr/src/plugins-dev/postgrest
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
     depends_on:
@@ -92,26 +93,13 @@ services:
       SWARM_CONFIG: >-
         {"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[{"name":"trexas","config":{"host":"0.0.0.0","port":8001,"main_service_path":"/usr/src/core/server","event_worker_path":"/usr/src/core/event","tls_port":8000,"tls_cert_path":"/usr/src/server.crt","tls_key_path":"/usr/src/server.key"}},{"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}]}}}
       SWARM_NODE: local
-      POSTGREST_HOST: postgrest
-      POSTGREST_PORT: "3000"
-      # Register prometheus in the web shell's top nav (consumed by plugins/web).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
-
-  postgrest:
-    image: postgrest/postgrest:v12.2.3
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
+      # REST is served in-process by the @trex/postgrest plugin, which
+      # consumes these PGRST_* values; PGRST_JWT_SECRET comes from
+      # ./secrets/derived.env (see env_file above).
       PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
       PGRST_DB_SCHEMAS: public
       PGRST_DB_ANON_ROLE: anon
-      # PGRST_JWT_SECRET comes from ./secrets/derived.env (see env_file above).
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
-      PGRST_DB_USE_LEGACY_GUCS: "false"
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
+      # Register prometheus in the web shell's top nav (consumed by plugins/web).
+      TREX_WEB_NAV_EXTRA: '[{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'

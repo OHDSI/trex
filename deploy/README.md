@@ -55,8 +55,7 @@ pulumi stack ls
 
 ```
 Internet → ALB (HTTPS 443) → ECS Fargate Task
-                                ├── trex container (port 8000)
-                                └── postgrest sidecar (port 3000)
+                                └── trex container (port 8000)
                               RDS PostgreSQL 16
                               S3 (storage plugin)
                               EFS (DuckDB workspace persistence)
@@ -66,8 +65,7 @@ Internet → ALB (HTTPS 443) → ECS Fargate Task
 
 ```
 Internet → Container Apps Ingress (HTTPS 443) → Container App
-                                                    ├── trex container (port 8000)
-                                                    └── postgrest sidecar (port 3000)
+                                                    └── trex container (port 8000)
                                                   PostgreSQL Flexible Server
                                                   Blob Storage (S3-compatible)
 ```
