@@ -25,6 +25,14 @@ Deno.test("filterTools: ask mode drops modifiesState tools, keeps read-only ones
   assertEquals(filterTools("Read", READ_ONLY_DEF, ctx), true);
 });
 
+Deno.test("filterTools: ask mode drops the built-in 'agent' tool (legacy-parity: Agent is modifiesState:true)", () => {
+  const ctx = fakeHookCtx({ mode: "ask" });
+  assert(!(filterTools("agent", READ_ONLY_DEF, ctx)));
+  // skill carries no modifiesState and isn't name-excluded — legacy's own
+  // Skill tool isn't modifiesState either, so no asymmetry to close there.
+  assertEquals(filterTools("skill", READ_ONLY_DEF, ctx), true);
+});
+
 Deno.test("filterTools: plan mode only allows PLAN_MODE_TOOLS", () => {
   const ctx = fakeHookCtx({ mode: "plan" });
   for (const name of ["Read", "Glob", "Grep", "CodeSearch", "GitStatus", "GitLog", "GitBranchList", "WritePlan", "ExitPlanMode", "TaskGet", "TaskList", "CronList", "ToolSearch"]) {

@@ -128,8 +128,12 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 
   // Ask mode drops state-mutating tools — modifiesState is a devx-only
   // passthrough field carried by lib/context.ts's wrap(), not part of eve's
-  // ToolDef shape, hence the cast.
-  if (mode === "ask" && (def as { modifiesState?: boolean } | undefined)?.modifiesState) return false;
+  // ToolDef shape, hence the cast. The built-in "agent" tool carries no
+  // modifiesState field (it's a generic eve built-in, not a devx-authored
+  // ToolDef) but legacy's own Agent tool IS modifiesState:true and gets
+  // dropped in ask mode (spawn_agent.ts:33) — name-check it explicitly here
+  // to close that asymmetry (documented in task-v4-report.md).
+  if (mode === "ask" && (name === "agent" || (def as { modifiesState?: boolean } | undefined)?.modifiesState)) return false;
 
   if (mode === "plan" && !PLAN_MODE_TOOLS.has(name)) return false;
 

@@ -150,8 +150,13 @@ for (const { legacy, ported, label } of MODES) {
   });
 }
 
-Deno.test("parity smoke (a): built-in skill/agent tools appear agent-side outside build/plan mode", async () => {
-  assert((await agentSideNames("ask")).has("agent"), "ask mode should keep the built-in agent tool");
+Deno.test("parity smoke (a): built-in skill/agent tools appear agent-side outside build/plan/ask mode", async () => {
+  // ask mode: "agent" is now explicitly name-excluded by filterTools (see
+  // agent.ts's ride-along fix below) to close the asymmetry the old
+  // "documented divergence" test used to pin down — see the parity test
+  // right after this one. "skill" has no legacy modifiesState counterpart,
+  // so it still survives ask mode.
+  assert(!(await agentSideNames("ask")).has("agent"), "ask mode now drops the built-in agent tool (legacy parity fix)");
   assert((await agentSideNames("ask")).has("skill"), "ask mode should keep the built-in skill tool");
   assert((await agentSideNames(undefined)).has("agent"), "no-mode should keep the built-in agent tool");
   assert((await agentSideNames(undefined)).has("skill"), "no-mode should keep the built-in skill tool");
@@ -161,14 +166,15 @@ Deno.test("parity smoke (a): built-in skill/agent tools appear agent-side outsid
   assert(!(await agentSideNames("build")).has("skill"), "build mode drops everything, built-ins included");
 });
 
-Deno.test("parity smoke (a): documented divergence — legacy drops 'Agent' in ask mode (modifiesState:true) but the eve built-in 'agent' tool carries no modifiesState flag and survives ask-mode filtering", () => {
-  // This is the one asymmetry the exclusion table papers over rather than
-  // silently absorbing: registry.ts's buildToolSet drops any modifiesState
-  // tool in ask mode, and the legacy Agent tool is modifiesState:true
-  // (functions/tools/spawn_agent.ts:33). The eve built-in `agent` tool has
-  // no such flag (it's a generic agent-framework built-in, not a devx-authored
-  // ToolDef with a modifiesState passthrough) — see toolset.ts's
-  // BUILTIN_AGENT_DEF, which filterTools sees, having no modifiesState field.
+Deno.test("parity smoke (a): ask-mode 'Agent'/'agent' asymmetry closed — both sides drop it (task-u1 ride-along)", () => {
+  // Previously documented as a divergence (V4 report): registry.ts's
+  // buildToolSet drops any modifiesState tool in ask mode, and the legacy
+  // Agent tool is modifiesState:true (functions/tools/spawn_agent.ts:33),
+  // while the eve built-in `agent` tool carries no modifiesState field (it's
+  // a generic agent-framework built-in, not a devx-authored ToolDef) and
+  // used to survive ask-mode filtering. agent.ts's filterTools now
+  // name-excludes "agent" in ask mode explicitly, closing the gap — this
+  // test pins down that BOTH sides drop their respective tool in ask mode.
   const legacyAsk = legacySideNames("ask");
   assert(!legacyAsk.has("Agent"), "legacy Agent tool should be dropped by ask-mode's modifiesState filter");
 });
