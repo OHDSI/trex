@@ -14,7 +14,7 @@ services. The repository ships several compose files for different scenarios.
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus Studio and Realtime. The REST API is served in-process by the `@trex/postgrest` plugin; the legacy `postgrest` sidecar sits behind the `postgrest-sidecar` profile. Uses the published image. |
+| `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus Studio and Realtime. The REST API is served in-process by the `@trex/postgrest` plugin. Uses the published image. |
 | `docker-compose.dev.yml` | Development overlay. Collapses to a single-node `trex` service and live-mounts `core/server`, `core/event`, `functions`, and the prebuilt `plugins/web/dist`, `plugins/notebook/dist`, `plugins/storage`, and `plugins/postgrest` directories so changes take effect without rebuilding. |
 | `docker-compose.dx.yml` | Standalone devx stack: a single-node trex with the devx plugin and `devx_ext` extension baked into a dedicated image (`ghcr.io/ohdsi/trexsql-dx:latest`). Runs alongside the default stack (ports offset +1000 on HTTP / +20 on pg). |
 | `docker-compose.pg-trex.yml` | Replaces vanilla Postgres with the `pg-trex` image (Postgres + the Trex extensions co-located in one process). Uses gossip port `7946`. |
@@ -57,13 +57,7 @@ This starts:
 
 The PostgREST-compatible REST API at `${BASE_PATH}/rest/v1/*` is served
 **in-process** on `trex-server` by the `@trex/postgrest` plugin (configured via
-the `PGRST_*` environment variables on the server container). The legacy
-`postgrest` sidecar container is kept behind the `postgrest-sidecar` compose
-profile for fallback:
-
-```bash
-POSTGREST_MODE=sidecar docker compose --profile postgrest-sidecar up -d
-```
+the `PGRST_*` environment variables on the server container).
 
 The two nodes auto-converge: gossip seeds are derived from the `nodes` map in
 `SWARM_CONFIG`. `trex-data` advertises Flight under its gossip host so the server
@@ -138,21 +132,8 @@ services:
       <<: *swarm-config
       SWARM_NODE: server
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
-      # Consumed by the in-process @trex/postgrest plugin (POSTGREST_MODE
-      # defaults to "plugin"); PGRST_JWT_SECRET comes from derived.env.
-      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
-      PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: anon
-
-  # Legacy sidecar — only started with --profile postgrest-sidecar
-  # (and POSTGREST_MODE=sidecar on trex-server).
-  postgrest:
-    profiles: ["postgrest-sidecar"]
-    image: postgrest/postgrest:v12.2.3
-    env_file:
-      - path: ./secrets/derived.env   # supplies PGRST_JWT_SECRET
-        required: false
-    environment:
+      # Consumed by the in-process @trex/postgrest plugin;
+      # PGRST_JWT_SECRET comes from derived.env.
       PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
       PGRST_DB_SCHEMAS: public
       PGRST_DB_ANON_ROLE: anon

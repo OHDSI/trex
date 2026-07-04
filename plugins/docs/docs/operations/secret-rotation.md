@@ -13,7 +13,7 @@ with a hardcoded salt (`"trex/v1"`) and a distinct `info` label per purpose:
 | Subkey label                  | Used by                                      |
 |-------------------------------|----------------------------------------------|
 | `trex.better-auth.session.v1` | Better Auth session signing                  |
-| `trex.jwt.hs256.v1`           | All HS256 JWTs (access tokens, anon, service) — also exported as `PGRST_JWT_SECRET` (consumed by the in-process `@trex/postgrest` REST plugin, the storage plugin, and the legacy postgrest sidecar when enabled), Studio (`AUTH_JWT_SECRET`), and Realtime (`API_JWT_SECRET` / `METRICS_JWT_SECRET`) so they can verify trex-issued tokens |
+| `trex.jwt.hs256.v1`           | All HS256 JWTs (access tokens, anon, service) — also exported as `PGRST_JWT_SECRET` (consumed by the in-process `@trex/postgrest` REST plugin and the storage plugin), Studio (`AUTH_JWT_SECRET`), and Realtime (`API_JWT_SECRET` / `METRICS_JWT_SECRET`) so they can verify trex-issued tokens |
 | `trex.pgmeta.aes.v1`          | Studio / pg-meta `PG_META_CRYPTO_KEY`        |
 | `trex.realtime.internal.v1`   | Realtime-internal material: first 16 chars feed `DB_ENC_KEY` (AES-128), concatenated with the `dek.wrap` subkey to form Realtime's 64-char `SECRET_KEY_BASE` |
 | `trex.dek.wrap.v1`            | KEK that wraps the Data Encryption Key (also contributes entropy to Realtime's `SECRET_KEY_BASE`) |
@@ -57,8 +57,7 @@ the old key but does NOT require re-encrypting stored secrets.
    subkeys change.
 4. Restart every service that reads `derived.env` (the trex server —
    whose in-process `@trex/postgrest` and storage plugins consume
-   `PGRST_JWT_SECRET` — plus studio, pg-meta, realtime, and the legacy
-   postgrest sidecar if the `postgrest-sidecar` profile is in use) so
+   `PGRST_JWT_SECRET` — plus studio, pg-meta, and realtime) so
    they pick up the new value. Skipping this step leaves them verifying
    with the old key, and every trex-issued JWT will be rejected by them
    until restart.

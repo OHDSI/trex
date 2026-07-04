@@ -77,16 +77,11 @@ over env vars. Apple is supported via DB-driven config only.
 
 ## REST API (`${BASE_PATH}/rest/v1/*`)
 
-| Variable | Description |
-|----------|-------------|
-| `POSTGREST_MODE` | `plugin` (default) serves the PostgREST-compatible REST API in-process via the `@trex/postgrest` plugin; `sidecar` reverse-proxies to a legacy external PostgREST container. |
-| `POSTGREST_HOST` | Sidecar mode only: internal hostname of the PostgREST container. |
-| `POSTGREST_PORT` | Sidecar mode only: PostgREST port (typically `3000`). |
-
-In plugin mode the server container consumes the standard `PGRST_*` variables
-(`PGRST_DB_URI`, `PGRST_DB_SCHEMAS`, `PGRST_DB_ANON_ROLE`, `PGRST_JWT_SECRET`,
-`PGRST_DB_PRE_REQUEST`, `PGRST_DB_MAX_ROWS`,
-`PGRST_OPENAPI_SERVER_PROXY_URI`, ...) that previously configured the sidecar;
+The PostgREST-compatible REST API is served in-process via the
+`@trex/postgrest` plugin. The server container consumes the standard `PGRST_*`
+variables (`PGRST_DB_URI`, `PGRST_DB_SCHEMAS`, `PGRST_DB_ANON_ROLE`,
+`PGRST_JWT_SECRET`, `PGRST_DB_PRE_REQUEST`, `PGRST_DB_MAX_ROWS`,
+`PGRST_OPENAPI_SERVER_PROXY_URI`, ...);
 `PGRST_JWT_SECRET` is sourced from `./secrets/derived.env`.
 
 ## Cluster (`SWARM_CONFIG`)

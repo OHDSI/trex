@@ -148,19 +148,14 @@ services:
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
       PLUGINS_DEV_PATH: /usr/src/plugins-dev
-      # REST is served in-process by the @trex/postgrest plugin (POSTGREST_MODE
-      # defaults to "plugin"). These PGRST_* values mirror what the legacy
-      # postgrest sidecar consumed; PGRST_JWT_SECRET comes from
+      # REST is served in-process by the @trex/postgrest plugin, which
+      # consumes these PGRST_* values; PGRST_JWT_SECRET comes from
       # ./secrets/derived.env (see env_file above).
       PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
       PGRST_DB_SCHEMAS: public
       PGRST_DB_ANON_ROLE: anon
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
-      # Only used when POSTGREST_MODE=sidecar (legacy proxy to the postgrest
-      # container below).
-      POSTGREST_HOST: postgrest
-      POSTGREST_PORT: "3000"
       STUDIO_INTERNAL_URL: http://studio:3000
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
     healthcheck:
@@ -176,38 +171,6 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
-
-  # Legacy sidecar — REST is served in-process by the @trex/postgrest plugin
-  # now. Only needed with POSTGREST_MODE=sidecar on trex-server:
-  #   POSTGREST_MODE=sidecar docker compose --profile postgrest-sidecar up
-  postgrest:
-    profiles: ["postgrest-sidecar"]
-    image: postgrest/postgrest:v12.2.3
-    # postgrest connects as the `authenticator` role, which is created by
-    # trex-data's schema migrations — not by postgres or trex-init. Waiting only
-    # on postgres raced ahead of the migrations and crashed with "password
-    # authentication failed for user authenticator" (postgrest has no internal
-    # retry budget for a missing role, so it exited 1). Gate on trex-data being
-    # healthy (migrations done) and restart as a safety net for any remaining race.
-    restart: unless-stopped
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      trex-data:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
-      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
-      PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: anon
-      # PGRST_JWT_SECRET comes from ./secrets/derived.env (see env_file above).
-      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
-      PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
 
   # Studio sidecar — internal-only; trex proxies /plugins/trex/studio/** to it.
   # Runs from the published image (the trex-specific entrypoint + key-fetch
