@@ -288,6 +288,105 @@ Deno.test("a tool that never calls ctx.emit produces no tool.event", async () =>
   assert(!events.some((e) => e.type === "tool.event"));
 });
 
+// H4 (sticky tool-consent decisions — task-h4-brief.md): authoredTool's
+// needsApproval branch checks store.getToolConsent(userId, plugin, agent,
+// tool) BEFORE creating a one-shot approval request.
+Deno.test("needsApproval tool with an 'always' consent on file executes immediately, no approval request", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.guarded = {
+    description: "guarded", inputSchema: { type: "object", properties: {} },
+    needsApproval: true,
+    execute: () => Promise.resolve({ ran: true }),
+  };
+  const { buildSdkTools } = await import("./toolset.ts");
+  const consents = new Map([["user-1|toy-agent|toy|guarded", "always"]]);
+  const store = {
+    getToolConsent: (userId: string, plugin: string, agentName: string, tool: string) =>
+      Promise.resolve(consents.get(`${userId}|${plugin}|${agentName}|${tool}`) ?? null),
+    // Any call into the one-shot approval flow is a bug for this test.
+    createApproval: () => Promise.reject(new Error("should not create an approval request")),
+  };
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, userId: "user-1", plugin: "toy-agent", agentName: "toy",
+    // deno-lint-ignore no-explicit-any
+    store: store as any,
+  });
+  const result = await (tools.guarded as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(result, { ran: true });
+});
+
+Deno.test("needsApproval tool with a 'never' consent on file is denied immediately, no approval request", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.guarded = {
+    description: "guarded", inputSchema: { type: "object", properties: {} },
+    needsApproval: true,
+    execute: () => Promise.resolve({ ran: true }),
+  };
+  const { buildSdkTools } = await import("./toolset.ts");
+  const store = {
+    getToolConsent: () => Promise.resolve("never" as const),
+    createApproval: () => Promise.reject(new Error("should not create an approval request")),
+  };
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, userId: "user-1", plugin: "toy-agent", agentName: "toy",
+    // deno-lint-ignore no-explicit-any
+    store: store as any,
+  });
+  const result = await (tools.guarded as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(result, { error: "denied by user" });
+});
+
+Deno.test("needsApproval tool with no consent on file falls through to the one-shot approval flow", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.guarded = {
+    description: "guarded", inputSchema: { type: "object", properties: {} },
+    needsApproval: true,
+    execute: () => Promise.resolve({ ran: true }),
+  };
+  const { buildSdkTools } = await import("./toolset.ts");
+  let created = false;
+  const store = {
+    getToolConsent: () => Promise.resolve(null),
+    createApproval: () => {
+      created = true;
+      return Promise.resolve("r-1");
+    },
+    getApprovalDecision: () => Promise.resolve("approve"),
+  };
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", turnId: "t-1", depth: 0, userId: "user-1", plugin: "toy-agent", agentName: "toy",
+    emit: () => {}, approvalPollMs: 5,
+    // deno-lint-ignore no-explicit-any
+    store: store as any,
+  });
+  const result = await (tools.guarded as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assert(created, "expected createApproval to be called");
+  assertEquals(result, { ran: true });
+});
+
+Deno.test("needsApproval tool with no userId skips the sticky lookup entirely (anonymous session)", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.guarded = {
+    description: "guarded", inputSchema: { type: "object", properties: {} },
+    needsApproval: true,
+    execute: () => Promise.resolve({ ran: true }),
+  };
+  const { buildSdkTools } = await import("./toolset.ts");
+  const store = {
+    getToolConsent: () => Promise.reject(new Error("should not be called without a userId")),
+    createApproval: () => Promise.resolve("r-1"),
+    getApprovalDecision: () => Promise.resolve("approve"),
+  };
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", turnId: "t-1", depth: 0, plugin: "toy-agent", agentName: "toy",
+    emit: () => {}, approvalPollMs: 5,
+    // deno-lint-ignore no-explicit-any
+    store: store as any,
+  });
+  const result = await (tools.guarded as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(result, { ran: true });
+});
+
 Deno.test("built-in agent tool guards subagent lookup against prototype-polluting names", async () => {
   // "__proto__"/"constructor" resolve through the prototype chain on a
   // plain `subagents[name]` lookup (returning Object.prototype/Function

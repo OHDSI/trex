@@ -106,6 +106,38 @@ export function createStore(query: QueryFn) {
       const r = await query(`SELECT decision FROM agents.approvals WHERE request_id = $1`, [requestId]);
       return r.rows[0]?.decision ?? null;
     },
+
+    // H4: looks up the tool an approval request was raised for, so a sticky
+    // (always/never) decision on that request can be recorded against the
+    // right (user, plugin, agent, tool) key — see handler.ts's approval
+    // routes, which call this only after resolveApproval succeeds.
+    async getApprovalTool(requestId: string): Promise<string | null> {
+      const r = await query(`SELECT tool FROM agents.approvals WHERE request_id = $1`, [requestId]);
+      return r.rows[0]?.tool ?? null;
+    },
+
+    // H4: sticky tool-consent decisions (task-h4-brief.md). Checked by
+    // toolset.ts's authoredTool BEFORE creating a one-shot approval request
+    // — "always" executes immediately, "never" denies immediately, and a
+    // miss (null) falls through to the existing per-call approval flow.
+    async getToolConsent(userId: string, plugin: string, agent: string, tool: string): Promise<"always" | "never" | null> {
+      const r = await query(
+        `SELECT consent FROM agents.tool_consents WHERE user_id = $1 AND plugin = $2 AND agent = $3 AND tool = $4`,
+        [userId, plugin, agent, tool],
+      );
+      return (r.rows[0]?.consent as "always" | "never" | undefined) ?? null;
+    },
+
+    // Upserts on the table's (user_id, plugin, agent, tool) primary key —
+    // a user changing their mind (always -> never or vice versa) replaces
+    // the prior verb rather than erroring or accumulating rows.
+    async setToolConsent(userId: string, plugin: string, agent: string, tool: string, consent: "always" | "never"): Promise<void> {
+      await query(
+        `INSERT INTO agents.tool_consents (user_id, plugin, agent, tool, consent) VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (user_id, plugin, agent, tool) DO UPDATE SET consent = EXCLUDED.consent`,
+        [userId, plugin, agent, tool, consent],
+      );
+    },
   };
 }
 

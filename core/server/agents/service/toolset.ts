@@ -38,6 +38,17 @@ export interface ToolBuildCtx {
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
   depth?: number;
+  // H4 (sticky tool-consent decisions — task-h4-brief.md): the key
+  // authoredTool's needsApproval branch looks up store.getToolConsent
+  // under, alongside userId and the tool's own name. Set by handler.ts from
+  // its Deps {plugin, agentName} at every buildSdkTools call site (both the
+  // session-runner path, via RunTurnOpts's spread into this ctx, and
+  // /chat's direct buildSdkTools call). Optional so existing callers that
+  // never touch needsApproval tools (or don't care about stickiness) keep
+  // working — the sticky lookup is skipped whenever either is missing, same
+  // as when userId itself is missing (anonymous session).
+  plugin?: string;
+  agentName?: string;
   // H2: threaded through so buildSdkTools can call agent.toolProvider and
   // agent.config.filterTools with the same per-request context
   // resolveModel/buildInstructions already get (see handler.ts's
@@ -85,24 +96,38 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx): any {
     inputSchema: schema,
     execute: async (input: unknown) => {
       if (def.needsApproval) {
-        const { store, turnId, emit } = ctx;
-        if (!store || !turnId || !emit) {
-          return { error: "approval required — use the session API" };
+        const { store, turnId, emit, userId, plugin, agentName } = ctx;
+        // H4: a sticky decision short-circuits the one-shot flow entirely.
+        // Only consulted when there's an identity to key it on — an
+        // anonymous session (no userId, e.g. no x-user-id header) has no
+        // consent to look up and always goes through the per-call approval
+        // flow below, same as before H4.
+        let consent: "always" | "never" | null = null;
+        if (store && userId && plugin && agentName) {
+          consent = await store.getToolConsent(userId, plugin, agentName, name);
         }
-        const requestId = await store.createApproval(ctx.sessionId, turnId, name, input);
-        emit({
-          type: "input.requested",
-          data: { turnId, requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName: name, input } }] },
-        });
-        const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 300_000);
-        let decision: string | null = null;
-        while (Date.now() < deadline) {
-          decision = await store.getApprovalDecision(requestId);
-          if (decision) break;
-          await new Promise((r) => setTimeout(r, ctx.approvalPollMs ?? 500));
+        if (consent === "never") {
+          return { error: "denied by user" };
         }
-        if (decision !== "approve") {
-          return { error: decision === "deny" ? "denied by user" : "approval timed out" };
+        if (consent !== "always") {
+          if (!store || !turnId || !emit) {
+            return { error: "approval required — use the session API" };
+          }
+          const requestId = await store.createApproval(ctx.sessionId, turnId, name, input);
+          emit({
+            type: "input.requested",
+            data: { turnId, requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName: name, input } }] },
+          });
+          const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 300_000);
+          let decision: string | null = null;
+          while (Date.now() < deadline) {
+            decision = await store.getApprovalDecision(requestId);
+            if (decision) break;
+            await new Promise((r) => setTimeout(r, ctx.approvalPollMs ?? 500));
+          }
+          if (decision !== "approve") {
+            return { error: decision === "deny" ? "denied by user" : "approval timed out" };
+          }
         }
       }
       return await def.execute!(input, {

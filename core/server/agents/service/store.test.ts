@@ -115,3 +115,40 @@ Deno.test("resolveApproval is session-scoped: a requestId for another session re
   const store = createStore(fn as never);
   assertEquals(await store.resolveApproval("r-1", "approve", "wrong-session"), false);
 });
+
+Deno.test("getApprovalTool returns the tool name for a requestId", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ tool: "dangerous_tool" }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getApprovalTool("r-1"), "dangerous_tool");
+  assert(calls[0].sql.includes("FROM agents.approvals"));
+  assertEquals(calls[0].params, ["r-1"]);
+});
+
+Deno.test("getApprovalTool returns null when the request is unknown", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getApprovalTool("nope"), null);
+});
+
+Deno.test("getToolConsent returns the stored consent verb", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ consent: "always" }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getToolConsent("user-1", "toy-agent", "toy", "guarded"), "always");
+  assert(calls[0].sql.includes("FROM agents.tool_consents"));
+  assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded"]);
+});
+
+Deno.test("getToolConsent returns null when no consent is on file", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getToolConsent("user-1", "toy-agent", "toy", "guarded"), null);
+});
+
+Deno.test("setToolConsent upserts on the (user, plugin, agent, tool) key", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.setToolConsent("user-1", "toy-agent", "toy", "guarded", "never");
+  assert(calls[0].sql.includes("INSERT INTO agents.tool_consents"));
+  assert(calls[0].sql.includes("ON CONFLICT"));
+  assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded", "never"]);
+});

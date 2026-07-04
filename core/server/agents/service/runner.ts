@@ -23,6 +23,12 @@ interface RunTurnOpts {
   model?: any;
   bearerToken?: string;
   userId?: string;
+  // H4: threaded through to ToolBuildCtx via this function's `{ ...opts,
+  // model, toolEmit }` spread into buildSdkTools below — see toolset.ts's
+  // ToolBuildCtx.plugin/agentName. Set by handler.ts's startTurn from its
+  // Deps {plugin, agentName}.
+  plugin?: string;
+  agentName?: string;
   // Per-request context for the agent's resolveModel/buildInstructions
   // hooks (H1). Optional so existing callers/tests that never touch hooks
   // (no agent.config.resolveModel/buildInstructions) keep working unchanged

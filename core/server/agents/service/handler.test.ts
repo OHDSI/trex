@@ -17,7 +17,10 @@ function inMemoryDb() {
   const sessions = new Map<string, { status: string }>();
   const turns: Array<{ id: string; session_id: string; seq: number; status: string; error: string | null }> = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
-  const approvals = new Map<string, { decision: string | null; sessionId: string }>();
+  const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string }>();
+  // H4: (userId, plugin, agent, tool) -> consent, keyed the same way as the
+  // real table's primary key.
+  const toolConsents = new Map<string, "always" | "never">();
   // Every call the store issues, in order — lets tests assert on the exact
   // params a route handed to the store (e.g. created_by, session-scoping)
   // without needing a real Postgres.
@@ -57,7 +60,7 @@ function inMemoryDb() {
     }
     if (sql.includes("INSERT INTO agents.approvals")) {
       const id = `r-${++n}`;
-      approvals.set(id, { decision: null, sessionId: params[0] as string });
+      approvals.set(id, { decision: null, sessionId: params[0] as string, tool: params[2] as string });
       return Promise.resolve({ rows: [{ request_id: id }] });
     }
     if (sql.includes("UPDATE agents.approvals")) {
@@ -71,6 +74,20 @@ function inMemoryDb() {
     if (sql.includes("SELECT decision")) {
       const a = approvals.get(params[0] as string);
       return Promise.resolve({ rows: a ? [{ decision: a.decision }] : [] });
+    }
+    if (sql.includes("SELECT tool FROM agents.approvals")) {
+      const a = approvals.get(params[0] as string);
+      return Promise.resolve({ rows: a ? [{ tool: a.tool }] : [] });
+    }
+    if (sql.includes("SELECT consent FROM agents.tool_consents")) {
+      const [userId, plugin, agentName, tool] = params as string[];
+      const consent = toolConsents.get(`${userId}|${plugin}|${agentName}|${tool}`);
+      return Promise.resolve({ rows: consent ? [{ consent }] : [] });
+    }
+    if (sql.includes("INSERT INTO agents.tool_consents")) {
+      const [userId, plugin, agentName, tool, consent] = params as string[];
+      toolConsents.set(`${userId}|${plugin}|${agentName}|${tool}`, consent as "always" | "never");
+      return Promise.resolve({ rows: [] });
     }
     if (sql.includes("FROM agents.steps")) {
       const sid = params[0] as string;
@@ -87,7 +104,7 @@ function inMemoryDb() {
     }
     return Promise.resolve({ rows: [] });
   };
-  return { query, turns, steps, approvals, calls };
+  return { query, turns, steps, approvals, toolConsents, calls };
 }
 
 // See runner.test.ts's FINISH/sequencedModel comment: ai@6's raw doStream
@@ -460,6 +477,177 @@ Deno.test("POST /approval 404s a requestId that belongs to a different session",
   assertEquals(ok.status, 200);
   await until(() => settled(db), 10_000);
   assertEquals(db.turns[0].status, "completed");
+});
+
+// H4 (sticky tool-consent decisions — task-h4-brief.md): POST /approval's
+// "always"/"never" decisions resolve the pending request (as approve/deny)
+// AND upsert agents.tool_consents for the authenticated user.
+Deno.test("POST /approval with decision 'always' resolves as approve and upserts a sticky consent", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const ok = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ requestId, decision: "always" }),
+  }));
+  assertEquals(ok.status, 200);
+  assertEquals(await ok.json(), { resolved: true });
+  assertEquals(db.approvals.get(requestId)!.decision, "approve");
+  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "always");
+
+  await until(() => settled(db), 10_000);
+  assertEquals(db.turns[0].status, "completed");
+});
+
+Deno.test("POST /approval with decision 'never' resolves as deny and upserts a sticky consent", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const ok = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ requestId, decision: "never" }),
+  }));
+  assertEquals(ok.status, 200);
+  assertEquals(db.approvals.get(requestId)!.decision, "deny");
+  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "never");
+
+  // Drain the fire-and-forget turn (denied tool call still lets the turn
+  // finish, per the pre-H4 deny path) — see the `until` helper's own comment
+  // on why leaving this pending leaks a timer into the next test.
+  await until(() => settled(db), 10_000);
+});
+
+Deno.test("POST /approval rejects an 'always'/'never' decision without an authenticated user (400)", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" }, // no x-user-id
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const rejected = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId, decision: "always" }),
+  }));
+  assertEquals(rejected.status, 400);
+  // Still pending — the 400 must not have resolved it as a side effect.
+  assertEquals(db.approvals.get(requestId)!.decision, null);
+  assertEquals(db.toolConsents.size, 0);
+
+  // Drain the fire-and-forget turn with a plain (non-sticky) decision, which
+  // needs no authenticated user — otherwise the guarded tool's poll loop
+  // leaks a timer past this test.
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId, decision: "deny" }),
+  }));
+  await until(() => settled(db), 10_000);
+});
+
+// Same sticky handling on the inputResponses follow-up path (POST
+// /eve/v1/session/:id), not just the standalone /approval convenience route.
+Deno.test("POST /eve/v1/session/:id with inputResponses optionId 'always' resolves as approve and upserts a sticky consent", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "always" }] }),
+  }));
+  assertEquals(res.status, 202);
+  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "always");
+  await until(() => settled(db), 10_000);
+  assertEquals(db.turns[0].status, "completed");
+});
+
+Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' without an authenticated user (400)", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" }, // no x-user-id
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const rejected = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "never" }] }),
+  }));
+  assertEquals(rejected.status, 400);
+  assertEquals(db.approvals.get(requestId)!.decision, null);
+
+  // Drain the fire-and-forget turn (see the sibling /approval test's comment).
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "deny" }] }),
+  }));
+  await until(() => settled(db), 10_000);
 });
 
 Deno.test("model failure marks the turn failed and persists an error event (no unhandled rejection)", async () => {
