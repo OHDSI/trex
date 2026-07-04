@@ -14,8 +14,11 @@ export function createStore(query: QueryFn) {
       return r.rows[0].id;
     },
 
+    // created_by is read back here (not just written by createSession) so
+    // handler.ts's approval routes can enforce session ownership — see
+    // resolveApprovalDecision's caller-side check.
     async getSession(id: string) {
-      const r = await query(`SELECT id, status FROM agents.sessions WHERE id = $1`, [id]);
+      const r = await query(`SELECT id, status, created_by FROM agents.sessions WHERE id = $1`, [id]);
       return r.rows[0] ?? null;
     },
 

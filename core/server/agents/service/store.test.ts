@@ -47,11 +47,12 @@ Deno.test("addTurn retries on unique violation", async () => {
 });
 
 Deno.test("getSession returns row when found", async () => {
-  const { fn, calls } = fakeQuery([{ rows: [{ id: "s-1", status: "active" }] }]);
+  const { fn, calls } = fakeQuery([{ rows: [{ id: "s-1", status: "active", created_by: "user-1" }] }]);
   const store = createStore(fn as never);
   const s = await store.getSession("s-1");
-  assertEquals(s, { id: "s-1", status: "active" });
+  assertEquals(s, { id: "s-1", status: "active", created_by: "user-1" });
   assert(calls[0].sql.includes("FROM agents.sessions"));
+  assert(calls[0].sql.includes("created_by"));
   assertEquals(calls[0].params, ["s-1"]);
 });
 

@@ -14,7 +14,7 @@ function inMemoryDb() {
   // Minimal in-memory impl of the SQL the store issues, keyed by table.
   // Exposed state (turns/steps/approvals) lets tests assert on persistence
   // and drive approval decisions without Postgres.
-  const sessions = new Map<string, { status: string }>();
+  const sessions = new Map<string, { status: string; created_by: string | null }>();
   const turns: Array<{ id: string; session_id: string; seq: number; status: string; error: string | null }> = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
   const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string }>();
@@ -30,12 +30,12 @@ function inMemoryDb() {
     calls.push({ sql, params });
     if (sql.includes("INSERT INTO agents.sessions")) {
       const id = `s-${++n}`;
-      sessions.set(id, { status: "active" });
+      sessions.set(id, { status: "active", created_by: (params[2] as string | null) ?? null });
       return Promise.resolve({ rows: [{ id }] });
     }
-    if (sql.includes("SELECT id, status FROM agents.sessions")) {
+    if (sql.includes("SELECT id, status, created_by FROM agents.sessions")) {
       const s = sessions.get(params[0] as string);
-      return Promise.resolve({ rows: s ? [{ id: params[0], status: s.status }] : [] });
+      return Promise.resolve({ rows: s ? [{ id: params[0], status: s.status, created_by: s.created_by }] : [] });
     }
     if (sql.includes("INSERT INTO agents.turns")) {
       const seq = turns.filter((t) => t.session_id === params[0]).length + 1;
@@ -641,12 +641,154 @@ Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' with
   }));
   assertEquals(rejected.status, 400);
   assertEquals(db.approvals.get(requestId)!.decision, null);
+  // H4 review Minor: the 400 must not have produced a sticky consent row.
+  assertEquals(db.toolConsents.size, 0);
 
   // Drain the fire-and-forget turn (see the sibling /approval test's comment).
   await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ inputResponses: [{ requestId, optionId: "deny" }] }),
   }));
+  await until(() => settled(db), 10_000);
+});
+
+// Ride-along security fix (task-h5-brief.md, from the H4 review): approval
+// resolution must verify the caller is the session's owner, not just
+// (requestId, sessionId) — otherwise any authenticated user who learns
+// those ids could resolve someone else's pending approval and, with H4's
+// sticky verbs, accrue a durable consent on their behalf.
+Deno.test("POST /approval: the session owner (matching x-user-id) can resolve their own approval", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const ok = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ requestId, decision: "approve" }),
+  }));
+  assertEquals(ok.status, 200);
+  assertEquals(db.approvals.get(requestId)!.decision, "approve");
+  await until(() => settled(db), 10_000);
+  assertEquals(db.turns[0].status, "completed");
+});
+
+Deno.test("POST /approval: a non-owner user is rejected with 403, the pending request is untouched, and no consent row is created", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  // A different authenticated user learns (sessionId, requestId) somehow and
+  // tries to resolve it — including a sticky "always", which would have
+  // accrued a consent under their own identity if unchecked.
+  const rejected = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-2" },
+    body: JSON.stringify({ requestId, decision: "always" }),
+  }));
+  assertEquals(rejected.status, 403);
+  assertEquals(await rejected.json(), { error: "approval can only be resolved by the session owner" });
+  assertEquals(db.approvals.get(requestId)!.decision, null);
+  assertEquals(db.toolConsents.size, 0);
+
+  // The real owner can still resolve it — proves the 403 was ownership, not
+  // approval corruption.
+  const ok = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ requestId, decision: "approve" }),
+  }));
+  assertEquals(ok.status, 200);
+  await until(() => settled(db), 10_000);
+});
+
+Deno.test("POST /eve/v1/session/:id inputResponses: a non-owner user is rejected with 403 and the pending request is untouched", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  const rejected = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-2" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "approve" }] }),
+  }));
+  assertEquals(rejected.status, 403);
+  assertEquals(db.approvals.get(requestId)!.decision, null);
+  assertEquals(db.toolConsents.size, 0);
+
+  // Drain with the real owner so no timer leaks into the next test.
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "approve" }] }),
+  }));
+  await until(() => settled(db), 10_000);
+});
+
+Deno.test("POST /approval: an anonymous session (no created_by) can still be resolved by anyone", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" }, // no x-user-id
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+
+  // No x-user-id at all on the resolve either — pre-existing anonymous
+  // behavior must be unaffected by the ownership check.
+  const ok = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ requestId, decision: "approve" }),
+  }));
+  assertEquals(ok.status, 200);
+  assertEquals(db.approvals.get(requestId)!.decision, "approve");
   await until(() => settled(db), 10_000);
 });
 

@@ -297,6 +297,18 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!session) return json({ error: "session not found" }, 404);
       const body = await req.json().catch(() => ({}));
       if (Array.isArray(body.inputResponses)) {
+        // Session-ownership check (ride-along, task-h5-brief.md): a session
+        // with a known owner (created_by set from x-user-id at creation)
+        // only lets that same owner resolve its pending approvals — without
+        // this, any authenticated caller who learns (sessionId, requestId)
+        // could resolve someone else's approval and, with sticky
+        // always/never, accrue a durable consent on their behalf. Anonymous
+        // sessions (created_by NULL) keep the pre-existing behavior: anyone
+        // who has the sessionId can resolve. Checked once for the whole
+        // batch, before any request in it is touched.
+        if (session.created_by != null && session.created_by !== createdBy) {
+          return json({ error: "approval can only be resolved by the session owner" }, 403);
+        }
         for (const r of body.inputResponses) {
           if (!r?.requestId || !["approve", "deny", "always", "never"].includes(r.optionId)) {
             return json({ error: "inputResponses[].requestId and optionId (approve|deny|always|never) required" }, 400);
@@ -323,6 +335,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       const [, sessionId] = approval;
       const session = await store.getSession(sessionId);
       if (!session) return json({ error: "session not found" }, 404);
+      // Same session-ownership check as the inputResponses path above — see
+      // that branch's comment.
+      if (session.created_by != null && session.created_by !== createdBy) {
+        return json({ error: "approval can only be resolved by the session owner" }, 403);
+      }
       const body = await req.json().catch(() => ({}));
       if (!body.requestId || !["approve", "deny", "always", "never"].includes(body.decision)) {
         return json({ error: "requestId and decision (approve|deny|always|never) required" }, 400);
