@@ -1,5 +1,5 @@
 import { assertEquals, assert } from "jsr:@std/assert";
-import { Channel, channelsByTopic, _handleJoin, _handleLeave } from "./channel.ts";
+import { channelsByTopic, _handleJoin, _handleLeave } from "./channel.ts";
 import type { PhoenixMessage } from "./protocol.ts";
 
 function fakeSocket() {

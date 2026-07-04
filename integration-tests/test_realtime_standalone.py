@@ -72,13 +72,14 @@ test_realtime_standalone.py -v`` (or ``make test-realtime``).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Any, Callable
+from typing import Callable
 
 import pytest
 
@@ -187,10 +188,8 @@ def _setting_value(key: str) -> str:
 
 def _safe(cur, sql: str) -> None:
     """Best-effort cleanup statement — never let teardown mask a real failure."""
-    try:
+    with contextlib.suppress(Exception):
         cur.execute(sql)
-    except Exception:
-        pass
 
 
 # -----------------------------------------------------------------------------

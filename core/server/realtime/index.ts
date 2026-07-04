@@ -10,6 +10,7 @@ import { clearAllSubscriptions } from "./subscriptions.ts";
 import { ReplicationPipeline } from "./replication.ts";
 import { fanOutTransaction } from "./walrus.ts";
 import { sockets } from "./socket.ts";
+import { apiLimiter } from "../middleware/rate-limit.ts";
 
 // Side-effect imports: loading these registers every phx_join/leave, broadcast,
 // presence, authz and subscription onJoin/onLeave hook. Task 11 is the first place
@@ -31,7 +32,7 @@ export function mountRealtime(app: Express): void {
     res.json({ status: "ok" });
   });
 
-  app.post(`${BASE_PATH}/realtime/v1/api/broadcast`, express.json(), async (req: Request, res: Response) => {
+  app.post(`${BASE_PATH}/realtime/v1/api/broadcast`, apiLimiter, express.json(), async (req: Request, res: Response) => {
     if (!realtimeEnabled()) return res.status(503).json({ error: "realtime disabled" });
     const authHeader = req.headers["authorization"] as string | undefined;
     const apikey = req.headers["apikey"] as string | undefined;
