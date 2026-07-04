@@ -20,35 +20,42 @@
 // would observe running outside a worker — proving the wrapper correctly
 // threads args/ctx all the way to the real legacy impl and stops exactly at
 // the Trex-runtime boundary, not before it.
+//
+// This file lives in lib/, NOT tools/: loader.ts scans EVERY tools/*.ts
+// entry under a strict one-file-one-tool contract (default export must be a
+// __trexTool-branded defineTool result), so a test file inside tools/ would
+// make loadAgent() throw and the whole agent fail to load. lib/ is never
+// scanned. The sibling load_agent_dir.test.ts is the regression guard for
+// that contract.
 import { assert, assertEquals, assertMatch, assertRejects } from "jsr:@std/assert";
 import type { ToolContext } from "../../../../core/server/agents/eve-shim/types.ts";
 
 // Wrapped (eve) tools — the thing under test.
-import BashTool from "./Bash.ts";
-import WriteTool from "./Write.ts";
-import EditTool from "./Edit.ts";
-import SearchReplaceTool from "./SearchReplace.ts";
-import DeleteFileTool from "./DeleteFile.ts";
-import CopyFileTool from "./CopyFile.ts";
-import RenameFileTool from "./RenameFile.ts";
-import AddDependencyTool from "./AddDependency.ts";
-import ReadTool from "./Read.ts";
-import GlobTool from "./Glob.ts";
-import GrepTool from "./Grep.ts";
-import CodeSearchTool from "./CodeSearch.ts";
-import GitInitTool from "./GitInit.ts";
-import GitCommitTool from "./GitCommit.ts";
-import GitStatusTool from "./GitStatus.ts";
-import GitLogTool from "./GitLog.ts";
-import GitDiffTool from "./GitDiff.ts";
-import GitBranchListTool from "./GitBranchList.ts";
-import GitBranchCreateTool from "./GitBranchCreate.ts";
-import GitBranchSwitchTool from "./GitBranchSwitch.ts";
-import GitRevertTool from "./GitRevert.ts";
-import GitPushTool from "./GitPush.ts";
-import GitPullTool from "./GitPull.ts";
-import EnterWorktreeTool from "./EnterWorktree.ts";
-import ExitWorktreeTool from "./ExitWorktree.ts";
+import BashTool from "../tools/Bash.ts";
+import WriteTool from "../tools/Write.ts";
+import EditTool from "../tools/Edit.ts";
+import SearchReplaceTool from "../tools/SearchReplace.ts";
+import DeleteFileTool from "../tools/DeleteFile.ts";
+import CopyFileTool from "../tools/CopyFile.ts";
+import RenameFileTool from "../tools/RenameFile.ts";
+import AddDependencyTool from "../tools/AddDependency.ts";
+import ReadTool from "../tools/Read.ts";
+import GlobTool from "../tools/Glob.ts";
+import GrepTool from "../tools/Grep.ts";
+import CodeSearchTool from "../tools/CodeSearch.ts";
+import GitInitTool from "../tools/GitInit.ts";
+import GitCommitTool from "../tools/GitCommit.ts";
+import GitStatusTool from "../tools/GitStatus.ts";
+import GitLogTool from "../tools/GitLog.ts";
+import GitDiffTool from "../tools/GitDiff.ts";
+import GitBranchListTool from "../tools/GitBranchList.ts";
+import GitBranchCreateTool from "../tools/GitBranchCreate.ts";
+import GitBranchSwitchTool from "../tools/GitBranchSwitch.ts";
+import GitRevertTool from "../tools/GitRevert.ts";
+import GitPushTool from "../tools/GitPush.ts";
+import GitPullTool from "../tools/GitPull.ts";
+import EnterWorktreeTool from "../tools/EnterWorktree.ts";
+import ExitWorktreeTool from "../tools/ExitWorktree.ts";
 
 // Legacy defs — the exact same objects each wrapper above imports and wraps.
 import { bashTool } from "../../functions/tools/bash.ts";
