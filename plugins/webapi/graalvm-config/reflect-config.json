@@ -10430,5 +10430,53 @@
         "parameterTypes": []
       }
     ]
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.InclusionRuleReport",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.InclusionRuleReport$Summary",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.cohortdefinition.InclusionRuleReport$InclusionRuleStatistic",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.PersonProfile",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.PersonRecord",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.CohortPerson",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.ObservationPeriod",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.PersonConfigurationInfo",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.Era",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.EraSet",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.Timewave",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.person.TimewaveBucket",
+    "allDeclaredFields": true, "allPublicFields": true, "allDeclaredMethods": true, "allPublicMethods": true, "queryAllDeclaredMethods": true, "queryAllPublicMethods": true, "allDeclaredConstructors": true, "allPublicConstructors": true
   }
 ]
