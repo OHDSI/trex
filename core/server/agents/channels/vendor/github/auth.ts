@@ -10,7 +10,18 @@
 // eve's, unchanged. `process.env` → `getEnv` (Deno.env). NOTE (flagged): the
 // RS256 rewrite is the one place the crypto backend differs from eve; it is
 // exercised by github.test.ts (JWT header/claims shape + a full mock
-// mint→exchange→verify round-trip). See vendor/VENDOR.md.
+// mint→exchange→verify round-trip).
+//
+// KEY FORMAT: WebCrypto's `importKey("pkcs8", …)` accepts ONLY PKCS8 keys
+// (`-----BEGIN PRIVATE KEY-----`), whereas GitHub Apps hand you the private key
+// in PKCS1 (`-----BEGIN RSA PRIVATE KEY-----`). Node's `createSign` (what eve
+// used) accepts both transparently, so this reimplementation would otherwise
+// silently break the GitHub-provided key with an opaque "operation does not meet
+// requirements" error. To keep the operator UX intact, a PKCS1 PEM is DETECTED
+// and CONVERTED to PKCS8 in-process (the standard deterministic ASN.1 wrapping:
+// prepend the `rsaEncryption` AlgorithmIdentifier + version and re-wrap the
+// PKCS1 DER in the PKCS8 SEQUENCE/OCTET STRING) before import. A PKCS8 key is
+// used as-is. See vendor/VENDOR.md.
 
 import { getEnv, isObject } from "./shared.ts";
 
@@ -73,8 +84,8 @@ function base64UrlJson(value: unknown): string {
   return base64UrlFromBytes(new TextEncoder().encode(JSON.stringify(value)));
 }
 
-/** Decodes a PKCS8 PEM into its DER bytes (strips the `-----BEGIN/END-----` armor). */
-function pkcs8DerFromPem(pem: string): Uint8Array {
+/** Decodes a PEM body (any armor) into its DER bytes. */
+function derFromPem(pem: string): Uint8Array {
   const b64 = pem
     .replace(/-----BEGIN [^-]+-----/g, "")
     .replace(/-----END [^-]+-----/g, "")
@@ -83,6 +94,45 @@ function pkcs8DerFromPem(pem: string): Uint8Array {
   const der = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) der[i] = bin.charCodeAt(i);
   return der;
+}
+
+/** Encodes a DER length (definite form): short form < 0x80, else long form. */
+function encodeDerLength(len: number): number[] {
+  if (len < 0x80) return [len];
+  const bytes: number[] = [];
+  let n = len;
+  while (n > 0) {
+    bytes.unshift(n & 0xff);
+    n >>= 8;
+  }
+  return [0x80 | bytes.length, ...bytes];
+}
+
+// The `rsaEncryption` AlgorithmIdentifier: SEQUENCE { OID 1.2.840.113549.1.1.1, NULL }.
+const RSA_ENCRYPTION_ALG_ID = [0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00];
+
+/**
+ * Wraps a PKCS1 RSA private-key DER (`RSAPrivateKey`) into a PKCS8
+ * `PrivateKeyInfo` DER: `SEQUENCE { version 0, rsaEncryption AlgId, OCTET STRING
+ * <pkcs1 DER> }`. Deterministic, byte-exact ASN.1 — the same transform as
+ * `openssl pkcs8 -topk8 -nocrypt`.
+ */
+function pkcs8FromPkcs1(pkcs1: Uint8Array): Uint8Array {
+  const version = [0x02, 0x01, 0x00];
+  const octetString = [0x04, ...encodeDerLength(pkcs1.length), ...pkcs1];
+  const body = [...version, ...RSA_ENCRYPTION_ALG_ID, ...octetString];
+  const der = [0x30, ...encodeDerLength(body.length), ...body];
+  return Uint8Array.from(der);
+}
+
+/**
+ * Resolves a private-key PEM (PKCS8 or GitHub's PKCS1) to the PKCS8 DER bytes
+ * WebCrypto's `importKey("pkcs8", …)` requires. A PKCS1 (`RSA PRIVATE KEY`) PEM
+ * is converted in-process; a PKCS8 (`PRIVATE KEY`) PEM is used as-is.
+ */
+function pkcs8DerFromPem(pem: string): Uint8Array {
+  const der = derFromPem(pem);
+  return /-----BEGIN RSA PRIVATE KEY-----/.test(pem) ? pkcs8FromPkcs1(der) : der;
 }
 
 /**

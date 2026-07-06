@@ -103,6 +103,38 @@ function decodeB64Url(s: string): string {
   return atob(b64);
 }
 
+// Reads a DER definite length at `offset`, returning the length + the index just
+// past the length octets.
+function readDerLength(bytes: Uint8Array, offset: number): { len: number; next: number } {
+  const first = bytes[offset];
+  if (first < 0x80) return { len: first, next: offset + 1 };
+  const n = first & 0x7f;
+  let len = 0;
+  for (let i = 0; i < n; i++) len = (len << 8) | bytes[offset + 1 + i];
+  return { len, next: offset + 1 + n };
+}
+
+// Unwraps a PKCS8 `PrivateKeyInfo` DER back to its PKCS1 `RSAPrivateKey` DER and
+// re-arms it as an `RSA PRIVATE KEY` PEM — the inverse of the adapter's
+// pkcs1→pkcs8 conversion, used to synthesize a GitHub-shaped PKCS1 key for tests.
+function pkcs8PemToPkcs1Pem(pkcs8Pem: string): string {
+  const b64 = pkcs8Pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, "");
+  const bin = atob(b64);
+  const der = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) der[i] = bin.charCodeAt(i);
+  let o = 0;
+  o = readDerLength(der, o + 1).next; // outer SEQUENCE
+  o += 3; // version INTEGER (02 01 00)
+  const alg = readDerLength(der, o + 1); // algorithm SEQUENCE
+  o = alg.next + alg.len;
+  const oct = readDerLength(der, o + 1); // privateKey OCTET STRING
+  const pkcs1 = der.slice(oct.next, oct.next + oct.len);
+  let pkcs1Bin = "";
+  for (const b of pkcs1) pkcs1Bin += String.fromCharCode(b);
+  const armored = btoa(pkcs1Bin).replace(/(.{64})/g, "$1\n");
+  return `-----BEGIN RSA PRIVATE KEY-----\n${armored}\n-----END RSA PRIVATE KEY-----`;
+}
+
 // ---- signature gate --------------------------------------------------------
 
 Deno.test("valid X-Hub-Signature-256 passes the gate → reaches send() + 202 ack", async () => {
@@ -266,6 +298,24 @@ Deno.test("createGitHubAppJwt mints an RS256 JWT with the right header + claims,
   assertEquals(claims.exp, 1_700_000_000 + 600);
 
   // The signature verifies against the public key (proves the RS256 sign is real).
+  const sigBin = decodeB64Url(s);
+  const sig = new Uint8Array(sigBin.length);
+  for (let i = 0; i < sigBin.length; i++) sig[i] = sigBin.charCodeAt(i);
+  const ok = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", publicKey, sig, new TextEncoder().encode(`${h}.${p}`));
+  assertEquals(ok, true);
+});
+
+Deno.test("createGitHubAppJwt accepts a PKCS1 (GitHub App) private key by converting it to PKCS8", async () => {
+  const { pem, publicKey } = await makeKeyPair();
+  const pkcs1Pem = pkcs8PemToPkcs1Pem(pem); // GitHub hands you this armor
+  const now = new Date(1_700_000_000_000);
+  const jwt = await createGitHubAppJwt({ appId: "999", privateKey: pkcs1Pem, now });
+  const [h, p, s] = jwt.split(".");
+
+  assertEquals(JSON.parse(decodeB64Url(h)).alg, "RS256");
+  assertEquals(JSON.parse(decodeB64Url(p)).iss, "999");
+  // The converted-key signature verifies against the ORIGINAL public key —
+  // proving the pkcs1→pkcs8 ASN.1 wrapping is byte-correct.
   const sigBin = decodeB64Url(s);
   const sig = new Uint8Array(sigBin.length);
   for (let i = 0; i < sigBin.length; i++) sig[i] = sigBin.charCodeAt(i);
