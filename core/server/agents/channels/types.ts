@@ -31,7 +31,17 @@ export interface ChannelRouteArgs {
   ): Promise<{ id: string }>;
   getSession(
     sessionId: string,
-  ): { getEventStream(o?: { startIndex?: number }): ReadableStream } | null;
+  ):
+    | {
+      // Existence check against the session store — the runtime's getSession
+      // handle is synchronous (empty id => null) but cannot know whether a
+      // non-empty id names a REAL session without a store round-trip. A route
+      // that must 404 an unknown session (e.g. the eve stream) awaits this
+      // before streaming, matching the native session API's 404 semantics.
+      exists(): Promise<boolean>;
+      getEventStream(o?: { startIndex?: number }): ReadableStream;
+    }
+    | null;
   receive(channel: ChannelDef, input: unknown): Promise<{ id: string }>;
   params: Record<string, string>;
   waitUntil(p: Promise<unknown>): void;

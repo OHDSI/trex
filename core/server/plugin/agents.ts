@@ -146,16 +146,25 @@ export function isTrexScopedAgentsPlugin(name: string): boolean {
 // lookahead) so their proxy auth is unchanged — weakening those would be a
 // serious bug. Passed to _addFunction as fncfg.authExemptPattern.
 //
-// INVARIANT: the reserved set below (session|health|info) MUST stay in sync
-// with handler.ts's authenticated `/eve/v1/*` route set. If a new AUTHED
-// `/eve/v1/<seg>` route is ever added to handler.ts, `<seg>` MUST be added to
-// this lookahead — otherwise `/eve/v1/<seg>` becomes auth-exempt (an
-// unauthenticated hole). A channel named like a reserved word (e.g. a
-// `sessionx` channel) is unaffected: the lookahead only excludes the exact
+// The `eve` channel is a SPECIAL case in the reserved set: it is the built-in
+// WEB channel (adapters/eve.ts), trusted browser traffic that — unlike a
+// platform webhook — carries NO platform signature. Instead it authenticates
+// via the trex JWT exactly like the native session API (spec §5: eve-web =
+// "trex JWT (existing)"). So `eve` MUST stay reserved (auth-enforced): leaving
+// it exempt would let anyone create sessions, spend model tokens, run tools,
+// and read other users' session streams (IDOR) with no credential.
+//
+// INVARIANT: the reserved set below (session|health|info|eve) MUST stay in sync
+// with handler.ts's authenticated `/eve/v1/*` route set PLUS the built-in
+// JWT-authed `eve` web channel. If a new AUTHED `/eve/v1/<seg>` route (or a new
+// JWT-authed built-in channel) is ever added, `<seg>` MUST be added to this
+// lookahead — otherwise `/eve/v1/<seg>` becomes auth-exempt (an unauthenticated
+// hole). A channel named like a reserved word (e.g. a `sessionx` or
+// `eventbridge` channel) is unaffected: the lookahead only excludes the exact
 // segments, boundaried by `/` or end.
 export function channelAuthExemptPattern(basePath: string): RegExp {
   const esc = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info)(?:/|$))[^/]+`);
+  return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info|eve)(?:/|$))[^/]+`);
 }
 
 export async function addAgentsPlugin(

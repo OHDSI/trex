@@ -18,6 +18,12 @@ Deno.test("channelAuthExemptPattern: keeps auth on session/health/info, exempts 
     "/eve/v1/session/abc/approval",
     "/eve/v1/health",
     "/eve/v1/info",
+    // The built-in `eve` WEB channel authenticates via trex JWT (spec §5), not a
+    // platform signature — so its routes must KEEP proxy auth, exactly like the
+    // session API. Both the create route and the per-session stream stay authed.
+    "/eve/v1/eve",
+    "/eve/v1/eve/session",
+    "/eve/v1/eve/session/x/stream",
   ];
   for (const s of kept) {
     assert(!re.test(p(s)), `expected auth KEPT (no match) for ${s}`);
@@ -32,6 +38,9 @@ Deno.test("channelAuthExemptPattern: keeps auth on session/health/info, exempts 
     // not the reserved route — the lookahead is boundaried by `/` or end.
     "/eve/v1/sessionx/x",
     "/eve/v1/healthcheck/ping",
+    // Starts with the reserved word "eve" but is a distinct channel id (the
+    // `(?:/|$)` boundary stops the lookahead from swallowing it) — still exempt.
+    "/eve/v1/eventbridge/x",
   ];
   for (const s of exempt) {
     assert(re.test(p(s)), `expected auth EXEMPT (match) for ${s}`);

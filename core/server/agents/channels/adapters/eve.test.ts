@@ -32,10 +32,14 @@ function fakeChannelStore() {
   return store as unknown as ChannelStore & { calls: typeof calls };
 }
 
-// A store whose listEvents replays a single persisted step (a completed
-// message) so the stream route has something to emit on replay.
-function fakeStore(rows: unknown[] = []) {
-  return { listEvents: () => Promise.resolve(rows) } as unknown as AgentStore;
+// A store whose listEvents replays a persisted step and whose getSession backs
+// the eve stream route's existence-404. `known` is the set of session ids that
+// getSession resolves to a row (anything else => null, i.e. unknown session).
+function fakeStore(rows: unknown[] = [], known: string[] = ["sess-1"]) {
+  return {
+    listEvents: () => Promise.resolve(rows),
+    getSession: (id: string) => Promise.resolve(known.includes(id) ? { id, status: "active", created_by: null } : null),
+  } as unknown as AgentStore;
 }
 
 type Harness = ReturnType<typeof makeLayer>;
@@ -55,18 +59,6 @@ function makeLayer(agent: LoadedAgent, opts?: { store?: AgentStore; subscribe?: 
   return { handler, channelStore, startTurns };
 }
 
-async function readAll(stream: ReadableStream): Promise<string> {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  let out = "";
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    out += typeof value === "string" ? value : decoder.decode(value);
-  }
-  return out;
-}
-
 Deno.test("eve channel: POST /session creates a session, starts a turn, returns sessionId + continuationToken", async () => {
   const agent = await loadAgent(TOY);
   agent.channels.eve = eveChannel();
@@ -74,7 +66,9 @@ Deno.test("eve channel: POST /session creates a session, starts a turn, returns 
 
   const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/eve/session`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    // x-user-id is injected by the proxy from the verified trex JWT — the eve
+    // adapter must attribute the session to that principal, not null.
+    headers: { "content-type": "application/json", "x-user-id": "user-abc" },
     body: JSON.stringify({ message: "hello web", continuationToken: "web-123" }),
   }));
 
@@ -88,7 +82,25 @@ Deno.test("eve channel: POST /session creates a session, starts a turn, returns 
   assertEquals(channelStore.calls.length, 1);
   assertEquals(channelStore.calls[0].channel, "eve");
   assertEquals(channelStore.calls[0].token, "eve:web-123");
+  // The authenticated trex principal (from x-user-id) is threaded into send().
+  assertEquals(channelStore.calls[0].principal, {
+    authenticator: "trex",
+    principalType: "user",
+    principalId: "user-abc",
+  });
   assertEquals(startTurns, [{ sessionId: "sess-1", message: "hello web" }]);
+});
+
+Deno.test("eve channel: POST /session with no x-user-id attributes the session to null (anonymous)", async () => {
+  const agent = await loadAgent(TOY);
+  agent.channels.eve = eveChannel();
+  const { handler, channelStore } = makeLayer(agent);
+  await handler(new Request(`${ORIGIN}${BASE}/eve/v1/eve/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "anon", continuationToken: "t" }),
+  }));
+  assertEquals(channelStore.calls[0].principal, null);
 });
 
 Deno.test("eve channel: POST /session without a continuationToken mints one (fresh session per call)", async () => {
@@ -148,22 +160,23 @@ Deno.test("eve channel: GET /session/:id/stream returns NDJSON (replay + live) v
   assertStringIncludes(out, "live");
 });
 
-Deno.test("eve channel: GET /session//stream with an unknown/empty session id -> 404", async () => {
+Deno.test("eve channel: GET /session/:id/stream with a genuinely-unknown session id -> 404 (not empty 200)", async () => {
   const agent = await loadAgent(TOY);
   agent.channels.eve = eveChannel();
-  const { handler } = makeLayer(agent);
-  // getSession("") returns null -> the adapter must 404 rather than stream.
-  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/eve/session/%20/stream`, { method: "GET" }));
-  // "%20" (a space) is a non-empty id so getSession returns a stream; assert the
-  // real null-guard by targeting getSession with an empty id via a direct call.
-  const ch = eveChannel();
-  const streamRoute = ch.routes.find((r) => r.method === "GET")!;
-  const nullArgs: any = { params: { id: "" }, getSession: () => null };
-  const r2 = await streamRoute.handler(new Request(`${ORIGIN}/x`), nullArgs);
-  assertEquals(r2.status, 404);
-  // (the space-id request still returns a valid streaming response, not an error)
-  assertEquals(res.status, 200);
-  await res.body?.cancel();
+  // The store knows only "sess-1"; a request for an unknown id must 404 via the
+  // real layer path (getSession(...).exists() store round-trip), matching native
+  // /stream — NOT stream an empty 200.
+  const { handler } = makeLayer(agent, { store: fakeStore([], ["sess-1"]) });
+
+  const unknown = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/eve/session/does-not-exist/stream`, { method: "GET" }));
+  assertEquals(unknown.status, 404);
+  assertEquals((await unknown.json()).error, "session not found");
+
+  // A known session still streams (200 NDJSON).
+  const known = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/eve/session/sess-1/stream`, { method: "GET" }));
+  assertEquals(known.status, 200);
+  assertEquals(known.headers.get("content-type"), "application/x-ndjson");
+  await known.body?.cancel();
 });
 
 Deno.test("custom authored channel: an author's own defineChannel route drives a turn end-to-end through the layer", async () => {

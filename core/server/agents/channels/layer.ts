@@ -226,6 +226,11 @@ function buildArgs(
     getSession(sessionId) {
       if (!sessionId) return null;
       return {
+        // Store-backed existence check (native /stream parity): a non-empty id
+        // is not necessarily a real session, so a route 404s on !exists().
+        async exists() {
+          return !!(await deps.store.getSession(sessionId));
+        },
         getEventStream(o) {
           const startIndex = o?.startIndex ?? 0;
           let unsub: (() => void) | undefined;
