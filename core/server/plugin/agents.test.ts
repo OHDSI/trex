@@ -1,5 +1,47 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
-import { addAgentsPlugin, buildAgentWorkerConfig, isTrexScopedAgentsPlugin, normalizeAgentsValue } from "./agents.ts";
+import { addAgentsPlugin, buildAgentWorkerConfig, channelAuthExemptPattern, isTrexScopedAgentsPlugin, normalizeAgentsValue } from "./agents.ts";
+
+// Security-sensitive invariant: the proxy auth-exemption regex must exempt
+// channel subpaths (adapter-signature-verified) while KEEPING full trex auth on
+// the session/chat/health/info routes. A regression here silently unauthenticates
+// the session API, so it gets its own table-driven test against full paths.
+Deno.test("channelAuthExemptPattern: keeps auth on session/health/info, exempts channel subpaths", () => {
+  const basePath = "/plugins/trex/toy";
+  const re = channelAuthExemptPattern(basePath);
+  const p = (suffix: string) => `${basePath}${suffix}`;
+
+  // NOT matched → proxy auth (authContext+pluginAuthz) is KEPT.
+  const kept = [
+    "/eve/v1/session",
+    "/eve/v1/session/abc",
+    "/eve/v1/session/abc/stream",
+    "/eve/v1/session/abc/approval",
+    "/eve/v1/health",
+    "/eve/v1/info",
+  ];
+  for (const s of kept) {
+    assert(!re.test(p(s)), `expected auth KEPT (no match) for ${s}`);
+  }
+
+  // MATCHED → auth EXEMPT (adapter verifies the platform signature in-worker).
+  const exempt = [
+    "/eve/v1/discord/message",
+    "/eve/v1/discord",
+    "/eve/v1/slack/events",
+    // A channel whose id merely STARTS with a reserved word is a real channel,
+    // not the reserved route — the lookahead is boundaried by `/` or end.
+    "/eve/v1/sessionx/x",
+    "/eve/v1/healthcheck/ping",
+  ];
+  for (const s of exempt) {
+    assert(re.test(p(s)), `expected auth EXEMPT (match) for ${s}`);
+  }
+
+  // The exemption is anchored to THIS agent's basePath — another agent's paths
+  // (or a bare /eve/v1) must not be exempted by this pattern.
+  assert(!re.test("/plugins/trex/other/eve/v1/discord/message"));
+  assert(!re.test("/eve/v1/discord/message"));
+});
 
 Deno.test("normalizeAgentsValue accepts array and single-object forms", () => {
   assertEquals(normalizeAgentsValue([{ name: "a", dir: "agent" }]), [{ name: "a", dir: "agent" }]);

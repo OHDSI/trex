@@ -545,7 +545,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
     // session/chat routes above are untouched — their proxy auth is unchanged.
     if (channelHandler) {
       const ch = path.match(/^\/eve\/v1\/([^/]+)(?:\/.*)?$/);
-      if (ch && agent.channels[ch[1]]) return channelHandler(req);
+      // Object.hasOwn (not a truthy index): a request to /eve/v1/constructor/x
+      // must NOT match an inherited prototype key — that would enter the layer
+      // and 500 on undefined routes. Inherited/unknown keys fall through to the
+      // final 404 below. The layer re-guards the same way as defense in depth.
+      if (ch && Object.hasOwn(agent.channels, ch[1])) return channelHandler(req);
     }
 
     return json({ error: "not found" }, 404);

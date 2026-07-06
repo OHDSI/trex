@@ -97,6 +97,35 @@ Deno.test("channel layer: unknown route on a known channel -> 404, no session", 
   assertEquals(channelStore.calls.length, 0);
 });
 
+Deno.test("channel layer: inherited prototype keys (constructor/__proto__) -> 404, not a 500", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, channelStore } = makeLayer(agent);
+  // `agent.channels.constructor` is truthy (inherited from Object.prototype) but
+  // has no `routes` — a plain index lookup would reach matchRoute and throw an
+  // UNAUTHENTICATED TypeError 500. The own-property guard must 404 instead.
+  for (const id of ["constructor", "__proto__", "toString"]) {
+    const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/${id}/x`, {
+      method: "POST",
+      body: JSON.stringify({ message: "x", token: "t" }),
+    }));
+    assertEquals(res.status, 404, `expected 404 for inherited key ${id}`);
+  }
+  assertEquals(channelStore.calls.length, 0);
+});
+
+Deno.test("channel layer: a key whose value is not a branded channel -> 404", async () => {
+  const agent = await loadAgent(TOY);
+  // An own key that isn't a real channel def (no brand / no routes) must 404,
+  // not crash — defense in depth alongside the Object.hasOwn guard.
+  (agent.channels as any).bogus = { routes: "nope" };
+  const { handler } = makeLayer(agent);
+  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/bogus/x`, {
+    method: "POST",
+    body: JSON.stringify({ message: "x", token: "t" }),
+  }));
+  assertEquals(res.status, 404);
+});
+
 Deno.test("channel layer: wrong method on a known route -> 404", async () => {
   const agent = await loadAgent(TOY);
   const { handler } = makeLayer(agent);

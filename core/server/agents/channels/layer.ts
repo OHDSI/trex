@@ -100,8 +100,14 @@ export function createChannelHandler(deps: ChannelLayerDeps): (req: Request) => 
     const channelId = m[1];
     const routePath = m[2] === "" ? "/" : m[2];
 
-    const channel = agent.channels[channelId];
-    if (!channel) return json({ error: `channel '${channelId}' not found` }, 404);
+    // Own-property + brand + shape guard: never treat an inherited key
+    // (constructor/__proto__/toString/…) as a channel — that would reach
+    // matchRoute with an undefined `routes` and throw an UNAUTHENTICATED 500.
+    // An unknown or non-channel key is a 404, same as any other miss.
+    const channel = Object.hasOwn(agent.channels, channelId) ? agent.channels[channelId] : undefined;
+    if (!channel || channel.__trexChannel !== true || !Array.isArray(channel.routes)) {
+      return json({ error: `channel '${channelId}' not found` }, 404);
+    }
 
     const matched = matchRoute(channel.routes, req.method, routePath);
     if (!matched) return json({ error: "route not found" }, 404);

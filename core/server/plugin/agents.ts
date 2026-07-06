@@ -145,6 +145,14 @@ export function isTrexScopedAgentsPlugin(name: string): boolean {
 // health/info routes are deliberately EXCLUDED from the exemption (negative
 // lookahead) so their proxy auth is unchanged — weakening those would be a
 // serious bug. Passed to _addFunction as fncfg.authExemptPattern.
+//
+// INVARIANT: the reserved set below (session|health|info) MUST stay in sync
+// with handler.ts's authenticated `/eve/v1/*` route set. If a new AUTHED
+// `/eve/v1/<seg>` route is ever added to handler.ts, `<seg>` MUST be added to
+// this lookahead — otherwise `/eve/v1/<seg>` becomes auth-exempt (an
+// unauthenticated hole). A channel named like a reserved word (e.g. a
+// `sessionx` channel) is unaffected: the lookahead only excludes the exact
+// segments, boundaried by `/` or end.
 export function channelAuthExemptPattern(basePath: string): RegExp {
   const esc = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info)(?:/|$))[^/]+`);
