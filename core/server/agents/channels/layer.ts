@@ -20,6 +20,20 @@ import { namespacedToken } from "./continuation.ts";
 import { ndjsonEncode } from "../service/stream.ts";
 import { stepToEvent } from "../service/handler.ts";
 import type { AgentEvent } from "../service/events.ts";
+import type { ChannelDef } from "./types.ts";
+import { registerDelivery as defaultRegisterDelivery } from "./delivery.ts";
+
+// Background-delivery executor (Task 5). The Task-0 spike verified
+// EdgeRuntime.waitUntil keeps a background fetch alive past the HTTP response
+// (specs/008-agents-channels/spike-channels.md); when the global is absent
+// (unit tests, non-edge hosts) fall back to a detached promise so delivery
+// still runs — it just isn't guaranteed against isolate reclamation.
+function edgeWaitUntil(p: Promise<unknown>): void {
+  // deno-lint-ignore no-explicit-any
+  const er = (globalThis as any).EdgeRuntime;
+  if (er && typeof er.waitUntil === "function") er.waitUntil(p);
+  else void Promise.resolve(p).catch((e) => console.error("agents: channel delivery task failed:", e));
+}
 
 // Fired right after a send() starts a turn so the delivery layer (Task 6) can
 // register where the agent's reply should be routed. A no-op for Task 4 — the
@@ -47,6 +61,16 @@ export interface ChannelLayerDeps {
   subscribe: (sessionId: string, fn: (e: AgentEvent) => void) => () => void;
   env?: (k: string) => string | undefined;
   onSessionStarted?: (info: ChannelSessionStarted) => void;
+  // Task 5 — server-initiated outbound delivery. All three are injectable so a
+  // test can drive delivery without EdgeRuntime; production leaves them unset
+  // and the defaults below (delivery.ts's registerDelivery + EdgeRuntime.waitUntil)
+  // apply. When a started channel turn's channel declares `events` handlers,
+  // send() registers them as a background subscriber on the session stream.
+  registerDelivery?: typeof defaultRegisterDelivery;
+  waitUntil?: (p: Promise<unknown>) => void;
+  buildChannelCtx?: (
+    info: ChannelSessionStarted & { channel: ChannelDef },
+  ) => { channelCtx: unknown; ctx?: unknown };
 }
 
 const json = (body: unknown, status = 200) =>
@@ -147,7 +171,7 @@ function buildArgs(
         opts.auth,
       );
       deps.startTurn(sessionId, message);
-      deps.onSessionStarted?.({
+      const info: ChannelSessionStarted = {
         channelId,
         sessionId,
         created,
@@ -155,7 +179,34 @@ function buildArgs(
         continuationToken: opts.continuationToken,
         state: opts.state,
         title: opts.title,
-      });
+      };
+      deps.onSessionStarted?.(info);
+
+      // Server-initiated delivery (Task 5): if this channel declares `events`
+      // handlers, subscribe them to the session's live stream so the adapter
+      // posts the agent's reply back to the platform AFTER this response
+      // returns. No-op for channels without events (e.g. the toy webhook).
+      const channel = Object.hasOwn(deps.agent.channels, channelId)
+        ? deps.agent.channels[channelId]
+        : undefined;
+      if (channel?.events) {
+        const waitUntil = deps.waitUntil ?? edgeWaitUntil;
+        (deps.registerDelivery ?? defaultRegisterDelivery)({
+          channel,
+          sessionId,
+          subscribe: deps.subscribe,
+          waitUntil,
+          buildChannelCtx: () =>
+            deps.buildChannelCtx
+              ? deps.buildChannelCtx({ ...info, channel })
+              : {
+                // Default context the events handlers receive as 2nd/3rd args.
+                // Adapter tasks supply a richer one via deps.buildChannelCtx.
+                channelCtx: { channelId, sessionId, state: info.state, title: info.title, auth: info.auth, env: deps.env },
+                ctx: { sessionId, channelId, waitUntil },
+              },
+        });
+      }
       return { id: sessionId };
     },
 

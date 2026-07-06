@@ -189,6 +189,67 @@ Deno.test("channel layer: requestIp is derived from x-forwarded-for (else null)"
   assertEquals(await noXff.json(), { ip: null });
 });
 
+Deno.test("channel layer: a channel with events registers background delivery on send() (Task 5, injectable)", async () => {
+  const agent = await loadAgent(TOY);
+  // A channel whose route calls send() and which declares an events handler —
+  // send() must register delivery for it (the toy webhook has no events, so it
+  // must NOT register).
+  agent.channels.evt = {
+    __trexChannel: true,
+    events: { "message.completed": () => {} },
+    routes: [{
+      method: "POST",
+      path: "/in",
+      handler: async (req: Request, args: any) => {
+        const b = await req.json();
+        const s = await args.send(b.message, { auth: null, continuationToken: b.token });
+        return Response.json({ sessionId: s.id });
+      },
+    }],
+  } as any;
+
+  const channelStore = fakeChannelStore();
+  const registered: Array<{ sessionId: string; hasEvents: boolean; sawWaitUntil: boolean }> = [];
+  const handler = createChannelHandler({
+    agent,
+    store: noopStore,
+    channelStore,
+    plugin: "toy-agent",
+    agentName: "toy",
+    basePath: BASE,
+    startTurn: () => {},
+    subscribe: () => () => {},
+    // Injected: assert send() wired us with the channel + a waitUntil executor.
+    registerDelivery: (opts) => {
+      registered.push({
+        sessionId: opts.sessionId,
+        hasEvents: !!opts.channel.events,
+        sawWaitUntil: typeof opts.waitUntil === "function",
+      });
+      // buildChannelCtx must be callable without throwing.
+      opts.buildChannelCtx();
+    },
+    waitUntil: () => {},
+  });
+
+  // events channel -> delivery registered.
+  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/evt/in`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi", token: "u-1" }),
+  }));
+  assertEquals(res.status, 200);
+  assertEquals(registered, [{ sessionId: "sess-1", hasEvents: true, sawWaitUntil: true }]);
+
+  // toy webhook (no events) -> no registration.
+  await handler(new Request(`${ORIGIN}${BASE}/eve/v1/webhook/message`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi", token: "u-2" }),
+  }));
+  assertEquals(registered.length, 1, "channel without events must not register delivery");
+});
+
 Deno.test("channel layer: a path outside {basePath}/eve/v1 -> 404", async () => {
   const agent = await loadAgent(TOY);
   const { handler } = makeLayer(agent);
