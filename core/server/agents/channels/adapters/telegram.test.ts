@@ -5,7 +5,7 @@
 import { assertEquals, assertExists } from "jsr:@std/assert";
 import { telegramChannel } from "./telegram.ts";
 import type { ChannelAuth, ChannelRouteArgs } from "eve/channels";
-import { encodeTelegramCallbackData, renderTelegramInputRequest } from "../vendor/telegram/hitl.ts";
+import { deriveTelegramInputResponse, encodeTelegramCallbackData, renderTelegramInputRequest } from "../vendor/telegram/hitl.ts";
 
 const SECRET = "s3cr3t-webhook-token";
 
@@ -171,7 +171,7 @@ Deno.test("message.completed with tool-calls finishReason posts nothing", async 
 
 // ---- delivery: input.requested → inline keyboard --------------------------
 
-Deno.test("input.requested renders an approve/deny inline keyboard", async () => {
+Deno.test("input.requested renders an approve/deny inline keyboard (real UUID requestId)", async () => {
   const calls: Array<{ body: { text: string; reply_markup?: { inline_keyboard?: Array<Array<{ text: string; callback_data: string }>> } } }> = [];
   const fetchMock: typeof fetch = (_input, init) => {
     calls.push({ body: JSON.parse(String(init?.body)) });
@@ -180,20 +180,39 @@ Deno.test("input.requested renders an approve/deny inline keyboard", async () =>
   const channel = telegramChannel({ credentials: { botToken: "bot-1" }, api: { fetch: fetchMock } });
   const channelCtx = { state: { chatId: "555" } };
 
+  // trex approval requestIds are gen_random_uuid() UUIDs — exercise the REAL format.
+  const requestId = crypto.randomUUID();
   await channel.events!["input.requested"](
-    { turnId: "t1", requests: [{ requestId: "req-1", action: { kind: "tool-call", callId: "c1", toolName: "delete_file", input: {} } }] },
+    { turnId: "t1", requests: [{ requestId, action: { kind: "tool-call", callId: "c1", toolName: "delete_file", input: {} } }] },
     channelCtx,
   );
 
-  assertEquals(calls.length, 1);
+  assertEquals(calls.length, 1); // did NOT throw + swallow → the keyboard rendered
   const keyboard = calls[0].body.reply_markup?.inline_keyboard;
   assertExists(keyboard);
   const buttons = keyboard!.flat();
   assertEquals(buttons.length, 2);
   assertEquals(buttons[0].text, "Approve");
   assertEquals(buttons[1].text, "Deny");
-  // callback_data round-trips through the vendored decoder.
-  assertEquals(buttons[0].callback_data.startsWith("eve:"), true);
+  // Every callback_data is within Telegram's 64-byte cap AND round-trips to the
+  // exact UUID requestId + optionId.
+  for (const [i, optionId] of ["approve", "deny"].entries()) {
+    const data = buttons[i].callback_data;
+    assertEquals(data.startsWith("eve:"), true);
+    assertEquals(new TextEncoder().encode(data).length <= 64, true);
+    const decoded = deriveTelegramInputResponse(data);
+    assertEquals(decoded, { requestId, optionId });
+  }
+});
+
+Deno.test("encodeTelegramCallbackData for a UUID + approve stays well under 64 bytes and round-trips", () => {
+  const requestId = crypto.randomUUID();
+  const data = encodeTelegramCallbackData(requestId, "approve");
+  const bytes = new TextEncoder().encode(data).length;
+  assertEquals(bytes <= 64, true);
+  // Compact packing: ~36 bytes, nowhere near the cap.
+  assertEquals(bytes < 40, true);
+  assertEquals(deriveTelegramInputResponse(data), { requestId, optionId: "approve" });
 });
 
 // ---- HITL callback → resume -----------------------------------------------
@@ -260,13 +279,15 @@ Deno.test("default resume (no opts.resume) is a loud no-op: warns, does NOT POST
 });
 
 // Sanity: the vendored renderer produces callback_data the decoder round-trips.
-Deno.test("renderTelegramInputRequest callback_data round-trips through decode", () => {
+Deno.test("renderTelegramInputRequest callback_data round-trips through decode (UUID id)", () => {
+  const requestId = crypto.randomUUID();
   const rendered = renderTelegramInputRequest({
-    requestId: "req-99",
+    requestId,
     prompt: "Approve `x`?",
     display: "confirmation",
     options: [{ id: "approve", label: "Approve", style: "primary" }, { id: "deny", label: "Deny", style: "danger" }],
   }) as unknown as { replyMarkup: { inline_keyboard: Array<Array<{ callback_data: string }>> } };
   const approve = rendered.replyMarkup.inline_keyboard.flat()[0].callback_data;
-  assertEquals(approve, encodeTelegramCallbackData("req-99", "approve"));
+  assertEquals(approve, encodeTelegramCallbackData(requestId, "approve"));
+  assertEquals(deriveTelegramInputResponse(approve), { requestId, optionId: "approve" });
 });

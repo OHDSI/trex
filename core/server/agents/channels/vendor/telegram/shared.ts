@@ -120,19 +120,26 @@ export function timingSafeEqual(a: string, b: string): boolean {
 
 // ---- base64url helpers (Deno replacements for Node Buffer) ------------------
 
-export function utf8ToBase64Url(text: string): string {
-  const bytes = new TextEncoder().encode(text);
+export function bytesToBase64Url(bytes: Uint8Array): string {
   let bin = "";
   for (const b of bytes) bin += String.fromCharCode(b);
   return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-export function base64UrlToUtf8(value: string): string {
+export function base64UrlToBytes(value: string): Uint8Array {
   const b64 = value.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat((4 - (value.length % 4)) % 4);
   const bin = atob(b64);
   const bytes = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return new TextDecoder().decode(bytes);
+  return bytes;
+}
+
+export function utf8ToBase64Url(text: string): string {
+  return bytesToBase64Url(new TextEncoder().encode(text));
+}
+
+export function base64UrlToUtf8(value: string): string {
+  return new TextDecoder().decode(base64UrlToBytes(value));
 }
 
 // ---- env (eve read process.env; trex worker is Deno) -----------------------

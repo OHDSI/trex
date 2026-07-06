@@ -9,13 +9,23 @@
 // HTTP requests) — the identical constraint the vendored Discord/Slack HITL
 // solve by self-encoding the answer into the widget id. So this reimplements the
 // render/decode as a STATELESS round-trip: `callback_data` carries the
-// requestId+optionId directly (base64url JSON under an `eve:` prefix), staying
-// within Telegram's 64-byte cap for typical ids. eve's stateful helpers
-// (`registerTelegramCallback`, `resolveTelegramInputResponses`,
-// `telegramCallbackInputResponse`, `pendingFreeformReplies`) are NOT vendored.
-// See vendor/VENDOR.md.
+// requestId+optionId directly. eve's stateful helpers (`registerTelegramCallback`,
+// `resolveTelegramInputResponses`, `telegramCallbackInputResponse`,
+// `pendingFreeformReplies`) are NOT vendored.
+//
+// 64-BYTE CAP: trex approval requestIds are `gen_random_uuid()` UUIDs, so a
+// naive JSON+base64url framing overflows Telegram's 64-byte `callback_data`
+// limit (a UUID+"approve" measures 71 bytes) and the encode would throw,
+// silently dropping the keyboard. So the wire format is COMPACT: a UUID
+// requestId is packed as its 16 RAW bytes → base64url (~22 chars) under a `1.`
+// version tag; the optionId is appended verbatim as the tail. A non-UUID
+// requestId falls back to a `0.` tag with base64url(utf8) framing. Concretely
+// `eve:1.<b64url(16 uuid bytes)>.<optionId>` ≈ 6 + 22 + 1 + len(optionId): for
+// approve/deny/always/never that is ~36 bytes, well under 64. A final guard
+// throws ONLY if the assembled value still exceeds 64 bytes (now rare — only a
+// pathologically long optionId). optionIds MUST stay short. See vendor/VENDOR.md.
 
-import { base64UrlToUtf8, type InputRequest, type InputResponse, utf8ToBase64Url } from "./shared.ts";
+import { base64UrlToBytes, base64UrlToUtf8, bytesToBase64Url, type InputRequest, type InputResponse, utf8ToBase64Url } from "./shared.ts";
 
 /** Prefix marking a callback_data value this channel generated. */
 export const TELEGRAM_HITL_CALLBACK_PREFIX = "eve:";
@@ -72,14 +82,22 @@ export function isTelegramHitlCallback(data: string | undefined): data is string
   return typeof data === "string" && data.startsWith(TELEGRAM_HITL_CALLBACK_PREFIX);
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /**
- * Encodes a requestId+optionId pair into a `callback_data` value. Throws when
- * the encoding would exceed Telegram's 64-byte cap (unusually long request ids).
+ * Encodes a requestId+optionId pair into a compact `callback_data` value. A
+ * canonical UUID requestId is packed as its 16 raw bytes (version tag `1`);
+ * anything else falls back to base64url(utf8) (version tag `0`). The optionId is
+ * the verbatim tail (any character allowed). Throws ONLY if the assembled value
+ * still exceeds Telegram's 64-byte cap (a pathologically long optionId).
  */
 export function encodeTelegramCallbackData(requestId: string, optionId: string): string {
-  const data = TELEGRAM_HITL_CALLBACK_PREFIX + utf8ToBase64Url(JSON.stringify([requestId, optionId]));
+  const [tag, payload] = UUID_RE.test(requestId)
+    ? ["1", bytesToBase64Url(uuidToBytes(requestId))]
+    : ["0", utf8ToBase64Url(requestId)];
+  const data = `${TELEGRAM_HITL_CALLBACK_PREFIX}${tag}.${payload}.${optionId}`;
   if (new TextEncoder().encode(data).length > TELEGRAM_CALLBACK_DATA_MAX_BYTES) {
-    throw new Error("telegramChannel: encoded HITL callback_data exceeds Telegram's 64-byte limit.");
+    throw new Error("telegramChannel: encoded HITL callback_data exceeds Telegram's 64-byte limit (optionId too long).");
   }
   return data;
 }
@@ -91,14 +109,43 @@ export function encodeTelegramCallbackData(requestId: string, optionId: string):
 export function deriveTelegramInputResponse(data: string | undefined): InputResponse | null {
   if (!isTelegramHitlCallback(data)) return null;
   try {
-    const decoded = JSON.parse(base64UrlToUtf8(data.slice(TELEGRAM_HITL_CALLBACK_PREFIX.length)));
-    if (!Array.isArray(decoded) || decoded.length !== 2) return null;
-    const [requestId, optionId] = decoded;
-    if (typeof requestId !== "string" || typeof optionId !== "string") return null;
+    const rest = data.slice(TELEGRAM_HITL_CALLBACK_PREFIX.length); // "<tag>.<payload>.<optionId>"
+    const firstDot = rest.indexOf(".");
+    if (firstDot < 0) return null;
+    const tag = rest.slice(0, firstDot);
+    const afterTag = rest.slice(firstDot + 1);
+    const secondDot = afterTag.indexOf(".");
+    if (secondDot < 0) return null;
+    const payload = afterTag.slice(0, secondDot);
+    const optionId = afterTag.slice(secondDot + 1);
+    if (optionId.length === 0) return null;
+    let requestId: string;
+    if (tag === "1") {
+      const bytes = base64UrlToBytes(payload);
+      if (bytes.length !== 16) return null;
+      requestId = bytesToUuid(bytes);
+    } else if (tag === "0") {
+      requestId = base64UrlToUtf8(payload);
+    } else {
+      return null;
+    }
+    if (requestId.length === 0) return null;
     return { requestId, optionId };
   } catch {
     return null;
   }
+}
+
+function uuidToBytes(uuid: string): Uint8Array {
+  const hex = uuid.replace(/-/g, "");
+  const bytes = new Uint8Array(16);
+  for (let i = 0; i < 16; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+  return bytes;
+}
+
+function bytesToUuid(bytes: Uint8Array): string {
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function truncate(text: string, max: number): string {
