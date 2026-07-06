@@ -7,6 +7,7 @@
 import pg from "npm:pg@^8";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
+import { createChannelStore } from "../channels/store.ts";
 import { createHandler } from "./handler.ts";
 
 const agentDir = Deno.env.get("TREX_AGENT_DIR");
@@ -21,6 +22,7 @@ const agent = await loadAgent(agentDir);
 const handler = createHandler({
   agent,
   store: createStore(query),
+  channelStore: createChannelStore(query),
   plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
   agentName: Deno.env.get("TREX_AGENT_NAME") || "agent",
   basePath: Deno.env.get("TREX_AGENT_BASE") || "",

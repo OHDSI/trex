@@ -9,6 +9,8 @@ import { buildSdkTools, resolveInstructions } from "./toolset.ts";
 import { resolveModelForTurn } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
+import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
+import type { ChannelStore } from "../channels/store.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -26,6 +28,13 @@ interface Deps {
   // fails loudly at call time instead of silently no-oping.
   sql?: QueryFn;
   env?: EnvFn;
+  // Channel layer (task-4). Optional so existing createHandler callers/tests
+  // that never exercise channels keep working; when set, {basePath}/eve/v1/
+  // <channelId>/* is dispatched to the channel layer (see the channel branch
+  // below). channel routes are auth-exempt at the proxy — see plugin/agents.ts.
+  channelStore?: ChannelStore;
+  // Task 6 delivery-registration hook, threaded straight through to the layer.
+  onSessionStarted?: (info: ChannelSessionStarted) => void;
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -59,7 +68,7 @@ async function historyForModel(store: AgentStore, sessionId: string): Promise<an
 // client actually reads the final reply off — see events.ts) rather than
 // the incremental message.appended deltas eve's live stream would have
 // shown; a replaying client never sees those deltas, only the final text.
-function stepToEvent(row: { turn_id: string; kind: string; name: string | null; payload: unknown; usage?: unknown }): unknown {
+export function stepToEvent(row: { turn_id: string; kind: string; name: string | null; payload: unknown; usage?: unknown }): unknown {
   const p = (row.payload ?? {}) as Record<string, unknown>;
   const turnId = row.turn_id;
   switch (row.kind) {
@@ -166,6 +175,24 @@ function startTurn(deps: Deps, sessionId: string, message: unknown, metadata: un
 
 export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
   const { agent, store, basePath } = deps;
+
+  // Channel dispatch is only wired when a channelStore is configured (index.ts
+  // always sets one; unit tests that don't exercise channels leave it unset).
+  const channelHandler = deps.channelStore
+    ? createChannelHandler({
+        agent,
+        store,
+        channelStore: deps.channelStore,
+        plugin: deps.plugin,
+        agentName: deps.agentName,
+        basePath,
+        // Channel sessions have no trex user, so no bearerToken/userId here.
+        startTurn: (sessionId, message, metadata) => startTurn(deps, sessionId, message, metadata),
+        subscribe,
+        env: deps.env,
+        onSessionStarted: deps.onSessionStarted,
+      })
+    : undefined;
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -507,6 +534,18 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         },
       });
       return createUIMessageStreamResponse({ stream: uiStream });
+    }
+
+    // Channel branch (task-4): {basePath}/eve/v1/{channelId}{routePath}, where
+    // channelId is one of the agent's loaded channels (never `session`/`health`/
+    // `info`, which the explicit routes above already handled). Served WITHOUT
+    // the x-user-id/JWT the session/chat routes rely on: the proxy exempts these
+    // subpaths from pluginAuthz (see plugin/agents.ts) and the adapter's own
+    // signature verify() authenticates the caller inside the route handler. The
+    // session/chat routes above are untouched — their proxy auth is unchanged.
+    if (channelHandler) {
+      const ch = path.match(/^\/eve\/v1\/([^/]+)(?:\/.*)?$/);
+      if (ch && agent.channels[ch[1]]) return channelHandler(req);
     }
 
     return json({ error: "not found" }, 404);

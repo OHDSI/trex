@@ -1,6 +1,6 @@
 import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
 import { Buffer } from "node:buffer";
-import type { Express, Request, Response } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
 import { pluginAuthz } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
@@ -442,7 +442,24 @@ export function _addFunction(
   // plugins authenticate inside the function worker using the forwarded Logto
   // Authorization header (as the d2e fork did); imposing trex's pluginAuthz here
   // would 401 every Logto-authenticated call — including the portal's public APIs.
-  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [];
+  //
+  // authExemptPattern (agents channel routes, task-4): a @trex plugin may mark a
+  // subset of its paths as auth-exempt at the proxy — for agents, the channel
+  // subpaths ({basePath}/eve/v1/<channelId>/*), which are authenticated by the
+  // adapter's own platform-signature verify() inside the worker, NOT by a trex
+  // JWT. Those paths skip authContext+pluginAuthz (which would otherwise 401 an
+  // unauthenticated platform webhook). Everything else — session/chat/health/
+  // info — keeps full proxy auth, unchanged. Non-agent plugins never set this,
+  // so their auth behavior is byte-for-byte identical to before.
+  const authExemptPattern = fncfg.authExemptPattern as RegExp | undefined;
+  const trexAuth = (req: Request, res: Response, next: NextFunction) => {
+    if (authExemptPattern && authExemptPattern.test(req.path)) return next();
+    authContext(req, res, (err?: unknown) => {
+      if (err) return next(err as Error);
+      pluginAuthz(req, res, next);
+    });
+  };
+  const authMw = isTrexPlugin ? [trexAuth] : [];
   app.all([fullSource, fullSource + "/*"], apiLimiter, ...authMw, async (req: Request, res: Response) => {
     // Propagate a client disconnect (browser tab closed, live tail dropped,
     // etc.) into the worker fetch so a long-lived stream (session tail,

@@ -137,6 +137,19 @@ export function isTrexScopedAgentsPlugin(name: string): boolean {
   return name.startsWith("@trex/");
 }
 
+// Auth carve-out for channel routes (task-4). A channel route lives at
+// {basePath}/eve/v1/<channelId>/... and is authenticated by the adapter's own
+// platform-signature verify() inside the worker — NOT by a trex JWT — so it
+// must bypass authContext/pluginAuthz at the proxy, which would otherwise 401
+// an unauthenticated platform webhook (Discord/Slack/…). The session/chat/
+// health/info routes are deliberately EXCLUDED from the exemption (negative
+// lookahead) so their proxy auth is unchanged — weakening those would be a
+// serious bug. Passed to _addFunction as fncfg.authExemptPattern.
+export function channelAuthExemptPattern(basePath: string): RegExp {
+  const esc = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info)(?:/|$))[^/]+`);
+}
+
 export async function addAgentsPlugin(
   app: Express,
   value: unknown,
@@ -163,7 +176,14 @@ export async function addAgentsPlugin(
       cfg.source,
       cfg.servicePath,
       cfg.importMapPath,
-      { function: `/agents/${entry.name}`, allowHostFsAccess: true },
+      {
+        function: `/agents/${entry.name}`,
+        allowHostFsAccess: true,
+        // Channel subpaths ({basePath}/eve/v1/<channelId>/*) bypass proxy auth;
+        // the worker enforces adapter signature verification instead. session/
+        // chat/health/info keep authContext+pluginAuthz. See the pattern's doc.
+        authExemptPattern: channelAuthExemptPattern(basePath),
+      },
       dir,
       name,
       { _shared: { ...cfg.env, TREX_AGENT_BASE: basePath } },
