@@ -3,7 +3,7 @@ use duckdb::{
     vtab::arrow::WritableVector,
     vscalar::{VScalar, ScalarFunctionSignature},
 };
-use hdbconnect::{HdbValue, ResultSetMetadata};
+use hdbconnect::{HdbValue, ResultSetMetadata, TypeId};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
@@ -162,6 +162,75 @@ fn connect(connection_string: &str) -> Result<HanaConnection, Box<dyn Error>> {
     }
 }
 
+/// Extract an integer from any integer-family `HdbValue`, else `None`.
+fn hdb_as_i64(value: &HdbValue<'static>) -> Option<i64> {
+    match value {
+        HdbValue::TINYINT(v) => Some(i64::from(*v)),
+        HdbValue::SMALLINT(v) => Some(i64::from(*v)),
+        HdbValue::INT(v) => Some(i64::from(*v)),
+        HdbValue::BIGINT(v) => Some(*v),
+        HdbValue::BOOLEAN(b) => Some(i64::from(*b)),
+        _ => None,
+    }
+}
+
+/// Render an integer-family `HdbValue` as a `STRING`; leave strings and anything
+/// non-integer untouched. hdbconnect accepts a `STRING` value for any target type
+/// (HANA converts server-side), so this is the universal fallback.
+fn stringify(value: HdbValue<'static>) -> HdbValue<'static> {
+    match value {
+        HdbValue::STRING(_) => value,
+        HdbValue::TINYINT(v) => HdbValue::STRING(v.to_string()),
+        HdbValue::SMALLINT(v) => HdbValue::STRING(v.to_string()),
+        HdbValue::INT(v) => HdbValue::STRING(v.to_string()),
+        HdbValue::BIGINT(v) => HdbValue::STRING(v.to_string()),
+        HdbValue::BOOLEAN(v) => HdbValue::STRING(v.to_string()),
+        other => other,
+    }
+}
+
+/// Adapt a bound value to satisfy the target column's HANA type.
+///
+/// hdbconnect rejects a batch row when the `HdbValue` variant does not exactly
+/// match the prepared statement's parameter type (e.g. binding a BIGINT into an
+/// INTEGER column raises "value type id BIGINT does not match metadata INT").
+/// The COHORT table's SUBJECT_ID is INTEGER, BIGINT, or NVARCHAR depending on the
+/// schema, while the source query can yield any integer width or a string, so we
+/// coerce the value to the target type. A `STRING` binds to any target, so it is
+/// the fallback when the numeric value does not fit the (narrower) target width or
+/// the target is a character type.
+fn coerce_to_target(value: HdbValue<'static>, target: TypeId) -> HdbValue<'static> {
+    if matches!(value, HdbValue::NULL) {
+        return value;
+    }
+    match target {
+        TypeId::TINYINT | TypeId::SMALLINT | TypeId::INT | TypeId::BIGINT => match hdb_as_i64(&value) {
+            Some(i) => match target {
+                TypeId::TINYINT if (0..=i64::from(u8::MAX)).contains(&i) => HdbValue::TINYINT(i as u8),
+                TypeId::SMALLINT if i >= i64::from(i16::MIN) && i <= i64::from(i16::MAX) => {
+                    HdbValue::SMALLINT(i as i16)
+                }
+                TypeId::INT if i >= i64::from(i32::MIN) && i <= i64::from(i32::MAX) => {
+                    HdbValue::INT(i as i32)
+                }
+                TypeId::BIGINT => HdbValue::BIGINT(i),
+                // Out of range for the narrower target: hand HANA the string form.
+                _ => HdbValue::STRING(i.to_string()),
+            },
+            // Non-integer value (e.g. an NVARCHAR subject id) into an integer column.
+            None => stringify(value),
+        },
+        TypeId::CHAR
+        | TypeId::VARCHAR
+        | TypeId::NCHAR
+        | TypeId::NVARCHAR
+        | TypeId::STRING
+        | TypeId::NSTRING => stringify(value),
+        // Dates, decimals, LOBs, etc.: leave the source value untouched.
+        _ => value,
+    }
+}
+
 fn run_materialize(
     connection_string: &str,
     source_sql: &str,
@@ -210,6 +279,15 @@ fn run_materialize(
     let [idx_subject, idx_start, idx_end] = col_indices;
 
     let mut insert_stmt = insert_conn.prepare(&insert_sql)?;
+    // Target column types for the three bound params (SUBJECT_ID, COHORT_START_DATE,
+    // COHORT_END_DATE), in placeholder order. The COHORT table's SUBJECT_ID type
+    // varies by schema (INTEGER / BIGINT / NVARCHAR), so we coerce each bound value
+    // to the actual target type rather than assume the source type matches.
+    let target_types: Vec<TypeId> = insert_stmt
+        .parameter_descriptors()
+        .iter_in()
+        .map(|d| d.type_id())
+        .collect();
     let mut processed: i64 = 0;
     let mut pending: usize = 0;
 
@@ -226,11 +304,24 @@ fn run_materialize(
             }
         }
         let [subject, start, end] = slots;
-        insert_stmt.add_row_to_batch(vec![
-            subject.ok_or_else(|| HanaError::new("internal: SUBJECT_ID value missing in row"))?,
-            start.ok_or_else(|| HanaError::new("internal: COHORT_START_DATE value missing in row"))?,
-            end.ok_or_else(|| HanaError::new("internal: COHORT_END_DATE value missing in row"))?,
-        ])?;
+        let subject = subject.ok_or_else(|| HanaError::new("internal: SUBJECT_ID value missing in row"))?;
+        let start = start.ok_or_else(|| HanaError::new("internal: COHORT_START_DATE value missing in row"))?;
+        let end = end.ok_or_else(|| HanaError::new("internal: COHORT_END_DATE value missing in row"))?;
+        let row = vec![
+            match target_types.first() {
+                Some(&t) => coerce_to_target(subject, t),
+                None => subject,
+            },
+            match target_types.get(1) {
+                Some(&t) => coerce_to_target(start, t),
+                None => start,
+            },
+            match target_types.get(2) {
+                Some(&t) => coerce_to_target(end, t),
+                None => end,
+            },
+        ];
+        insert_stmt.add_row_to_batch(row)?;
         pending += 1;
         if pending >= batch_size {
             insert_stmt.execute_batch()?;
