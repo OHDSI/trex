@@ -178,7 +178,9 @@ Deno.test("loadAgent ignores eve dirs we don't support, without failing", async 
 
 Deno.test("loadAgent discovers channels/*.{ts,js} as branded ChannelDefs keyed by filename", async () => {
   const a = await loadAgent(TOY);
-  assertEquals(Object.keys(a.channels), ["webhook"]);
+  // Order is Deno.readDir-dependent; assert the set, not the sequence. The toy
+  // agent ships `webhook` plus the authored `custom-hook` channel (Task 7).
+  assertEquals(Object.keys(a.channels).sort(), ["custom-hook", "webhook"]);
   assert(a.channels.webhook.__trexChannel);
   assertEquals(a.channels.webhook.routes[0].method, "POST");
   assertEquals(a.channels.webhook.routes[0].path, "/message");
