@@ -26,6 +26,13 @@ export function createChannelStore(query: QueryFn) {
     // principal (auth) and record the token -> session mapping (created:true).
     // created_by is null — that column is the trex x-user-id, distinct from the
     // channel principal (spec §4.3); a channel-initiated session has no trex user.
+    //
+    // Race-safe: the SELECT-then-INSERT is a TOCTOU window — two inbound
+    // messages with the same (channel, token) can both miss the SELECT. We let
+    // both create a session but arbitrate on the channel_sessions PK via
+    // ON CONFLICT DO NOTHING RETURNING: the winner's mapping INSERT returns a
+    // row; the loser gets no row, deletes its now-orphaned session, and adopts
+    // the winner's session (created:false).
     async resolveOrCreateSession(
       channel: string,
       token: string,
@@ -55,11 +62,23 @@ export function createChannelStore(query: QueryFn) {
       );
       const sessionId = created.rows[0].id;
 
-      await query(
-        `INSERT INTO agents.channel_sessions (channel, continuation_token, session_id) VALUES ($1, $2, $3)`,
+      const mapped = await query(
+        `INSERT INTO agents.channel_sessions (channel, continuation_token, session_id) VALUES ($1, $2, $3)
+         ON CONFLICT (channel, continuation_token) DO NOTHING RETURNING session_id`,
         [channel, token, sessionId],
       );
-      return { sessionId, created: true };
+      if (mapped.rows.length > 0) {
+        return { sessionId, created: true };
+      }
+
+      // Lost the race: a concurrent caller already mapped this token. Drop our
+      // orphaned session and adopt the winner's mapping.
+      await query(`DELETE FROM agents.sessions WHERE id = $1`, [sessionId]);
+      const winner = await query(
+        `SELECT session_id FROM agents.channel_sessions WHERE channel = $1 AND continuation_token = $2`,
+        [channel, token],
+      );
+      return { sessionId: winner.rows[0].session_id, created: false };
     },
 
     // Re-keys a parked session under a (channel, token): idempotently points

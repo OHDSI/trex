@@ -47,7 +47,7 @@ Deno.test("resolveOrCreateSession creates a session and mapping on a miss, popul
   const { fn, calls } = fakeQuery([
     { rows: [] }, // lookup miss
     { rows: [{ id: "s-new" }] }, // sessions INSERT ... RETURNING id
-    { rows: [] }, // channel_sessions INSERT
+    { rows: [{ session_id: "s-new" }] }, // channel_sessions INSERT ... RETURNING -> we won
   ]);
   const store = createChannelStore(fn as never);
   const auth: ChannelAuth = {
@@ -72,11 +72,39 @@ Deno.test("resolveOrCreateSession creates a session and mapping on a miss, popul
   assertEquals(calls[2].params, ["discord", "discord:u42", "s-new"]);
 });
 
+Deno.test("resolveOrCreateSession loses the PK race: deletes orphan session and adopts the winner", async () => {
+  const { fn, calls } = fakeQuery([
+    { rows: [] }, // lookup miss
+    { rows: [{ id: "s-mine" }] }, // sessions INSERT ... RETURNING id
+    { rows: [] }, // channel_sessions INSERT ... ON CONFLICT DO NOTHING RETURNING -> no row (lost)
+    { rows: [] }, // DELETE orphan session
+    { rows: [{ session_id: "s-winner" }] }, // re-SELECT the winner's mapping
+  ]);
+  const store = createChannelStore(fn as never);
+  const res = await store.resolveOrCreateSession("discord", "discord:u1", "toy-agent", "toy", null);
+  assertEquals(res, { sessionId: "s-winner", created: false });
+  assertEquals(calls.length, 5);
+
+  // mapping INSERT is a conflict-tolerant upsert-guard.
+  assert(calls[2].sql.includes("INSERT INTO agents.channel_sessions"));
+  assert(calls[2].sql.includes("ON CONFLICT"));
+  assert(calls[2].sql.includes("DO NOTHING"));
+  assert(calls[2].sql.includes("RETURNING session_id"));
+
+  // orphan cleanup: our own just-created session is deleted.
+  assert(calls[3].sql.includes("DELETE FROM agents.sessions"));
+  assertEquals(calls[3].params, ["s-mine"]);
+
+  // re-select the winner's mapping.
+  assert(calls[4].sql.includes("SELECT session_id FROM agents.channel_sessions"));
+  assertEquals(calls[4].params, ["discord", "discord:u1"]);
+});
+
 Deno.test("resolveOrCreateSession leaves principal columns null when principal is null", async () => {
   const { fn, calls } = fakeQuery([
     { rows: [] },
     { rows: [{ id: "s-anon" }] },
-    { rows: [] },
+    { rows: [{ session_id: "s-anon" }] }, // channel_sessions INSERT ... RETURNING -> we won
   ]);
   const store = createChannelStore(fn as never);
   const res = await store.resolveOrCreateSession("web", "web:anon", "toy-agent", "toy", null);
