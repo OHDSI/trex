@@ -116,3 +116,43 @@ around).
   file attachments (parity with the Discord/Slack adapters). Not vendored.
 - `defaults.js`'s `defaultEvents` / `defaultOnMessage` — see above.
 - `index.js` — barrel re-export.
+
+## twilio/ — copied files
+
+Source dir: `dist/src/public/channels/twilio/`.
+
+Twilio is the ODD ONE OUT: eve's "pure" Twilio helpers (`verify.js`, `api.js`,
+`inbound.js`, `twiml.js`) are one-line wrappers that re-export their real logic
+from `#compiled/@chat-adapter/twilio/{webhook,api,voice}.js`, and those resolve
+to BUNDLED, MINIFIED chunks (`dist/src/compiled/_chunks/node/chunk-*.js`) — not
+vendorable as readable source. So those four are **Reimplemented** from the
+minified chunk (labelled honestly), not vendored. Only `defaults.js`'s pure
+`defaultTwilioAuth` is genuinely **Vendored**, and the SMS text HITL
+(`hitl.ts`) has NO eve source at all — eve's Twilio channel has no HITL widget
+(its widgets live on Discord/Slack/Telegram), so it is **invented for trex**.
+SMS-only: the voice-call / transcription / media-stream helpers are DEFERRED.
+
+| vendored file | eve source | edits |
+|---|---|---|
+| `shared.ts` | `dist/src/shared/guards.js` + the constant-time compare / byte→base64 helpers inside `compiled/_chunks/node/chunk-QZV7YRVM-*.js`, plus TYPE shapes from `runtime/input/types.d.ts` + `channel/types.d.ts` (→ `TwilioAuthContext`). | Consolidated so vendored files import only siblings. `timingSafeEqual` is eve's compiled length-tolerant compare (seeds the diff with the length delta), `bytesToBase64` is its `btoa`-over-byte-string; `getEnv` wraps `Deno.env`. |
+| `verify.ts` | `verify.js` → `compiled/@chat-adapter/twilio/webhook.js` (minified chunk). | **Reimplemented.** The pure `verify.js` re-exports `twilioSignatureBase`/`verifyTwilioRequest`/`readTwilioWebhook`/`resolveTwilioWebhookUrl` from a minified `#compiled` chunk, so the algorithm is reimplemented from that chunk. The crypto is byte-for-byte eve's: HMAC-SHA1 via **WebCrypto `crypto.subtle`** (which eve itself uses — NOT `node:crypto`) over the request URL + params sorted by key (values deduped + sorted per key), base64, constant-time compared vs `X-Twilio-Signature`. Adds `resolveTwilioAuthToken` (fail-closed on missing token → the signature check is the ONLY webhook auth), a configurable `webhookUrl` resolver (the URL Twilio signed can differ behind a proxy), `signTwilioRequest` (the sign side, for tests/forwarders), and `verifyTwilioInbound` (returns null instead of throwing so a route can 401). |
+| `inbound.ts` | `inbound.js` → `compiled/@chat-adapter/twilio/webhook.js` (`parseTwilioWebhookBody`). | **Reimplemented** from the minified chunk. Only the SMS (text) path + `formatTwilioContextBlock` are kept (voice/transcription parsers DEFERRED). The status-vs-text-vs-unsupported classification + `NumMedia` media handling are eve's, unchanged. |
+| `api.ts` | `api.js` → `compiled/@chat-adapter/twilio/api.js` (minified chunk). | **Reimplemented** from the minified chunk. `process.env` → `getEnv`. Only the SMS-send path is kept (YAGNI): `encodeTwilioForm`, `resolveTwilioCredential`/`resolveTwilioAccountSid`/`resolveTwilioAuthToken`, `callTwilioApi`, `sendTwilioMessage` (Basic-auth `POST /2010-04-01/Accounts/{SID}/Messages.json`), `twilioContinuationToken` (`${from}:${to}`), `TwilioApiError`. The media fetch, message get/delete/list, and voice `updateCall` were dropped. `splitTwilioMessageBody` (1600-char per-request cap, newline/space boundaries) is trex-added — eve has no explicit SMS splitter (it relies on carrier segmentation). |
+| `twiml.ts` | `twiml.js` → `compiled/@chat-adapter/twilio/voice.js` (`twilioResponse`/`escapeXml`). | **Reimplemented** from the minified chunk. Only `emptyTwilioResponse` (the `<Response/>` ack returned immediately from the webhook — the real SMS reply goes out via REST once the async turn completes) + `messageTwilioResponse` (inline `<Message>`, available for sync single-shot replies) + `escapeXml` are kept. Voice responses (`say`/`gatherSpeech`) DEFERRED. |
+| `hitl.ts` | none. | **Reimplemented for trex — no eve source.** eve's Twilio channel has no HITL widget. SMS has no buttons, so `renderTwilioInputRequest` renders a numbered PLAIN-TEXT option list ("Reply with a number …") and `deriveTwilioInputResponse` maps a reply SMS back to an option robustly (bare index `"2"`/`"2."`, then case-insensitive id/label match, then first-word match, then freeform when allowed). Stateless and text-only — unlike Telegram's `callback_data`, SMS carries no length-limited id, so the Telegram 64-byte-overflow class of bug does not apply. |
+| `defaults.ts` | `defaults.js` | **Vendored — only** the pure `defaultTwilioAuth` (its `#channel/types` `SessionAuthContext` return → sibling `TwilioAuthContext`); de-minified. eve's `defaultEvents` / `defaultOnText` / `defaultOnVoice*` were NOT copied — they are shaped against eve's runtime channel handle (`ctx.twilio.sendMessage()`) and `#internal/logging`. The trex factory supplies its own `events` + message default against `ChannelRouteArgs`. |
+
+### Not vendored (eve runtime — the trex factory replaces it)
+
+- `twilioChannel.js` — eve's runtime-coupled factory (builds a stateful
+  `ctx.twilio` handle, `allowFrom` gating, voice/transcription routes, a
+  `receive`/`context`/`metadata` surface); `../adapters/twilio.ts` is the
+  replacement. Its `waitUntil`-dispatch + empty-TwiML-ack + REST-reply split is
+  the shape the trex factory reproduces.
+- `routing.js` — imports `#internal/logging` + builds the voice/transcription
+  route set; the trex factory needs only the single SMS `POST` route, so the URL
+  resolution is folded into `verify.ts`'s `webhookUrl` resolver instead.
+- `defaults.js`'s `defaultEvents` / `defaultOnText` / `defaultOnVoice*` — see above.
+- `index.js` — barrel re-export.
+- Voice (`onVoice`/`onVoiceTranscription`, `parseTwilioVoiceCall`, the `say`/
+  `gatherSpeech` TwiML) + WebSocket media-streams — DEFERRED (out of v1 SMS scope).
