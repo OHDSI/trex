@@ -84,3 +84,35 @@ supplies that wiring).
 - `slackChannel.js` — eve's runtime-coupled factory; `../adapters/slack.ts` is
   the replacement. `index.js` — barrel. `constants.js`/`utils.js` — unused (the
   factory defaults `route` to `/` like discord, and event-dedup is deferred).
+
+## telegram/ — copied files
+
+Source dir: `dist/src/public/channels/telegram/`.
+
+Telegram is the SIMPLEST auth of the three: not HMAC/Ed25519 but plain
+secret-token equality (the value you set on `setWebhook`'s `secret_token`,
+echoed by Telegram in `X-Telegram-Bot-Api-Secret-Token`). Most of eve's pure
+helpers vendor cleanly; only `hitl.js` is reimplemented (its 64-byte-workaround
+design is coupled to eve's durable per-session channel state, which the trex
+factory does not expose — the same constraint the Discord/Slack HITL self-encode
+around).
+
+| vendored file | eve source | edits |
+|---|---|---|
+| `shared.ts` | `dist/src/shared/guards.js`, `dist/src/shared/json.js`, plus TYPE shapes from `runtime/input/types.d.ts` + `channel/types.d.ts` (→ `TelegramAuthContext`). | Consolidated so vendored files import only siblings. Added Deno replacements for Node crypto/Buffer: `timingSafeEqual` (string constant-time), `utf8ToBase64Url`/`base64UrlToUtf8`; `getEnv` wraps `Deno.env`. |
+| `verify.ts` | `verify.js` | **Vendored (modified).** eve's secret-token check logic is unchanged; only the plumbing is swapped: Node `node:crypto` `timingSafeEqual` + `Buffer` → sibling string `timingSafeEqual`, `#internal/logging` → `console`, `process.env` → `getEnv`. Env fallback key is `TELEGRAM_WEBHOOK_SECRET` (trex naming; eve reads `TELEGRAM_WEBHOOK_SECRET_TOKEN`). Adds `verifyTelegramInbound` (returns null instead of throwing so a route can 401 — fail-closed on a missing secret). |
+| `inbound.ts` | `inbound.js` | imports `#shared/guards` → `./shared.ts`; types added from `inbound.d.ts`; de-minified. `parseTelegramUpdate` / `formatTelegramContextBlock` / `parseTelegramChatType` and the full parse chain unchanged. |
+| `api.ts` | `api.js` | imports `#shared/json` + `#shared/guards` + `inbound` → siblings; `process.env` → `getEnv`; types from `api.d.ts`. **Only** the helpers the factory uses are kept (YAGNI): `callTelegramApi`, `sendTelegramMessage`, `sendTelegramChatAction`, `answerTelegramCallbackQuery`, `splitTelegramMessageText` (the documented 4096-char splitter). The file-download (`getFile`/`downloadFile`), `editMessageReplyMarkup`, and the composite `telegramContinuationToken` were dropped (the trex factory uses the raw `${chatId}` as its continuation token). REST/split logic unchanged. |
+| `hitl.ts` | `hitl.js` | **Reimplemented.** eve's HITL is stateful: Telegram caps `callback_data` at 64 bytes, so eve stores compact ids (`eve:0`, `eve:1`, …) in durable per-session channel state (`hitlCallbacks`/`nextHitlCallbackId`) and remaps them in a runtime `deliver` hook. The trex factory has no cross-request channel-state store (render and callback are two separate HTTP requests), so this self-encodes requestId+optionId into `callback_data` (base64url JSON under an `eve:` prefix) for a STATELESS round-trip, staying within the 64-byte cap for typical ids (throws if exceeded). eve's stateful helpers (`registerTelegramCallback`, `resolveTelegramInputResponses`, `telegramCallbackInputResponse`, `pendingFreeformReplies`) are NOT vendored. |
+| `defaults.ts` | `defaults.js` | **Only** the pure `defaultTelegramAuth` is vendored (its `#channel/types` `SessionAuthContext` return → sibling `TelegramAuthContext`); de-minified. eve's `defaultEvents` / `defaultOnMessage` / `shouldDispatchTelegramMessage` were intentionally NOT copied — they are shaped against eve's runtime channel handle (`ctx.telegram.startTyping()`/`.post()`) and durable HITL state. The trex factory supplies its own `events` / message default against `ChannelRouteArgs`. |
+
+### Not vendored (eve runtime — the trex factory replaces it)
+
+- `telegramChannel.js` — eve's runtime-coupled factory (builds a stateful
+  `ctx.telegram` handle, durable channel state, a `deliver` remap hook);
+  `../adapters/telegram.ts` is the replacement.
+- `attachments.js` — imports `#internal/logging`, `#public/channels/upload-policy`,
+  and the runtime file-download path; the trex factory does not ingest Telegram
+  file attachments (parity with the Discord/Slack adapters). Not vendored.
+- `defaults.js`'s `defaultEvents` / `defaultOnMessage` — see above.
+- `index.js` — barrel re-export.

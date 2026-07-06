@@ -13,6 +13,7 @@
     "eve/channels/eve": "./agents/channels/adapters/eve.ts",
     "eve/channels/discord": "./agents/channels/adapters/discord.ts",
     "eve/channels/slack": "./agents/channels/adapters/slack.ts",
+    "eve/channels/telegram": "./agents/channels/adapters/telegram.ts",
     "eve/evals": "./agents/eve-shim/evals.ts",
     "edn-data": "npm:edn-data@^1"
   },
