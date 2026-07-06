@@ -199,3 +199,49 @@ features (`checkout.js`, `binding.js`) are OUT of v1 and NOT vendored.
 - `index.js` — barrel re-export.
 - CI events (`check_suite`/`check_run`/`workflow_run`) parsing + their types —
   DROPPED (the factory dispatches only issue/PR/comment events).
+
+## linear/ — copied files
+
+Source dir: `dist/src/public/channels/linear/`.
+
+Linear is the LEAST-vendorable adapter so far — a **model mismatch**, not just a
+runtime-coupling one. eve@0.19.0's Linear channel is built on Linear's **Agent
+Session** platform: it consumes `AgentSessionEvent` webhooks (`parseLinearWebhookEvent`
+returns an `agent_session` event with `agentSession`/`agentActivity`), keys the
+session by `agent-session:{id}`, and DELIVERS by posting **Agent Activities**
+(`agentActivityCreate` / `createLinearAgentSession*`) through a stateful runtime
+handle. The brief (the GitHub analog) prescribes the CLASSIC **Comment/Issue
+webhook + `commentCreate`** model instead. So only the MODEL-AGNOSTIC pieces are
+reused from eve: the webhook signature+timestamp verify ALGORITHM, the credential
+resolvers, and the GraphQL transport. The inbound parse, the delivery mutation,
+the HITL comment, and the auth projection are all trex-shaped for the comment
+model (like the GitHub adapter), and honestly labelled Reimplemented.
+
+| vendored file | eve source | edits |
+|---|---|---|
+| `shared.ts` | `dist/src/shared/guards.js` (isObject) + `dist/src/shared/json.js` (parseJsonObject), plus TYPE shapes from `runtime/input/types.d.ts` (→ `InputOption`/`InputRequest`/`InputResponse`) + `channel/types.d.ts` (→ `LinearAuthContext`). | Consolidated so the vendored Linear files import only siblings — no eve import survives. `getEnv` wraps `Deno.env`; `bytesToHex` mirrors Node's `.digest("hex")`; `timingSafeEqual` is a length-tolerant constant-time string compare. |
+| `verify.ts` | `verify.js` | **Reimplemented.** eve computes the HMAC with `node:crypto` `createHmac("sha256")` + `timingSafeEqual` and imports `#internal/logging` (runtime-coupled), so the HMAC is redone on **WebCrypto** (`crypto.subtle`, HMAC + SHA-256). The algorithm is byte-for-byte eve's: lowercase-hex HMAC-SHA256 over the RAW body, keyed by `LINEAR_WEBHOOK_SECRET`, constant-time compared vs `Linear-Signature`. eve's REPLAY WINDOW is preserved: after the signature matches, the payload's `webhookTimestamp` (epoch-ms number) must be within `maxSkewMs` (default `60_000`, eve's `6e4`) of now. Fails CLOSED on a missing secret (the signature is the ONLY webhook auth). Adds `verifyLinearInbound` (returns null instead of throwing so a route can 401) + a `webhookVerifier` seam. |
+| `inbound.ts` | `inbound.js` | **Reimplemented.** eve's `parseLinearWebhookEvent` is PURE (imports only `#shared/*`) but shaped around the Agent Session model; its non-session branch collapses every other delivery into an opaque `{ kind:"data", type, action, raw }`. This file keeps eve's data-webhook CLASSIFICATION (`type`/`action`/`data`, the `Linear-Event`/`Linear-Delivery` headers, `organizationId`) but ADDS the Comment/Issue field extraction, the `isIgnoredLinearEvent` loop guard, the raw issue-id continuation token, and the `<linear_context>` block. eve's agent-session readers (`readAgentSession`/`readAgentActivity`/…) and its `agent-session:` token are NOT carried. |
+| `api.ts` | `api.js` | **Partly vendored**, de-minified. **Vendored:** the GraphQL transport `callLinearGraphQL` (POST `https://api.linear.app/graphql`, `Authorization: Bearer <token>`, JSON body, `errors[]`/non-2xx → `LinearApiError`) + the `LinearApiError` class — eve's, unchanged (imports map to siblings, no eve import survives). **Trex-added (NOT vendored):** `createLinearComment` (the `commentCreate($input: CommentCreateInput!)` mutation). eve has no `commentCreate` — it posts Agent Activities (`agentActivityCreate`) — so the mutation is trex's over eve's transport. eve's agent-session mutations are DROPPED (YAGNI). |
+| `auth.ts` | `auth.js` | **Vendored**, de-minified. eve's `auth.js` is PURE (two credential resolvers, no imports). Modified: `process.env.*` → `getEnv` (`Deno.env`); the resolver logic (provider-or-literal, env fallback chain, fail-closed throw) is eve's, unchanged. `resolveLinearAccessToken` keeps eve's full fallback chain (`LINEAR_AGENT_ACCESS_TOKEN` → `LINEAR_ACCESS_TOKEN` → `LINEAR_API_KEY` → `LINEAR_API_TOKEN`) so the brief's `LINEAR_API_KEY` and an OAuth agent token both resolve. |
+| `defaults.ts` | `defaults.js` | **Reimplemented.** eve's `defaultLinearAuth` projects an **Agent Session** actor (`agentSession.creator` / `agentActivity.user`) — its shape does not fit the classic comment webhook — so the auth PROJECTION is redone against a Comment/Issue actor (`linear:${userId}` principal, `linear:${orgId}` issuer, the same `authenticator`/`principalType` posture). eve's `createDefaultEvents` (Agent Activity handlers) and `defaultOnAgentSession` are NOT copied (agent-session runtime). |
+| `limits.ts` | none. | **Reimplemented for trex — no eve source.** eve posts Agent Activities and defines no comment-length constant (its only Linear constant is the default route). The trex channel posts comments, so it needs a split. The SPLIT ALGORITHM is copied from the vendored `github/limits.ts` (newline-then-space boundary past the halfway mark, else a hard cut). The CAP is trex-chosen: Linear publishes no hard comment-body limit, so `LINEAR_COMMENT_BODY_MAX_LENGTH` is a conservative `64_000`. |
+| `hitl.ts` | none. | **Reimplemented for trex — no usable eve source.** eve's `hitl.js` encodes input requests as a base64url `<!-- eve-input: … -->` marker in an Agent Activity and resolves the reply via the runtime-coupled `#channel/resolve-text` + an `listAgentSessionActivities` lookup (agent-session runtime). Linear has no interactive widgets, so (like `github/hitl.ts` / `twilio/hitl.ts`) `renderLinearInputRequest` renders a plain-text reply-instructions comment and `deriveLinearInputResponse` maps the next comment back to an option with a stateless text match (`/slash`, then bare index, then id/label). |
+
+### Not vendored (eve runtime / model mismatch — the trex factory replaces it)
+
+- `linearChannel.js` — eve's runtime-coupled Agent Session factory (stateful
+  `ctx.linear` handle, `agentActivityCreate` delivery, `receive`/`context`/
+  `metadata` surface, `#internal/logging`); `../adapters/linear.ts` is the
+  replacement. Its verify-first → parse → `waitUntil`-dispatch → async-GraphQL-
+  reply shape is what the trex factory reproduces (for the comment model).
+- The Agent Session inbound model — `AgentSessionEvent` parsing,
+  `messageFromLinearAgentSessionEvent`, `readAgentSession`/`readAgentActivity`,
+  `previousComments`, the `agent-session:{id}` continuation token — DROPPED
+  (the factory dispatches Comment/Issue data webhooks keyed by raw issue id).
+- Agent-session GraphQL mutations (`agentActivityCreate`,
+  `createLinearAgentSessionOnComment`/`OnIssue`, `updateLinearAgentSession`,
+  `listLinearAgentSessionActivities`) — DROPPED; the factory posts `commentCreate`.
+- `constants.js` — eve's default route; the factory defaults its own route to
+  `/` (the channel root), like the prior adapters.
+- `index.js` — barrel re-export.
