@@ -57,6 +57,16 @@ export type ChannelEventHandlers = Record<
   (eventData: any, channel: any, ctx?: any) => void | Promise<void>
 >;
 
+// What a channel's `receive` hook returns for a cross-channel hand-off (§4.5).
+// `continuationToken` is the RAW token (adapter-owned format) — the runtime
+// namespaces it with the target channel id, exactly like send()'s opts token —
+// so a hook must NOT pre-namespace it.
+export interface ChannelReceiveResult {
+  continuationToken: string;
+  state?: unknown;
+  title?: string;
+}
+
 // The branded channel definition produced by defineChannel and consumed by the
 // loader/runtime (Tasks 2/5/8+). `__trexChannel` is the brand the loader checks
 // before trusting a channel file's default export, exactly as `__trexTool` /
@@ -65,6 +75,14 @@ export interface ChannelDef {
   __trexChannel: true;
   routes: ChannelRoute[];
   events?: ChannelEventHandlers;
+  // Cross-channel hand-off hook (§4.5). When another channel's route calls
+  // args.receive(thisChannel, input), the runtime invokes this to derive the
+  // continuation token + optional initial state/title for the session it starts
+  // on THIS channel, from the caller-supplied {message, target, auth} input.
+  // Optional: without it, receive() falls back to a default token (target's
+  // channelId, else a fresh UUID) and empty state.
+  // deno-lint-ignore no-explicit-any
+  receive?: (input: any) => ChannelReceiveResult | Promise<ChannelReceiveResult>;
   state?: Record<string, unknown>;
   // deno-lint-ignore no-explicit-any
   metadata?: (state: any) => Record<string, unknown>;

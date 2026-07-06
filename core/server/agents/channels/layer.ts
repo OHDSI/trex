@@ -155,59 +155,72 @@ function buildArgs(
     req.headers.get("x-real-ip") ||
     null;
 
+  // Shared session-start path. send() (current channel) and receive() (a
+  // different, TARGET channel) both funnel through here — the ONLY difference is
+  // which channel id owns the session key + delivery. `sessionChannelId` is that
+  // owner; `channel` is its ChannelDef (used to decide/wire delivery).
+  const startChannelSession = async (
+    sessionChannelId: string,
+    channel: ChannelDef | undefined,
+    message: unknown,
+    opts: { auth: ChannelAuth | null; continuationToken: string; state?: unknown; title?: string },
+  ): Promise<{ id: string }> => {
+    // The raw token is adapter-owned; namespace it with the channelId so two
+    // channels minting the same raw token address distinct sessions.
+    const token = namespacedToken(sessionChannelId, opts.continuationToken);
+    const { sessionId, created } = await deps.channelStore.resolveOrCreateSession(
+      sessionChannelId,
+      token,
+      deps.plugin,
+      deps.agentName,
+      opts.auth,
+    );
+    deps.startTurn(sessionId, message);
+    const info: ChannelSessionStarted = {
+      channelId: sessionChannelId,
+      sessionId,
+      created,
+      auth: opts.auth,
+      continuationToken: opts.continuationToken,
+      state: opts.state,
+      title: opts.title,
+    };
+    deps.onSessionStarted?.(info);
+
+    // Server-initiated delivery (Task 5): if this channel declares `events`
+    // handlers, subscribe them to the session's live stream so the adapter
+    // posts the agent's reply back to the platform AFTER this response
+    // returns. No-op for channels without events (e.g. the toy webhook).
+    if (channel?.events) {
+      const waitUntil = deps.waitUntil ?? edgeWaitUntil;
+      (deps.registerDelivery ?? defaultRegisterDelivery)({
+        channel,
+        sessionId,
+        subscribe: deps.subscribe,
+        waitUntil,
+        buildChannelCtx: () =>
+          deps.buildChannelCtx
+            ? deps.buildChannelCtx({ ...info, channel })
+            : {
+              // Default context the events handlers receive as 2nd/3rd args.
+              // Adapter tasks supply a richer one via deps.buildChannelCtx.
+              channelCtx: { channelId: sessionChannelId, sessionId, state: info.state, title: info.title, auth: info.auth, env: deps.env },
+              ctx: { sessionId, channelId: sessionChannelId, waitUntil },
+            },
+      });
+    }
+    return { id: sessionId };
+  };
+
   return {
     params,
     requestIp,
 
-    async send(message, opts) {
-      // The raw token is adapter-owned; namespace it with the channelId so two
-      // channels minting the same raw token address distinct sessions.
-      const token = namespacedToken(channelId, opts.continuationToken);
-      const { sessionId, created } = await deps.channelStore.resolveOrCreateSession(
-        channelId,
-        token,
-        deps.plugin,
-        deps.agentName,
-        opts.auth,
-      );
-      deps.startTurn(sessionId, message);
-      const info: ChannelSessionStarted = {
-        channelId,
-        sessionId,
-        created,
-        auth: opts.auth,
-        continuationToken: opts.continuationToken,
-        state: opts.state,
-        title: opts.title,
-      };
-      deps.onSessionStarted?.(info);
-
-      // Server-initiated delivery (Task 5): if this channel declares `events`
-      // handlers, subscribe them to the session's live stream so the adapter
-      // posts the agent's reply back to the platform AFTER this response
-      // returns. No-op for channels without events (e.g. the toy webhook).
+    send(message, opts) {
       const channel = Object.hasOwn(deps.agent.channels, channelId)
         ? deps.agent.channels[channelId]
         : undefined;
-      if (channel?.events) {
-        const waitUntil = deps.waitUntil ?? edgeWaitUntil;
-        (deps.registerDelivery ?? defaultRegisterDelivery)({
-          channel,
-          sessionId,
-          subscribe: deps.subscribe,
-          waitUntil,
-          buildChannelCtx: () =>
-            deps.buildChannelCtx
-              ? deps.buildChannelCtx({ ...info, channel })
-              : {
-                // Default context the events handlers receive as 2nd/3rd args.
-                // Adapter tasks supply a richer one via deps.buildChannelCtx.
-                channelCtx: { channelId, sessionId, state: info.state, title: info.title, auth: info.auth, env: deps.env },
-                ctx: { sessionId, channelId, waitUntil },
-              },
-        });
-      }
-      return { id: sessionId };
+      return startChannelSession(channelId, channel, message, opts);
     },
 
     getSession(sessionId) {
@@ -248,11 +261,44 @@ function buildArgs(
       };
     },
 
-    // Reserved for adapters that forward inbound platform input through a
-    // channel's own event pipeline. Out of scope for v1 (adapters use send());
-    // kept on the interface so the shape is stable — mirrors shim.ts's WS stub.
-    receive() {
-      return Promise.reject(new Error("agents: ChannelRouteArgs.receive() is not implemented in v1"));
+    // Cross-channel hand-off (spec §4.5): start a session on a DIFFERENT
+    // channel (e.g. an incident webhook opening a Slack thread). Does NOT start
+    // a session on the current channel — the current route's own HTTP response
+    // is whatever its handler returns. Reuses the same send() path, keyed to the
+    // TARGET channel's id + delivery.
+    async receive(targetChannel, input) {
+      // eve parity: the target is passed by REFERENCE (its ChannelDef default
+      // export). Map it back to its id by identity match against the agent's
+      // channels — that id owns the session key + delivery.
+      let targetId: string | undefined;
+      for (const [id, def] of Object.entries(deps.agent.channels)) {
+        if (def === targetChannel) { targetId = id; break; }
+      }
+      if (targetId === undefined) {
+        throw new Error("agents: receive() target is not a registered channel of this agent");
+      }
+
+      const { message, target, auth } = (input ?? {}) as {
+        message?: unknown;
+        target?: { channelId?: string };
+        auth?: ChannelAuth | null;
+      };
+
+      // Derive the continuation token + initial state. If the target declares a
+      // `receive` hook, it owns that derivation (from {message, target, auth}).
+      // Otherwise default to the target's channelId as the raw token (else a
+      // fresh UUID) and empty state — startChannelSession namespaces the raw
+      // token to `${targetId}:<raw>`, same as send().
+      const derived = typeof targetChannel.receive === "function"
+        ? await targetChannel.receive(input)
+        : { continuationToken: target?.channelId ?? crypto.randomUUID() };
+
+      return startChannelSession(targetId, targetChannel, message, {
+        auth: auth ?? null,
+        continuationToken: derived.continuationToken,
+        state: derived.state,
+        title: derived.title,
+      });
     },
 
     waitUntil(p) {

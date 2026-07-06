@@ -250,6 +250,166 @@ Deno.test("channel layer: a channel with events registers background delivery on
   assertEquals(registered.length, 1, "channel without events must not register delivery");
 });
 
+Deno.test("channel layer: receive() starts a session on the TARGET channel (default token), not the current one", async () => {
+  const agent = await loadAgent(TOY);
+  // Target channel B: declares events (so delivery must register) but NO receive
+  // hook -> default continuation token = target.channelId, namespaced to B.
+  agent.channels.B = {
+    __trexChannel: true,
+    events: { "message.completed": () => {} },
+    routes: [],
+  } as any;
+  // Current channel A: its route hands off to B via receive() and returns its
+  // OWN response (no session on A).
+  agent.channels.A = {
+    __trexChannel: true,
+    routes: [{
+      method: "POST",
+      path: "/handoff",
+      handler: async (_req: Request, args: any) => {
+        const s = await args.receive(agent.channels.B, {
+          message: "go",
+          target: { channelId: "C1" },
+          auth: { authenticator: "x", principalType: "user", principalId: "p-1" },
+        });
+        return Response.json({ handoffTo: s.id, ok: true });
+      },
+    }],
+  } as any;
+
+  const channelStore = fakeChannelStore();
+  const startTurns: Array<{ sessionId: string; message: unknown }> = [];
+  const started: Array<{ channelId: string; sessionId: string; created: boolean }> = [];
+  const registered: Array<{ channelId: string; sessionId: string; hasEvents: boolean; sawWaitUntil: boolean }> = [];
+  const handler = createChannelHandler({
+    agent,
+    store: noopStore,
+    channelStore,
+    plugin: "toy-agent",
+    agentName: "toy",
+    basePath: BASE,
+    startTurn: (sessionId, message) => startTurns.push({ sessionId, message }),
+    subscribe: () => () => {},
+    onSessionStarted: (info) => started.push({ channelId: info.channelId, sessionId: info.sessionId, created: info.created }),
+    registerDelivery: (opts) => {
+      registered.push({
+        channelId: (opts.buildChannelCtx() as any).channelCtx.channelId,
+        sessionId: opts.sessionId,
+        hasEvents: !!opts.channel.events,
+        sawWaitUntil: typeof opts.waitUntil === "function",
+      });
+    },
+    waitUntil: () => {},
+  });
+
+  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/A/handoff`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }));
+
+  // A's route response is exactly what A returned.
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { handoffTo: "sess-1", ok: true });
+
+  // Exactly one session, keyed to B (target), with B-namespaced default token.
+  assertEquals(channelStore.calls.length, 1);
+  assertEquals(channelStore.calls[0].channel, "B");
+  assertEquals(channelStore.calls[0].token, "B:C1");
+  assertEquals(channelStore.calls[0].principal, {
+    authenticator: "x",
+    principalType: "user",
+    principalId: "p-1",
+  });
+
+  // The turn ran against B's session with the hand-off message.
+  assertEquals(startTurns, [{ sessionId: "sess-1", message: "go" }]);
+  // onSessionStarted reports channel B (target), never A.
+  assertEquals(started, [{ channelId: "B", sessionId: "sess-1", created: true }]);
+  // Delivery registered for B (it has events), with B's ctx + a waitUntil.
+  assertEquals(registered, [{ channelId: "B", sessionId: "sess-1", hasEvents: true, sawWaitUntil: true }]);
+});
+
+Deno.test("channel layer: receive() invokes the target channel's receive hook to derive the token + state", async () => {
+  const agent = await loadAgent(TOY);
+  const seen: unknown[] = [];
+  agent.channels.dest = {
+    __trexChannel: true,
+    // Hook mints a RAW token (runtime namespaces it) + initial state.
+    receive: (input: any) => {
+      seen.push(input);
+      return { continuationToken: `thread-${input.target.channelId}`, state: { opened: true }, title: "Incident" };
+    },
+    routes: [],
+  } as any;
+  agent.channels.src = {
+    __trexChannel: true,
+    routes: [{
+      method: "POST",
+      path: "/go",
+      handler: async (_req: Request, args: any) => {
+        const s = await args.receive(agent.channels.dest, {
+          message: "page on-call",
+          target: { channelId: "ops" },
+          auth: null,
+        });
+        return Response.json({ id: s.id });
+      },
+    }],
+  } as any;
+
+  const channelStore = fakeChannelStore();
+  const started: Array<{ channelId: string; state: unknown; title?: string }> = [];
+  const handler = createChannelHandler({
+    agent,
+    store: noopStore,
+    channelStore,
+    plugin: "toy-agent",
+    agentName: "toy",
+    basePath: BASE,
+    startTurn: () => {},
+    subscribe: () => () => {},
+    onSessionStarted: (info) => started.push({ channelId: info.channelId, state: info.state, title: info.title }),
+  });
+
+  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/src/go`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  }));
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { id: "sess-1" });
+
+  // Hook received the full {message, target, auth} input.
+  assertEquals(seen, [{ message: "page on-call", target: { channelId: "ops" }, auth: null }]);
+  // Session keyed to dest with the hook's raw token, namespaced.
+  assertEquals(channelStore.calls[0].channel, "dest");
+  assertEquals(channelStore.calls[0].token, "dest:thread-ops");
+  // Hook's state + title propagate through onSessionStarted.
+  assertEquals(started, [{ channelId: "dest", state: { opened: true }, title: "Incident" }]);
+});
+
+Deno.test("channel layer: receive() with a target that is not a registered channel rejects, no session", async () => {
+  const agent = await loadAgent(TOY);
+  const stranger = { __trexChannel: true, routes: [] } as any; // never added to agent.channels
+  agent.channels.caller = {
+    __trexChannel: true,
+    routes: [{
+      method: "POST",
+      path: "/go",
+      handler: (_req: Request, args: any) => args.receive(stranger, { message: "x", target: {}, auth: null }),
+    }],
+  } as any;
+  const { handler, channelStore } = makeLayer(agent);
+
+  await assertRejects(
+    () => handler(new Request(`${ORIGIN}${BASE}/eve/v1/caller/go`, { method: "POST" })),
+    Error,
+    "not a registered channel",
+  );
+  assertEquals(channelStore.calls.length, 0);
+});
+
 Deno.test("channel layer: a path outside {basePath}/eve/v1 -> 404", async () => {
   const agent = await loadAgent(TOY);
   const { handler } = makeLayer(agent);
