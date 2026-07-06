@@ -8739,6 +8739,39 @@
     "queryAllDeclaredMethods": true
   },
   {
+    "name": "org.ohdsi.webapi.ircalc.AnalysisReport",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.ircalc.AnalysisReport$Summary",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
+    "name": "org.ohdsi.webapi.ircalc.AnalysisReport$StrataStatistic",
+    "allDeclaredFields": true,
+    "allPublicFields": true,
+    "allDeclaredMethods": true,
+    "allPublicMethods": true,
+    "queryAllDeclaredMethods": true,
+    "queryAllPublicMethods": true,
+    "allDeclaredConstructors": true,
+    "allPublicConstructors": true
+  },
+  {
     "name": "org.ohdsi.circe.cohortdefinition.CohortExpression$1",
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
