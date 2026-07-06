@@ -262,7 +262,7 @@ Deno.test("component callback derives input responses + calls resume", async () 
   assertEquals(responses[0].optionId, "approve");
 });
 
-Deno.test("default resume POSTs input responses to the native session route", async () => {
+Deno.test("default resume (no opts.resume) is a loud no-op: warns, does NOT POST", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
   const rendered = renderInputRequestComponents({
     requestId: "req-7",
@@ -272,29 +272,51 @@ Deno.test("default resume POSTs input responses to the native session route", as
   }) as Array<{ components: Array<{ custom_id: string }> }>;
   const denyCustomId = rendered[0].components[1].custom_id;
 
-  const fetched: Array<{ url: string; body: { inputResponses: Array<{ requestId: string; optionId?: string }> } }> = [];
-  const fetchMock: typeof fetch = (input, init) => {
-    fetched.push({ url: String(input), body: JSON.parse(String(init!.body)) });
+  // Any HTTP call would be a bug (the native route would 404). Fail loudly if hit.
+  let fetchCalls = 0;
+  const fetchMock: typeof fetch = () => {
+    fetchCalls++;
     return Promise.resolve(new Response("{}", { status: 202 }));
   };
-  const channel = discordChannel({ credentials: { publicKey: publicKeyHex }, api: { fetch: fetchMock } });
-  const { args } = mockArgs();
+  // Capture the placeholder warning.
+  const warnings: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
 
-  const payload = {
-    type: 3,
-    id: "i3",
-    application_id: "app-1",
-    channel_id: "chan-1",
-    token: "t",
-    user: { id: "u", username: "bob" },
-    message: { id: "msg-5", content: "Approve `x`?" },
-    data: { custom_id: denyCustomId, component_type: 2 },
-  };
-  await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  try {
+    const channel = discordChannel({ credentials: { publicKey: publicKeyHex }, api: { fetch: fetchMock } });
+    const { args } = mockArgs();
+    const payload = {
+      type: 3,
+      id: "i3",
+      application_id: "app-1",
+      channel_id: "chan-1",
+      token: "t",
+      user: { id: "u", username: "bob" },
+      message: { id: "msg-5", content: "Approve `x`?" },
+      data: { custom_id: denyCustomId, component_type: 2 },
+    };
+    const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+    // Still returns the deferred-update ACK.
+    assertEquals((await res.json()).type, 6);
+  } finally {
+    console.warn = origWarn;
+  }
 
-  assertEquals(fetched.length, 1);
-  // Native resume route under the request's basePath.
-  assertEquals(fetched[0].url, "https://worker.example/base/eve/v1/session/chan-1%3Amsg-5");
-  assertEquals(fetched[0].body.inputResponses[0].requestId, "req-7");
-  assertEquals(fetched[0].body.inputResponses[0].optionId, "deny");
+  assertEquals(fetchCalls, 0); // no 404-generating POST
+  assertEquals(warnings.some((w) => w.includes("no opts.resume provided")), true);
+});
+
+Deno.test("onCommand returning explicit { auth: null } sends with null auth", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex },
+    onCommand: () => ({ auth: null }),
+  });
+  const { args, sends } = mockArgs();
+  const body = JSON.stringify(COMMAND_PAYLOAD);
+  await channel.routes[0].handler(await signedRequest(keypair.privateKey, body), args);
+  assertEquals(sends.length, 1);
+  // Explicit null is honored, NOT collapsed into the default discord identity.
+  assertEquals(sends[0].opts.auth, null);
 });

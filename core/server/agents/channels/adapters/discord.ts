@@ -20,10 +20,13 @@
 //
 // HITL: `input.requested` → Discord components (buttons/select/modal via the
 // vendored HITL helpers); the component/modal callback → derive InputResponses
-// (vendored) → resume the parked session. trex's channel layer exposes no
-// token→session resume primitive to a route (its `send()` always starts a fresh
-// turn), so resume is an injectable transport (`opts.resume`); the default POSTs
-// the derived responses to the native session resume route (spec 006).
+// (vendored) → resume the parked session. LIMITATION (deferred): trex's channel
+// layer exposes NO token→session resume primitive to a route — `send()` always
+// starts a fresh turn and cannot resolve a parked session's UUID from a
+// continuation token, and the native resume route is keyed by session id, not by
+// a channel token. So resume is an injectable seam (`opts.resume`); without it
+// the default is a LOUD NO-OP (warns + drops the approval — it does NOT pretend
+// to work by POSTing to a route that would 404). See task-8-report.md.
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -208,7 +211,10 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     }
     if (result === null) return discordJson({ content: "Command ignored.", ephemeral: true });
 
-    const auth: ChannelAuth = result.auth ?? toChannelAuth(interaction);
+    // Honor an EXPLICIT `{ auth: null }` (an unauthenticated/anonymous session)
+    // — only fall back to the default Discord identity when the hook omits
+    // `auth` entirely. `result.auth ?? …` would wrongly collapse null → default.
+    const auth: ChannelAuth | null = "auth" in result ? result.auth ?? null : toChannelAuth(interaction);
     const message = commandInteractionMessage(interaction);
     const contextBlock = formatDiscordContextBlock({
       channelId: interaction.channelId,
@@ -292,32 +298,24 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     }
   }
 
-  // DEFAULT resume: POST the derived InputResponses to the native session
-  // resume route (spec 006 — `POST {basePath}/eve/v1/session/:id`, which accepts
-  // `inputResponses` to resolve a parked approval). The parked session is
-  // addressed by the channel continuation token; a host that maps that token to
-  // its session id (or an injected `opts.resume`) closes the loop. Best-effort:
-  // failures are logged, never thrown.
-  async function defaultResume(ctx: DiscordResumeContext) {
-    const url = new URL(ctx.req.url);
-    const marker = "/eve/v1/discord";
-    const idx = url.pathname.indexOf(marker);
-    const basePath = idx >= 0 ? url.pathname.slice(0, idx) : "";
-    const target = `${url.origin}${basePath}/eve/v1/session/${encodeURIComponent(ctx.continuationToken)}`;
-    const body = {
-      inputResponses: ctx.inputResponses.map((r) => ({
-        requestId: r.requestId,
-        ...(r.optionId !== undefined ? { optionId: r.optionId } : {}),
-        ...(r.text !== undefined ? { text: r.text } : {}),
-      })),
-    };
-    const doFetch = opts.api?.fetch ?? fetch;
-    const res = await doFetch(target, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) console.warn(`discord: resume POST to ${target} returned HTTP ${res.status}`);
+  // DEFAULT resume: a LOUD NO-OP.
+  //
+  // HITL-RESUME LIMITATION (deferred): the channel layer has no token→session
+  // resume primitive. A route only gets `send()` (which ALWAYS starts a fresh
+  // turn — it cannot resolve a parked session's UUID from a continuation token),
+  // and the native session resume route (`POST {basePath}/eve/v1/session/:id`)
+  // is keyed by SESSION id, not by a channel continuation token, and requires
+  // `optionId ∈ approve|deny|always|never`. So there is no correct HTTP call the
+  // adapter can make on its own — any default POST would just 404. Rather than
+  // pretend it works, we warn loudly and drop the approval. `opts.resume` is the
+  // injection seam: provide it (mapping the continuation token → session id and
+  // calling the resume route) to wire HITL end-to-end. See task-8-report.md.
+  function defaultResume(_ctx: DiscordResumeContext): void {
+    console.warn(
+      "agents/discord: HITL resume received but no opts.resume provided — the channel layer has no " +
+        "token→session resume primitive yet, so this approval cannot be applied. Provide opts.resume " +
+        "to wire HITL end-to-end.",
+    );
   }
 
   return defineChannel({
