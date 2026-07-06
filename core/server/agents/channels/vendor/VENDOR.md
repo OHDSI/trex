@@ -46,3 +46,41 @@ Source dir: `dist/src/public/channels/discord/`.
 4. Add types from the paired `.d.ts` where inference needs them for `deno check`.
 5. Drop any helper shaped against eve's runtime channel handle; the trex factory
    supplies that behavior.
+
+## slack/ — copied files
+
+Source dir: `dist/src/public/channels/slack/`.
+
+Slack couples harder to eve's runtime than Discord: eve's `verify.js`, `api.js`,
+and `mrkdwn.js` all import `#compiled/@chat-adapter/slack/*` compiled runtime
+primitives (a bundled chat-SDK), and `interactions.js` / `defaults.js` /
+`attachments.js` additionally import `#internal/logging` and the runtime
+`buildSlackBinding` — none of which are vendorable. So only the genuinely-pure
+helpers are copied line-for-line; `verify.ts` and `api.ts` are **reimplemented**
+(the signing algorithm / REST calls are standard and trex-owned), and the
+runtime-coupled files are NOT vendored (the trex factory `adapters/slack.ts`
+supplies that wiring).
+
+| vendored file | eve source | edits |
+|---|---|---|
+| `shared.ts` | `dist/src/shared/guards.js`, `dist/src/shared/json.js`, plus TYPE shapes from `runtime/input/types.d.ts` + `channel/types.d.ts` (→ `SlackAuthContext`), plus `slackContinuationToken` from `api.js`. | Consolidated so vendored files import only siblings. Added Deno replacements for Node crypto/Buffer: `bytesToHex`, `timingSafeEqual`, `hmacSha256Hex` (WebCrypto HMAC-SHA256); `getEnv` wraps `Deno.env`. |
+| `verify.ts` | `verify.js` | **Reimplemented.** eve's `verifySlackRequest` is a thin wrapper over `#compiled/@chat-adapter/slack/webhook.js#verifySlackRequest` (a Node runtime primitive — NOT vendorable). Rewritten against WebCrypto to Slack's documented v0 scheme: HMAC-SHA256 over `v0:{ts}:{raw body}` keyed by the signing secret, constant-time hex compare vs. `X-Slack-Signature`, 5-min replay window on `X-Slack-Request-Timestamp`, fail-closed on a missing secret. Adds `verifySlackInbound` (returns null instead of throwing so a route can 401). |
+| `api.ts` | `api.js` | **Reimplemented.** eve's `api.js` builds every call on `#compiled/@chat-adapter/slack/api.js` runtime primitives + `#internal/logging` (NOT vendorable). Rewritten as a minimal trex web-API client over the vendored `encodeSlackApiBody`: `chat.postMessage` (thread reply / HITL card), `views.open` (freeform modal), `chat.update` (answered card), `assistant.threads.setStatus` (typing). Keeps the pure `slackContinuationToken` and adds `splitSlackMessageText` (40k limit splitter). |
+| `api-encoding.ts` | `api-encoding.js` | De-minified only; pure. Form-encode outbound bodies + decode the inbound `payload=` interactivity field. |
+| `inbound.ts` | `inbound.js` | The `markdown` field is a passthrough of the raw Slack `text` — eve's `slackMrkdwnToGfm` wraps `#compiled/@chat-adapter/slack/format.js` (NOT vendorable) and the trex factory prompts on `text` regardless. Dropped the chat-SDK-shaped `slackMessageFromWebhookPayload`; kept the raw-envelope `parseAppMentionEvent` / `parseDirectMessageEvent`. Types from `inbound.d.ts`. |
+| `interactions.ts` | `interactions.js` | **Only** the PURE payload parsers are vendored: the raw-Slack branch of `parseBlockActionsPayload` + a new `parseViewSubmission`. eve's `handleInteractionPost` (imports logging, compiled webhook, runtime `buildSlackBinding`/`resolveSlackBotToken`/`buildSlackAuthContext`, issues its own `fetch`) and the shared-chat-SDK `block_actions` branch are dropped — the trex factory supplies that wiring. |
+| `hitl.ts` | `hitl.js` | De-minified; `#public/channels/slack/limits` → `./limits.ts`; `InputRequest` type from `./shared.ts`. Block Kit render/decode logic unchanged **except** one defensive add: `isApprovalRequest` also requires `action != null` (this vendor widened `action` to optional). |
+| `limits.ts` | `limits.js` | De-minified only; pure string-length guards. |
+| `auth.ts` | `auth.js` | De-minified; `#channel/types` `SessionAuthContext` → sibling `SlackAuthContext`. Auth-context derivation unchanged. |
+
+### Not vendored (eve runtime — the trex factory replaces it)
+
+- `verify.js` / `api.js` / `mrkdwn.js` — wrap `#compiled/@chat-adapter/slack/*`
+  compiled runtime primitives (webhook verify, REST client, mrkdwn↔GFM format);
+  reimplemented (verify, api) or passthrough (mrkdwn) as noted above.
+- `interactions.js`'s `handleInteractionPost`, `defaults.js`, `attachments.js`,
+  `connections.js`, `model-context.js`, `thread.js` — shaped against eve's
+  runtime channel handle / import `#internal/logging` / `#compiled/*`.
+- `slackChannel.js` — eve's runtime-coupled factory; `../adapters/slack.ts` is
+  the replacement. `index.js` — barrel. `constants.js`/`utils.js` — unused (the
+  factory defaults `route` to `/` like discord, and event-dedup is deferred).
