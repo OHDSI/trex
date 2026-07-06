@@ -15,6 +15,7 @@
     "eve/channels/slack": "./agents/channels/adapters/slack.ts",
     "eve/channels/telegram": "./agents/channels/adapters/telegram.ts",
     "eve/channels/twilio": "./agents/channels/adapters/twilio.ts",
+    "eve/channels/github": "./agents/channels/adapters/github.ts",
     "eve/evals": "./agents/eve-shim/evals.ts",
     "edn-data": "npm:edn-data@^1"
   },

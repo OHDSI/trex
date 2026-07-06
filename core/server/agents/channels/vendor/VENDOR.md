@@ -156,3 +156,46 @@ SMS-only: the voice-call / transcription / media-stream helpers are DEFERRED.
 - `index.js` — barrel re-export.
 - Voice (`onVoice`/`onVoiceTranscription`, `parseTwilioVoiceCall`, the `say`/
   `gatherSpeech` TwiML) + WebSocket media-streams — DEFERRED (out of v1 SMS scope).
+
+## github/ — copied files
+
+Source dir: `dist/src/public/channels/github/`.
+
+GitHub is the CLEANEST split so far: most of eve's GitHub helpers are genuinely
+PURE (imports are only `#shared/guards`/`#shared/json` + the sibling `auth.js`),
+so `inbound.js`, `api.js`, `limits.js`, and `defaultGitHubAuth` are **Vendored**
+(de-minified). Only the two helpers that use `node:crypto` primitives absent in
+the Deno worker are **Reimplemented** on WebCrypto: `verify.js` (webhook
+HMAC-SHA256) and `auth.js` (the RS256 App-JWT mint). The comment HITL
+(`hitl.ts`) has NO eve source — eve's GitHub channel has no HITL widget — so it
+is **invented for trex** (like Twilio's SMS HITL). The git-checkout / repo-binding
+features (`checkout.js`, `binding.js`) are OUT of v1 and NOT vendored.
+
+| vendored file | eve source | edits |
+|---|---|---|
+| `shared.ts` | `dist/src/shared/guards.js` (isObject) + `dist/src/shared/json.js` (parseJsonObject), plus TYPE shapes from `runtime/input/types.d.ts` + `channel/types.d.ts` (→ `GitHubAuthContext`, `InputRequest`/`InputResponse`). | Consolidated so the vendored GitHub files import only siblings — no eve import survives. `parseJsonObject` de-minified verbatim; `getEnv` wraps `Deno.env`; `bytesToHex` mirrors Node's `.digest("hex")`; `timingSafeEqual` is a length-tolerant constant-time string compare (GitHub sigs are fixed-width hex). |
+| `inbound-types.ts` | `inbound-types.d.ts` | **Vendored** (type-only). `JsonObject` → sibling alias. The CI event shapes (`check_suite`/`check_run`/`workflow_run`) are DROPPED — the factory handles only issue/PR/comment events (YAGNI). |
+| `inbound.ts` | `inbound.js` | **Vendored**, de-minified. PURE in eve. Modified: (1) CI parsers dropped (those deliveries → null); (2) `isIgnoredGitHubComment` EXPORTED as the factory's loop guard (eve kept it private); (3) `githubContinuationToken` trex-shaped to `${owner}/${repo}#${number}` (human-readable thread key) instead of eve's numeric `repo:{id}:issue:{n}`. The webhook classification, payload normalization, mention-trigger extraction, and bot/self ignore rules are eve's, unchanged. |
+| `verify.ts` | `verify.js` | **Reimplemented.** eve computes the HMAC with `node:crypto` `createHmac("sha256")` + `timingSafeEqual` (Node built-ins), so the HMAC is redone on **WebCrypto** (`crypto.subtle`, HMAC + SHA-256). The algorithm is byte-for-byte eve's: `sha256=` + lowercase-hex HMAC-SHA256 over the RAW body, keyed by `GITHUB_WEBHOOK_SECRET`, constant-time compared vs `X-Hub-Signature-256`. Fails CLOSED on a missing secret (the signature is the ONLY webhook auth). Adds `verifyGitHubInbound` (returns null instead of throwing so a route can 401) + a `webhookVerifier` seam. |
+| `auth.ts` | `auth.js` | **Reimplemented (flagged).** eve mints the App JWT with `node:crypto` `createSign("RSA-SHA256")`, so the RS256 signing is redone on **WebCrypto** RSASSA-PKCS1-v1_5 + SHA-256 (importing the PKCS8 key via `importKey("pkcs8", …)`). This is the ONE place the crypto backend differs from eve — exercised by github.test.ts (JWT header/claims shape + a full mock mint→exchange→public-key-verify round-trip). Everything else — the header/claims (`{alg:"RS256",typ:"JWT"}` / `{iss, iat:now-60, exp:now+600}`), the `/app/installations/{id}/access_tokens` exchange, the 60s-skew installation-token cache, and the `GITHUB_APP_ID`/`GITHUB_APP_PRIVATE_KEY`/`GITHUB_APP_INSTALLATION_ID` resolvers — is eve's, unchanged. `process.env` → `getEnv`. |
+| `api.ts` | `api.js` | **Vendored**, de-minified. PURE in eve. Only the delivery path the factory needs is kept (YAGNI): `callGitHubApi` (Bearer installation token, `accept`/`2022-11-28` headers), `createGitHubIssueComment` (`POST /repos/{owner}/{repo}/issues/{n}/comments`), `GitHubApiError`. The PR-review / review-comment / reaction / repository / files helpers are DROPPED. |
+| `limits.ts` | `limits.js` | **Vendored**, de-minified. PURE. `splitGitHubCommentBody` (65536-char cap, newline-then-space boundary past the halfway mark) unchanged. |
+| `hitl.ts` | none. | **Reimplemented for trex — no eve source.** eve's GitHub channel has no HITL widget. GitHub comments have no buttons, so `renderGitHubInputRequest` renders a Markdown checklist + `/slash` reply-instructions comment, and `deriveGitHubInputResponse` maps a reply comment back to an option (`/slash`, then bare index, then id/label, then first-word, then freeform). Stateless + text-only, mirroring `twilio/hitl.ts`. |
+| `defaults.ts` | `defaults.js` | **Vendored — only** the pure `defaultGitHubAuth` (input shape narrowed to `GitHubAuthInput`; `#channel/types` return → sibling `GitHubAuthContext`); de-minified. eve's `defaultOnComment` / `createDefaultEvents` / `checkoutRepositoryForTurn` were NOT copied — they are shaped against eve's runtime handle (`ctx.thread`, `getSandbox()`) + `#internal/logging` + the git-checkout module (out of v1). The trex factory supplies its own `events` + dispatch against `ChannelRouteArgs`. |
+
+### Not vendored (eve runtime / out of v1 — the trex factory replaces it)
+
+- `githubChannel.js` — eve's runtime-coupled factory (stateful `ctx.thread`
+  handle, checkout wiring, CI-event hooks, `receive`/`context`/`metadata`
+  surface); `../adapters/github.ts` is the replacement. Its verify-first →
+  parse → loop-guard → `waitUntil`-dispatch → async-REST-reply shape is what the
+  trex factory reproduces.
+- `dispatch.js` / `state.js` / `pr-context.js` — eve runtime session/state
+  plumbing (imports `#internal/*`); the trex factory threads its own
+  `{owner, repo, number}` delivery state instead.
+- `checkout.js` / `binding.js` — git-checkout + repo-binding; OUT of v1 (skipped).
+- `constants.js` — eve's default route (`/eve/v1/github`); the factory defaults
+  its own route to `/` (the channel root), like the prior adapters.
+- `index.js` — barrel re-export.
+- CI events (`check_suite`/`check_run`/`workflow_run`) parsing + their types —
+  DROPPED (the factory dispatches only issue/PR/comment events).
