@@ -9,6 +9,8 @@
     "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",
     "eve": "./agents/eve-shim/mod.ts",
     "eve/tools": "./agents/eve-shim/tools.ts",
+    "eve/tools/approval": "./agents/eve-shim/approval.ts",
+    "eve/connections": "./agents/connections/shim.ts",
     "eve/channels": "./agents/channels/shim.ts",
     "eve/channels/eve": "./agents/channels/adapters/eve.ts",
     "eve/channels/discord": "./agents/channels/adapters/discord.ts",
