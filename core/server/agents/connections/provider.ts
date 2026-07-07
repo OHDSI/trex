@@ -12,7 +12,7 @@
 import type { ConnectionAuth, ConnectionDef, ConnectionTools } from "./types.ts";
 import type { HookCtx, ToolContext, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
-import { formatMcpResult, type McpConnectFn, realizeMcp } from "./mcp.ts";
+import { formatMcpResult, hashResolvedAuth, type McpConnectFn, realizeMcp } from "./mcp.ts";
 
 export interface ConnectionProviderOpts {
   // Injectable MCP connect factory (tests pass a fake). Defaults to the real
@@ -64,8 +64,12 @@ export function buildConnectionProvider(
       // OpenAPI is Task 4 — leave a clear seam.
       if (conn.type !== "mcp") continue;
       try {
+        // Resolve auth per turn, then key the client cache by a hash of the
+        // resolved credentials so a ctx-dependent static getToken/headers never
+        // reuses one caller's client (and token) for another's callTool.
         const headers = await resolveHeaders(conn, ctx);
-        const { client, tools } = await realizeMcp(conn, headers, agent.dir, opts.connect);
+        const authHash = await hashResolvedAuth(headers);
+        const { client, tools } = await realizeMcp(conn, headers, agent.dir, authHash, opts.connect);
         const needsApproval = conn.approval === "once" ? true : undefined;
         for (const t of tools) {
           if (!passesToolFilter(t.name, conn.tools)) continue;

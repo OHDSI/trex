@@ -176,3 +176,43 @@ Deno.test("openapi connections are skipped (Task 4)", async () => {
   const tools = await provider(hookCtx());
   assertEquals(Object.keys(tools), []);
 });
+
+Deno.test("per-user static getToken → distinct clients per user (no cross-tenant reuse)", async () => {
+  _resetMcpCache();
+  const { fn, rec } = fakeConnect();
+  const agent = fakeAgent({
+    echo: mcpConn("echo", {
+      // ctx-dependent static auth: token is the caller's userId.
+      auth: {
+        kind: "static",
+        getToken: (ctx?: { userId?: string }) => Promise.resolve({ token: ctx?.userId ?? "anon" }),
+      },
+    }),
+  });
+  const provider = buildConnectionProvider(agent, { connect: fn });
+  const ctxA: HookCtx = { sessionId: "s", userId: "userA", env: () => undefined, sql: () => Promise.resolve({ rows: [] }) };
+  const ctxB: HookCtx = { sessionId: "s", userId: "userB", env: () => undefined, sql: () => Promise.resolve({ rows: [] }) };
+  const toolsA = await provider(ctxA);
+  const toolsB = await provider(ctxB);
+  // Two distinct auths → two connects; each carries its own bearer.
+  assertEquals(rec.headers.length, 2);
+  assertEquals(rec.headers[0]["Authorization"], "Bearer userA");
+  assertEquals(rec.headers[1]["Authorization"], "Bearer userB");
+  // User B's tool executes against a client connected with B's credentials.
+  await toolsB["echo__ping"].execute!({}, undefined);
+  await toolsA["echo__ping"].execute!({}, undefined);
+});
+
+Deno.test("same resolved auth across turns → single shared client", async () => {
+  _resetMcpCache();
+  const { fn, rec } = fakeConnect();
+  // Agent-level constant token: every caller resolves the same headers.
+  const agent = fakeAgent({
+    echo: mcpConn("echo", { auth: { kind: "static", getToken: () => Promise.resolve({ token: "constant" }) } }),
+  });
+  const provider = buildConnectionProvider(agent, { connect: fn });
+  const mk = (userId: string): HookCtx => ({ sessionId: "s", userId, env: () => undefined, sql: () => Promise.resolve({ rows: [] }) });
+  await provider(mk("userA"));
+  await provider(mk("userB"));
+  assertEquals(rec.headers.length, 1); // one shared client despite two users
+});
