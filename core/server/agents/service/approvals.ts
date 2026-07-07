@@ -41,7 +41,12 @@ export interface ApprovalResolveResult {
 const VERBS: ApprovalDecision[] = ["approve", "deny", "always", "never"];
 
 // Normalize either input shape into a flat list of {requestId, decision}.
-function decisionsFrom(input: ApprovalResolveInput): Array<{ requestId?: string; decision?: string }> {
+// Exported so the channel resume primitive (channels/layer.ts) can inspect the
+// input to pick an addressing mode: every decision carrying a requestId → MODE A
+// (by request id); otherwise → MODE B (by token, single pending).
+export function normalizeApprovalDecisions(
+  input: ApprovalResolveInput,
+): Array<{ requestId?: string; decision?: string }> {
   if (Array.isArray(input.inputResponses)) {
     return input.inputResponses.map((r) => ({ requestId: r?.requestId, decision: r?.optionId }));
   }
@@ -63,7 +68,7 @@ export async function resolveApprovalDecision(
   input: ApprovalResolveInput,
   consent: ApprovalConsentCtx,
 ): Promise<ApprovalResolveResult> {
-  const decisions = decisionsFrom(input);
+  const decisions = normalizeApprovalDecisions(input);
   if (decisions.length === 0) {
     return { ok: false, error: "requestId and decision (approve|deny|always|never) required" };
   }

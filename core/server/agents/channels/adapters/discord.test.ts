@@ -45,8 +45,16 @@ interface SendCall {
   opts: { auth: ChannelAuth | null; continuationToken: string; state?: unknown; title?: string };
 }
 
-function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[] } {
+interface ResumeCall {
+  continuationToken: string;
+  input: { requestId?: string; decision?: string; inputResponses?: Array<{ requestId?: string; optionId?: string }> };
+}
+
+function mockArgs(
+  resumeResult: { ok: boolean; error?: string } = { ok: true },
+): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[] } {
   const sends: SendCall[] = [];
+  const resumes: ResumeCall[] = [];
   const args: ChannelRouteArgs = {
     send(message, opts) {
       sends.push({ message, opts });
@@ -54,11 +62,15 @@ function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[] } {
     },
     getSession: () => null,
     receive: () => Promise.resolve({ id: "session-1" }),
+    resume(continuationToken, input) {
+      resumes.push({ continuationToken, input });
+      return Promise.resolve(resumeResult);
+    },
     params: {},
     waitUntil: () => {},
     requestIp: null,
   };
-  return { args, sends };
+  return { args, sends, resumes };
 }
 
 const COMMAND_PAYLOAD = {
@@ -234,7 +246,7 @@ Deno.test("component callback derives input responses + calls resume", async () 
       resumeCalls.push({ continuationToken: ctx.continuationToken, inputResponses: ctx.inputResponses });
     },
   });
-  const { args } = mockArgs();
+  const { args, resumes } = mockArgs();
 
   const componentPayload = {
     type: 3, // MESSAGE_COMPONENT
@@ -254,15 +266,18 @@ Deno.test("component callback derives input responses + calls resume", async () 
   assertEquals(ack.type, 6); // DEFERRED_UPDATE_MESSAGE
 
   assertEquals(resumeCalls.length, 1);
-  // Continuation token addresses the parked session by message id.
-  assertEquals(resumeCalls[0].continuationToken, "chan-1:msg-99");
   const responses = resumeCalls[0].inputResponses as Array<{ requestId: string; optionId: string }>;
   assertEquals(responses.length, 1);
   assertEquals(responses[0].requestId, "req-42");
   assertEquals(responses[0].optionId, "approve");
+  // opts.resume wins → the layer primitive is NOT invoked.
+  assertEquals(resumes.length, 0);
 });
 
-Deno.test("default resume (no opts.resume) is a loud no-op: warns, does NOT POST", async () => {
+// Discord's send-time token (channelId:interactionId) never equals the callback's
+// (channelId:messageId), so resume works via MODE A: the requestId decoded from
+// the button custom_id is forwarded to args.resume, which resolves BY REQUEST ID.
+Deno.test("default resume (no opts.resume) forwards the decoded requestId+optionId to args.resume", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
   const rendered = renderInputRequestComponents({
     requestId: "req-7",
@@ -272,39 +287,52 @@ Deno.test("default resume (no opts.resume) is a loud no-op: warns, does NOT POST
   }) as Array<{ components: Array<{ custom_id: string }> }>;
   const denyCustomId = rendered[0].components[1].custom_id;
 
-  // Any HTTP call would be a bug (the native route would 404). Fail loudly if hit.
-  let fetchCalls = 0;
-  const fetchMock: typeof fetch = () => {
-    fetchCalls++;
-    return Promise.resolve(new Response("{}", { status: 202 }));
+  const channel = discordChannel({ credentials: { publicKey: publicKeyHex } });
+  const { args, resumes } = mockArgs();
+  const payload = {
+    type: 3,
+    id: "i3",
+    application_id: "app-1",
+    channel_id: "chan-1",
+    token: "t",
+    user: { id: "u", username: "bob" },
+    message: { id: "msg-5", content: "Approve `x`?" },
+    data: { custom_id: denyCustomId, component_type: 2 },
   };
-  // Capture the placeholder warning.
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  // Deferred-update ACK preserved regardless of the resume outcome.
+  assertEquals((await res.json()).type, 6);
 
-  try {
-    const channel = discordChannel({ credentials: { publicKey: publicKeyHex }, api: { fetch: fetchMock } });
-    const { args } = mockArgs();
-    const payload = {
-      type: 3,
-      id: "i3",
-      application_id: "app-1",
-      channel_id: "chan-1",
-      token: "t",
-      user: { id: "u", username: "bob" },
-      message: { id: "msg-5", content: "Approve `x`?" },
-      data: { custom_id: denyCustomId, component_type: 2 },
-    };
-    const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
-    // Still returns the deferred-update ACK.
-    assertEquals((await res.json()).type, 6);
-  } finally {
-    console.warn = origWarn;
-  }
+  assertEquals(resumes.length, 1);
+  // The requestId (from the custom_id) is what the layer resolves on — not the token.
+  assertEquals(resumes[0].input.inputResponses, [{ requestId: "req-7", optionId: "deny" }]);
+});
 
-  assertEquals(fetchCalls, 0); // no 404-generating POST
-  assertEquals(warnings.some((w) => w.includes("no opts.resume provided")), true);
+Deno.test("DEFERRED_UPDATE ACK still returned when args.resume reports {ok:false}", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rendered = renderInputRequestComponents({
+    requestId: "req-8",
+    prompt: "Approve `x`?",
+    display: "confirmation",
+    options: [{ id: "approve", label: "Approve", style: "primary" }, { id: "deny", label: "Deny", style: "danger" }],
+  }) as Array<{ components: Array<{ custom_id: string }> }>;
+  const approveCustomId = rendered[0].components[0].custom_id;
+
+  const channel = discordChannel({ credentials: { publicKey: publicKeyHex } });
+  const { args, resumes } = mockArgs({ ok: false, error: "no approval for request" });
+  const payload = {
+    type: 3,
+    id: "i4",
+    application_id: "app-1",
+    channel_id: "chan-1",
+    token: "t",
+    user: { id: "u", username: "bob" },
+    message: { id: "msg-6", content: "Approve `x`?" },
+    data: { custom_id: approveCustomId, component_type: 2 },
+  };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals((await res.json()).type, 6);
+  assertEquals(resumes.length, 1); // attempted, soft-failed, never threw
 });
 
 Deno.test("onCommand returning explicit { auth: null } sends with null auth", async () => {

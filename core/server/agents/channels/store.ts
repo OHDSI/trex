@@ -89,6 +89,19 @@ export function createChannelStore(query: QueryFn) {
       return r.rows[0]?.session_id ?? null;
     },
 
+    // Channel HITL resume cross-channel guard — MODE A (channels/layer.ts). True
+    // iff `sessionId` is owned by `channel` (has a channel_sessions mapping under
+    // it). A by-request-id resume arriving on one channel must NOT resolve an
+    // approval parked in a DIFFERENT channel's session — this extends Task 17's
+    // token-scoping (no cross-channel resolve) to the requestId path.
+    async sessionInChannel(channel: string, sessionId: string): Promise<boolean> {
+      const r = await query(
+        `SELECT 1 FROM agents.channel_sessions WHERE channel = $1 AND session_id = $2 LIMIT 1`,
+        [channel, sessionId],
+      );
+      return r.rows.length > 0;
+    },
+
     // Re-keys a parked session under a (channel, token): idempotently points
     // that token at sessionId, updating the mapping if the token was already in
     // use (spec §4.1 "session.setContinuationToken re-keys a parked session").

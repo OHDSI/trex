@@ -136,6 +136,17 @@ Deno.test("getSessionByToken returns null on a miss", async () => {
   assertEquals(await store.getSessionByToken("discord", "discord:nope"), null);
 });
 
+// Channel HITL resume — MODE A cross-channel guard.
+Deno.test("sessionInChannel is true only when the session is mapped under the channel", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ "?column?": 1 }] }, { rows: [] }]);
+  const store = createChannelStore(fn as never);
+  assertEquals(await store.sessionInChannel("discord", "s-9"), true);
+  assert(calls[0].sql.includes("FROM agents.channel_sessions WHERE channel = $1 AND session_id = $2"));
+  assertEquals(calls[0].params, ["discord", "s-9"]);
+  // A session owned by a different channel → not found here → false (no cross-channel).
+  assertEquals(await store.sessionInChannel("discord", "s-other"), false);
+});
+
 Deno.test("setContinuationToken re-keys a session via upsert", async () => {
   const { fn, calls } = fakeQuery([{ rows: [] }]);
   const store = createChannelStore(fn as never);

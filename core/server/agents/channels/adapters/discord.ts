@@ -20,13 +20,14 @@
 //
 // HITL: `input.requested` → Discord components (buttons/select/modal via the
 // vendored HITL helpers); the component/modal callback → derive InputResponses
-// (vendored) → resume the parked session. LIMITATION (deferred): trex's channel
-// layer exposes NO token→session resume primitive to a route — `send()` always
-// starts a fresh turn and cannot resolve a parked session's UUID from a
-// continuation token, and the native resume route is keyed by session id, not by
-// a channel token. So resume is an injectable seam (`opts.resume`); without it
-// the default is a LOUD NO-OP (warns + drops the approval — it does NOT pretend
-// to work by POSTing to a route that would 404). See task-8-report.md.
+// (vendored) → resume the parked session. The callback's custom_id carries the
+// requestId, so the channel layer's resume primitive (`args.resume`, Task 17/18)
+// resolves BY REQUEST ID (Mode A) with a channel-ownership check — the send-time
+// continuation token (channelId:interactionId) never matches the callback's
+// channelId:messageId, but the requestId does, so Discord HITL works without any
+// token match. `opts.resume` remains an injectable override; without it the
+// default routes the decoded decision through `args.resume` (a miss is logged,
+// never thrown). See task-8-report.md / task-18-report.md.
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -292,30 +293,26 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
 
   async function runResume(ctx: DiscordResumeContext) {
     try {
-      await (opts.resume ?? defaultResume)(ctx);
+      if (opts.resume) {
+        // An integrator override fully owns applying the decision.
+        await opts.resume(ctx);
+        return;
+      }
+      // DEFAULT: apply the decoded decision via the channel layer's resume
+      // primitive. The button/modal callback custom_id carries the requestId
+      // (decoded above into inputResponses), so the layer resolves BY REQUEST ID
+      // (Mode A) — the interaction-id continuation token, which never matches the
+      // callback's message-id, is irrelevant. A miss returns `{ok:false}` (logged,
+      // never thrown); the DEFERRED_UPDATE ACK is returned by the caller regardless.
+      const result = await ctx.args.resume(ctx.continuationToken, {
+        inputResponses: ctx.inputResponses.map((r) => ({ requestId: r.requestId, optionId: r.optionId })),
+      });
+      if (!result.ok) {
+        console.warn(`agents/discord: HITL resume did not apply the decision: ${result.error ?? "unknown error"}`);
+      }
     } catch (e) {
       console.error("discord: HITL resume failed:", e);
     }
-  }
-
-  // DEFAULT resume: a LOUD NO-OP.
-  //
-  // HITL-RESUME LIMITATION (deferred): the channel layer has no token→session
-  // resume primitive. A route only gets `send()` (which ALWAYS starts a fresh
-  // turn — it cannot resolve a parked session's UUID from a continuation token),
-  // and the native session resume route (`POST {basePath}/eve/v1/session/:id`)
-  // is keyed by SESSION id, not by a channel continuation token, and requires
-  // `optionId ∈ approve|deny|always|never`. So there is no correct HTTP call the
-  // adapter can make on its own — any default POST would just 404. Rather than
-  // pretend it works, we warn loudly and drop the approval. `opts.resume` is the
-  // injection seam: provide it (mapping the continuation token → session id and
-  // calling the resume route) to wire HITL end-to-end. See task-8-report.md.
-  function defaultResume(_ctx: DiscordResumeContext): void {
-    console.warn(
-      "agents/discord: HITL resume received but no opts.resume provided — the channel layer has no " +
-        "token→session resume primitive yet, so this approval cannot be applied. Provide opts.resume " +
-        "to wire HITL end-to-end.",
-    );
   }
 
   return defineChannel({

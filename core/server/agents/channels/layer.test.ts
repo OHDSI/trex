@@ -427,19 +427,34 @@ Deno.test("channel layer: a path outside {basePath}/eve/v1 -> 404", async () => 
   assertEquals(res.status, 404);
 });
 
-// Task 17: channel HITL resume primitive. Built with its own store fakes (a
-// getSessionByToken on the channel store + a resolveApproval on the agent store)
-// and driven through the webhook channel's POST /resume test seam.
+// Task 17/18: channel HITL resume primitive with two addressing modes.
+//   MODE A — by request id: getApprovalSession(requestId) → sessionInChannel
+//            guard → resolve. (widgets: the callback carries the requestId.)
+//   MODE B — by token, single pending: getSessionByToken → getSinglePendingApproval
+//            → resolve. (text: the reply carries only a decision.)
+// Built with store fakes and driven through the webhook channel's POST /resume seam.
 function makeResumeLayer(
   agent: LoadedAgent,
-  opts: { tokenToSession: Record<string, string> },
+  opts: {
+    tokenToSession?: Record<string, string>;
+    approvalToSession?: Record<string, string>; // requestId -> sessionId (MODE A)
+    sessionsInChannel?: Record<string, string[]>; // channel -> sessionIds (MODE A guard)
+    singlePending?: Record<string, string | null>; // sessionId -> requestId | null (MODE B)
+  },
 ) {
   const lookups: Array<{ channel: string; token: string }> = [];
   const resolves: Array<{ requestId: string; decision: string; sessionId: string }> = [];
+  const approvalLookups: string[] = [];
+  const channelChecks: Array<{ channel: string; sessionId: string }> = [];
+  const pendingLookups: string[] = [];
   const channelStore = {
     getSessionByToken(channel: string, token: string) {
       lookups.push({ channel, token });
-      return Promise.resolve(opts.tokenToSession[token] ?? null);
+      return Promise.resolve(opts.tokenToSession?.[token] ?? null);
+    },
+    sessionInChannel(channel: string, sessionId: string) {
+      channelChecks.push({ channel, sessionId });
+      return Promise.resolve((opts.sessionsInChannel?.[channel] ?? []).includes(sessionId));
     },
     resolveOrCreateSession: () => Promise.reject(new Error("unused")),
     setContinuationToken: () => Promise.resolve(),
@@ -448,6 +463,14 @@ function makeResumeLayer(
     resolveApproval(requestId: string, decision: "approve" | "deny", sessionId: string) {
       resolves.push({ requestId, decision, sessionId });
       return Promise.resolve(true);
+    },
+    getApprovalSession(requestId: string) {
+      approvalLookups.push(requestId);
+      return Promise.resolve(opts.approvalToSession?.[requestId] ?? null);
+    },
+    getSinglePendingApproval(sessionId: string) {
+      pendingLookups.push(sessionId);
+      return Promise.resolve(opts.singlePending?.[sessionId] ?? null);
     },
     getApprovalTool: () => Promise.resolve(null),
     setToolConsent: () => Promise.resolve(),
@@ -463,42 +486,107 @@ function makeResumeLayer(
     startTurn: () => {},
     subscribe: () => () => {},
   });
-  return { handler, lookups, resolves };
+  return { handler, lookups, resolves, approvalLookups, channelChecks, pendingLookups };
 }
 
-Deno.test("channel resume: known token resolves to its session and applies the decision", async () => {
-  const agent = await loadAgent(TOY);
-  // The layer namespaces the raw token with the channelId before the lookup.
-  const { handler, lookups, resolves } = makeResumeLayer(agent, {
-    tokenToSession: { "webhook:u-42": "sess-9" },
-  });
-
-  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/webhook/resume`, {
+function resumeRequest(body: unknown): Request {
+  return new Request(`${ORIGIN}${BASE}/eve/v1/webhook/resume`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "u-42", input: { requestId: "req-1", decision: "approve" } }),
-  }));
+    body: JSON.stringify(body),
+  });
+}
+
+// ---- MODE A (by request id) -----------------------------------------------
+
+Deno.test("channel resume MODE A: requestId resolves its session (channel-verified) and applies", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, lookups, resolves, approvalLookups, channelChecks } = makeResumeLayer(agent, {
+    approvalToSession: { "req-1": "sess-9" },
+    sessionsInChannel: { webhook: ["sess-9"] },
+  });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { requestId: "req-1", decision: "approve" } }));
 
   assertEquals(res.status, 200);
   assertEquals(await res.json(), { ok: true });
-  // Looked the (namespaced) token up on the channel store.
-  assertEquals(lookups, [{ channel: "webhook", token: "webhook:u-42" }]);
-  // Delegated the write to the shared resolver against the resolved session.
+  assertEquals(approvalLookups, ["req-1"]); // resolved BY REQUEST ID
+  assertEquals(channelChecks, [{ channel: "webhook", sessionId: "sess-9" }]); // cross-channel guard ran
+  assertEquals(lookups, []); // the token was NOT consulted in MODE A
   assertEquals(resolves, [{ requestId: "req-1", decision: "approve", sessionId: "sess-9" }]);
 });
 
-Deno.test("channel resume: unknown token -> {ok:false}, no resolve, no throw", async () => {
+// THE cross-channel guard: an approval whose session belongs to ANOTHER channel
+// must NOT be resolvable from this channel's callback.
+Deno.test("channel resume MODE A: rejects a request whose session is not in the calling channel", async () => {
   const agent = await loadAgent(TOY);
-  const { handler, lookups, resolves } = makeResumeLayer(agent, { tokenToSession: {} });
+  const { handler, resolves, channelChecks } = makeResumeLayer(agent, {
+    approvalToSession: { "req-1": "sess-other" },
+    sessionsInChannel: { webhook: [] }, // sess-other belongs to a DIFFERENT channel
+  });
 
-  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/webhook/resume`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ token: "ghost", input: { requestId: "req-1", decision: "approve" } }),
-  }));
+  const res = await handler(resumeRequest({ token: "u-42", input: { requestId: "req-1", decision: "approve" } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: false });
+  assertEquals(channelChecks, [{ channel: "webhook", sessionId: "sess-other" }]);
+  assertEquals(resolves, []); // never written (no cross-channel resolve)
+});
+
+Deno.test("channel resume MODE A: unknown requestId -> {ok:false}, no resolve", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves, channelChecks } = makeResumeLayer(agent, { approvalToSession: {} });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { inputResponses: [{ requestId: "ghost", optionId: "approve" }] } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: false });
+  assertEquals(channelChecks, []); // never reached the guard
+  assertEquals(resolves, []);
+});
+
+// ---- MODE B (by token, single pending) ------------------------------------
+
+Deno.test("channel resume MODE B: decision-only resolves the session's single pending approval", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, lookups, resolves, pendingLookups } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": "req-7" },
+  });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { decision: "approve" } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(lookups, [{ channel: "webhook", token: "webhook:u-42" }]); // resolved BY TOKEN
+  assertEquals(pendingLookups, ["sess-9"]);
+  assertEquals(resolves, [{ requestId: "req-7", decision: "approve", sessionId: "sess-9" }]);
+});
+
+Deno.test("channel resume MODE B: unknown token -> {ok:false} 'no session for token', no resolve", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, lookups, resolves, pendingLookups } = makeResumeLayer(agent, { tokenToSession: {} });
+
+  const res = await handler(resumeRequest({ token: "ghost", input: { decision: "approve" } }));
 
   assertEquals(res.status, 200);
   assertEquals(await res.json(), { ok: false, error: "no session for token" });
   assertEquals(lookups, [{ channel: "webhook", token: "webhook:ghost" }]);
+  assertEquals(pendingLookups, []);
+  assertEquals(resolves, []);
+});
+
+Deno.test("channel resume MODE B: zero/ambiguous pending -> {ok:false} 'no single pending approval'", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves, pendingLookups } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": null }, // zero or >1 pending → null (never guess)
+  });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { decision: "approve" } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: false, error: "no single pending approval" });
+  assertEquals(pendingLookups, ["sess-9"]);
   assertEquals(resolves, []);
 });

@@ -65,8 +65,18 @@ interface SendCall {
   opts: { auth: ChannelAuth | null; continuationToken: string; state?: unknown; title?: string };
 }
 
-function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[]; flush: () => Promise<void> } {
+interface ResumeCall {
+  continuationToken: string;
+  input: { requestId?: string; decision?: string; inputResponses?: Array<{ requestId?: string; optionId?: string }> };
+}
+
+// Default resumeResult is {ok:false} — the common case is "no pending approval",
+// where a reply-shaped comment must fall through to a normal turn.
+function mockArgs(
+  resumeResult: { ok: boolean; error?: string } = { ok: false },
+): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[]; flush: () => Promise<void> } {
   const sends: SendCall[] = [];
+  const resumes: ResumeCall[] = [];
   const pending: Promise<unknown>[] = [];
   const args: ChannelRouteArgs = {
     send(message, opts) {
@@ -75,13 +85,17 @@ function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[]; flush: () => P
     },
     getSession: () => null,
     receive: () => Promise.resolve({ id: "session-1" }),
+    resume(continuationToken, input) {
+      resumes.push({ continuationToken, input });
+      return Promise.resolve(resumeResult);
+    },
     params: {},
     waitUntil: (p) => {
       pending.push(p);
     },
     requestIp: null,
   };
-  return { args, sends, flush: async () => void (await Promise.allSettled(pending)) };
+  return { args, sends, resumes, flush: async () => void (await Promise.allSettled(pending)) };
 }
 
 // An ephemeral RSA keypair exported as PKCS8 PEM, for the RS256 App-JWT tests.
@@ -442,7 +456,7 @@ Deno.test("deriveGitHubInputResponse maps a slash / number / keyword reply back 
 
 // ---- HITL resume ----------------------------------------------------------
 
-Deno.test("reply-shaped comment + opts.resume → resume called with continuation token, no send()", async () => {
+Deno.test("reply-shaped comment + opts.resume → override called, args.resume NOT used, no send()", async () => {
   const resumeCalls: Array<{ continuationToken: string; body: string }> = [];
   const channel = githubChannel({
     credentials: { webhookSecret: SECRET },
@@ -450,49 +464,56 @@ Deno.test("reply-shaped comment + opts.resume → resume called with continuatio
       resumeCalls.push({ continuationToken: ctx.continuationToken, body: ctx.body });
     },
   });
-  const { args, sends, flush } = mockArgs();
+  const { args, sends, resumes, flush } = mockArgs();
   await channel.routes[0].handler(await githubRequest(issueCommentPayload({ body: "/approve" })), args);
   await flush();
 
-  assertEquals(sends.length, 0); // routed to resume, not a fresh turn
+  assertEquals(sends.length, 0); // routed to the override, not a fresh turn
   assertEquals(resumeCalls.length, 1);
   assertEquals(resumeCalls[0].continuationToken, "acme/widgets#42");
   assertEquals(resumeCalls[0].body, "/approve");
+  assertEquals(resumes.length, 0); // override wins → layer primitive untouched
 });
 
-Deno.test("reply-shaped comment with NO opts.resume → treated as a normal message (not dropped)", async () => {
+// MODE B: exactly one pending approval → the comment is consumed as the decision.
+Deno.test("reply-shaped comment, single pending approval → resolved via args.resume, no send()", async () => {
   const channel = githubChannel({ credentials: { webhookSecret: SECRET } });
-  const { args, sends, flush } = mockArgs();
+  const { args, sends, resumes, flush } = mockArgs({ ok: true });
   await channel.routes[0].handler(await githubRequest(issueCommentPayload({ body: "/approve" })), args);
   await flush();
-  assertEquals(sends.length, 1);
+
+  assertEquals(sends.length, 0); // consumed as an approval, not a fresh turn
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, "acme/widgets#42");
+  assertEquals(resumes[0].input.decision, "approve"); // "/approve" → approve verb
+});
+
+// MODE B: no single pending approval → the comment falls through to a normal
+// turn (nothing dropped) — preserving the pre-wiring behavior.
+Deno.test("reply-shaped comment, no pending approval → falls through to a normal turn", async () => {
+  const channel = githubChannel({ credentials: { webhookSecret: SECRET } });
+  const { args, sends, resumes, flush } = mockArgs({ ok: false });
+  await channel.routes[0].handler(await githubRequest(issueCommentPayload({ body: "/approve" })), args);
+  await flush();
+
+  assertEquals(resumes.length, 1); // attempted resume first
+  assertEquals(sends.length, 1); // then fell through to a normal turn
   assertStringIncludes(sends[0].message, "/approve");
 });
 
-Deno.test("default resume is a loud no-op: warns, does NOT POST a resume route", () => {
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
-  const origFetch = globalThis.fetch;
-  let fetched = 0;
-  globalThis.fetch = () => {
-    fetched++;
-    return Promise.resolve(new Response("{}"));
-  };
-  try {
-    defaultGitHubResume({
-      req: new Request(ROUTE_URL),
-      args: mockArgs().args,
-      continuationToken: "acme/widgets#42",
-      owner: "acme",
-      repo: "widgets",
-      number: 42,
-      body: "/approve",
-    });
-  } finally {
-    console.warn = origWarn;
-    globalThis.fetch = origFetch;
-  }
-  assertEquals(warnings.some((w) => w.includes("no opts.resume provided")), true);
-  assertEquals(fetched, 0);
+Deno.test("defaultGitHubResume forwards the decoded decision to args.resume; returns its ok", async () => {
+  const { args, resumes } = mockArgs({ ok: true });
+  const applied = await defaultGitHubResume({
+    req: new Request(ROUTE_URL),
+    args,
+    continuationToken: "acme/widgets#42",
+    owner: "acme",
+    repo: "widgets",
+    number: 42,
+    body: "/deny",
+  });
+  assertEquals(applied, true);
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, "acme/widgets#42");
+  assertEquals(resumes[0].input.decision, "deny"); // "/deny" → deny
 });

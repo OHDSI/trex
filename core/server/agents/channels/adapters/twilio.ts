@@ -28,14 +28,14 @@
 // (`message.completed` → REST Messages.json, split to Twilio's per-request cap).
 //
 // HITL: SMS has no widgets, so `input.requested` → a numbered PLAIN-TEXT options
-// SMS ("Reply with a number …"). The user's reply is a plain SMS, and SMS has NO
-// distinct interaction surface to tell a HITL reply apart from a new message, so
-// resume is an injectable seam (`opts.resume`): when provided, a reply-shaped
-// inbound (a bare option number) is forwarded to it; the integration resolves
-// the parked request from its own store keyed by the continuation token. Without
-// it the default (`defaultTwilioResume`) is a LOUD NO-OP — it warns and drops the
-// approval; it does NOT POST to a resume route that would 404, identical posture
-// to discord.ts/slack.ts/telegram.ts. See task-11-report.md.
+// SMS ("Reply with a number …"). The user's reply is a plain SMS carrying a
+// decision but NO requestId, and SMS has no distinct interaction surface to tell
+// a HITL reply apart from a new message. So the default (`defaultTwilioResume`)
+// routes a reply-shaped inbound through the channel layer's resume primitive in
+// MODE B (by token, single pending): it applies ONLY when the conversation has
+// exactly one pending approval, else `{ok:false}` and the reply falls through to
+// a normal message (nothing dropped). `opts.resume` remains an override that
+// fully owns the reply (its own pending-request store). See task-11 / task-18.
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -119,16 +119,35 @@ function isReplyShaped(body: string): boolean {
   return /^\s*\d+\.?\s*$/.test(body);
 }
 
-// DEFAULT resume: a LOUD NO-OP. Identical posture to discord.ts/slack.ts/
-// telegram.ts — the channel layer has no token→session resume primitive, so any
-// default POST would 404. Warn and drop rather than pretend. `opts.resume` is
-// the injection seam an integration wires with its own pending-request store.
-export function defaultTwilioResume(_ctx: TwilioResumeContext): void {
-  console.warn(
-    "agents/twilio: HITL reply received but no opts.resume provided — the channel layer has no " +
-      "token→session resume primitive yet, so this reply cannot be applied to the parked request. " +
-      "Provide opts.resume to wire SMS HITL end-to-end.",
-  );
+/**
+ * Maps a reply-shaped follow-up to an approve/deny verb — trex renders approve
+ * as option 1 and deny as option 2 (see the `input.requested` handler), so a
+ * bare "1"/"2" (plus the approve/deny keywords for robustness) decodes cleanly.
+ * Returns null when the reply isn't a clear decision (→ ordinary message).
+ */
+function decodeApprovalDecision(body: string): "approve" | "deny" | null {
+  const t = body.trim().toLowerCase().replace(/\.$/, "");
+  if (t === "1" || t === "approve" || t === "/approve") return "approve";
+  if (t === "2" || t === "deny" || t === "/deny") return "deny";
+  return null;
+}
+
+// DEFAULT resume (Mode B — by token, single pending): decode the reply into a
+// decision and apply it to the conversation's SOLE pending approval via the
+// channel layer's resume primitive. Returns true when it consumed the reply as
+// an approval, false when there is no single pending approval or the reply isn't
+// a clear decision — in which case the caller treats it as an ordinary message
+// (nothing dropped). Never throws. `opts.resume` overrides this entirely.
+export async function defaultTwilioResume(ctx: TwilioResumeContext): Promise<boolean> {
+  const decision = decodeApprovalDecision(ctx.body);
+  if (!decision) return false;
+  try {
+    const result = await ctx.args.resume(ctx.continuationToken, { decision });
+    return result.ok;
+  } catch (e) {
+    console.error("twilio: HITL resume failed:", e);
+    return false;
+  }
 }
 
 export function twilioChannel(opts: TwilioChannelOptions = {}): ChannelDef {
@@ -196,26 +215,27 @@ export function twilioChannel(opts: TwilioChannelOptions = {}): ChannelDef {
 
   const events: ChannelEventHandlers = { ...builtinEvents, ...opts.events };
 
-  async function runResume(ctx: TwilioResumeContext) {
-    try {
-      await (opts.resume ?? defaultTwilioResume)(ctx);
-    } catch (e) {
-      console.error("twilio: HITL resume failed:", e);
-    }
-  }
-
   // ---- inbound message ------------------------------------------------------
 
   async function dispatchText(message: TwilioTextMessage, args: ChannelRouteArgs, req: Request) {
     const continuationToken = twilioContinuationToken(message.from, message.to);
 
-    // A reply-shaped SMS (a bare option number) is a candidate HITL answer. Only
-    // route it to resume when a transport is wired — otherwise treat it as an
-    // ordinary message so nothing is dropped (SMS cannot reliably distinguish the
-    // two). See the HITL note atop this file.
-    if (opts.resume && isReplyShaped(message.body)) {
-      await runResume({ req, args, continuationToken, from: message.from, to: message.to, body: message.body });
-      return;
+    // A reply-shaped SMS (a bare option number) is a candidate HITL answer.
+    if (isReplyShaped(message.body)) {
+      const ctx: TwilioResumeContext = { req, args, continuationToken, from: message.from, to: message.to, body: message.body };
+      if (opts.resume) {
+        // An integrator override fully owns the reply (its own pending-request store).
+        try {
+          await opts.resume(ctx);
+        } catch (e) {
+          console.error("twilio: HITL resume failed:", e);
+        }
+        return;
+      }
+      // DEFAULT (Mode B): apply to the conversation's single pending approval. If
+      // there is none (or the reply isn't a clear decision), fall through and let
+      // it be handled as an ordinary message — SMS can't distinguish the two.
+      if (await defaultTwilioResume(ctx)) return;
     }
 
     let result: TwilioCommandResult | null;

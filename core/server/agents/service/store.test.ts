@@ -131,6 +131,31 @@ Deno.test("getApprovalTool returns null when the request is unknown", async () =
   assertEquals(await store.getApprovalTool("nope"), null);
 });
 
+// Channel HITL resume — MODE A lookup.
+Deno.test("getApprovalSession returns the session for a requestId (null when unknown)", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-9" }] }, { rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getApprovalSession("r-1"), "s-9");
+  assert(calls[0].sql.includes("SELECT session_id FROM agents.approvals"));
+  assertEquals(calls[0].params, ["r-1"]);
+  assertEquals(await store.getApprovalSession("ghost"), null);
+});
+
+// Channel HITL resume — MODE B lookup: exactly-one-pending semantics.
+Deno.test("getSinglePendingApproval returns the id only when exactly one is pending", async () => {
+  const { fn, calls } = fakeQuery([
+    { rows: [{ request_id: "r-7" }] }, // exactly one pending
+    { rows: [] }, // zero pending
+    { rows: [{ request_id: "r-1" }, { request_id: "r-2" }] }, // two pending (ambiguous)
+  ]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getSinglePendingApproval("s-9"), "r-7");
+  assert(calls[0].sql.includes("decision IS NULL"));
+  assertEquals(calls[0].params, ["s-9"]);
+  assertEquals(await store.getSinglePendingApproval("s-9"), null); // zero
+  assertEquals(await store.getSinglePendingApproval("s-9"), null); // >1 → never guess
+});
+
 Deno.test("getToolConsent returns the stored consent verb", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ consent: "always" }] }]);
   const store = createStore(fn as never);

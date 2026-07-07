@@ -44,8 +44,18 @@ interface SendCall {
   opts: { auth: ChannelAuth | null; continuationToken: string; state?: unknown; title?: string };
 }
 
-function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[]; flush: () => Promise<void> } {
+interface ResumeCall {
+  continuationToken: string;
+  input: { requestId?: string; decision?: string; inputResponses?: Array<{ requestId?: string; optionId?: string }> };
+}
+
+// Default resumeResult is {ok:false} — the common case is "no pending approval",
+// where a reply-shaped inbound must fall through to a normal message.
+function mockArgs(
+  resumeResult: { ok: boolean; error?: string } = { ok: false },
+): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[]; flush: () => Promise<void> } {
   const sends: SendCall[] = [];
+  const resumes: ResumeCall[] = [];
   const pending: Promise<unknown>[] = [];
   const args: ChannelRouteArgs = {
     send(message, opts) {
@@ -54,13 +64,17 @@ function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[]; flush: () => P
     },
     getSession: () => null,
     receive: () => Promise.resolve({ id: "session-1" }),
+    resume(continuationToken, input) {
+      resumes.push({ continuationToken, input });
+      return Promise.resolve(resumeResult);
+    },
     params: {},
     waitUntil: (p) => {
       pending.push(p);
     },
     requestIp: null,
   };
-  return { args, sends, flush: async () => void (await Promise.allSettled(pending)) };
+  return { args, sends, resumes, flush: async () => void (await Promise.allSettled(pending)) };
 }
 
 // ---- signature gate --------------------------------------------------------
@@ -254,7 +268,7 @@ Deno.test("deriveTwilioInputResponse maps a numbered reply back to its option", 
 
 // ---- HITL resume ----------------------------------------------------------
 
-Deno.test("reply-shaped SMS + opts.resume → resume called with continuation token, no send()", async () => {
+Deno.test("reply-shaped SMS + opts.resume → override called, args.resume NOT used, no send()", async () => {
   const resumeCalls: Array<{ continuationToken: string; body: string }> = [];
   const channel = twilioChannel({
     credentials: { authToken: AUTH_TOKEN },
@@ -262,49 +276,56 @@ Deno.test("reply-shaped SMS + opts.resume → resume called with continuation to
       resumeCalls.push({ continuationToken: ctx.continuationToken, body: ctx.body });
     },
   });
-  const { args, sends, flush } = mockArgs();
+  const { args, sends, resumes, flush } = mockArgs();
   await channel.routes[0].handler(await smsRequest({ From: USER, To: TWILIO_NUMBER, Body: "1", MessageSid: "SM2" }), args);
   await flush();
 
-  assertEquals(sends.length, 0); // routed to resume, not a fresh turn
+  assertEquals(sends.length, 0); // routed to the override, not a fresh turn
   assertEquals(resumeCalls.length, 1);
   assertEquals(resumeCalls[0].continuationToken, `${USER}:${TWILIO_NUMBER}`);
   assertEquals(resumeCalls[0].body, "1");
+  assertEquals(resumes.length, 0); // override wins → layer primitive untouched
 });
 
-Deno.test("reply-shaped SMS with NO opts.resume → treated as a normal message (not dropped)", async () => {
+// MODE B: exactly one pending approval → the reply is consumed as the decision.
+Deno.test("reply-shaped SMS, single pending approval → resolved via args.resume, no send()", async () => {
   const channel = twilioChannel({ credentials: { authToken: AUTH_TOKEN } });
-  const { args, sends, flush } = mockArgs();
+  const { args, sends, resumes, flush } = mockArgs({ ok: true });
   await channel.routes[0].handler(await smsRequest({ From: USER, To: TWILIO_NUMBER, Body: "1", MessageSid: "SM3" }), args);
   await flush();
-  assertEquals(sends.length, 1);
+
+  assertEquals(sends.length, 0); // consumed as an approval, not a fresh turn
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, `${USER}:${TWILIO_NUMBER}`);
+  // "1" decodes to the approve verb (trex renders approve as option 1).
+  assertEquals(resumes[0].input.decision, "approve");
+});
+
+// MODE B: no single pending approval → the reply falls through to a normal
+// message (nothing dropped) — preserving the pre-wiring behavior.
+Deno.test("reply-shaped SMS, no pending approval → falls through to a normal message", async () => {
+  const channel = twilioChannel({ credentials: { authToken: AUTH_TOKEN } });
+  const { args, sends, resumes, flush } = mockArgs({ ok: false });
+  await channel.routes[0].handler(await smsRequest({ From: USER, To: TWILIO_NUMBER, Body: "1", MessageSid: "SM4" }), args);
+  await flush();
+
+  assertEquals(resumes.length, 1); // attempted resume first
+  assertEquals(sends.length, 1); // then fell through to a normal message
   assertStringIncludes(sends[0].message, "1");
 });
 
-Deno.test("default resume is a loud no-op: warns, does NOT POST a resume route", () => {
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
-  // A fetch spy proves the default resume issues no HTTP (no 404-POST).
-  const origFetch = globalThis.fetch;
-  let fetched = 0;
-  globalThis.fetch = () => {
-    fetched++;
-    return Promise.resolve(new Response("{}"));
-  };
-  try {
-    defaultTwilioResume({
-      req: new Request(WEBHOOK_URL),
-      args: mockArgs().args,
-      continuationToken: `${USER}:${TWILIO_NUMBER}`,
-      from: USER,
-      to: TWILIO_NUMBER,
-      body: "1",
-    });
-  } finally {
-    console.warn = origWarn;
-    globalThis.fetch = origFetch;
-  }
-  assertEquals(warnings.some((w) => w.includes("no opts.resume provided")), true);
-  assertEquals(fetched, 0);
+Deno.test("defaultTwilioResume forwards the decoded decision to args.resume; returns its ok", async () => {
+  const { args, resumes } = mockArgs({ ok: true });
+  const applied = await defaultTwilioResume({
+    req: new Request(WEBHOOK_URL),
+    args,
+    continuationToken: `${USER}:${TWILIO_NUMBER}`,
+    from: USER,
+    to: TWILIO_NUMBER,
+    body: "2",
+  });
+  assertEquals(applied, true);
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, `${USER}:${TWILIO_NUMBER}`);
+  assertEquals(resumes[0].input.decision, "deny"); // "2" → deny
 });

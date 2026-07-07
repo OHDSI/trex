@@ -19,7 +19,7 @@ import type { ChannelAuth, ChannelRoute, ChannelRouteArgs } from "./types.ts";
 import { namespacedToken } from "./continuation.ts";
 import { ndjsonEncode } from "../service/stream.ts";
 import { stepToEvent } from "../service/handler.ts";
-import { resolveApprovalDecision } from "../service/approvals.ts";
+import { type ApprovalDecision, normalizeApprovalDecisions, resolveApprovalDecision } from "../service/approvals.ts";
 import type { AgentEvent } from "../service/events.ts";
 import type { ChannelDef } from "./types.ts";
 import { registerDelivery as defaultRegisterDelivery } from "./delivery.ts";
@@ -319,31 +319,71 @@ function buildArgs(
       });
     },
 
-    // Channel HITL resume (Task 17): apply an approval decision to the parked
-    // session behind `continuationToken`. Namespaces the raw token exactly like
-    // send() (so it addresses the same session the inbound message opened),
-    // looks it up WITHOUT creating a session, and — on a hit — delegates the DB
-    // write to the SAME resolver the native routes use. No turn is driven: the
-    // session's still-alive poll loop consumes the decision. Channel sessions
-    // carry no trex user, so sticky "always"/"never" (which needs one) is
-    // rejected by the resolver; approve/deny work. An unknown token is a logged
-    // soft failure, never a throw (an adapter default calls this best-effort).
+    // Channel HITL resume (Task 17/18): apply an approval decision to a parked
+    // session WITHOUT driving a turn (the session's still-alive poll loop
+    // consumes it). Two addressing modes, chosen by the input, both scoped to
+    // THIS channel so a callback can never resolve another channel's approval.
+    // The DB write is delegated to the SAME resolver the native routes use.
+    // Channel sessions carry no trex user, so sticky "always"/"never" (which
+    // needs one) is rejected by the resolver; approve/deny work. Never throws —
+    // an unresolvable input is a logged `{ok:false}` (adapters call it best-effort).
     async resume(continuationToken, input) {
+      const decisions = normalizeApprovalDecisions(input);
+      const consent = { plugin: deps.plugin, agentName: deps.agentName, userId: undefined };
+
+      // MODE A — BY REQUEST ID (widget platforms: the callback custom_id /
+      // callback_data / Action.Submit carries the requestId, decoded by the
+      // adapter). The continuation token is irrelevant here. For each decision:
+      // resolve the approval's session, VERIFY it belongs to this channel (the
+      // cross-channel guard), then apply. This is what makes Discord work — its
+      // send-time interaction-id token never matches the callback's message-id
+      // token, but the requestId does.
+      if (decisions.length > 0 && decisions.every((d) => !!d.requestId)) {
+        let ok = true;
+        for (const d of decisions) {
+          const sessionId = await deps.store.getApprovalSession(d.requestId!);
+          if (!sessionId) {
+            console.error(`agents: channel resume found no approval for request '${d.requestId}'`);
+            ok = false;
+            continue;
+          }
+          if (!(await deps.channelStore.sessionInChannel(channelId, sessionId))) {
+            console.error(`agents: channel '${channelId}' resume rejected request '${d.requestId}' — session not in channel`);
+            ok = false;
+            continue;
+          }
+          const r = await resolveApprovalDecision(
+            deps.store,
+            sessionId,
+            { requestId: d.requestId, decision: d.decision as ApprovalDecision | undefined },
+            consent,
+          );
+          if (!r.ok) ok = false;
+        }
+        return { ok };
+      }
+
+      // MODE B — BY TOKEN, SINGLE PENDING (text platforms: the reply carries a
+      // decision but NO requestId). Resolve the token to its session exactly like
+      // send() keyed it, then apply the decision to that session's SOLE pending
+      // approval. Zero or >1 pending → `{ok:false}` and the adapter falls back to
+      // treating the reply as an ordinary message (nothing is dropped).
       const token = namespacedToken(channelId, continuationToken);
       const sessionId = await deps.channelStore.getSessionByToken(channelId, token);
       if (!sessionId) {
         console.error(`agents: channel resume found no session for token '${token}'`);
         return { ok: false, error: "no session for token" };
       }
-      return await resolveApprovalDecision(deps.store, sessionId, input, {
-        plugin: deps.plugin,
-        agentName: deps.agentName,
-        // Platform-webhook channel sessions have no trex user; sticky verbs are
-        // rejected by the resolver (v1 gap — parity with native's "always/never
-        // requires an authenticated user"). Task 18 may thread the session's
-        // created_by here for the JWT-authed eve-web channel.
-        userId: undefined,
-      });
+      const requestId = await deps.store.getSinglePendingApproval(sessionId);
+      if (!requestId) {
+        return { ok: false, error: "no single pending approval" };
+      }
+      return await resolveApprovalDecision(
+        deps.store,
+        sessionId,
+        { requestId, decision: decisions[0]?.decision as ApprovalDecision | undefined },
+        consent,
+      );
     },
 
     waitUntil(p) {

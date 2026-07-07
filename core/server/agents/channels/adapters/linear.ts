@@ -32,10 +32,12 @@
 // to a conservative comment cap).
 //
 // HITL: Linear has no widgets, so `input.requested` → a comment with a numbered
-// option list + reply-instructions (e.g. "Reply with `/approve`"). Resume is an
-// injectable seam (`opts.resume`); the DEFAULT (`defaultLinearResume`) is a LOUD
-// NO-OP — it warns and drops rather than POSTing to a resume route that would
-// 404, identical posture to the prior adapters.
+// option list + reply-instructions (e.g. "Reply with `/approve`"). The reply
+// carries a decision but NO requestId, so the DEFAULT (`defaultLinearResume`)
+// routes it through the channel layer's resume primitive in MODE B (by token,
+// single pending): it applies ONLY when the issue has exactly one pending
+// approval, else `{ok:false}` and the comment falls through to a normal turn
+// (nothing dropped). `opts.resume` remains an override with its own store.
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -111,16 +113,34 @@ export interface LinearChannelOptions {
   resume?: (ctx: LinearResumeContext) => void | Promise<void>;
 }
 
-// DEFAULT resume: a LOUD NO-OP. Identical posture to the prior adapters — the
-// channel layer has no token→session resume primitive, so any default POST would
-// 404. Warn and drop rather than pretend. `opts.resume` is the injection seam an
-// integration wires with its own pending-request store.
-export function defaultLinearResume(_ctx: LinearResumeContext): void {
-  console.warn(
-    "agents/linear: HITL reply received but no opts.resume provided — the channel layer has no " +
-      "token→session resume primitive yet, so this reply cannot be applied to the parked request. " +
-      "Provide opts.resume to wire Linear comment HITL end-to-end.",
-  );
+/**
+ * Maps a reply-shaped comment to an approve/deny verb — trex renders approve as
+ * option 1 / deny as option 2 and its reply-instructions use `/approve`,
+ * `/deny`. Returns null when the comment isn't a clear decision (→ ordinary turn).
+ */
+function decodeApprovalDecision(body: string): "approve" | "deny" | null {
+  const t = body.trim().toLowerCase().replace(/\.$/, "");
+  if (t === "1" || t === "approve" || t === "/approve") return "approve";
+  if (t === "2" || t === "deny" || t === "/deny") return "deny";
+  return null;
+}
+
+// DEFAULT resume (Mode B — by token, single pending): decode the reply into a
+// decision and apply it to the issue's SOLE pending approval via the channel
+// layer's resume primitive. Returns true when it consumed the comment as an
+// approval, false when there is no single pending approval or the comment isn't
+// a clear decision — the caller then treats it as an ordinary turn (nothing
+// dropped). Never throws. `opts.resume` overrides this entirely.
+export async function defaultLinearResume(ctx: LinearResumeContext): Promise<boolean> {
+  const decision = decodeApprovalDecision(ctx.body);
+  if (!decision) return false;
+  try {
+    const result = await ctx.args.resume(ctx.continuationToken, { decision });
+    return result.ok;
+  } catch (e) {
+    console.error("linear: HITL resume failed:", e);
+    return false;
+  }
 }
 
 /** A dispatch candidate distilled from a parsed webhook event, or null to ignore. */
@@ -229,14 +249,6 @@ export function linearChannel(opts: LinearChannelOptions = {}): ChannelDef {
 
   const events: ChannelEventHandlers = { ...builtinEvents, ...opts.events };
 
-  async function runResume(ctx: LinearResumeContext) {
-    try {
-      await (opts.resume ?? defaultLinearResume)(ctx);
-    } catch (e) {
-      console.error("linear: HITL resume failed:", e);
-    }
-  }
-
   // ---- inbound event --------------------------------------------------------
 
   async function dispatch(event: LinearInboundEvent, args: ChannelRouteArgs, req: Request) {
@@ -251,12 +263,22 @@ export function linearChannel(opts: LinearChannelOptions = {}): ChannelDef {
     const continuationToken = linearContinuationToken(candidate.issueId);
     const isComment = event.type === "Comment";
 
-    // A reply-shaped comment could be a HITL answer, but Linear has no distinct
-    // interaction surface to tell one apart from a new message, so resume is only
-    // taken when a transport is wired; otherwise the comment is a normal turn.
-    if (opts.resume && isComment && isReplyShaped(candidate.body)) {
-      await runResume({ req, args, continuationToken, issueId: candidate.issueId, body: candidate.body });
-      return;
+    // A reply-shaped comment could be a HITL answer. Linear has no distinct
+    // interaction surface to tell one apart from a new message, so it is applied
+    // ONLY when the issue has a single pending approval (Mode B); otherwise it
+    // falls through and is handled as a normal turn (nothing dropped).
+    if (isComment && isReplyShaped(candidate.body)) {
+      const ctx: LinearResumeContext = { req, args, continuationToken, issueId: candidate.issueId, body: candidate.body };
+      if (opts.resume) {
+        // An integrator override fully owns the reply (its own pending-request store).
+        try {
+          await opts.resume(ctx);
+        } catch (e) {
+          console.error("linear: HITL resume failed:", e);
+        }
+        return;
+      }
+      if (await defaultLinearResume(ctx)) return;
     }
 
     let result: LinearCommandResult | null;

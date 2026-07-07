@@ -33,10 +33,12 @@
 // (RS256) and exchanges it for an installation token used as the Bearer.
 //
 // HITL: GitHub has no widgets, so `input.requested` → a comment with a Markdown
-// checklist + reply-instructions (e.g. "Reply with `/approve`"). Resume is an
-// injectable seam (`opts.resume`); the DEFAULT (`defaultGitHubResume`) is a LOUD
-// NO-OP — it warns and drops rather than POSTing to a resume route that would
-// 404, identical posture to discord.ts/slack.ts/telegram.ts/twilio.ts.
+// checklist + reply-instructions (e.g. "Reply with `/approve`"). The reply
+// carries a decision but NO requestId, so the DEFAULT (`defaultGitHubResume`)
+// routes it through the channel layer's resume primitive in MODE B (by token,
+// single pending): it applies ONLY when the thread has exactly one pending
+// approval, else `{ok:false}` and the comment falls through to a normal message
+// (nothing dropped). `opts.resume` remains an override with its own store.
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -113,16 +115,34 @@ export interface GitHubChannelOptions {
   resume?: (ctx: GitHubResumeContext) => void | Promise<void>;
 }
 
-// DEFAULT resume: a LOUD NO-OP. Identical posture to the prior adapters — the
-// channel layer has no token→session resume primitive, so any default POST would
-// 404. Warn and drop rather than pretend. `opts.resume` is the injection seam an
-// integration wires with its own pending-request store.
-export function defaultGitHubResume(_ctx: GitHubResumeContext): void {
-  console.warn(
-    "agents/github: HITL reply received but no opts.resume provided — the channel layer has no " +
-      "token→session resume primitive yet, so this reply cannot be applied to the parked request. " +
-      "Provide opts.resume to wire GitHub comment HITL end-to-end.",
-  );
+/**
+ * Maps a reply-shaped comment to an approve/deny verb — trex renders approve as
+ * option 1 / deny as option 2 and its reply-instructions use `/approve`,
+ * `/deny`. Returns null when the comment isn't a clear decision (→ ordinary turn).
+ */
+function decodeApprovalDecision(body: string): "approve" | "deny" | null {
+  const t = body.trim().toLowerCase().replace(/\.$/, "");
+  if (t === "1" || t === "approve" || t === "/approve") return "approve";
+  if (t === "2" || t === "deny" || t === "/deny") return "deny";
+  return null;
+}
+
+// DEFAULT resume (Mode B — by token, single pending): decode the reply into a
+// decision and apply it to the thread's SOLE pending approval via the channel
+// layer's resume primitive. Returns true when it consumed the comment as an
+// approval, false when there is no single pending approval or the comment isn't
+// a clear decision — the caller then treats it as an ordinary turn (nothing
+// dropped). Never throws. `opts.resume` overrides this entirely.
+export async function defaultGitHubResume(ctx: GitHubResumeContext): Promise<boolean> {
+  const decision = decodeApprovalDecision(ctx.body);
+  if (!decision) return false;
+  try {
+    const result = await ctx.args.resume(ctx.continuationToken, { decision });
+    return result.ok;
+  } catch (e) {
+    console.error("github: HITL resume failed:", e);
+    return false;
+  }
 }
 
 /** A dispatch candidate distilled from a parsed webhook event, or null to ignore. */
@@ -276,14 +296,6 @@ export function githubChannel(opts: GitHubChannelOptions = {}): ChannelDef {
 
   const events: ChannelEventHandlers = { ...builtinEvents, ...opts.events };
 
-  async function runResume(ctx: GitHubResumeContext) {
-    try {
-      await (opts.resume ?? defaultGitHubResume)(ctx);
-    } catch (e) {
-      console.error("github: HITL resume failed:", e);
-    }
-  }
-
   // ---- inbound event --------------------------------------------------------
 
   async function dispatch(event: GitHubInboundEvent, args: ChannelRouteArgs, req: Request) {
@@ -307,12 +319,22 @@ export function githubChannel(opts: GitHubChannelOptions = {}): ChannelDef {
       if (trigger) body = trigger.message;
     }
 
-    // A reply-shaped comment could be a HITL answer, but GitHub has no distinct
-    // interaction surface to tell one apart from a new message, so resume is only
-    // taken when a transport is wired; otherwise the comment is a normal turn.
-    if (opts.resume && isComment && isReplyShaped(candidate.body)) {
-      await runResume({ req, args, continuationToken, owner, repo, number: candidate.number, body: candidate.body });
-      return;
+    // A reply-shaped comment could be a HITL answer. GitHub has no distinct
+    // interaction surface to tell one apart from a new message, so it is applied
+    // ONLY when the thread has a single pending approval (Mode B); otherwise it
+    // falls through and is handled as a normal turn (nothing dropped).
+    if (isComment && isReplyShaped(candidate.body)) {
+      const ctx: GitHubResumeContext = { req, args, continuationToken, owner, repo, number: candidate.number, body: candidate.body };
+      if (opts.resume) {
+        // An integrator override fully owns the reply (its own pending-request store).
+        try {
+          await opts.resume(ctx);
+        } catch (e) {
+          console.error("github: HITL resume failed:", e);
+        }
+        return;
+      }
+      if (await defaultGitHubResume(ctx)) return;
     }
 
     let result: GitHubCommandResult | null;
