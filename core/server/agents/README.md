@@ -49,7 +49,8 @@ clean up whenever the server is stopped.
 | `subagents/<name>/` | no | Full support, **one level deep only**. Each is itself an eve-layout directory (own `instructions.md`, `tools/`, `skills/`, model). Invoked via the built-in `agent` tool; a `subagents/` directory nested inside a subagent is logged and ignored. |
 | `agent.edn`, `instructions.edn`, `skills/<name>.edn` | no | trex extension for CLJS-authored agents — see below. |
 | `channels/*.ts`, `channels/*.js` | no | Supported. One channel per file, the filename (minus extension) is the channel id. Each file default-exports a `defineChannel(...)` result. Top-level only (subagents declare none — eve parity). See "Channels" below. |
-| `connections/`, `sandbox/` | — | Not implemented in v1. Logged and skipped (not an error), so a real eve project directory still loads without crashing. |
+| `connections/*.ts`, `connections/*.js` | no | Supported. One connection per file, the filename (minus extension) is the connection name. Each file default-exports a `defineMcpClientConnection(...)` or `defineOpenApiConnection(...)` result. Top-level only. See "Connections" below. |
+| `sandbox/` | — | Not implemented in v1. Logged and skipped (not an error), so a real eve project directory still loads without crashing. |
 
 Skills are sorted by name. Subagent names come from the `subagents/` directory entry names.
 
@@ -523,6 +524,160 @@ POSTing to a route that would 404. To wire HITL fully today you must supply
 native approval route yourself. See COMPAT.md's "Channels — known v1 limitations"
 and `channels/ACCEPTANCE.md`.
 
+## Connections
+
+A **connection** is a declarative, per-agent integration that exposes an
+*external service's* tools to the model with credentials kept **out of the
+prompt** — a remote MCP server, or an OpenAPI-described HTTP API. Connections are
+eve's own concept; trex implements the same `defineMcpClientConnection` /
+`defineOpenApiConnection` authoring contract, so **static-auth + MCP/OpenAPI
+connection files stay portable to real eve**. The one intentional break is
+`trexConnect` (trex's OAuth broker, replacing Vercel Connect — see "OAuth" below
+and COMPAT.md). Declare connections by dropping `connections/*.ts` files at the
+agent-dir root; the file stem is the connection name, and its tools are exposed
+as `<name>__<tool>`.
+
+Connections plug into the **tool layer** (not the session/channel layer): each is
+realized on demand as a dynamic tool provider, so a broken/unreachable connection
+logs and continues — its tools are simply absent that turn, never a turn failure.
+
+### `connection_search` and tool naming
+
+When an agent has ≥1 connection, a built-in **`connection_search`** tool is added:
+the model calls it with `{ query }` and gets back the best-matching
+`<name>__<tool>` names + descriptions, so it can discover the right tool without
+the whole connection surface being spelled out in the system prompt. In v1 this is
+**discovery only** — the `<name>__<tool>` tools are still realized eagerly and
+stay directly callable; `connection_search` just helps the model *name* them.
+
+### MCP connection
+
+```ts
+// connections/linear.ts
+import { defineMcpClientConnection } from "eve/connections";
+import { once } from "eve/tools/approval";
+
+export default defineMcpClientConnection({
+  description: "Linear issue tracker (MCP).",
+  url: "https://mcp.linear.app/sse",
+  // optional: narrow the model-visible tools (exactly one of allow/block)
+  tools: { allow: ["create_issue", "search_issues"] },
+  // optional: pause for approval before each call
+  approval: once(),
+});
+```
+
+The server's tools become `linear__create_issue`, `linear__search_issues`, ….
+The transport tries streamable-HTTP first, then falls back to SSE.
+
+### OpenAPI connection
+
+```ts
+// connections/petstore.ts
+import { defineOpenApiConnection } from "eve/connections";
+
+export default defineOpenApiConnection({
+  description: "Pet Store API.",
+  spec: {/* inline OpenAPI 3.x / Swagger 2.0 document object (or a JSON string) */},
+  baseUrl: "https://api.example.com", // optional: override the spec's server URL
+  tools: { block: ["deletePet"] },    // exactly one of allow/block
+});
+```
+
+One tool is generated per operation (`petstore__<operationId>`). In v1 the `spec`
+must be an **inline document object or a JSON string** — remote-URL, file-path,
+and YAML specs are deferred (COMPAT.md).
+
+`tools` accepts **exactly one** of `allow`/`block` (the filter is over the *bare*
+remote tool name; specifying both, or neither, is a load-time error).
+`approval: once()` (from `eve/tools/approval`) marks every tool of that connection
+`needsApproval`, so it rides the same approval park/resume + sticky-consent flow
+as a `needsApproval` authored tool (see "Runtime hooks").
+
+### Static auth
+
+Credentials come from env / the per-agent manifest `env` (spec 007) / functions of
+session ctx. This path is byte-portable to real eve:
+
+```ts
+export default defineMcpClientConnection({
+  description: "Internal service.",
+  url: "https://mcp.internal/sse",
+  // Bearer token — sent as `Authorization: Bearer <token>`:
+  auth: { getToken: async (ctx) => ({ token: process.env.INTERNAL_TOKEN! }) },
+  // …or arbitrary headers (a literal map, or a function of ctx):
+  // headers: { "X-Api-Key": process.env.INTERNAL_KEY! },
+});
+```
+
+Omit both `auth` and `headers` for a no-auth (public/local) server.
+
+### OAuth (the trex broker — `trexConnect`)
+
+For **user-delegated** OAuth, trex ships its own broker (replacing Vercel
+Connect). Reference a registered connector by name:
+
+```ts
+import { defineMcpClientConnection, trexConnect } from "eve/connections";
+
+export default defineMcpClientConnection({
+  description: "GitHub (user-delegated).",
+  url: "https://mcp.github.example/sse",
+  auth: trexConnect("github"),               // user-scoped (default)
+  // auth: trexConnect("github", { principalType: "app" }),  // app-scoped
+});
+```
+
+At tool-call time the broker resolves `(principal, connector)` to a live token:
+a valid stored token is used as-is, an expiring one is **refreshed** silently, and
+when there's **no** token the tool emits a consent URL (as a `tool.event`) and
+**parks** the turn until the user authorizes (or a 5-minute timeout). A user-scoped
+connection with no principal fails closed with `principal_required` (it never
+borrows another principal's token).
+
+**Register a connector** — insert a row into `agents.oauth_connectors` (one small
+admin route set, mirroring devx's provider-config routes):
+
+| Column | Meaning |
+|---|---|
+| `id` | the name you pass to `trexConnect("<id>")` |
+| `authorization_url` | the provider's authorize endpoint |
+| `token_url` | the provider's token endpoint |
+| `client_id` | your OAuth app's client id |
+| `client_secret_ref` | the **env var name** holding the client secret (never the secret itself) |
+| `scopes` | space-delimited scopes to request |
+| `principal_scope` | `user` (per-user tokens) or `app` (one app-wide token) |
+
+The consent round-trip runs through two routes mounted on the agent
+(**exempt from the trex JWT** — authenticated only by a signed, expiring
+`state`):
+
+```
+<base>/eve/v1/oauth/<connector>/start?state=<signed>     # → 302 to the provider
+<base>/eve/v1/oauth/<connector>/callback?code=…&state=…  # → exchange + store, resume the parked turn
+```
+
+`<base>` is `<trex-host>/plugins/<scope>/<agent>/eve/v1`. Tokens are stored
+**encrypted** (AES-GCM via the DEK) in `agents.oauth_tokens`, keyed by
+`(principal_type, principal_id, connector)`; app-scoped tokens live under the
+`__app__` sentinel principal.
+
+**Env vars for the broker:**
+
+| Env var | Purpose |
+|---|---|
+| `TREX_ROOT_KEY` | **Gates the whole broker.** Needed to unwrap the DEK (token encryption-at-rest) and derive the HMAC state secret. Unset (or a DEK-init failure) → the `/oauth/*` routes 404 and `trexConnect` connections skip with a "not configured" log; every non-oauth agent still boots. |
+| `<client_secret_ref>` | The env var each connector's `client_secret_ref` names — the OAuth client secret, resolved at exchange/refresh time. An unset/empty ref is a hard error (never sends an empty secret). |
+
+**v1 limitations** (see COMPAT.md's "Connections — known v1 limitations"): a
+**channel**-initiated session can't complete OAuth yet (the channel principal
+isn't threaded into `HookCtx.principal`, so it fails closed — web sessions with an
+`x-user-id` work); an oauth-gated **MCP** connection can't enumerate its tools
+until after the first authorization (OpenAPI parks cleanly from cold); and the
+callback `redirect_uri` is derived from the worker's request origin (behind a
+proxy with a different public origin, a `PUBLIC_URL` override — a follow-up — is
+needed). `connections/ACCEPTANCE.md` is the manual live-acceptance checklist.
+
 ## Tool extensions and eve portability
 
 `defineTool` accepts eve's real fields (`description`, `inputSchema`, `execute`, `needsApproval`)
@@ -639,9 +794,10 @@ above to work. See COMPAT.md's "eve-eval verdict" section for the full run log.
 
 [COMPAT.md](./COMPAT.md) has the full reconciliation against real eve: every deliberate divergence
 in the HTTP/event surface, the "Channels" section (per-adapter vendoring/reimplementation record,
-the eve-model divergences, and the known v1 limitations), everything the loader still ignores
-entirely (`connections/`, `sandbox/`, `schedules/`, `hooks/`, and several stream events eve
-documents that we don't emit), the AI SDK version skew between eve's tooling and trex's runtime,
-and the verified-vs-provisional breakdown of what was actually exercised end-to-end.
-`channels/ACCEPTANCE.md` is the manual live-acceptance checklist (deferred to an environment with
-real platform credentials).
+the eve-model divergences, and the known v1 limitations), the "Connections" section (MCP/OpenAPI,
+the trex OAuth broker vs eve's `connect`, and the known v1 limitations), everything the loader
+still ignores entirely (`sandbox/`, `schedules/`, `hooks/`, and several stream events eve documents
+that we don't emit), the AI SDK version skew between eve's tooling and trex's runtime, and the
+verified-vs-provisional breakdown of what was actually exercised end-to-end.
+`channels/ACCEPTANCE.md` and `connections/ACCEPTANCE.md` are the manual live-acceptance checklists
+(deferred to an environment with real platform/provider credentials).
