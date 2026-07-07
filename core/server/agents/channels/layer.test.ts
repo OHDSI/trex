@@ -219,7 +219,7 @@ Deno.test("channel layer: a channel with events registers background delivery on
   } as any;
 
   const channelStore = fakeChannelStore();
-  const registered: Array<{ sessionId: string; hasEvents: boolean; sawWaitUntil: boolean }> = [];
+  const registered: Array<{ sessionId: string; turnId: string; hasEvents: boolean; sawWaitUntil: boolean }> = [];
   const handler = createChannelHandler({
     agent,
     store: noopStore,
@@ -227,12 +227,15 @@ Deno.test("channel layer: a channel with events registers background delivery on
     plugin: "toy-agent",
     agentName: "toy",
     basePath: BASE,
-    startTurn: () => {},
+    // Task 19: startTurn surfaces the created turn id via onTurnCreated; send()
+    // uses it to scope this turn's delivery.
+    startTurn: (_s, _m, _md, onTurnCreated) => onTurnCreated?.("turn-1"),
     subscribe: () => () => {},
-    // Injected: assert send() wired us with the channel + a waitUntil executor.
+    // Injected: assert send() wired us with the channel + turnId + a waitUntil.
     registerDelivery: (opts) => {
       registered.push({
         sessionId: opts.sessionId,
+        turnId: opts.turnId,
         hasEvents: !!opts.channel.events,
         sawWaitUntil: typeof opts.waitUntil === "function",
       });
@@ -242,14 +245,14 @@ Deno.test("channel layer: a channel with events registers background delivery on
     waitUntil: () => {},
   });
 
-  // events channel -> delivery registered.
+  // events channel -> delivery registered, scoped to the created turn.
   const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/evt/in`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ message: "hi", token: "u-1" }),
   }));
   assertEquals(res.status, 200);
-  assertEquals(registered, [{ sessionId: "sess-1", hasEvents: true, sawWaitUntil: true }]);
+  assertEquals(registered, [{ sessionId: "sess-1", turnId: "turn-1", hasEvents: true, sawWaitUntil: true }]);
 
   // toy webhook (no events) -> no registration.
   await handler(new Request(`${ORIGIN}${BASE}/eve/v1/webhook/message`, {
@@ -298,7 +301,10 @@ Deno.test("channel layer: receive() starts a session on the TARGET channel (defa
     plugin: "toy-agent",
     agentName: "toy",
     basePath: BASE,
-    startTurn: (sessionId, message) => startTurns.push({ sessionId, message }),
+    startTurn: (sessionId, message, _md, onTurnCreated) => {
+      startTurns.push({ sessionId, message });
+      onTurnCreated?.("turn-1");
+    },
     subscribe: () => () => {},
     onSessionStarted: (info) => started.push({ channelId: info.channelId, sessionId: info.sessionId, created: info.created }),
     registerDelivery: (opts) => {

@@ -25,6 +25,22 @@ function fakeStream() {
   };
 }
 
+// A fan-out stream: many deliveries subscribe to the SAME session and every
+// emit reaches all of them (mirrors stream.ts's per-session fan-out). Needed to
+// exercise two concurrent turns on one session.
+function fakeMultiStream() {
+  const listeners = new Set<(e: AgentEvent) => void>();
+  const subscribe = (_sid: string, fn: (e: AgentEvent) => void) => {
+    listeners.add(fn);
+    return () => { listeners.delete(fn); };
+  };
+  return {
+    subscribe,
+    emit(e: AgentEvent) { for (const l of [...listeners]) l(e); },
+    get active() { return listeners.size; },
+  };
+}
+
 const CHANNEL_CTX = { kind: "channel-ctx" };
 const CTX = { kind: "runtime-ctx" };
 
@@ -44,6 +60,7 @@ Deno.test("registerDelivery: runs the matching events handler with (eventData, c
   registerDelivery({
     channel,
     sessionId: "sess-1",
+    turnId: "t1",
     subscribe: stream.subscribe,
     waitUntil: (p) => waited.push(p),
     buildChannelCtx: () => ({ channelCtx: CHANNEL_CTX, ctx: CTX }),
@@ -90,6 +107,7 @@ Deno.test("registerDelivery: a throwing handler is caught per-event and does not
   registerDelivery({
     channel,
     sessionId: "sess-2",
+    turnId: "t1",
     subscribe: stream.subscribe,
     waitUntil: (p) => waited.push(p),
     buildChannelCtx: () => ({ channelCtx: null }),
@@ -125,6 +143,7 @@ Deno.test("registerDelivery: async handler rejection is isolated and the lifetim
   registerDelivery({
     channel,
     sessionId: "sess-3",
+    turnId: "t1",
     subscribe: stream.subscribe,
     waitUntil: (p) => waited.push(p),
     buildChannelCtx: () => ({ channelCtx: null }),
@@ -146,6 +165,79 @@ Deno.test("registerDelivery: async handler rejection is isolated and the lifetim
   assertEquals(order, ["delivered"]);
 });
 
+Deno.test("registerDelivery: concurrent turns on one session are turn-scoped — a sibling turn's terminal does NOT tear this delivery down (Task 19)", async () => {
+  const stream = fakeMultiStream();
+  const waitedA: Promise<unknown>[] = [];
+  const waitedB: Promise<unknown>[] = [];
+  const deliveredA: string[] = [];
+  const deliveredB: string[] = [];
+
+  const channelA: ChannelDef = {
+    __trexChannel: true,
+    routes: [],
+    events: { "message.completed": (d: any) => { deliveredA.push(d.message); } },
+  };
+  const channelB: ChannelDef = {
+    __trexChannel: true,
+    routes: [],
+    events: { "message.completed": (d: any) => { deliveredB.push(d.message); } },
+  };
+
+  // Two overlapping turns (A, B) on ONE session, each its own delivery.
+  registerDelivery({
+    channel: channelA, sessionId: "sess", turnId: "A",
+    subscribe: stream.subscribe, waitUntil: (p) => waitedA.push(p),
+    buildChannelCtx: () => ({ channelCtx: null }),
+  });
+  registerDelivery({
+    channel: channelB, sessionId: "sess", turnId: "B",
+    subscribe: stream.subscribe, waitUntil: (p) => waitedB.push(p),
+    buildChannelCtx: () => ({ channelCtx: null }),
+  });
+  assertEquals(stream.active, 2, "both deliveries subscribed to the shared session stream");
+
+  // Interleaved events for both turns on the shared stream.
+  stream.emit({ type: "message.completed", data: { turnId: "A", message: "a1", finishReason: "stop" } });
+  stream.emit({ type: "message.completed", data: { turnId: "B", message: "b1", finishReason: "stop" } });
+
+  // Turn A completes. THE regression: this must tear down ONLY A, not B.
+  stream.emit({ type: "turn.completed", data: { turnId: "A" } });
+  assertEquals(stream.active, 1, "A's terminal tore down A only — B is still subscribed");
+  await waitedA[0]; // A's lifetime resolves once A is drained.
+
+  // B still delivers AFTER A completed (would have been dropped by the bug).
+  stream.emit({ type: "message.completed", data: { turnId: "B", message: "b2", finishReason: "stop" } });
+  stream.emit({ type: "turn.completed", data: { turnId: "B" } });
+  assertEquals(stream.active, 0, "B tore down on its OWN terminal event");
+  await waitedB[0];
+
+  assertEquals(deliveredA, ["a1"], "A handled only turnA events");
+  assertEquals(deliveredB, ["b1", "b2"], "B handled its own events, including the one after A completed");
+});
+
+Deno.test("registerDelivery: session.failed (session-level, no turnId) tears the delivery down (Task 19)", async () => {
+  const stream = fakeStream();
+  const waited: Promise<unknown>[] = [];
+
+  const channel: ChannelDef = {
+    __trexChannel: true,
+    routes: [],
+    events: { "message.completed": () => {} },
+  };
+
+  registerDelivery({
+    channel, sessionId: "sess-f", turnId: "t1",
+    subscribe: stream.subscribe, waitUntil: (p) => waited.push(p),
+    buildChannelCtx: () => ({ channelCtx: null }),
+  });
+  assert(stream.active, "subscribed");
+
+  // session.failed carries a sessionId, not a turnId — it must still tear down.
+  stream.emit({ type: "session.failed", data: { sessionId: "sess-f", message: "kaboom" } });
+  assert(stream.unsubscribed, "session.failed tears down the delivery even without a turnId");
+  await waited[0];
+});
+
 Deno.test("registerDelivery: no events handlers -> no subscription, no waitUntil (does not hold the isolate open)", () => {
   const stream = fakeStream();
   const waited: Promise<unknown>[] = [];
@@ -153,6 +245,7 @@ Deno.test("registerDelivery: no events handlers -> no subscription, no waitUntil
   registerDelivery({
     channel: { __trexChannel: true, routes: [] },
     sessionId: "sess-4",
+    turnId: "t1",
     subscribe: stream.subscribe,
     waitUntil: (p) => waited.push(p),
     buildChannelCtx: () => ({ channelCtx: null }),

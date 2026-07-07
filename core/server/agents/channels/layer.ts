@@ -58,7 +58,14 @@ export interface ChannelLayerDeps {
   basePath: string;
   // Fire-and-forget turn start (handler.ts's startTurn, pre-bound to its Deps).
   // Channel sessions carry no trex user, so no bearerToken/userId is threaded.
-  startTurn: (sessionId: string, message: unknown, metadata?: unknown) => void;
+  // `onTurnCreated` fires with the freshly-created turn id (before any event is
+  // published) so send() can scope this turn's background delivery to it.
+  startTurn: (
+    sessionId: string,
+    message: unknown,
+    metadata?: unknown,
+    onTurnCreated?: (turnId: string) => void,
+  ) => void;
   subscribe: (sessionId: string, fn: (e: AgentEvent) => void) => () => void;
   env?: (k: string) => string | undefined;
   onSessionStarted?: (info: ChannelSessionStarted) => void;
@@ -188,7 +195,6 @@ function buildArgs(
       opts.auth,
       createdBy,
     );
-    deps.startTurn(sessionId, message);
     const info: ChannelSessionStarted = {
       channelId: sessionChannelId,
       sessionId,
@@ -198,17 +204,21 @@ function buildArgs(
       state: opts.state,
       title: opts.title,
     };
-    deps.onSessionStarted?.(info);
 
-    // Server-initiated delivery (Task 5): if this channel declares `events`
-    // handlers, subscribe them to the session's live stream so the adapter
-    // posts the agent's reply back to the platform AFTER this response
-    // returns. No-op for channels without events (e.g. the toy webhook).
-    if (channel?.events) {
+    // Server-initiated delivery (Task 5, turn-scoped in Task 19): if this
+    // channel declares `events` handlers, subscribe them to the session's live
+    // stream so the adapter posts the agent's reply back to the platform AFTER
+    // this response returns. Registration is deferred to onTurnCreated so the
+    // subscription is scoped to THIS turn's id — two overlapping turns on one
+    // session no longer cross-cancel each other's delivery. No-op for channels
+    // without events (e.g. the toy webhook).
+    const registerForTurn = (turnId: string) => {
+      if (!channel?.events) return;
       const waitUntil = deps.waitUntil ?? edgeWaitUntil;
       (deps.registerDelivery ?? defaultRegisterDelivery)({
         channel,
         sessionId,
+        turnId,
         subscribe: deps.subscribe,
         waitUntil,
         buildChannelCtx: () =>
@@ -221,7 +231,10 @@ function buildArgs(
               ctx: { sessionId, channelId: sessionChannelId, waitUntil },
             },
       });
-    }
+    };
+
+    deps.startTurn(sessionId, message, undefined, registerForTurn);
+    deps.onSessionStarted?.(info);
     return { id: sessionId };
   };
 

@@ -24,6 +24,12 @@ import type { AgentEvent } from "../service/events.ts";
 export interface RegisterDeliveryOpts {
   channel: ChannelDef;
   sessionId: string;
+  // The turn THIS delivery belongs to. A session can run two turns at once (two
+  // rapid messages on one continuation token), and every turn-scoped event on
+  // the shared session stream carries its own `data.turnId`. Scoping to turnId
+  // is what stops a sibling turn's terminal event from tearing this delivery
+  // down (and stops us from re-delivering the sibling's replies).
+  turnId: string;
   // stream.ts's live fan-out: (sessionId, fn) -> unsubscribe. Mirrors how
   // handler.ts's /stream route subscribes for the live tail.
   subscribe: (sessionId: string, fn: (e: AgentEvent) => void) => () => void;
@@ -35,20 +41,12 @@ export interface RegisterDeliveryOpts {
   buildChannelCtx: () => { channelCtx: unknown; ctx?: unknown };
 }
 
-// A turn's delivery window closes on any of these — the session either finished
-// its turn or failed outright. Reached exactly once; releases the subscription.
-const TERMINAL: ReadonlySet<AgentEvent["type"]> = new Set([
-  "turn.completed",
-  "turn.failed",
-  "session.failed",
-]);
-
 function isThenable(v: unknown): v is Promise<unknown> {
   return !!v && typeof (v as { then?: unknown }).then === "function";
 }
 
 export function registerDelivery(opts: RegisterDeliveryOpts): void {
-  const { channel, sessionId, subscribe, waitUntil, buildChannelCtx } = opts;
+  const { channel, sessionId, turnId, subscribe, waitUntil, buildChannelCtx } = opts;
   const events = channel.events;
   // No events handlers → nothing to deliver; don't subscribe or hold the
   // isolate open with a waitUntil that would never resolve.
@@ -75,6 +73,14 @@ export function registerDelivery(opts: RegisterDeliveryOpts): void {
   };
 
   const unsub = subscribe(sessionId, (event) => {
+    // Sibling-turn isolation: turn-scoped events carry `data.turnId`. An event
+    // for a DIFFERENT turn belongs to that turn's own delivery — ignore it
+    // entirely (don't invoke handlers, don't tear down). Turn-agnostic events
+    // (tool.event, session.waiting, session.failed) carry no turnId and fall
+    // through so their handlers still run and session.failed can tear down.
+    const evTurnId = (event.data as { turnId?: string } | undefined)?.turnId;
+    if (evTurnId !== undefined && evTurnId !== turnId) return;
+
     const handler = events[event.type];
     if (handler) {
       // Per-event isolation: a handler that throws synchronously OR rejects
@@ -91,7 +97,16 @@ export function registerDelivery(opts: RegisterDeliveryOpts): void {
         console.error(`agents: channel delivery handler '${event.type}' failed:`, e);
       }
     }
-    if (TERMINAL.has(event.type)) finish();
+    // Close the delivery window on MY turn's terminal event, or on any
+    // session-level failure (session.failed has no turnId → tears down every
+    // delivery on the session). A sibling turn's terminal event was already
+    // filtered out above, so it can never cross-cancel this delivery.
+    if (
+      ((event.type === "turn.completed" || event.type === "turn.failed") && evTurnId === turnId) ||
+      event.type === "session.failed"
+    ) {
+      finish();
+    }
   });
 
   function finish() {

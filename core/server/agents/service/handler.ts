@@ -112,12 +112,24 @@ function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerTo
   };
 }
 
-function startTurn(deps: Deps, sessionId: string, message: unknown, metadata: unknown, bearerToken?: string, userId?: string) {
+function startTurn(
+  deps: Deps,
+  sessionId: string,
+  message: unknown,
+  metadata: unknown,
+  bearerToken?: string,
+  userId?: string,
+  onTurnCreated?: (turnId: string) => void,
+) {
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
     const history = await historyForModel(deps.store, sessionId);
     const turn = await deps.store.addTurn(sessionId, message, metadata);
+    // Surface the freshly-created turn id to the caller (the channel layer uses
+    // it to scope its background delivery to THIS turn) BEFORE publishing any
+    // event, so a subscriber registered here can't miss the turn's events.
+    onTurnCreated?.(turn.id);
     publish(sessionId, { type: "turn.started", data: { turnId: turn.id, sequence: turn.seq } });
     const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
     try {
@@ -157,7 +169,8 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         agentName: deps.agentName,
         basePath,
         // Channel sessions have no trex user, so no bearerToken/userId here.
-        startTurn: (sessionId, message, metadata) => startTurn(deps, sessionId, message, metadata),
+        startTurn: (sessionId, message, metadata, onTurnCreated) =>
+          startTurn(deps, sessionId, message, metadata, undefined, undefined, onTurnCreated),
         subscribe,
         env: deps.env,
         onSessionStarted: deps.onSessionStarted,
