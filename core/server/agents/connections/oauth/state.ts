@@ -5,10 +5,15 @@
 // the user's browser back to the callback with no trex credential). The ONLY
 // thing that authenticates a callback is this signed `state`: an HMAC-SHA256
 // MAC over the {session, principalType, principalId, connector, nonce, exp}
-// payload keyed by a server secret. It is the anti-CSRF / anti-replay token —
+// payload keyed by a server secret. It is the anti-CSRF token —
 //   * tamper (any field changed) → the MAC no longer verifies → rejected;
-//   * replay past `exp` → rejected;
-//   * the `nonce` makes each authorization request's state unique.
+//   * replay past `exp` → rejected.
+// The `nonce` adds entropy so each authorization request's state is unique; it
+// is NOT a one-time token — there is no server-side nonce store, so a state is
+// replayable within its `exp` window. That replay is not exploitable: the
+// callback still requires the IdP to have issued a fresh, single-use `code`
+// bound to this exact redirect, and the minted token is written under the
+// state's own principal binding — a replayed state can't retarget it.
 // verifyState MUST be called (and MUST return ok) before ANY redirect to a
 // provider or ANY token write. The secret never leaves the server.
 //
@@ -23,7 +28,7 @@ export interface StatePayload {
   principalId: string;
   /** The connector id this authorization is for. */
   connector: string;
-  /** Single-use random value — anti-replay/CSRF. */
+  /** Random value for per-request uniqueness/entropy (not a stored one-time token). */
   nonce: string;
   /** Absolute expiry, epoch milliseconds. */
   exp: number;

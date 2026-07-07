@@ -97,10 +97,10 @@ export async function handleOAuthCallback(req: Request, deps: OAuthRouteDeps): P
 
   const c = await deps.store.getConnector(deps.connector);
   if (!c) return jsonErr("unknown connector", 404);
-  // HARD ERROR: an unset client-secret env-ref must never be sent as
-  // `undefined`. Do not proceed to the token exchange.
-  if (c.clientSecret === undefined) {
-    console.error(`agents oauth: connector "${deps.connector}" client secret env-ref is unset — refusing token exchange`);
+  // HARD ERROR: an unset OR empty client-secret env-ref must never be sent to
+  // the IdP (neither `undefined` nor `client_secret=`). Do not proceed.
+  if (!c.clientSecret) {
+    console.error(`agents oauth: connector "${deps.connector}" client secret env-ref is unset or empty — refusing token exchange`);
     return jsonErr("connector misconfigured", 500);
   }
 

@@ -166,6 +166,24 @@ Deno.test("callback: connector with unset client secret → 500 hard error, no e
   assertEquals(store.puts.length, 0);
 });
 
+Deno.test("callback: connector with an EMPTY client secret → 500 hard error, no exchange", async () => {
+  const state = await signState(payload(), SECRET);
+  let fetched = false;
+  const fetchMock = () => {
+    fetched = true;
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  };
+  const store = fakeStore({ connectors: { github: connector({ clientSecret: "" }) } });
+  const d = deps({ store, fetch: fetchMock });
+  const req = new Request(
+    `https://host.example${BASE}/eve/v1/oauth/github/callback?code=X&state=${encodeURIComponent(state)}`,
+  );
+  const res = await handleOAuthCallback(req, d);
+  assertEquals(res.status, 500);
+  assertEquals(fetched, false);
+  assertEquals(store.puts.length, 0);
+});
+
 Deno.test("callback: state connector must match the path connector", async () => {
   const state = await signState(payload({ connector: "gitlab" }), SECRET);
   const store = fakeStore({ connectors: { github: connector() } });

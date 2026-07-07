@@ -13,7 +13,7 @@ import type { ConnectionAuth, ConnectionDef, ConnectionTools } from "./types.ts"
 import type { HookCtx, ToolContext, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { formatMcpResult, hashResolvedAuth, type McpConnectFn, realizeMcp } from "./mcp.ts";
-import { type FetchLike, realizeOpenApi } from "./openapi.ts";
+import { type FetchLike, realizeOpenApi, type RealizedOpenApiTool } from "./openapi.ts";
 import type { OAuthStore } from "./oauth/store.ts";
 import {
   type BrokerCtx,
@@ -254,6 +254,20 @@ async function realizeOAuthConnection(
       );
       return;
     }
+    // The spec is baked into each op's execute at realize time (the Bearer must
+    // be present so openapi.ts's `security` placement can position it). To avoid
+    // re-parsing the document on every tool call, realize the authed tool set
+    // ONCE per distinct token and memoize it (a turn normally uses one token; a
+    // mid-turn refresh mints at most one more). Shared by all this connection's
+    // tools.
+    let authedCache: { token: string; byName: Map<string, RealizedOpenApiTool> } | null = null;
+    const authedTool = (token: string, name: string): RealizedOpenApiTool | undefined => {
+      if (!authedCache || authedCache.token !== token) {
+        const realized = realizeOpenApi(conn, { Authorization: `Bearer ${token}` }, { fetch: deps.fetch });
+        authedCache = { token, byName: new Map(realized.map((t) => [t.name, t])) };
+      }
+      return authedCache.byName.get(name);
+    };
     for (const t of listed) {
       if (!passesToolFilter(t.name, conn.tools)) continue;
       out[`${connName}__${t.name}`] = {
@@ -263,10 +277,7 @@ async function realizeOAuthConnection(
         execute: async (input: unknown, tctx?: ToolContext) => {
           const got = await ensureToken(tctx);
           if ("error" in got) return { error: `oauth authorization ${got.error}` };
-          // Re-realize with the resolved bearer so the operation's `security`
-          // placement (openapi.ts) puts the token where the scheme dictates.
-          const authed = realizeOpenApi(conn, { Authorization: `Bearer ${got.token}` }, { fetch: deps.fetch });
-          const rt = authed.find((x) => x.name === t.name);
+          const rt = authedTool(got.token, t.name);
           if (!rt) return { error: "oauth: operation no longer available" };
           return await rt.execute(input);
         },

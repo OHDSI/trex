@@ -166,6 +166,31 @@ Deno.test("no principal on a user-scoped connection → principal_required (term
   assertEquals(res, { error: "principal_required" });
 });
 
+Deno.test("refresh with an EMPTY client secret is a hard error (never posts an empty secret)", async () => {
+  const store = fakeStore({
+    tokens: {
+      "user|u-1|github": { access: "old", refresh: "rt", expiresAt: new Date(1_000_000 + 10_000), scopes: "repo" },
+    },
+    connectors: { github: connector({ clientSecret: "" }) },
+  });
+  let fetched = false;
+  const fetchMock = () => {
+    fetched = true;
+    return Promise.resolve(new Response("{}", { status: 200 }));
+  };
+  await assertRejects(
+    () =>
+      resolveOAuthAuth(
+        store,
+        { kind: "oauth", connector: "github", principalType: "user" },
+        ctx({ fetch: fetchMock }),
+      ),
+    Error,
+    "unset or empty",
+  );
+  assertEquals(fetched, false);
+});
+
 Deno.test("refresh with an unset client secret is a hard error (never posts undefined)", async () => {
   const store = fakeStore({
     tokens: {

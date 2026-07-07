@@ -135,9 +135,11 @@ async function refreshAccessToken(
 ): Promise<string | null> {
   const connector = await store.getConnector(connectorId);
   if (!connector) return null;
-  if (connector.clientSecret === undefined) {
+  // Reject a missing OR empty secret: an env-ref set to "" must hard-error the
+  // same way an unset one does, never post `client_secret=` to the IdP.
+  if (!connector.clientSecret) {
     throw new Error(
-      `oauth connector "${connectorId}": client secret env-ref is unset — cannot refresh (never send an undefined secret)`,
+      `oauth connector "${connectorId}": client secret env-ref is unset or empty — cannot refresh (never send an empty secret)`,
     );
   }
   const fetchFn = ctx.fetch ?? ((u, i) => fetch(u, i));
