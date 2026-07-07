@@ -16,9 +16,14 @@
 
 import { isObject, type JsonObject, parseJsonObject } from "./shared.ts";
 
-/** Raw inbound webhook the parser consumes: the raw body + request headers. */
+/**
+ * Raw inbound webhook the parser consumes: the request headers plus EITHER an
+ * already-parsed `payload` (the signature path parses once and threads it) or a
+ * raw `body` string to parse (the verifier path / a rewritten body).
+ */
 export interface LinearWebhookInput {
-  readonly body: string;
+  readonly body?: string;
+  readonly payload?: JsonObject;
   readonly headers: Headers;
 }
 
@@ -77,10 +82,14 @@ export function linearContinuationToken(issueId: string): string {
  */
 export function parseLinearWebhookEvent(input: LinearWebhookInput): LinearInboundEvent | null {
   let raw: JsonObject;
-  try {
-    raw = parseJsonObject(JSON.parse(input.body));
-  } catch {
-    return null;
+  if (input.payload !== undefined) {
+    raw = input.payload;
+  } else {
+    try {
+      raw = parseJsonObject(JSON.parse(input.body ?? ""));
+    } catch {
+      return null;
+    }
   }
   const type = readString(raw.type);
   const data = isObject(raw.data) ? parseJsonObject(raw.data) : null;
@@ -101,11 +110,19 @@ export function parseLinearWebhookEvent(input: LinearWebhookInput): LinearInboun
 
 /**
  * The actor that authored an inbound event — used for the LOOP GUARD and auth
- * projection. Prefers the resource's own author (`data.user`/`data.userId` for a
- * comment, `data.creator`/`data.creatorId` for an issue) and falls back to the
- * top-level webhook `actor` (the user who triggered an update).
+ * projection. Prefers the resource's HUMAN author (`data.user`/`data.userId` for
+ * a comment, `data.creator`/`data.creatorId` for an issue, then the top-level
+ * webhook `actor`) and falls back to `data.botActor` — the app/agent identity
+ * Linear attributes a comment to when it was posted with an OAuth agent/app token
+ * (in that case `data.user` is null). Used for auth attribution; the loop guard
+ * uses `readLinearHumanActor` + the botActor presence check directly.
  */
 export function readLinearActor(event: LinearInboundEvent): LinearUserRef | undefined {
+  return readLinearHumanActor(event) ?? readUser(event.data.botActor);
+}
+
+/** The HUMAN author of an event (excludes `data.botActor`). */
+function readLinearHumanActor(event: LinearInboundEvent): LinearUserRef | undefined {
   return readUser(event.data.user) ??
     idOnlyUser(event.data.userId) ??
     readUser(event.data.creator) ??
@@ -115,18 +132,31 @@ export function readLinearActor(event: LinearInboundEvent): LinearUserRef | unde
 
 /**
  * Decides whether an inbound comment/event should ignore-and-drop rather than
- * start a turn — the LOOP GUARD. True when the actor is the bot itself
- * (`actorId === botUserId`) or the body carries the trex HITL marker. Without
- * this the agent would answer its OWN commentCreate deliveries forever (Linear
- * echoes the bot's comments back as `Comment.create` webhooks).
+ * start a turn — the LOOP GUARD. Without it the agent answers its OWN
+ * commentCreate deliveries forever (Linear echoes the bot's comments back as
+ * `Comment.create` webhooks). Drops when ANY of:
+ *   1) the body carries the trex marker we stamp on every outgoing comment — a
+ *      CONFIG-FREE guard that needs no bot-id configuration;
+ *   2) the event is APP-AUTHORED — `data.botActor` is present with no human
+ *      author — i.e. posted by our OAuth agent/app token (also config-free);
+ *   3) (optional) the human actor id equals a configured `botUserId`.
  */
-export function isIgnoredLinearEvent(body: string, actorId: string | undefined, botUserId?: string): boolean {
+export function isIgnoredLinearEvent(event: LinearInboundEvent, body: string, botUserId?: string): boolean {
+  // 1) our own marker — config-free.
   if (body.includes(LINEAR_TREX_MARKER)) return true;
-  if (!actorId || !botUserId) return false;
-  return actorId === botUserId;
+  // 2) app/agent-token authored (botActor present, no human) — config-free.
+  if (isObject(event.data.botActor) && readLinearHumanActor(event) === undefined) return true;
+  // 3) explicit bot user id, when configured.
+  const actorId = readLinearHumanActor(event)?.id;
+  if (botUserId && actorId && actorId === botUserId) return true;
+  return false;
 }
 
-/** Hidden marker stamped on agent-authored comments as a belt-and-braces loop guard. */
+/**
+ * Hidden marker stamped on EVERY outgoing agent comment (see the adapter's
+ * delivery path) so Linear's echo of our own comment always carries it and the
+ * loop guard drops it — a self-loop guard that works with NO bot-id config.
+ */
 export const LINEAR_TREX_MARKER = "<!-- trex:linear:agent -->";
 
 /** Renders an opened issue's `title\n\ndescription` from its raw data node. */

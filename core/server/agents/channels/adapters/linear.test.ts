@@ -168,6 +168,44 @@ Deno.test("LOOP GUARD: a comment authored by the bot itself → no send()", asyn
   assertEquals(sends.length, 0);
 });
 
+Deno.test("CONFIG-FREE LOOP GUARD: our marker-stamped echo → no send() with NO botUserId", async () => {
+  // Linear echoes the bot's own commentCreate back as a Comment.create webhook.
+  // With NO LINEAR_BOT_USER_ID set, the hidden marker we stamp on outgoing
+  // comments must still drop it.
+  const channel = linearChannel({ credentials: { webhookSecret: SECRET } });
+  const { args, sends, flush } = mockArgs();
+  const echoed = commentPayload({ body: "my earlier reply\n\n<!-- trex:linear:agent -->" });
+  const res = await channel.routes[0].handler(await linearRequest(echoed), args);
+  assertEquals(res.status, 200);
+  await flush();
+  assertEquals(sends.length, 0);
+});
+
+Deno.test("CONFIG-FREE LOOP GUARD: an app/agent-token-authored comment (botActor, no human) → no send()", async () => {
+  // A comment posted with an OAuth agent/app token is attributed via
+  // `data.botActor` with `data.user` null. Dropped with NO botUserId configured.
+  const channel = linearChannel({ credentials: { webhookSecret: SECRET } });
+  const { args, sends, flush } = mockArgs();
+  const payload = {
+    action: "create",
+    type: "Comment",
+    data: {
+      id: "comment-app",
+      body: "posted by our app token",
+      issueId: "issue-abc",
+      user: null,
+      userId: null,
+      botActor: { id: "app-agent-1", name: "trex", type: "app" },
+    },
+    webhookTimestamp: Date.now(),
+    organizationId: "org-1",
+  };
+  const res = await channel.routes[0].handler(await linearRequest(payload), args);
+  assertEquals(res.status, 200);
+  await flush();
+  assertEquals(sends.length, 0);
+});
+
 Deno.test("a non-create comment action (update) is ignored → no send()", async () => {
   const channel = linearChannel({ credentials: { webhookSecret: SECRET } });
   const { args, sends, flush } = mockArgs();
@@ -217,9 +255,8 @@ Deno.test("onCommand returning explicit { auth: null } sends with null auth", as
 
 // ---- delivery: message.completed → commentCreate (API-key auth) ------------
 
-Deno.test("message.completed → GraphQL commentCreate with the reply + Bearer API key", async () => {
-  const calls: Array<{ url: string; auth?: string; body?: unknown }> = [];
-  const fetchMock: typeof fetch = (input, init) => {
+function graphqlFetchMock(calls: Array<{ url: string; auth?: string; body?: unknown }>): typeof fetch {
+  return (input, init) => {
     calls.push({
       url: String(input),
       auth: new Headers(init?.headers).get("authorization") ?? undefined,
@@ -229,9 +266,14 @@ Deno.test("message.completed → GraphQL commentCreate with the reply + Bearer A
       new Response(JSON.stringify({ data: { commentCreate: { success: true, comment: { id: "c-new" } } } }), { status: 200 }),
     );
   };
+}
+
+Deno.test("message.completed → GraphQL commentCreate with the reply + RAW personal API key auth", async () => {
+  const calls: Array<{ url: string; auth?: string; body?: unknown }> = [];
   const channel = linearChannel({
+    // A personal API key (`lin_api_…`) must be sent RAW — `Bearer lin_api_…` 401s.
     credentials: { webhookSecret: SECRET, accessToken: "lin_api_secret" },
-    api: { fetch: fetchMock },
+    api: { fetch: graphqlFetchMock(calls) },
   });
   await channel.events!["message.completed"](
     { turnId: "t1", message: "the weather is sunny", finishReason: "stop" },
@@ -240,11 +282,28 @@ Deno.test("message.completed → GraphQL commentCreate with the reply + Bearer A
 
   assertEquals(calls.length, 1);
   assertStringIncludes(calls[0].url, "api.linear.app/graphql");
-  assertEquals(calls[0].auth, "Bearer lin_api_secret");
+  assertEquals(calls[0].auth, "lin_api_secret"); // RAW — no Bearer scheme.
   const gql = calls[0].body as { query: string; variables: { input: { issueId: string; body: string } } };
   assertStringIncludes(gql.query, "commentCreate");
   assertEquals(gql.variables.input.issueId, "issue-abc");
-  assertEquals(gql.variables.input.body, "the weather is sunny");
+  assertStringIncludes(gql.variables.input.body, "the weather is sunny");
+  // The outgoing comment carries the hidden loop-guard marker.
+  assertStringIncludes(gql.variables.input.body, "<!-- trex:linear:agent -->");
+});
+
+Deno.test("message.completed → an OAuth agent access token keeps the Bearer scheme", async () => {
+  const calls: Array<{ url: string; auth?: string; body?: unknown }> = [];
+  const channel = linearChannel({
+    // A non-`lin_api_` token is an OAuth agent access token → `Bearer <token>`.
+    credentials: { webhookSecret: SECRET, accessToken: "oauth_agent_token_xyz" },
+    api: { fetch: graphqlFetchMock(calls) },
+  });
+  await channel.events!["message.completed"](
+    { turnId: "t1", message: "hi", finishReason: "stop" },
+    { state: { issueId: "issue-abc" } },
+  );
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].auth, "Bearer oauth_agent_token_xyz");
 });
 
 Deno.test("message.completed splits a >64000-char reply into multiple commentCreate calls", async () => {

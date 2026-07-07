@@ -44,6 +44,7 @@ import { type LinearWebhookVerifier, verifyLinearInbound } from "../vendor/linea
 import {
   formatLinearContextBlock,
   isIgnoredLinearEvent,
+  LINEAR_TREX_MARKER,
   type LinearInboundEvent,
   type LinearIssueRef,
   linearContinuationToken,
@@ -173,9 +174,13 @@ export function linearChannel(opts: LinearChannelOptions = {}): ChannelDef {
     ((channelCtx as { state?: LinearDeliveryState } | undefined)?.state ?? {}) as LinearDeliveryState;
 
   // Posts one comment chunk back to the issue thread via GraphQL (best-effort).
+  // Every outgoing comment carries the hidden LINEAR_TREX_MARKER so Linear's echo
+  // of our own comment (a `Comment.create` webhook) is dropped by the loop guard
+  // even with NO bot-id configured — the config-free self-loop protection.
   async function postComment(state: LinearDeliveryState, body: string) {
     if (!state.issueId) return;
-    await createLinearComment({ api: opts.api, body, credentials: opts.credentials, issueId: state.issueId });
+    const stamped = `${body}\n\n${LINEAR_TREX_MARKER}`;
+    await createLinearComment({ api: opts.api, body: stamped, credentials: opts.credentials, issueId: state.issueId });
   }
 
   const builtinEvents: ChannelEventHandlers = {
@@ -238,8 +243,10 @@ export function linearChannel(opts: LinearChannelOptions = {}): ChannelDef {
     const candidate = toCandidate(event);
     if (candidate === null) return;
 
-    // LOOP GUARD — never start a turn for the bot's own content.
-    if (isIgnoredLinearEvent(candidate.body, candidate.actor?.id, botUserId())) return;
+    // LOOP GUARD — never start a turn for the bot's own content. Config-free:
+    // drops our own marker-stamped comments AND app/agent-token-authored events
+    // (data.botActor, no human) even when botUserId is unset.
+    if (isIgnoredLinearEvent(event, candidate.body, botUserId())) return;
 
     const continuationToken = linearContinuationToken(candidate.issueId);
     const isComment = event.type === "Comment";
@@ -290,15 +297,16 @@ export function linearChannel(opts: LinearChannelOptions = {}): ChannelDef {
     routes: [
       POST(route, async (req, args) => {
         // 1) SIGNATURE + TIMESTAMP FIRST — 401 before any parse or send().
-        const body = await verifyLinearInbound(req, {
+        const verified = await verifyLinearInbound(req, {
           maxSkewMs: opts.maxSkewMs,
           webhookSecret: opts.credentials?.webhookSecret,
           webhookVerifier: opts.webhookVerifier,
         });
-        if (body === null) return new Response("unauthorized", { status: 401 });
+        if (verified === null) return new Response("unauthorized", { status: 401 });
 
-        // 2) parse the delivery. Unsupported / malformed → 200 ack.
-        const event = parseLinearWebhookEvent({ body, headers: req.headers });
+        // 2) parse the delivery (reusing the payload verify already parsed).
+        //    Unsupported / malformed → 200 ack.
+        const event = parseLinearWebhookEvent({ body: verified.body, headers: req.headers, payload: verified.payload });
         if (event === null) return ack();
 
         // 3) dispatch the turn ASYNC (waitUntil) and return an immediate ack —

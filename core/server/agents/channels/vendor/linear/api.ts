@@ -13,13 +13,13 @@
 // `agentSessionCreateOn*`, `agentSessionUpdate`, `listAgentSessionActivities`)
 // are DROPPED (YAGNI — a different integration model).
 //
-// AUTH-HEADER NOTE (flagged): the vendored transport sends `Authorization:
-// Bearer <token>`, which is correct for a Linear OAuth **agent access token**.
-// A personal **API key** (`lin_api_…`, the brief's `LINEAR_API_KEY`) is
-// technically sent RAW (no `Bearer`) per Linear's docs. This is preserved from
-// eve verbatim; an integration using a personal key should pass an OAuth token
-// or a `credentials.accessToken` provider that omits the scheme. See
-// vendor/VENDOR.md.
+// AUTH-HEADER (trex fix, diverges from eve): Linear uses TWO Authorization
+// schemes. A personal **API key** (`lin_api_…`, the brief's `LINEAR_API_KEY`)
+// must be sent RAW (`Authorization: lin_api_…`) — `Bearer lin_api_…` 401s. An
+// **OAuth agent access token** uses `Authorization: Bearer <token>`. eve only
+// ever handles the OAuth token so it hardcodes `Bearer`; `linearAuthorization`
+// here picks the scheme by the `lin_api_` prefix so both credential kinds work.
+// See vendor/VENDOR.md.
 
 import { isObject, parseJsonObject } from "./shared.ts";
 import { type LinearApiOptions, type LinearCredential, resolveLinearAccessToken } from "./auth.ts";
@@ -58,7 +58,7 @@ export async function callLinearGraphQL(input: {
   const res = await doFetch(input.api?.apiBaseUrl ?? "https://api.linear.app/graphql", {
     body: JSON.stringify({ query: input.query, variables: input.variables ?? {} }),
     headers: {
-      authorization: `Bearer ${token}`,
+      authorization: linearAuthorization(token),
       "content-type": "application/json; charset=utf-8",
     },
     method: "POST",
@@ -107,6 +107,15 @@ export async function createLinearComment(input: {
     id: typeof comment.id === "string" ? comment.id : "",
     success: result.success === true,
   };
+}
+
+/**
+ * Builds the Linear `Authorization` header value. Personal API keys (`lin_api_…`)
+ * are sent RAW; OAuth agent access tokens use the `Bearer` scheme. Sending a
+ * personal key as `Bearer lin_api_…` 401s, so the prefix picks the scheme.
+ */
+export function linearAuthorization(token: string): string {
+  return token.startsWith("lin_api_") ? token : `Bearer ${token}`;
 }
 
 async function parseResponseBody(res: Response): Promise<unknown> {

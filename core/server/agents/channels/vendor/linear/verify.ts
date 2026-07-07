@@ -13,8 +13,19 @@
 // returns null instead of throwing so a route can turn it into a 401 BEFORE any
 // session work. See vendor/VENDOR.md.
 
-import { bytesToHex, isObject, timingSafeEqual } from "./shared.ts";
+import { bytesToHex, type JsonObject, parseJsonObject, timingSafeEqual } from "./shared.ts";
 import { type LinearCredential, resolveLinearWebhookSecret } from "./auth.ts";
+
+/**
+ * A verified inbound webhook: the RAW body (the exact bytes the signature covers)
+ * plus, on the signature path, the already-parsed `payload` so the route need not
+ * JSON.parse the body a second time. The verifier path leaves `payload` undefined
+ * (the possibly-rewritten body is parsed downstream).
+ */
+export interface VerifiedLinearWebhook {
+  readonly body: string;
+  readonly payload?: JsonObject;
+}
 
 /**
  * Caller-supplied inbound verifier. Replaces the signature check when an
@@ -44,19 +55,22 @@ export async function signLinearWebhookBody(body: string, secret: string): Promi
   return bytesToHex(new Uint8Array(sig));
 }
 
-/**
- * Enforces eve's replay window: the payload's `webhookTimestamp` must be a
- * finite number within `maxSkewMs` of now. Throws on a missing/stale timestamp
- * or a non-JSON body.
- */
-function verifyWebhookTimestamp(body: string, maxSkewMs: number): void {
-  let parsed: unknown;
+/** Parses the raw body to a JSON object, throwing eve's "not valid JSON" error. */
+function parsePayload(body: string): JsonObject {
   try {
-    parsed = JSON.parse(body);
+    return parseJsonObject(JSON.parse(body));
   } catch {
     throw new Error("linearChannel: inbound request body is not valid JSON.");
   }
-  const ts = isObject(parsed) ? parsed.webhookTimestamp : undefined;
+}
+
+/**
+ * Enforces eve's replay window on an ALREADY-PARSED payload: its
+ * `webhookTimestamp` must be a finite number within `maxSkewMs` of now. Throws on
+ * a missing/stale timestamp.
+ */
+function verifyWebhookTimestamp(payload: JsonObject, maxSkewMs: number): void {
+  const ts = payload.webhookTimestamp;
   if (typeof ts !== "number" || !Number.isFinite(ts)) {
     throw new Error("linearChannel: inbound request missing webhookTimestamp.");
   }
@@ -66,19 +80,20 @@ function verifyWebhookTimestamp(body: string, maxSkewMs: number): void {
 }
 
 /**
- * Reads + verifies an inbound Linear webhook, returning the RAW body on success.
- * Throws when the signature header is missing, no secret is configured, the
- * computed HMAC does not match, or the `webhookTimestamp` is missing/stale. The
- * body is read ONCE and the signature is over those exact bytes (not a
- * re-serialization), matching Linear + eve.
+ * Reads + verifies an inbound Linear webhook, returning the RAW body (and, on the
+ * signature path, the parsed payload) on success. Throws when the signature
+ * header is missing, no secret is configured, the computed HMAC does not match,
+ * or the `webhookTimestamp` is missing/stale. The body is read ONCE and the
+ * signature is over those exact bytes (not a re-serialization), matching Linear +
+ * eve; the JSON is parsed ONCE and threaded out via `payload`.
  */
-export async function readLinearWebhook(request: Request, options: LinearVerifyOptions): Promise<string> {
+export async function readLinearWebhook(request: Request, options: LinearVerifyOptions): Promise<VerifiedLinearWebhook> {
   const body = await request.text();
 
   if (options.webhookVerifier !== undefined) {
     const result = await options.webhookVerifier(request, body);
     if (!result) throw new Error("linearChannel: inbound webhook verifier rejected the request.");
-    return typeof result === "string" ? result : body;
+    return { body: typeof result === "string" ? result : body };
   }
 
   const provided = request.headers.get("linear-signature") ?? "";
@@ -87,18 +102,22 @@ export async function readLinearWebhook(request: Request, options: LinearVerifyO
   if (!timingSafeEqual(await signLinearWebhookBody(body, secret), provided)) {
     throw new Error("linearChannel: inbound request signature mismatch.");
   }
-  verifyWebhookTimestamp(body, options.maxSkewMs ?? 60_000);
-  return body;
+  const payload = parsePayload(body);
+  verifyWebhookTimestamp(payload, options.maxSkewMs ?? 60_000);
+  return { body, payload };
 }
 
 /**
- * Verifies an inbound Linear request, returning the RAW body on success or
- * `null` on ANY failure (missing/invalid signature, missing secret, stale
- * timestamp) so a route can turn the null into a 401 BEFORE any session work —
- * this signature+timestamp check is the only thing gating the unauthenticated
- * webhook.
+ * Verifies an inbound Linear request, returning the verified webhook (raw body +
+ * parsed payload) on success or `null` on ANY failure (missing/invalid signature,
+ * missing secret, stale timestamp) so a route can turn the null into a 401 BEFORE
+ * any session work — this signature+timestamp check is the only thing gating the
+ * unauthenticated webhook.
  */
-export async function verifyLinearInbound(request: Request, options: LinearVerifyOptions): Promise<string | null> {
+export async function verifyLinearInbound(
+  request: Request,
+  options: LinearVerifyOptions,
+): Promise<VerifiedLinearWebhook | null> {
   try {
     return await readLinearWebhook(request, options);
   } catch (error) {
