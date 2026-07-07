@@ -246,3 +246,39 @@ model (like the GitHub adapter), and honestly labelled Reimplemented.
 - `constants.js` — eve's default route; the factory defaults its own route to
   `/` (the channel root), like the prior adapters.
 - `index.js` — barrel re-export.
+
+## teams/ — copied files
+
+Source dir: `dist/src/public/channels/teams/`.
+
+Teams is the HIGHEST-effort adapter: its inbound auth is an **Azure Bot
+Framework JWT** validated against a remote JWKS, not a body HMAC. eve validates
+that JWT with its bundled **jose** (`#compiled/jose` `importJWK` + `jwtVerify`)
+plus `#internal/logging` — both eve runtime primitives absent in the Deno worker
+— so the WHOLE validator is REIMPLEMENTED on **WebCrypto** (the security-critical
+piece). Everything else splits cleanly and is genuinely VENDORED: the Activity
+parsing, the client-credentials delivery token + reply, the Adaptive-Card HITL,
+the limits, and `defaultTeamsAuth`. Only the wiring into `defineChannel`
+(`../adapters/teams.ts`) is trex glue.
+
+| vendored file | eve source | edits |
+|---|---|---|
+| `shared.ts` | `dist/src/shared/guards.js` (isObject, isNonEmptyString) + `dist/src/shared/json.js` (parseJsonObject), plus TYPE shapes from `runtime/input/types.d.ts` (→ `InputOption`/`InputRequest`/`InputResponse`) + `channel/types.d.ts` (→ `TeamsAuthContext`). | Consolidated so the vendored Teams files import only siblings — no eve import survives. `getEnv` wraps `Deno.env`; `base64UrlToBytes`/`base64UrlToString` replace jose/`Buffer` for JWT-segment + JWK `n`/`e` decoding. |
+| `verify.ts` | `verify.js` | **Reimplemented (security-critical).** eve validates the Bot Framework JWT with `#compiled/jose` (`importJWK`+`jwtVerify`) and `#internal/logging` (runtime-coupled), so the ENTIRE validator is redone on **WebCrypto** (`crypto.subtle.importKey("jwk", …)` + `verify`, RSASSA-PKCS1-v1_5 SHA-256). The SECURITY SEMANTICS are eve's / the Bot Framework's: (1) `Authorization: Bearer <jwt>` (else reject); (2) `alg` MUST be `RS256` — `none`/`HS*`/any other is REJECTED before the signature step (an `alg:none` accept would be a total auth bypass); (3) RS256 signature over `header.payload` verified against the JWK selected by `kid` (or `x5t`) from the Bot Framework **JWKS** — fetched from the OpenID metadata's `jwks_uri`, CACHED (24h TTL), and REFRESHED ONCE on an unknown `kid`; (4) `iss === "https://api.botframework.com"`, `aud === MICROSOFT_APP_ID`, `exp`/`nbf` within a 300s skew (eve's `clockTolerance`). FAILS CLOSED — missing app id / unfetchable JWKS / unknown kid after refresh / any claim mismatch → `verifyTeamsInbound` returns `null` (never throws) so the route 401s BEFORE any session work. The JWKS fetch is INJECTABLE (`opts.jwks`: a static key set or a `({forceRefresh}) => keys` resolver) so tests run the full validator against an ephemeral RSA keypair with no network. Adds a `webhookVerifier` seam. NOTE: like eve/jose, the `serviceUrl` claim is NOT cross-checked against the Activity's serviceUrl. The minimal `importKey` JWK strips `alg`/`use`/`key_ops` (algorithm pinned by us, not the key) so a real Bot Framework key imports cleanly. |
+| `api.ts` | `api.js` | **Vendored**, de-minified. eve's `api.js` is PURE (imports only `#shared/*`, consolidated). The DELIVERY-TOKEN flow is eve's, unchanged: a Bot Framework **client-credentials** token (POST `login.microsoftonline.com/{tenant}/oauth2/v2.0/token`, `client_id`/`client_secret`/`scope=https://api.botframework.com/.default`/`grant_type=client_credentials`), CACHED until 60s before expiry, used as `Bearer` on the reply. So are `callTeamsConnectorApi`, `sendTeamsActivity`, `replyToTeamsActivity` (`POST ${serviceUrl}/v3/conversations/{id}/activities[/{activityId}]`), `splitTeamsMessageText` (~80 KB cap, blank-line→newline→space boundary), and the credential resolvers. `process.env.*` → `getEnv`. Modified (YAGNI): eve's `updateTeamsActivity`/`triggerTeamsTypingIndicator`/`normalizeTeamsPostInput`/`normalizeAccessTokenResult` (edit/typing niceties) DROPPED; `teamsContinuationToken` narrowed to the raw `conversation.id` (the brief's session key) instead of eve's `tenant:conversation:replyTo` triple. |
+| `inbound.ts` | `inbound.js` | **Vendored** with ONE divergence, de-minified. eve's `parseTeamsActivity` is otherwise PURE, so the Activity-shape parsing (`parseActivityBase`/`parseConversation`/`parseChannelAccount`/`parseMentions`/`stripBotMention`/`inferScope`, the `<teams_context>` block) is eve's, unchanged. DIVERGENCE: eve normalizes HTML message text to Markdown via `#compiled/turndown` (an eve-bundled engine). Rather than re-vendor a whole HTML→Markdown engine (YAGNI — Teams bot text is predominantly plaintext + `<at>` mentions), `normalizeTeamsText` does a LIGHTWEIGHT strip (unwrap `<at>…</at>`→`@…`, drop remaining tags, decode eve's `HTML_ENTITY_MAP`). eve's attachment/upload-policy collection is out of v1 scope and NOT carried. Only `message`/`invoke` activities are parsed; others (`conversationUpdate`, …) return `null` (ignored gracefully). |
+| `hitl.ts` | `hitl.js` | **Vendored**, de-minified. PURE (imports `#shared/*` + the sibling `limits.js`, consolidated). The Adaptive-Card shapes are eve's, unchanged: `input.requested` → an `AdaptiveCard` (v1.5) with a prompt `TextBlock` and either `Action.Submit` buttons (confirmation) or `Input.ChoiceSet`/`Input.Text`, each submit carrying an `eve_input: { requestId, optionId }` payload; `deriveTeamsInputResponses`/`isTeamsInputResponseActivity` read that payload back off an inbound message/invoke Activity's `value` (the card round-trip); `teamsInvokeResponse` acks an `invoke`. Modified (YAGNI): eve's `renderAnsweredInputRequestMessage` (post-answer card update) DROPPED. |
+| `limits.ts` | `limits.js` | **Vendored**, de-minified. PURE — no imports. The Adaptive-Card size limits (text 4000, action title 80, choice title 100, ≤6 actions) are eve's, unchanged. |
+| `defaults.ts` | `defaults.js` | **Vendored** (partial), de-minified. ONLY the pure `defaultTeamsAuth` is carried (`teams:{tenant}:{userId}` principal, `teams:{tenant}` issuer, `teams-activity` authenticator, `bot` role → `service`) — its `#channel/types` return → the sibling `TeamsAuthContext`, its input narrowed to a `TeamsAuthInput`. eve's `defaultOnMessage`/`defaultEvents`/`teamsMentionUser` are eve-runtime code (`ctx.thread`, `startTyping`, `#internal/logging`) and NOT carried — the trex factory supplies its own `events` + dispatch against `ChannelRouteArgs`. |
+
+### Not vendored (eve runtime — the trex factory replaces it)
+
+- `teamsChannel.js` — eve's runtime-coupled factory (stateful `ctx.teams`/`thread`
+  handle, `receive`/`context`/`metadata` surface, typing indicators,
+  `#internal/logging`); `../adapters/teams.ts` is the replacement. Its
+  verify-first → parse → `waitUntil`-dispatch → async-connector-reply shape is
+  what the trex factory reproduces. The factory defaults its route to `/` (the
+  channel root), not eve's `/eve/v1/teams`.
+- `attachments.js` — the file-upload policy engine (`collectTeamsFileParts`,
+  `#public/channels/upload-policy`, Node `Buffer` fetch) — out of v1 scope.
+- `index.js` — barrel re-export.
