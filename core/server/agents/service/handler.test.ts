@@ -1185,3 +1185,70 @@ Deno.test("GET /stream releases the subscriber when replay (listEvents) fails", 
   // No leaked subscriber: the registry is back to its pre-request count.
   assertEquals(subscriberCount(sid), before);
 });
+
+// ── OAuth broker routes (task-7) ─────────────────────────────────────────────
+import { signState } from "../connections/oauth/state.ts";
+import type { OAuthConnector, OAuthStore, OAuthToken } from "../connections/oauth/store.ts";
+
+const OAUTH_SECRET = "handler-oauth-secret";
+
+function oauthHandler() {
+  const puts: Array<{ pt: string; pid: string; c: string; token: OAuthToken }> = [];
+  const connectors: Record<string, OAuthConnector> = {
+    github: {
+      authorizationUrl: "https://prov.example/authorize",
+      tokenUrl: "https://prov.example/token",
+      clientId: "cid",
+      clientSecret: "csecret",
+      scopes: "repo",
+      principalScope: "user",
+    },
+  };
+  const store: OAuthStore = {
+    getToken: () => Promise.resolve(null),
+    putToken: (pt, pid, c, token) => {
+      puts.push({ pt, pid, c, token });
+      return Promise.resolve();
+    },
+    getConnector: (id) => Promise.resolve(connectors[id] ?? null),
+  } as OAuthStore;
+  return { store, puts, connectors };
+}
+
+Deno.test("oauth route: 404 when no broker is configured", async () => {
+  const { handler } = await makeHandler();
+  const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/start?state=x`));
+  assertEquals(res.status, 404);
+});
+
+Deno.test("oauth start route is mounted and 302s on a valid signed state", async () => {
+  const agent = await loadAgent(TOY);
+  const db = inMemoryDb();
+  const { store } = oauthHandler();
+  const handler = createHandler({
+    agent, store: createStore(db.query as never),
+    plugin: "toy-agent", agentName: "toy", basePath: "/plugins/trex/toy",
+    oauth: { store, secret: OAUTH_SECRET, startUrlBase: "/plugins/trex/toy/eve/v1/oauth", basePath: "/plugins/trex/toy" },
+  });
+  const state = await signState(
+    { session: "s", principalType: "user", principalId: "u", connector: "github", nonce: "n", exp: Date.now() + 600_000 },
+    OAUTH_SECRET,
+  );
+  const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/start?state=${encodeURIComponent(state)}`));
+  assertEquals(res.status, 302);
+  assert((res.headers.get("location") ?? "").startsWith("https://prov.example/authorize"));
+});
+
+Deno.test("oauth callback route rejects a tampered state with 400 (no token write)", async () => {
+  const agent = await loadAgent(TOY);
+  const db = inMemoryDb();
+  const { store, puts } = oauthHandler();
+  const handler = createHandler({
+    agent, store: createStore(db.query as never),
+    plugin: "toy-agent", agentName: "toy", basePath: "/plugins/trex/toy",
+    oauth: { store, secret: OAUTH_SECRET, startUrlBase: "/plugins/trex/toy/eve/v1/oauth", basePath: "/plugins/trex/toy" },
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/callback?code=X&state=forged.sig`));
+  assertEquals(res.status, 400);
+  assertEquals(puts.length, 0);
+});

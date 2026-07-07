@@ -12,8 +12,18 @@ import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
 import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
+import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
+import type { OAuthProviderDeps } from "../connections/provider.ts";
 
 type EnvFn = (k: string) => string | undefined;
+
+// OAuth broker wiring (Task 7). index.ts builds this (a DEK-backed OAuthStore +
+// the HMAC state secret) only when the worker has a root key; absent → oauth
+// connections are skipped and the /oauth routes 404. Combines OAuthProviderDeps
+// (threaded to the connection provider) with the routes' basePath.
+export interface OAuthBrokerDeps extends OAuthProviderDeps {
+  basePath: string;
+}
 
 interface Deps {
   agent: LoadedAgent;
@@ -36,6 +46,11 @@ interface Deps {
   channelStore?: ChannelStore;
   // Task 6 delivery-registration hook, threaded straight through to the layer.
   onSessionStarted?: (info: ChannelSessionStarted) => void;
+  // Task 7 OAuth broker. When set: the /eve/v1/oauth/<connector>/{start,callback}
+  // consent routes are mounted (auth-exempt at the proxy, gated by signed state)
+  // AND the connection provider gets the broker so kind:"oauth" connections
+  // resolve/park tokens. Unset → those routes 404 and oauth connections skip.
+  oauth?: OAuthBrokerDeps;
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -107,9 +122,21 @@ export function stepToEvent(row: { turn_id: string; kind: string; name: string |
 function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerToken: string | undefined, userId: string | undefined): HookCtx {
   return {
     sessionId, bearerToken, userId, metadata,
+    // OAuth broker principal (Task 7): a native session's end-user principal IS
+    // its x-user-id. A channel session (no x-user-id) leaves this undefined, so
+    // a user-scoped oauth connection fails closed (principal_required) until the
+    // channel principal is threaded here — see the report's follow-up note.
+    principal: userId ? { principalType: "user", principalId: userId } : undefined,
     env: deps.env ?? defaultEnv,
     sql: deps.sql ?? unconfiguredSql,
   };
+}
+
+// The connection-provider opts (Task 5/7) for a turn: the OAuth broker deps
+// when configured, so kind:"oauth" connections resolve/park tokens. Built fresh
+// per call; undefined when no broker is wired (oauth connections then skip).
+function connectionOptsFor(deps: Deps) {
+  return deps.oauth ? { oauth: deps.oauth } : undefined;
 }
 
 function startTurn(
@@ -146,6 +173,7 @@ function startTurn(
         store: deps.store, emit: (e) => publish(sessionId, e),
         model: deps.model, bearerToken, userId, hookCtx,
         plugin: deps.plugin, agentName: deps.agentName,
+        connectionOpts: connectionOptsFor(deps),
       });
       await deps.store.finishTurn(turn.id, "completed");
       // eve's client (t.send()/MessageResponse.result()) ends its per-turn
@@ -494,6 +522,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       const tools = await buildSdkTools({
         agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
         plugin: deps.plugin, agentName: deps.agentName,
+        connectionOpts: connectionOptsFor(deps),
       });
       // H3: switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has
@@ -535,6 +564,28 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         },
       });
       return createUIMessageStreamResponse({ stream: uiStream });
+    }
+
+    // OAuth consent routes (task-7): {basePath}/eve/v1/oauth/<connector>/{start,
+    // callback}. EXEMPT from proxy auth (channelAuthExemptPattern excludes only
+    // session|health|info|eve, so `oauth` falls through to the exemption) — a
+    // provider's browser redirect carries no trex JWT; the signed `state` is the
+    // sole authenticator (verified inside the handlers before any redirect or
+    // token write). Matched BEFORE the channel branch so an agent that happens to
+    // declare a channel named "oauth" can't shadow the broker. 404 when no broker
+    // is configured (deps.oauth unset).
+    const oauthM = path.match(/^\/eve\/v1\/oauth\/([^/]+)\/(start|callback)$/);
+    if (oauthM && req.method === "GET") {
+      if (!deps.oauth) return json({ error: "oauth not configured" }, 404);
+      const [, connector, kind] = oauthM;
+      const routeDeps = {
+        connector,
+        store: deps.oauth.store,
+        secret: deps.oauth.secret,
+        basePath,
+        fetch: deps.oauth.fetch,
+      };
+      return kind === "start" ? handleOAuthStart(req, routeDeps) : handleOAuthCallback(req, routeDeps);
     }
 
     // Channel branch (task-4): {basePath}/eve/v1/{channelId}{routePath}, where

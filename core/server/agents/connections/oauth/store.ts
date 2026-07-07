@@ -25,8 +25,12 @@ export type GetEnv = (name: string) => string | undefined;
 export interface OAuthToken {
   access: string;
   refresh: string | null;
-  expiresAt: Date;
-  scopes: string;
+  // Nullable to match the DDL (agents.oauth_tokens.expires_at / scopes are
+  // NULLable): app-scoped / non-expiring tokens carry no expiry, and some
+  // providers return no scope on refresh. A null `expiresAt` means "never
+  // near-expiry" to the broker (it never triggers a refresh on such a token).
+  expiresAt: Date | null;
+  scopes: string | null;
 }
 
 export interface OAuthConnector {

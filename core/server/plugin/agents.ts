@@ -32,6 +32,11 @@ const PASSTHROUGH_ENV = [
   "DATABASE_URL", "TREX_AGENTS_DEFAULT_MODEL",
   "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
   "GOOGLE_GENERATIVE_AI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION",
+  // OAuth broker (task-7): the worker needs the root key to unwrap the DEK
+  // (token encryption-at-rest) and derive the signed-state HMAC secret. Absent
+  // → the broker stays unwired and oauth connections are skipped (see
+  // service/index.ts) — every non-oauth agent still boots.
+  "TREX_ROOT_KEY",
 ];
 
 export async function buildAgentWorkerConfig(
@@ -162,6 +167,13 @@ export function isTrexScopedAgentsPlugin(name: string): boolean {
 // hole). A channel named like a reserved word (e.g. a `sessionx` or
 // `eventbridge` channel) is unaffected: the lookahead only excludes the exact
 // segments, boundaried by `/` or end.
+//
+// The OAuth consent routes (task-7) at `/eve/v1/oauth/<connector>/{start,
+// callback}` are DELIBERATELY NOT in the reserved set: they are auth-exempt on
+// purpose (a provider's browser redirect carries no trex JWT) and are gated by
+// the signed `state` verified inside the handlers (connections/oauth/routes.ts)
+// — exactly like a channel route is gated by its adapter's signature verify.
+// `oauth` must therefore stay OUT of the lookahead.
 export function channelAuthExemptPattern(basePath: string): RegExp {
   const esc = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info|eve)(?:/|$))[^/]+`);
