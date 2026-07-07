@@ -87,6 +87,21 @@ Deno.test("same authHash → single shared client", async () => {
   assertEquals(rec.connects, 1);
 });
 
+Deno.test("distinct url under the same (agentDir, name, authHash) → distinct clients (no stale-url reuse)", async () => {
+  _resetMcpCache();
+  const { fn, rec } = fakeConnect([{ name: "ping" }]);
+  // Same connection name + same resolved auth, but the url was edited: this is
+  // the devx per-user mcp_servers case (a row's url changed while its name +
+  // headers stayed the same). The url is part of the cache key, so the second
+  // realize must NOT reuse the first (old-endpoint) client.
+  await realizeMcp(mcpConn({ url: "https://old.example/sse" }), {}, "/agents/a", "h0", fn);
+  await realizeMcp(mcpConn({ url: "https://new.example/sse" }), {}, "/agents/a", "h0", fn);
+  assertEquals(rec.connects, 2);
+  // Identical url + name + auth → the shared cached client (unchanged behavior).
+  await realizeMcp(mcpConn({ url: "https://new.example/sse" }), {}, "/agents/a", "h0", fn);
+  assertEquals(rec.connects, 2);
+});
+
 Deno.test("hashResolvedAuth is deterministic + order-independent", async () => {
   const a = await hashResolvedAuth({ "X-A": "1", "X-B": "2" });
   const b = await hashResolvedAuth({ "X-B": "2", "X-A": "1" });
