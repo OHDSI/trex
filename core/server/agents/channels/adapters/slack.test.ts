@@ -36,8 +36,16 @@ interface SendCall {
   opts: { auth: ChannelAuth | null; continuationToken: string; state?: unknown; title?: string };
 }
 
-function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[] } {
+interface ResumeCall {
+  continuationToken: string;
+  input: { requestId?: string; decision?: string; inputResponses?: Array<{ requestId?: string; optionId?: string }> };
+}
+
+function mockArgs(
+  resumeResult: { ok: boolean; error?: string } = { ok: true },
+): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[] } {
   const sends: SendCall[] = [];
+  const resumes: ResumeCall[] = [];
   const args: ChannelRouteArgs = {
     send(message, opts) {
       sends.push({ message, opts });
@@ -45,11 +53,15 @@ function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[] } {
     },
     getSession: () => null,
     receive: () => Promise.resolve({ id: "session-1" }),
+    resume(continuationToken, input) {
+      resumes.push({ continuationToken, input });
+      return Promise.resolve(resumeResult);
+    },
     params: {},
     waitUntil: () => {},
     requestIp: null,
   };
-  return { args, sends };
+  return { args, sends, resumes };
 }
 
 const MESSAGE_EVENT = {
@@ -263,7 +275,7 @@ Deno.test("interaction callback derives input responses + calls opts.resume", as
       resumeCalls.push({ continuationToken: ctx.continuationToken, inputResponses: ctx.inputResponses });
     },
   });
-  const { args } = mockArgs();
+  const { args, resumes } = mockArgs();
   const res = await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
   assertEquals(res.status, 200);
 
@@ -273,22 +285,45 @@ Deno.test("interaction callback derives input responses + calls opts.resume", as
   assertEquals(responses.length, 1);
   assertEquals(responses[0].requestId, "req-42");
   assertEquals(responses[0].optionId, "approve");
+  // opts.resume wins → the layer primitive is NOT invoked.
+  assertEquals(resumes.length, 0);
 });
 
-Deno.test("default resume (no opts.resume) is a loud no-op: warns, does NOT POST", async () => {
-  // Any chat.update POST is fine (answered-card best-effort), but there must be
-  // no resume-route POST and the placeholder warning must fire.
+Deno.test("default resume (no opts.resume) routes the decoded decision through args.resume", async () => {
+  // chat.update (answered-card) is best-effort; mock it away.
   const fetchMock: typeof fetch = () => Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
-  try {
-    const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET, botToken: "xoxb-1" }, api: { fetch: fetchMock } });
-    const { args } = mockArgs();
-    const res = await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
-    assertEquals(res.status, 200);
-  } finally {
-    console.warn = origWarn;
-  }
-  assertEquals(warnings.some((w) => w.includes("no opts.resume provided")), true);
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET, botToken: "xoxb-1" }, api: { fetch: fetchMock } });
+  const { args, resumes } = mockArgs();
+  const res = await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
+  assertEquals(res.status, 200); // interactivity ACK preserved
+
+  assertEquals(resumes.length, 1);
+  // Resume addresses the parked session by the SAME channel:thread_ts token.
+  assertEquals(resumes[0].continuationToken, "C555:1700000000.000001");
+  // The vendored decode is forwarded verbatim as inputResponses.
+  assertEquals(resumes[0].input.inputResponses, [{ requestId: "req-42", optionId: "approve" }]);
+});
+
+// THE KEY correctness property: the resume token equals the token send() used
+// for the SAME Slack thread, so the layer's getSessionByToken finds the session.
+Deno.test("resume token equals the send token for the same thread", async () => {
+  const fetchMock: typeof fetch = () => Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET, botToken: "xoxb-1" }, api: { fetch: fetchMock } });
+  const { args, sends, resumes } = mockArgs();
+  // 1) inbound message opens/keys the session for this thread.
+  await channel.routes[0].handler(await signedRequest(JSON.stringify(MESSAGE_EVENT)), args);
+  // 2) a HITL button click in that SAME thread resumes it.
+  await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
+  assertEquals(sends.length, 1);
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, sends[0].opts.continuationToken);
+});
+
+Deno.test("interactivity ACK still 200 when args.resume reports {ok:false}", async () => {
+  const fetchMock: typeof fetch = () => Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET, botToken: "xoxb-1" }, api: { fetch: fetchMock } });
+  const { args, resumes } = mockArgs({ ok: false, error: "no session for token" });
+  const res = await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
+  assertEquals(res.status, 200);
+  assertEquals(resumes.length, 1); // attempted, soft-failed, never threw
 });

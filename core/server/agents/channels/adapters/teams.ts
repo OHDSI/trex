@@ -28,11 +28,12 @@
 //
 // HITL: Teams has rich Adaptive Cards, so `input.requested` → an Adaptive Card
 // with `Action.Submit` buttons (vendored `hitl`). The card round-trip (a submit
-// Activity carrying `eve_input` → derived responses) IS parsed inbound, but
-// applying it requires a token→session resume primitive the channel layer does
-// not have yet, so resume is an injectable seam (`opts.resume`); the DEFAULT
-// (`defaultTeamsResume`) is a LOUD NO-OP — it warns and drops rather than POSTing
-// to a resume route that would 404, identical posture to the prior adapters.
+// Activity carrying `eve_input` → derived responses) is parsed inbound, and the
+// continuation token is the SAME conversation id the inbound message used for
+// send(), so the channel layer's resume primitive (`args.resume`, Task 17)
+// resolves it back to that parked session and applies the decision. `opts.resume`
+// remains an injectable override; the DEFAULT (`defaultTeamsResume`) routes the
+// derived responses through `args.resume` (a miss is logged, never thrown).
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -131,16 +132,19 @@ export interface TeamsChannelOptions {
   resume?: (ctx: TeamsResumeContext) => void | Promise<void>;
 }
 
-// DEFAULT resume: a LOUD NO-OP. Identical posture to the prior adapters — the
-// channel layer has no token→session resume primitive, so any default action
-// would be a dead end. Warn and drop rather than pretend. `opts.resume` is the
-// injection seam an integration wires with its own pending-request store.
-export function defaultTeamsResume(_ctx: TeamsResumeContext): void {
-  console.warn(
-    "agents/teams: HITL card response received but no opts.resume provided — the channel layer has no " +
-      "token→session resume primitive yet, so this response cannot be applied to the parked request. " +
-      "Provide opts.resume to wire Teams Adaptive Card HITL end-to-end.",
-  );
+// DEFAULT resume: apply the derived card decision to the parked session via the
+// channel layer's resume primitive (Task 17). `ctx.continuationToken` is the SAME
+// conversation id the inbound message used for send(), so the layer resolves it
+// to that session. A miss returns `{ok:false}` (logged, never thrown); the Teams
+// ACK is issued by the route regardless. `opts.resume` is the injection seam an
+// integration can still override with its own pending-request store.
+export async function defaultTeamsResume(ctx: TeamsResumeContext): Promise<void> {
+  const result = await ctx.args.resume(ctx.continuationToken, {
+    inputResponses: ctx.responses.map((r) => ({ requestId: r.requestId, optionId: r.optionId })),
+  });
+  if (!result.ok) {
+    console.warn(`agents/teams: HITL resume did not apply the decision: ${result.error ?? "unknown error"}`);
+  }
 }
 
 export function teamsChannel(opts: TeamsChannelOptions = {}): ChannelDef {
@@ -220,6 +224,8 @@ export function teamsChannel(opts: TeamsChannelOptions = {}): ChannelDef {
 
   async function runResume(ctx: TeamsResumeContext) {
     try {
+      // An integrator override fully owns applying the decision; otherwise the
+      // default routes the derived responses through the layer's resume primitive.
       await (opts.resume ?? defaultTeamsResume)(ctx);
     } catch (e) {
       console.error("teams: HITL resume failed:", e);

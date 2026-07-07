@@ -22,13 +22,12 @@
 //
 // HITL: `input.requested` → an inline keyboard (approve/deny buttons, vendored
 // render); the `callback_query` → derive InputResponses (vendored decode) →
-// resume the parked session. LIMITATION (deferred, identical to
-// discord.ts/slack.ts): trex's channel layer exposes NO token→session resume
-// primitive to a route — `send()` always starts a fresh turn and cannot resolve
-// a parked session's UUID from a continuation token. So resume is an injectable
-// seam (`opts.resume`); without it the default is a LOUD NO-OP (warns + drops
-// the approval — it does NOT POST to a route that would 404). See
-// task-10-report.md.
+// resume the parked session. The continuation token is the SAME raw `${chatId}`
+// the inbound message used for send(), so the channel layer's resume primitive
+// (`args.resume`, Task 17) resolves it back to that parked session and applies
+// the decision. `opts.resume` remains an injectable override; without it the
+// default routes the decoded decision through `args.resume` (a miss is logged,
+// never thrown). See task-10-report.md / task-18-report.md.
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -253,21 +252,25 @@ export function telegramChannel(opts: TelegramChannelOptions = {}): ChannelDef {
 
   async function runResume(ctx: TelegramResumeContext) {
     try {
-      await (opts.resume ?? defaultResume)(ctx);
+      if (opts.resume) {
+        // An integrator override fully owns applying the decision.
+        await opts.resume(ctx);
+        return;
+      }
+      // DEFAULT: apply the decoded decision to the parked session via the channel
+      // layer's resume primitive. `ctx.continuationToken` is the SAME raw
+      // `${chatId}` the inbound message used for send(), so the layer resolves it
+      // to that session. A miss returns `{ok:false}` (logged, never thrown); the
+      // answerCallbackQuery ACK is issued by the caller regardless.
+      const result = await ctx.args.resume(ctx.continuationToken, {
+        inputResponses: ctx.inputResponses.map((r) => ({ requestId: r.requestId, optionId: r.optionId })),
+      });
+      if (!result.ok) {
+        console.warn(`agents/telegram: HITL resume did not apply the decision: ${result.error ?? "unknown error"}`);
+      }
     } catch (e) {
       console.error("telegram: HITL resume failed:", e);
     }
-  }
-
-  // DEFAULT resume: a LOUD NO-OP. Identical posture to discord.ts/slack.ts — the
-  // channel layer has no token→session resume primitive, so any default POST
-  // would 404. Warn and drop rather than pretend. `opts.resume` is the seam.
-  function defaultResume(_ctx: TelegramResumeContext): void {
-    console.warn(
-      "agents/telegram: HITL resume received but no opts.resume provided — the channel layer has no " +
-        "token→session resume primitive yet, so this approval cannot be applied. Provide opts.resume " +
-        "to wire HITL end-to-end.",
-    );
   }
 
   return defineChannel({

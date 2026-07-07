@@ -20,12 +20,12 @@
 //
 // HITL: `input.requested` → Block Kit buttons/select (vendored render); the
 // interactivity callback → derive InputResponses (vendored) → resume the parked
-// session. LIMITATION (deferred, identical to discord.ts): trex's channel layer
-// exposes NO token→session resume primitive to a route — `send()` always starts
-// a fresh turn and cannot resolve a parked session's UUID from a continuation
-// token. So resume is an injectable seam (`opts.resume`); without it the default
-// is a LOUD NO-OP (warns + drops the approval — it does NOT POST to a route that
-// would 404). See task-9-report.md / task-8-report.md.
+// session. The continuation token is the SAME `${channel}:${thread_ts}` the
+// inbound message used for send(), so the channel layer's resume primitive
+// (`args.resume`, Task 17) resolves it back to that parked session and applies
+// the decision. `opts.resume` remains an injectable override; without it the
+// default routes the decoded decision through `args.resume` (a miss is logged,
+// never thrown). See task-9-report.md / task-18-report.md.
 
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
@@ -312,21 +312,25 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
 
   async function runResume(ctx: SlackResumeContext) {
     try {
-      await (opts.resume ?? defaultResume)(ctx);
+      if (opts.resume) {
+        // An integrator override fully owns applying the decision.
+        await opts.resume(ctx);
+        return;
+      }
+      // DEFAULT: apply the decoded decision to the parked session via the channel
+      // layer's resume primitive. `ctx.continuationToken` is the SAME
+      // `${channel}:${thread_ts}` the inbound message used for send(), so the layer
+      // resolves it to that session. A miss returns `{ok:false}` (logged, never
+      // thrown); the interactivity ACK is returned by the caller regardless.
+      const result = await ctx.args.resume(ctx.continuationToken, {
+        inputResponses: ctx.inputResponses.map((r) => ({ requestId: r.requestId, optionId: r.optionId })),
+      });
+      if (!result.ok) {
+        console.warn(`agents/slack: HITL resume did not apply the decision: ${result.error ?? "unknown error"}`);
+      }
     } catch (e) {
       console.error("slack: HITL resume failed:", e);
     }
-  }
-
-  // DEFAULT resume: a LOUD NO-OP. Identical posture to discord.ts — the channel
-  // layer has no token→session resume primitive, so any default POST would 404.
-  // Warn and drop rather than pretend. `opts.resume` is the injection seam.
-  function defaultResume(_ctx: SlackResumeContext): void {
-    console.warn(
-      "agents/slack: HITL resume received but no opts.resume provided — the channel layer has no " +
-        "token→session resume primitive yet, so this approval cannot be applied. Provide opts.resume " +
-        "to wire HITL end-to-end.",
-    );
   }
 
   return defineChannel({

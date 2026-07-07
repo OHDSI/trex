@@ -91,8 +91,16 @@ interface SendCall {
   opts: { auth: ChannelAuth | null; continuationToken: string; state?: unknown; title?: string };
 }
 
-function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[]; flush: () => Promise<void> } {
+interface ResumeCall {
+  continuationToken: string;
+  input: { requestId?: string; decision?: string; inputResponses?: Array<{ requestId?: string; optionId?: string }> };
+}
+
+function mockArgs(
+  resumeResult: { ok: boolean; error?: string } = { ok: true },
+): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[]; flush: () => Promise<void> } {
   const sends: SendCall[] = [];
+  const resumes: ResumeCall[] = [];
   const pending: Promise<unknown>[] = [];
   const args: ChannelRouteArgs = {
     send(message, opts) {
@@ -101,13 +109,17 @@ function mockArgs(): { args: ChannelRouteArgs; sends: SendCall[]; flush: () => P
     },
     getSession: () => null,
     receive: () => Promise.resolve({ id: "session-1" }),
+    resume(continuationToken, input) {
+      resumes.push({ continuationToken, input });
+      return Promise.resolve(resumeResult);
+    },
     params: {},
     waitUntil: (p) => {
       pending.push(p);
     },
     requestIp: null,
   };
-  return { args, sends, flush: async () => void (await Promise.allSettled(pending)) };
+  return { args, sends, resumes, flush: async () => void (await Promise.allSettled(pending)) };
 }
 
 // ---- JWT gate: valid passes ------------------------------------------------
@@ -411,7 +423,7 @@ Deno.test("a card-submit Activity + opts.resume → resume called with derived r
       resumeCalls.push({ continuationToken: ctx.continuationToken, responses: ctx.responses });
     },
   });
-  const { args, sends, flush } = mockArgs();
+  const { args, sends, resumes, flush } = mockArgs();
   const submit = {
     type: "message",
     id: "activity-2",
@@ -429,30 +441,90 @@ Deno.test("a card-submit Activity + opts.resume → resume called with derived r
   assertEquals(resumeCalls.length, 1);
   assertEquals(resumeCalls[0].continuationToken, "conv-1");
   assertEquals(resumeCalls[0].responses[0], { requestId, optionId: "approve" });
+  // opts.resume wins → the layer primitive is NOT invoked.
+  assertEquals(resumes.length, 0);
 });
 
-Deno.test("default resume is a loud no-op: warns, takes no network action", () => {
-  const warnings: string[] = [];
-  const origWarn = console.warn;
-  console.warn = (...a: unknown[]) => warnings.push(a.map(String).join(" "));
-  const origFetch = globalThis.fetch;
-  let fetched = 0;
-  globalThis.fetch = () => {
-    fetched++;
-    return Promise.resolve(new Response("{}"));
+function cardSubmit(requestId: string, optionId: string): unknown {
+  return {
+    type: "message",
+    id: "activity-2",
+    serviceUrl: SERVICE_URL,
+    conversation: { id: "conv-1", conversationType: "personal" },
+    from: { id: "user-1", name: "Alice" },
+    recipient: { id: "bot-1" },
+    text: "",
+    value: { eve_input: { requestId, optionId } },
   };
-  try {
-    defaultTeamsResume({
-      req: new Request(ROUTE_URL),
-      args: mockArgs().args,
-      continuationToken: "conv-1",
-      conversationId: "conv-1",
-      responses: [{ requestId: "r1", optionId: "approve" }],
-    });
-  } finally {
-    console.warn = origWarn;
-    globalThis.fetch = origFetch;
-  }
-  assertEquals(warnings.some((w) => w.includes("no opts.resume provided")), true);
-  assertEquals(fetched, 0);
+}
+
+Deno.test("default resume (no opts.resume) routes the derived responses through args.resume", async () => {
+  const key = await makeKey(KID);
+  const requestId = crypto.randomUUID();
+  const channel = teamsChannel({ appId: APP_ID, jwks: [key.jwk] });
+  const { args, sends, resumes, flush } = mockArgs();
+  const res = await channel.routes[0].handler(
+    teamsRequest(cardSubmit(requestId, "approve"), { token: await mintJwt(key.privateKey) }),
+    args,
+  );
+  assertEquals(res.status, 200); // Teams ACK preserved
+  await flush();
+
+  assertEquals(sends.length, 0);
+  assertEquals(resumes.length, 1);
+  // Resume addresses the parked session by the SAME conversation-id token.
+  assertEquals(resumes[0].continuationToken, "conv-1");
+  assertEquals(resumes[0].input.inputResponses, [{ requestId, optionId: "approve" }]);
+});
+
+// THE KEY correctness property: the resume token equals the token send() used
+// for the SAME Teams conversation, so the layer's getSessionByToken finds it.
+Deno.test("resume token equals the send token for the same conversation", async () => {
+  const key = await makeKey(KID);
+  const requestId = crypto.randomUUID();
+  const channel = teamsChannel({ appId: APP_ID, jwks: [key.jwk] });
+  const { args, sends, resumes, flush } = mockArgs();
+  // 1) inbound message opens/keys the session for conv-1.
+  await channel.routes[0].handler(
+    teamsRequest(messageActivity({ isBotMentioned: true }), { token: await mintJwt(key.privateKey) }),
+    args,
+  );
+  // 2) a card submit in that SAME conversation resumes it.
+  await channel.routes[0].handler(
+    teamsRequest(cardSubmit(requestId, "approve"), { token: await mintJwt(key.privateKey) }),
+    args,
+  );
+  await flush();
+  assertEquals(sends.length, 1);
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, sends[0].opts.continuationToken);
+});
+
+Deno.test("Teams ACK still 200 when args.resume reports {ok:false}", async () => {
+  const key = await makeKey(KID);
+  const channel = teamsChannel({ appId: APP_ID, jwks: [key.jwk] });
+  const { args, resumes, flush } = mockArgs({ ok: false, error: "no session for token" });
+  const res = await channel.routes[0].handler(
+    teamsRequest(cardSubmit(crypto.randomUUID(), "approve"), { token: await mintJwt(key.privateKey) }),
+    args,
+  );
+  assertEquals(res.status, 200);
+  await flush();
+  assertEquals(resumes.length, 1); // attempted, soft-failed, never threw
+});
+
+// Direct-call coverage of the exported default: it forwards to args.resume and
+// swallows a soft-fail (logs, never throws).
+Deno.test("defaultTeamsResume forwards derived responses to args.resume", async () => {
+  const { args, resumes } = mockArgs();
+  await defaultTeamsResume({
+    req: new Request(ROUTE_URL),
+    args,
+    continuationToken: "conv-1",
+    conversationId: "conv-1",
+    responses: [{ requestId: "r1", optionId: "approve" }],
+  });
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, "conv-1");
+  assertEquals(resumes[0].input.inputResponses, [{ requestId: "r1", optionId: "approve" }]);
 });
