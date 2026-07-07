@@ -43,6 +43,22 @@ export interface ChannelRouteArgs {
     }
     | null;
   receive(channel: ChannelDef, input: unknown): Promise<{ id: string }>;
+  // Apply a HITL decision to a PARKED session (Task 17). Resolves the
+  // (adapter-owned) `continuationToken` back to its session, then writes the
+  // approve/deny/always/never decision the same way the native resolve routes
+  // do — the session's `waitUntil`-alive poll loop consumes it and the SAME turn
+  // continues. This does NOT drive a turn (no `send`). Sticky "always"/"never"
+  // needs an authenticated trex user; a platform-webhook caller (no trex user)
+  // can only approve/deny. An unknown token resolves to `{ ok: false, error }`
+  // (logged, never thrown). Wiring an adapter's default resume to this is Task 18.
+  resume(
+    continuationToken: string,
+    input: {
+      requestId?: string;
+      decision?: "approve" | "deny" | "always" | "never";
+      inputResponses?: Array<{ requestId?: string; optionId?: string }>;
+    },
+  ): Promise<{ ok: boolean; error?: string }>;
   params: Record<string, string>;
   waitUntil(p: Promise<unknown>): void;
   requestIp: string | null;

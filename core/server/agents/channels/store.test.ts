@@ -120,6 +120,22 @@ Deno.test("resolveOrCreateSession leaves principal columns null when principal i
   assertEquals(calls[1].params, ["toy-agent", "toy", null, null, null, null]);
 });
 
+Deno.test("getSessionByToken returns the session id on a hit", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-7" }] }]);
+  const store = createChannelStore(fn as never);
+  const sid = await store.getSessionByToken("discord", "discord:u1");
+  assertEquals(sid, "s-7");
+  assertEquals(calls.length, 1);
+  assert(calls[0].sql.includes("SELECT session_id FROM agents.channel_sessions"));
+  assertEquals(calls[0].params, ["discord", "discord:u1"]);
+});
+
+Deno.test("getSessionByToken returns null on a miss", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createChannelStore(fn as never);
+  assertEquals(await store.getSessionByToken("discord", "discord:nope"), null);
+});
+
 Deno.test("setContinuationToken re-keys a session via upsert", async () => {
   const { fn, calls } = fakeQuery([{ rows: [] }]);
   const store = createChannelStore(fn as never);

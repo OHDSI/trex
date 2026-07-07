@@ -11,6 +11,7 @@ import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
 import type { ChannelStore } from "../channels/store.ts";
+import { resolveApprovalDecision } from "./approvals.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -109,37 +110,6 @@ function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerTo
     env: deps.env ?? defaultEnv,
     sql: deps.sql ?? unconfiguredSql,
   };
-}
-
-// H4 (sticky tool-consent decisions — task-h4-brief.md): shared by both
-// approval resolve sites — the standalone POST .../approval route and the
-// inputResponses follow-up on POST /eve/v1/session/:id — so the two can't
-// drift on what "always"/"never" mean. `decision` is the wire-level verb
-// (approve|deny|always|never); `approve`/`deny` persist as-is (unchanged
-// from pre-H4 behavior). `always`/`never` require an authenticated userId
-// (no x-user-id header => 400, checked by the caller BEFORE calling this —
-// see both call sites) and, once the pending request resolves, additionally
-// upsert agents.tool_consents keyed on (userId, deps.plugin, deps.agentName,
-// the approval's own tool — looked up via getApprovalTool since the
-// approvals table doesn't carry plugin/agent). agents.approvals.decision's
-// CHECK constraint stays approve/deny — the sticky verbs never reach it.
-async function resolveApprovalDecision(
-  deps: Deps,
-  sessionId: string,
-  requestId: string,
-  decision: "approve" | "deny" | "always" | "never",
-  userId: string | undefined,
-): Promise<boolean> {
-  const sticky = decision === "always" || decision === "never";
-  const persistedDecision = sticky ? (decision === "always" ? "approve" : "deny") : decision;
-  const ok = await deps.store.resolveApproval(requestId, persistedDecision, sessionId);
-  if (ok && sticky) {
-    // userId is guaranteed present here — callers 400 before reaching this
-    // function when sticky is requested without one.
-    const tool = await deps.store.getApprovalTool(requestId);
-    if (tool) await deps.store.setToolConsent(userId!, deps.plugin, deps.agentName, tool, decision);
-  }
-  return ok;
 }
 
 function startTurn(deps: Deps, sessionId: string, message: unknown, metadata: unknown, bearerToken?: string, userId?: string) {
@@ -346,7 +316,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           if ((r.optionId === "always" || r.optionId === "never") && !createdBy) {
             return json({ error: "always/never decisions require an authenticated user" }, 400);
           }
-          await resolveApprovalDecision(deps, sessionId, r.requestId, r.optionId, createdBy);
+          await resolveApprovalDecision(
+            store,
+            sessionId,
+            { requestId: r.requestId, decision: r.optionId },
+            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy },
+          );
         }
       }
       if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken, createdBy);
@@ -374,7 +349,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if ((body.decision === "always" || body.decision === "never") && !createdBy) {
         return json({ error: "always/never decisions require an authenticated user" }, 400);
       }
-      const ok = await resolveApprovalDecision(deps, sessionId, body.requestId, body.decision, createdBy);
+      const { ok } = await resolveApprovalDecision(
+        store,
+        sessionId,
+        { requestId: body.requestId, decision: body.decision },
+        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy },
+      );
       return ok ? json({ resolved: true }) : json({ error: "unknown or already-decided request" }, 404);
     }
 

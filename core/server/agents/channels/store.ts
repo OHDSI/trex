@@ -75,6 +75,20 @@ export function createChannelStore(query: QueryFn) {
       return { sessionId: winner.rows[0].session_id, created: false };
     },
 
+    // Resolve a (channel, namespacedToken) to its session id without creating
+    // one — the read half of resolveOrCreateSession, used by the channel HITL
+    // resume primitive (channels/layer.ts) to turn an inbound continuation token
+    // back into the parked session whose approval it applies. `token` is already
+    // namespaced (`${channel}:<raw>`) by the caller. Returns null on a miss (the
+    // resume path treats that as "no session for token", not an error).
+    async getSessionByToken(channel: string, token: string): Promise<string | null> {
+      const r = await query(
+        `SELECT session_id FROM agents.channel_sessions WHERE channel = $1 AND continuation_token = $2`,
+        [channel, token],
+      );
+      return r.rows[0]?.session_id ?? null;
+    },
+
     // Re-keys a parked session under a (channel, token): idempotently points
     // that token at sessionId, updating the mapping if the token was already in
     // use (spec §4.1 "session.setContinuationToken re-keys a parked session").

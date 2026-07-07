@@ -19,6 +19,7 @@ import type { ChannelAuth, ChannelRoute, ChannelRouteArgs } from "./types.ts";
 import { namespacedToken } from "./continuation.ts";
 import { ndjsonEncode } from "../service/stream.ts";
 import { stepToEvent } from "../service/handler.ts";
+import { resolveApprovalDecision } from "../service/approvals.ts";
 import type { AgentEvent } from "../service/events.ts";
 import type { ChannelDef } from "./types.ts";
 import { registerDelivery as defaultRegisterDelivery } from "./delivery.ts";
@@ -315,6 +316,33 @@ function buildArgs(
         continuationToken: derived.continuationToken,
         state: derived.state,
         title: derived.title,
+      });
+    },
+
+    // Channel HITL resume (Task 17): apply an approval decision to the parked
+    // session behind `continuationToken`. Namespaces the raw token exactly like
+    // send() (so it addresses the same session the inbound message opened),
+    // looks it up WITHOUT creating a session, and — on a hit — delegates the DB
+    // write to the SAME resolver the native routes use. No turn is driven: the
+    // session's still-alive poll loop consumes the decision. Channel sessions
+    // carry no trex user, so sticky "always"/"never" (which needs one) is
+    // rejected by the resolver; approve/deny work. An unknown token is a logged
+    // soft failure, never a throw (an adapter default calls this best-effort).
+    async resume(continuationToken, input) {
+      const token = namespacedToken(channelId, continuationToken);
+      const sessionId = await deps.channelStore.getSessionByToken(channelId, token);
+      if (!sessionId) {
+        console.error(`agents: channel resume found no session for token '${token}'`);
+        return { ok: false, error: "no session for token" };
+      }
+      return await resolveApprovalDecision(deps.store, sessionId, input, {
+        plugin: deps.plugin,
+        agentName: deps.agentName,
+        // Platform-webhook channel sessions have no trex user; sticky verbs are
+        // rejected by the resolver (v1 gap — parity with native's "always/never
+        // requires an authenticated user"). Task 18 may thread the session's
+        // created_by here for the JWT-authed eve-web channel.
+        userId: undefined,
       });
     },
 

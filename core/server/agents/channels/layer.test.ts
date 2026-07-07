@@ -426,3 +426,79 @@ Deno.test("channel layer: a path outside {basePath}/eve/v1 -> 404", async () => 
   const res = await handler(new Request(`${ORIGIN}/somewhere/else`, { method: "POST" }));
   assertEquals(res.status, 404);
 });
+
+// Task 17: channel HITL resume primitive. Built with its own store fakes (a
+// getSessionByToken on the channel store + a resolveApproval on the agent store)
+// and driven through the webhook channel's POST /resume test seam.
+function makeResumeLayer(
+  agent: LoadedAgent,
+  opts: { tokenToSession: Record<string, string> },
+) {
+  const lookups: Array<{ channel: string; token: string }> = [];
+  const resolves: Array<{ requestId: string; decision: string; sessionId: string }> = [];
+  const channelStore = {
+    getSessionByToken(channel: string, token: string) {
+      lookups.push({ channel, token });
+      return Promise.resolve(opts.tokenToSession[token] ?? null);
+    },
+    resolveOrCreateSession: () => Promise.reject(new Error("unused")),
+    setContinuationToken: () => Promise.resolve(),
+  } as unknown as ChannelStore;
+  const store = {
+    resolveApproval(requestId: string, decision: "approve" | "deny", sessionId: string) {
+      resolves.push({ requestId, decision, sessionId });
+      return Promise.resolve(true);
+    },
+    getApprovalTool: () => Promise.resolve(null),
+    setToolConsent: () => Promise.resolve(),
+    listEvents: () => Promise.resolve([]),
+  } as unknown as AgentStore;
+  const handler = createChannelHandler({
+    agent,
+    store,
+    channelStore,
+    plugin: "toy-agent",
+    agentName: "toy",
+    basePath: BASE,
+    startTurn: () => {},
+    subscribe: () => () => {},
+  });
+  return { handler, lookups, resolves };
+}
+
+Deno.test("channel resume: known token resolves to its session and applies the decision", async () => {
+  const agent = await loadAgent(TOY);
+  // The layer namespaces the raw token with the channelId before the lookup.
+  const { handler, lookups, resolves } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+  });
+
+  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/webhook/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "u-42", input: { requestId: "req-1", decision: "approve" } }),
+  }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  // Looked the (namespaced) token up on the channel store.
+  assertEquals(lookups, [{ channel: "webhook", token: "webhook:u-42" }]);
+  // Delegated the write to the shared resolver against the resolved session.
+  assertEquals(resolves, [{ requestId: "req-1", decision: "approve", sessionId: "sess-9" }]);
+});
+
+Deno.test("channel resume: unknown token -> {ok:false}, no resolve, no throw", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, lookups, resolves } = makeResumeLayer(agent, { tokenToSession: {} });
+
+  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/webhook/resume`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token: "ghost", input: { requestId: "req-1", decision: "approve" } }),
+  }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: false, error: "no session for token" });
+  assertEquals(lookups, [{ channel: "webhook", token: "webhook:ghost" }]);
+  assertEquals(resolves, []);
+});
