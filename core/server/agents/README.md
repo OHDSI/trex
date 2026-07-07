@@ -48,7 +48,8 @@ clean up whenever the server is stopped.
 | `skills/<name>/SKILL.md` | no | Full support, same semantics as the flat form (directory form for skills with adjacent assets). |
 | `subagents/<name>/` | no | Full support, **one level deep only**. Each is itself an eve-layout directory (own `instructions.md`, `tools/`, `skills/`, model). Invoked via the built-in `agent` tool; a `subagents/` directory nested inside a subagent is logged and ignored. |
 | `agent.edn`, `instructions.edn`, `skills/<name>.edn` | no | trex extension for CLJS-authored agents — see below. |
-| `channels/`, `connections/`, `sandbox/` | — | Not implemented in v1. Logged and skipped (not an error), so a real eve project directory still loads without crashing. |
+| `channels/*.ts`, `channels/*.js` | no | Supported. One channel per file, the filename (minus extension) is the channel id. Each file default-exports a `defineChannel(...)` result. Top-level only (subagents declare none — eve parity). See "Channels" below. |
+| `connections/`, `sandbox/` | — | Not implemented in v1. Logged and skipped (not an error), so a real eve project directory still loads without crashing. |
 
 Skills are sorted by name. Subagent names come from the `subagents/` directory entry names.
 
@@ -427,6 +428,101 @@ request, not from a session id), though a session/turn is still persisted for ob
 API — it answers with `{"error": "approval required — use the session API"}` instead of hanging
 a stateless request.
 
+## Channels
+
+A channel is an **inbound platform entry point** that starts (or resumes) an agent
+session from an external service — a Discord slash command, a Slack mention, a
+GitHub issue comment — and **delivers the reply back** to that platform. Channels
+are eve's own concept and trex implements the same `defineChannel` authoring
+contract, so **channel files stay portable to real eve** (same factory names,
+same `defineChannel`/`POST`/`GET` helpers). Declare them by dropping
+`channels/*.ts` files at the agent-dir root; the file stem is the channel id.
+
+```ts
+// channels/discord.ts
+import { discordChannel } from "eve/channels/discord";
+export default discordChannel();
+```
+
+Each channel default-exports a `defineChannel(...)` result — usually via one of
+the eight built-in adapter factories, which fill in the per-platform signature
+verify, prompt extraction, reply formatting, and HITL-widget encode/decode. A
+`custom` channel calls `defineChannel({ routes, events })` directly with your own
+routes and delivery handlers (the layer, no adapter). See COMPAT.md's "Channels"
+section for exactly where each adapter matches eve and where it diverges.
+
+### Supported channels (v1)
+
+`eve` (web), `discord`, `slack`, `telegram`, `twilio` (SMS), `github`, `linear`,
+`teams`, plus `custom` (author-defined HTTP routes). All eight built-in adapters
+are HTTP webhooks — WebSocket channels (`WS()`) and Twilio *voice* media-streams
+are deferred to v1.1 (COMPAT.md).
+
+### Route URLs
+
+Channel routes mount under the agent's scoped path, prefixed by the channel id:
+
+```
+<trex-host>/plugins/<scope>/<agent>/eve/v1/<channelId>/<route>
+```
+
+Every built-in adapter defaults its `route` to `/` (the channel root), so the
+URL you register on the platform is simply
+`<trex-host>/plugins/<scope>/<agent>/eve/v1/<channelId>` — e.g. a
+`channels/discord.ts` mounts at `…/eve/v1/discord`. Pass `{ route: "/events" }`
+to a factory to move it (e.g. `…/eve/v1/slack/events`) if a platform needs
+distinct URLs for events vs. interactivity.
+
+Channel webhook routes authenticate by **platform signature** (verified by the
+adapter), **not** the trex `pluginAuthz` JWT — the layer exempts
+`…/eve/v1/<channelId>/*` from `authContext`/`pluginAuthz` and each adapter must
+pass its own `verify` before any session work runs (a bad signature 401s before
+`send()`). The one exception is the **`eve` web channel**, which carries no
+platform signature and therefore stays behind the trex JWT exactly like the
+native session API. Replies are delivered **server-side in the background** (a
+`waitUntil`-style primitive keeps the worker alive after the webhook ACK
+returns), so the platform gets its answer even though no HTTP client holds the
+stream; delivery is best-effort / at-least-once.
+
+### Per-adapter setup
+
+For each adapter, set the env vars (forwarded from the host into the worker, or
+via the per-agent manifest `env`; each factory also accepts explicit
+`credentials`/`opts` overrides — eve parity) and paste the route URL into the
+platform's webhook/interactions config. `<base>` below is
+`<trex-host>/plugins/<scope>/<agent>/eve/v1`.
+
+| Channel | Env vars | URL to register (platform config field) |
+|---|---|---|
+| `discord` | `DISCORD_PUBLIC_KEY`, `DISCORD_APPLICATION_ID`, `DISCORD_BOT_TOKEN` | `<base>/discord` → Developer Portal → your app → "Interactions Endpoint URL" |
+| `slack` | `SLACK_SIGNING_SECRET`, `SLACK_BOT_TOKEN` | `<base>/slack` → app config → Event Subscriptions "Request URL" **and** Interactivity "Request URL" **and** each Slash Command URL (one route handles all three by default) |
+| `telegram` | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET` | `<base>/telegram` → `setWebhook` call: `url=<base>/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>` |
+| `twilio` (SMS) | `TWILIO_AUTH_TOKEN`, `TWILIO_ACCOUNT_SID` (+ a `from` number via `twilioChannel({ from })`) | `<base>/twilio` → Console → your number → Messaging → "A message comes in" webhook (HTTP POST) |
+| `github` | `GITHUB_WEBHOOK_SECRET`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_APP_INSTALLATION_ID` | `<base>/github` → GitHub App settings → "Webhook URL" (subscribe to Issue/Issue comment/PR events) |
+| `linear` | `LINEAR_WEBHOOK_SECRET`, `LINEAR_API_KEY` (or `LINEAR_AGENT_ACCESS_TOKEN`), optional `LINEAR_BOT_USER_ID` | `<base>/linear` → Settings → API → Webhooks → "URL" (subscribe to Comments/Issues) |
+| `teams` | `MICROSOFT_APP_ID`, `MICROSOFT_APP_PASSWORD`, `MICROSOFT_TENANT_ID` (each falls back to `TEAMS_*`) | `<base>/teams` → Azure Bot resource → "Messaging endpoint" |
+| `eve` (web) | — (trex JWT) | native browser traffic; behind the trex JWT, no platform webhook to register |
+
+The GitHub App private key may be downloaded in PKCS1 (`BEGIN RSA PRIVATE KEY`)
+form; the adapter converts it to PKCS8 in-process, so paste it as-is (see
+COMPAT.md's "Channels" note). `LINEAR_API_KEY` (a `lin_api_…` personal key) and
+an OAuth agent token are both accepted; the adapter picks the auth scheme by
+prefix.
+
+### HITL over channels (v1 limitation — read this)
+
+The adapters render human-in-the-loop approvals as native platform widgets
+(Discord buttons, Slack Block Kit, Telegram inline keyboards, Adaptive Cards on
+Teams, numbered plain-text lists on Twilio/GitHub/Linear). The **widget renders,
+but the button/reply does not yet close the loop end-to-end**: the channel layer
+has no token→session RESUME primitive a webhook route can call (`send()` always
+starts a *fresh* turn), so every adapter exposes an injectable `opts.resume` seam
+and the **default is a loud no-op** — it warns and drops the approval rather than
+POSTing to a route that would 404. To wire HITL fully today you must supply
+`opts.resume` (e.g. `discordChannel({ resume: myResumeFn })`) that calls the
+native approval route yourself. See COMPAT.md's "Channels — known v1 limitations"
+and `channels/ACCEPTANCE.md`.
+
 ## Tool extensions and eve portability
 
 `defineTool` accepts eve's real fields (`description`, `inputSchema`, `execute`, `needsApproval`)
@@ -458,7 +554,7 @@ plain JSON Schema.
 
 Tools run **in-process** in the agent's Deno worker — there is no microVM or other sandbox
 isolation (eve's `sandbox/` directory, and any seeded `/workspace`, is not implemented; it's
-detected and ignored the same way `channels/`/`connections/` are). A tool has the same
+detected and ignored the same way `connections/` is). A tool has the same
 filesystem/network access as the worker process itself. This is an intentional, documented
 out-of-scope decision (spec §1) rather than an oversight: trex's self-hosted trust model assumes
 the operator running the stack trusts the plugins they install, the same way a `functions` plugin
@@ -542,7 +638,10 @@ above to work. See COMPAT.md's "eve-eval verdict" section for the full run log.
 ## Further reading
 
 [COMPAT.md](./COMPAT.md) has the full reconciliation against real eve: every deliberate divergence
-in the HTTP/event surface, everything the loader ignores entirely (`channels/`, `connections/`,
-`sandbox/`, `schedules/`, `hooks/`, and several stream events eve documents that we don't emit),
-the AI SDK version skew between eve's tooling and trex's runtime, and the verified-vs-provisional
-breakdown of what was actually exercised end-to-end.
+in the HTTP/event surface, the "Channels" section (per-adapter vendoring/reimplementation record,
+the eve-model divergences, and the known v1 limitations), everything the loader still ignores
+entirely (`connections/`, `sandbox/`, `schedules/`, `hooks/`, and several stream events eve
+documents that we don't emit), the AI SDK version skew between eve's tooling and trex's runtime,
+and the verified-vs-provisional breakdown of what was actually exercised end-to-end.
+`channels/ACCEPTANCE.md` is the manual live-acceptance checklist (deferred to an environment with
+real platform credentials).
