@@ -78,8 +78,9 @@ connection**, and **one real OAuth consent round-trip**.
 
 ## Part C — OAuth consent round-trip
 
-1. **Register a connector.** Insert an `agents.oauth_connectors` row (or use the
-   admin route) with the provider's `authorization_url` / `token_url` / real
+1. **Register a connector.** Insert an `agents.oauth_connectors` row directly via
+   SQL (v1 has no connector-registration route — see COMPAT.md limitation (f))
+   with the provider's `authorization_url` / `token_url` / real
    `client_id`, a `client_secret_ref` naming an env var you've set, `scopes`, and
    `principal_scope = 'user'`. Register the provider-side redirect URI as
    `<base>/oauth/<connector>/callback` at the OAuth app.

@@ -553,6 +553,15 @@ e. **`connection_search` is discovery-only.** The `<name>__<tool>` tools are
    availability (full lazy-gating is deferred past v1). One consequence: a
    `filterTools` hook runs *after* the connection merge, so `connection_search`
    can list a tool that `filterTools` later drops from the callable set.
+f. **No connector-registration route.** `agents.oauth_connectors` rows are seeded
+   by an operator via SQL; the admin route set spec §5 sketched (mirroring devx
+   `provider_config_routes`) is deferred. The store exposes only `getConnector`
+   (read) — there is no write path outside migrations/tests. Connectors are
+   admin infrastructure, so SQL-seeding is the v1 workflow.
+g. **Consent routes are not rate-limited.** `/eve/v1/oauth/<connector>/{start,
+   callback}` reject any request without a valid signed `state` before any token
+   write, so the exposed surface is only cheap HMAC-verify CPU (no credential or
+   token exposure) — but per-IP throttling (spec §5 Security) is a v1.1 follow-up.
 
 ## What we ignore entirely
 
