@@ -1,8 +1,8 @@
 // Connection tool provider — realizes an agent's connections/*.ts into trex
 // ToolDefs and hands them to buildSdkTools via the H2 provider slot (a sibling
-// of the dynamic-tools.ts provider; see service/toolset.ts). Task 3 scope:
-// MCP connections + static auth only. OpenAPI connections (type:"openapi") are
-// skipped here and land in Task 4.
+// of the dynamic-tools.ts provider; see service/toolset.ts). Handles both MCP
+// (`realizeMcp`) and OpenAPI (`realizeOpenApi`) connections with static auth;
+// OAuth-kind auth is resolved by the token store (Task 6).
 //
 // Posture (H2): a broken connection NEVER kills the turn. Each connection is
 // realized inside its own try/catch — a connect/list failure logs and yields
@@ -13,11 +13,15 @@ import type { ConnectionAuth, ConnectionDef, ConnectionTools } from "./types.ts"
 import type { HookCtx, ToolContext, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { formatMcpResult, hashResolvedAuth, type McpConnectFn, realizeMcp } from "./mcp.ts";
+import { type FetchLike, realizeOpenApi } from "./openapi.ts";
 
 export interface ConnectionProviderOpts {
   // Injectable MCP connect factory (tests pass a fake). Defaults to the real
   // SDK-backed connect inside mcp.ts.
   connect?: McpConnectFn;
+  // Injectable fetch for OpenAPI operation calls (tests pass a mock). Defaults
+  // to the global fetch inside openapi.ts.
+  fetch?: FetchLike;
 }
 
 // allow/block policy over the BARE (un-namespaced) remote tool name. The shim
@@ -61,16 +65,35 @@ export function buildConnectionProvider(
   return async (ctx: HookCtx): Promise<Record<string, ToolDef>> => {
     const out: Record<string, ToolDef> = {};
     for (const conn of Object.values(agent.connections)) {
-      // OpenAPI is Task 4 — leave a clear seam.
-      if (conn.type !== "mcp") continue;
       try {
-        // Resolve auth per turn, then key the client cache by a hash of the
-        // resolved credentials so a ctx-dependent static getToken/headers never
-        // reuses one caller's client (and token) for another's callTool.
+        // Resolve auth per turn (shared by both connection kinds): the outbound
+        // header set carries any static Bearer / header credential.
         const headers = await resolveHeaders(conn, ctx);
+        const needsApproval = conn.approval === "once" ? true : undefined;
+
+        if (conn.type === "openapi") {
+          // One realized tool per operation; the provider applies the same
+          // namespacing/filter/approval it applies to MCP tools. Per-operation
+          // security relocates the resolved Bearer where the scheme dictates.
+          for (const t of realizeOpenApi(conn, headers, { fetch: opts.fetch })) {
+            if (!passesToolFilter(t.name, conn.tools)) continue;
+            out[`${conn.name}__${t.name}`] = {
+              description: t.description,
+              inputSchema: t.inputSchema,
+              ...(needsApproval ? { needsApproval } : {}),
+              execute: (input: unknown, _tctx?: ToolContext) => t.execute(input),
+            };
+          }
+          continue;
+        }
+
+        if (conn.type !== "mcp") continue;
+
+        // Key the MCP client cache by a hash of the resolved credentials so a
+        // ctx-dependent static getToken/headers never reuses one caller's
+        // client (and token) for another's callTool.
         const authHash = await hashResolvedAuth(headers);
         const { client, tools } = await realizeMcp(conn, headers, agent.dir, authHash, opts.connect);
-        const needsApproval = conn.approval === "once" ? true : undefined;
         for (const t of tools) {
           if (!passesToolFilter(t.name, conn.tools)) continue;
           const remoteName = t.name;

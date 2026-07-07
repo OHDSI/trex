@@ -158,23 +158,83 @@ Deno.test("a broken connection is skipped; others still resolve", async () => {
   assertEquals(Object.keys(tools).sort(), ["ok__danger", "ok__ping"]);
 });
 
-Deno.test("openapi connections are skipped (Task 4)", async () => {
-  _resetMcpCache();
-  const { fn } = fakeConnect();
+const OPENAPI_SPEC = {
+  openapi: "3.0.0",
+  servers: [{ url: "https://api.example.com" }],
+  paths: {
+    "/ping": { get: { operationId: "ping", summary: "Ping" } },
+    "/danger": { post: { operationId: "danger", summary: "Danger" } },
+  },
+};
+
+function openapiConn(name: string, over: Partial<ConnectionDef> = {}): ConnectionDef {
+  return {
+    __trexConnection: true,
+    type: "openapi",
+    name,
+    description: `${name} API`,
+    spec: OPENAPI_SPEC,
+    ...over,
+  };
+}
+
+function recordingFetch() {
+  const rec: { url: string; method?: string; headers?: Record<string, string> }[] = [];
+  const fn = (url: string | URL, init?: RequestInit): Promise<Response> => {
+    rec.push({ url: String(url), method: init?.method, headers: init?.headers as Record<string, string> });
+    return Promise.resolve(new Response("{}", { status: 200, headers: { "content-type": "application/json" } }));
+  };
+  return { fn, rec };
+}
+
+Deno.test("openapi connection yields namespaced <conn>__<op> ToolDefs", async () => {
+  const { fn } = recordingFetch();
+  const provider = buildConnectionProvider(fakeAgent({ api: openapiConn("api") }), { fetch: fn });
+  const tools = await provider(hookCtx());
+  assertEquals(Object.keys(tools).sort(), ["api__danger", "api__ping"]);
+  assertEquals(tools["api__ping"].description, "Ping");
+});
+
+Deno.test("openapi execute fetches the built URL + injects static auth", async () => {
+  const { fn, rec } = recordingFetch();
   const provider = buildConnectionProvider(
     fakeAgent({
-      api: {
-        __trexConnection: true,
-        type: "openapi",
-        name: "api",
-        description: "Petstore",
-        spec: "https://x/openapi.json",
-      },
+      api: openapiConn("api", {
+        auth: { kind: "static", getToken: () => Promise.resolve({ token: "sekret" }) },
+      }),
     }),
-    { connect: fn },
+    { fetch: fn },
   );
   const tools = await provider(hookCtx());
-  assertEquals(Object.keys(tools), []);
+  await tools["api__ping"].execute!({}, undefined);
+  assertEquals(rec[0].url, "https://api.example.com/ping");
+  // No security scheme in the spec → default bearer, Authorization stays.
+  assertEquals(rec[0].headers!["Authorization"], "Bearer sekret");
+});
+
+Deno.test("openapi tools.allow/block + approval honored by the provider", async () => {
+  const { fn } = recordingFetch();
+  const allow = buildConnectionProvider(
+    fakeAgent({ api: openapiConn("api", { tools: { allow: ["ping"] }, approval: "once" }) }),
+    { fetch: fn },
+  );
+  const tools = await allow(hookCtx());
+  assertEquals(Object.keys(tools), ["api__ping"]);
+  assertEquals(tools["api__ping"].needsApproval, true);
+});
+
+Deno.test("a broken openapi connection is skipped; others still resolve", async () => {
+  const { fn } = recordingFetch();
+  const provider = buildConnectionProvider(
+    fakeAgent({
+      // Missing spec + no baseUrl → realizeOpenApi throws → skipped.
+      broken: openapiConn("broken", { spec: undefined }),
+      ok: openapiConn("ok"),
+    }),
+    { fetch: fn },
+  );
+  const tools = await provider(hookCtx());
+  assertEquals(Object.keys(tools).sort(), ["ok__danger", "ok__ping"]);
 });
 
 Deno.test("per-user static getToken → distinct clients per user (no cross-tenant reuse)", async () => {
