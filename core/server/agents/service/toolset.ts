@@ -8,6 +8,7 @@ import { resolveModel } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
+import { buildConnectionProvider } from "../connections/provider.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 
@@ -292,6 +293,34 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
         }
       } catch (e) {
         console.error(`agents: ${agent.dir}/dynamic-tools.ts threw — continuing with static tools only: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  // Step 2b: connection-backed tools (connections/*.ts → MCP + static auth,
+  // Task 3). Same depth-0-only, log+continue posture as the dynamic provider
+  // above — a broken connection never fails the turn (the provider also
+  // catches per connection). Authored/static and dynamic tools win on a name
+  // collision (`<conn>__<tool>` is namespaced, so collisions are unlikely).
+  // Tracked in dynamicNames so authoredTool withholds ToolContext.sql from
+  // these provider-sourced tools, exactly like the dynamic-tools path.
+  if (depth === 0 && Object.keys(agent.connections).length > 0) {
+    if (!ctx.hookCtx) {
+      console.log(`agents: ${agent.dir} has connections but no request hookCtx was available — skipping connection tools for this turn`);
+    } else {
+      try {
+        const connProvider = buildConnectionProvider(agent);
+        const connTools = await connProvider(ctx.hookCtx);
+        for (const [name, def] of Object.entries(connTools)) {
+          if (Object.hasOwn(defs, name)) {
+            console.log(`agents: connection tool "${name}" from ${agent.dir}/connections shadowed by an existing tool`);
+            continue;
+          }
+          defs[name] = def;
+          dynamicNames.add(name);
+        }
+      } catch (e) {
+        console.error(`agents: connection provider for ${agent.dir} threw — continuing without connection tools: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
   }
