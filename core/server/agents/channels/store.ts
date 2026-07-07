@@ -10,22 +10,15 @@ export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[]
 
 export function createChannelStore(query: QueryFn) {
   return {
-    // Looks up the session a (channel, token) pair already addresses, or null
-    // when the token has never been seen. `token` is expected to be the
-    // channel-namespaced token (see continuation.ts's namespacedToken).
-    async getSessionByToken(channel: string, token: string): Promise<string | null> {
-      const r = await query(
-        `SELECT session_id FROM agents.channel_sessions WHERE channel = $1 AND continuation_token = $2`,
-        [channel, token],
-      );
-      return r.rows[0]?.session_id ?? null;
-    },
-
     // Resolve a (channel, token) to a session: on a hit, resume the existing
     // session (created:false); on a miss, create a session carrying the channel
     // principal (auth) and record the token -> session mapping (created:true).
-    // created_by is null — that column is the trex x-user-id, distinct from the
-    // channel principal (spec §4.3); a channel-initiated session has no trex user.
+    // `createdBy` is the trex x-user-id, distinct from the channel principal
+    // (spec §4.3): it is set only for a JWT-authed channel that has a real trex
+    // user (the eve-web channel, authenticator "trex"), and null for every
+    // platform-webhook channel (Discord/Slack/…), which has no trex user. This
+    // populates agents.sessions.created_by so the native approval-ownership
+    // check (handler.ts) protects eve-web sessions like a native session.
     //
     // Race-safe: the SELECT-then-INSERT is a TOCTOU window — two inbound
     // messages with the same (channel, token) can both miss the SELECT. We let
@@ -39,6 +32,7 @@ export function createChannelStore(query: QueryFn) {
       plugin: string,
       agent: string,
       principal: ChannelAuth | null,
+      createdBy: string | null,
     ): Promise<{ sessionId: string; created: boolean }> {
       const existing = await query(
         `SELECT session_id FROM agents.channel_sessions WHERE channel = $1 AND continuation_token = $2`,
@@ -54,7 +48,7 @@ export function createChannelStore(query: QueryFn) {
         [
           plugin,
           agent,
-          null,
+          createdBy,
           principal?.principalType ?? null,
           principal?.principalId ?? null,
           principal?.authenticator ?? null,
@@ -84,6 +78,8 @@ export function createChannelStore(query: QueryFn) {
     // Re-keys a parked session under a (channel, token): idempotently points
     // that token at sessionId, updating the mapping if the token was already in
     // use (spec §4.1 "session.setContinuationToken re-keys a parked session").
+    // Re-key seam reserved for the (deferred-v1.1) channel HITL token->session
+    // resume primitive — defined but currently unused by the runtime.
     async setContinuationToken(channel: string, token: string, sessionId: string): Promise<void> {
       await query(
         `INSERT INTO agents.channel_sessions (channel, continuation_token, session_id) VALUES ($1, $2, $3)

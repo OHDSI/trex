@@ -12,20 +12,6 @@ function fakeQuery(responses: Array<{ rows: unknown[] }>) {
   return { fn, calls };
 }
 
-Deno.test("getSessionByToken returns the mapped session id", async () => {
-  const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-1" }] }]);
-  const store = createChannelStore(fn as never);
-  assertEquals(await store.getSessionByToken("discord", "discord:u1"), "s-1");
-  assert(calls[0].sql.includes("FROM agents.channel_sessions"));
-  assertEquals(calls[0].params, ["discord", "discord:u1"]);
-});
-
-Deno.test("getSessionByToken returns null when no mapping exists", async () => {
-  const { fn } = fakeQuery([{ rows: [] }]);
-  const store = createChannelStore(fn as never);
-  assertEquals(await store.getSessionByToken("discord", "discord:u1"), null);
-});
-
 Deno.test("resolveOrCreateSession returns existing session on a token hit", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-1" }] }]);
   const store = createChannelStore(fn as never);
@@ -35,7 +21,7 @@ Deno.test("resolveOrCreateSession returns existing session on a token hit", asyn
     principalId: "u1",
     attributes: {},
   };
-  const res = await store.resolveOrCreateSession("discord", "discord:u1", "toy-agent", "toy", auth);
+  const res = await store.resolveOrCreateSession("discord", "discord:u1", "toy-agent", "toy", auth, null);
   assertEquals(res, { sessionId: "s-1", created: false });
   // Only the lookup runs — no session/mapping INSERT on a hit.
   assertEquals(calls.length, 1);
@@ -56,7 +42,8 @@ Deno.test("resolveOrCreateSession creates a session and mapping on a miss, popul
     principalId: "u42",
     attributes: {},
   };
-  const res = await store.resolveOrCreateSession("discord", "discord:u42", "toy-agent", "toy", auth);
+  // Webhook auth (authenticator != "trex") => created_by stays null.
+  const res = await store.resolveOrCreateSession("discord", "discord:u42", "toy-agent", "toy", auth, null);
   assertEquals(res, { sessionId: "s-new", created: true });
   assertEquals(calls.length, 3);
 
@@ -72,6 +59,26 @@ Deno.test("resolveOrCreateSession creates a session and mapping on a miss, popul
   assertEquals(calls[2].params, ["discord", "discord:u42", "s-new"]);
 });
 
+Deno.test("resolveOrCreateSession threads createdBy into agents.sessions.created_by (eve-web trex user)", async () => {
+  const { fn, calls } = fakeQuery([
+    { rows: [] }, // lookup miss
+    { rows: [{ id: "s-new" }] }, // sessions INSERT ... RETURNING id
+    { rows: [{ session_id: "s-new" }] }, // channel_sessions INSERT ... RETURNING -> we won
+  ]);
+  const store = createChannelStore(fn as never);
+  // A JWT-authed eve-web principal (authenticator "trex", the layer passes its
+  // principalId as createdBy) => created_by is the trex x-user-id, not null.
+  const auth: ChannelAuth = {
+    authenticator: "trex",
+    principalType: "user",
+    principalId: "u42",
+  };
+  const res = await store.resolveOrCreateSession("eve", "eve:tok", "toy-agent", "toy", auth, "u42");
+  assertEquals(res, { sessionId: "s-new", created: true });
+  // $3 (created_by) carries the trex user id; principal columns still populated.
+  assertEquals(calls[1].params, ["toy-agent", "toy", "u42", "user", "u42", "trex"]);
+});
+
 Deno.test("resolveOrCreateSession loses the PK race: deletes orphan session and adopts the winner", async () => {
   const { fn, calls } = fakeQuery([
     { rows: [] }, // lookup miss
@@ -81,7 +88,7 @@ Deno.test("resolveOrCreateSession loses the PK race: deletes orphan session and 
     { rows: [{ session_id: "s-winner" }] }, // re-SELECT the winner's mapping
   ]);
   const store = createChannelStore(fn as never);
-  const res = await store.resolveOrCreateSession("discord", "discord:u1", "toy-agent", "toy", null);
+  const res = await store.resolveOrCreateSession("discord", "discord:u1", "toy-agent", "toy", null, null);
   assertEquals(res, { sessionId: "s-winner", created: false });
   assertEquals(calls.length, 5);
 
@@ -107,7 +114,8 @@ Deno.test("resolveOrCreateSession leaves principal columns null when principal i
     { rows: [{ session_id: "s-anon" }] }, // channel_sessions INSERT ... RETURNING -> we won
   ]);
   const store = createChannelStore(fn as never);
-  const res = await store.resolveOrCreateSession("web", "web:anon", "toy-agent", "toy", null);
+  // Null auth (no principal, no trex user) => created_by null too.
+  const res = await store.resolveOrCreateSession("web", "web:anon", "toy-agent", "toy", null, null);
   assertEquals(res, { sessionId: "s-anon", created: true });
   assertEquals(calls[1].params, ["toy-agent", "toy", null, null, null, null]);
 });

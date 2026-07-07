@@ -18,15 +18,23 @@ const BASE = "/plugins/trex/toy";
 const ORIGIN = "http://local";
 
 function fakeChannelStore() {
-  const calls: Array<{ channel: string; token: string; plugin: string; agent: string; principal: unknown }> = [];
+  const calls: Array<
+    { channel: string; token: string; plugin: string; agent: string; principal: unknown; createdBy: string | null }
+  > = [];
   let n = 0;
   const store = {
     calls,
-    resolveOrCreateSession(channel: string, token: string, plugin: string, agent: string, principal: unknown) {
-      calls.push({ channel, token, plugin, agent, principal });
+    resolveOrCreateSession(
+      channel: string,
+      token: string,
+      plugin: string,
+      agent: string,
+      principal: unknown,
+      createdBy: string | null,
+    ) {
+      calls.push({ channel, token, plugin, agent, principal, createdBy });
       return Promise.resolve({ sessionId: `sess-${++n}`, created: true });
     },
-    getSessionByToken: () => Promise.resolve(null),
     setContinuationToken: () => Promise.resolve(),
   };
   return store as unknown as ChannelStore & { calls: typeof calls };
@@ -88,6 +96,9 @@ Deno.test("eve channel: POST /session creates a session, starts a turn, returns 
     principalType: "user",
     principalId: "user-abc",
   });
+  // …and the trex user id also lands in created_by so the native
+  // approval-ownership check protects this eve-web session (FIX 1).
+  assertEquals(channelStore.calls[0].createdBy, "user-abc");
   assertEquals(startTurns, [{ sessionId: "sess-1", message: "hello web" }]);
 });
 
@@ -101,6 +112,8 @@ Deno.test("eve channel: POST /session with no x-user-id attributes the session t
     body: JSON.stringify({ message: "anon", continuationToken: "t" }),
   }));
   assertEquals(channelStore.calls[0].principal, null);
+  // No trex user => created_by null too (anonymous eve-web session).
+  assertEquals(channelStore.calls[0].createdBy, null);
 });
 
 Deno.test("eve channel: POST /session without a continuationToken mints one (fresh session per call)", async () => {

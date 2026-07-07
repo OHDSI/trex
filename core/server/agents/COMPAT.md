@@ -367,6 +367,12 @@ d. **Slack mrkdwn is a passthrough** (eve's compiled mrkdwn↔GFM engine isn't
 e. **Linear delivery is mock-tested only.** The `commentCreate` fields have not
    been confirmed against live Linear; the adapter's inbound/verify/loop-guard
    are unit-tested, but end-to-end delivery is unverified against the real API.
+f. **A channel's declared `state`/`metadata`/`context` are accepted but not
+   projected (spec §6).** `ChannelDef.state`, `metadata(state)`, and
+   `context(state, session)` pass through `defineChannel` and type-check, but the
+   runtime never invokes `.metadata(`/`.context(` and there is no `channel_state`
+   table — so an author who declares them gets a silent no-op. State projection
+   into session metadata / dynamic-tool resolution is not wired in v1.
 
 ## What we ignore entirely
 

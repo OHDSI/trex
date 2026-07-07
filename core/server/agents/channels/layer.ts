@@ -168,12 +168,24 @@ function buildArgs(
     // The raw token is adapter-owned; namespace it with the channelId so two
     // channels minting the same raw token address distinct sessions.
     const token = namespacedToken(sessionChannelId, opts.continuationToken);
+    // created_by is the trex x-user-id: set it ONLY when the channel auth is a
+    // real trex user (the JWT-authed eve-web channel, authenticator "trex").
+    // Every platform-webhook channel authenticates by platform signature and
+    // has no trex user (authenticator "discord"/"slack"/…) — those stay null
+    // (principal-only). This makes the native approval-ownership check protect
+    // an eve-web session, matching the native POST /eve/v1/session path.
+    const createdBy = opts.auth &&
+        opts.auth.authenticator === "trex" &&
+        opts.auth.principalType === "user"
+      ? opts.auth.principalId
+      : null;
     const { sessionId, created } = await deps.channelStore.resolveOrCreateSession(
       sessionChannelId,
       token,
       deps.plugin,
       deps.agentName,
       opts.auth,
+      createdBy,
     );
     deps.startTurn(sessionId, message);
     const info: ChannelSessionStarted = {

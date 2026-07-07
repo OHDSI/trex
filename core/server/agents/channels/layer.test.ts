@@ -14,15 +14,23 @@ const ORIGIN = "http://local";
 // Records every resolveOrCreateSession the layer issues so tests can assert on
 // the channel-namespaced token + principal without a Postgres.
 function fakeChannelStore() {
-  const calls: Array<{ channel: string; token: string; plugin: string; agent: string; principal: unknown }> = [];
+  const calls: Array<
+    { channel: string; token: string; plugin: string; agent: string; principal: unknown; createdBy: string | null }
+  > = [];
   let n = 0;
   const store = {
     calls,
-    resolveOrCreateSession(channel: string, token: string, plugin: string, agent: string, principal: unknown) {
-      calls.push({ channel, token, plugin, agent, principal });
+    resolveOrCreateSession(
+      channel: string,
+      token: string,
+      plugin: string,
+      agent: string,
+      principal: unknown,
+      createdBy: string | null,
+    ) {
+      calls.push({ channel, token, plugin, agent, principal, createdBy });
       return Promise.resolve({ sessionId: `sess-${++n}`, created: true });
     },
-    getSessionByToken: () => Promise.resolve(null),
     setContinuationToken: () => Promise.resolve(),
   };
   return store as unknown as ChannelStore & { calls: typeof calls };
@@ -69,6 +77,8 @@ Deno.test("channel layer: POST to a channel route runs the handler, send() creat
   assertEquals(channelStore.calls[0].plugin, "toy-agent");
   assertEquals(channelStore.calls[0].agent, "toy");
   assertEquals(channelStore.calls[0].principal, null);
+  // Webhook channel (no trex auth) => created_by stays null (FIX 1).
+  assertEquals(channelStore.calls[0].createdBy, null);
 
   // The turn was started against the resolved session, and the Task 6 hook fired.
   assertEquals(startTurns, [{ sessionId: "sess-1", message: "hi there" }]);
