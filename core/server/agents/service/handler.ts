@@ -129,7 +129,15 @@ function startTurn(
     // Surface the freshly-created turn id to the caller (the channel layer uses
     // it to scope its background delivery to THIS turn) BEFORE publishing any
     // event, so a subscriber registered here can't miss the turn's events.
-    onTurnCreated?.(turn.id);
+    // Isolated: delivery registration runs synchronous adapter code
+    // (buildChannelCtx). A throw there must NEVER abort the turn — otherwise the
+    // IIFE unwinds before turn.started/runTurn and the turn dies with no
+    // turn.failed/session.failed, hanging every /stream reader. Log and carry on.
+    try {
+      onTurnCreated?.(turn.id);
+    } catch (e) {
+      console.error(`agents: channel delivery registration failed for turn ${turn.id}:`, e);
+    }
     publish(sessionId, { type: "turn.started", data: { turnId: turn.id, sequence: turn.seq } });
     const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
     try {

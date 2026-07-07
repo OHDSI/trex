@@ -832,6 +832,73 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
   // sanitizers or an uncaught-error crash IS the assertion here.
 });
 
+Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (Task 19 robustness)", async () => {
+  const agent = await loadAgent(TOY);
+  // A channel whose `events` access throws — this fires inside startTurn's
+  // onTurnCreated (the delivery-registration callback: layer.ts's registerForTurn
+  // reads channel.events). Pre-fix that throw unwound the turn's IIFE BEFORE
+  // turn.started/runTurn, so the turn died with no turn.failed/session.failed and
+  // any /stream reader hung forever. The turn must now run to completion and emit
+  // its own lifecycle regardless of a delivery-registration failure.
+  // deno-lint-ignore no-explicit-any
+  (agent.channels as any).boomevt = {
+    __trexChannel: true,
+    get events() { throw new Error("registration boom"); },
+    routes: [{
+      method: "POST",
+      path: "/in",
+      // deno-lint-ignore no-explicit-any
+      handler: async (_req: Request, args: any) => {
+        const s = await args.send("hi", { auth: null, continuationToken: "u-1" });
+        return Response.json({ sessionId: s.id });
+      },
+    }],
+  };
+
+  const db = inMemoryDb();
+  const channelStore = {
+    resolveOrCreateSession: () => Promise.resolve({ sessionId: "chan-sess", created: true }),
+    setContinuationToken: () => Promise.resolve(),
+  };
+  const handler = createHandler({
+    agent,
+    store: createStore(db.query as never),
+    plugin: "toy-agent",
+    agentName: "toy",
+    basePath: "/plugins/trex/toy",
+    model: model("hello from toy"),
+    channelStore: channelStore as never,
+  });
+
+  // Deterministic sessionId from the fake channelStore -> subscribe before the POST.
+  const live: AgentEvent[] = [];
+  const unsub = subscribe("chan-sess", (e) => live.push(e));
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    const res = await handler(new Request(`${BASE}/eve/v1/boomevt/in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }));
+    assertEquals(res.status, 200); // send() already returned before the async throw
+    await until(() => settled(db)); // pre-fix this would hang (turn stuck "running")
+  } finally {
+    console.error = origError;
+    unsub();
+  }
+
+  // The turn ran to completion despite the registration throw...
+  assertEquals(db.turns[0].status, "completed");
+  // ...and published its full lifecycle on the wire (turn.started + a terminal).
+  assert(live.some((e) => e.type === "turn.started"), "turn.started was published");
+  assert(live.some((e) => e.type === "turn.completed"), "turn.completed was published");
+  assert(live.some((e) => e.type === "session.waiting"), "session parked (terminal reached)");
+  // The registration failure was logged, not silently swallowed.
+  assert(logged.some((l) => l.includes("delivery registration failed")), "logged the registration failure");
+});
+
 Deno.test("POST /chat returns a UIMessage stream", async () => {
   const { handler } = await makeHandler();
   const res = await handler(new Request(`${BASE}/chat`, {
