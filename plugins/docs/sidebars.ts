@@ -51,6 +51,7 @@ const sidebars: SidebarsConfig = {
             "sql-reference/pgwire",
             "sql-reference/migration",
             "sql-reference/tpm",
+            "sql-reference/runtime",
           ],
         },
         {
@@ -60,6 +61,7 @@ const sidebars: SidebarsConfig = {
             "sql-reference/hana",
             "sql-reference/chdb",
             "sql-reference/etl",
+            "sql-reference/cache",
           ],
         },
         {
@@ -70,6 +72,8 @@ const sidebars: SidebarsConfig = {
             "sql-reference/cql2elm",
             "sql-reference/atlas",
             "sql-reference/ai",
+            "sql-reference/webapi",
+            "sql-reference/hades",
           ],
         },
         {
@@ -95,12 +99,15 @@ const sidebars: SidebarsConfig = {
       type: "category",
       label: "APIs",
       items: [
+        "apis/rest",
         "apis/graphql",
+        "apis/realtime",
         "apis/auth",
         "apis/mcp",
         "apis/functions",
         "apis/storage",
         "apis/pg-meta",
+        "apis/fhir",
       ],
     },
     "cli",
