@@ -42,9 +42,6 @@ function extractToken(req: import("express").Request): string | null {
     for (const cookie of cookies) {
       if (cookie.startsWith("authtoken=")) {
         return cookie.slice("authtoken=".length).trim();
-      } else if (cookie.startsWith("fhirtoken=")) {
-        const val = cookie.slice("fhirtoken=".length).trim();
-        return val.split(" ")[1] || null;
       }
     }
   }

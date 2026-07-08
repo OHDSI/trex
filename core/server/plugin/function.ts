@@ -7,6 +7,18 @@ import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
 import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
 
+// eszip bundles are immutable on disk for the life of the process, so read each
+// one once and cache the bytes in memory — re-reading the (brotli-compressed)
+// bundle from disk on every worker create is pure overhead on the hot path.
+const _eszipCache = new Map<string, Uint8Array>();
+async function readEszipCached(eszipPath: string): Promise<Uint8Array> {
+  const cached = _eszipCache.get(eszipPath);
+  if (cached) return cached;
+  const bytes = await Deno.readFile(eszipPath);
+  _eszipCache.set(eszipPath, bytes);
+  return bytes;
+}
+
 export const ROLE_SCOPES: Record<string, string[]> = {};
 export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[] }> = [];
 
@@ -274,7 +286,7 @@ async function _callWorker(
   if (fncfg.eszip) {
     // Prebuilt eszip; fall back to source if absent (e.g. unbundled dev plugin).
     try {
-      options.maybeEszip = await Deno.readFile(`${dir}${fncfg.eszip}`);
+      options.maybeEszip = await readEszipCached(`${dir}${fncfg.eszip}`);
     } catch {
       /* no bundle on disk — use servicePath source */
     }
@@ -368,7 +380,7 @@ async function _callInit(
   if (eszip) {
     // Prebuilt eszip; fall back to source if absent.
     try {
-      options.maybeEszip = await Deno.readFile(`${dir}${eszip}`);
+      options.maybeEszip = await readEszipCached(`${dir}${eszip}`);
     } catch {
       /* no bundle on disk — use servicePath source */
     }

@@ -35,8 +35,24 @@ addEventListener("unhandledrejection", (ev) => {
   ev.preventDefault();
 });
 
+// Trust only the configured number of reverse-proxy hops (default 1). Setting
+// "trust proxy" to true derives req.ip from the client-supplied X-Forwarded-For
+// chain, which lets callers spoof it to mint unlimited buckets against the
+// IP-keyed rate limiters (including the auth brute-force limiter). Override via
+// TREX_TRUST_PROXY (hop count, "true"/"false", or a CIDR/IP list) to match the
+// deployment's proxy topology.
+function parseTrustProxy(raw: string | undefined): boolean | number | string {
+  if (raw === undefined || raw.trim() === "") return 1;
+  const v = raw.trim();
+  if (v.toLowerCase() === "true") return true;
+  if (v.toLowerCase() === "false") return false;
+  const n = Number(v);
+  if (Number.isInteger(n) && n >= 0) return n;
+  return v; // CIDR / IP list — passed through to express verbatim
+}
+
 const app = express();
-app.set("trust proxy", true);
+app.set("trust proxy", parseTrustProxy(Deno.env.get("TREX_TRUST_PROXY")));
 // D2E_COMPAT: strip the /d2e base prefix before ANY route is registered.
 applyD2eCompatEarly(app);
 const server = createServer(app);
@@ -1129,16 +1145,19 @@ async function invokeEdgeFunction(req: any, res: any) {
       }
     }
   } catch {
-    // No function.json or parse error — default to requiring auth
+    // No function.json or parse error — fail closed: require a valid token
+    // (matches the verify_jwt path; a tokenless caller must not slip through).
     const authHeader = req.headers.authorization;
     const apikey = req.headers.apikey;
     const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : apikey;
-    if (token) {
-      const claims = await verifyAccessToken(token);
-      if (!claims) {
-        res.status(401).json({ error: "Invalid JWT" });
-        return;
-      }
+    if (!token) {
+      res.status(401).json({ error: "Invalid JWT" });
+      return;
+    }
+    const claims = await verifyAccessToken(token);
+    if (!claims) {
+      res.status(401).json({ error: "Invalid JWT" });
+      return;
     }
   }
 
