@@ -14,7 +14,7 @@ services. The repository ships several compose files for different scenarios.
 
 | File | Purpose |
 |------|---------|
-| `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus Studio and Realtime. The REST API is served in-process by the `@trex/postgrest` plugin. Uses the published image. |
+| `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus a Studio sidecar. The REST API and Realtime are served in-process on `trex-server` (`@trex/postgrest` plugin / native Realtime). Uses the published image. |
 | `docker-compose.dev.yml` | Development overlay. Collapses to a single-node `trex` service and live-mounts `core/server`, `core/event`, `functions`, and the prebuilt `plugins/web/dist`, `plugins/notebook/dist`, `plugins/storage`, and `plugins/postgrest` directories so changes take effect without rebuilding. |
 | `docker-compose.dx.yml` | Standalone devx stack: a single-node trex with the devx plugin and `devx_ext` extension baked into a dedicated image (`ghcr.io/ohdsi/trexsql-dx:latest`). Runs alongside the default stack (ports offset +1000 on HTTP / +20 on pg). |
 | `docker-compose.pg-trex.yml` | Replaces vanilla Postgres with the `pg-trex` image (Postgres + the Trex extensions co-located in one process). Uses gossip port `7946`. |
@@ -48,12 +48,13 @@ This starts:
   Realtime. Published on host port `65433`.
 - **trex-data** — the data node. Holds the analytical pool and serves Arrow
   Flight SQL on `50051` (internal only). Runs the schema migrations.
-- **trex-server** — the non-data node. Serves the web/MCP/REST/GraphQL HTTP
-  surface on `8001`, the TLS variant on `8000`, and the pgwire endpoint on
-  `5433`. Opens remote sessions to `trex-data`.
+- **trex-server** — the non-data node. Serves the web/MCP/REST/GraphQL/Realtime
+  HTTP surface on `8001`, the TLS variant on `8000`, and the pgwire endpoint on
+  `5433`. Opens remote sessions to `trex-data`. Realtime runs **in-process**
+  here (Phoenix-channels at `/trex/realtime/v1/*`) — there is no separate
+  Realtime container.
 - **studio** — the Supabase Studio sidecar (internal only; Trex proxies
   `/plugins/trex/studio/**` to it).
-- **realtime** (`supabase/realtime:v2.93.3`) — the Realtime server.
 
 The PostgREST-compatible REST API at `${BASE_PATH}/rest/v1/*` is served
 **in-process** on `trex-server` by the `@trex/postgrest` plugin (configured via

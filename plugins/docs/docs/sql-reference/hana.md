@@ -162,6 +162,39 @@ SELECT trex_hana_execute(
 );
 ```
 
+### `trex_hana_materialize_cohort(connection_string, source_sql, source_params_json, results_schema, cohort_definition_id, session_vars_json)`
+
+Materialize an OHDSI cohort directly inside HANA. Runs `source_sql` on HANA,
+then batch-inserts the resulting subjects into the `COHORT` table of
+`results_schema` on the same HANA server — the data never leaves HANA. Use it
+to write cohorts back to a HANA results schema without round-tripping rows
+through Trex.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| connection_string | VARCHAR | HANA connection URL. |
+| source_sql | VARCHAR | Query producing the cohort. Must yield `SUBJECT_ID`, `COHORT_START_DATE`, `COHORT_END_DATE` (case-insensitive). |
+| source_params_json | VARCHAR | JSON array of bind parameters for `source_sql`. Empty array runs it as a plain query. |
+| results_schema | VARCHAR | HANA schema containing the target `COHORT` table. Validated as a safe identifier. |
+| cohort_definition_id | BIGINT | Value written to `COHORT_DEFINITION_ID` on every inserted row. |
+| session_vars_json | VARCHAR | JSON object of HANA client-info session vars. `APPLICATION` and `APPLICATIONUSER` are recognized. |
+
+**Returns:** BIGINT — the number of rows inserted.
+
+```sql
+SELECT trex_hana_materialize_cohort(
+  'hdbsqls://user:pass@hana:39015/HDB',
+  'SELECT person_id AS subject_id, start_date AS cohort_start_date, end_date AS cohort_end_date FROM CDM.MY_COHORT',
+  '[]',
+  'RESULTS',
+  42,
+  '{"APPLICATION": "trex"}'
+);
+```
+
+Insert batching is tuned by `HANA_MATERIALIZE_BATCH_SIZE` (default 30000) and
+`HANA_MATERIALIZE_FETCH_SIZE` (default 100000).
+
 ## Operational notes
 
 - **Pushdown coverage**: filters (`WHERE`), projections (`SELECT cols`), and
