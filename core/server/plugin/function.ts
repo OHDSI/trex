@@ -19,6 +19,23 @@ async function readEszipCached(eszipPath: string): Promise<Uint8Array> {
   return bytes;
 }
 
+// buildDatabaseCredentials() marshals the whole credential registry across the
+// Trex.DatabaseManager FFI boundary and JSON-serializes it. Doing that on every
+// _callWorker — once per request, and again for each cross-worker fan-out hop —
+// was the dominant per-request cost under D2E_COMPAT. The registry only changes
+// on a deliberate sync (getRegistrationEpoch advances on boot and /trex/db
+// writes), so memoize the serialized value and rebuild only when the epoch moves.
+let _dbCredsJson: string | null = null;
+let _dbCredsEpoch = -1;
+function cachedDatabaseCredentialsJson(): string {
+  const epoch = getRegistrationEpoch();
+  if (_dbCredsJson === null || _dbCredsEpoch !== epoch) {
+    _dbCredsJson = JSON.stringify(buildDatabaseCredentials());
+    _dbCredsEpoch = epoch;
+  }
+  return _dbCredsJson;
+}
+
 export const ROLE_SCOPES: Record<string, string[]> = {};
 export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[] }> = [];
 
@@ -231,10 +248,10 @@ async function _callWorker(
       // Under d2e, provide the live DB registry to function workers the way d2e
       // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
       // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Serialized to a JSON
-      // string by the _myenv builder below (like the d2e env var).
+      // mapping stays in the plugin's own envConverter. Already a JSON string
+      // (epoch-cached), so the _myenv builder passes it through unchanged.
       ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: buildDatabaseCredentials() }
+        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
         : {}),
     },
   );
@@ -336,10 +353,10 @@ async function _callInit(
       // Under d2e, provide the live DB registry to function workers the way d2e
       // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
       // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Serialized to a JSON
-      // string by the _myenv builder below (like the d2e env var).
+      // mapping stays in the plugin's own envConverter. Already a JSON string
+      // (epoch-cached), so the _myenv builder passes it through unchanged.
       ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: buildDatabaseCredentials() }
+        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
         : {}),
     },
   );
