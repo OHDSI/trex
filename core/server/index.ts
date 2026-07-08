@@ -474,95 +474,12 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
 });
 
 try {
-// Studio's static export emits literal bracket-segment paths (e.g. /project/[ref]/index.html).
-// The browser hits /project/default/..., so we rewrite to the bracket-form sibling on disk.
-const STUDIO_STATIC_DIR = "/usr/src/plugins-dev/studio/build_static";
-const STUDIO_REWRITE_CACHE = new Map<string, string>();
-const STUDIO_REWRITE_CACHE_MAX = 4096;
-
-function rewriteStudioUrl(originalUrl: string): string {
-  const cached = STUDIO_REWRITE_CACHE.get(originalUrl);
-  if (cached !== undefined) return cached;
-  const result = computeStudioRewrite(originalUrl);
-  if (STUDIO_REWRITE_CACHE.size >= STUDIO_REWRITE_CACHE_MAX) {
-    const firstKey = STUDIO_REWRITE_CACHE.keys().next().value;
-    if (firstKey !== undefined) STUDIO_REWRITE_CACHE.delete(firstKey);
-  }
-  STUDIO_REWRITE_CACHE.set(originalUrl, result);
-  return result;
-}
-
-function computeStudioRewrite(originalUrl: string): string {
-  const queryIdx = originalUrl.indexOf("?");
-  const pathOnly = queryIdx >= 0 ? originalUrl.slice(0, queryIdx) : originalUrl;
-  const query = queryIdx >= 0 ? originalUrl.slice(queryIdx) : "";
-
-  if (!pathOnly.startsWith("/plugins/trex/studio")) return originalUrl;
-  if (pathOnly.startsWith("/plugins/trex/studio/api")) return originalUrl;
-
-  const stripped = pathOnly.slice("/plugins/trex/studio".length);
-  const segments = stripped.split("/").filter(Boolean);
-  if (segments.length === 0) return originalUrl;
-
-  let cur = STUDIO_STATIC_DIR;
-  const outSegs: string[] = [];
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const literal = `${cur}/${seg}`;
-    let stat: any;
-    try { stat = Deno.statSync(literal); } catch { stat = null; }
-    if (stat?.isDirectory) {
-      outSegs.push(seg);
-      cur = literal;
-      continue;
-    }
-    if (stat?.isFile) {
-      outSegs.push(seg);
-      cur = literal;
-      continue;
-    }
-
-    let bracket: string | null = null;
-    let catchall: string | null = null;
-    try {
-      for (const e of Deno.readDirSync(cur)) {
-        if (!e.isDirectory) continue;
-        if (e.name.startsWith("[[...")) catchall = e.name;
-        else if (e.name.startsWith("[") && e.name.endsWith("]")) bracket = e.name;
-      }
-    } catch { /* ignore */ }
-
-    if (bracket) {
-      outSegs.push(bracket);
-      cur = `${cur}/${bracket}`;
-      continue;
-    }
-    if (catchall) {
-      outSegs.push(catchall);
-      return "/plugins/trex/studio/" + outSegs.join("/") + query;
-    }
-    return originalUrl;
-  }
-
-  const rewritten = "/plugins/trex/studio/" + outSegs.join("/") + (pathOnly.endsWith("/") ? "/" : "") + query;
-  return rewritten;
-}
-
-// The Studio index page hangs trying to resolve `/project/[ref]` against `as=/` — skip to /project/default.
-app.get(["/plugins/trex/studio", "/plugins/trex/studio/"], (_req, res) => {
-  res.redirect(302, "/plugins/trex/studio/project/default/");
-});
-
-app.use((req, _res, next) => {
-  if (req.url.startsWith("/plugins/trex/studio")) {
-    const next_url = rewriteStudioUrl(req.url);
-    if (next_url !== req.url) req.url = next_url;
-  }
-  next();
-});
-
-// /plugins/trex/studio/api/** proxies to the Studio Node sidecar via the
-// @trex/studio function plugin; non-/api paths are served as static assets.
+// The studio SPA is served entirely by the Studio Node sidecar via the
+// @trex/studio function plugin (the studio catch-all route below). The sidecar's
+// Next.js build embeds NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio, so its HTML
+// references assets under that base and they resolve. The old static build_static
+// export shipped root-relative asset refs (blank page) and lacked studio's server
+// API routes, so it is no longer served.
 function buildWorkerRequest(req: any, rewrittenPath?: string): globalThis.Request {
   const host = req.get("host") || "localhost";
   const protocol = req.protocol || "http";
@@ -629,13 +546,15 @@ app.post("/plugins/trex/studio/api/platform/notifications/archive-all", (_req, r
   res.status(200).json([]);
 });
 
+// Serve the whole studio app (pages, /_next assets, and API) from the sidecar.
+// The admin-only gate above still protects /plugins/trex/studio/api.
 app.all(
-  ["/plugins/trex/studio/api", "/plugins/trex/studio/api/*"],
+  ["/plugins/trex/studio", "/plugins/trex/studio/*"],
   async (req, res) => {
     try {
       await forwardToStudioSidecar(req, res);
     } catch (err) {
-      console.error("[studio-api] Error:", err);
+      console.error("[studio] Error:", err);
       res.status(500).json({ error: "Internal server error", message: String(err) });
     }
   },
