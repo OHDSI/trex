@@ -1,7 +1,7 @@
 import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
 import type { Express, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
-import { pluginAuthz } from "../middleware/plugin-authz.ts";
+import { pluginAuthz, d2eAuthn } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
@@ -449,11 +449,14 @@ function _addFunction(
   const fullSource = isTrexPlugin
     ? PLUGINS_BASE_PATH + scopePrefix + url
     : url;
-  // @trex plugins go through trex's auth (authContext + pluginAuthz). d2e/legacy
-  // plugins authenticate inside the function worker using the forwarded Logto
-  // Authorization header (as the d2e fork did); imposing trex's pluginAuthz here
-  // would 401 every Logto-authenticated call — including the portal's public APIs.
-  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [];
+  // @trex plugins go through trex's auth (authContext + pluginAuthz, keyed on the
+  // trex HS256 session). d2e/legacy plugins carry a Logto RS256 JWT that authContext
+  // can't validate, so they use d2eAuthn: it verifies the Logto token against the
+  // Logto JWKS and enforces the role/URL scope check before forwarding to the worker
+  // (which only decodes the token). This restores the authn+authz the d2e fork did
+  // itself; without it a forged JWT would be trusted. Public paths are allowlisted
+  // inside d2eAuthn.
+  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [d2eAuthn];
   app.all([fullSource, fullSource + "/*"], apiLimiter, ...authMw, async (req: Request, res: Response) => {
     try {
       const host = req.get("host") || "localhost";
