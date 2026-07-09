@@ -6,8 +6,8 @@ sidebar_position: 1
 
 Trex is built around three layers that share one process tree: an analytical
 column-store engine (Rust), a Deno-based core management server, and a plugin
-system that lets third parties contribute UIs, APIs, flows, migrations, and
-data transforms.
+system that lets third parties contribute UIs, APIs, flows, migrations, data
+transforms, and AI agents.
 
 ## Process Layout
 
@@ -43,6 +43,7 @@ flowchart TD
         Flows
         Migrations
         Transforms
+        Agents
     end
 
     subgraph Data["Data Layer"]

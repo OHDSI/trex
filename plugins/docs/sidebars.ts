@@ -93,6 +93,7 @@ const sidebars: SidebarsConfig = {
         "plugins/function-plugins",
         "plugins/flow-plugins",
         "plugins/transform-plugins",
+        "plugins/agent-plugins",
       ],
     },
     {
