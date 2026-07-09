@@ -952,7 +952,10 @@ jobs:
       checks: write
       pull-requests: write
     env:
-      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
+      # Test against the d2e branch carrying the trex-main migration changes so the
+      # e2e exercises the d2e-plugin auth/routing against this trex build. Revert to
+      # 'develop' once p-hoffmann/trex-main-migration merges into d2e develop.
+      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'p-hoffmann/trex-main-migration' }}
       VERSION: develop
       # Force the compose project name so containers come up as d2e-* — the health
       # check, log dumps and checkflow steps inspect `d2e-trex` by name, but d2e's
