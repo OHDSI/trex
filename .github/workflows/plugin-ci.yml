@@ -255,6 +255,23 @@ jobs:
         env:
           CI: true
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Rust plugins (runtime/trexas especially) produce a multi-GB target/ and,
+      # with both the build cache and rust-cache saving in the post phase, exhaust
+      # the runner's ~14 GB free disk ("No space left on device"). Reclaim ~15-20 GB
+      # first. tool-cache is kept (it holds the Node just installed by setup-node,
+      # which `npm pack` needs below).
+      - name: Free disk space
+        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
+        continue-on-error: true
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
       # Cache cargo / maven / leiningen state per-plugin. The actual build
       # is triggered by `npm pack` -> the plugin's prepack hook, so caches
       # need to be in place before that. Without this the runtime (trexas)
