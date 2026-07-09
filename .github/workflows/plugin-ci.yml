@@ -255,23 +255,53 @@ jobs:
         env:
           CI: true
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Rust plugins (runtime/trexas especially) produce a multi-GB target/ and,
+      # with both the build cache and rust-cache saving in the post phase, exhaust
+      # the runner's ~14 GB free disk ("No space left on device"). Reclaim ~15-20 GB
+      # first. tool-cache is kept (it holds the Node just installed by setup-node,
+      # which `npm pack` needs below).
+      - name: Free disk space
+        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
+        continue-on-error: true
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          # large-packages runs `apt-get remove` on the host and cascades into the
+          # C toolchain (removes gcc's stdarg.h) — this job compiles libsqlite3-sys
+          # via cc on the host, so keep it off. android+dotnet+haskell+docker already
+          # reclaim ~20 GB.
+          large-packages: false
+          docker-images: true
+          swap-storage: true
       # Cache cargo / maven / leiningen state per-plugin. The actual build
       # is triggered by `npm pack` -> the plugin's prepack hook, so caches
       # need to be in place before that. Without this the runtime (trexas)
       # build takes ~29 min on every PR which blocks e2e-d2e.
+      # Non-Rust build state (maven/leiningen/CMake). The Rust cache is handled by
+      # rust-cache below, which prunes target/ to just dependency artifacts so it
+      # stays well under GitHub's 10 GB cache limit (the raw target/ cache here was
+      # evicted, forcing the ~29 min trexas rebuild on nearly every run).
       - name: Restore build cache
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
             ~/.m2/repository
             ~/.cache/lein
-            ${{ matrix.PKGPATH }}/target
             ${{ matrix.PKGPATH }}/build
-          key: plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH), format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
+          key: plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-${{ hashFiles(format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
           restore-keys: |
             plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-
+      # Compact, eviction-resilient Rust cache (~/.cargo + pruned target/) for the
+      # plugins that have a Cargo.lock (runtime/trexas, bao, etl, chdb, …).
+      - name: Rust build cache
+        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.PKGPATH }}
+          cache-on-failure: "true"
       - name: Configure @trex publish registry
         uses: actions/setup-node@v4
         with:
@@ -381,7 +411,7 @@ jobs:
           - PKGPATH: ./plugins/migration
           - PKGPATH: ./plugins/db
             SWAP: true
-            CARGO_BUILD_JOBS: 2
+            CARGO_BUILD_JOBS: 4
           - PKGPATH: ./plugins/etl
           - PKGPATH: ./plugins/fhir
           - PKGPATH: ./plugins/transform
@@ -389,7 +419,7 @@ jobs:
           - PKGPATH: ./plugins/webapi
           - PKGPATH: ./plugins/chdb
             SWAP: true
-            CARGO_BUILD_JOBS: 2
+            CARGO_BUILD_JOBS: 4
             # chdb links a prebuilt libchdb; install_chdb.sh (which already
             # selects linux-aarch64) runs in prepack on amd64, but build-arm
             # calls make directly, so install it here first.
@@ -414,7 +444,7 @@ jobs:
           # rusty_v8 chromium submodule fetch succeed.
           - PKGPATH: ./plugins/runtime
             SWAP: true
-            CARGO_BUILD_JOBS: 2
+            CARGO_BUILD_JOBS: 4
             PREBUILD: "sudo apt-get update && sudo apt-get install -y curl unzip clang libclang-dev libopenblas-dev libglib2.0-dev && curl -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-arm64.zip && unzip -o libtrexsql-linux-arm64.zip && sudo cp duckdb.h /usr/local/include/ && sudo cp libtrexsql.so /usr/local/lib/ && sudo ldconfig"
 
     runs-on: ubuntu-24.04-arm
@@ -951,8 +981,18 @@ jobs:
       contents: read
       checks: write
       pull-requests: write
+      packages: read
     env:
-      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
+      # Test against the d2e branch carrying the trex-main migration changes so the
+      # e2e exercises the d2e-plugin auth/routing against this trex build. Revert to
+      # 'develop' once p-hoffmann/trex-main-migration merges into d2e develop.
+      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'p-hoffmann/trex-main-migration' }}
+      # d2e-trex tag prefix to base the stack on. The migration branch is d2e PR
+      # #2747, published as d2e-trex:pr-2747-<sha> (develop-<sha> tags are pruned by
+      # d2e's stale-tag cleanup, so they are not a reliable base). Its trex binary is
+      # built FROM our trexsql base, so it can rebundle this branch's core. Switch to
+      # 'develop-' once p-hoffmann/trex-main-migration merges into d2e develop.
+      D2E_TREX_TAG_PREFIX: pr-2747-
       VERSION: develop
     steps:
       - uses: actions/checkout@v4
@@ -1058,6 +1098,51 @@ jobs:
           cp ./trex-artifacts/*.trex d2e/.ci-overlay/
           ls -l d2e/.ci-overlay/
 
+      # d2e publishes d2e-trex only as <prefix><sha> tags (no moving ":develop"), and
+      # stale tags are pruned — so resolve the newest tag with D2E_TREX_TAG_PREFIX
+      # (the packages API returns versions newest-first) and verify it actually pulls
+      # before pinning it. DOCKER_TAG_NAME then drives the rebundle IMG, the compose
+      # override, and the cli.js compose pull/start.
+      - name: Resolve latest d2e-trex image tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
+            --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][0]')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::no d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*' found"; exit 1
+          fi
+          IMG="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${TAG}"
+          if ! docker manifest inspect "$IMG" >/dev/null 2>&1; then
+            echo "::error::resolved tag $TAG is not pullable ($IMG)"; exit 1
+          fi
+          echo "Using d2e-trex image: $IMG"
+          echo "DOCKER_TAG_NAME=$TAG" >> "$GITHUB_ENV"
+
+      - name: Rebundle this branch's core (main) into fresh eszips
+        run: |
+          # The pulled d2e-trex image's baked index.eszip is the OLD core. Rebundle
+          # THIS branch's core/server + core/event using the image's own `trex`
+          # binary + core node_modules, so the e2e exercises our actual main
+          # (d2eAuthn, routing, …) rather than the image's stale core.
+          IMG="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${DOCKER_TAG_NAME:-develop}"
+          docker pull "$IMG"
+          docker run --rm \
+            -v "$PWD/core:/newcore:ro" \
+            -v "$PWD/d2e/.ci-overlay:/out" \
+            --entrypoint bash "$IMG" -c '
+              set -eu
+              # Overlay our source onto the image core (keeping its node_modules), then rebundle.
+              cp -a /newcore/server/. /usr/src/core/server/
+              cp -a /newcore/event/.  /usr/src/core/event/
+              cd /usr/src
+              trex bundle ./core/server/index.ts ./core/server/index.eszip
+              trex bundle ./core/event/index.ts  ./core/event/index.eszip
+              cp ./core/server/index.eszip /out/core-server.eszip
+              cp ./core/event/index.eszip  /out/core-event.eszip
+            '
+          ls -l d2e/.ci-overlay/core-*.eszip
+
       - name: Create CI compose override
         run: |
           cat > d2e/docker-compose-ci.yml << 'EOF'
@@ -1078,6 +1163,9 @@ jobs:
                 - ./.ci-overlay/fhir.trex:/usr/src/node_modules/@trex/fhir/fhir.trex:ro
                 - ./.ci-overlay/pool.trex:/usr/src/node_modules/@trex/pool/pool.trex:ro
                 - ./.ci-overlay/tpm.trex:/usr/src/node_modules/@trex/tpm/tpm.trex:ro
+                # This branch's freshly-rebundled core (main) — so the e2e tests our core.
+                - ./.ci-overlay/core-server.eszip:/usr/src/core/server/index.eszip:ro
+                - ./.ci-overlay/core-event.eszip:/usr/src/core/event/index.eszip:ro
           EOF
           cat d2e/docker-compose-ci.yml
 
@@ -1112,12 +1200,17 @@ jobs:
       - name: Wait for services to be healthy
         timeout-minutes: 5
         run: |
-          echo "Waiting for d2e-trex to become healthy..."
-          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
-            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+          # The compose project name is d2e or alp depending on d2e's cli/env, so
+          # discover the trex container by its name suffix instead of hardcoding it.
+          echo "Waiting for the trex container to become healthy..."
+          while true; do
+            TREX=$(docker ps -a --format '{{.Names}}' | grep -E '(^|[-_])trex$' | head -1)
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$TREX" 2>/dev/null || echo "not found")
+            echo "  ${TREX:-<no trex container>}: ${STATUS}"
+            [ "$STATUS" = "healthy" ] && break
             sleep 5
           done
-          echo "d2e-trex is healthy"
+          echo "$TREX is healthy"
           docker ps --format "{{.Names}},{{.Status}}"
 
       - name: Run setupdemo
@@ -1151,14 +1244,17 @@ jobs:
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml stop
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml start
 
-      - name: Wait for d2e-trex healthy after restart
+      - name: Wait for trex healthy after restart
         timeout-minutes: 5
         run: |
-          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
-            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+          while true; do
+            TREX=$(docker ps -a --format '{{.Names}}' | grep -E '(^|[-_])trex$' | head -1)
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$TREX" 2>/dev/null || echo "not found")
+            echo "  ${TREX:-<no trex container>}: ${STATUS}"
+            [ "$STATUS" = "healthy" ] && break
             sleep 5
           done
-          echo "d2e-trex is healthy"
+          echo "$TREX is healthy"
 
       - name: Wait for d2e-ui plugin to be available
         run: |

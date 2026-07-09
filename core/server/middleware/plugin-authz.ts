@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { ROLE_SCOPES, REQUIRED_URL_SCOPES } from "../plugin/function.ts";
 import { extractToken, verifyLogtoToken } from "../d2e-compat/auth.ts";
+import { fetchUserGroups } from "../d2e-compat/lib/usermgmt.ts";
 
 export function pluginAuthz(
   req: Request,
@@ -76,30 +77,36 @@ const D2E_AUTHZ_PUBLIC_PATTERNS: RegExp[] = [
   /^\/usermgmt\/api\/user-group\/list$/,
 ];
 
-// Resolve the caller's roles from BOTH sources the d2e token carries, because
-// neither alone is complete:
-//   1. the Logto `roles` claim (role.systemadmin, role.researcher.<dataset>, …) —
-//      what d2e #129 keyed on; the setup/admin identity carries system-admin here,
-//      NOT in userMgmtGroups, so dropping it 403s admins and dataset researchers.
-//   2. the userMgmtGroups alp_role_* flags → RBAC role names (ported from d2e
-//      authz.ts buildUserFromToken) — what grants a non-admin (e.g. a Viewer) the
-//      scopes old main resolved via UserMgmt.
-// Both are looked up in ROLE_SCOPES, so whichever source grants the scope suffices.
-function d2eRolesFromToken(payload: Record<string, unknown>): string[] {
+// The d2e Logto token carries only coarse `roles` (Logto scope names, e.g.
+// role.systemadmin / role.researcher.<dataset>) — NOT the userMgmtGroups the
+// role/URL scope check needs. So the caller's role set is assembled from two
+// sources, exactly as old main's authz did:
+//   1. the token's `roles` claim (system-admin, M2M scopes, dataset-researcher);
+//   2. userMgmtGroups (alp_role_* flags) fetched per-request from usermgmt and
+//      mapped to the RBAC role names ROLE_SCOPES is keyed on.
+
+// Roles carried directly on the token. For M2M/service tokens the granted scopes
+// ARE the roles (old main's adUser), so the sub is included.
+function tokenRoles(payload: Record<string, unknown>): string[] {
   const roles: string[] = [];
   const rawRoles = payload["roles"];
   if (Array.isArray(rawRoles)) roles.push(...(rawRoles as string[]));
+  const sub = payload["sub"] as string | undefined;
+  if (isServiceToken(payload) && sub && !roles.includes(sub)) roles.push(sub);
+  return roles;
+}
 
+function isServiceToken(payload: Record<string, unknown>): boolean {
   const sub = payload["sub"] as string | undefined;
   const clientId = payload["client_id"] as string | undefined;
-  const grantType = payload["grant_type"] as string | undefined;
-  if (grantType === "client_credentials" || (!!sub && sub === clientId)) {
-    if (sub && !roles.includes(sub)) roles.push(sub);
-    return roles;
-  }
+  return payload["grant_type"] === "client_credentials" || (!!sub && sub === clientId);
+}
 
-  const g = (payload["userMgmtGroups"] ?? {}) as Record<string, unknown>;
+// Map d2e userMgmtGroups (alp_role_* flags) → RBAC role names that key into
+// ROLE_SCOPES — ported from d2e authz.ts buildUserFromToken.
+function rolesFromGroups(g: Record<string, unknown>): string[] {
   const nonEmptyArr = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
+  const roles: string[] = [];
   if (g["alp_role_user_admin"] === true) roles.push("ALP_USER_ADMIN");
   if (g["alp_role_system_admin"] === true) roles.push("ALP_SYSTEM_ADMIN");
   if (g["alp_role_dashboard_viewer"] === true) roles.push("ALP_DASHBOARD_VIEWER");
@@ -124,9 +131,10 @@ function d2eRolesFromToken(payload: Record<string, unknown>): string[] {
  *  - Missing/invalid token  → 401 (signature + expiry; aud/iss skipped, per old main).
  *  - System admin           → pass.
  *  - authz-public path      → pass, token required but no scope (authz_publicURLs).
- *  - Else                   → check REQUIRED_URL_SCOPES against the caller's scopes
- *                             (roles → ROLE_SCOPES); 403 if absent. Endpoints with no
- *                             scope entry pass (authenticated-only).
+ *  - No scope for the path  → pass (authenticated-only).
+ *  - Else                   → resolve the caller's roles (token `roles` + userMgmtGroups
+ *                             fetched from usermgmt, as old main did) and check
+ *                             REQUIRED_URL_SCOPES against ROLE_SCOPES; 403 if absent.
  */
 export const d2eAuthn = async (
   req: Request,
@@ -153,15 +161,13 @@ export const d2eAuthn = async (
   }
   (req as any).logtoSubject = (payload["sub"] as string | undefined) ?? null;
 
-  const roles = d2eRolesFromToken(payload);
+  const roles = tokenRoles(payload);
+  const tokenGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
 
-  // System admins pass (parity with pluginAuthz's admin bypass). Match old main:
-  // system-admin appears either as the userMgmtGroups flag (→ ALP_SYSTEM_ADMIN) or
-  // the Logto `roles` claim (role.systemadmin).
-  const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
-  if (roles.includes("ALP_SYSTEM_ADMIN") ||
-      roles.includes("role.systemadmin") ||
-      userMgmtGroups?.["alp_role_system_admin"] === true) {
+  // System admins pass (parity with pluginAuthz's admin bypass). System-admin is on
+  // the Logto `roles` claim (role.systemadmin); tolerate a userMgmtGroups flag too.
+  if (roles.includes("role.systemadmin") ||
+      tokenGroups?.["alp_role_system_admin"] === true) {
     next();
     return;
   }
@@ -172,16 +178,33 @@ export const d2eAuthn = async (
     return;
   }
 
+  // Endpoints with no declared scope → an authenticated user suffices; skip the
+  // (network) group resolution entirely.
   const requiredScopes: string[] = [];
   for (const entry of REQUIRED_URL_SCOPES) {
     if (new RegExp(entry.path).test(path)) {
       requiredScopes.push(...entry.scopes);
     }
   }
-  // No scope declared for this path → an authenticated user suffices.
   if (requiredScopes.length === 0) {
     next();
     return;
+  }
+
+  // Resolve the caller's full role set. The token does NOT carry userMgmtGroups, so
+  // regular users need them fetched from usermgmt (cached by jti), exactly as old
+  // main's authz did. Service/M2M tokens already carry their scopes as roles.
+  if (!isServiceToken(payload)) {
+    const sub = payload["sub"] as string | undefined;
+    const idpUserId = (payload["oid"] as string | undefined) || sub || "";
+    const jti = typeof payload["jti"] === "string" ? (payload["jti"] as string) : undefined;
+    const exp = typeof payload["exp"] === "number" ? (payload["exp"] as number) : undefined;
+    const groups = tokenGroups ?? (await fetchUserGroups(token, idpUserId, jti, exp));
+    if (!groups) {
+      res.status(403).json({ error: "Forbidden: could not resolve user roles" });
+      return;
+    }
+    roles.push(...rolesFromGroups(groups));
   }
 
   const userScopes = new Set<string>();
