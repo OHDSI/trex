@@ -76,22 +76,30 @@ const D2E_AUTHZ_PUBLIC_PATTERNS: RegExp[] = [
   /^\/usermgmt\/api\/user-group\/list$/,
 ];
 
-// Map the token's d2e userMgmtGroups (alp_role_* claims) → RBAC role names that key
-// into ROLE_SCOPES — ported from d2e authz.ts buildUserFromToken. Service/M2M tokens
-// carry their scopes as role claims directly. Resolving from userMgmtGroups (not the
-// coarse Logto `roles` claim) is what lets a non-admin (e.g. a Viewer) receive the
-// scopes old main granted via its UserMgmt-backed role resolution.
+// Resolve the caller's roles from BOTH sources the d2e token carries, because
+// neither alone is complete:
+//   1. the Logto `roles` claim (role.systemadmin, role.researcher.<dataset>, …) —
+//      what d2e #129 keyed on; the setup/admin identity carries system-admin here,
+//      NOT in userMgmtGroups, so dropping it 403s admins and dataset researchers.
+//   2. the userMgmtGroups alp_role_* flags → RBAC role names (ported from d2e
+//      authz.ts buildUserFromToken) — what grants a non-admin (e.g. a Viewer) the
+//      scopes old main resolved via UserMgmt.
+// Both are looked up in ROLE_SCOPES, so whichever source grants the scope suffices.
 function d2eRolesFromToken(payload: Record<string, unknown>): string[] {
+  const roles: string[] = [];
+  const rawRoles = payload["roles"];
+  if (Array.isArray(rawRoles)) roles.push(...(rawRoles as string[]));
+
   const sub = payload["sub"] as string | undefined;
   const clientId = payload["client_id"] as string | undefined;
   const grantType = payload["grant_type"] as string | undefined;
   if (grantType === "client_credentials" || (!!sub && sub === clientId)) {
-    const r = payload["roles"];
-    return Array.isArray(r) ? (r as string[]) : sub ? [sub] : [];
+    if (sub && !roles.includes(sub)) roles.push(sub);
+    return roles;
   }
+
   const g = (payload["userMgmtGroups"] ?? {}) as Record<string, unknown>;
   const nonEmptyArr = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
-  const roles: string[] = [];
   if (g["alp_role_user_admin"] === true) roles.push("ALP_USER_ADMIN");
   if (g["alp_role_system_admin"] === true) roles.push("ALP_SYSTEM_ADMIN");
   if (g["alp_role_dashboard_viewer"] === true) roles.push("ALP_DASHBOARD_VIEWER");
@@ -147,9 +155,12 @@ export const d2eAuthn = async (
 
   const roles = d2eRolesFromToken(payload);
 
-  // System admins pass (parity with pluginAuthz's admin bypass).
+  // System admins pass (parity with pluginAuthz's admin bypass). Match old main:
+  // system-admin appears either as the userMgmtGroups flag (→ ALP_SYSTEM_ADMIN) or
+  // the Logto `roles` claim (role.systemadmin).
   const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
   if (roles.includes("ALP_SYSTEM_ADMIN") ||
+      roles.includes("role.systemadmin") ||
       userMgmtGroups?.["alp_role_system_admin"] === true) {
     next();
     return;
