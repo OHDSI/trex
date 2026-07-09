@@ -259,19 +259,28 @@ jobs:
       # is triggered by `npm pack` -> the plugin's prepack hook, so caches
       # need to be in place before that. Without this the runtime (trexas)
       # build takes ~29 min on every PR which blocks e2e-d2e.
+      # Non-Rust build state (maven/leiningen/CMake). The Rust cache is handled by
+      # rust-cache below, which prunes target/ to just dependency artifacts so it
+      # stays well under GitHub's 10 GB cache limit (the raw target/ cache here was
+      # evicted, forcing the ~29 min trexas rebuild on nearly every run).
       - name: Restore build cache
         uses: actions/cache@v4
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
             ~/.m2/repository
             ~/.cache/lein
-            ${{ matrix.PKGPATH }}/target
             ${{ matrix.PKGPATH }}/build
-          key: plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH), format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
+          key: plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-${{ hashFiles(format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
           restore-keys: |
             plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-
+      # Compact, eviction-resilient Rust cache (~/.cargo + pruned target/) for the
+      # plugins that have a Cargo.lock (runtime/trexas, bao, etl, chdb, …).
+      - name: Rust build cache
+        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.PKGPATH }}
+          cache-on-failure: "true"
       - name: Configure @trex publish registry
         uses: actions/setup-node@v4
         with:
@@ -381,7 +390,7 @@ jobs:
           - PKGPATH: ./plugins/migration
           - PKGPATH: ./plugins/db
             SWAP: true
-            CARGO_BUILD_JOBS: 2
+            CARGO_BUILD_JOBS: 4
           - PKGPATH: ./plugins/etl
           - PKGPATH: ./plugins/fhir
           - PKGPATH: ./plugins/transform
@@ -389,7 +398,7 @@ jobs:
           - PKGPATH: ./plugins/webapi
           - PKGPATH: ./plugins/chdb
             SWAP: true
-            CARGO_BUILD_JOBS: 2
+            CARGO_BUILD_JOBS: 4
             # chdb links a prebuilt libchdb; install_chdb.sh (which already
             # selects linux-aarch64) runs in prepack on amd64, but build-arm
             # calls make directly, so install it here first.
@@ -414,7 +423,7 @@ jobs:
           # rusty_v8 chromium submodule fetch succeed.
           - PKGPATH: ./plugins/runtime
             SWAP: true
-            CARGO_BUILD_JOBS: 2
+            CARGO_BUILD_JOBS: 4
             PREBUILD: "sudo apt-get update && sudo apt-get install -y curl unzip clang libclang-dev libopenblas-dev libglib2.0-dev && curl -L -O https://github.com/p-hoffmann/trexsql-rs/releases/download/v1.4.4-trex/libtrexsql-linux-arm64.zip && unzip -o libtrexsql-linux-arm64.zip && sudo cp duckdb.h /usr/local/include/ && sudo cp libtrexsql.so /usr/local/lib/ && sudo ldconfig"
 
     runs-on: ubuntu-24.04-arm
@@ -1061,6 +1070,30 @@ jobs:
           cp ./trex-artifacts/*.trex d2e/.ci-overlay/
           ls -l d2e/.ci-overlay/
 
+      - name: Rebundle this branch's core (main) into fresh eszips
+        run: |
+          # The e2e runs d2e-trex:develop, whose baked index.eszip is the OLD core.
+          # Rebundle THIS branch's core/server + core/event using the image's own
+          # `trex` binary + core node_modules, so the e2e exercises our actual main
+          # (d2eAuthn, routing, …) rather than the image's stale core.
+          IMG="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${DOCKER_TAG_NAME:-develop}"
+          docker pull "$IMG"
+          docker run --rm \
+            -v "$PWD/core:/newcore:ro" \
+            -v "$PWD/d2e/.ci-overlay:/out" \
+            --entrypoint bash "$IMG" -c '
+              set -eu
+              # Overlay our source onto the image core (keeping its node_modules), then rebundle.
+              cp -a /newcore/server/. /usr/src/core/server/
+              cp -a /newcore/event/.  /usr/src/core/event/
+              cd /usr/src
+              trex bundle ./core/server/index.ts ./core/server/index.eszip
+              trex bundle ./core/event/index.ts  ./core/event/index.eszip
+              cp ./core/server/index.eszip /out/core-server.eszip
+              cp ./core/event/index.eszip  /out/core-event.eszip
+            '
+          ls -l d2e/.ci-overlay/core-*.eszip
+
       - name: Create CI compose override
         run: |
           cat > d2e/docker-compose-ci.yml << 'EOF'
@@ -1081,6 +1114,9 @@ jobs:
                 - ./.ci-overlay/fhir.trex:/usr/src/node_modules/@trex/fhir/fhir.trex:ro
                 - ./.ci-overlay/pool.trex:/usr/src/node_modules/@trex/pool/pool.trex:ro
                 - ./.ci-overlay/tpm.trex:/usr/src/node_modules/@trex/tpm/tpm.trex:ro
+                # This branch's freshly-rebundled core (main) — so the e2e tests our core.
+                - ./.ci-overlay/core-server.eszip:/usr/src/core/server/index.eszip:ro
+                - ./.ci-overlay/core-event.eszip:/usr/src/core/event/index.eszip:ro
           EOF
           cat d2e/docker-compose-ci.yml
 
