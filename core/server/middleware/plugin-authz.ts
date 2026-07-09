@@ -69,23 +69,56 @@ const D2E_PUBLIC_URL_PATTERNS: RegExp[] = [
   /^\/gateway\/api\/dataset\/shiny-live\/.*$/,
 ];
 
+// authz-public: a valid token is REQUIRED but no scope is enforced. From old main's
+// authz_publicURLs = publicURLs + these — shared bootstrap endpoints every signed-in
+// user hits regardless of role.
+const D2E_AUTHZ_PUBLIC_PATTERNS: RegExp[] = [
+  /^\/usermgmt\/api\/user-group\/list$/,
+];
+
+// Map the token's d2e userMgmtGroups (alp_role_* claims) → RBAC role names that key
+// into ROLE_SCOPES — ported from d2e authz.ts buildUserFromToken. Service/M2M tokens
+// carry their scopes as role claims directly. Resolving from userMgmtGroups (not the
+// coarse Logto `roles` claim) is what lets a non-admin (e.g. a Viewer) receive the
+// scopes old main granted via its UserMgmt-backed role resolution.
+function d2eRolesFromToken(payload: Record<string, unknown>): string[] {
+  const sub = payload["sub"] as string | undefined;
+  const clientId = payload["client_id"] as string | undefined;
+  const grantType = payload["grant_type"] as string | undefined;
+  if (grantType === "client_credentials" || (!!sub && sub === clientId)) {
+    const r = payload["roles"];
+    return Array.isArray(r) ? (r as string[]) : sub ? [sub] : [];
+  }
+  const g = (payload["userMgmtGroups"] ?? {}) as Record<string, unknown>;
+  const nonEmptyArr = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
+  const roles: string[] = [];
+  if (g["alp_role_user_admin"] === true) roles.push("ALP_USER_ADMIN");
+  if (g["alp_role_system_admin"] === true) roles.push("ALP_SYSTEM_ADMIN");
+  if (g["alp_role_dashboard_viewer"] === true) roles.push("ALP_DASHBOARD_VIEWER");
+  if (g["alp_role_study_write_dqd_researcher"] === true) roles.push("STUDY_WRITE_DQD_RESEARCHER");
+  if (g["alp_role_study_results_read_researcher"] === true) roles.push("STUDY_RESULTS_READ_RESEARCHER");
+  if (nonEmptyArr(g["alp_role_tenant_viewer"])) roles.push("TENANT_VIEWER");
+  if (g["alp_role_etl_mapping_contributor"] === true) roles.push("ETL_MAPPING_CONTRIBUTOR");
+  if (nonEmptyArr(g["alp_role_study_researcher"])) roles.push("RESEARCHER");
+  return roles;
+}
+
 /**
- * Authentication + authorization gate for d2e (non-@trex) plugin worker routes.
+ * Authentication + central authorization gate for d2e (non-@trex) plugin worker
+ * routes — a port of d2e's pre-migration authn.ts + authz.ts.
  *
- * Restores the enforcement d2e's own authn.ts + authz.ts performed before the
- * core migration. The new core forwards d2e-plugin requests straight to workers
- * that only `jwt.decode()` the bearer token (never verify its signature), so
- * without this gate a forged JWT is fully trusted — an authentication bypass.
- * Here trex verifies the Logto JWT and enforces the role/URL scope check before
- * the request reaches the worker.
+ * The new core forwards d2e-plugin requests straight to workers that only
+ * `jwt.decode()` the bearer token (never verify its signature), so without this
+ * gate a forged JWT is fully trusted. trex verifies the Logto JWT and enforces the
+ * role/URL scope check centrally (as old main did) before the worker runs.
  *
- *  - Public path (allowlist) → pass through, no token required.
- *  - Missing/invalid token   → 401 (signature + expiry verified; audience/issuer
- *                              skipped to match old main's jwtVerify).
- *  - System admin            → pass (parity with pluginAuthz's admin bypass).
- *  - Else                    → URL→scope RBAC via REQUIRED_URL_SCOPES/ROLE_SCOPES
- *                              keyed on the token's verified `roles` claim
- *                              (403 if the required scope is absent).
+ *  - authn-public path      → pass, no token (old main publicURLs).
+ *  - Missing/invalid token  → 401 (signature + expiry; aud/iss skipped, per old main).
+ *  - System admin           → pass.
+ *  - authz-public path      → pass, token required but no scope (authz_publicURLs).
+ *  - Else                   → check REQUIRED_URL_SCOPES against the caller's scopes
+ *                             (roles → ROLE_SCOPES); 403 if absent. Endpoints with no
+ *                             scope entry pass (authenticated-only).
  */
 export const d2eAuthn = async (
   req: Request,
@@ -110,40 +143,39 @@ export const d2eAuthn = async (
     res.status(401).send("Authentication Token not valid");
     return;
   }
-
-  const roles = Array.isArray(payload["roles"]) ? (payload["roles"] as string[]) : [];
-  const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
-  const isSystemAdmin = userMgmtGroups?.["alp_role_system_admin"] === true ||
-    roles.includes("role.systemadmin");
   (req as any).logtoSubject = (payload["sub"] as string | undefined) ?? null;
 
-  // System admins bypass scope checks (parity with pluginAuthz's admin bypass).
-  if (isSystemAdmin) {
+  const roles = d2eRolesFromToken(payload);
+
+  // System admins pass (parity with pluginAuthz's admin bypass).
+  const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
+  if (roles.includes("ALP_SYSTEM_ADMIN") ||
+      userMgmtGroups?.["alp_role_system_admin"] === true) {
     next();
     return;
   }
 
-  // URL → required-scope RBAC — identical logic to pluginAuthz, but keyed on the
-  // verified Logto token's roles rather than pgSettings/authContext.
+  // authz-public: valid token, no scope check (old main authz_publicURLs).
+  if (D2E_AUTHZ_PUBLIC_PATTERNS.some((re) => re.test(path))) {
+    next();
+    return;
+  }
+
   const requiredScopes: string[] = [];
   for (const entry of REQUIRED_URL_SCOPES) {
     if (new RegExp(entry.path).test(path)) {
       requiredScopes.push(...entry.scopes);
     }
   }
-  // No scope requirement for this path — any authenticated user suffices (e.g.
-  // /usermgmt/api/user-group/list, in old main's authz_publicURLs but not its
-  // authn publicURLs: token required, no specific scope).
+  // No scope declared for this path → an authenticated user suffices.
   if (requiredScopes.length === 0) {
     next();
     return;
   }
 
   const userScopes = new Set<string>();
-  for (const roleName of roles) {
-    for (const scope of ROLE_SCOPES[roleName] ?? []) {
-      userScopes.add(scope);
-    }
+  for (const role of roles) {
+    for (const scope of ROLE_SCOPES[role] ?? []) userScopes.add(scope);
   }
   if (requiredScopes.some((scope) => userScopes.has(scope))) {
     next();
