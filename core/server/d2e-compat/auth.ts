@@ -27,7 +27,7 @@ function getJWKS(): ReturnType<typeof createRemoteJWKSet> {
   return _JWKS;
 }
 
-function extractToken(req: import("express").Request): string | null {
+export function extractToken(req: import("express").Request): string | null {
   const regex = /\b(Bearer|bearer|token)\b/;
 
   const authHeader = req.headers.authorization as string | undefined;
@@ -42,14 +42,29 @@ function extractToken(req: import("express").Request): string | null {
     for (const cookie of cookies) {
       if (cookie.startsWith("authtoken=")) {
         return cookie.slice("authtoken=".length).trim();
-      } else if (cookie.startsWith("fhirtoken=")) {
-        const val = cookie.slice("fhirtoken=".length).trim();
-        return val.split(" ")[1] || null;
       }
     }
   }
 
   return null;
+}
+
+/**
+ * Verify a Logto JWT (signature + expiry only — matching old main's authn.ts,
+ * which did NOT validate audience/issuer) and return its decoded claims, or
+ * null if the token is missing or invalid. Shared by the d2e plugin auth gate.
+ */
+export async function verifyLogtoToken(
+  token: string | null,
+): Promise<Record<string, unknown> | null> {
+  if (!token) return null;
+  try {
+    await jwtVerify(token, getJWKS());
+    return decodeJwt(token) as Record<string, unknown>;
+  } catch (err) {
+    console.error(`[d2e-compat] verifyLogtoToken: invalid Logto token: ${err}`);
+    return null;
+  }
 }
 
 /**

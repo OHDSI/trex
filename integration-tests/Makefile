@@ -15,11 +15,11 @@ VENV=./venv
 PYTEST=$(VENV)/bin/pytest
 PYTEST_COV_ARGS=--cov=. --cov-report=xml:coverage/python.xml --cov-append
 
-.PHONY: configure test test-tier1 test-tier2 test-tier3 test-pgwire test-pgwire-db test-pgwire-decimal test-pgwire-datatypes test-atlas test-ai test-chdb test-chdb-db test-hana test-tpm test-etl test-etl-db test-fhir test-trexas test-trexas-swarm test-pg-trex check-extensions check-pgwire check-atlas check-ai check-chdb check-hana check-tpm check-etl check-fhir check-migration check-trexas check-db hana-up hana-down hana-clean pg-trex-up pg-trex-down clean coverage-merge coverage-clean
+.PHONY: configure test test-tier1 test-tier2 test-tier3 test-pgwire test-pgwire-db test-pgwire-decimal test-pgwire-datatypes test-atlas test-ai test-chdb test-chdb-db test-hana test-tpm test-etl test-etl-db test-fhir test-realtime test-realtime-js test-trexas test-trexas-swarm test-pg-trex check-extensions check-pgwire check-atlas check-ai check-chdb check-hana check-tpm check-etl check-fhir check-migration check-trexas check-db hana-up hana-down hana-clean pg-trex-up pg-trex-down clean coverage-merge coverage-clean
 
 configure:
 	$(PYTHON_BIN) -m venv $(VENV)
-	$(VENV)/bin/pip install 'duckdb==1.4.4' pytest pytest-cov psycopg2-binary
+	$(VENV)/bin/pip install 'duckdb==1.4.4' pytest pytest-cov psycopg2-binary 'psycopg[binary]' websockets requests
 
 check-extensions:
 	@test -f $(DB_EXT) || (echo "Build db first: cd ../plugins/db && make configure && make debug" && exit 1)
@@ -193,6 +193,24 @@ check-fhir:
 test-fhir: check-fhir
 	@mkdir -p coverage
 	$(PYTEST) -v $(PYTEST_COV_ARGS) test_fhir_standalone.py
+
+# Native realtime (Supabase-Realtime-compatible) end-to-end suite. Requires a
+# running trex stack (docker compose up) reachable at http://localhost:8001
+# and its backing Postgres reachable at DATABASE_URL (defaults to
+# postgres://postgres:mypass@localhost:65433/testdb, matching docker-compose.yml).
+# Skips cleanly (not a failure) when either is unreachable.
+test-realtime:
+	@mkdir -p coverage
+	$(PYTEST) -v $(PYTEST_COV_ARGS) test_realtime_standalone.py
+
+# realtime-js reference-client E2E: drives the REAL @supabase/realtime-js v2
+# client against trex (the definitive compat oracle, vs. test-realtime's
+# direct-wire-protocol tests above). Requires the same running stack plus
+# TREX_ANON_KEY (fetched automatically from trexdb.setting if unset — see
+# realtime_js_e2e/run.sh) and Docker (used to prep/insert/clean up the
+# rt_e2e table without requiring a local psql).
+test-realtime-js:
+	cd realtime_js_e2e && ./run.sh
 
 clean:
 	rm -rf venv __pycache__ .pytest_cache

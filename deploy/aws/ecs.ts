@@ -3,11 +3,8 @@ import * as pulumi from "@pulumi/pulumi";
 import { Sizing } from "../shared/config";
 import {
   TREX_PORT,
-  POSTGREST_PORT,
-  POSTGREST_IMAGE,
   TREX_HEALTH_CHECK,
   buildTrexEnvVars,
-  buildPostgrestEnvVars,
 } from "../shared/containers";
 
 export interface EcsResult {
@@ -104,15 +101,10 @@ export function createEcs(opts: {
       })
     );
 
-  const postgrestEnv = pulumi.all([opts.databaseUrl, opts.authSecret, opts.endpointUrl]).apply(
-    ([dbUrl, secret, endpoint]) =>
-      buildPostgrestEnvVars({ databaseUrl: dbUrl, jwtSecret: secret, endpointUrl: endpoint })
-  );
-
   const logGroupName = logGroup.name;
   const containerDefinitions = pulumi
-    .all([trexEnv, postgrestEnv, opts.s3BucketName, logGroupName, region])
-    .apply(([tEnv, pEnv, bucketName, lgName, awsRegion]) =>
+    .all([trexEnv, opts.s3BucketName, logGroupName, region])
+    .apply(([tEnv, bucketName, lgName, awsRegion]) =>
       JSON.stringify([
         {
           name: "trex",
@@ -136,25 +128,6 @@ export function createEcs(opts: {
               "awslogs-group": lgName,
               "awslogs-region": awsRegion,
               "awslogs-stream-prefix": "trex",
-            },
-          },
-        },
-        {
-          name: "postgrest",
-          image: POSTGREST_IMAGE,
-          essential: false,
-          dependsOn: [{ containerName: "trex", condition: "HEALTHY" }],
-          portMappings: [{ containerPort: POSTGREST_PORT, protocol: "tcp" }],
-          environment: Object.entries(pEnv).map(([name, value]) => ({
-            name,
-            value,
-          })),
-          logConfiguration: {
-            logDriver: "awslogs",
-            options: {
-              "awslogs-group": lgName,
-              "awslogs-region": awsRegion,
-              "awslogs-stream-prefix": "postgrest",
             },
           },
         },

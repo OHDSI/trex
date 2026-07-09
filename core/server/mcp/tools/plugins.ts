@@ -118,6 +118,46 @@ export function registerPluginTools(server: McpServer) {
   );
 
   server.tool(
+    "plugin-update",
+    "Update an installed trex plugin to a new version (or the latest if no version given). Implemented as uninstall-then-reinstall on disk; the new version loads on next restart. Pass packageName (e.g. '@trex/my-plugin') and optionally a target version.",
+    {
+      packageName: z.string().describe("NPM package name to update, e.g. '@trex/my-plugin'"),
+      version: z.string().optional().describe("Target version, e.g. '1.2.0'. Omit for latest."),
+    },
+    async ({ packageName, version }) => {
+      try {
+        const dir = Deno.env.get("PLUGINS_PATH") || "./plugins";
+        const conn = new Trex.TrexDB("memory");
+
+        const delSql = `SELECT delete_results FROM trex_plugin_delete('${escapeSql(packageName)}', '${escapeSql(dir)}')`;
+        await conn.execute(delSql, []);
+
+        const spec = version ? `${packageName}@${escapeSql(version)}` : packageName;
+        const installSql = `SELECT install_results FROM trex_plugin_install('${escapeSql(spec)}', '${escapeSql(dir)}')`;
+        const result = await conn.execute(installSql, []);
+        const rows = result?.rows || result || [];
+        const parsed = rows.map((r: any) => {
+          try {
+            return JSON.parse(r.install_results || r[0]);
+          } catch {
+            return r.install_results || r[0];
+          }
+        });
+        const installResult = parsed.length === 1 ? parsed[0] : parsed;
+        if (installResult?.success === false || installResult?.error) {
+          return {
+            content: [{ type: "text", text: `Update failed: ${installResult.error || "Unknown error"}\n${JSON.stringify(installResult, null, 2)}` }],
+            isError: true,
+          };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(installResult, null, 2) }] };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
     "plugin-get-info",
     "Get detailed information about a specific trex plugin including its full trex config from package.json, active/installed status, registered types, and migration status (applied/pending counts). Use this to inspect a plugin's configuration and verify it is correctly set up.",
     {

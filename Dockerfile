@@ -230,6 +230,13 @@ COPY --from=docs-builder /build/build/ ./plugins-dev/docs/build/
 COPY plugins/studio/ ./plugins-dev/studio/
 COPY --from=studio-builder /build/build_static/ ./plugins-dev/studio/build_static/
 COPY plugins/storage/ ./plugins-dev/storage/
+COPY plugins/postgrest/ ./plugins-dev/postgrest/
+# Pre-warm the postgrest worker's npm deps (pg/jose are npm: specifiers in
+# functions/deno.json — the worker runtime stages the source WITHOUT
+# node_modules, so bare/byonm resolution is not an option) into the node
+# user's DENO_DIR so the first REST request needs no registry access.
+RUN DENO_DIR=/home/node/.cache/deno deno cache --config plugins-dev/postgrest/functions/deno.json plugins-dev/postgrest/functions/index.ts \
+ && chown -R node:node /home/node/.cache/deno
 COPY plugins/pg-meta/ ./plugins-dev/pg-meta/
 COPY --from=pg-meta-builder /build/dist/ ./plugins-dev/pg-meta/postgres-meta/dist/
 COPY --from=pg-meta-builder /build/node_modules/ ./plugins-dev/pg-meta/postgres-meta/node_modules/
