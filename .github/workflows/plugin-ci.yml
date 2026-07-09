@@ -981,6 +981,7 @@ jobs:
       contents: read
       checks: write
       pull-requests: write
+      packages: read
     env:
       # Test against the d2e branch carrying the trex-main migration changes so the
       # e2e exercises the d2e-plugin auth/routing against this trex build. Revert to
@@ -1091,11 +1092,28 @@ jobs:
           cp ./trex-artifacts/*.trex d2e/.ci-overlay/
           ls -l d2e/.ci-overlay/
 
+      # d2e publishes d2e-trex only as develop-<sha> / pr-<n>-<sha> — there is no
+      # moving ":develop" tag, so resolve the newest develop-* tag (the packages API
+      # returns versions newest-first) and pin every downstream reference to it via
+      # DOCKER_TAG_NAME (used by the rebundle IMG, the compose override, and the
+      # cli.js compose pull/start).
+      - name: Resolve latest d2e-trex image tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
+            --jq '[.[].metadata.container.tags[]? | select(startswith("develop-"))][0]')
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::could not resolve a develop-* tag for d2e-trex"; exit 1
+          fi
+          echo "Using d2e-trex tag: $TAG"
+          echo "DOCKER_TAG_NAME=$TAG" >> "$GITHUB_ENV"
+
       - name: Rebundle this branch's core (main) into fresh eszips
         run: |
-          # The e2e runs d2e-trex:develop, whose baked index.eszip is the OLD core.
-          # Rebundle THIS branch's core/server + core/event using the image's own
-          # `trex` binary + core node_modules, so the e2e exercises our actual main
+          # The pulled d2e-trex image's baked index.eszip is the OLD core. Rebundle
+          # THIS branch's core/server + core/event using the image's own `trex`
+          # binary + core node_modules, so the e2e exercises our actual main
           # (d2eAuthn, routing, …) rather than the image's stale core.
           IMG="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${DOCKER_TAG_NAME:-develop}"
           docker pull "$IMG"
