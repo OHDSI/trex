@@ -69,20 +69,56 @@ const D2E_PUBLIC_URL_PATTERNS: RegExp[] = [
   /^\/gateway\/api\/dataset\/shiny-live\/.*$/,
 ];
 
+// authz-public: a valid token is REQUIRED but no scope is enforced. From old main's
+// authz_publicURLs = publicURLs + these — shared bootstrap endpoints every signed-in
+// user hits regardless of role.
+const D2E_AUTHZ_PUBLIC_PATTERNS: RegExp[] = [
+  /^\/usermgmt\/api\/user-group\/list$/,
+];
+
+// Map the token's d2e userMgmtGroups (alp_role_* claims) → RBAC role names that key
+// into ROLE_SCOPES — ported from d2e authz.ts buildUserFromToken. Service/M2M tokens
+// carry their scopes as role claims directly. Resolving from userMgmtGroups (not the
+// coarse Logto `roles` claim) is what lets a non-admin (e.g. a Viewer) receive the
+// scopes old main granted via its UserMgmt-backed role resolution.
+function d2eRolesFromToken(payload: Record<string, unknown>): string[] {
+  const sub = payload["sub"] as string | undefined;
+  const clientId = payload["client_id"] as string | undefined;
+  const grantType = payload["grant_type"] as string | undefined;
+  if (grantType === "client_credentials" || (!!sub && sub === clientId)) {
+    const r = payload["roles"];
+    return Array.isArray(r) ? (r as string[]) : sub ? [sub] : [];
+  }
+  const g = (payload["userMgmtGroups"] ?? {}) as Record<string, unknown>;
+  const nonEmptyArr = (v: unknown): boolean => Array.isArray(v) && v.length > 0;
+  const roles: string[] = [];
+  if (g["alp_role_user_admin"] === true) roles.push("ALP_USER_ADMIN");
+  if (g["alp_role_system_admin"] === true) roles.push("ALP_SYSTEM_ADMIN");
+  if (g["alp_role_dashboard_viewer"] === true) roles.push("ALP_DASHBOARD_VIEWER");
+  if (g["alp_role_study_write_dqd_researcher"] === true) roles.push("STUDY_WRITE_DQD_RESEARCHER");
+  if (g["alp_role_study_results_read_researcher"] === true) roles.push("STUDY_RESULTS_READ_RESEARCHER");
+  if (nonEmptyArr(g["alp_role_tenant_viewer"])) roles.push("TENANT_VIEWER");
+  if (g["alp_role_etl_mapping_contributor"] === true) roles.push("ETL_MAPPING_CONTRIBUTOR");
+  if (nonEmptyArr(g["alp_role_study_researcher"])) roles.push("RESEARCHER");
+  return roles;
+}
+
 /**
- * Authentication gate for d2e (non-@trex) plugin worker routes.
+ * Authentication + central authorization gate for d2e (non-@trex) plugin worker
+ * routes — a port of d2e's pre-migration authn.ts + authz.ts.
  *
  * The new core forwards d2e-plugin requests straight to workers that only
  * `jwt.decode()` the bearer token (never verify its signature), so without this
- * gate a forged JWT is fully trusted — an authentication bypass. This middleware
- * verifies the Logto JWT before the request reaches the worker; the worker then
- * applies its own role/scope authz (it resolves the caller's full role set via
- * UserMgmt, which a coarse token claim can't reproduce — see the note below).
+ * gate a forged JWT is fully trusted. trex verifies the Logto JWT and enforces the
+ * role/URL scope check centrally (as old main did) before the worker runs.
  *
- *  - Public path (allowlist) → pass through, no token required.
- *  - Missing/invalid token   → 401 (signature + expiry verified; audience/issuer
- *                              skipped to match old main's jwtVerify).
- *  - Valid token             → set logtoSubject, forward to the worker.
+ *  - authn-public path      → pass, no token (old main publicURLs).
+ *  - Missing/invalid token  → 401 (signature + expiry; aud/iss skipped, per old main).
+ *  - System admin           → pass.
+ *  - authz-public path      → pass, token required but no scope (authz_publicURLs).
+ *  - Else                   → check REQUIRED_URL_SCOPES against the caller's scopes
+ *                             (roles → ROLE_SCOPES); 403 if absent. Endpoints with no
+ *                             scope entry pass (authenticated-only).
  */
 export const d2eAuthn = async (
   req: Request,
@@ -107,14 +143,43 @@ export const d2eAuthn = async (
     res.status(401).send("Authentication Token not valid");
     return;
   }
-
-  // Fine-grained role/URL authz is enforced INSIDE the d2e workers, which resolve
-  // the caller's full role/scope set via UserMgmt (as the pre-migration d2e services
-  // did). A Logto access token carries only coarse role claims, so enforcing scopes
-  // here would 403 legitimate non-admin users on shared bootstrap endpoints — e.g. a
-  // Viewer's /usermgmt/api/user-group/list (old main's authz_publicURLs) and
-  // /system-portal/config/types. trex's job is to VERIFY the token so the workers can
-  // trust the identity they decode; the worker then applies scope authz.
   (req as any).logtoSubject = (payload["sub"] as string | undefined) ?? null;
-  next();
+
+  const roles = d2eRolesFromToken(payload);
+
+  // System admins pass (parity with pluginAuthz's admin bypass).
+  const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
+  if (roles.includes("ALP_SYSTEM_ADMIN") ||
+      userMgmtGroups?.["alp_role_system_admin"] === true) {
+    next();
+    return;
+  }
+
+  // authz-public: valid token, no scope check (old main authz_publicURLs).
+  if (D2E_AUTHZ_PUBLIC_PATTERNS.some((re) => re.test(path))) {
+    next();
+    return;
+  }
+
+  const requiredScopes: string[] = [];
+  for (const entry of REQUIRED_URL_SCOPES) {
+    if (new RegExp(entry.path).test(path)) {
+      requiredScopes.push(...entry.scopes);
+    }
+  }
+  // No scope declared for this path → an authenticated user suffices.
+  if (requiredScopes.length === 0) {
+    next();
+    return;
+  }
+
+  const userScopes = new Set<string>();
+  for (const role of roles) {
+    for (const scope of ROLE_SCOPES[role] ?? []) userScopes.add(scope);
+  }
+  if (requiredScopes.some((scope) => userScopes.has(scope))) {
+    next();
+    return;
+  }
+  res.status(403).json({ error: "Forbidden: insufficient scopes" });
 };
