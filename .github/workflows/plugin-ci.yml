@@ -269,7 +269,11 @@ jobs:
           android: true
           dotnet: true
           haskell: true
-          large-packages: true
+          # large-packages runs `apt-get remove` on the host and cascades into the
+          # C toolchain (removes gcc's stdarg.h) — this job compiles libsqlite3-sys
+          # via cc on the host, so keep it off. android+dotnet+haskell+docker already
+          # reclaim ~20 GB.
+          large-packages: false
           docker-images: true
           swap-storage: true
       # Cache cargo / maven / leiningen state per-plugin. The actual build
