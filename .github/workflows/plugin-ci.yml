@@ -954,6 +954,11 @@ jobs:
     env:
       D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
       VERSION: develop
+      # Force the compose project name so containers come up as d2e-* — the health
+      # check, log dumps and checkflow steps inspect `d2e-trex` by name, but d2e's
+      # docker-compose-local.yml (merged into the up command) defaults PROJECT_NAME
+      # to `alp`, which made `docker inspect d2e-trex` return "not found" and time out.
+      PROJECT_NAME: d2e
     steps:
       - uses: actions/checkout@v4
       # extension-ci-tools is needed for sign-if-key.sh below.
