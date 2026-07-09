@@ -957,11 +957,6 @@ jobs:
       # 'develop' once p-hoffmann/trex-main-migration merges into d2e develop.
       D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'p-hoffmann/trex-main-migration' }}
       VERSION: develop
-      # Force the compose project name so containers come up as d2e-* — the health
-      # check, log dumps and checkflow steps inspect `d2e-trex` by name, but d2e's
-      # docker-compose-local.yml (merged into the up command) defaults PROJECT_NAME
-      # to `alp`, which made `docker inspect d2e-trex` return "not found" and time out.
-      PROJECT_NAME: d2e
     steps:
       - uses: actions/checkout@v4
       # extension-ci-tools is needed for sign-if-key.sh below.
@@ -1120,12 +1115,17 @@ jobs:
       - name: Wait for services to be healthy
         timeout-minutes: 5
         run: |
-          echo "Waiting for d2e-trex to become healthy..."
-          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
-            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+          # The compose project name is d2e or alp depending on d2e's cli/env, so
+          # discover the trex container by its name suffix instead of hardcoding it.
+          echo "Waiting for the trex container to become healthy..."
+          while true; do
+            TREX=$(docker ps -a --format '{{.Names}}' | grep -E '(^|[-_])trex$' | head -1)
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$TREX" 2>/dev/null || echo "not found")
+            echo "  ${TREX:-<no trex container>}: ${STATUS}"
+            [ "$STATUS" = "healthy" ] && break
             sleep 5
           done
-          echo "d2e-trex is healthy"
+          echo "$TREX is healthy"
           docker ps --format "{{.Names}},{{.Status}}"
 
       - name: Run setupdemo
@@ -1159,14 +1159,17 @@ jobs:
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml stop
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml start
 
-      - name: Wait for d2e-trex healthy after restart
+      - name: Wait for trex healthy after restart
         timeout-minutes: 5
         run: |
-          until [ "$(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null)" = "healthy" ]; do
-            echo "  d2e-trex: $(docker inspect -f '{{.State.Health.Status}}' d2e-trex 2>/dev/null || echo 'not found')"
+          while true; do
+            TREX=$(docker ps -a --format '{{.Names}}' | grep -E '(^|[-_])trex$' | head -1)
+            STATUS=$(docker inspect -f '{{.State.Health.Status}}' "$TREX" 2>/dev/null || echo "not found")
+            echo "  ${TREX:-<no trex container>}: ${STATUS}"
+            [ "$STATUS" = "healthy" ] && break
             sleep 5
           done
-          echo "d2e-trex is healthy"
+          echo "$TREX is healthy"
 
       - name: Wait for d2e-ui plugin to be available
         run: |
