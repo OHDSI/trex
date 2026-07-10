@@ -45,13 +45,21 @@
     "migrations": {
       "schema": "devx",
       "database": "_config"
-    }
+    },
+    "agents": [
+      {
+        "name": "devx-agent",
+        "dir": "agent"
+      }
+    ]
   },
   "dependencies": {
+    "@ai-sdk/react": "^3.0.221",
     "@fontsource-variable/inter": "^5.2.8",
     "@fontsource-variable/roboto-flex": "^5.2.8",
     "@monaco-editor/react": "^4.7.0",
     "@radix-ui/react-accordion": "^1.2.12",
+    "ai": "^6.0.219",
     "@tailwindcss/typography": "^0.5.19",
     "class-variance-authority": "^0.7.1",
     "single-spa": "^6.0.0",

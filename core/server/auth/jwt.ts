@@ -54,7 +54,7 @@ async function hmacVerify(
     false,
     ["verify"],
   );
-  return crypto.subtle.verify("HMAC", key, new Uint8Array(signature), encoder.encode(data));
+  return crypto.subtle.verify("HMAC", key, signature as BufferSource, encoder.encode(data) as BufferSource);
 }
 
 let _jwtSecretCache: string | null = null;

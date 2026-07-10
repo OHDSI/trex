@@ -32,6 +32,7 @@ export function AdminLayout() {
         { to: "/admin/flows", label: "Flows" },
         { to: "/admin/ui", label: "UI" },
         { to: "/admin/logs", label: "Logs" },
+        { to: "/admin/agent-runs", label: "Agent Runs" },
       ],
     },
     {

@@ -69,6 +69,7 @@ services:
       - ./plugins/prometheus/dist:/usr/src/plugins-dev/prometheus/dist
       - ./plugins/storage:/usr/src/plugins-dev/storage
       - ./plugins/postgrest:/usr/src/plugins-dev/postgrest
+      - ./plugins-dev/toy-agent:/usr/src/plugins-dev/toy-agent
       - claude-config:/home/node/.claude
       - gh-config:/home/node/.config/gh
     depends_on:

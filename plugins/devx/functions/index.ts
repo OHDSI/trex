@@ -1,5 +1,6 @@
 // @ts-nocheck - Deno edge function, not compiled by tsc
 import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
+import { deriveAuthShape } from "./auth_shape.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -268,6 +269,45 @@ Deno.serve(async (req: Request) => {
         [chatId],
       );
       return Response.json(result.rows, { headers: corsHeaders });
+    }
+
+    // POST /chats/:id/messages - persist a message (task-u1: the eve/agents
+    // runtime's stateless /chat endpoint never writes to devx.messages
+    // itself — history is client-provided on every request, and
+    // agents.sessions/turns records the run for the dashboard in parallel,
+    // not devx's own chat history. This is the client-side persistence call
+    // the new agents-loop chat client makes after each turn so devx.messages
+    // (read by GET above, shared by both loops) stays complete regardless of
+    // which loop produced the turn. Same insert shape the legacy /stream
+    // handler already writes server-side (chat_id, role, content, model,
+    // tool_calls) — additive only, the legacy route above is untouched.
+    if (messagesMatch && method === "POST") {
+      const chatId = messagesMatch[1];
+      const chatCheck = await sql(
+        `SELECT id FROM devx.chats WHERE id = $1 AND user_id = $2`,
+        [chatId, userId],
+      );
+      if (chatCheck.rows.length === 0) {
+        return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+      }
+      const body = await req.json();
+      if (body.role !== "user" && body.role !== "assistant") {
+        return Response.json({ error: "role must be 'user' or 'assistant'" }, { status: 400, headers: corsHeaders });
+      }
+      if (typeof body.content !== "string") {
+        return Response.json({ error: "content must be a string" }, { status: 400, headers: corsHeaders });
+      }
+      if (body.content.length > 200_000) {
+        return Response.json({ error: "content too long" }, { status: 400, headers: corsHeaders });
+      }
+      const result = await sql(
+        `INSERT INTO devx.messages (chat_id, role, content, model, tool_calls)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, chat_id, role, content, model, tool_calls, created_at`,
+        [chatId, body.role, body.content, body.model || null, body.tool_calls ? JSON.stringify(body.tool_calls) : null],
+      );
+      await sql(`UPDATE devx.chats SET updated_at = NOW() WHERE id = $1`, [chatId]);
+      return Response.json(result.rows[0], { status: 201, headers: corsHeaders });
     }
 
     // POST /chats/:id/stream - stream chat completion
@@ -1112,15 +1152,20 @@ Deno.serve(async (req: Request) => {
       const result = await sql(
         `SELECT id, user_id, provider, model, api_key, base_url, ai_rules,
                 auto_approve, max_steps, max_tool_steps, auto_fix_problems,
-                created_at, updated_at
+                loop, created_at, updated_at
          FROM devx.settings WHERE user_id = $1`,
         [userId],
       );
       if (result.rows.length === 0) {
         return Response.json(null, { headers: corsHeaders });
       }
-      // Mask API key
+      // Mask API key. auth_shape is a derived, NON-SECRET hint (bearer/iam/
+      // plain/none) computed from the raw key BEFORE masking — the masked
+      // api_key is never valid JSON, so a client cannot derive the shape
+      // itself (useEffectiveLoop.ts gates bedrock-IAM users onto the legacy
+      // loop with it; see functions/auth_shape.ts).
       const row = result.rows[0];
+      row.auth_shape = deriveAuthShape(row.api_key);
       if (row.api_key) {
         row.api_key = row.api_key.substring(0, 8) + "..." + row.api_key.slice(-4);
       }
@@ -1137,9 +1182,18 @@ Deno.serve(async (req: Request) => {
       // Distinguish between "not provided" (undefined) and "explicitly cleared" (empty string)
       const apiKey = body.api_key === undefined ? undefined : (body.api_key || null);
       const hasApiKeyUpdate = body.api_key !== undefined;
+      // task-u1 (V11__loop_flag.sql): same "only touch it if the caller
+      // actually sent it" posture as api_key above. SettingsPage.tsx now
+      // sends `loop` on every save, but any OTHER caller of this endpoint
+      // (or an older cached frontend bundle) that omits it must not
+      // silently reset a user's flag back to the column default.
+      if (body.loop !== undefined && body.loop !== "legacy" && body.loop !== "agents") {
+        return Response.json({ error: "loop must be 'legacy' or 'agents'" }, { status: 400, headers: corsHeaders });
+      }
+      const hasLoopUpdate = body.loop !== undefined;
       const result = await sql(
-        `INSERT INTO devx.settings (user_id, provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+        `INSERT INTO devx.settings (user_id, provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'legacy'))
          ON CONFLICT (user_id) DO UPDATE SET
            provider = EXCLUDED.provider,
            model = EXCLUDED.model,
@@ -1150,9 +1204,10 @@ Deno.serve(async (req: Request) => {
            max_steps = EXCLUDED.max_steps,
            max_tool_steps = EXCLUDED.max_tool_steps,
            auto_fix_problems = EXCLUDED.auto_fix_problems,
+           loop = ${hasLoopUpdate ? "EXCLUDED.loop" : "devx.settings.loop"},
            updated_at = NOW()
-         RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, created_at, updated_at`,
-        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? 25, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false],
+         RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, created_at, updated_at`,
+        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? 25, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null],
       );
       return Response.json(result.rows[0], { headers: corsHeaders });
     }

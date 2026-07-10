@@ -7,6 +7,7 @@ import { REGISTERED_FUNCTIONS, ROLE_SCOPES, REQUIRED_URL_SCOPES } from "../plugi
 import { REGISTERED_UI_ROUTES, getPluginsJson } from "../plugin/ui.ts";
 import { REGISTERED_FLOWS } from "../plugin/flow.ts";
 import { rotateAnonKey, rotateServiceRoleKey } from "../auth/jwt.ts";
+import { sessionsQuery, sessionDetailQueries } from "./agent-runs-sql.ts";
 
 declare const Trex: any;
 declare const Deno: any;
@@ -18,6 +19,23 @@ function assertAdmin(context: any) {
   if (role !== "admin") {
     throw new Error("Forbidden");
   }
+}
+
+function toIsoString(v: unknown): string {
+  return v instanceof Date ? v.toISOString() : String(v);
+}
+
+// pg returns JSONB columns already parsed as objects/arrays (or strings, if
+// the driver leaves them raw). Serialize back to a JSON string for the
+// GraphQL `String` field; leave existing strings and null/undefined as-is.
+function toJsonStringOrNull(v: unknown): string | null {
+  if (v === null || v === undefined) {
+    return null;
+  }
+  if (typeof v === "string") {
+    return v;
+  }
+  return JSON.stringify(v);
 }
 
 export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
@@ -242,6 +260,44 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
         createdAt: String!
       }
 
+      type AgentSessionRow {
+        id: ID!
+        plugin: String!
+        agent: String!
+        createdBy: String
+        status: String!
+        createdAt: String!
+        updatedAt: String!
+        turnCount: Int!
+        lastActivity: String
+      }
+
+      type AgentStepRow {
+        seq: Int!
+        kind: String!
+        name: String
+        payload: String
+        usage: String
+        startedAt: String!
+        finishedAt: String
+      }
+
+      type AgentTurnRow {
+        id: ID!
+        seq: Int!
+        message: String
+        status: String!
+        error: String
+        startedAt: String!
+        finishedAt: String
+        steps: [AgentStepRow!]!
+      }
+
+      type AgentSessionDetail {
+        session: AgentSessionRow!
+        turns: [AgentTurnRow!]!
+      }
+
       extend type Query {
         availablePlugins: [PluginInfo!]!
         trexNodes: [TrexNode!]!
@@ -264,6 +320,8 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
         uiPluginsJson: JSON
         registeredFlows: [RegisteredFlow!]!
         eventLogs(level: String, limit: Int, before: String): [EventLogEntry!]!
+        agentSessions(limit: Int, offset: Int, agent: String, status: String): [AgentSessionRow!]!
+        agentSession(id: ID!): AgentSessionDetail
       }
 
       extend type Mutation {
@@ -795,6 +853,84 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
             console.error("eventLogs error:", err);
             return [];
           }
+        },
+
+        async agentSessions(
+          _parent: any,
+          args: { limit?: number; offset?: number; agent?: string; status?: string },
+          context: any,
+        ) {
+          assertAdmin(context);
+
+          const { sql, params } = sessionsQuery(args);
+          const result = await authPool.query(sql, params);
+
+          return result.rows.map((r: any) => ({
+            id: r.id,
+            plugin: r.plugin,
+            agent: r.agent,
+            createdBy: r.created_by,
+            status: r.status,
+            createdAt: toIsoString(r.created_at),
+            updatedAt: toIsoString(r.updated_at),
+            turnCount: r.turn_count,
+            lastActivity: r.last_activity ? toIsoString(r.last_activity) : null,
+          }));
+        },
+
+        async agentSession(_parent: any, args: { id: string }, context: any) {
+          assertAdmin(context);
+
+          const q = sessionDetailQueries(args.id);
+          const [sessionResult, turnsResult, stepsResult] = await Promise.all([
+            authPool.query(q.session.sql, q.session.params),
+            authPool.query(q.turns.sql, q.turns.params),
+            authPool.query(q.steps.sql, q.steps.params),
+          ]);
+
+          const sessionRow = sessionResult.rows[0];
+          if (!sessionRow) {
+            return null;
+          }
+
+          const stepsByTurn = new Map<string, any[]>();
+          for (const s of stepsResult.rows) {
+            const list = stepsByTurn.get(s.turn_id) ?? [];
+            list.push({
+              seq: s.seq,
+              kind: s.kind,
+              name: s.name,
+              payload: toJsonStringOrNull(s.payload),
+              usage: toJsonStringOrNull(s.usage),
+              startedAt: toIsoString(s.started_at),
+              finishedAt: s.finished_at ? toIsoString(s.finished_at) : null,
+            });
+            stepsByTurn.set(s.turn_id, list);
+          }
+
+          return {
+            session: {
+              id: sessionRow.id,
+              plugin: sessionRow.plugin,
+              agent: sessionRow.agent,
+              createdBy: sessionRow.created_by,
+              status: sessionRow.status,
+              createdAt: toIsoString(sessionRow.created_at),
+              updatedAt: toIsoString(sessionRow.updated_at),
+              turnCount: sessionRow.turn_count,
+              lastActivity: sessionRow.last_activity ? toIsoString(sessionRow.last_activity) : null,
+            },
+            turns: turnsResult.rows.map((t: any) => ({
+              id: t.id,
+              seq: t.seq,
+              message: toJsonStringOrNull(t.message),
+              status: t.status,
+              error: t.error,
+              startedAt: toIsoString(t.started_at),
+              finishedAt: t.finished_at ? toIsoString(t.finished_at) : null,
+              steps: stepsByTurn.get(t.id) ?? [],
+            })),
+          };
         },
       },
       Mutation: {

@@ -1,4 +1,5 @@
 import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
+import { Buffer } from "node:buffer";
 import type { Express, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
 import { pluginAuthz, d2eAuthn } from "../middleware/plugin-authz.ts";
@@ -180,7 +181,7 @@ function substituteVariable(varExpression: string): string {
   return envValue !== undefined ? envValue : "";
 }
 
-function substituteEnvVarsInObject(obj: any): any {
+export function substituteEnvVarsInObject(obj: any): any {
   if (typeof obj === "string") return substituteEnvVars(obj);
   if (Array.isArray(obj)) return obj.map(substituteEnvVarsInObject);
   if (obj !== null && typeof obj === "object") {
@@ -224,13 +225,22 @@ function _needsCredentialRefresh(servicePath: string, dir: string): boolean {
   return _CRED_REFRESH_SERVICES.some((s) => hay.includes(s));
 }
 
+// SSE (text/event-stream) and eve's NDJSON session stream
+// (application/x-ndjson) must both be piped to the client as they arrive
+// rather than buffered — buffering waits for the worker stream to close,
+// which for a live tail never happens until the client disconnects.
+function isStreamingContentType(contentType: string): boolean {
+  return contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson");
+}
+
 async function _callWorker(
   req: globalThis.Request,
   servicePath: string,
   imports: string | null,
   fncfg: any,
   dir: string,
-  xenv: any
+  xenv: any,
+  signal?: AbortSignal
 ): Promise<globalThis.Response> {
   const myenv = Object.assign(
     {},
@@ -308,17 +318,24 @@ async function _callWorker(
     }
   }
 
+  // Callers that don't care about cancellation (e.g. the inter-service
+  // fnmap handler, which has no client response to tie an abort to) pass no
+  // signal — fall back to a controller that's never aborted, matching prior
+  // behavior.
+  const fetchSignal = signal ?? new AbortController().signal;
+
   try {
     // deno-lint-ignore no-explicit-any
     const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
-    const controller = new AbortController();
-    return await worker.fetch(req, { signal: controller.signal });
+    return await worker.fetch(req, { signal: fetchSignal });
   } catch (e: any) {
-    if (e instanceof Deno.errors.WorkerRequestCancelled) {
+    // Retry once on WorkerRequestCancelled, same as before — but only if
+    // the caller's own signal isn't already aborted (client gone): retrying
+    // a dead request just wastes a worker slot on a response nobody reads.
+    if (e instanceof (Deno.errors as any).WorkerRequestCancelled && !fetchSignal.aborted) {
       // deno-lint-ignore no-explicit-any
       const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
-      const controller = new AbortController();
-      return await worker.fetch(req, { signal: controller.signal });
+      return await worker.fetch(req, { signal: fetchSignal });
     }
     console.error("Worker call error:", e);
     return new globalThis.Response(JSON.stringify({ msg: e.toString() }), {
@@ -410,7 +427,7 @@ async function _callInit(
   }
 }
 
-function _addFunction(
+export function _addFunction(
   app: Express,
   url: string,
   path: string,
@@ -458,6 +475,15 @@ function _addFunction(
   // inside d2eAuthn.
   const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [d2eAuthn];
   app.all([fullSource, fullSource + "/*"], apiLimiter, ...authMw, async (req: Request, res: Response) => {
+    // Propagate a client disconnect (browser tab closed, live tail dropped,
+    // etc.) into the worker fetch so a long-lived stream (session tail,
+    // SSE) doesn't run forever unread. "close" also fires on a normal,
+    // fully-written response — only abort when the response hasn't
+    // finished, i.e. this is a genuine premature disconnect.
+    const controller = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) controller.abort();
+    });
     try {
       const host = req.get("host") || "localhost";
       const protocol = req.protocol || "http";
@@ -504,7 +530,7 @@ function _addFunction(
           } catch {
             // Stream may not be async iterable in some environments
           }
-          if (chunks.length > 0) body = new Blob(chunks);
+          if (chunks.length > 0) body = new Blob(chunks as BlobPart[]);
         }
       }
 
@@ -512,9 +538,10 @@ function _addFunction(
         method: req.method,
         headers,
         body,
+        signal: controller.signal,
       });
 
-      const workerResponse = await _callWorker(webReq, path, imports, fncfg, dir, xenv);
+      const workerResponse = await _callWorker(webReq, path, imports, fncfg, dir, xenv, controller.signal);
 
       res.status(workerResponse.status);
       workerResponse.headers.forEach((value: string, key: string) => {
@@ -526,8 +553,12 @@ function _addFunction(
       });
       const contentType = workerResponse.headers.get("content-type") || "";
 
-      if (contentType.includes("text/event-stream") && workerResponse.body) {
-        // SSE: pipe the stream directly — don't buffer
+      if (isStreamingContentType(contentType) && workerResponse.body) {
+        // SSE / NDJSON: pipe the stream directly — don't buffer. Buffering
+        // (the arrayBuffer/text branches below) waits for the worker stream
+        // to close, which for a live tail (eve's session stream) never
+        // happens until the client disconnects — the request would hang
+        // forever instead of delivering events as they're produced.
         res.flushHeaders();
         const reader = workerResponse.body.getReader();
         const pump = async () => {
