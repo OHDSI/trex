@@ -1166,6 +1166,13 @@ jobs:
                 # This branch's freshly-rebundled core (main) — so the e2e tests our core.
                 - ./.ci-overlay/core-server.eszip:/usr/src/core/server/index.eszip:ro
                 - ./.ci-overlay/core-event.eszip:/usr/src/core/event/index.eszip:ro
+                # e2e seed patch (patch-seed-for-e2e.js, run above): forces the cohort
+                # chart to group by monthOfBirth (stable screenshots) and enables
+                # atlasCohortDefinition (the cohort "Import" button). The patched file
+                # lives in the d2e checkout, but PLUGINS_DEV_PATH loads bundled-plugins
+                # before /usr/src/plugins, so the image's baked (unpatched) seed would
+                # win — overwrite it directly so the patch actually takes effect.
+                - ./plugins/functions/mri-pg-config/src/db/seeds/03_Config.ts:/usr/src/bundled-plugins/d2e-functions/mri-pg-config/src/db/seeds/03_Config.ts:ro
           EOF
           cat d2e/docker-compose-ci.yml
 

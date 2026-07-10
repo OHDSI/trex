@@ -131,10 +131,12 @@ function rolesFromGroups(g: Record<string, unknown>): string[] {
  *  - Missing/invalid token  → 401 (signature + expiry; aud/iss skipped, per old main).
  *  - System admin           → pass.
  *  - authz-public path      → pass, token required but no scope (authz_publicURLs).
- *  - No scope for the path  → pass (authenticated-only).
- *  - Else                   → resolve the caller's roles (token `roles` + userMgmtGroups
- *                             fetched from usermgmt, as old main did) and check
- *                             REQUIRED_URL_SCOPES against ROLE_SCOPES; 403 if absent.
+ *  - No governing policy    → 403 (old main returned 404: a route absent from the
+ *                             scope table is denied, NOT open to any authenticated user).
+ *  - Else                   → pick the FIRST REQUIRED_URL_SCOPES entry matching path
+ *                             AND method, resolve the caller's roles (token `roles` +
+ *                             userMgmtGroups fetched from usermgmt, as old main did),
+ *                             and require ALL of that entry's scopes; 403 otherwise.
  */
 export const d2eAuthn = async (
   req: Request,
@@ -178,16 +180,21 @@ export const d2eAuthn = async (
     return;
   }
 
-  // Endpoints with no declared scope → an authenticated user suffices; skip the
-  // (network) group resolution entirely.
-  const requiredScopes: string[] = [];
-  for (const entry of REQUIRED_URL_SCOPES) {
-    if (new RegExp(entry.path).test(path)) {
-      requiredScopes.push(...entry.scopes);
-    }
-  }
-  if (requiredScopes.length === 0) {
-    next();
+  // Select the governing policy exactly as old main's authz did: the FIRST
+  // REQUIRED_URL_SCOPES entry whose path regex matches AND whose httpMethods (when
+  // declared) include this request's method. Method matters — most entries are
+  // method-scoped (e.g. GET→read vs POST→execute on the same path), so ignoring it
+  // would let a read scope satisfy a write/execute route. No governing entry → deny
+  // (old main returned 404 for a route not in its scope table); never fall through
+  // to "any authenticated user".
+  const method = req.method;
+  const match = REQUIRED_URL_SCOPES.find(
+    (entry) =>
+      new RegExp(entry.path).test(path) &&
+      (!entry.httpMethods || entry.httpMethods.includes(method)),
+  );
+  if (!match) {
+    res.status(403).json({ error: "Forbidden: no authorization policy for route" });
     return;
   }
 
@@ -211,7 +218,11 @@ export const d2eAuthn = async (
   for (const role of roles) {
     for (const scope of ROLE_SCOPES[role] ?? []) userScopes.add(scope);
   }
-  if (requiredScopes.some((scope) => userScopes.has(scope))) {
+  // Old main required ALL of the matched entry's scopes (hasRequiredScopes = every),
+  // not any — e.g. an entry of [strategus.results.admin.upload, portal.dataset.read]
+  // demands both. `.some` here would grant access to callers holding only the weaker
+  // secondary scope.
+  if (match.scopes.every((scope) => userScopes.has(scope))) {
     next();
     return;
   }
