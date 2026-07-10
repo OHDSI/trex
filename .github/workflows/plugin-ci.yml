@@ -983,16 +983,11 @@ jobs:
       pull-requests: write
       packages: read
     env:
-      # Test against the d2e branch carrying the trex-main migration changes so the
-      # e2e exercises the d2e-plugin auth/routing against this trex build. Revert to
-      # 'develop' once p-hoffmann/trex-main-migration merges into d2e develop.
-      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'p-hoffmann/trex-main-migration' }}
-      # d2e-trex tag prefix to base the stack on. The migration branch is d2e PR
-      # #2747, published as d2e-trex:pr-2747-<sha> (develop-<sha> tags are pruned by
-      # d2e's stale-tag cleanup, so they are not a reliable base). Its trex binary is
-      # built FROM our trexsql base, so it can rebundle this branch's core. Switch to
-      # 'develop-' once p-hoffmann/trex-main-migration merges into d2e develop.
-      D2E_TREX_TAG_PREFIX: pr-2747-
+      # d2e branch the e2e checks out for its tests/config and bases the stack on.
+      D2E_BRANCH: ${{ github.event.inputs.d2e_branch || 'develop' }}
+      # d2e-trex image tag prefix. d2e publishes develop-<sha> per develop push (no
+      # moving :develop tag), so the resolve step picks the newest published one.
+      D2E_TREX_TAG_PREFIX: develop-
       VERSION: develop
     steps:
       - uses: actions/checkout@v4
@@ -1098,25 +1093,32 @@ jobs:
           cp ./trex-artifacts/*.trex d2e/.ci-overlay/
           ls -l d2e/.ci-overlay/
 
-      # d2e publishes d2e-trex only as <prefix><sha> tags (no moving ":develop"), and
-      # stale tags are pruned — so resolve the newest tag with D2E_TREX_TAG_PREFIX
-      # (the packages API returns versions newest-first) and verify it actually pulls
-      # before pinning it. DOCKER_TAG_NAME then drives the rebundle IMG, the compose
-      # override, and the cli.js compose pull/start.
+      # d2e publishes d2e-trex only as <prefix><sha> tags (no moving ":develop"). The
+      # packages API returns versions newest-first, but the newest tag can belong to
+      # an in-flight build whose manifest isn't pushed yet (pull → "manifest unknown").
+      # Walk newest→older and pin the first tag that actually resolves. DOCKER_TAG_NAME
+      # then drives the rebundle IMG, the compose override, and the cli.js pull/start.
       - name: Resolve latest d2e-trex image tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
-            --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][0]')
-          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+          PREFIX="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}"
+          TAGS=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
+            --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][]')
+          if [ -z "$TAGS" ]; then
             echo "::error::no d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*' found"; exit 1
           fi
-          IMG="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}d2e-trex:${TAG}"
-          if ! docker manifest inspect "$IMG" >/dev/null 2>&1; then
-            echo "::error::resolved tag $TAG is not pullable ($IMG)"; exit 1
+          TAG=""
+          for t in $TAGS; do
+            if docker manifest inspect "${PREFIX}d2e-trex:${t}" >/dev/null 2>&1; then
+              TAG="$t"; break
+            fi
+            echo "skip ${t}: manifest not published yet"
+          done
+          if [ -z "$TAG" ]; then
+            echo "::error::no pullable d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*'"; exit 1
           fi
-          echo "Using d2e-trex image: $IMG"
+          echo "Using d2e-trex image: ${PREFIX}d2e-trex:${TAG}"
           echo "DOCKER_TAG_NAME=$TAG" >> "$GITHUB_ENV"
 
       - name: Rebundle this branch's core (main) into fresh eszips
