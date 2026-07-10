@@ -36,7 +36,7 @@ function cachedDatabaseCredentialsJson(): string {
   return _dbCredsJson;
 }
 export const ROLE_SCOPES: Record<string, string[]> = {};
-export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[] }> = [];
+export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[]; httpMethods?: string[] }> = [];
 
 export const REGISTERED_FUNCTIONS: Array<{
   name: string;
