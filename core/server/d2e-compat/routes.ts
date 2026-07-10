@@ -178,7 +178,13 @@ export function mountD2eRoutes(app: Express): void {
       // required"). Re-serialize req.body when present; fall back to the raw stream
       // for unparsed bodies.
       const parsed = (req as any).body;
-      if (parsed && typeof parsed === "object" && Object.keys(parsed).length > 0) {
+      // Re-serialize any parsed body — including an empty {} or [] (e.g. the
+      // cohort-characterization result POST sends an empty filter). Keying on
+      // `Object.keys(parsed).length > 0` dropped those: the body-parser had
+      // already drained the raw stream, so the fallback read below yielded
+      // nothing and the POST reached WebAPI bodiless ("Required request body is
+      // missing"). Only fall back to the raw stream for genuinely unparsed bodies.
+      if (parsed !== undefined && parsed !== null && typeof parsed === "object") {
         body = JSON.stringify(parsed);
         if (!headers.has("content-type")) headers.set("content-type", "application/json");
       } else {
