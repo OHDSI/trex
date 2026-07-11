@@ -3,7 +3,7 @@
 // (core/server/agents/service). Routing/auth/SSE piping reuse the function
 // plugin proxy (_addFunction).
 import type { Express } from "express";
-import { _addFunction, substituteEnvVarsInObject } from "./function.ts";
+import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_PLUGIN_SCOPES } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 
 export interface AgentEntry {
@@ -189,13 +189,14 @@ export async function buildAgentWorkerConfig(
 }
 
 // _addFunction (function.ts) only applies [authContext, pluginAuthz] to
-// plugins named `@trex/...` — d2e/legacy function plugins authenticate
-// themselves inside the worker using the forwarded Logto header, which an
-// agents worker doesn't do. Until worker-side auth exists for agents,
-// anything outside the @trex scope would mount a completely
-// unauthenticated HTTP surface (session create, chat, tool execution).
-export function isTrexScopedAgentsPlugin(name: string): boolean {
-  return name.startsWith("@trex/");
+// plugins under a trusted scope (TRUSTED_PLUGIN_SCOPES: @trex, @ohdsi) —
+// d2e/legacy function plugins authenticate themselves inside the worker using
+// the forwarded Logto header, which an agents worker doesn't do. Until
+// worker-side auth exists for agents, anything outside a trusted scope would
+// mount a completely unauthenticated HTTP surface (session create, chat, tool
+// execution).
+export function isTrustedScopeAgentsPlugin(name: string): boolean {
+  return isTrustedPluginScope(name);
 }
 
 export async function addAgentsPlugin(
@@ -204,10 +205,10 @@ export async function addAgentsPlugin(
   dir: string,
   name: string,
 ): Promise<void> {
-  if (!isTrexScopedAgentsPlugin(name)) {
+  if (!isTrustedScopeAgentsPlugin(name)) {
     // Log and skip, don't throw: one misconfigured/malicious plugin must
     // not take down boot for every other plugin.
-    console.error(`agents: plugin ${name} skipped — agents plugins must be published under the @trex scope (auth requirement)`);
+    console.error(`agents: plugin ${name} skipped — agents plugins must be published under a trusted scope (${TRUSTED_PLUGIN_SCOPES.join(", ")}) (auth requirement)`);
     return;
   }
   for (const entry of normalizeAgentsValue(value)) {
@@ -216,7 +217,7 @@ export async function addAgentsPlugin(
     // _addFunction computes servicePath as `${dir}${fncfg.function}` and the
     // mounted URL from `source` + plugin scope; TREX_AGENT_BASE tells the
     // worker its mount point so it can strip the prefix. Always the
-    // @trex-scoped mount — the guard above rejects everything else.
+    // trusted-scope mount — the guard above rejects everything else.
     const scope = `/${name.slice(1, name.indexOf("/"))}`;
     const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
     _addFunction(

@@ -427,6 +427,21 @@ async function _callInit(
   }
 }
 
+
+// Scopes whose plugins are first-party trusted: their function routes mount
+// scoped under PLUGINS_BASE_PATH/<scope>/ and are guarded by trex's own auth
+// (authContext + pluginAuthz) instead of the d2e/legacy Logto path, and their
+// agents plugins are allowed to mount (see agents.ts). @ohdsi is OHDSI's own
+// publishing scope — GitHub Packages only accepts owner-scoped names, so
+// first-party plugins built in OHDSI repos (e.g. the Pythia agent) publish as
+// @ohdsi/* and must be trusted like @trex/*. UI plugins are NOT affected:
+// ui.ts keeps non-@trex UI plugins root-mounted so @ohdsi/atlas3 stays at
+// /atlas.
+export const TRUSTED_PLUGIN_SCOPES = ["@trex/", "@ohdsi/"];
+export function isTrustedPluginScope(name: string): boolean {
+  return TRUSTED_PLUGIN_SCOPES.some((s) => name.startsWith(s));
+}
+
 export function _addFunction(
   app: Express,
   url: string,
@@ -455,25 +470,25 @@ export function _addFunction(
   fnmap[`${shortName}${fncfg.function}`] = handler;
 
   const scopePrefix = scopeUrlPrefix(name);
-  // @trex plugins mount scoped under PLUGINS_BASE_PATH/<scope>/; d2e/legacy
-  // plugins (@data2evidence, ...) mount their function routes at the bare source
-  // path (/analytics-svc, /system-portal, ...) as the d2e fork did, so the d2e
-  // UI's API calls keep resolving.
+  // Trusted-scope plugins mount scoped under PLUGINS_BASE_PATH/<scope>/;
+  // d2e/legacy plugins (@data2evidence, ...) mount their function routes at the
+  // bare source path (/analytics-svc, /system-portal, ...) as the d2e fork did,
+  // so the d2e UI's API calls keep resolving.
   // Match both the bare source (`/list`) and any sub-path (`/list/...`).
   // Express 4's `/list/*` pattern requires content after `/list/`, so we
   // register two routes to cover both shapes.
-  const isTrexPlugin = name.startsWith("@trex/");
-  const fullSource = isTrexPlugin
+  const isTrustedPlugin = isTrustedPluginScope(name);
+  const fullSource = isTrustedPlugin
     ? PLUGINS_BASE_PATH + scopePrefix + url
     : url;
-  // @trex plugins go through trex's auth (authContext + pluginAuthz, keyed on the
-  // trex HS256 session). d2e/legacy plugins carry a Logto RS256 JWT that authContext
-  // can't validate, so they use d2eAuthn: it verifies the Logto token against the
-  // Logto JWKS and enforces the role/URL scope check before forwarding to the worker
-  // (which only decodes the token). This restores the authn+authz the d2e fork did
-  // itself; without it a forged JWT would be trusted. Public paths are allowlisted
-  // inside d2eAuthn.
-  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [d2eAuthn];
+  // Trusted-scope plugins go through trex's auth (authContext + pluginAuthz, keyed
+  // on the trex HS256 session). d2e/legacy plugins carry a Logto RS256 JWT that
+  // authContext can't validate, so they use d2eAuthn: it verifies the Logto token
+  // against the Logto JWKS and enforces the role/URL scope check before forwarding
+  // to the worker (which only decodes the token). This restores the authn+authz the
+  // d2e fork did itself; without it a forged JWT would be trusted. Public paths are
+  // allowlisted inside d2eAuthn.
+  const authMw = isTrustedPlugin ? [authContext, pluginAuthz] : [d2eAuthn];
   app.all([fullSource, fullSource + "/*"], apiLimiter, ...authMw, async (req: Request, res: Response) => {
     // Propagate a client disconnect (browser tab closed, live tail dropped,
     // etc.) into the worker fetch so a long-lived stream (session tail,
