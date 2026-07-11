@@ -194,6 +194,10 @@ export function buildToolSet(
     if (mode === "ask" && tool.modifiesState) continue;
 
     // Plan mode: only read-only tools + plan-specific tools
+    // Reciprocal sync note: plugins/devx/agent/agent.ts's filterTools carries
+    // its OWN transcribed copy of this exact set (that file can't import this
+    // unexported const) — keep the two lists in sync by hand when editing
+    // either one.
     const PLAN_MODE_TOOLS = new Set([
       "Read", "Glob", "Grep", "CodeSearch",
       "GitStatus", "GitLog", "GitBranchList",

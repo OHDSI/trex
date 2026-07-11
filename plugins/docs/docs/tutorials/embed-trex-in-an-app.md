@@ -312,7 +312,7 @@ MCP is the right path when:
 | A JVM batch job pulling rollups | pgwire / JDBC |
 | A python notebook for ad-hoc analysis | pgwire (psycopg) or `trexdb-execute-sql` via MCP |
 | A typed browser frontend | GraphQL |
-| A REST-shaped client (mobile, IoT) | The PostgREST proxy at `/rest/v1/*` |
+| A REST-shaped client (mobile, IoT) | The in-process PostgREST-compatible API at `/rest/v1/*` |
 | An AI assistant that should "do things" | MCP |
 | Inter-service calls within a Trex deployment | Plugin functions ([Plugins → Function Plugins](../plugins/function-plugins)) |
 

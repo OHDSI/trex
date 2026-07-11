@@ -6,8 +6,8 @@ sidebar_position: 3
 
 Trex plugins are NPM packages that contribute to a running deployment without
 forking the core. Each plugin can ship some mix of UI assets, HTTP function
-workers, Prefect flows, schema migrations, and dbt-like transformation
-projects. This page explains *how* the plugin loader works; for per-type
+workers, Prefect flows, schema migrations, dbt-like transformation projects, and
+AI agents. This page explains *how* the plugin loader works; for per-type
 configuration syntax, see [Plugins](../plugins/overview).
 
 ## Why NPM packages
@@ -55,6 +55,7 @@ flowchart TD
     Loaders --> UI["ui.ts<br/>register static routes"]
     Loaders --> Flow["flow.ts<br/>register Prefect deployments"]
     Loaders --> Tx["transform.ts<br/>recover endpoints"]
+    Loaders --> Agent["agents.ts<br/>register agent workers"]
     Fns --> EnsureRoles["Auto-create roles in trexdb.role"]
     EnsureRoles --> CliLogin["Mount cliLoginRouter"]
     CliLogin --> AuthCtx["Install authContext middleware"]
@@ -62,6 +63,7 @@ flowchart TD
     UI --> Ready
     Flow --> Ready
     Tx --> Ready
+    Agent --> Ready
 ```
 
 Each loader lives in `core/server/plugin/<type>.ts` and is responsible for one
@@ -69,7 +71,7 @@ plugin type's lifecycle. The plugin's package directory becomes the working
 directory for path resolution — `trex.functions.api[0].function = "/foo.ts"`
 means `<plugin-dir>/foo.ts`.
 
-## Four plugin types
+## Five plugin types
 
 | Type | Loader | What it adds |
 |------|--------|--------------|
@@ -77,6 +79,7 @@ means `<plugin-dir>/foo.ts`.
 | **UI** | `plugin/ui.ts` | Static frontend assets and admin-shell sidebar entries. Supports plain static-file serving, single-page-app fallback, and the single-spa micro-frontend protocol. |
 | **Flow** | `plugin/flow.ts` | Prefect deployments registered against `PREFECT_API_URL`. The image, work pool, concurrency limits, and image-tag overrides are read from the plugin config. |
 | **Transform** | `plugin/transform.ts` | dbt-like SQL projects whose models compile, materialize, and serve as JSON / CSV / Arrow HTTP endpoints. Endpoints persist across restarts via `trexdb.transform_deployment`. |
+| **Agent** | `plugin/agents.ts` | AI agents running as Deno workers on the eve-compatible agents runtime, reached through the function proxy. Sessions/turns/steps persist to the `agents` schema. `@trex`-scoped only. See [Plugins → Agent Plugins](../plugins/agent-plugins). |
 
 A single plugin can contribute multiple types — most non-trivial plugins
 combine UI + functions. Schema migrations for a plugin-owned schema are
@@ -109,12 +112,14 @@ flowchart LR
         FunctionRoutes["Function routes"]
         UIStatic["UI static routes"]
         TransformEP["Transform endpoints"]
+        AgentRoutes["Agent routes (via function proxy)"]
     end
 
     subgraph DenoRuntime["Deno EdgeRuntime"]
         FnWorker1["Function worker"]
         FnWorker2["Function worker"]
         InitWorker["Init worker"]
+        AgentWorker["Agent runtime worker"]
     end
 
     subgraph TrexEngine["Trex Engine"]
@@ -124,6 +129,7 @@ flowchart LR
     subgraph PG["PostgreSQL"]
         Migrations["Plugin migrations"]
         Roles["trexdb.role / trexdb.user_role"]
+        AgentState["agents schema<br/>sessions / turns / steps"]
     end
 
     subgraph Prefect["Prefect API"]
@@ -133,6 +139,8 @@ flowchart LR
     FunctionRoutes --> FnWorker1
     FunctionRoutes --> FnWorker2
     TransformEP --> TrexQuery
+    AgentRoutes --> AgentWorker
+    AgentWorker --> AgentState
     UIStatic -.->|served from disk| UIStatic
 ```
 

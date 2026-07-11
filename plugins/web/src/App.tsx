@@ -38,6 +38,8 @@ import { Functions } from "@/pages/admin/Functions";
 import { Flows } from "@/pages/admin/Flows";
 import { UiPlugins } from "@/pages/admin/UiPlugins";
 import { Logs } from "@/pages/admin/Logs";
+import AgentRuns from "@/pages/admin/AgentRuns";
+import AgentRunDetail from "@/pages/admin/AgentRunDetail";
 import { Subscriptions } from "@/pages/admin/Subscriptions";
 import { Analytics } from "@/pages/admin/Analytics";
 import { AnalyticsDetail } from "@/pages/admin/AnalyticsDetail";
@@ -137,6 +139,8 @@ export default function App() {
             <Route path="flows" element={<Flows />} />
             <Route path="ui" element={<UiPlugins />} />
             <Route path="logs" element={<Logs />} />
+            <Route path="agent-runs" element={<AgentRuns />} />
+            <Route path="agent-runs/:id" element={<AgentRunDetail />} />
           </Route>
         </Route>
 

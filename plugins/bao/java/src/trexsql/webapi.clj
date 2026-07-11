@@ -1207,14 +1207,19 @@
 ;; Agent reverse-proxy
 ;;
 ;; The Pythia agent now runs as a Deno function in the trex node, served at
-;; :8001/plugins/trexsql/agent (gated by pluginAuthz, which requires
-;; `apikey: <service_role>`). The browser still POSTs to
-;; /WebAPI/trexsql/agent/* on :8080. We forward those here, injecting the
-;; service_role key and relaying the user's Authorization bearer. The native
-;; in-lib agent handler (trexsql.agent.routes) is no longer mounted.
+;; :8001/plugins/trex/pythia (an @trex-scoped agents plugin gated by
+;; authContext + pluginAuthz, which requires `apikey: <service_role>`). The
+;; browser POSTs to /WebAPI/trex/pythia/* on :8080 (the canonical mount); we
+;; also keep accepting /WebAPI/trexsql/agent/* for stale frontend bundles
+;; still pointed at the old path. Both external prefixes are normalized onto
+;; the internal /agent/*path route by trexsql.servlet/wrap-strip-context (see
+;; agent-proxy-external-prefixes there), so a single handler here forwards
+;; both, injecting the service_role key and relaying the user's Authorization
+;; bearer. The native in-lib agent handler (trexsql.agent.routes) is no
+;; longer mounted.
 
 (def ^:private agent-upstream-base
-  "http://localhost:8001/plugins/trexsql")
+  "http://localhost:8001/plugins/trex/pythia")
 
 (defn- jdbc-url-from-database-url
   "Convert a postgres:// connection URL (DATABASE_URL) into a jdbc:postgresql
@@ -1267,10 +1272,29 @@
   "Cached service_role key — read once on first agent request."
   (delay (read-service-role-key)))
 
+(def agent-proxy-external-prefixes
+  "External URI prefixes (as seen by the servlet, i.e. including /WebAPI)
+   that should be reverse-proxied to the Pythia agent function. Consulted by
+   trexsql.servlet/wrap-strip-context, which normalizes any match onto the
+   internal /agent/*path route ahead of the generic /WebAPI/trexsql strip —
+   see agent-proxy-handler for how the upstream URL is then built from the
+   wildcard remainder.
+     /WebAPI/trex/pythia   -> canonical mount (new @trex-scoped agents plugin)
+     /WebAPI/trexsql/agent -> back-compat alias for stale frontend bundles"
+  ["/WebAPI/trex/pythia" "/WebAPI/trexsql/agent"])
+
 (defn- agent-proxy-handler
-  "Reverse-proxy /trexsql/agent/* → the :8001 Pythia function. Injects the
-   service_role apikey, relays the incoming Authorization bearer, and streams
-   the SSE response back unbuffered."
+  "Reverse-proxy the Pythia agent-proxy prefixes → the :8001 Pythia function.
+   Injects the service_role apikey, relays the incoming Authorization
+   bearer, and streams the SSE response back unbuffered.
+
+   Both external prefixes (/WebAPI/trex/pythia/* canonical,
+   /WebAPI/trexsql/agent/* back-compat) are normalized by
+   trexsql.servlet/wrap-strip-context onto the same internal /agent/*path
+   Reitit route, so :uri here is always \"/agent/<remainder>\" regardless of
+   which prefix the browser used. We build the upstream path from the
+   Reitit wildcard capture (:path-params :path) rather than from :uri, so
+   the internal \"/agent\" segment never leaks into the upstream URL."
   [request]
   (let [key @service-role-key]
     (if (str/blank? key)
@@ -1282,11 +1306,14 @@
             ;; keyword-keyed Clojure map; re-encode it to JSON so the upstream node
             ;; gets valid JSON (the proxy's generic (str body) would emit {:k ...}).
             body (let [b (:body request)]
-                   (cond (nil? b) nil (string? b) b :else (json/write-str b)))]
+                   (cond (nil? b) nil (string? b) b :else (json/write-str b)))
+            remainder (or (get-in request [:path-params :path]) "")
+            upstream-uri (str "/" remainder)]
         ;; Long socket timeout: a single agent turn can stream over many
         ;; seconds (tool execution between deltas). :as :stream keeps the
         ;; body unbuffered so SSE chunks flow through as they arrive.
-        (proxy/proxy-request (assoc request :body body) agent-upstream-base extra
+        (proxy/proxy-request (assoc request :body body :uri upstream-uri)
+                             agent-upstream-base extra
                              {:socket-timeout 300000
                               :connection-timeout 10000})))))
 
@@ -1316,7 +1343,10 @@
         ["/vocab/search" {:get {:handler search-vocab-handler}}]]
        ;; Agent endpoints are reverse-proxied to the :8001 Pythia function
        ;; (see agent-proxy-handler). The catch-all "/agent/*path" covers
-       ;; /agent/chat and /agent/chat/health.
+       ;; /agent/chat and /agent/chat/health. Both external prefixes in
+       ;; agent-proxy-external-prefixes — /WebAPI/trex/pythia/* (canonical)
+       ;; and /WebAPI/trexsql/agent/* (back-compat) — are normalized onto
+       ;; this same internal route by trexsql.servlet/wrap-strip-context.
        ["/agent/*path" {:handler agent-proxy-handler :no-doc true}]])))
 
 (defn- create-proxy-handler [target-url]

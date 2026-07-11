@@ -1,14 +1,43 @@
 import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
+import { Buffer } from "node:buffer";
 import type { Express, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
-import { pluginAuthz } from "../middleware/plugin-authz.ts";
+import { pluginAuthz, d2eAuthn } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
 import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
 
+// eszip bundles are immutable on disk for the life of the process, so read each
+// one once and cache the bytes in memory — re-reading the (brotli-compressed)
+// bundle from disk on every worker create is pure overhead on the hot path.
+const _eszipCache = new Map<string, Uint8Array>();
+async function readEszipCached(eszipPath: string): Promise<Uint8Array> {
+  const cached = _eszipCache.get(eszipPath);
+  if (cached) return cached;
+  const bytes = await Deno.readFile(eszipPath);
+  _eszipCache.set(eszipPath, bytes);
+  return bytes;
+}
+
+// buildDatabaseCredentials() marshals the whole credential registry across the
+// Trex.DatabaseManager FFI boundary and JSON-serializes it. Doing that on every
+// _callWorker — once per request, and again for each cross-worker fan-out hop —
+// was the dominant per-request cost under D2E_COMPAT. The registry only changes
+// on a deliberate sync (getRegistrationEpoch advances on boot and /trex/db
+// writes), so memoize the serialized value and rebuild only when the epoch moves.
+let _dbCredsJson: string | null = null;
+let _dbCredsEpoch = -1;
+function cachedDatabaseCredentialsJson(): string {
+  const epoch = getRegistrationEpoch();
+  if (_dbCredsJson === null || _dbCredsEpoch !== epoch) {
+    _dbCredsJson = JSON.stringify(buildDatabaseCredentials());
+    _dbCredsEpoch = epoch;
+  }
+  return _dbCredsJson;
+}
 export const ROLE_SCOPES: Record<string, string[]> = {};
-export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[] }> = [];
+export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[]; httpMethods?: string[] }> = [];
 
 export const REGISTERED_FUNCTIONS: Array<{
   name: string;
@@ -152,7 +181,7 @@ function substituteVariable(varExpression: string): string {
   return envValue !== undefined ? envValue : "";
 }
 
-function substituteEnvVarsInObject(obj: any): any {
+export function substituteEnvVarsInObject(obj: any): any {
   if (typeof obj === "string") return substituteEnvVars(obj);
   if (Array.isArray(obj)) return obj.map(substituteEnvVarsInObject);
   if (obj !== null && typeof obj === "object") {
@@ -196,13 +225,22 @@ function _needsCredentialRefresh(servicePath: string, dir: string): boolean {
   return _CRED_REFRESH_SERVICES.some((s) => hay.includes(s));
 }
 
+// SSE (text/event-stream) and eve's NDJSON session stream
+// (application/x-ndjson) must both be piped to the client as they arrive
+// rather than buffered — buffering waits for the worker stream to close,
+// which for a live tail never happens until the client disconnects.
+function isStreamingContentType(contentType: string): boolean {
+  return contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson");
+}
+
 async function _callWorker(
   req: globalThis.Request,
   servicePath: string,
   imports: string | null,
   fncfg: any,
   dir: string,
-  xenv: any
+  xenv: any,
+  signal?: AbortSignal
 ): Promise<globalThis.Response> {
   const myenv = Object.assign(
     {},
@@ -219,10 +257,10 @@ async function _callWorker(
       // Under d2e, provide the live DB registry to function workers the way d2e
       // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
       // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Serialized to a JSON
-      // string by the _myenv builder below (like the d2e env var).
+      // mapping stays in the plugin's own envConverter. Already a JSON string
+      // (epoch-cached), so the _myenv builder passes it through unchanged.
       ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: buildDatabaseCredentials() }
+        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
         : {}),
     },
   );
@@ -274,23 +312,30 @@ async function _callWorker(
   if (fncfg.eszip) {
     // Prebuilt eszip; fall back to source if absent (e.g. unbundled dev plugin).
     try {
-      options.maybeEszip = await Deno.readFile(`${dir}${fncfg.eszip}`);
+      options.maybeEszip = await readEszipCached(`${dir}${fncfg.eszip}`);
     } catch {
       /* no bundle on disk — use servicePath source */
     }
   }
 
+  // Callers that don't care about cancellation (e.g. the inter-service
+  // fnmap handler, which has no client response to tie an abort to) pass no
+  // signal — fall back to a controller that's never aborted, matching prior
+  // behavior.
+  const fetchSignal = signal ?? new AbortController().signal;
+
   try {
     // deno-lint-ignore no-explicit-any
     const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
-    const controller = new AbortController();
-    return await worker.fetch(req, { signal: controller.signal });
+    return await worker.fetch(req, { signal: fetchSignal });
   } catch (e: any) {
-    if (e instanceof Deno.errors.WorkerRequestCancelled) {
+    // Retry once on WorkerRequestCancelled, same as before — but only if
+    // the caller's own signal isn't already aborted (client gone): retrying
+    // a dead request just wastes a worker slot on a response nobody reads.
+    if (e instanceof (Deno.errors as any).WorkerRequestCancelled && !fetchSignal.aborted) {
       // deno-lint-ignore no-explicit-any
       const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
-      const controller = new AbortController();
-      return await worker.fetch(req, { signal: controller.signal });
+      return await worker.fetch(req, { signal: fetchSignal });
     }
     console.error("Worker call error:", e);
     return new globalThis.Response(JSON.stringify({ msg: e.toString() }), {
@@ -324,10 +369,10 @@ async function _callInit(
       // Under d2e, provide the live DB registry to function workers the way d2e
       // fed its services DATABASE_CREDENTIALS. The engine only PROVIDES the data
       // (from Trex.DatabaseManager); the DATABASE_CREDENTIALS → VCAP_SERVICES
-      // mapping stays in the plugin's own envConverter. Serialized to a JSON
-      // string by the _myenv builder below (like the d2e env var).
+      // mapping stays in the plugin's own envConverter. Already a JSON string
+      // (epoch-cached), so the _myenv builder passes it through unchanged.
       ...(Deno.env.get("D2E_COMPAT") === "true"
-        ? { DATABASE_CREDENTIALS: buildDatabaseCredentials() }
+        ? { DATABASE_CREDENTIALS: cachedDatabaseCredentialsJson() }
         : {}),
     },
   );
@@ -368,7 +413,7 @@ async function _callInit(
   if (eszip) {
     // Prebuilt eszip; fall back to source if absent.
     try {
-      options.maybeEszip = await Deno.readFile(`${dir}${eszip}`);
+      options.maybeEszip = await readEszipCached(`${dir}${eszip}`);
     } catch {
       /* no bundle on disk — use servicePath source */
     }
@@ -382,7 +427,7 @@ async function _callInit(
   }
 }
 
-function _addFunction(
+export function _addFunction(
   app: Express,
   url: string,
   path: string,
@@ -421,12 +466,24 @@ function _addFunction(
   const fullSource = isTrexPlugin
     ? PLUGINS_BASE_PATH + scopePrefix + url
     : url;
-  // @trex plugins go through trex's auth (authContext + pluginAuthz). d2e/legacy
-  // plugins authenticate inside the function worker using the forwarded Logto
-  // Authorization header (as the d2e fork did); imposing trex's pluginAuthz here
-  // would 401 every Logto-authenticated call — including the portal's public APIs.
-  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [];
+  // @trex plugins go through trex's auth (authContext + pluginAuthz, keyed on the
+  // trex HS256 session). d2e/legacy plugins carry a Logto RS256 JWT that authContext
+  // can't validate, so they use d2eAuthn: it verifies the Logto token against the
+  // Logto JWKS and enforces the role/URL scope check before forwarding to the worker
+  // (which only decodes the token). This restores the authn+authz the d2e fork did
+  // itself; without it a forged JWT would be trusted. Public paths are allowlisted
+  // inside d2eAuthn.
+  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [d2eAuthn];
   app.all([fullSource, fullSource + "/*"], apiLimiter, ...authMw, async (req: Request, res: Response) => {
+    // Propagate a client disconnect (browser tab closed, live tail dropped,
+    // etc.) into the worker fetch so a long-lived stream (session tail,
+    // SSE) doesn't run forever unread. "close" also fires on a normal,
+    // fully-written response — only abort when the response hasn't
+    // finished, i.e. this is a genuine premature disconnect.
+    const controller = new AbortController();
+    res.on("close", () => {
+      if (!res.writableEnded) controller.abort();
+    });
     try {
       const host = req.get("host") || "localhost";
       const protocol = req.protocol || "http";
@@ -473,7 +530,7 @@ function _addFunction(
           } catch {
             // Stream may not be async iterable in some environments
           }
-          if (chunks.length > 0) body = new Blob(chunks);
+          if (chunks.length > 0) body = new Blob(chunks as BlobPart[]);
         }
       }
 
@@ -481,9 +538,10 @@ function _addFunction(
         method: req.method,
         headers,
         body,
+        signal: controller.signal,
       });
 
-      const workerResponse = await _callWorker(webReq, path, imports, fncfg, dir, xenv);
+      const workerResponse = await _callWorker(webReq, path, imports, fncfg, dir, xenv, controller.signal);
 
       res.status(workerResponse.status);
       workerResponse.headers.forEach((value: string, key: string) => {
@@ -495,8 +553,12 @@ function _addFunction(
       });
       const contentType = workerResponse.headers.get("content-type") || "";
 
-      if (contentType.includes("text/event-stream") && workerResponse.body) {
-        // SSE: pipe the stream directly — don't buffer
+      if (isStreamingContentType(contentType) && workerResponse.body) {
+        // SSE / NDJSON: pipe the stream directly — don't buffer. Buffering
+        // (the arrayBuffer/text branches below) waits for the worker stream
+        // to close, which for a live tail (eve's session stream) never
+        // happens until the client disconnects — the request would hang
+        // forever instead of delivering events as they're produced.
         res.flushHeaders();
         const reader = workerResponse.body.getReader();
         const pump = async () => {

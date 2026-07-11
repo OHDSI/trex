@@ -499,6 +499,9 @@ router.get(`${BASE_PATH}/v1/projects/:ref/api-keys`, apiLimiter, async (req, res
 });
 
 // GET /v1/projects/:ref/postgrest — PostgREST config
+// Returns the live effective values: trexdb.setting postgrest.* rows (written
+// by the PATCH handler below) merged over the PGRST_* env defaults, mirroring
+// the @trex/postgrest plugin's precedence (defaults < env < trexdb.setting).
 router.get(`${BASE_PATH}/v1/projects/:ref/postgrest`, async (req, res) => {
   const user = await requireAdmin(req);
   if (!user) {
@@ -506,11 +509,35 @@ router.get(`${BASE_PATH}/v1/projects/:ref/postgrest`, async (req, res) => {
     return;
   }
 
+  // trexdb.setting layer (jsonb values come back parsed: number or string)
+  const settings: Record<string, unknown> = {};
+  try {
+    const { pool } = await import("../db.ts");
+    const result = await pool.query(
+      `SELECT key, value FROM trexdb.setting WHERE key LIKE 'postgrest.%'`,
+    );
+    for (const row of result.rows) settings[row.key] = row.value;
+  } catch (err) {
+    console.error("[config] PostgREST settings read error:", err);
+  }
+
+  // PGRST_* env layer (empty strings count as unset, like the plugin)
+  const env = (name: string): string | undefined => Deno.env.get(name) || undefined;
+  const toInt = (v: unknown): number | null => {
+    const n = typeof v === "number" ? v : Number.parseInt(String(v), 10);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const maxRows = settings["postgrest.maxRows"] ?? env("PGRST_DB_MAX_ROWS");
+  const dbSchema = settings["postgrest.dbSchema"] ?? env("PGRST_DB_SCHEMAS");
+  const extraSearchPath = settings["postgrest.dbExtraSearchPath"] ?? env("PGRST_DB_EXTRA_SEARCH_PATH");
+  const dbPool = settings["postgrest.dbPool"] ?? env("PGRST_DB_POOL");
+
   res.json({
-    db_extra_search_path: "public,extensions",
-    db_pool: null,
-    db_schema: "public",
-    max_rows: 1000,
+    db_extra_search_path: extraSearchPath != null ? String(extraSearchPath) : "public,extensions",
+    db_pool: dbPool != null ? toInt(dbPool) : null,
+    db_schema: dbSchema != null ? String(dbSchema) : "public",
+    max_rows: maxRows != null ? (toInt(maxRows) ?? 1000) : 1000,
   });
 });
 
@@ -914,6 +941,16 @@ const updatePostgrestConfig = async (req: any, res: any) => {
       db_extra_search_path: "postgrest.dbExtraSearchPath",
       db_pool: "postgrest.dbPool",
     });
+
+    // Nudge the @trex/postgrest plugin to re-read its config live — it LISTENs
+    // on the pgrst channel like upstream PostgREST. Best-effort: on failure the
+    // new values still apply on the next config load.
+    try {
+      const { pool } = await import("../db.ts");
+      await pool.query("NOTIFY pgrst, 'reload config'");
+    } catch (err) {
+      console.error("[config] PostgREST reload notify failed:", err);
+    }
 
     res.json({
       db_extra_search_path: body.db_extra_search_path ?? "public,extensions",

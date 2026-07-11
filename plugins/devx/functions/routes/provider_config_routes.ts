@@ -3,20 +3,30 @@
  * Provider configuration CRUD routes.
  * Manages multiple provider configs per user for multi-provider support.
  */
+import { deriveAuthShape } from "../auth_shape.ts";
 
 export async function handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) {
   // GET /provider-configs — list all configs for this user
   if (path.endsWith("/provider-configs") && method === "GET") {
+    // api_key_raw is selected ONLY to derive the non-secret auth_shape hint
+    // below (masking is a SQL expression, so the shape must be computed from
+    // the raw column before it's lost) — it is deleted from every row before
+    // the response is serialized. The masked api_key stays exactly as-is.
     const result = await sql(
       `SELECT id, user_id, provider, model,
               CASE WHEN api_key IS NOT NULL AND api_key != '' THEN
                 CONCAT(LEFT(api_key, 8), '...', RIGHT(api_key, 4))
               ELSE NULL END AS api_key,
+              api_key AS api_key_raw,
               base_url, display_name, is_active, created_at, updated_at
        FROM devx.provider_configs WHERE user_id = $1
        ORDER BY is_active DESC, updated_at DESC`,
       [userId],
     );
+    for (const row of result.rows) {
+      row.auth_shape = deriveAuthShape(row.api_key_raw);
+      delete row.api_key_raw;
+    }
     return Response.json(result.rows, { headers: corsHeaders });
   }
 

@@ -5,11 +5,18 @@ import { MessagesList } from "./chat/MessagesList";
 import { ChatInput } from "./chat/ChatInput";
 import { PlanQuestionnaire } from "./chat/PlanQuestionnaire";
 import { useMessages } from "@/hooks/useMessages";
+import { useEffectiveLoop } from "@/hooks/useEffectiveLoop";
+import { AgentsChatPanel } from "./AgentsChatPanel";
 import type { ChatMode } from "@/lib/types";
 import type { VisualEditContext, SelectedComponent } from "@/lib/visual-editing-types";
 
 interface ChatPanelProps {
   chatId: string | null;
+  // task-u1: only consumed by the agents-loop branch below (metadata.mode/
+  // appId for the stateless /chat endpoint) — the legacy loop derives mode
+  // server-side from the chat row and never needed these client-side.
+  mode?: ChatMode;
+  appId?: string | null;
   onModeChange: (mode: ChatMode) => void;
   onPlanContentChange?: (content: string | null) => void;
   visualEditContext?: VisualEditContext | null;
@@ -23,7 +30,33 @@ interface ChatPanelProps {
   onNewChat?: () => void;
 }
 
-export function ChatPanel({ chatId, onModeChange, onPlanContentChange, visualEditContext, onClearVisualEditContext, selectedComponents, onRemoveSelectedComponent, onClearSelectedComponents, onAppCommand, onBuildAction, sendRef, onNewChat }: ChatPanelProps) {
+// task-u1: the single flag branch point (task-u1-brief.md's Requirement 4).
+// devx.settings.loop === 'agents' (and no claude-code/copilot provider
+// override — see useEffectiveLoop.ts) renders AgentsChatPanel; everything
+// else renders LegacyChatPanel below, whose body is byte-for-byte what
+// ChatPanel used to be before this task (see git history) — same hook
+// (useMessages), same components, same behavior. `resolved` gates against a
+// one-render flash of the legacy UI before the settings/provider fetch
+// completes: renders nothing (same posture as the loading gate every other
+// devx page already uses) rather than mount-then-possibly-remount into the
+// agents loop, which would otherwise start a stream against the wrong
+// endpoint for a moment on every chat open.
+export function ChatPanel(props: ChatPanelProps) {
+  const { loop, resolved } = useEffectiveLoop();
+  if (!resolved) return null;
+  if (loop === "agents") {
+    return (
+      <AgentsChatPanel
+        {...props}
+        mode={props.mode ?? "agent"}
+        appId={props.appId}
+      />
+    );
+  }
+  return <LegacyChatPanel {...props} />;
+}
+
+function LegacyChatPanel({ chatId, onModeChange, onPlanContentChange, visualEditContext, onClearVisualEditContext, selectedComponents, onRemoveSelectedComponent, onClearSelectedComponents, onAppCommand, onBuildAction, sendRef, onNewChat }: ChatPanelProps) {
   const {
     messages,
     streaming,

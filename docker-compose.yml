@@ -148,8 +148,14 @@ services:
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
       PLUGINS_DEV_PATH: /usr/src/plugins-dev
-      POSTGREST_HOST: postgrest
-      POSTGREST_PORT: "3000"
+      # REST is served in-process by the @trex/postgrest plugin, which
+      # consumes these PGRST_* values; PGRST_JWT_SECRET comes from
+      # ./secrets/derived.env (see env_file above).
+      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
       STUDIO_INTERNAL_URL: http://studio:3000
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
     healthcheck:
@@ -165,34 +171,6 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
-
-  postgrest:
-    image: postgrest/postgrest:v12.2.3
-    # postgrest connects as the `authenticator` role, which is created by
-    # trex-data's schema migrations — not by postgres or trex-init. Waiting only
-    # on postgres raced ahead of the migrations and crashed with "password
-    # authentication failed for user authenticator" (postgrest has no internal
-    # retry budget for a missing role, so it exited 1). Gate on trex-data being
-    # healthy (migrations done) and restart as a safety net for any remaining race.
-    restart: unless-stopped
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      trex-data:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
-      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
-      PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: anon
-      # PGRST_JWT_SECRET comes from ./secrets/derived.env (see env_file above).
-      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
-      PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
 
   # Studio sidecar — internal-only; trex proxies /plugins/trex/studio/** to it.
   # Runs from the published image (the trex-specific entrypoint + key-fetch
@@ -250,38 +228,3 @@ services:
       NEXT_PUBLIC_ENABLE_LOGS: "false"
       SNIPPETS_MANAGEMENT_FOLDER: /app/snippets
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
-
-  realtime:
-    image: supabase/realtime:v2.93.3
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
-      PORT: "4000"
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_NAME: testdb
-      DB_USER: supabase_admin
-      DB_PASSWORD: ${REALTIME_DB_PASSWORD:-realtime_admin_pass}
-      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
-      # DB_ENC_KEY, API_JWT_SECRET, METRICS_JWT_SECRET, SECRET_KEY_BASE come
-      # from ./secrets/derived.env (see env_file above).
-      ERL_AFLAGS: -proto_dist inet_tcp
-      DNS_NODES: "''"
-      RLIMIT_NOFILE: "10000"
-      APP_NAME: realtime
-      SEED_SELF_HOST: "true"
-      RUN_JANITOR: "true"
-    healthcheck:
-      # Realtime serves an unauthenticated landing page on /; getting 200 here
-      # means Cowboy is up and the runtime booted past Ecto migrations.
-      test: ["CMD", "curl", "-sSfL", "--head", "-o", "/dev/null", "http://localhost:4000/"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s

@@ -29,18 +29,31 @@ export const CHAT_MODES: { id: ChatMode; label: string; description: string }[] 
 ];
 
 
+// Server-derived, NON-SECRET credential-shape hint. api_key is masked in
+// every GET response (LEFT(...,8)||'...'||RIGHT(...,4)), so the shape of the
+// stored credential cannot be derived client-side — the server computes it
+// from the raw key before masking (functions/auth_shape.ts). Used by
+// useEffectiveLoop.ts to gate bedrock-IAM users onto the legacy loop.
+// Absent on older server builds (optional everywhere it appears).
+export type AuthShape = "bearer" | "iam" | "plain" | "none";
+
 export interface DevxSettings {
   id: string;
   user_id: string;
   provider: string;
   model: string;
   api_key?: string;
+  auth_shape?: AuthShape;
   base_url?: string;
   ai_rules?: string;
   auto_approve?: boolean;
   max_steps?: number;
   max_tool_steps?: number;
   auto_fix_problems?: boolean;
+  // task-u1 (V11__loop_flag.sql): per-user coexistence flag between the
+  // legacy AI-SDK loop and the ported eve/agents runtime. Defaults to
+  // 'legacy' server-side (DB column default) when unset/absent.
+  loop?: "legacy" | "agents";
 }
 
 export interface ProviderConfigRecord {
@@ -49,6 +62,7 @@ export interface ProviderConfigRecord {
   provider: Provider;
   model: string;
   api_key?: string;
+  auth_shape?: AuthShape;
   base_url?: string;
   display_name?: string;
   is_active: boolean;
