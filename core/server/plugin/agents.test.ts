@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
-import { addAgentsPlugin, buildAgentWorkerConfig, isTrexScopedAgentsPlugin, normalizeAgentsValue } from "./agents.ts";
+import { addAgentsPlugin, agentsCoreMigrationTarget, buildAgentWorkerConfig, isTrexScopedAgentsPlugin, normalizeAgentsValue } from "./agents.ts";
 
 Deno.test("normalizeAgentsValue accepts array and single-object forms", () => {
   assertEquals(normalizeAgentsValue([{ name: "a", dir: "agent" }]), [{ name: "a", dir: "agent" }]);
@@ -16,12 +16,56 @@ Deno.test("buildAgentWorkerConfig produces worker env and generated import map",
   const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
   const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent");
   assertEquals(cfg.source, "/toy");
-  assertEquals(cfg.env.TREX_AGENT_DIR, `${toyPlugin}/agent`);
+  // TREX_AGENT_DIR is the staged copy inside the servicePath, not the plugin
+  // dir: the worker's module loader only resolves files under its
+  // servicePath, and loader.ts dynamic-imports agent code from this dir.
+  assertEquals(cfg.env.TREX_AGENT_DIR, `${cfg.servicePath}/agent`);
   assertEquals(cfg.env.TREX_AGENT_NAME, "toy");
-  // import map exists on disk and maps "eve" to the shim
+  // import map exists on disk and maps "eve" to the staged shim
   const map = JSON.parse(await Deno.readTextFile(cfg.importMapPath));
   assert(map.imports["eve"].endsWith("/agents/eve-shim/mod.ts"));
+  assert(map.imports["eve"].startsWith(`file://${cfg.servicePath}/`));
   assertEquals(map.imports["ai"], "npm:ai@^6");
+});
+
+Deno.test("buildAgentWorkerConfig stages a self-contained servicePath (packaged-image module confinement)", async () => {
+  // The runtime's user-worker module loader only resolves file: specifiers
+  // under the worker's servicePath — out-of-tree file:// imports fail in the
+  // packaged image (statically at graph creation, dynamically at module
+  // evaluation), and import.meta.url there points into a build-time compile
+  // graph that doesn't exist on disk. Everything the worker imports must
+  // therefore be staged inside the servicePath.
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent");
+  // Staged runtime: entrypoint chain and the eve shim the import map targets.
+  for (const f of ["index.ts", "agents/service/index.ts", "agents/loader.ts", "agents/eve-shim/mod.ts"]) {
+    const st = await Deno.stat(`${cfg.servicePath}/${f}`);
+    assert(st.isFile, `expected staged file ${f}`);
+  }
+  // Staged agent code: contents copied from the plugin's agent dir.
+  const staged = await Deno.readTextFile(`${cfg.servicePath}/agent/instructions.md`);
+  const original = await Deno.readTextFile(`${toyPlugin}/agent/instructions.md`);
+  assertEquals(staged, original);
+  // The generated entrypoint imports the staged service relatively — no
+  // absolute file:// URL that the confined module loader would reject.
+  const entry = await Deno.readTextFile(`${cfg.servicePath}/index.ts`);
+  assert(entry.includes('"./agents/service/index.ts"'));
+  assert(!entry.includes("file://"));
+  // Every file: entry in the import map stays inside the servicePath.
+  const map = JSON.parse(await Deno.readTextFile(cfg.importMapPath));
+  for (const [k, v] of Object.entries(map.imports) as [string, string][]) {
+    if (v.startsWith("file://")) {
+      assert(v.startsWith(`file://${cfg.servicePath}/`), `${k} escapes servicePath: ${v}`);
+    }
+  }
+});
+
+Deno.test("agentsCoreMigrationTarget resolves the migrations dir on disk (not via import.meta.url)", async () => {
+  const target = await agentsCoreMigrationTarget();
+  assertEquals(target.name, "agents-core");
+  assertEquals(target.schema, "agents");
+  const st = await Deno.stat(target.path);
+  assert(st.isDirectory, `migrations dir must exist on disk: ${target.path}`);
 });
 
 Deno.test("buildAgentWorkerConfig gives each agent its own servicePath (no shared worker pool key)", async () => {
@@ -53,7 +97,7 @@ Deno.test("buildAgentWorkerConfig accepts EDN-only agent dirs (instructions.edn)
   await Deno.writeTextFile(`${tmp}/agent/instructions.edn`, `"You are an EDN-configured agent."`);
   const cfg = await buildAgentWorkerConfig(tmp, { name: "ednagent", dir: "agent" }, "@trex/edn-agent");
   assertEquals(cfg.source, "/ednagent");
-  assertEquals(cfg.env.TREX_AGENT_DIR, `${tmp}/agent`);
+  assertEquals(cfg.env.TREX_AGENT_DIR, `${cfg.servicePath}/agent`);
 });
 
 Deno.test("buildAgentWorkerConfig fails fast when instructions.md missing", async () => {
@@ -149,7 +193,7 @@ Deno.test("manifest: buildAgentWorkerConfig succeeds for the devx-agent trex.age
   const devxPlugin = new URL("../../../plugins/devx", import.meta.url).pathname;
   const cfg = await buildAgentWorkerConfig(devxPlugin, { name: "devx-agent", dir: "agent" }, "@trex/devx");
   assertEquals(cfg.source, "/devx-agent");
-  assertEquals(cfg.env.TREX_AGENT_DIR, `${devxPlugin}/agent`);
+  assertEquals(cfg.env.TREX_AGENT_DIR, `${cfg.servicePath}/agent`);
   assertEquals(cfg.env.TREX_AGENT_NAME, "devx-agent");
   assertEquals(cfg.env.TREX_PLUGIN_NAME, "@trex/devx");
   // No plugins/devx/agent/deno.json is checked in (see task-v1 report):
@@ -163,7 +207,6 @@ Deno.test("manifest: buildAgentWorkerConfig succeeds for the devx-agent trex.age
 
 Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async () => {
   const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
-  const realDir = `${toyPlugin}/agent`;
 
   const cfg = await buildAgentWorkerConfig(
     toyPlugin,
@@ -171,7 +214,8 @@ Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async
     "@trex/toy-agent"
   );
 
-  // Reserved key must retain its real value, not the evil override
-  assertEquals(cfg.env.TREX_AGENT_DIR, realDir);
+  // Reserved key must retain its real value (the staged copy), not the
+  // evil override
+  assertEquals(cfg.env.TREX_AGENT_DIR, `${cfg.servicePath}/agent`);
   assertEquals(cfg.env.TREX_AGENT_NAME, "a");
 });

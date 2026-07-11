@@ -92,7 +92,7 @@ export class Plugins {
           case "agents":
             await addAgentsPlugin(app, value, dir, fullName);
             if (!Plugins.migrationTargets.some((t) => t.name === "agents-core")) {
-              Plugins.migrationTargets.push(agentsCoreMigrationTarget());
+              Plugins.migrationTargets.push(await agentsCoreMigrationTarget());
             }
             break;
           default:
