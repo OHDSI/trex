@@ -68,10 +68,14 @@ public class TrexSQLAutoConfiguration {
         servletClass.getMethod("initTrex", Object.class, Map.class)
             .invoke(servlet, sourceRepo, servletConfig);
 
+        // /trex/pythia/* is the canonical mount for the Pythia agent-proxy
+        // (trexsql.webapi/agent-proxy-handler); it's served by this same
+        // servlet so the Clojure router can forward both the new prefix and
+        // the /trexsql/agent/* back-compat alias to the agents plugin.
         ServletRegistrationBean<HttpServlet> reg =
-            new ServletRegistrationBean<>(servlet, "/trexsql/*");
+            new ServletRegistrationBean<>(servlet, "/trexsql/*", "/trex/pythia/*");
         reg.setLoadOnStartup(1);
-        log.info("TrexSQL servlet registered at /trexsql/*");
+        log.info("TrexSQL servlet registered at /trexsql/* and /trex/pythia/*");
         return reg;
     }
 
@@ -92,7 +96,7 @@ public class TrexSQLAutoConfiguration {
         };
         FilterRegistrationBean<OpenEntityManagerInViewFilter> reg =
             new FilterRegistrationBean<>(filter);
-        reg.addUrlPatterns("/trexsql/*");
+        reg.addUrlPatterns("/trexsql/*", "/trex/pythia/*");
         reg.setName("trexsqlOpenEntityManagerInViewFilter");
         reg.setOrder(Ordered.HIGHEST_PRECEDENCE);
         return reg;
