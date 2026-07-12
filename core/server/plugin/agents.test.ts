@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
-import { addAgentsPlugin, agentsCoreMigrationTarget, buildAgentWorkerConfig, isTrexScopedAgentsPlugin, normalizeAgentsValue } from "./agents.ts";
+import { addAgentsPlugin, agentsCoreMigrationTarget, buildAgentWorkerConfig, isTrustedScopeAgentsPlugin, normalizeAgentsValue } from "./agents.ts";
 
 Deno.test("normalizeAgentsValue accepts array and single-object forms", () => {
   assertEquals(normalizeAgentsValue([{ name: "a", dir: "agent" }]), [{ name: "a", dir: "agent" }]);
@@ -130,10 +130,14 @@ Deno.test("buildAgentWorkerConfig surfaces a non-NotFound stat error with its ow
   }
 });
 
-Deno.test("isTrexScopedAgentsPlugin only accepts the @trex scope", () => {
-  assertEquals(isTrexScopedAgentsPlugin("@trex/toy-agent"), true);
-  assertEquals(isTrexScopedAgentsPlugin("@evil/agent"), false);
-  assertEquals(isTrexScopedAgentsPlugin("unscoped-agent"), false);
+Deno.test("isTrustedScopeAgentsPlugin accepts the trusted scopes and rejects everything else", () => {
+  assertEquals(isTrustedScopeAgentsPlugin("@trex/toy-agent"), true);
+  // @ohdsi is trusted like @trex: first-party OHDSI plugins publish to GitHub
+  // Packages, which only accepts owner-scoped names (e.g. @ohdsi/pythia-agent).
+  assertEquals(isTrustedScopeAgentsPlugin("@ohdsi/pythia-agent"), true);
+  assertEquals(isTrustedScopeAgentsPlugin("@evil/agent"), false);
+  assertEquals(isTrustedScopeAgentsPlugin("@data2evidence/agent"), false);
+  assertEquals(isTrustedScopeAgentsPlugin("unscoped-agent"), false);
 });
 
 Deno.test("addAgentsPlugin skips registration for a non-@trex plugin name without throwing", async () => {
