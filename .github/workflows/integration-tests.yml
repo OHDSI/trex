@@ -75,9 +75,10 @@ jobs:
             tool: deno
             apt: libopenblas-dev
             # base's build.rs links libtrexsql since the startup snapshot
-            # bakes in trex_core (trex-runtime#163)
+            # bakes in trex_core (trex-runtime#163); LD_LIBRARY_PATH because
+            # the build script runs to create the snapshot
             libtrexsql: true
-            build-cmd: export LIBRARY_PATH=/tmp/trexsql && make configure && make debug_coverage
+            build-cmd: export LIBRARY_PATH=/tmp/trexsql LD_LIBRARY_PATH=/tmp/trexsql && make configure && make debug_coverage
             artifact: plugins/runtime/build/debug/extension/trexas/trexas.trex
             timeout: 60
 
