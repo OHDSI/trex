@@ -1,0 +1,13 @@
+{
+  "name": "@trex/devx-agent-evals",
+  "private": true,
+  "description": "eve eval suite for the devx (Code) agent — runs against a live dx stack",
+  "scripts": {
+    "eval": "eve eval --url \"${EVE_TARGET_URL:-http://localhost:9001/plugins/trex/devx-agent}\""
+  },
+  "dependencies": {
+    "eve": "^0.19.0",
+    "ai": "^7.0.0",
+    "zod": "^4.0.0"
+  }
+}
