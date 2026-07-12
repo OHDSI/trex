@@ -60,7 +60,7 @@ jobs:
           sudo apt-get install -y postgresql-17 postgresql-server-dev-17
 
       - uses: ./.github/actions/setup-libtrexsql
-        if: matrix.plugin == 'pg_trex'
+        if: matrix.plugin == 'pg_trex' || matrix.plugin == 'runtime'
         with:
           version: v1.4.4-trex
 
@@ -107,6 +107,11 @@ jobs:
         continue-on-error: true
         run: make coverage
         working-directory: plugins/${{ matrix.plugin }}
+        env:
+          # runtime links + loads libtrexsql (base's startup snapshot bakes
+          # in trex_core); no effect on plugins that don't link it
+          LIBRARY_PATH: /tmp/trexsql
+          LD_LIBRARY_PATH: /tmp/trexsql
 
       - uses: codecov/codecov-action@v4
         with:
