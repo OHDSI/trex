@@ -167,3 +167,31 @@
     (is (= "http://localhost:8001/plugins/ohdsi/pythia"
            (webapi/resolve-agent-upstream probe)))
     (is (= ["http://localhost:8001/plugins/ohdsi/pythia/eve/v1/info"] @seen))))
+
+;; Agent proxy body normalization (agent-proxy-handler)
+
+(deftest test-normalize-proxy-body-nil
+  (testing "nil body stays nil"
+    (is (nil? (#'webapi/normalize-proxy-body nil)))))
+
+(deftest test-normalize-proxy-body-string
+  (testing "blank string collapses to nil; non-blank string passes through"
+    (is (nil? (#'webapi/normalize-proxy-body "")))
+    (is (= "raw" (#'webapi/normalize-proxy-body "raw")))))
+
+(deftest test-normalize-proxy-body-collections
+  (testing "parser-produced collections (including empty) are re-encoded to JSON"
+    (is (= "{}" (#'webapi/normalize-proxy-body {})))
+    (is (= "[]" (#'webapi/normalize-proxy-body [])))
+    (let [encoded (#'webapi/normalize-proxy-body {:a 1})]
+      (is (= {"a" 1} (json/read-str encoded))))))
+
+(deftest test-normalize-proxy-body-empty-input-stream
+  (testing "an empty ServletInputStream (bodyless GET, e.g. /eve/v1/health) becomes nil"
+    (let [stream (java.io.ByteArrayInputStream. (.getBytes ""))]
+      (is (nil? (#'webapi/normalize-proxy-body stream))))))
+
+(deftest test-normalize-proxy-body-raw-json-input-stream
+  (testing "a non-parsed InputStream carrying JSON is forwarded verbatim, not re-encoded"
+    (let [stream (java.io.ByteArrayInputStream. (.getBytes "{\"x\":1}"))]
+      (is (= "{\"x\":1}" (#'webapi/normalize-proxy-body stream))))))

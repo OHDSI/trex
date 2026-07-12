@@ -1320,6 +1320,23 @@
   "Cached service_role key — read once on first agent request."
   (delay (read-service-role-key)))
 
+(defn- normalize-proxy-body
+  "Normalize a ring request :body for re-sending upstream. The servlet
+   middleware parses JSON request bodies into Clojure collections — re-encode
+   those (including empty {} / []) so the upstream gets valid JSON. Bodyless
+   requests (GET /eve/v1/health) and non-JSON requests leave :body as the raw
+   InputStream — slurp and forward verbatim (nil when empty) instead of
+   feeding it to the JSON encoder, which throws (mirrors the d2e-compat
+   proxy's shouldReserializeParsedBody, #139)."
+  [b]
+  (cond
+    (nil? b) nil
+    (string? b) (when-not (str/blank? b) b)
+    (coll? b) (json/write-str b)
+    (instance? java.io.InputStream b) (let [s (slurp b)]
+                                        (when-not (str/blank? s) s))
+    :else (str b)))
+
 (def agent-proxy-external-prefixes
   "External URI prefixes (as seen by the servlet, i.e. including /WebAPI)
    that should be reverse-proxied to the Pythia agent function. Consulted by
@@ -1350,11 +1367,13 @@
       (let [auth (get-in request [:headers "authorization"])
             extra (cond-> {"apikey" key}
                     (not (str/blank? auth)) (assoc "authorization" auth))
-            ;; The servlet middleware already parsed the JSON request body into a
-            ;; keyword-keyed Clojure map; re-encode it to JSON so the upstream node
-            ;; gets valid JSON (the proxy's generic (str body) would emit {:k ...}).
-            body (let [b (:body request)]
-                   (cond (nil? b) nil (string? b) b :else (json/write-str b)))
+            ;; The servlet middleware parses JSON request bodies into a
+            ;; keyword-keyed Clojure map; re-encode it to JSON so the upstream
+            ;; node gets valid JSON (the proxy's generic (str body) would emit
+            ;; {:k ...}). Bodyless requests (GET /eve/v1/health) leave :body
+            ;; as the raw InputStream, which normalize-proxy-body slurps
+            ;; instead of handing to the JSON encoder.
+            body (normalize-proxy-body (:body request))
             remainder (or (get-in request [:path-params :path]) "")
             upstream-uri (str "/" remainder)]
         ;; Long socket timeout: a single agent turn can stream over many
