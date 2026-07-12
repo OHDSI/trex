@@ -163,6 +163,8 @@ impl VScalar for StartTrexServerScalar {
       worker_memory_limit_mb: None,
       decorator: false,
       restrict_host_fs: false,
+      otel: None,
+      otel_console: None,
     };
 
     let response = match TREX_MANAGER.start_server_sync(config) {
