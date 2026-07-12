@@ -1,6 +1,7 @@
 (ns trexsql.webapi
   "WebAPI integration handlers with Reitit routing."
-  (:require [trexsql.datamart :as datamart]
+  (:require [trexsql.http-client :as client]
+            [trexsql.datamart :as datamart]
             [trexsql.jobs :as jobs]
             [trexsql.study :as study]
             [trexsql.vocab :as vocab]
@@ -1206,20 +1207,67 @@
 
 ;; Agent reverse-proxy
 ;;
-;; The Pythia agent now runs as a Deno function in the trex node, served at
-;; :8001/plugins/trex/pythia (an @trex-scoped agents plugin gated by
-;; authContext + pluginAuthz, which requires `apikey: <service_role>`). The
-;; browser POSTs to /WebAPI/trex/pythia/* on :8080 (the canonical mount); we
-;; also keep accepting /WebAPI/trexsql/agent/* for stale frontend bundles
-;; still pointed at the old path. Both external prefixes are normalized onto
-;; the internal /agent/*path route by trexsql.servlet/wrap-strip-context (see
+;; The Pythia agent runs as a Deno function in the trex node, mounted under a
+;; trusted plugin scope (core TRUSTED_PLUGIN_SCOPES) and gated by
+;; authContext + pluginAuthz, which requires `apikey: <service_role>`. The
+;; mount depends on how the plugin was installed — registry installs publish
+;; as @ohdsi/pythia-agent (GitHub Packages only accepts owner-scoped names)
+;; and mount at :8001/plugins/ohdsi/pythia; dev checkouts still mount the
+;; @trex-scoped package at :8001/plugins/trex/pythia. The agent entry name is
+;; `pythia` either way, so only the scope segment differs; the upstream is
+;; probed once on first use (see resolve-agent-upstream).
+;;
+;; The browser POSTs to /WebAPI/trex/pythia/* on :8080 (the canonical
+;; external path, unchanged regardless of the plugin's scope); we also keep
+;; accepting /WebAPI/trexsql/agent/* for stale frontend bundles still pointed
+;; at the old path. Both external prefixes are normalized onto the internal
+;; /agent/*path route by trexsql.servlet/wrap-strip-context (see
 ;; agent-proxy-external-prefixes there), so a single handler here forwards
 ;; both, injecting the service_role key and relaying the user's Authorization
 ;; bearer. The native in-lib agent handler (trexsql.agent.routes) is no
 ;; longer mounted.
 
+(def agent-upstream-candidates
+  "Candidate mounts for the Pythia agent function, probed in order. @ohdsi
+   first: that is the published/registry form; the @trex form is the
+   dev-checkout fallback and the pre-@ohdsi default."
+  ["http://localhost:8001/plugins/ohdsi/pythia"
+   "http://localhost:8001/plugins/trex/pythia"])
+
+(defn resolve-agent-upstream
+  "Pick the agent upstream base. The BAO_AGENT_UPSTREAM_BASE env var
+   overrides probing entirely; otherwise take the first candidate whose
+   mount answers anything but 404 for GET /eve/v1/info (401 means mounted
+   but unauthenticated, which still identifies the mount — the probe sends
+   no credentials on purpose). Falls back to the @trex mount (the
+   pre-@ohdsi behavior) when no candidate answers, e.g. the node is still
+   booting; the resulting 502s resolve once it is up, and the next process
+   restart re-probes.
+
+   probe-fn is injectable for tests: (probe-fn url) -> status int or nil."
+  ([] (resolve-agent-upstream
+        (fn [url]
+          (try
+            (:status (client/request {:method :get
+                                      :url url
+                                      :throw-exceptions false
+                                      :socket-timeout 3000
+                                      :connection-timeout 2000}))
+            (catch Exception _ nil)))))
+  ([probe-fn]
+   (let [override (System/getenv "BAO_AGENT_UPSTREAM_BASE")]
+     (if-not (str/blank? override)
+       override
+       (or (some (fn [base]
+                   (let [status (probe-fn (str base "/eve/v1/info"))]
+                     (when (and status (not= 404 status)) base)))
+                 agent-upstream-candidates)
+           (last agent-upstream-candidates))))))
+
 (def ^:private agent-upstream-base
-  "http://localhost:8001/plugins/trex/pythia")
+  "Resolved once on the first agent request (same lifecycle as
+   service-role-key)."
+  (delay (resolve-agent-upstream)))
 
 (defn- jdbc-url-from-database-url
   "Convert a postgres:// connection URL (DATABASE_URL) into a jdbc:postgresql
@@ -1313,7 +1361,7 @@
         ;; seconds (tool execution between deltas). :as :stream keeps the
         ;; body unbuffered so SSE chunks flow through as they arrive.
         (proxy/proxy-request (assoc request :body body :uri upstream-uri)
-                             agent-upstream-base extra
+                             @agent-upstream-base extra
                              {:socket-timeout 300000
                               :connection-timeout 10000})))))
 
