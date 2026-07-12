@@ -115,7 +115,123 @@ async function ensureConcurrencyLimit(
   }
 }
 
-export async function addPlugin(value: any) {
+interface PluginMeta {
+  name: string; // full npm name, e.g. @data2evidence/d2e-flows
+  version: string;
+  dir: string; // install dir the plugin was scanned from
+}
+
+interface PluginArtifact {
+  path: string; // storage object path: flow-plugins/<short-name>/<version>.tgz
+  sha256: string;
+  name: string; // npm short name (worker cache key)
+  version: string;
+}
+
+/**
+ * Publish the plugin's retained tarball (written by tpm next to the install
+ * tree as `.tarballs/<name>-<version>.tgz` + `.sha256`) to @trex/storage and
+ * return the artifact reference stamped into each deployment's job variables.
+ * The worker (run-flow.sh/provision-envs.sh) resolves deployment ->
+ * plugin_artifact -> fetch -> sha256-verify -> provision. Best-effort: any
+ * failure returns null and deployments register without the ref (workers then
+ * fall back to their baked plugin cache).
+ *
+ * Requires TREX_STORAGE_URL (e.g. http://localhost:8001/plugins/trex/storage-api)
+ * and TREX_STORAGE_SERVICE_KEY; publication is skipped when unset.
+ */
+async function publishPluginArtifact(
+  meta: PluginMeta
+): Promise<PluginArtifact | null> {
+  const storageUrl = Deno.env.get("TREX_STORAGE_URL");
+  const serviceKey = Deno.env.get("TREX_STORAGE_SERVICE_KEY");
+  if (!storageUrl || !serviceKey) {
+    console.log(
+      "TREX_STORAGE_URL/TREX_STORAGE_SERVICE_KEY not set — flow plugin artifacts not published"
+    );
+    return null;
+  }
+  try {
+    const shortName = meta.name.includes("/")
+      ? meta.name.slice(meta.name.indexOf("/") + 1)
+      : meta.name;
+    const fileStem = `${meta.name.replaceAll("/", "__")}-${meta.version}`;
+
+    // tpm writes .tarballs at the install root; the plugin dir is either
+    // <root>/<name> or <root>/@scope/<name>, so probe both ancestors. Bundled
+    // plugin images retain tarballs the same way (see the d2e trex image).
+    let tgzPath: string | null = null;
+    for (const up of ["..", "../.."]) {
+      const candidate = `${meta.dir}/${up}/.tarballs/${fileStem}.tgz`;
+      try {
+        await Deno.stat(candidate);
+        tgzPath = candidate;
+        break;
+      } catch (_) {
+        /* keep probing */
+      }
+    }
+    if (!tgzPath) {
+      console.log(
+        `No retained tarball for ${meta.name}@${meta.version} — artifact not published`
+      );
+      return null;
+    }
+
+    const sha256 = (await Deno.readTextFile(`${tgzPath}.sha256`)).trim();
+    const objectPath = `flow-plugins/${shortName}/${meta.version}.tgz`;
+    const base = storageUrl.replace(/\/$/, "");
+    // Both headers on purpose: trex's authContext accepts service_role keys
+    // only via `apikey` (middleware/auth-context.ts), while the embedded
+    // supabase-storage validates `Authorization` internally — same secret.
+    const headers = {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+    };
+
+    // Idempotent bucket creation (409 = already exists).
+    const bucketRes = await fetch(`${base}/bucket`, {
+      method: "POST",
+      headers: { ...headers, "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "flow-plugins", id: "flow-plugins" }),
+    });
+    if (!bucketRes.ok && bucketRes.status !== 409) {
+      console.error(
+        `flow-plugins bucket creation failed: ${bucketRes.status} ${await bucketRes.text()}`
+      );
+      return null;
+    }
+
+    // Upsert the object: same sha -> overwrite is a semantic no-op; new
+    // version -> new key. Tarballs are small (sources + lockfiles only).
+    const bytes = await Deno.readFile(tgzPath);
+    const uploadRes = await fetch(`${base}/object/${objectPath}`, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "Content-Type": "application/gzip",
+        "x-upsert": "true",
+      },
+      body: bytes,
+    });
+    if (!uploadRes.ok) {
+      console.error(
+        `artifact upload failed for ${meta.name}@${meta.version}: ${uploadRes.status} ${await uploadRes.text()}`
+      );
+      return null;
+    }
+
+    console.log(
+      `>FLOW< Published plugin artifact ${objectPath} (sha256 ${sha256.slice(0, 12)}…)`
+    );
+    return { path: objectPath, sha256, name: shortName, version: meta.version };
+  } catch (e) {
+    console.error(`artifact publication error for ${meta.name}:`, e);
+    return null;
+  }
+}
+
+export async function addPlugin(value: any, meta?: PluginMeta) {
   const prefectApiUrl = Deno.env.get("PREFECT_API_URL");
   if (!prefectApiUrl) {
     console.log("PREFECT_API_URL not set — skipping flow plugins");
@@ -145,6 +261,9 @@ export async function addPlugin(value: any) {
     } catch (_) {}
 
     if (!value.flows) return;
+
+    // Published once per plugin; every deployment below carries the same ref.
+    const pluginArtifact = meta ? await publishPluginArtifact(meta) : null;
 
     for (const f of value.flows) {
       const res = await fetchWithRetry(`${prefectApiUrl}/flows/`, {
@@ -213,6 +332,14 @@ export async function addPlugin(value: any) {
         },
         tags: f.tags,
       };
+
+      // Deployment-attached artifact: couples this deployment to the exact
+      // plugin tarball it was registered from. Process workers resolve it
+      // (fetch from @trex/storage, sha256-verify, provision the pixi env);
+      // the docker worker's template ignores it.
+      if (pluginArtifact) {
+        body.job_variables.plugin_artifact = pluginArtifact;
+      }
 
       // If the flow declares a deployment command, apply it to job_variables so the
       // Prefect docker worker runs it instead of the image's default CMD. d2e's HANA

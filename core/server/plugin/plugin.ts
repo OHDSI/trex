@@ -81,7 +81,7 @@ export class Plugins {
             addUIPlugin(app, value, dir, fullName);
             break;
           case "flow":
-            addFlowPlugin(value);
+            addFlowPlugin(value, { name: fullName, version: pkg.version, dir });
             break;
           case "transform":
             addTransformPlugin(app, value, dir, shortName);

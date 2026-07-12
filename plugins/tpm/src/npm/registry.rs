@@ -1,6 +1,7 @@
 use reqwest::blocking::Client;
 use semver::{Version, VersionReq};
 use sha1::{Digest, Sha1};
+use sha2::Sha256;
 use std::path::{Component, Path};
 use std::time::Duration;
 
@@ -52,6 +53,40 @@ fn validate_package_name(name: &str) -> NpmResult<()> {
 
 // Returns Ok(()) iff `child` (after canonicalization of an existing parent)
 // resolves to a path strictly inside `root`.
+/// Persist a verified plugin tarball to `<install_dir>/.tarballs/` so the
+/// flow-plugin artifact publisher (core/server/plugin/flow.ts) can upload it
+/// to @trex/storage. Writes `<name>-<version>.tgz` (scoped names flattened:
+/// `@scope/pkg` -> `@scope__pkg`) plus a `.sha256` sidecar with the digest the
+/// worker-side provisioner verifies against.
+fn retain_tarball(
+  install_dir: &Path,
+  package: &str,
+  version: &str,
+  bytes: &[u8],
+) -> NpmResult<()> {
+  let tarball_dir = install_dir.join(".tarballs");
+  std::fs::create_dir_all(&tarball_dir).map_err(|e| {
+    NpmError::Other(format!("Failed to create .tarballs dir: {}", e))
+  })?;
+  assert_path_contained(install_dir, &tarball_dir)?;
+
+  let file_stem = format!("{}-{}", package.replace('/', "__"), version);
+  let tgz_path = tarball_dir.join(format!("{}.tgz", file_stem));
+
+  let mut hasher = Sha256::new();
+  hasher.update(bytes);
+  let sha256 = format!("{:x}", hasher.finalize());
+
+  let tmp_path = tarball_dir.join(format!("{}.tgz.partial", file_stem));
+  std::fs::write(&tmp_path, bytes)
+    .map_err(|e| NpmError::Other(format!("Failed to write tarball: {}", e)))?;
+  std::fs::rename(&tmp_path, &tgz_path)
+    .map_err(|e| NpmError::Other(format!("Failed to move tarball: {}", e)))?;
+  std::fs::write(tarball_dir.join(format!("{}.tgz.sha256", file_stem)), &sha256)
+    .map_err(|e| NpmError::Other(format!("Failed to write sha256: {}", e)))?;
+  Ok(())
+}
+
 fn assert_path_contained(root: &Path, child: &Path) -> NpmResult<()> {
   let canon_root = root
     .canonicalize()
@@ -340,6 +375,23 @@ impl NpmRegistry {
     // before mixing it into a filesystem path — the registry URL is itself
     // configurable (TPM_REGISTRY_URL) and could be attacker-controlled.
     validate_package_name(&resolved.package)?;
+
+    // Retain the verified tarball beside the install tree. Flow-plugin
+    // artifact publication (core/server/plugin/flow.ts) uploads it to
+    // @trex/storage and stamps its sha256 into each Prefect deployment's job
+    // variables; without the retained bytes there is nothing to publish.
+    // Best-effort: a retention failure must not fail the install.
+    if let Err(e) = retain_tarball(
+      std::path::Path::new(install_dir),
+      &resolved.package,
+      &resolved.resolved_version,
+      &tarball_bytes,
+    ) {
+      eprintln!(
+        "tpm: tarball retention failed for {}@{}: {}",
+        resolved.package, resolved.resolved_version, e
+      );
+    }
 
     let package_dir = if resolved.package.starts_with('@') {
       let parts: Vec<&str> = resolved.package.splitn(2, '/').collect();

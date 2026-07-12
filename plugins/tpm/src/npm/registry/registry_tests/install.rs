@@ -310,3 +310,39 @@ fn install_package_with_deps_continues_after_dependency_failure() {
   assert!(root_ok, "root should have succeeded: {:?}", results);
   assert!(dep_failed, "baddep should have failed: {:?}", results);
 }
+
+#[test]
+fn install_package_retains_verified_tarball_with_sha256() {
+  use sha2::{Digest as _, Sha256};
+
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let mut server = mockito::Server::new();
+  let tarball = build_minimal_tarball("@scope/flowpkg", "2.0.0", "");
+  let shasum = sha1_hex(&tarball);
+  let tarball_url = format!("{}/@scope/flowpkg/-/flowpkg-2.0.0.tgz", server.url());
+  let body = metadata_body("@scope/flowpkg", "2.0.0", &tarball_url, &shasum, "{}");
+
+  let _meta = server.mock("GET", "/@scope/flowpkg").with_status(200).with_body(body).create();
+  let _tgz = server
+    .mock("GET", "/@scope/flowpkg/-/flowpkg-2.0.0.tgz")
+    .with_status(200)
+    .with_body(tarball.clone())
+    .create();
+
+  let r = mocked_registry(&server);
+  let res = r.install_package("@scope/flowpkg", tmp.path().to_str().unwrap()).expect("ok");
+  assert!(res.success, "expected success, got {:?}", res);
+
+  let retained = tmp.path().join(".tarballs/@scope__flowpkg-2.0.0.tgz");
+  assert!(retained.exists(), "retained tarball missing at {}", retained.display());
+  assert_eq!(std::fs::read(&retained).unwrap(), tarball, "retained bytes differ");
+
+  let mut hasher = Sha256::new();
+  hasher.update(&tarball);
+  let expected = format!("{:x}", hasher.finalize());
+  let sidecar = std::fs::read_to_string(
+    tmp.path().join(".tarballs/@scope__flowpkg-2.0.0.tgz.sha256"),
+  )
+  .expect("sha256 sidecar");
+  assert_eq!(sidecar, expected, "sha256 sidecar mismatch");
+}

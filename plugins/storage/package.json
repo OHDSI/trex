@@ -1,16 +1,16 @@
 {
   "name": "@trex/storage",
   "version": "0.1.0",
-  "description": "Supabase Storage feasibility test",
+  "description": "Embedded Supabase Storage (file or S3 backend)",
   "trex": {
     "functions": {
       "env": {
         "_shared": {
           "DATABASE_URL": "${DATABASE_URL}",
           "DATABASE_SEARCH_PATH": "storage,public",
-          "STORAGE_BACKEND": "file",
-          "FILE_STORAGE_BACKEND_PATH": "/tmp/storage",
-          "FILE_SIZE_LIMIT": "52428800",
+          "STORAGE_BACKEND": "${STORAGE_BACKEND:-file}",
+          "FILE_STORAGE_BACKEND_PATH": "${STORAGE_FILE_BACKEND_PATH:-/tmp/storage}",
+          "FILE_SIZE_LIMIT": "${STORAGE_FILE_SIZE_LIMIT:-52428800}",
           "IS_MULTITENANT": "false",
           "ANON_KEY": "${PGRST_JWT_SECRET}",
           "SERVICE_KEY": "${PGRST_JWT_SECRET}",
