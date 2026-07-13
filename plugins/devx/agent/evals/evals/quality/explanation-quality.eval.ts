@@ -1,15 +1,15 @@
 import { defineEval } from "eve/evals";
 
 // LLM-judged (task 12). The plan-stage brief put a `judge:` STRING (a
-// rubric) on defineEval expecting it to gate pass/fail — that is rejected at
-// load time by eve's validateEvalInput (`judge` must be
-// `{ model, modelOptions? }`, a model config, not a rubric string; see
-// define-eval.js's rejectLegacyKey for `model`/`modelOptions`, which is the
-// closest analog eve actually enforces). The real LLM-as-judge grading call
-// happens inside test(t): `t.judge.autoevals.closedQA(criteria)`, scored by
-// the model configured via this eval's own `judge` (absent here) falling
-// back to evals.config.ts's default (a runner-side Bedrock model — see
-// evals/lib/judge-model.ts).
+// rubric) on defineEval expecting it to gate pass/fail, but that's not how
+// eve's judge works. A bare `judge: "<string>"` is not rejected at load time
+// by validateEvalInput (which only rejects legacy top-level `model`/
+// `modelOptions` keys); it simply does nothing — a per-eval judge string sits
+// inert. Real LLM-as-judge grading happens inside test(t) via the call chain
+// `t.judge.autoevals.closedQA(criteria).gate()` (see below), which records a
+// gate assertion scored by the model configured via this eval's own `judge`
+// (absent here) falling back to evals.config.ts's default (a runner-side
+// Bedrock model — see evals/lib/judge-model.ts).
 //
 // `closedQA` records a *soft* assertion by default (see judge.js: severity
 // is fixed to `soft` with no threshold) — verified live (see README) that a
