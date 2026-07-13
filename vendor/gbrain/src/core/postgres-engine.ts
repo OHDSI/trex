@@ -402,23 +402,39 @@ export class PostgresEngine implements BrainEngine {
    *      requests in this process before the cache is warm) serialize on
    *      THIS schema's provisioning only, without blocking unrelated tenants
    *      the way the fixed `pg_advisory_lock(42)` inside initSchema() does.
+   *
+   * The hash SELECT, `pg_advisory_lock`, and `pg_advisory_unlock` MUST run on
+   * the SAME backend connection — `pg_advisory_lock` is session-scoped, so
+   * issuing these as separate awaited calls against `this.sql` (a pool) risks
+   * each one landing on a different backend: the lock is taken on backend A,
+   * the unlock is a no-op on backend B, and A never releases (leak) while
+   * concurrent provisioning of the same schema never actually serializes.
+   * `withReservedConnection` pins one connection for the whole critical
+   * section to guarantee lock/unlock hit the same backend.
    */
   async provisionSchema(name: string): Promise<void> {
     const schema = `memory_${name}`;
     if (!isValidSchemaIdent(schema)) throw new Error(`invalid memory name: ${name}`);
     if (PROVISIONED.has(schema)) return;
-    // Advisory lock keyed on the schema name hash — serializes concurrent
-    // first-touch provisioning across requests without blocking other schemas.
-    const conn = this.sql;
-    const [{ h }] = await conn<{ h: number }[]>`SELECT ('x' || substr(md5(${schema}), 1, 8))::bit(32)::int AS h`;
-    await conn`SELECT pg_advisory_lock(${h})`;
-    try {
-      if (PROVISIONED.has(schema)) return;
-      await this.initSchema(schema);
-      PROVISIONED.add(schema);
-    } finally {
-      await conn`SELECT pg_advisory_unlock(${h})`;
-    }
+    await this.withReservedConnection(async (conn) => {
+      // Advisory lock keyed on the schema name hash — serializes concurrent
+      // first-touch provisioning across requests without blocking other schemas.
+      const rows = await conn.executeRaw<{ h: number }>(
+        `SELECT ('x' || substr(md5($1), 1, 8))::bit(32)::int AS h`,
+        [schema],
+      );
+      const h = rows[0].h;
+      await conn.executeRaw(`SELECT pg_advisory_lock($1)`, [h]);
+      try {
+        if (PROVISIONED.has(schema)) return;
+        // initSchema uses its own DDL connection + its own fixed lock (42);
+        // that's a separate, coarser lock and is fine to nest under this one.
+        await this.initSchema(schema);
+        PROVISIONED.add(schema);
+      } finally {
+        await conn.executeRaw(`SELECT pg_advisory_unlock($1)`, [h]);
+      }
+    });
   }
 
   /**

@@ -141,6 +141,15 @@ function resolveClientIp(req: Request, server: { requestIP: (r: Request) => { ad
 export async function startHttpTransport(opts: HttpTransportOptions) {
   const { port, engine } = opts;
 
+  // Multi-tenant memory routing (design §8): memories are a FINITE set
+  // declared by tpm-installed plugins, not arbitrary caller-supplied names.
+  // trex passes the declared names at spawn via `GBRAIN_MEMORY_ALLOWLIST`
+  // (comma-separated). Parsed once per process start; empty/unset means no
+  // name is allowed (every /memory/<name>/... route 404s).
+  const memoryAllowlist = new Set(
+    (process.env.GBRAIN_MEMORY_ALLOWLIST ?? '').split(',').map(s => s.trim()).filter(Boolean),
+  );
+
   // Engine-aware: route SQL through the active BrainEngine. Both Postgres
   // and PGLite carry access_tokens + mcp_request_log in their schemas
   // (pglite-schema.ts:478,495 and schema.sql), so the legacy bearer-auth
@@ -438,7 +447,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       // 404 first; must NOT affect any path that doesn't start with /memory/
       // (parseMemoryPath returns null for those, so this block is a no-op
       // and the legacy path check below runs exactly as before).
-      const mem = parseMemoryPath(path);
+      const mem = parseMemoryPath(path, memoryAllowlist);
       if (mem) {
         // Multi-tenancy is Postgres-only by design (withSchema/provisionSchema
         // aren't on the BrainEngine interface — see engine.ts). Fail clearly
