@@ -1,6 +1,7 @@
-# Standalone compose stack that runs trex + the devx plugin from a single
-# pre-built image (ghcr.io/ohdsi/trexsql-dx) with the devx plugin and the
-# devx_ext DuckDB extension baked in — NO local builds, bind-mounts, or
+# Standalone compose stack that runs trex + the devx plugin from the standard
+# image (ghcr.io/ohdsi/trexsql). The devx plugin and the devx_ext DuckDB
+# extension are baked into every published image in gated folders and are
+# activated here via TREX_DX_ENABLED=true — NO local builds, bind-mounts, or
 # submodule checkouts required. Runs alongside the default docker-compose.yml
 # (ports offset by +1000 on HTTP / +20 on pg).
 #
@@ -11,10 +12,10 @@
 #   docker compose -f docker-compose.dx.yml up -d
 # UI: http://localhost:9001/plugins/trex/devx/
 #
-# Build the image locally instead of pulling (see Dockerfile.dx):
+# Build the image locally instead of pulling (see Dockerfile):
 #   git submodule update --init plugins/extension-ci-tools
-#   docker build -f Dockerfile.dx -t trexsql-dx:dev .
-#   TREX_IMAGE=trexsql-dx:dev docker compose -f docker-compose.dx.yml up -d
+#   docker build -t trexsql-local:full .
+#   TREX_IMAGE=trexsql-local:full docker compose -f docker-compose.dx.yml up -d
 #
 # Init containers (one-shots, not builds):
 #   - trex-init             — generates ./secrets/{root,derived}.env (the
@@ -24,7 +25,7 @@
 #                             uid 1000 (`node`) so devx-api routes can write.
 #
 # Notes:
-# - The dx image is multi-arch (arm64-native), so it runs natively rather than
+# - The image is multi-arch (arm64-native), so it runs natively rather than
 #   under amd64 emulation.
 # - Back up secrets/root.env — losing it invalidates every encrypted secret and
 #   issued JWT.
@@ -63,7 +64,7 @@ services:
   # Generates ./secrets/{root,derived}.env on first boot (TREX_ROOT_KEY and the
   # derived JWT/crypto keys). Short-circuits if the files already exist.
   trex-init:
-    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql-dx:latest}
+    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql:latest}
     entrypoint: /usr/local/bin/trex-init
     environment:
       TREX_SECRETS_DIR: /shared
@@ -114,9 +115,9 @@ services:
   # the devx plugin all live here. devx_ext command execution, the workspaces,
   # and the function runtime are co-located, so no remote sessions are involved.
   trex:
-    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql-dx:latest}
+    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql:latest}
     # Override with a local image for development:
-    #   TREX_IMAGE=trexsql-test:dev docker compose -f docker-compose.dx.yml up -d
+    #   TREX_IMAGE=trexsql-local:full docker compose -f docker-compose.dx.yml up -d
     # Ports offset by +1000 (HTTP) / +20 (pg) so this runs alongside the default
     # docker-compose.yml (which uses 8000/8001/5433). pgwire is on 5453 (not
     # 5443): 5443 is taken by an unrelated `sibyl-trex` container on this host.
@@ -139,12 +140,17 @@ services:
     volumes:
       - dx-claude-config:/home/node/.claude
       - dx-gh-config:/home/node/.config/gh
-      # The devx plugin and devx_ext extension are baked into the dx image, so
-      # nothing source-related is mounted here — only persistent data volumes.
+      # The devx plugin and devx_ext extension are baked into the image
+      # (activated by TREX_DX_ENABLED), so nothing source-related is mounted
+      # here — only persistent data volumes.
       - devx-workspaces:/tmp/devx-workspaces
     environment:
       <<: *swarm-config
       SWARM_NODE: trex
+      # Expose the baked-in devx plugin + devx_ext extension (gated folders in
+      # the image; see docker/entrypoint.sh). Everything else in this stack
+      # assumes devx is active.
+      TREX_DX_ENABLED: "true"
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
       # data_node runs the schema migrations (creates the `authenticator` role etc.)
       SCHEMA_DIR: /usr/src/core/schema
@@ -184,8 +190,14 @@ services:
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
       PLUGINS_DEV_PATH: /usr/src/plugins-dev
-      POSTGREST_HOST: postgrest
-      POSTGREST_PORT: "3000"
+      # REST is served in-process by the @trex/postgrest plugin, which
+      # consumes these PGRST_* values; PGRST_JWT_SECRET comes from
+      # ./secrets/derived.env (see env_file above).
+      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
+      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
       # Register devx and prometheus in the web shell's top nav (consumed by plugins/web).
       TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"DevX","plugin":"devx"},{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
     healthcheck:
@@ -198,28 +210,3 @@ services:
       timeout: 5s
       retries: 30
       start_period: 60s
-
-  postgrest:
-    image: postgrest/postgrest:v12.2.3
-    # The `authenticator` role is created by trex's schema migrations, not by
-    # postgres or trex-init. Gate on trex healthy (migrations done) and restart
-    # as a safety net — postgrest exits 1 if the role isn't there yet.
-    restart: unless-stopped
-    depends_on:
-      trex-init:
-        condition: service_completed_successfully
-      postgres:
-        condition: service_healthy
-      trex:
-        condition: service_healthy
-    env_file:
-      - path: ./secrets/derived.env
-        required: false
-    environment:
-      PGRST_DB_URI: postgres://authenticator:authenticator_pass@postgres:5432/testdb
-      PGRST_DB_SCHEMAS: public
-      PGRST_DB_ANON_ROLE: anon
-      # PGRST_JWT_SECRET comes from ./secrets/derived.env (see env_file above).
-      PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
-      PGRST_DB_USE_LEGACY_GUCS: "false"
-      PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1

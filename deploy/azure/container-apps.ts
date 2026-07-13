@@ -2,10 +2,8 @@ import * as azure from "@pulumi/azure-native";
 import * as pulumi from "@pulumi/pulumi";
 import { Sizing } from "../shared/config";
 import {
-  POSTGREST_IMAGE,
   TREX_HEALTH_CHECK,
   buildTrexEnvVars,
-  buildPostgrestEnvVars,
 } from "../shared/containers";
 
 export interface ContainerAppsResult {
@@ -72,17 +70,6 @@ export function createContainerApps(opts: {
       return Object.entries(env).map(([name, value]) => ({ name, value }));
     });
 
-  const postgrestEnvVars = pulumi
-    .all([opts.databaseUrl, opts.authSecret])
-    .apply(([dbUrl, secret]) => {
-      const env = buildPostgrestEnvVars({
-        databaseUrl: dbUrl,
-        jwtSecret: secret,
-        endpointUrl: "https://placeholder",
-      });
-      return Object.entries(env).map(([name, value]) => ({ name, value }));
-    });
-
   const app = new azure.app.ContainerApp(`trex-${opts.env}-app`, {
     resourceGroupName: opts.resourceGroupName,
     location: opts.location,
@@ -144,15 +131,6 @@ export function createContainerApps(opts: {
               failureThreshold: 3,
             },
           ],
-        },
-        {
-          name: "postgrest",
-          image: POSTGREST_IMAGE,
-          resources: {
-            cpu: 0.25,
-            memory: "0.5Gi",
-          },
-          env: postgrestEnvVars.apply((vars) => vars),
         },
       ],
       scale: {

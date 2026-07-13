@@ -3,7 +3,7 @@
 // (core/server/agents/service). Routing/auth/SSE piping reuse the function
 // plugin proxy (_addFunction).
 import type { Express } from "express";
-import { _addFunction, substituteEnvVarsInObject } from "./function.ts";
+import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_PLUGIN_SCOPES } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 
 export interface AgentEntry {
@@ -34,6 +34,40 @@ const PASSTHROUGH_ENV = [
   "GOOGLE_GENERATIVE_AI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION",
 ];
 
+// Resolve the on-disk agents runtime dir (core/server/agents). import.meta.url
+// is NOT a reliable disk path here: in the packaged image the main service
+// executes from a build-time compile graph whose file URLs
+// (file:///var/tmp/sb-compile-…) don't exist at runtime. Try meta-relative
+// first (source checkouts, tests), then cwd-relative (packaged image — same
+// convention as index.ts's shinylive path).
+export async function resolveAgentsRuntimeDir(): Promise<string> {
+  const candidates = [
+    new URL("../agents/", import.meta.url).pathname,
+    `${Deno.cwd()}/core/server/agents/`,
+  ];
+  for (const c of candidates) {
+    try {
+      await Deno.stat(`${c}service/index.ts`);
+      return c;
+    } catch { /* try next candidate */ }
+  }
+  throw new Error(
+    `agents: cannot locate the agents runtime dir (tried ${candidates.join(", ")})`,
+  );
+}
+
+async function copyDirRecursive(src: string, dest: string): Promise<void> {
+  await Deno.mkdir(dest, { recursive: true });
+  for await (const entry of Deno.readDir(src)) {
+    const s = `${src}/${entry.name}`;
+    const d = `${dest}/${entry.name}`;
+    // Deno.stat follows symlinks, so linked files/dirs are copied as content.
+    const info = entry.isSymlink ? await Deno.stat(s) : entry;
+    if (info.isDirectory) await copyDirRecursive(s, d);
+    else if (info.isFile) await Deno.copyFile(s, d);
+  }
+}
+
 export async function buildAgentWorkerConfig(
   pluginDir: string,
   entry: AgentEntry,
@@ -63,11 +97,32 @@ export async function buildAgentWorkerConfig(
     }
   }
 
-  const shimBase = new URL("../agents/eve-shim/", import.meta.url);
+  // The worker's module loader only resolves file: specifiers under its own
+  // servicePath (plus npm:/jsr:/remote specifiers) — out-of-tree file://
+  // imports fail in the packaged image, statically at graph creation and
+  // dynamically at module evaluation, regardless of fs permissions
+  // (allowHostFsAccess governs runtime I/O like Deno.readTextFile, not
+  // module resolution). So stage everything the worker imports inside the
+  // servicePath: the core agents runtime (self-contained — relative imports
+  // and bare specifiers only) and the agent's own dir (loader.ts
+  // dynamic-imports agent.ts/tools/hooks from TREX_AGENT_DIR). Boot-time
+  // snapshot semantics are unchanged: the pool reuses the first worker per
+  // servicePath anyway, so live edits to a dev-mounted plugin already
+  // required re-registration to take effect.
+  const tmp = await Deno.makeTempDir({ prefix: "trex-agents-" });
+  const runtimeSrc = await resolveAgentsRuntimeDir();
+  for (const sub of ["service", "eve-shim"]) {
+    await copyDirRecursive(`${runtimeSrc}${sub}`, `${tmp}/agents/${sub}`);
+  }
+  await Deno.copyFile(`${runtimeSrc}loader.ts`, `${tmp}/agents/loader.ts`);
+  const stagedAgentDir = `${tmp}/agent`;
+  await copyDirRecursive(agentDir, stagedAgentDir);
+
+  const shimBase = `file://${tmp}/agents/eve-shim/`;
   const imports: Record<string, string> = {
-    "eve": new URL("mod.ts", shimBase).href,
-    "eve/tools": new URL("tools.ts", shimBase).href,
-    "eve/evals": new URL("evals.ts", shimBase).href,
+    "eve": `${shimBase}mod.ts`,
+    "eve/tools": `${shimBase}tools.ts`,
+    "eve/evals": `${shimBase}evals.ts`,
     "ai": "npm:ai@^6",
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@latest",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@latest",
@@ -83,9 +138,13 @@ export async function buildAgentWorkerConfig(
     Object.assign(imports, own.imports ?? {});
   } catch { /* optional */ }
 
-  const tmp = await Deno.makeTempDir({ prefix: "trex-agents-" });
   const importMapPath = `${tmp}/import_map.json`;
   await Deno.writeTextFile(importMapPath, JSON.stringify({ imports }, null, 2));
+  // The worker's static graph builder resolves bare specifiers from the
+  // servicePath's deno.json, not from the importMapPath worker option (that
+  // one only kicks in at runtime) — without this, graph creation fails with
+  // `Import "edn-data" not a dependency` on the staged loader.ts.
+  await Deno.writeTextFile(`${tmp}/deno.json`, JSON.stringify({ imports }, null, 2));
 
   // The runtime's worker pool keys workers by servicePath and reuses the
   // FIRST worker created for a given path (env vars and the import map are
@@ -93,11 +152,11 @@ export async function buildAgentWorkerConfig(
   // trex-runtime/crates/base's servicePath-keyed pool. If every agent
   // shared the core service dir as servicePath, every agent after the
   // first would silently run with the first agent's TREX_AGENT_DIR/env.
-  // Give each agent its own servicePath (this temp dir, alongside its
-  // import_map.json) whose index.ts just imports the real, shared service
-  // entrypoint — mirrors how each function plugin already gets its own dir.
-  const serviceEntryUrl = new URL("../agents/service/index.ts", import.meta.url).href;
-  await Deno.writeTextFile(`${tmp}/index.ts`, `import "${serviceEntryUrl}";\n`);
+  // Give each agent its own servicePath (this temp dir, holding its
+  // import_map.json and the staged runtime + agent code) whose index.ts
+  // imports the staged service entrypoint — everything the graph needs is
+  // in-tree.
+  await Deno.writeTextFile(`${tmp}/index.ts`, `import "./agents/service/index.ts";\n`);
 
   const env: Record<string, string> = {};
 
@@ -111,9 +170,11 @@ export async function buildAgentWorkerConfig(
   const entryEnv = substituteEnvVarsInObject(entry.env ?? {});
   Object.assign(env, entryEnv);
 
-  // Reserved keys must not be overridden
+  // Reserved keys must not be overridden. TREX_AGENT_DIR points at the
+  // staged copy: the worker can only import modules under its servicePath
+  // (see above), and loader.ts dynamic-imports agent code from this dir.
   const reserved: Record<string, string> = {
-    TREX_AGENT_DIR: agentDir,
+    TREX_AGENT_DIR: stagedAgentDir,
     TREX_AGENT_NAME: entry.name,
     TREX_PLUGIN_NAME: pluginFullName,
   };
@@ -128,13 +189,14 @@ export async function buildAgentWorkerConfig(
 }
 
 // _addFunction (function.ts) only applies [authContext, pluginAuthz] to
-// plugins named `@trex/...` — d2e/legacy function plugins authenticate
-// themselves inside the worker using the forwarded Logto header, which an
-// agents worker doesn't do. Until worker-side auth exists for agents,
-// anything outside the @trex scope would mount a completely
-// unauthenticated HTTP surface (session create, chat, tool execution).
-export function isTrexScopedAgentsPlugin(name: string): boolean {
-  return name.startsWith("@trex/");
+// plugins under a trusted scope (TRUSTED_PLUGIN_SCOPES: @trex, @ohdsi) —
+// d2e/legacy function plugins authenticate themselves inside the worker using
+// the forwarded Logto header, which an agents worker doesn't do. Until
+// worker-side auth exists for agents, anything outside a trusted scope would
+// mount a completely unauthenticated HTTP surface (session create, chat, tool
+// execution).
+export function isTrustedScopeAgentsPlugin(name: string): boolean {
+  return isTrustedPluginScope(name);
 }
 
 // Auth carve-out for channel routes (task-4). A channel route lives at
@@ -173,10 +235,10 @@ export async function addAgentsPlugin(
   dir: string,
   name: string,
 ): Promise<void> {
-  if (!isTrexScopedAgentsPlugin(name)) {
+  if (!isTrustedScopeAgentsPlugin(name)) {
     // Log and skip, don't throw: one misconfigured/malicious plugin must
     // not take down boot for every other plugin.
-    console.error(`agents: plugin ${name} skipped — agents plugins must be published under the @trex scope (auth requirement)`);
+    console.error(`agents: plugin ${name} skipped — agents plugins must be published under a trusted scope (${TRUSTED_PLUGIN_SCOPES.join(", ")}) (auth requirement)`);
     return;
   }
   for (const entry of normalizeAgentsValue(value)) {
@@ -185,7 +247,7 @@ export async function addAgentsPlugin(
     // _addFunction computes servicePath as `${dir}${fncfg.function}` and the
     // mounted URL from `source` + plugin scope; TREX_AGENT_BASE tells the
     // worker its mount point so it can strip the prefix. Always the
-    // @trex-scoped mount — the guard above rejects everything else.
+    // trusted-scope mount — the guard above rejects everything else.
     const scope = `/${name.slice(1, name.indexOf("/"))}`;
     const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
     _addFunction(
@@ -209,10 +271,14 @@ export async function addAgentsPlugin(
 }
 
 // Registered once by plugin.ts when the first agents-type plugin appears.
-export function agentsCoreMigrationTarget() {
+// Async because the migrations dir must be resolved from disk, not from
+// import.meta.url — see resolveAgentsRuntimeDir (in the packaged image the
+// meta URL points into a build-time compile graph that doesn't exist at
+// runtime, so the migration runner failed with "Directory not found").
+export async function agentsCoreMigrationTarget() {
   return {
     name: "agents-core",
-    path: new URL("../agents/migrations", import.meta.url).pathname,
+    path: `${await resolveAgentsRuntimeDir()}migrations`,
     schema: "agents",
     database: "_config",
   };

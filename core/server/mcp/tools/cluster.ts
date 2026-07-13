@@ -120,4 +120,47 @@ export function registerClusterTools(server: McpServer) {
       }
     },
   );
+
+  server.tool(
+    "cluster-restart-service",
+    "Restart a service on the trexsql cluster: stops it (ignoring errors if it wasn't running) then starts it with the given config. Use this to apply a new configuration to a running service.",
+    {
+      extension: z.string().describe("Extension name that provides the service (e.g. 'pgwire', 'flight')"),
+      config: z.string().describe("JSON configuration string for the service"),
+    },
+    async ({ extension, config }) => {
+      try {
+        const conn = new Trex.TrexDB("memory");
+        try {
+          await conn.execute(`SELECT trex_db_stop_service('${escapeSql(extension)}')`, []);
+        } catch {
+          // Service may not be running — starting is still valid.
+        }
+        const sql = `SELECT trex_db_start_service('${escapeSql(extension)}', '${escapeSql(config)}')`;
+        const result = await conn.execute(sql, []);
+        const rows = result?.rows || result || [];
+        const message = rows[0]?.[0] || rows[0]?.trex_db_start_service || "Service restarted";
+        return { content: [{ type: "text", text: message }] };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+      }
+    },
+  );
+
+  server.tool(
+    "cluster-load-extension",
+    "Load a DuckDB/trexsql extension into the engine (equivalent to LOAD '<name>'). Use this to make an installed extension's functions available. Returns a confirmation message on success.",
+    {
+      extensionName: z.string().describe("Extension name to load, e.g. 'httpfs', 'spatial'"),
+    },
+    async ({ extensionName }) => {
+      try {
+        const conn = new Trex.TrexDB("memory");
+        await conn.execute(`LOAD '${escapeSql(extensionName)}'`, []);
+        return { content: [{ type: "text", text: `Extension '${extensionName}' loaded` }] };
+      } catch (err: any) {
+        return { content: [{ type: "text", text: `Error: ${err.message}` }], isError: true };
+      }
+    },
+  );
 }

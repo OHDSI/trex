@@ -9,8 +9,10 @@
     "express-rate-limit": "^7.5.0",
     "graphile-utils": "^5.0.0-rc.6",
     "pg": "^8.13.0",
+    "pg-logical-replication": "^2.0.7",
     "postgraphile": "^5.0.0-rc.4",
     "postgraphile-plugin-connection-filter": "^3.0.0-rc.1",
+    "ws": "^8.18.0",
     "zod": "^3.25.0"
   },
   "overrides": {

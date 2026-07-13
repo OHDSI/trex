@@ -4,7 +4,7 @@ import { addPlugin as addFunctionPlugin } from "./function.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { addAgentsPlugin, agentsCoreMigrationTarget } from "./agents.ts";
-import { scanPluginDirectory } from "./utils.ts";
+import { scanPluginDirectory, splitPathList } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
 import { waitForAttachedDatabase } from "../lib/db-wait.ts";
 
@@ -92,7 +92,7 @@ export class Plugins {
           case "agents":
             await addAgentsPlugin(app, value, dir, fullName);
             if (!Plugins.migrationTargets.some((t) => t.name === "agents-core")) {
-              Plugins.migrationTargets.push(agentsCoreMigrationTarget());
+              Plugins.migrationTargets.push(await agentsCoreMigrationTarget());
             }
             break;
           default:
@@ -142,10 +142,10 @@ export class Plugins {
     // PLUGINS_DEV_PATH / PLUGINS_PATH may be colon-separated PATH-style lists
     // (e.g. d2e uses /usr/src/plugins-dev:/usr/src/bundled-plugins:/usr/src/plugins),
     // so scan each entry. Dev paths have highest priority — scanned first.
-    for (const p of devPath.split(":").map((s) => s.trim()).filter(Boolean)) {
+    for (const p of splitPathList(devPath)) {
       await Plugins.scanAndRegister(app, p, "dev");
     }
-    for (const p of pluginsPath.split(":").map((s) => s.trim()).filter(Boolean)) {
+    for (const p of splitPathList(pluginsPath)) {
       await Plugins.scanAndRegister(app, p, "npm");
     }
 

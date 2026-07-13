@@ -19,9 +19,12 @@ export function getPluginsJson(): string {
 export function addPlugin(app: Express, value: any, dir: string, fullName: string = "") {
   const scopePrefix = scopeUrlPrefix(fullName);
   // @trex plugins mount scoped under PLUGINS_BASE_PATH/<scope>/ (e.g.
-  // /plugins/trex/web). d2e/legacy plugins (@data2evidence, @ohdsi, ...) mount at
-  // their bare source paths (/portal, /atlas) the way the d2e fork served them, so
-  // the existing d2e front-end and routing keep resolving.
+  // /plugins/trex/web). Everything else (@data2evidence, @ohdsi, ...) mounts at
+  // its bare source path (/portal, /atlas) the way the d2e fork served them, so
+  // the existing d2e front-end and routing keep resolving. Deliberately NOT
+  // keyed on TRUSTED_PLUGIN_SCOPES (function.ts): @ohdsi is auth-trusted for
+  // function/agent routes, but its UI plugins (e.g. @ohdsi/atlas3) must stay
+  // root-mounted — moving them under /plugins/ohdsi/ would break /atlas.
   const rootMount = !fullName.startsWith("@trex/");
   if (value.routes) {
     for (const r of value.routes) {

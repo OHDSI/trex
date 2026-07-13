@@ -3,7 +3,7 @@
 
 RUST_PLUGINS := cache chdb db etl fhir hades hana migration pgt pgwire pool pool-client runtime tpm transform
 TS_PACKAGES  := plugins/notebook plugins/web plugins/studio
-DENO_PACKAGES := core/server core/event
+DENO_PACKAGES := core/server core/event plugins/postgrest
 
 .PHONY: test test-rust test-integration test-frontend test-deno \
         coverage coverage-rust coverage-integration coverage-frontend coverage-deno coverage-merge-all \

@@ -1,14 +1,10 @@
 export const TREX_PORT = 8000;
-export const POSTGREST_PORT = 3000;
-export const POSTGREST_IMAGE = "postgrest/postgrest:v12.2.3";
 
 export interface ContainerEnvVars {
   DATABASE_URL: string;
   BETTER_AUTH_SECRET: string;
   BETTER_AUTH_URL: string;
   BASE_PATH: string;
-  POSTGREST_HOST: string;
-  POSTGREST_PORT: string;
   SCHEMA_DIR: string;
   PLUGINS_PATH: string;
   PLUGINS_DEV_PATH: string;
@@ -61,8 +57,13 @@ export function buildTrexEnvVars(opts: {
     BETTER_AUTH_SECRET: opts.authSecret,
     BETTER_AUTH_URL: `${opts.endpointUrl}/trex`,
     BASE_PATH: "/trex",
-    POSTGREST_HOST: "localhost",
-    POSTGREST_PORT: String(POSTGREST_PORT),
+    // REST is served in-process by the @trex/postgrest plugin, which
+    // consumes this PGRST_* config.
+    ...buildPostgrestEnvVars({
+      databaseUrl: opts.databaseUrl,
+      jwtSecret: opts.authSecret,
+      endpointUrl: opts.endpointUrl,
+    }),
     SCHEMA_DIR: "/usr/src/core/schema",
     PLUGINS_PATH: "/usr/src/plugins",
     PLUGINS_DEV_PATH: "/usr/src/plugins-dev",

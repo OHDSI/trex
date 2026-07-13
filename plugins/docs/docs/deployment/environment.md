@@ -75,14 +75,14 @@ over env vars. Apple is supported via DB-driven config only.
 | `PLUGINS_IMAGE_TAG` | `latest` | Tag appended to flow plugin images. |
 | `PUBLIC_FQDN` | — | Substituted for `$$FQDN$$` in UI plugin config. |
 
-## PostgREST Proxy
+## REST API (`${BASE_PATH}/rest/v1/*`)
 
-| Variable | Description |
-|----------|-------------|
-| `POSTGREST_HOST` | Internal hostname of the PostgREST service. |
-| `POSTGREST_PORT` | PostgREST port (typically `3000`). |
-
-These configure the reverse proxy at `${BASE_PATH}/rest/v1/*`.
+The PostgREST-compatible REST API is served in-process via the
+`@trex/postgrest` plugin. The server container consumes the standard `PGRST_*`
+variables (`PGRST_DB_URI`, `PGRST_DB_SCHEMAS`, `PGRST_DB_ANON_ROLE`,
+`PGRST_JWT_SECRET`, `PGRST_DB_PRE_REQUEST`, `PGRST_DB_MAX_ROWS`,
+`PGRST_OPENAPI_SERVER_PROXY_URI`, ...);
+`PGRST_JWT_SECRET` is sourced from `./secrets/derived.env`.
 
 ## Cluster (`SWARM_CONFIG`)
 

@@ -137,3 +137,61 @@
   (testing "Cache path is correctly generated"
     (is (= "./data/cache/mydb.db" (#'webapi/get-cache-path "./data/cache" "mydb")))
     (is (= "/tmp/mydb.db" (#'webapi/get-cache-path "/tmp" "mydb")))))
+
+;; Agent upstream resolution (agent reverse-proxy)
+
+(deftest test-resolve-agent-upstream-prefers-ohdsi-mount
+  ;; 401 = mounted but unauthenticated — the probe sends no credentials, so
+  ;; any non-404 answer identifies the mount.
+  (let [probe (fn [url] (if (.contains ^String url "/plugins/ohdsi/pythia") 401 404))]
+    (is (= "http://localhost:8001/plugins/ohdsi/pythia"
+           (webapi/resolve-agent-upstream probe)))))
+
+(deftest test-resolve-agent-upstream-falls-back-to-trex-mount
+  ;; Dev checkouts still mount the @trex-scoped package.
+  (let [probe (fn [url] (if (.contains ^String url "/plugins/trex/pythia") 401 404))]
+    (is (= "http://localhost:8001/plugins/trex/pythia"
+           (webapi/resolve-agent-upstream probe)))))
+
+(deftest test-resolve-agent-upstream-defaults-to-trex-when-unreachable
+  ;; Node not answering at probe time (nil = connect error): keep the
+  ;; pre-@ohdsi default rather than failing outright.
+  (let [probe (fn [_url] nil)]
+    (is (= "http://localhost:8001/plugins/trex/pythia"
+           (webapi/resolve-agent-upstream probe)))))
+
+(deftest test-resolve-agent-upstream-probes-in-declared-order
+  ;; Both mounts answer: the published @ohdsi form wins.
+  (let [seen (atom [])
+        probe (fn [url] (swap! seen conj url) 200)]
+    (is (= "http://localhost:8001/plugins/ohdsi/pythia"
+           (webapi/resolve-agent-upstream probe)))
+    (is (= ["http://localhost:8001/plugins/ohdsi/pythia/eve/v1/info"] @seen))))
+
+;; Agent proxy body normalization (agent-proxy-handler)
+
+(deftest test-normalize-proxy-body-nil
+  (testing "nil body stays nil"
+    (is (nil? (#'webapi/normalize-proxy-body nil)))))
+
+(deftest test-normalize-proxy-body-string
+  (testing "blank string collapses to nil; non-blank string passes through"
+    (is (nil? (#'webapi/normalize-proxy-body "")))
+    (is (= "raw" (#'webapi/normalize-proxy-body "raw")))))
+
+(deftest test-normalize-proxy-body-collections
+  (testing "parser-produced collections (including empty) are re-encoded to JSON"
+    (is (= "{}" (#'webapi/normalize-proxy-body {})))
+    (is (= "[]" (#'webapi/normalize-proxy-body [])))
+    (let [encoded (#'webapi/normalize-proxy-body {:a 1})]
+      (is (= {"a" 1} (json/read-str encoded))))))
+
+(deftest test-normalize-proxy-body-empty-input-stream
+  (testing "an empty ServletInputStream (bodyless GET, e.g. /eve/v1/health) becomes nil"
+    (let [stream (java.io.ByteArrayInputStream. (.getBytes ""))]
+      (is (nil? (#'webapi/normalize-proxy-body stream))))))
+
+(deftest test-normalize-proxy-body-raw-json-input-stream
+  (testing "a non-parsed InputStream carrying JSON is forwarded verbatim, not re-encoded"
+    (let [stream (java.io.ByteArrayInputStream. (.getBytes "{\"x\":1}"))]
+      (is (= "{\"x\":1}" (#'webapi/normalize-proxy-body stream))))))

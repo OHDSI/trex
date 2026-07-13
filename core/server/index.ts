@@ -2,7 +2,6 @@ import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
 import { join } from "jsr:@std/path@^1.0";
 import express from "express";
 import { createServer, request as httpRequest } from "node:http";
-import { connect as netConnect } from "node:net";
 import { grafserv } from "postgraphile/grafserv/express/v4";
 import cors from "cors";
 import { BASE_PATH } from "./config.ts";
@@ -21,12 +20,14 @@ import { cliLoginRouter } from "./routes/cli-login.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
 console.log("main function started");
 console.log(Deno.version);
 
 addEventListener("beforeunload", () => {
   console.log("main worker exiting");
+  void stopRealtimeService();
 });
 
 addEventListener("unhandledrejection", (ev) => {
@@ -34,8 +35,24 @@ addEventListener("unhandledrejection", (ev) => {
   ev.preventDefault();
 });
 
+// Trust only the configured number of reverse-proxy hops (default 1). Setting
+// "trust proxy" to true derives req.ip from the client-supplied X-Forwarded-For
+// chain, which lets callers spoof it to mint unlimited buckets against the
+// IP-keyed rate limiters (including the auth brute-force limiter). Override via
+// TREX_TRUST_PROXY (hop count, "true"/"false", or a CIDR/IP list) to match the
+// deployment's proxy topology.
+function parseTrustProxy(raw: string | undefined): boolean | number | string {
+  if (raw === undefined || raw.trim() === "") return 1;
+  const v = raw.trim();
+  if (v.toLowerCase() === "true") return true;
+  if (v.toLowerCase() === "false") return false;
+  const n = Number(v);
+  if (Number.isInteger(n) && n >= 0) return n;
+  return v; // CIDR / IP list — passed through to express verbatim
+}
+
 const app = express();
-app.set("trust proxy", true);
+app.set("trust proxy", parseTrustProxy(Deno.env.get("TREX_TRUST_PROXY")));
 // D2E_COMPAT: strip the /d2e base prefix before ANY route is registered.
 applyD2eCompatEarly(app);
 const server = createServer(app);
@@ -335,107 +352,96 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
   }
 });
 
-// PostgREST proxy — before authContext since PostgREST handles its own JWT verification
-const POSTGREST_HOST = Deno.env.get("POSTGREST_HOST") || "postgrest";
-const POSTGREST_PORT = Deno.env.get("POSTGREST_PORT") || "3000";
-
-app.all(`${BASE_PATH}/rest/v1/*`, (req, res) => {
-  const targetPath = req.originalUrl.replace(`${BASE_PATH}/rest/v1`, "") || "/";
-
-  const headers: Record<string, string> = {};
-  const forwardHeaders = [
-    "authorization", "apikey", "prefer", "range", "content-type",
-    "accept", "content-profile", "accept-profile", "x-client-info",
-  ];
-  for (const h of forwardHeaders) {
-    if (req.headers[h]) {
-      headers[h] = Array.isArray(req.headers[h]) ? req.headers[h].join(", ") : req.headers[h] as string;
+// Streams a worker Response into an express response — CSV/binary bodies must
+// not be text()-mangled. Defined BEFORE the routes that call it: in the
+// unbundled dev-mode module evaluation, later top-level function declarations
+// are not hoisted into earlier route closures (calling one throws
+// ReferenceError at request time).
+async function pipeWorkerResponse(workerResponse: globalThis.Response, res: any) {
+  res.status(workerResponse.status);
+  workerResponse.headers.forEach((value: string, key: string) => {
+    const lower = key.toLowerCase();
+    if (lower === "content-encoding" || lower === "content-length" || lower === "transfer-encoding") return;
+    res.setHeader(key, value);
+  });
+  if (!workerResponse.body) { res.end(); return; }
+  const reader = workerResponse.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) res.write(value);
     }
+  } finally {
+    try { reader.releaseLock(); } catch { /* ignore */ }
+    try { res.end(); } catch { /* ignore */ }
   }
+}
 
-  // supabase-js sends apikey header + Authorization header.
-  // If no Authorization header, use apikey as Bearer token so PostgREST can determine the role.
-  if (!headers["authorization"] && headers["apikey"]) {
-    headers["authorization"] = `Bearer ${headers["apikey"]}`;
-  }
+// PostgREST — before authContext since PostgREST handles its own JWT verification.
+// Served in-process by the @trex/postgrest plugin worker.
+// Use express.raw() to capture the raw body before any middleware consumes it
+// (same caveat as the /storage/v1 route below).
+app.all(
+  [`${BASE_PATH}/rest/v1`, `${BASE_PATH}/rest/v1/*`],
+  express.raw({ type: "*/*", limit: "50mb" }),
+  async (req, res) => {
+    const handler = fnmap["@trex/postgrest/functions"];
+    if (!handler) {
+      res.status(503).json({ error: "postgrest plugin not loaded" });
+      return;
+    }
+    try {
+      const host = req.get("host") || "localhost";
+      const protocol = req.protocol || "http";
+      // Rewrite /trex/rest/v1/... to the plugin's /postgrest/... mount.
+      const pluginPath = req.originalUrl.replace(`${BASE_PATH}/rest/v1`, "/postgrest") || "/postgrest/";
+      const requestUrl = `${protocol}://${host}${pluginPath}`;
 
-  const proxyReq = httpRequest(
-    {
-      hostname: POSTGREST_HOST,
-      port: parseInt(POSTGREST_PORT),
-      path: targetPath,
-      method: req.method,
-      headers,
-    },
-    (proxyRes) => {
-      res.status(proxyRes.statusCode || 500);
-      const skipHeaders = new Set(["transfer-encoding"]);
-      for (const [key, value] of Object.entries(proxyRes.headers)) {
-        if (!skipHeaders.has(key) && value !== undefined) {
-          res.setHeader(key, value);
+      const headers = new Headers();
+      for (const [key, val] of Object.entries(req.headers)) {
+        if (val) {
+          const lower = key.toLowerCase();
+          if (lower === "accept-encoding" || lower === "content-length") continue;
+          headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
         }
       }
-      proxyRes.pipe(res);
-    },
-  );
+      // supabase-js sends apikey header + Authorization header.
+      // If no Authorization header, use apikey as Bearer token so the plugin can determine the role.
+      const apikey = headers.get("apikey");
+      if (!headers.has("authorization") && apikey) {
+        headers.set("authorization", `Bearer ${apikey}`);
+      }
 
-  proxyReq.on("error", (err) => {
-    console.error("[postgrest-proxy] Error:", err.message);
-    if (!res.headersSent) {
-      res.status(502).json({ error: "PostgREST unavailable" });
-    }
-  });
-
-  req.pipe(proxyReq);
-});
-
-// Realtime proxy — HTTP only. Path rewrite matches Supabase Kong:
-// /realtime/v1/* -> realtime:4000/socket/*. WebSocket upgrades are handled
-// in the server.on("upgrade") block lower in this file.
-const REALTIME_HOST = Deno.env.get("REALTIME_HOST") || "realtime";
-const REALTIME_PORT = Deno.env.get("REALTIME_PORT") || "4000";
-
-app.all(`${BASE_PATH}/realtime/v1/*`, (req, res) => {
-  const targetPath = req.originalUrl.replace(`${BASE_PATH}/realtime/v1`, "/socket") || "/socket/";
-  const headers: Record<string, string> = {};
-  for (const [k, v] of Object.entries(req.headers)) {
-    if (k.toLowerCase() === "host") continue;
-    if (v === undefined) continue;
-    headers[k] = Array.isArray(v) ? v.join(", ") : v as string;
-  }
-  // Realtime resolves tenants by host — for self-host we have one tenant
-  // seeded with external_id=realtime-dev, so override the upstream Host.
-  headers["host"] = "realtime-dev";
-
-  const proxyReq = httpRequest(
-    {
-      hostname: REALTIME_HOST,
-      port: parseInt(REALTIME_PORT),
-      path: targetPath,
-      method: req.method,
-      headers,
-    },
-    (proxyRes) => {
-      res.status(proxyRes.statusCode || 500);
-      const skipHeaders = new Set(["transfer-encoding"]);
-      for (const [key, value] of Object.entries(proxyRes.headers)) {
-        if (!skipHeaders.has(key) && value !== undefined) {
-          res.setHeader(key, value);
+      let body: Blob | undefined;
+      if (req.method !== "GET" && req.method !== "HEAD") {
+        // req.body may already be a parsed object: cliLoginRouter's express.json() short-circuits express.raw().
+        if (Buffer.isBuffer(req.body) && req.body.length > 0) {
+          body = new Blob([req.body]);
+        } else if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
+          body = new Blob([JSON.stringify(req.body)], { type: "application/json" });
         }
       }
-      proxyRes.pipe(res);
-    },
-  );
 
-  proxyReq.on("error", (err) => {
-    console.error("[realtime-proxy] HTTP error:", err.message);
-    if (!res.headersSent) {
-      res.status(502).json({ error: "Realtime unavailable" });
+      const webReq = new globalThis.Request(requestUrl, { method: req.method, headers, body });
+      const workerResponse = await handler(webReq);
+      // Stream the response — CSV/binary bodies must not be text()-mangled.
+      await pipeWorkerResponse(workerResponse, res);
+    } catch (err) {
+      console.error("[postgrest-plugin] Error:", err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Internal server error" });
+      }
     }
-  });
+  },
+);
 
-  req.pipe(proxyReq);
-});
+// Realtime is served natively (Phoenix-channels protocol over WS + the
+// /realtime/v1/api/broadcast HTTP endpoint) — no external realtime container.
+// mountRealtime registers the HTTP routes; the WS upgrade is handled in the
+// server.on("upgrade") block below, and the replication service is started
+// after server.listen.
+mountRealtime(app);
 
 // Supabase CLI subdomain routing — the CLI hits https://{ref}.trex.local/storage/v1/...
 // without the BASE_PATH prefix. Rewrite to include the prefix so routes match.
@@ -468,95 +474,12 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
 });
 
 try {
-// Studio's static export emits literal bracket-segment paths (e.g. /project/[ref]/index.html).
-// The browser hits /project/default/..., so we rewrite to the bracket-form sibling on disk.
-const STUDIO_STATIC_DIR = "/usr/src/plugins-dev/studio/build_static";
-const STUDIO_REWRITE_CACHE = new Map<string, string>();
-const STUDIO_REWRITE_CACHE_MAX = 4096;
-
-function rewriteStudioUrl(originalUrl: string): string {
-  const cached = STUDIO_REWRITE_CACHE.get(originalUrl);
-  if (cached !== undefined) return cached;
-  const result = computeStudioRewrite(originalUrl);
-  if (STUDIO_REWRITE_CACHE.size >= STUDIO_REWRITE_CACHE_MAX) {
-    const firstKey = STUDIO_REWRITE_CACHE.keys().next().value;
-    if (firstKey !== undefined) STUDIO_REWRITE_CACHE.delete(firstKey);
-  }
-  STUDIO_REWRITE_CACHE.set(originalUrl, result);
-  return result;
-}
-
-function computeStudioRewrite(originalUrl: string): string {
-  const queryIdx = originalUrl.indexOf("?");
-  const pathOnly = queryIdx >= 0 ? originalUrl.slice(0, queryIdx) : originalUrl;
-  const query = queryIdx >= 0 ? originalUrl.slice(queryIdx) : "";
-
-  if (!pathOnly.startsWith("/plugins/trex/studio")) return originalUrl;
-  if (pathOnly.startsWith("/plugins/trex/studio/api")) return originalUrl;
-
-  const stripped = pathOnly.slice("/plugins/trex/studio".length);
-  const segments = stripped.split("/").filter(Boolean);
-  if (segments.length === 0) return originalUrl;
-
-  let cur = STUDIO_STATIC_DIR;
-  const outSegs: string[] = [];
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    const literal = `${cur}/${seg}`;
-    let stat: any;
-    try { stat = Deno.statSync(literal); } catch { stat = null; }
-    if (stat?.isDirectory) {
-      outSegs.push(seg);
-      cur = literal;
-      continue;
-    }
-    if (stat?.isFile) {
-      outSegs.push(seg);
-      cur = literal;
-      continue;
-    }
-
-    let bracket: string | null = null;
-    let catchall: string | null = null;
-    try {
-      for (const e of Deno.readDirSync(cur)) {
-        if (!e.isDirectory) continue;
-        if (e.name.startsWith("[[...")) catchall = e.name;
-        else if (e.name.startsWith("[") && e.name.endsWith("]")) bracket = e.name;
-      }
-    } catch { /* ignore */ }
-
-    if (bracket) {
-      outSegs.push(bracket);
-      cur = `${cur}/${bracket}`;
-      continue;
-    }
-    if (catchall) {
-      outSegs.push(catchall);
-      return "/plugins/trex/studio/" + outSegs.join("/") + query;
-    }
-    return originalUrl;
-  }
-
-  const rewritten = "/plugins/trex/studio/" + outSegs.join("/") + (pathOnly.endsWith("/") ? "/" : "") + query;
-  return rewritten;
-}
-
-// The Studio index page hangs trying to resolve `/project/[ref]` against `as=/` — skip to /project/default.
-app.get(["/plugins/trex/studio", "/plugins/trex/studio/"], (_req, res) => {
-  res.redirect(302, "/plugins/trex/studio/project/default/");
-});
-
-app.use((req, _res, next) => {
-  if (req.url.startsWith("/plugins/trex/studio")) {
-    const next_url = rewriteStudioUrl(req.url);
-    if (next_url !== req.url) req.url = next_url;
-  }
-  next();
-});
-
-// /plugins/trex/studio/api/** proxies to the Studio Node sidecar via the
-// @trex/studio function plugin; non-/api paths are served as static assets.
+// The studio SPA is served entirely by the Studio Node sidecar via the
+// @trex/studio function plugin (the studio catch-all route below). The sidecar's
+// Next.js build embeds NEXT_PUBLIC_BASE_PATH=/plugins/trex/studio, so its HTML
+// references assets under that base and they resolve. The old static build_static
+// export shipped root-relative asset refs (blank page) and lacked studio's server
+// API routes, so it is no longer served.
 function buildWorkerRequest(req: any, rewrittenPath?: string): globalThis.Request {
   const host = req.get("host") || "localhost";
   const protocol = req.protocol || "http";
@@ -575,27 +498,6 @@ function buildWorkerRequest(req: any, rewrittenPath?: string): globalThis.Reques
     body = new Blob([new Uint8Array(req.body as Buffer)]);
   }
   return new globalThis.Request(requestUrl, { method: req.method, headers, body });
-}
-
-async function pipeWorkerResponse(workerResponse: globalThis.Response, res: any) {
-  res.status(workerResponse.status);
-  workerResponse.headers.forEach((value: string, key: string) => {
-    const lower = key.toLowerCase();
-    if (lower === "content-encoding" || lower === "content-length" || lower === "transfer-encoding") return;
-    res.setHeader(key, value);
-  });
-  if (!workerResponse.body) { res.end(); return; }
-  const reader = workerResponse.body.getReader();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value) res.write(value);
-    }
-  } finally {
-    try { reader.releaseLock(); } catch { /* ignore */ }
-    try { res.end(); } catch { /* ignore */ }
-  }
 }
 
 // Best-effort JSON-body redaction — secrets must not hit stdout.
@@ -644,13 +546,15 @@ app.post("/plugins/trex/studio/api/platform/notifications/archive-all", (_req, r
   res.status(200).json([]);
 });
 
+// Serve the whole studio app (pages, /_next assets, and API) from the sidecar.
+// The admin-only gate above still protects /plugins/trex/studio/api.
 app.all(
-  ["/plugins/trex/studio/api", "/plugins/trex/studio/api/*"],
+  ["/plugins/trex/studio", "/plugins/trex/studio/*"],
   async (req, res) => {
     try {
       await forwardToStudioSidecar(req, res);
     } catch (err) {
-      console.error("[studio-api] Error:", err);
+      console.error("[studio] Error:", err);
       res.status(500).json({ error: "Internal server error", message: String(err) });
     }
   },
@@ -956,40 +860,16 @@ if (databaseUrl) {
   console.warn("DATABASE_URL not set — PostGraphile disabled");
 }
 
-// WebSocket upgrade handler — handles realtime proxy and the devx Vite HMR tunnel.
+// WebSocket upgrade handler — handles the native realtime channel socket and the
+// devx Vite HMR tunnel.
 // Reaches user code because trexas's runtime patches `internals.upgradeHttpRaw`
 // in ext/runtime/js/http.js to use op_http_upgrade_raw2 instead of upstream's
 // Deno.serve-only path.
 server.on("upgrade", (req, socket, head) => {
-  const urlPath = req.url || "";
+  // Realtime websocket (native Phoenix-channels handler) gets first refusal.
+  if (handleRealtimeUpgrade(req, socket, head)) return;
 
-  // Realtime websocket: rewrite /realtime/v1/* -> /socket/*, tunnel via raw TCP.
-  // Override Host so realtime resolves to the seeded `realtime-dev` tenant.
-  const realtimePrefix = `${BASE_PATH}/realtime/v1`;
-  if (urlPath.startsWith(realtimePrefix + "/") || urlPath === realtimePrefix) {
-    const targetPath = urlPath.replace(realtimePrefix, "/socket") || "/socket/";
-    const upstream = netConnect({ host: REALTIME_HOST, port: parseInt(REALTIME_PORT) });
-    upstream.on("connect", () => {
-      const headerLines = [`GET ${targetPath} HTTP/1.1`];
-      for (const [k, v] of Object.entries(req.headers)) {
-        if (k.toLowerCase() === "host") continue;
-        if (v === undefined) continue;
-        const value = Array.isArray(v) ? v.join(", ") : v;
-        headerLines.push(`${k}: ${value}`);
-      }
-      headerLines.push(`Host: realtime-dev`);
-      upstream.write(headerLines.join("\r\n") + "\r\n\r\n");
-      if (head && head.length > 0) upstream.write(head);
-      upstream.pipe(socket);
-      socket.pipe(upstream);
-    });
-    upstream.on("error", (err) => {
-      console.error("[realtime-proxy] WS upstream error:", err.message);
-      socket.destroy();
-    });
-    socket.on("error", () => upstream.destroy());
-    return;
-  }
+  const urlPath = req.url || "";
 
   const proxyMatch = urlPath.match(/\/plugins\/\w+\/devx-api\/apps\/([^/]+)\/proxy(\/.*)?$/);
   if (!proxyMatch) return; // Not a devx proxy path — let other handlers (e.g. PostGraphile) handle it
@@ -1184,16 +1064,19 @@ async function invokeEdgeFunction(req: any, res: any) {
       }
     }
   } catch {
-    // No function.json or parse error — default to requiring auth
+    // No function.json or parse error — fail closed: require a valid token
+    // (matches the verify_jwt path; a tokenless caller must not slip through).
     const authHeader = req.headers.authorization;
     const apikey = req.headers.apikey;
     const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : apikey;
-    if (token) {
-      const claims = await verifyAccessToken(token);
-      if (!claims) {
-        res.status(401).json({ error: "Invalid JWT" });
-        return;
-      }
+    if (!token) {
+      res.status(401).json({ error: "Invalid JWT" });
+      return;
+    }
+    const claims = await verifyAccessToken(token);
+    if (!claims) {
+      res.status(401).json({ error: "Invalid JWT" });
+      return;
     }
   }
 
@@ -1448,3 +1331,7 @@ await runD2eBoot();
 server.listen(8000, () => {
   console.log("server listening on port 8000");
 });
+
+// Start the native realtime replication service without blocking boot — a
+// failure here (e.g. transient DB unavailability) must not take the node down.
+startRealtimeService().catch((e) => console.error("[realtime] failed to start:", e));
