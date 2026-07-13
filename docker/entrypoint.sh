@@ -72,6 +72,19 @@ if [ "$skip_root_key_check" -eq 0 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 3. exec trex
+# 3. DevX gate
+# ---------------------------------------------------------------------------
+# The full image bakes the devx plugin into /usr/src/plugins-dx and the
+# devx_ext DuckDB extension into /usr/lib/trexsql/extensions-dx. Both folders
+# sit outside the default scan paths, so devx is inert unless
+# TREX_DX_ENABLED=true (exact string) appends them here.
+if [ "${TREX_DX_ENABLED:-}" = "true" ]; then
+    export PLUGINS_DEV_PATH="${PLUGINS_DEV_PATH:-/usr/src/plugins-dev}:/usr/src/plugins-dx"
+    export EXTENSION_DIR="${EXTENSION_DIR:-/usr/lib/trexsql/extensions}:/usr/lib/trexsql/extensions-dx"
+    echo "STARTUP: TREX_DX_ENABLED=true — devx plugin and devx_ext extension enabled"
+fi
+
+# ---------------------------------------------------------------------------
+# 4. exec trex
 # ---------------------------------------------------------------------------
 exec trex "$@"
