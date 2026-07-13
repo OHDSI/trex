@@ -396,14 +396,21 @@ WORKDIR /usr/src
 ARG TARGETARCH
 ARG SHINYLIVE_VERSION=0.10.7
 ARG GH_VERSION=2.65.0
+# Shinylive (the ~770MB analytics dashboard runtime) is opt-in: it is skipped
+# unless the image is built with --build-arg INSTALL_SHINYLIVE=true.
+ARG INSTALL_SHINYLIVE=false
 
 # --- Dev tooling (formerly Dockerfile.dev) ---
-# Shinylive — analytics dashboard runtime
-RUN curl -sLO https://github.com/posit-dev/shinylive/releases/download/v${SHINYLIVE_VERSION}/shinylive-${SHINYLIVE_VERSION}.tar.gz && \
-    tar -xzf shinylive-${SHINYLIVE_VERSION}.tar.gz && \
-    mv shinylive-${SHINYLIVE_VERSION} shinylive && \
-    rm shinylive-${SHINYLIVE_VERSION}.tar.gz && \
-    chown -R node:node /usr/src/shinylive
+# Shinylive — analytics dashboard runtime (opt-in via INSTALL_SHINYLIVE=true)
+RUN if [ "${INSTALL_SHINYLIVE}" = "true" ]; then \
+      curl -sLO https://github.com/posit-dev/shinylive/releases/download/v${SHINYLIVE_VERSION}/shinylive-${SHINYLIVE_VERSION}.tar.gz && \
+      tar -xzf shinylive-${SHINYLIVE_VERSION}.tar.gz && \
+      mv shinylive-${SHINYLIVE_VERSION} shinylive && \
+      rm shinylive-${SHINYLIVE_VERSION}.tar.gz && \
+      chown -R node:node /usr/src/shinylive; \
+    else \
+      echo "INSTALL_SHINYLIVE!=true — skipping shinylive install"; \
+    fi
 
 # Playwright + headless Chromium for QA / design-review tools
 ENV PLAYWRIGHT_BROWSERS_PATH=/usr/lib/playwright-browsers
