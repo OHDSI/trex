@@ -1,5 +1,5 @@
 {
-  "name": "@trex/devx-agent-evals",
+  "name": "@trex/devx-agent",
   "private": true,
   "description": "eve eval suite for the devx (Code) agent — runs against a live dx stack",
   "scripts": {
