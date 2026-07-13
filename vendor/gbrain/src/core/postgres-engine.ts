@@ -71,10 +71,12 @@ function escapeSqlStringLiteral(value: string): string {
 }
 
 // Multi-tenant guard: schema names are interpolated into DDL, so they must be
-// validated to a strict allow-list, never taken raw. Mirrors trex's memory
-// name rule (memory_<name>, name = ^[a-z0-9][a-z0-9_-]*$).
+// validated to a strict allow-list, never taken raw. Hyphen-free: the schema
+// name is interpolated UNQUOTED into DDL/search_path, and a hyphen is not a
+// legal character in an unquoted Postgres identifier. Mirrors trex's memory
+// name rule (memory_<name>, name = ^[a-z0-9][a-z0-9_]*$).
 export function isValidSchemaIdent(s: string): boolean {
-  return /^memory_[a-z0-9][a-z0-9_-]*$/.test(s);
+  return /^memory_[a-z0-9_]+$/.test(s);
 }
 
 export function getPostgresSchema(
@@ -96,6 +98,14 @@ export function getPostgresSchema(
     .replace(/\('embedding_dimensions', '1536'\)/g, `('embedding_dimensions', '${parsedDims}')`)
     .replace(/__MEMORY_SEARCH_PATH__/g, searchPath);
 }
+
+// In-process "already provisioned" cache for provisionSchema(), keyed on the
+// full schema name (`memory_<name>`). Avoids re-running initSchema() (and its
+// advisory-lock round trip) on every request once a tenant schema is known
+// good for this process's lifetime. Module-level (not per-instance) so it's
+// shared across any PostgresEngine constructed in this process — matches the
+// module-singleton pattern already used elsewhere in this file (#1471).
+const PROVISIONED = new Set<string>();
 
 // CONNECTION_ERROR_PATTERNS / isConnectionError were used by the per-call
 // executeRaw retry that #406 originally shipped. Eng-review D3 dropped that
@@ -379,6 +389,35 @@ export class PostgresEngine implements BrainEngine {
         caller: 'PostgresEngine.initSchema',
         duration_ms: Date.now() - t0,
       });
+    }
+  }
+
+  /**
+   * Multi-tenant auto-provision: idempotent `initSchema('memory_'+name)` for
+   * the `/memory/<name>/mcp` HTTP route. Guarded two ways:
+   *   1. An in-process `PROVISIONED` cache (module-level Set) — once this
+   *      process has seen the schema provisioned, skip straight through.
+   *   2. A Postgres advisory lock keyed on a hash of the schema name — so
+   *      concurrent first-touch requests (racing across processes, or two
+   *      requests in this process before the cache is warm) serialize on
+   *      THIS schema's provisioning only, without blocking unrelated tenants
+   *      the way the fixed `pg_advisory_lock(42)` inside initSchema() does.
+   */
+  async provisionSchema(name: string): Promise<void> {
+    const schema = `memory_${name}`;
+    if (!isValidSchemaIdent(schema)) throw new Error(`invalid memory name: ${name}`);
+    if (PROVISIONED.has(schema)) return;
+    // Advisory lock keyed on the schema name hash — serializes concurrent
+    // first-touch provisioning across requests without blocking other schemas.
+    const conn = this.sql;
+    const [{ h }] = await conn<{ h: number }[]>`SELECT ('x' || substr(md5(${schema}), 1, 8))::bit(32)::int AS h`;
+    await conn`SELECT pg_advisory_lock(${h})`;
+    try {
+      if (PROVISIONED.has(schema)) return;
+      await this.initSchema(schema);
+      PROVISIONED.add(schema);
+    } finally {
+      await conn`SELECT pg_advisory_unlock(${h})`;
     }
   }
 

@@ -27,6 +27,7 @@
 
 import { createHash } from 'crypto';
 import type { BrainEngine } from '../core/engine.ts';
+import type { PostgresEngine } from '../core/postgres-engine.ts';
 import { buildToolDefs } from './tool-defs.ts';
 import { operations } from '../core/operations.ts';
 import type { AuthInfo } from '../core/operations.ts';
@@ -35,6 +36,7 @@ import { dispatchToolCall } from './dispatch.ts';
 import { buildDefaultLimiters, type RateLimiter } from './rate-limit.ts';
 import { sqlQueryForEngine } from '../core/sql-query.ts';
 import { parseLegacyTokenScope } from '../core/legacy-token-scope.ts';
+import { parseMemoryPath } from '../core/multi-tenant.ts';
 export { parseLegacyTokenScope };
 
 const DEFAULT_BODY_CAP = 1024 * 1024; // 1 MiB
@@ -241,10 +243,170 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
       .catch(() => { /* best-effort */ });
   }
 
+  /**
+   * The full `/mcp` JSON-RPC handler: resolveClientIp -> auth -> rate-limit
+   * -> body-cap -> JSON-RPC parse -> initialize/tools-list/tools-call
+   * dispatch -> Response. Extracted verbatim from the original single-tenant
+   * `fetch` body so BOTH the legacy `/mcp` route and the multi-tenant
+   * `/memory/<name>/mcp` route share one code path — no risk of the two
+   * diverging on auth, rate-limiting, or logging behavior.
+   *
+   * `ctx.schema` is the ONLY behavioral fork: when set (multi-tenant route),
+   * tools/call dispatches through `ctx.engine.withSchema(...)` so the tool
+   * runs against the tenant's schema-scoped connection; when unset (legacy
+   * `/mcp`), dispatch is byte-for-byte identical to before this extraction.
+   */
+  async function handleMcpBody(
+    req: Request,
+    server: { requestIP: (r: Request) => { address: string } | null },
+    ctx: { schema?: string; engine: BrainEngine },
+  ): Promise<Response> {
+    const startedMs = Date.now();
+    const origin = req.headers.get('origin');
+
+    const ip = resolveClientIp(req, server);
+
+    // Pre-auth IP rate limit. Fires BEFORE the DB lookup so we actually limit brute-force load.
+    const ipCheck = limiters.ip.check(ip);
+    if (!ipCheck.allowed) {
+      logRequest(null, 'unknown', 'rate_limited', Date.now() - startedMs);
+      return Response.json(
+        { error: 'rate_limited', message: 'Too many requests' },
+        {
+          status: 429,
+          headers: corsHeaders(origin, { extra: { 'Retry-After': String(ipCheck.retryAfter ?? 60) } }),
+        },
+      );
+    }
+
+    // Body cap (stream-counted; chunked transfers caught here, not at req.json).
+    const bodyText = await readBodyWithCap(req, bodyCap);
+    if (bodyText === null) {
+      logRequest(null, 'unknown', 'body_too_large', Date.now() - startedMs);
+      return Response.json(
+        { error: 'payload_too_large', message: `Request body exceeds ${bodyCap} bytes` },
+        { status: 413, headers: corsHeaders(origin) },
+      );
+    }
+
+    // Auth.
+    const auth = await validateToken(req.headers.get('Authorization'));
+    if (!auth.ok) {
+      logRequest(null, 'unknown', 'auth_failed', Date.now() - startedMs);
+      return Response.json(
+        { error: 'invalid_token', message: 'Bearer token required. Create one: gbrain auth create <name>' },
+        { status: 401, headers: corsHeaders(origin) },
+      );
+    }
+
+    // Post-auth token-id rate limit. Limits runaway authed clients.
+    const tokCheck = limiters.token.check(auth.tokenId!);
+    if (!tokCheck.allowed) {
+      logRequest(auth.tokenName!, 'unknown', 'rate_limited', Date.now() - startedMs);
+      return Response.json(
+        { error: 'rate_limited', message: 'Too many requests for this token' },
+        {
+          status: 429,
+          headers: corsHeaders(origin, { extra: { 'Retry-After': String(tokCheck.retryAfter ?? 60) } }),
+        },
+      );
+    }
+
+    // Parse JSON-RPC body.
+    let body: { method?: string; params?: any; id?: any };
+    try {
+      body = JSON.parse(bodyText);
+    } catch (e: any) {
+      logRequest(auth.tokenName!, 'unknown', 'parse_error', Date.now() - startedMs);
+      return Response.json(
+        { error: 'parse_error', message: e?.message ?? 'invalid JSON' },
+        { status: 400, headers: corsHeaders(origin) },
+      );
+    }
+
+    const { method, params, id } = body;
+
+    // initialize
+    if (method === 'initialize') {
+      logRequest(auth.tokenName!, 'initialize', 'success', Date.now() - startedMs);
+      return Response.json(
+        {
+          result: {
+            protocolVersion: '2025-03-26',
+            serverInfo: { name: 'gbrain', version: VERSION },
+            capabilities: { tools: {} },
+          },
+          jsonrpc: '2.0',
+          id,
+        },
+        { headers: corsHeaders(origin) },
+      );
+    }
+
+    // notifications/initialized — acknowledge with 204
+    if (method === 'notifications/initialized') {
+      return new Response(null, { status: 204, headers: corsHeaders(origin) });
+    }
+
+    // tools/list
+    if (method === 'tools/list') {
+      logRequest(auth.tokenName!, 'tools/list', 'success', Date.now() - startedMs);
+      return Response.json(
+        { result: { tools }, jsonrpc: '2.0', id },
+        { headers: corsHeaders(origin) },
+      );
+    }
+
+    // tools/call — dispatch through shared dispatch.ts (parity with stdio)
+    if (method === 'tools/call') {
+      const toolName: string = params?.name ?? 'unknown';
+      const args: Record<string, unknown> = params?.arguments ?? {};
+      // v0.28: thread per-token takes-holder allow-list so takes_list /
+      // takes_search / query (when it returns takes) can server-side filter.
+      // v0.34.1 (#861): thread source-isolation scope. Legacy access_tokens
+      // path defaults to 'default' per AuthResult.sourceId above.
+      //
+      // Multi-tenant (ctx.schema set): dispatch through the schema-scoped
+      // engine so the tool call runs with `search_path = <schema>`. `ctx.engine`
+      // is typed as the generic `BrainEngine` (multi-tenancy is Postgres-only
+      // by design — see the 501 guard at the `/memory` route below, which is
+      // what guarantees this cast is safe whenever ctx.schema is set), so the
+      // cast to `PostgresEngine` here is load-bearing, not decorative.
+      const result = ctx.schema
+        ? await (ctx.engine as PostgresEngine).withSchema(ctx.schema, (scoped) =>
+            dispatchToolCall(scoped, toolName, args, {
+              remote: true,
+              schema: ctx.schema,
+              takesHoldersAllowList: auth.takesHoldersAllowList,
+              sourceId: auth.sourceId,
+              auth: auth.auth,
+            }))
+        : await dispatchToolCall(ctx.engine, toolName, args, {
+            remote: true,
+            takesHoldersAllowList: auth.takesHoldersAllowList,
+            sourceId: auth.sourceId,
+            // #1336: thread the token's federated_read grant so read ops scope
+            // to the operator-granted sources via sourceScopeOpts.
+            auth: auth.auth,
+          });
+      const status = result.isError ? 'error' : 'success';
+      logRequest(auth.tokenName!, `tools/call:${toolName}`, status, Date.now() - startedMs);
+      return Response.json(
+        { result, jsonrpc: '2.0', id },
+        { headers: corsHeaders(origin) },
+      );
+    }
+
+    logRequest(auth.tokenName!, method ?? 'unknown', 'unknown_method', Date.now() - startedMs);
+    return Response.json(
+      { error: 'unknown_method', message: `Unknown method: ${method}` },
+      { status: 400, headers: corsHeaders(origin) },
+    );
+  }
+
   const server = Bun.serve({
     port,
     async fetch(req, server) {
-      const startedMs = Date.now();
       const url = new URL(req.url);
       const path = url.pathname;
       const origin = req.headers.get('origin');
@@ -271,6 +433,54 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
         }
       }
 
+      // Multi-tenant memory routing: /memory/<name>/mcp and /memory/<name>/health.
+      // Must run BEFORE the legacy `path !== '/mcp'` guard below so it doesn't
+      // 404 first; must NOT affect any path that doesn't start with /memory/
+      // (parseMemoryPath returns null for those, so this block is a no-op
+      // and the legacy path check below runs exactly as before).
+      const mem = parseMemoryPath(path);
+      if (mem) {
+        // Multi-tenancy is Postgres-only by design (withSchema/provisionSchema
+        // aren't on the BrainEngine interface — see engine.ts). Fail clearly
+        // instead of throwing deep inside dispatch for a PGLite/other engine.
+        if (typeof (engine as any).provisionSchema !== 'function') {
+          return Response.json(
+            { error: 'multi_tenant_unsupported', message: 'memory routing requires the postgres engine' },
+            { status: 501, headers: corsHeaders(origin) },
+          );
+        }
+        if (mem.rest === '/health') {
+          try {
+            await (engine as PostgresEngine).withSchema(mem.schema, (e) => e.executeRaw('SELECT 1'));
+          } catch {
+            return Response.json(
+              { status: 'unhealthy', memory: mem.name },
+              { status: 503, headers: corsHeaders(origin) },
+            );
+          }
+          return Response.json(
+            { status: 'ok', memory: mem.name, transport: 'http' },
+            { headers: corsHeaders(origin) },
+          );
+        }
+        if (mem.rest !== '/mcp') {
+          return Response.json({ error: 'not_found' }, { status: 404, headers: corsHeaders(origin) });
+        }
+        if (req.method !== 'POST') {
+          return Response.json({ error: 'method_not_allowed' }, { status: 405, headers: corsHeaders(origin) });
+        }
+        // Auto-provision on first touch (idempotent).
+        try {
+          await (engine as PostgresEngine).provisionSchema(mem.name);
+        } catch (e: any) {
+          return Response.json(
+            { error: 'provision_failed', message: e?.message },
+            { status: 500, headers: corsHeaders(origin) },
+          );
+        }
+        return await handleMcpBody(req, server, { schema: mem.schema, engine });
+      }
+
       if (path !== '/mcp') {
         return Response.json({ error: 'not_found' }, { status: 404, headers: corsHeaders(origin) });
       }
@@ -278,128 +488,7 @@ export async function startHttpTransport(opts: HttpTransportOptions) {
         return Response.json({ error: 'method_not_allowed' }, { status: 405, headers: corsHeaders(origin) });
       }
 
-      const ip = resolveClientIp(req, server);
-
-      // Pre-auth IP rate limit. Fires BEFORE the DB lookup so we actually limit brute-force load.
-      const ipCheck = limiters.ip.check(ip);
-      if (!ipCheck.allowed) {
-        logRequest(null, 'unknown', 'rate_limited', Date.now() - startedMs);
-        return Response.json(
-          { error: 'rate_limited', message: 'Too many requests' },
-          {
-            status: 429,
-            headers: corsHeaders(origin, { extra: { 'Retry-After': String(ipCheck.retryAfter ?? 60) } }),
-          },
-        );
-      }
-
-      // Body cap (stream-counted; chunked transfers caught here, not at req.json).
-      const bodyText = await readBodyWithCap(req, bodyCap);
-      if (bodyText === null) {
-        logRequest(null, 'unknown', 'body_too_large', Date.now() - startedMs);
-        return Response.json(
-          { error: 'payload_too_large', message: `Request body exceeds ${bodyCap} bytes` },
-          { status: 413, headers: corsHeaders(origin) },
-        );
-      }
-
-      // Auth.
-      const auth = await validateToken(req.headers.get('Authorization'));
-      if (!auth.ok) {
-        logRequest(null, 'unknown', 'auth_failed', Date.now() - startedMs);
-        return Response.json(
-          { error: 'invalid_token', message: 'Bearer token required. Create one: gbrain auth create <name>' },
-          { status: 401, headers: corsHeaders(origin) },
-        );
-      }
-
-      // Post-auth token-id rate limit. Limits runaway authed clients.
-      const tokCheck = limiters.token.check(auth.tokenId!);
-      if (!tokCheck.allowed) {
-        logRequest(auth.tokenName!, 'unknown', 'rate_limited', Date.now() - startedMs);
-        return Response.json(
-          { error: 'rate_limited', message: 'Too many requests for this token' },
-          {
-            status: 429,
-            headers: corsHeaders(origin, { extra: { 'Retry-After': String(tokCheck.retryAfter ?? 60) } }),
-          },
-        );
-      }
-
-      // Parse JSON-RPC body.
-      let body: { method?: string; params?: any; id?: any };
-      try {
-        body = JSON.parse(bodyText);
-      } catch (e: any) {
-        logRequest(auth.tokenName!, 'unknown', 'parse_error', Date.now() - startedMs);
-        return Response.json(
-          { error: 'parse_error', message: e?.message ?? 'invalid JSON' },
-          { status: 400, headers: corsHeaders(origin) },
-        );
-      }
-
-      const { method, params, id } = body;
-
-      // initialize
-      if (method === 'initialize') {
-        logRequest(auth.tokenName!, 'initialize', 'success', Date.now() - startedMs);
-        return Response.json(
-          {
-            result: {
-              protocolVersion: '2025-03-26',
-              serverInfo: { name: 'gbrain', version: VERSION },
-              capabilities: { tools: {} },
-            },
-            jsonrpc: '2.0',
-            id,
-          },
-          { headers: corsHeaders(origin) },
-        );
-      }
-
-      // notifications/initialized — acknowledge with 204
-      if (method === 'notifications/initialized') {
-        return new Response(null, { status: 204, headers: corsHeaders(origin) });
-      }
-
-      // tools/list
-      if (method === 'tools/list') {
-        logRequest(auth.tokenName!, 'tools/list', 'success', Date.now() - startedMs);
-        return Response.json(
-          { result: { tools }, jsonrpc: '2.0', id },
-          { headers: corsHeaders(origin) },
-        );
-      }
-
-      // tools/call — dispatch through shared dispatch.ts (parity with stdio)
-      if (method === 'tools/call') {
-        const toolName: string = params?.name ?? 'unknown';
-        const args: Record<string, unknown> = params?.arguments ?? {};
-        // v0.28: thread per-token takes-holder allow-list so takes_list /
-        // takes_search / query (when it returns takes) can server-side filter.
-        // v0.34.1 (#861): thread source-isolation scope. Legacy access_tokens
-        // path defaults to 'default' per AuthResult.sourceId above.
-        const result = await dispatchToolCall(engine, toolName, args, {
-          remote: true,
-          takesHoldersAllowList: auth.takesHoldersAllowList,
-          sourceId: auth.sourceId,
-          // #1336: thread the token's federated_read grant so read ops scope
-          // to the operator-granted sources via sourceScopeOpts.
-          auth: auth.auth,
-        });
-        const status = result.isError ? 'error' : 'success';
-        logRequest(auth.tokenName!, `tools/call:${toolName}`, status, Date.now() - startedMs);
-        return Response.json(
-          { result, jsonrpc: '2.0', id },
-          { headers: corsHeaders(origin) },
-        );
-      }
-
-      logRequest(auth.tokenName!, method ?? 'unknown', 'unknown_method', Date.now() - startedMs);
-      return Response.json(
-        { error: 'unknown_method', message: `Unknown method: ${method}` },
-        { status: 400, headers: corsHeaders(origin) },
-      );
+      return await handleMcpBody(req, server, { engine });
     },
   });
 
