@@ -59,3 +59,11 @@ export async function waitfor(url: string): Promise<string> {
   }
   return "OK";
 }
+
+/**
+ * Split a PATH-style, colon-separated list of directories
+ * (e.g. "/usr/src/plugins-dev:/usr/src/plugins-dx").
+ */
+export function splitPathList(val: string): string[] {
+  return val.split(":").map((s) => s.trim()).filter(Boolean);
+}
