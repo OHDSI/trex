@@ -101,6 +101,24 @@ with `provider='anthropic'`, `model`, `api_key` via
 `psql -h localhost -p 65443 -U postgres testdb` — matches the query at
 `plugins/devx/agent/agent.ts:72`.
 
+### Mutating-tool HITL approval — sticky consent (required for Write/Edit evals)
+
+Verified live, plan Task 5, 2026-07-13. `Write` and `Edit` (`plugins/devx/functions/tools/write_file.ts`/`edit_file.ts`, `defaultConsent: "ask"`) run through core's generic `authoredTool` wrapper (`core/server/agents/service/toolset.ts`), which requires human-in-the-loop approval for any tool with `needsApproval`. Read-only tools (Read, Glob, Grep, CodeSearch) don't set this and need no approval. Without a sticky consent on file, the tool call emits an `input.requested` event and then polls `agents.approvals` for up to `approvalTimeoutMs` (default **5 minutes**) before failing with `{"error": "approval timed out"}` — and critically, **`t.send()` blocks for the full poll window** rather than returning early with `t.pendingInputRequests` populated (this agent's tool executor awaits the approval synchronously inside the same request, so there is no way to `t.respondAll()` mid-turn from an eval script; the approval must already be on file before the turn starts).
+
+Fix: pre-seed an "always" sticky consent for the eval user, once per fresh `testdb` (survives container restarts, keyed in Postgres — re-run if the DB volume is ever reset):
+
+```bash
+PGPASSWORD=mypass psql -h localhost -p 65443 -U postgres -d testdb -c "
+INSERT INTO agents.tool_consents (user_id, plugin, agent, tool, consent)
+VALUES
+  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Write', 'always'),
+  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Edit', 'always')
+ON CONFLICT (user_id, plugin, agent, tool) DO UPDATE SET consent = EXCLUDED.consent;
+"
+```
+
+(`plugin`/`agent` values confirmed from a live `agents.sessions` row for this eval user — `@trex/devx` / `devx-agent`.) With the row present, `store.getToolConsent` short-circuits the approval flow entirely and the tool executes immediately, same as the read-only tools. Any future eval that exercises another `needsApproval` tool (e.g. a git-mutating tool) needs its own row here — check `defaultConsent`/`modifiesState` on the tool definition in `plugins/devx/functions/tools/` if a new eval hangs for ~5 minutes before failing.
+
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
 The published dx image cannot serve the devx-agent mount as-is — run
@@ -170,6 +188,11 @@ from this branch) are follow-up work.
 4. `export EVE_EVAL_AUTH_TOKEN="$(plugins/devx/agent/evals/mint-eval-token.sh)"` — see auth notes.
 5. Fixture seeding: `plugins/devx/agent/evals/seed.sh` (from the repo root) — resets the fixture
    workspace. Run it before every full suite run.
+6. Sticky tool consent for mutating tools (Write/Edit): the `agents.tool_consents`
+   insert in "Mutating-tool HITL approval" above — a one-time row per `testdb`,
+   only needed again if the Postgres volume is reset. Skipping this doesn't fail
+   the `tools/files/write`/`edit` evals outright, but makes each hang for the
+   full 5-minute `approvalTimeoutMs` before failing.
 
 ## Running
 
