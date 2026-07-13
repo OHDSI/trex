@@ -40,6 +40,7 @@ import {
 } from "./lib/attach.ts";
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
+import { migrateLegacyDatabaseRegistry } from "./dbm-migrate.ts";
 
 declare const Trex: any;
 declare const EdgeRuntime: any;
@@ -125,6 +126,11 @@ export async function d2eBoot(): Promise<void> {
   } catch (e) {
     err(`Failed to attach cdw_config_svc validation schema: ${(e as Error).message}`);
   }
+
+  // ── Block 5.5: legacy trex.db → trexdb registry migration ─────────────────
+  // Reconcile the legacy d2e `trex.db` connection registry into trexdb before
+  // the attach blocks read it, so migrated connections are attached this boot.
+  await migrateLegacyDatabaseRegistry();
 
   // ── Block 6: HANA cache attach ───────────────────────────────────────────
   // For each credential with dialect="hana", attach its DuckDB cache file.
