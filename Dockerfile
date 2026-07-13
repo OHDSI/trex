@@ -275,8 +275,9 @@ COPY docker/entrypoint.sh /usr/src/entrypoint.sh
 COPY scripts/ /usr/src/scripts/
 RUN chmod 755 /usr/src/entrypoint.sh
 
-# Stage 8: Runtime
-FROM node:22-trixie-slim
+# Stage 8: Runtime ("prod" target — lean image without dev tooling or devx;
+# not published by CI, but kept as a build option: docker build --target prod .)
+FROM node:22-trixie-slim AS prod
 
 ARG DENO_VERSION
 ARG DUCKDB_VERSION
@@ -345,4 +346,97 @@ USER node
 # Entrypoint script generates a per-container TLS cert (NOT for production —
 # see comments in that script) and verifies TREX_ROOT_KEY is present (set by
 # the trex-init container).
+ENTRYPOINT ["/usr/src/entrypoint.sh"]
+
+# Stage 9: Build the devx_ext DuckDB extension for the target arch.
+# extension-ci-tools is a git submodule (the Makefile includes ../extension-ci-tools):
+#   git submodule update --init plugins/extension-ci-tools
+# DEVX_EXT_VERSION must be a real version (the git sha in CI): the extension
+# build's metadata step runs `git describe`, which fails inside the build
+# context (no .git) and would otherwise bake the error string into the
+# extension's ABI metadata, making it unloadable.
+FROM rust:1.88-bookworm AS devx-ext-builder
+ARG DEVX_EXT_VERSION=dev
+WORKDIR /work/plugins/devx-ext
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      python3 python3-venv make pkg-config libssl-dev git && \
+    rm -rf /var/lib/apt/lists/*
+COPY plugins/extension-ci-tools/ /work/plugins/extension-ci-tools/
+COPY plugins/devx-ext/ /work/plugins/devx-ext/
+RUN make configure EXTENSION_VERSION="${DEVX_EXT_VERSION}" && \
+    make release   EXTENSION_VERSION="${DEVX_EXT_VERSION}" && \
+    test -f build/release/devx_ext.trex
+
+# Stage 10: Build the devx plugin (SPA dist + fn-* runtime deps)
+FROM node:22-trixie-slim AS devx-builder
+WORKDIR /work
+COPY plugins/devx/ /work/
+# Bundle the trex Docusaurus docs as a local knowledge-base source so the agent
+# can query them via the kb MCP server's `trex-docs` source — no clone, no
+# network at runtime. Source of truth stays in plugins/docs; this is a
+# build-time snapshot. (The `d2e` local source is authored in-repo under
+# fn-claude-code/kb-local/d2e and ships via the COPY above.)
+COPY plugins/docs/docs/ /work/fn-claude-code/kb-local/trex-docs/
+# Build the SPA, then install runtime deps for the two agent sidecar servers.
+RUN npm ci && \
+    npm run build && \
+    (cd fn-claude-code && npm install --omit=dev) && \
+    (cd fn-copilot && npm install --omit=dev) && \
+    # Root node_modules are build-only (vite/tsc); the runtime uses dist/ + the
+    # Deno functions, so drop them to keep the image small.
+    rm -rf node_modules
+
+# Stage 11: Full image (DEFAULT — last stage). prod + dev tooling + the devx
+# payload in gated folders that entrypoint.sh only exposes when
+# TREX_DX_ENABLED=true. This is the only image CI publishes.
+FROM prod AS full
+USER root
+WORKDIR /usr/src
+
+ARG TARGETARCH
+ARG SHINYLIVE_VERSION=0.10.7
+ARG GH_VERSION=2.65.0
+
+# --- Dev tooling (formerly Dockerfile.dev) ---
+# Shinylive — analytics dashboard runtime
+RUN curl -sLO https://github.com/posit-dev/shinylive/releases/download/v${SHINYLIVE_VERSION}/shinylive-${SHINYLIVE_VERSION}.tar.gz && \
+    tar -xzf shinylive-${SHINYLIVE_VERSION}.tar.gz && \
+    mv shinylive-${SHINYLIVE_VERSION} shinylive && \
+    rm shinylive-${SHINYLIVE_VERSION}.tar.gz && \
+    chown -R node:node /usr/src/shinylive
+
+# Playwright + headless Chromium for QA / design-review tools
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/lib/playwright-browsers
+ENV NODE_PATH=/usr/lib/node_modules
+RUN npm install -g playwright@latest && \
+    npx playwright install --with-deps chromium && \
+    rm -rf /tmp/* /root/.cache/ms-playwright-*
+
+# Claude Code CLI for subscription-based AI usage
+RUN npm install -g @anthropic-ai/claude-code
+
+# GitHub CLI for subscription-based AI usage / gh copilot
+RUN curl -fsSL https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${TARGETARCH}.deb -o /tmp/gh.deb && \
+    dpkg -i /tmp/gh.deb && rm /tmp/gh.deb
+
+# --- d2e flow tooling (formerly Dockerfile.dx) ---
+# yarn (via Corepack) for the d2e-ui Nx/yarn-workspaces monorepo; python3 + uv
+# + prefect to run d2e flows. NOTE: fully RUNNING flows also requires adding
+# python/uv/prefect to the devx_ext validate_command allowlist
+# (plugins/devx-ext/src/validation.rs) — until then flows are context-only.
+RUN corepack enable
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-pip pipx && \
+    rm -rf /var/lib/apt/lists/*
+RUN pipx install uv && \
+    (uv tool install prefect || pip3 install --break-system-packages prefect)
+
+# --- Gated devx payload ---
+# Outside the default PLUGINS_DEV_PATH / EXTENSION_DIR scan paths; only
+# entrypoint.sh's TREX_DX_ENABLED=true gate exposes these dirs.
+COPY --from=devx-builder --chown=node:node /work/ /usr/src/plugins-dx/devx/
+COPY --from=devx-ext-builder /work/plugins/devx-ext/build/release/devx_ext.trex \
+     /usr/lib/trexsql/extensions-dx/devx_ext.trex
+
+USER node
 ENTRYPOINT ["/usr/src/entrypoint.sh"]
