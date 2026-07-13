@@ -51,3 +51,38 @@ git -c user.email=eval@example.com -c user.name=eval commit -qm "fixture: add gr
 echo "Pending line for git-diff eval." >> fixture/notes/greeting.txt
 EOF
 echo "seeded: $EVAL_WS (git repo at workspace root, fixture/ files inside)"
+
+# SQL-tool fixture (plan Task 7, tools/sql/): ExecuteSQL/DatabaseSchema
+# (plugins/devx/functions/tools/execute_sql.ts,get_database_schema.ts) scope
+# every query to one "app"'s own devx_app_* Postgres schema, resolved via
+# devx.app_databases. ExecuteSQL additionally requires ctx.chatId to map
+# to a devx.chats row owning an app_id (verifyChatOwnership,
+# plugins/devx/agent/lib/context.ts) — DatabaseSchema instead takes app_id
+# as a direct tool argument and has no ownership check. Fixed ids so both
+# eval files can reference them without re-querying:
+EVAL_APP_ID="6e6a3b1c-0000-4000-8000-00000000a001"
+EVAL_CHAT_ID="6e6a3b1c-0000-4000-8000-00000000c001"
+EVAL_SQL_SCHEMA="devx_app_eval"
+# EVAL_WS is "/tmp/devx-workspaces/<userId>" (see above) — derive the eval
+# user id from it rather than hardcoding it a second time.
+EVAL_USER_ID="$(basename "$EVAL_WS")"
+
+PGPASSWORD=mypass psql -h localhost -p 65443 -U postgres -d testdb -v ON_ERROR_STOP=1 -q -c "
+INSERT INTO devx.apps (id, user_id, name, path)
+VALUES ('$EVAL_APP_ID', '$EVAL_USER_ID', 'Eval Fixture App', '$EVAL_WS')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO devx.chats (id, user_id, app_id, title, mode)
+VALUES ('$EVAL_CHAT_ID', '$EVAL_USER_ID', '$EVAL_APP_ID', 'Eval Fixture Chat', 'build')
+ON CONFLICT (id) DO UPDATE SET app_id = EXCLUDED.app_id;
+
+CREATE SCHEMA IF NOT EXISTS $EVAL_SQL_SCHEMA;
+CREATE TABLE IF NOT EXISTS $EVAL_SQL_SCHEMA.widgets (id SERIAL PRIMARY KEY, name TEXT NOT NULL);
+DELETE FROM $EVAL_SQL_SCHEMA.widgets;
+INSERT INTO $EVAL_SQL_SCHEMA.widgets (name) VALUES ('foo'), ('bar');
+
+INSERT INTO devx.app_databases (app_id, schema_name)
+VALUES ('$EVAL_APP_ID', '$EVAL_SQL_SCHEMA')
+ON CONFLICT (schema_name) DO NOTHING;
+"
+echo "seeded: devx.apps/$EVAL_APP_ID, devx.chats/$EVAL_CHAT_ID, schema $EVAL_SQL_SCHEMA (tools/sql fixture)"

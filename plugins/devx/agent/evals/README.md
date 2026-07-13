@@ -114,7 +114,8 @@ VALUES
   ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Write', 'always'),
   ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Edit', 'always'),
   ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'GitCommit', 'always'),
-  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Bash', 'always')
+  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Bash', 'always'),
+  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'ExecuteSQL', 'always')
 ON CONFLICT (user_id, plugin, agent, tool) DO UPDATE SET consent = EXCLUDED.consent;
 "
 ```
@@ -133,6 +134,99 @@ The `GitCommit` and `Bash` rows above were added for the `tools/git/` family
 when a task's phrasing implies precision the coarse `GitCommit` tool can't
 give (see the `git-commit` note below), and an unconsented `Bash` call hangs
 the same 5 minutes as any other unconsented mutating tool.
+
+The `ExecuteSQL` row above was added for the `tools/sql/` family (plan
+Task 7): `ExecuteSQL` (`plugins/devx/functions/tools/execute_sql.ts`) is
+`defaultConsent: "ask"`/`modifiesState: true`; `DatabaseSchema`
+(`plugins/devx/functions/tools/get_database_schema.ts`) is
+`defaultConsent: "always"` (read-only, no row needed).
+
+### SQL-tool app-database fixture (`tools/sql/` — ExecuteSQL/DatabaseSchema)
+
+Verified live, plan Task 7, 2026-07-13. Both SQL tools scope every query to
+one **app**'s own `devx_app_*` Postgres schema — this is a materially
+different context model from every other tool family (which only need
+`ctx.workspacePath`, resolved purely from the authenticated `userId`):
+
+- `DatabaseSchema` takes `app_id` as an explicit, required tool argument
+  (`get_database_schema.ts`) and does `SELECT schema_name FROM
+  devx.app_databases WHERE app_id = $1` with **no ownership check** — any
+  caller who knows an `app_id` can introspect its schema.
+- `ExecuteSQL` (`execute_sql.ts`) instead resolves the schema from
+  `ctx.chatId`: `... FROM devx.app_databases WHERE app_id = (SELECT id FROM
+  devx.apps WHERE id IN (SELECT app_id FROM devx.chats WHERE id =
+  ctx.chatId))`. `ctx.chatId` comes from `readMetadata(evectx.metadata).chatId`
+  (`plugins/devx/agent/lib/context.ts` `toDevxCtx`), verified against the
+  authenticated `userId` via `devx.chats.user_id`
+  (`verifyChatOwnership`) — and `evectx.metadata` is exactly the raw HTTP
+  request's top-level `metadata` field
+  (`core/server/agents/service/handler.ts`'s `/eve/v1/session` route reads
+  `body.metadata` directly, `startTurn(..., body.metadata, ...)`).
+
+**The blocker**: eve's eval-harness `t.send()` can never populate that
+`metadata` field. `SendTurnPayload`
+(`node_modules/eve/dist/src/client/types.d.ts`) only carries
+`message`/`inputResponses`/`clientContext`/`outputSchema`/`continuationToken`
+onto the request body (confirmed in
+`node_modules/eve/dist/src/client/session.js`'s `createHandleMessageBody`),
+and `clientContext` is a *different* channel — it's rendered as an injected
+user-role context message, never surfaced as `ToolContext.metadata`. So a
+plain `t.send()` turn always resolves `ctx.chatId` to `""`, and `ExecuteSQL`
+fails before running any SQL: `invalid input syntax for type uuid: ""`. This
+is a structural gap in the eval harness/tool contract, not a fixture
+problem — no amount of pre-seeding a `devx.chats` row fixes it, because
+`t.send()` never hands the tool anything to match that row against.
+
+**Fixture** (idempotent; part of `seed.sh`, re-run before every full run
+like the rest of the fixture): one `devx.apps` row, one `devx.chats` row
+(fixed id, owned by the eval user, pointing at that app), a real
+`devx_app_eval` Postgres schema with one seeded table
+(`devx_app_eval.widgets`), and a `devx.app_databases` row tying the app to
+that schema:
+
+```bash
+EVAL_APP_ID="6e6a3b1c-0000-4000-8000-00000000a001"
+EVAL_CHAT_ID="6e6a3b1c-0000-4000-8000-00000000c001"
+```
+
+(see `seed.sh` for the exact SQL). `database-schema.eval.ts` passes
+`EVAL_APP_ID` to the model directly in its prompt (there is no "list apps"
+tool in this suite to discover it another way) — this also means the
+original brief's `includes("devx")` check passes unmodified, since the
+fixture schema is literally named `devx_app_eval`.
+
+**Workaround for `ExecuteSQL`** (`execute-sql.eval.ts`): rather than
+`t.send()`, the eval uses two *documented, supported*
+`EveEvalTargetHandle` members instead of the session driver — not an eve
+internals hack:
+
+1. `t.target.fetch("/eve/v1/session", { method: "POST", body: JSON.stringify({ message, metadata: { chatId: EVAL_CHAT_ID } }) })` —
+   "Authenticated fetch against the target base URL" per eve's own type
+   doc comment; posts directly to the raw HTTP route with a `metadata` field
+   the `ClientSession` wrapper would otherwise strip.
+2. `t.target.attachSession(sessionId)` — "Attach to a pre-existing session
+   and consume one turn boundary"; returns a full `EveEvalSession` (same
+   assertion vocabulary as `t.send()`'s result: `succeeded()`,
+   `calledTool()`, etc.) wired into the *same* assertion collector as the
+   eval's primary session (confirmed by reading
+   `node_modules/eve/dist/src/evals/runner/execute-task.js`: `t.target` is
+   `scopeEvalTargetHandle(target, { sessions: <the same EvalSessionManager
+   backing t> })`), so gates recorded on the attached session are reported
+   exactly like `t`'s own.
+
+Verified live before writing the eval file: a raw `curl -X POST
+.../eve/v1/session -d '{"message":"...","metadata":{"chatId":"<EVAL_CHAT_ID>"}}'`
+followed by reading the session's event stream showed the tool call's
+`action.result` output as `"answer\n------\n42"` — genuine SQL execution
+against the fixture schema, not the model doing arithmetic in text (which
+is what happens, and silently passes a naive `includes("42")` check on
+`t.reply`, if the tool call is left to fail).
+
+`EveEvalSession` has no `.message` field (only `EveEvalTurn`, returned by
+`send()`/`respond()`, does) — the eval derives the final assistant text
+from the public `session.events` list instead, mirroring eve's own
+internal `extractCompletedMessage` (`client/session-utils.js`): the last
+`message.completed` event whose `finishReason !== "tool-calls"`.
 
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
@@ -202,13 +296,14 @@ from this branch) are follow-up work.
    including the recreate in step 2.
 4. `export EVE_EVAL_AUTH_TOKEN="$(plugins/devx/agent/evals/mint-eval-token.sh)"` — see auth notes.
 5. Fixture seeding: `plugins/devx/agent/evals/seed.sh` (from the repo root) — resets the fixture
-   workspace. Run it before every full suite run.
-6. Sticky tool consent for mutating tools (Write/Edit/GitCommit): the
+   workspace AND the `tools/sql/` app-database fixture (idempotent). Run it
+   before every full suite run.
+6. Sticky tool consent for mutating tools (Write/Edit/GitCommit/ExecuteSQL): the
    `agents.tool_consents` insert in "Mutating-tool HITL approval" above — a
    one-time row per `testdb`, only needed again if the Postgres volume is
-   reset. Skipping this doesn't fail the `tools/files/write`/`edit` or
-   `tools/git/git-commit` evals outright, but makes each hang for the full
-   5-minute `approvalTimeoutMs` before failing.
+   reset. Skipping this doesn't fail the `tools/files/write`/`edit`,
+   `tools/git/git-commit`, or `tools/sql/execute-sql` evals outright, but
+   makes each hang for the full 5-minute `approvalTimeoutMs` before failing.
 
 ## Running
 
