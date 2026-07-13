@@ -203,7 +203,15 @@ function stripBotMention(text: string, mentions: readonly TeamsMention[], recipi
  */
 function normalizeTeamsText(text: string): string {
   const unwrapped = text.replace(/<at>(.*?)<\/at>/gi, "@$1");
-  const detagged = /<\/?[a-z][\s\S]*>/i.test(unwrapped) ? unwrapped.replace(/<[^>]+>/g, "") : unwrapped;
+  // Strip HTML tags in a loop until the string stops changing. A single pass of
+  // `<[^>]+>` can leave a tag behind when tags are nested/overlapping (e.g.
+  // `<scr<b>ipt>` → `<script>`), which CodeQL flags as incomplete
+  // multi-character sanitization; iterating to a fixpoint removes them fully.
+  let detagged = unwrapped;
+  for (let prev = ""; prev !== detagged;) {
+    prev = detagged;
+    detagged = detagged.replace(/<[^>]+>/g, "");
+  }
   return decodeHtmlEntities(detagged).trim();
 }
 

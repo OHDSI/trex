@@ -43,7 +43,7 @@ function normalize(value: unknown, seen = new WeakSet<object>()): unknown {
     }
     return out;
   }
-  if (typeof value !== "object" || value === undefined || !isPlainObject(value) || seen.has(value)) {
+  if (typeof value !== "object" || !isPlainObject(value) || seen.has(value)) {
     return INVALID;
   }
   seen.add(value as object);
