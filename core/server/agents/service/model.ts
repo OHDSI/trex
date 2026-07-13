@@ -129,3 +129,60 @@ function bedrockModel(modelId: string, env: EnvFn, bearerTokenOverride?: string)
   }
   return createAmazonBedrock(config)(modelId);
 }
+
+// Task 15: Bedrock prompt caching for the stable TOOLS+SYSTEM prefix.
+// `model.provider` ("amazon-bedrock" — verified against the installed
+// @ai-sdk/amazon-bedrock@4.0.133's bedrock-chat-language-model.ts: `readonly
+// provider = 'amazon-bedrock'`) is the only signal callers have for which
+// wire format streamText will use; there's no separate "is this bedrock"
+// flag threaded through resolveModelForTurn/resolveModel. Gate on it here so
+// non-bedrock model objects (anthropic/openai/google) are left completely
+// untouched by the caller — see withBedrockCachePoint.
+// deno-lint-ignore no-explicit-any
+export function isBedrockModel(model: any): boolean {
+  return model?.provider === "amazon-bedrock";
+}
+
+// A SystemModelMessage carrying a Bedrock cache point, or the plain-string
+// no-op for every other provider.
+export type SystemPrompt = string | {
+  role: "system";
+  content: string;
+  providerOptions: { bedrock: { cachePoint: { type: "default" } } };
+};
+
+// Wraps a plain system-prompt string in the AI SDK's SystemModelMessage
+// shape with a Bedrock cache point covering everything up to and including
+// the system block — when (and only when) the resolved model is bedrock;
+// returns the original string unchanged for every other provider (a true
+// no-op: anthropic/openai/google never see a providerOptions.bedrock key).
+//
+// Why a cache point on `system` also covers the TOOLS prefix (the other half
+// of the brief's "cache the stable TOOLS+SYSTEM prefix" target): the
+// installed @ai-sdk/amazon-bedrock@^4.0.115 (resolves to 4.0.133 in the dx
+// image's npm set) has NO mechanism to attach a cache point to the tools
+// array — `BedrockCachePoint` is a valid member of
+// `BedrockToolConfiguration.tools` per bedrock-api-types.ts, but
+// bedrock-prepare-tools.ts's `prepareTools()` never constructs one; tool
+// definitions cannot be cache-pointed directly in this SDK version. Bedrock's
+// Converse API (for Anthropic models) builds the model context in the fixed
+// order tools -> system -> messages — the same ordering Anthropic's own
+// Messages API prompt-caching docs describe — so a cache point placed on the
+// system block caches the entire prefix up to and including it, tool
+// definitions included, as long as both are byte-identical across requests
+// (true here: buildSystemPrompt/resolveInstructions and the built tool set
+// are both deterministic per agent+metadata+turn). Confirmed against
+// convert-to-bedrock-chat-messages.ts: a system message's
+// `providerOptions.bedrock.cachePoint` becomes a second `{ cachePoint: {...} }`
+// entry appended to the wire `system` array — a field bedrockModel()'s
+// bearer-token custom fetch above never touches (it only rewrites
+// `parsed.messages`), so the marker survives that rewrite unmodified.
+// deno-lint-ignore no-explicit-any
+export function withBedrockCachePoint(model: any, system: string): SystemPrompt {
+  if (!isBedrockModel(model)) return system;
+  return {
+    role: "system",
+    content: system,
+    providerOptions: { bedrock: { cachePoint: { type: "default" } } },
+  };
+}

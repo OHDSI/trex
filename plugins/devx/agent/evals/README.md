@@ -368,6 +368,112 @@ No new sticky consent rows needed: `Read` is `defaultConsent: "always"`
 (read-only); `ExecuteSQL`'s row already exists from the `tools/sql` family
 (task 7).
 
+## Bedrock prompt caching (task 15)
+
+Verified live, 2026-07-13. Every turn resends the agent's stable prefix — the
+system prompt plus all authored tool JSON schemas — on every model step; this
+was previously never cached (usage objects only ever carried
+`inputTokens`/`outputTokens`). `core/server/agents/service/model.ts` now
+exports `withBedrockCachePoint(model, system)`, called from both
+`streamText` sites (`runner.ts`'s primary turn loop and `toolset.ts`'s
+`runSubagent`): when `model.provider === "amazon-bedrock"` it wraps the
+plain `system` string in a `SystemModelMessage` with
+`providerOptions: { bedrock: { cachePoint: { type: "default" } } }`; for
+every other provider (anthropic/openai/google) it returns the string
+unchanged — a true no-op, verified by `deno test` staying green across the
+whole `agents/service` suite (73/73) with no provider-specific test changes
+needed.
+
+**Why a cache point on `system` alone also covers `tools`**: the installed
+`@ai-sdk/amazon-bedrock@^4.0.115` (resolves to 4.0.133 in the dx image's npm
+set) has no mechanism to attach a cache point to the `tools` array itself —
+`bedrock-prepare-tools.ts`'s `prepareTools()` never constructs one, even
+though `BedrockCachePoint` is a valid `tools[]` member type. Bedrock's
+Converse API builds an Anthropic model's context in the fixed order
+`tools -> system -> messages` (same ordering Anthropic's own prompt-caching
+docs describe), so a cache point on the system block caches everything
+before it too — tool definitions included — as long as both are
+byte-identical across requests, which they are here (deterministic per
+agent+metadata+turn). This was confirmed empirically, not just by reading
+docs: see the before/after numbers below, where `cacheReadInputTokens` on a
+warm cache accounts for essentially the entire request (tools+system+small
+per-turn overhead), not just a system-prompt-sized slice.
+
+**Bearer-fetch compatibility (brief's caveat 3)**: `bedrockModel()`'s custom
+`fetch` (dummy-credential bearer auth) only rewrites `parsed.messages` (it
+injects a `"."` text part into tool-only assistant messages); it never
+touches `parsed.system`, so the cache-point marker Bedrock actually receives
+is untouched by that rewrite. Confirmed live, not just by reading the fetch
+code: the AFTER runs below show real `cacheReadInputTokens`/
+`cacheWriteInputTokens` values, which could only appear if the marker
+reached Bedrock intact through that custom fetch.
+
+**Before/after (same evals, live dx stack, `us.anthropic.claude-sonnet-4-6`
+via bedrock bearer-token auth)**. BEFORE (`.eve/evals/2026-07-13T15-14-51`,
+pre-change): usage objects never carry a cache field at all.
+
+| eval | turn/step | inputTokens | outputTokens | cacheReadInputTokens | cacheWriteInputTokens |
+|---|---|---|---|---|---|
+| smoke/multi-turn | turn 1 | 12519 | 22 | *(absent)* | *(absent)* |
+| smoke/multi-turn | turn 2 | 12562 | 7 | *(absent)* | *(absent)* |
+| tools/files/edit | turn 1 (2 steps) | 38050 | 174 | *(absent)* | *(absent)* |
+
+AFTER, cold cache (`.eve/evals/2026-07-13T15-29-59`, first request after the
+change — establishes the cache):
+
+| eval | turn/step | inputTokens | outputTokens | cacheReadInputTokens | cacheWriteInputTokens |
+|---|---|---|---|---|---|
+| smoke/multi-turn | turn 1 | 12519 | 24 | 0 | 12181 |
+| smoke/multi-turn | turn 2 | 12564 | 7 | 12181 | 0 |
+| tools/files/edit | turn 1 (2 steps) | 38050 | 174 | 24362 | 12181 |
+
+Turn 1 of `smoke/multi-turn` pays a one-time `cacheWriteInputTokens: 12181`
+(writing the tools+system prefix into the cache — nothing to read yet);
+turn 2 of the SAME session reads that same 12181 tokens back
+(`cacheReadInputTokens: 12181`, `cacheWriteInputTokens: 0`) instead of
+resending them. `inputTokens` (the SDK's total-including-cache figure,
+`noCache + cacheRead + cacheWrite`) stays roughly constant — the reduction
+shows up in the cache-read/write split, not in that total: turn 2's
+non-cached remainder is `12564 - 12181 = 383` tokens (just the per-turn user
+message and bookkeeping), down from the full ~12.5k prefix a cold call pays.
+
+AFTER, warm cache (`.eve/evals/2026-07-13T15-34-17`, a later full-suite run
+within the same ~5-minute Bedrock cache TTL window — every eval in the run
+benefits, not just the second turn of one session):
+
+| eval | turn/step | inputTokens | outputTokens | cacheReadInputTokens | cacheWriteInputTokens |
+|---|---|---|---|---|---|
+| smoke/multi-turn | turn 1 | 12519 | 15 | 12181 | 0 |
+| smoke/multi-turn | turn 2 | 12555 | 7 | 12181 | 0 |
+| tools/files/edit | turn 1 (2 steps) | 38050 | 174 | 36543 | 0 |
+| tools/files/write | turn 1 | 25178 | 88 | 24362 | 0 |
+
+`runner.ts`'s persisted `usage` object was extended to surface
+`cacheReadInputTokens`/`cacheWriteInputTokens` (re-expressed from ai@6's
+`totalUsage.inputTokenDetails.cacheReadTokens`/`cacheWriteTokens` under the
+provider-raw names) alongside the existing `inputTokens`/`outputTokens` —
+this is what makes the numbers above visible in `.eve/evals/<ts>/*.ndjson`
+at all; previously the cache breakdown was silently dropped even when the
+provider returned it.
+
+**Full suite stayed green**: `npm run eval` (all 28 evals) passed 28/28 both
+before and after this change — the message-shape change (plain string ->
+`SystemModelMessage` for bedrock only) caused no behavior regression.
+
+**Live application**: `fix-agent-mount.sh` gained a 6th step that syncs
+`core/server/agents/service/` (the whole dir, not just the three files this
+task touches) from the checkout into the staged worker dir — core's agent
+staging only copies this dir into a NEW worker's servicePath at
+worker-creation time (see "Known live-stack gaps" below), so edits here
+never reach an already-running worker without either this sync + a fresh
+worker, or a full trex container restart. Verified live: two staged dirs
+existed at once mid-task (`/tmp/trex-agents-*`, one stale from before this
+task's edits) — `fix-agent-mount.sh`'s `head -1` pick only patches the
+alphabetically-first one, so after any edit here, restart the trex
+container (`docker compose -f docker-compose.dx.yml restart trex`) to force
+exactly one fresh staging dir, THEN run `fix-agent-mount.sh` against it,
+before the first request.
+
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
 The published dx image cannot serve the devx-agent mount as-is — run

@@ -4,7 +4,7 @@
 // endpoints cannot drift. Spec §3 (skills/subagents) + §4 (extensions).
 // deno-lint-ignore-file no-explicit-any
 import { streamText, tool, jsonSchema, stepCountIs } from "ai";
-import { resolveModel } from "./model.ts";
+import { resolveModel, withBedrockCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
@@ -186,9 +186,12 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
   // which still runs against depth-1's (smaller) tool set using the same
   // hookCtx carried in via the ...ctx spread.
   const tools = await buildSdkTools({ ...ctx, agent: target, depth: 1 });
+  // Task 15: same bedrock-only cache-point treatment as runner.ts's primary
+  // turn loop, for consistency — a subagent's system+tools prefix is just as
+  // stable/repeated (across its own steps) as the top-level turn's.
   const result = streamText({
     model,
-    system: buildSystemPrompt(target, ctx.metadata),
+    system: withBedrockCachePoint(model, buildSystemPrompt(target, ctx.metadata)),
     messages: [{ role: "user" as const, content: prompt }],
     tools,
     stopWhen: stepCountIs(target.config.maxSteps ?? 25),

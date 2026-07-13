@@ -85,4 +85,24 @@ EOF
 #    a host path.
 $COMPOSE cp plugins/devx/agent/instructions.md "trex:$staged/agent/instructions.md"
 
+# 6. (task 15) Sync the core agent-runtime service files from THIS checkout
+#    over the staged copy. core's agent staging (buildAgentWorkerConfig in
+#    core/server/plugin/agents.ts) copies core/server/agents/{service,eve-shim}
+#    into the worker servicePath at WORKER-CREATION time only — same
+#    creation-time-baked pattern as the import map fixed in steps 2-3 above —
+#    so edits to runner.ts/toolset.ts/model.ts (or anything else under
+#    service/) never reach an already-staged worker on their own. Copies the
+#    whole service/ dir (not just the three files task 15 touches) so this
+#    step stays correct for future edits to the same runtime without needing
+#    another update here. Runs on the host, same as step 5, since it reads
+#    host paths; the worker itself still needs a restart/recreate afterward
+#    for a NEW worker to be created against this patched staging dir (the
+#    pool reuses the first worker per servicePath — see agents.ts).
+# Trailing "/." on the source: `docker cp`/`compose cp` copies a bare
+# directory INTO an existing destination directory (producing a nested
+# .../agents/service/service/*), but copies a directory's CONTENTS when the
+# source ends with "/." — the staged $staged/agents/service dir already
+# exists (created by buildAgentWorkerConfig), so this must be the latter.
+$COMPOSE cp core/server/agents/service/. "trex:$staged/agents/service"
+
 echo "fix-agent-mount: patched $staged"
