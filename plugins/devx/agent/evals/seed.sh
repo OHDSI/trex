@@ -26,6 +26,7 @@ TS
 
 cat > "$EVAL_WS/fixture/src/util.ts" <<'TS'
 // FIXTURE_MARKER_ALPHA
+// FIXTURE_MARKER_EDIT
 export function slugify(s: string): string {
   return s.toLowerCase().replace(/[^a-z0-9]+/g, "-");
 }
