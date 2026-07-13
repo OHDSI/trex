@@ -70,19 +70,31 @@ function escapeSqlStringLiteral(value: string): string {
   return value.replace(/'/g, "''");
 }
 
+// Multi-tenant guard: schema names are interpolated into DDL, so they must be
+// validated to a strict allow-list, never taken raw. Mirrors trex's memory
+// name rule (memory_<name>, name = ^[a-z0-9][a-z0-9_-]*$).
+export function isValidSchemaIdent(s: string): boolean {
+  return /^memory_[a-z0-9][a-z0-9_-]*$/.test(s);
+}
+
 export function getPostgresSchema(
   dims: number = DEFAULT_EMBEDDING_DIMENSIONS,
   model: string = DEFAULT_EMBEDDING_MODEL,
+  schema?: string,
 ): string {
   const parsedDims = Number(dims);
   if (!Number.isInteger(parsedDims) || parsedDims <= 0) {
     throw new Error(`Invalid embedding dimensions: ${dims}`);
   }
   const sanitizedModel = escapeSqlStringLiteral(String(model));
+  const searchPath = schema
+    ? (isValidSchemaIdent(schema) ? `pg_catalog, ${schema}` : (() => { throw new Error(`invalid schema ident: ${schema}`); })())
+    : 'pg_catalog, public';
   return applyChunkEmbeddingIndexPolicy(SCHEMA_SQL, parsedDims)
     .replace(/vector\(1536\)/g, `vector(${parsedDims})`)
     .replace(/'text-embedding-3-large'/g, `'${sanitizedModel}'`)
-    .replace(/\('embedding_dimensions', '1536'\)/g, `('embedding_dimensions', '${parsedDims}')`);
+    .replace(/\('embedding_dimensions', '1536'\)/g, `('embedding_dimensions', '${parsedDims}')`)
+    .replace(/__MEMORY_SEARCH_PATH__/g, searchPath);
 }
 
 // CONNECTION_ERROR_PATTERNS / isConnectionError were used by the per-call
@@ -274,7 +286,7 @@ export class PostgresEngine implements BrainEngine {
     // else: nothing to disconnect (already done or never connected)
   }
 
-  async initSchema(): Promise<void> {
+  async initSchema(schema?: string): Promise<void> {
     // v0.30.1 (X1): route DDL through the direct pool when ConnectionManager
     // is in dual-pool mode. The pooler's 2-min statement_timeout truncates
     // SCHEMA_SQL replays + migrations on Supabase; the direct pool gets
@@ -298,7 +310,15 @@ export class PostgresEngine implements BrainEngine {
       model = gw.getEmbeddingModel() || model;
     } catch { /* gateway not yet configured — use defaults */ }
 
-    const sqlText = getPostgresSchema(dims, model);
+    const sqlText = getPostgresSchema(dims, model, schema);
+
+    // Multi-tenant: create the target schema and pin this DDL connection to
+    // it so unqualified CREATE TABLE / triggers land in <schema>, not public.
+    if (schema) {
+      if (!isValidSchemaIdent(schema)) throw new Error(`invalid schema ident: ${schema}`);
+      await conn.unsafe(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
+      await conn.unsafe(`SET search_path = ${schema}, pg_catalog`);
+    }
 
     // Advisory lock prevents concurrent initSchema() calls from deadlocking
     // on DDL statements (DROP TRIGGER + CREATE TRIGGER acquire AccessExclusiveLock).
