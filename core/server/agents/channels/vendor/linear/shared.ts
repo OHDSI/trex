@@ -39,7 +39,7 @@ function normalizeJsonValueCandidate(value: unknown, seen = new WeakSet<object>(
     }
     return out;
   }
-  if (typeof value !== "object" || value === undefined || !isPlainObject(value) || seen.has(value)) return INVALID;
+  if (typeof value !== "object" || !isPlainObject(value) || seen.has(value)) return INVALID;
   seen.add(value);
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(value)) {

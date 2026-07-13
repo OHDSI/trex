@@ -54,7 +54,7 @@ import {
   shouldDispatchGitHubComment,
 } from "../vendor/github/inbound.ts";
 import type { GitHubUser } from "../vendor/github/inbound-types.ts";
-import type { GitHubApiOptions, GitHubCredentials, GitHubFetch } from "../vendor/github/auth.ts";
+import type { GitHubApiOptions, GitHubCredentials } from "../vendor/github/auth.ts";
 import { getEnv } from "../vendor/github/shared.ts";
 import { createGitHubIssueComment } from "../vendor/github/api.ts";
 import { splitGitHubCommentBody } from "../vendor/github/limits.ts";

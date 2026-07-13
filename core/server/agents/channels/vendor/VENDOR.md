@@ -11,6 +11,22 @@ Unmodified/Modified). This file records the eve version and the local edits so
 re-syncing on an eve upgrade is mechanical: bump the version, re-copy the listed
 files, and re-apply the edit categories below.
 
+### Cross-platform static-analysis edits (re-apply on re-sync)
+
+Applied uniformly after vendoring to satisfy the repo's CodeQL/code-quality
+scans; behavior-preserving, so re-apply them verbatim after a re-copy:
+
+- **`<platform>/shared.ts` `normalize`/`normalizeJsonValueCandidate` guard** —
+  dropped the dead `value === undefined` clause from
+  `typeof value !== "object" || value === undefined || …`; `typeof value !==
+  "object"` already excludes `undefined`, so the comparison was unreachable
+  (CodeQL "comparison between inconvertible types"). Files: discord, github,
+  linear, slack, teams, telegram.
+- **`teams/inbound.ts` `normalizeTeamsText`** — the HTML-tag strip now loops
+  `replace(/<[^>]+>/g, "")` to a fixpoint instead of a single pass, so nested/
+  overlapping tags (`<scr<b>ipt>`) can't survive (CodeQL "incomplete
+  multi-character sanitization").
+
 ## eve version
 
 - **eve@0.19.0**, from the installed package at
