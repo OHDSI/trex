@@ -155,7 +155,7 @@ async function getActualColumns(engine: BrainEngine): Promise<Set<string>> {
   const rows = await engine.executeRaw<{ table_name: string; column_name: string }>(
     `SELECT table_name, column_name
      FROM information_schema.columns
-     WHERE table_schema = 'public'`
+     WHERE table_schema = current_schema()`
   );
   const set = new Set<string>();
   for (const row of rows) {
@@ -171,7 +171,7 @@ async function getActualTables(engine: BrainEngine): Promise<Set<string>> {
   const rows = await engine.executeRaw<{ table_name: string }>(
     `SELECT table_name
      FROM information_schema.tables
-     WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
+     WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`
   );
   return new Set(rows.map(r => r.table_name));
 }
@@ -254,6 +254,8 @@ export async function verifySchema(engine: BrainEngine): Promise<VerifyResult> {
     const simpleDef = simplifyColumnDef(rawDef);
 
     try {
+      // Unqualified ALTER: resolves via the connection search_path, so under
+      // multi-tenant initSchema this heals the target memory_<name> schema.
       const sql = `ALTER TABLE ${m.table} ADD COLUMN IF NOT EXISTS ${m.column} ${simpleDef}`;
       await engine.runMigration(0, sql);
       result.healed.push({ table: m.table, column: m.column });
