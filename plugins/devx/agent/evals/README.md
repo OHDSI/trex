@@ -279,6 +279,46 @@ for `ExecuteSQL`:
   family; a future eval touching them would need rows added here, same
   pattern as `GitCommit`/`ExecuteSQL` above.)
 
+### Mode-filtering fixture (`modes/` — ask/plan/build/default)
+
+Verified live, plan Task 10, 2026-07-13. `plugins/devx/agent/agent.ts`'s
+`filterTools` hook (`:164-195`) keys off `metadata.mode` — a raw HTTP
+request field, exactly the same structural gap as `ExecuteSQL`'s `chatId`
+and `TaskCreate`'s `chatId` above: `t.send()`'s `SendTurnPayload` has no
+`metadata` field at all, so a plain `t.send()` turn can never exercise
+`ask`/`plan`/`build` mode filtering. `evals/modes/helpers.ts` factors the
+same `t.target.fetch("/eve/v1/session", { metadata: { mode } })` +
+`t.target.attachSession()` workaround as `execute-sql.eval.ts`/
+`task-create.eval.ts` into one shared `sendWithMode(t, message, mode)`
+helper (three of the four mode evals import it); `default-allows.eval.ts`
+is the exception — absent/unknown mode is exactly what a plain `t.send()`
+already produces (no metadata field sent at all), so it drives its turn
+normally and needs no workaround.
+
+Each eval's tool choice is deliberate, not incidental. `PLAN_MODE_TOOLS`
+(transcribed at `agent.ts:23-31`, re-verified against that source before
+writing these evals) allows `Read` but excludes `DatabaseSchema` even
+though `DatabaseSchema` is just as read-only (`modifiesState: false`,
+`defaultConsent: "always"`, no sticky consent row needed) — `ask` mode's
+`filterTools` branch only drops `modifiesState: true` tools (plus the
+built-in `agent` tool), so it allows `DatabaseSchema` through where `plan`
+mode blocks it. Using `DatabaseSchema` (not just `Write`) as the second
+probe tool in `ask-blocks-mutation.eval.ts`/`plan-restricted.eval.ts` is
+what makes "ask" and "plan" pairwise distinguishable — a design that only
+ever tried `Read`+`Write` per mode would pass identically under either
+mode's real semantics or a bug that collapsed ask mode into plan mode's
+narrower allowlist. `build-no-tools.eval.ts` asserts the real
+`session.usedNoTools()` gate (not a manual event scan) plus a negative
+content check (the reply must not leak the fixture codeword, since the
+agent has no way to have actually read it). See `task-10-report.md` for the
+full per-eval assertion rationale.
+
+No new sticky consent rows were needed: `Write`'s `always` row already
+existed (from the `tools/files` family) and is reachable only from
+`default-allows.eval.ts` (the only mode of the four where `Write` is
+actually offered to the model); `DatabaseSchema` needs none regardless of
+mode.
+
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
 The published dx image cannot serve the devx-agent mount as-is — run
