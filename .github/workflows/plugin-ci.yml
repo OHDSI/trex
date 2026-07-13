@@ -842,25 +842,27 @@ jobs:
         with:
           driver: docker
 
+      # Non-pushed smoke build: keeps the lean prod target from bit-rotting.
       - name: Build prod image for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: prod
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: trexsql-test:prod
+
+      - name: Build full image for testing
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/${{ matrix.arch }}
           load: true
-          tags: trexsql-test:prod
-
-      - name: Build dev image for testing
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.dev
-          platforms: linux/${{ matrix.arch }}
-          load: true
-          tags: trexsql-test:dev
+          tags: trexsql-test:full
           build-args: |
-            BASE_IMAGE=trexsql-test:prod
+            DEVX_EXT_VERSION=${{ github.sha }}
 
       - name: Test extensions load (${{ matrix.arch }})
         run: |
@@ -873,9 +875,23 @@ jobs:
           # gh CLI / claude / playwright must NOT be in the prod image
           ! docker run --rm --entrypoint sh trexsql-test:prod -c 'command -v gh' >/dev/null 2>&1
           ! docker run --rm --entrypoint sh trexsql-test:prod -c 'command -v claude' >/dev/null 2>&1
-          # And SHOULD be in the dev image
-          docker run --rm --entrypoint sh trexsql-test:dev -c 'command -v gh' >/dev/null
-          docker run --rm --entrypoint sh trexsql-test:dev -c 'command -v claude' >/dev/null
+          # And SHOULD be in the full image
+          docker run --rm --entrypoint sh trexsql-test:full -c 'command -v gh' >/dev/null
+          docker run --rm --entrypoint sh trexsql-test:full -c 'command -v claude' >/dev/null
+
+      - name: Verify devx gate (${{ matrix.arch }})
+        run: |
+          # Gate OFF (default): boots clean, devx_ext NOT loaded, payload present but dormant
+          OFF=$(docker run --rm trexsql-test:full --check 2>&1) || true
+          echo "$OFF"
+          echo "$OFF" | grep -q "extension(s) loaded successfully"
+          ! echo "$OFF" | grep -q devx_ext
+          docker run --rm --entrypoint sh trexsql-test:full -c \
+            'test -d /usr/src/plugins-dx/devx && test -f /usr/lib/trexsql/extensions-dx/devx_ext.trex'
+          # Gate ON: devx_ext loads
+          ON=$(docker run --rm -e TREX_DX_ENABLED=true trexsql-test:full --check 2>&1) || true
+          echo "$ON"
+          echo "$ON" | grep -q "Loading extension: /usr/lib/trexsql/extensions-dx/devx_ext.trex ... ok"
 
       # GHCR rejects uppercase repo names. github.repository_owner preserves the
       # org's actual casing (OHDSI), so lowercase it once via shell into $IMAGE_NS.
@@ -894,7 +910,9 @@ jobs:
 
       # Each arch pushes an -<arch>-suffixed tag; merge-docker assembles these
       # into the multi-arch manifests (:latest, :sha-<sha>, :dev, ...).
-      - name: Build and push prod image (per-arch)
+      # Single published image: the full (default) target, with devx gated off
+      # by default. The prod target is intentionally NOT published.
+      - name: Build and push image (per-arch)
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         uses: docker/build-push-action@v6
         with:
@@ -902,19 +920,9 @@ jobs:
           file: Dockerfile
           platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
-
-      - name: Build and push dev image (per-arch)
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.dev
-          platforms: linux/${{ matrix.arch }}
-          push: true
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
-          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev-sha-${{ github.sha }}-${{ matrix.arch }}
+            DEVX_EXT_VERSION=${{ github.sha }}
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
 
       - name: Build and push studio sidecar image (per-arch)
         # The studio sidecar (referenced by docker-compose.yml) ships as its own
@@ -962,9 +970,11 @@ jobs:
           docker buildx imagetools create \
             -t "${NS}/trexsql:latest" -t "${NS}/trexsql:sha-${SHA}" \
             $(srcs "${NS}/trexsql:sha-${SHA}")
+          # :dev tags are aliases of the same full image (kept for consumers
+          # of the old dev-image tags).
           docker buildx imagetools create \
             -t "${NS}/trexsql:dev" -t "${NS}/trexsql:dev-sha-${SHA}" \
-            $(srcs "${NS}/trexsql:dev-sha-${SHA}")
+            $(srcs "${NS}/trexsql:sha-${SHA}")
           docker buildx imagetools create \
             -t "${NS}/trex-studio:latest" -t "${NS}/trex-studio:sha-${SHA}" \
             $(srcs "${NS}/trex-studio:sha-${SHA}")
