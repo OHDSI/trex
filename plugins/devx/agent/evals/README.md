@@ -395,11 +395,17 @@ from this branch) are follow-up work.
    reset. Skipping this doesn't fail the `tools/files/write`/`edit`,
    `tools/git/git-commit`, or `tools/sql/execute-sql` evals outright, but
    makes each hang for the full 5-minute `approvalTimeoutMs` before failing.
+7. For `quality/` (LLM-as-judge evals, task 12): export `AWS_BEARER_TOKEN_BEDROCK`
+   (and optionally `AWS_REGION`) into the shell that runs `npm run eval` —
+   `evals.config.ts`'s judge model runs in this Node process, not the
+   container, so it needs its own copy of the credential. See "Judge-based
+   quality evals" below.
 
 ## Running
 
     cd plugins/devx/agent/evals
     npm install
+    set -a; . ../../../../.env; set +a   # runner-side Bedrock judge creds (quality/)
     npm run eval                # full suite
     # single eval / family: <filter syntax documented in step 3 below>
 
@@ -577,7 +583,22 @@ Per-call `opts: JudgeOpts` = `{ on?, model?, modelOptions? }` — `on` defaults 
 
 Judge model resolution precedence (confirmed in `judge.js`'s `grade()`): per-call `opts.model` → the eval's own `judge` (`defineEval({ judge: { model } })`) → `evals.config.ts`'s `defineEvalConfig({ judge: { model } })` default. If none is set anywhere, the call throws `"<name> needs a judge model..."` at score time — not at definition time. The judge model is used **only for scoring**, never to drive the agent under test (this is stated explicitly in the type doc comments and structurally true: the judge model is passed straight into the `autoevals` grader call, with no path back into the session driver).
 
-`judge: EveEvalJudgeConfig` (both on `defineEval` and `defineEvalConfig`) = `{ model: LanguageModel, modelOptions?: AgentModelOptionsDefinition }` — `model` is an AI SDK `LanguageModel`; per `judge.js`'s `formatLanguageModelGatewayId`, string model ids appear to route through the Vercel AI Gateway per the type doc comment ("String model ids route through the Vercel AI Gateway; provider model instances run directly") — UNCONFIRMED beyond that doc comment (did not exercise an actual judge call against a real model in this task).
+`judge: EveEvalJudgeConfig` (both on `defineEval` and `defineEvalConfig`) = `{ model: LanguageModel, modelOptions?: AgentModelOptionsDefinition }` — `model` is an AI SDK `LanguageModel`; per `judge.js`'s `formatLanguageModelGatewayId`, string model ids appear to route through the Vercel AI Gateway per the type doc comment ("String model ids route through the Vercel AI Gateway; provider model instances run directly") — the provider-model-instance path (a real `LanguageModel`, not a gateway string) IS now exercised live: see "Judge-based quality evals" below.
+
+**Soft-by-default does NOT gate the exit code — confirmed empirically (task 12).** `closedQA`/etc. record severity `soft` with no threshold by default; `collector.js`'s `computePassed` only defaults a threshold when severity is `gate` (`threshold ?? (severity==='gate' ? 1 : undefined)`), so an un-thresholded soft assertion's `passed` is always `true` regardless of score. Separately, `cli/eval.js` only flips `process.exitCode = 1` for a `scored`-only run (all gates held, a soft assertion missed threshold) when `--strict` is passed — plain `npm run eval` does not. **Net effect: `t.judge.autoevals.closedQA(criteria)` alone never fails a run.** Chain `.gate()` on the returned `AssertionHandle` (`closedQA(criteria).gate()`) to make it a real gate — severity becomes `gate`, default threshold 1, so a "no" verdict (score 0) fails the eval's exit status immediately, no `--strict` needed. Verified live: a deliberately-wrong `closedQA` criteria against `quality/explanation-quality` scored 0 and the run exited 1 (`npm run eval -- quality/explanation-quality; echo $?` → `1`, `Gates: 1 passed, 1 failed`).
+
+### Judge-based quality evals (`quality/` — task 12)
+
+`quality/explanation-quality.eval.ts`, `quality/plan-quality.eval.ts`, `quality/code-change-quality.eval.ts` are the first evals to use `t.judge.autoevals.closedQA(...).gate()`. The plan-stage brief for this task specified `judge: "<rubric string>"` directly on `defineEval` — that shape is REJECTED at load time by `validateEvalInput` (`judge` must be `{ model, modelOptions? }`, a model config; there is no rubric field on `defineEval` at all). The rubric text lives at the `closedQA(criteria)` call site inside `test(t)` instead; `judge` (per-eval or in `evals.config.ts`) only ever configures *which model grades*.
+
+**Judge model wiring.** The judge runs in the Node process executing `npm run eval` (the runner), not inside the trex container — so it needs its own credentials in *this* process's environment, distinct from the container-side agent-under-test's Bedrock setup. The only credential available anywhere in this environment is the Bedrock bearer token (no Anthropic/OpenAI key exists), so `evals/lib/judge-model.ts` replicates `core/server/agents/service/model.ts`'s `bedrockModel()` bearer-token pattern (dummy static credentials bypass SigV4; a custom `fetch` injects `Authorization: Bearer $AWS_BEARER_TOKEN_BEDROCK`) using `@ai-sdk/amazon-bedrock` (added as a direct dependency) and reads the token from `process.env` **lazily, inside the per-request fetch override** — not at module-load time — because `evals.config.ts` (where the resulting model is installed as the default `judge.model`) is loaded unconditionally for every `npm run eval` invocation, including families that never touch `t.judge.*`; throwing eagerly there would break `tools/`, `modes/`, etc. too when the runner shell has no Bedrock token exported. Model id defaults to `us.anthropic.claude-sonnet-4-6` (override with `EVE_JUDGE_MODEL_ID`); region defaults to `us-east-1` (override with `AWS_REGION`), matching the container-side default.
+
+**Runner-shell env requirement.** Before running anything touching `quality/`, export the Bedrock credentials into the shell running `npm run eval` (the repo-root `.env` the container already loads via compose is NOT automatically visible to this process):
+
+    set -a; . ../../../../.env; set +a   # from plugins/devx/agent/evals/
+    npm run eval -- quality
+
+**Fixture isolation.** `quality/plan-quality` and `quality/code-change-quality` both target a dedicated `fixture/src/quality-math.ts` (seeded by `seed.sh`, identical content to `fixture/src/math.ts`), NOT the shared `fixture/src/math.ts` that `quality/explanation-quality` reads. This was discovered empirically, not designed upfront: an initial version had all three evals share `math.ts`; a first run passed 3/3, but a second run without reseeding regressed `quality/explanation-quality` because the prior `code-change-quality` run had already added `subtract()` to the shared file, so "exactly two functions, add and multiply" no longer held. Splitting the file fixed the cross-eval pollution (mirrors the same hazard `tools/files/edit.eval.ts`'s dedicated `FIXTURE_MARKER_EDIT` comment documents). `quality-math.ts` itself is still not idempotent across re-runs without reseeding — same as every other mutating eval in this suite (Write/Edit/GitCommit/ExecuteSQL) — reseed before every run per "Prerequisites".
 
 ### Local helper `.ts` imports from eval files — confirmed supported
 

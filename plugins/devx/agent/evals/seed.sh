@@ -24,6 +24,24 @@ export function multiply(a: number, b: number): number {
 }
 TS
 
+# Dedicated target for the quality/plan-quality and quality/code-change-quality
+# evals (task 12) — kept separate from math.ts so those two evals' subtract()
+# mutation (or a plan-mode agent disobeying "plan only" and editing anyway)
+# never pollutes quality/explanation-quality's "exactly two functions, add and
+# multiply" rubric. Same collision hazard edit.eval.ts's FIXTURE_MARKER_EDIT
+# comment documents for the tools/files family; concurrent eval execution
+# (eve's default maxConcurrency) makes same-file cross-eval mutation visible
+# even within a single run, not just across re-runs.
+cat > "$EVAL_WS/fixture/src/quality-math.ts" <<'TS'
+export function add(a: number, b: number): number {
+  return a + b;
+}
+
+export function multiply(a: number, b: number): number {
+  return a * b;
+}
+TS
+
 cat > "$EVAL_WS/fixture/src/util.ts" <<'TS'
 // FIXTURE_MARKER_ALPHA
 // FIXTURE_MARKER_EDIT

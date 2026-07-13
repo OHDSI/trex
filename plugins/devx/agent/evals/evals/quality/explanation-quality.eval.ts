@@ -1,0 +1,35 @@
+import { defineEval } from "eve/evals";
+
+// LLM-judged (task 12). The plan-stage brief put a `judge:` STRING (a
+// rubric) on defineEval expecting it to gate pass/fail — that is rejected at
+// load time by eve's validateEvalInput (`judge` must be
+// `{ model, modelOptions? }`, a model config, not a rubric string; see
+// define-eval.js's rejectLegacyKey for `model`/`modelOptions`, which is the
+// closest analog eve actually enforces). The real LLM-as-judge grading call
+// happens inside test(t): `t.judge.autoevals.closedQA(criteria)`, scored by
+// the model configured via this eval's own `judge` (absent here) falling
+// back to evals.config.ts's default (a runner-side Bedrock model — see
+// evals/lib/judge-model.ts).
+//
+// `closedQA` records a *soft* assertion by default (see judge.js: severity
+// is fixed to `soft` with no threshold) — verified live (see README) that a
+// soft assertion with no threshold auto-passes regardless of score
+// (collector.js's computePassed: severity soft + threshold undefined + gate
+// only defaults threshold to 1 → an unset soft threshold never fails), and
+// the eve CLI only turns a `scored` verdict into a nonzero exit code under
+// `--strict` (cli/eval.js). Chaining `.gate()` on the returned handle makes
+// the grade a real gate (severity "gate", default threshold 1 — closedQA's
+// score is 0 or 1), so a "no" verdict fails this eval's exit status without
+// needing `--strict`.
+export default defineEval({
+  description: "explains fixture code accurately (LLM-judged)",
+  async test(t) {
+    await t.send("Explain what fixture/src/math.ts does.");
+    t.succeeded();
+    t.judge.autoevals
+      .closedQA(
+        "Pass only if the reply correctly explains that the module exports exactly two functions, add and multiply, states what each computes, and invents no APIs that are not in the file.",
+      )
+      .gate();
+  },
+});
