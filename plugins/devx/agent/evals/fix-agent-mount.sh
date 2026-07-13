@@ -18,11 +18,22 @@
 # by design. The real fixes belong upstream (staging the sibling
 # `functions/` dir + pinning the import map) — see evals/README.md
 # "Known live-stack gaps".
+#
+# A fifth, unrelated gap (found live, plan Task 4): the published dx image
+# bakes a pre-rename plugins-dev/devx tree, so the STAGED agent/
+# instructions.md still reads "You are DevX..." even though this branch's
+# source (plugins/devx/agent/instructions.md) says "You are Code..." — same
+# root cause as the SPA `<title>` gap in evals/README.md's "Rename (DevX ->
+# Code) live verification" section. `smoke/persona.eval.ts` fails against an
+# unpatched mount for this reason, not because the eval is wrong. Patched
+# below by copying this checkout's instructions.md over the staged copy
+# (host file, not a container-internal path — the only one of these five
+# fixes that pulls from the branch rather than from the image).
 set -euo pipefail
 
 COMPOSE="${COMPOSE:-docker compose -f docker-compose.dx.yml}"
 
-$COMPOSE exec -T trex sh -eu <<'EOF'
+staged=$($COMPOSE exec -T trex sh -eu <<'EOF'
 staged=$(ls -d /tmp/trex-agents-* 2>/dev/null | head -1)
 if [ -z "$staged" ]; then
   echo "fix-agent-mount: no /tmp/trex-agents-* staging dir found (is the trex service up?)" >&2
@@ -63,5 +74,15 @@ if grep -q '^import { mcpManager } from "../functions/mcp_manager.ts";' "$dt"; t
   sed -i 's|const mcpTools = await mcpManager.getTools(userId, servers);|const { mcpManager } = await import("../functions/mcp_manager.ts");\n  const mcpTools = await mcpManager.getTools(userId, servers);|' "$dt"
 fi
 
-echo "fix-agent-mount: patched $staged"
+echo "$staged"
 EOF
+)
+
+# 5. Sync agent/instructions.md from THIS checkout (not the image) so the
+#    worker's system prompt matches the branch's DevX -> Code rename
+#    instead of whatever pre-rename text the published image baked in.
+#    Runs on the host, not inside the container shell above, since it reads
+#    a host path.
+$COMPOSE cp plugins/devx/agent/instructions.md "trex:$staged/agent/instructions.md"
+
+echo "fix-agent-mount: patched $staged"

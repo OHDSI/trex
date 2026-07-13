@@ -119,9 +119,18 @@ under `/tmp/trex-agents-*` in the container:
 4. the MCP SDK is not in the image's frozen npm package set → makes
    `dynamic-tools.ts`'s `mcp_manager` import lazy (eval users have no
    `devx.mcp_servers` rows, so it never loads).
+5. (found live, plan Task 4) the published image also bakes a pre-rename
+   `agent/instructions.md` ("You are DevX...") → overwrites the staged copy
+   with this checkout's `plugins/devx/agent/instructions.md` ("You are
+   Code..."), via `docker compose cp` from the host (the only one of these
+   five fixes pulling from the branch rather than the image). Without this,
+   `smoke/persona.eval.ts` fails — not because the eval is wrong, but
+   because the live target's system prompt is stale; see "Rename (DevX →
+   Code) live verification" below for the same root cause elsewhere.
 
 These are container-local, boot-scoped workarounds; the upstream fixes
-(staging the sibling dir + pinning the import map) are follow-up work.
+(staging the sibling dir + pinning the import map + rebuilding the image
+from this branch) are follow-up work.
 
 ## Rename (DevX → Code) live verification
 
@@ -135,6 +144,11 @@ These are container-local, boot-scoped workarounds; the upstream fixes
   stack: the published image bakes a pre-rename `dist/` build. The branch
   source has `<title>Code</title>` (`plugins/devx/index.html`); the title
   check passes only after the image is rebuilt from this branch.
+- The agent's own self-introduction has the identical problem for the
+  identical reason (baked `agent/instructions.md`, not rebuilt from this
+  branch) — worked around live by `fix-agent-mount.sh`'s step 5 above, so
+  `smoke/persona.eval.ts` passes today, but a real image rebuild is still
+  the upstream fix.
 
 ## Prerequisites
 
