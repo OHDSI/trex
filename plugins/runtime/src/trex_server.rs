@@ -1,8 +1,11 @@
 use anyhow::{bail, Result};
-use base::server::{RequestIdleTimeout, ServerFlags, WorkerEntrypoints};
+use base::server::{
+  OtelKind, RequestIdleTimeout, ServerFlags, WorkerEntrypoints,
+};
 use base::worker::pool::{SupervisorPolicy, WorkerPoolPolicy};
 use base::worker::TerminationToken;
 use base::InspectorOption;
+use deno::deno_telemetry::{OtelConfig, OtelConsoleConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -42,6 +45,8 @@ pub struct ServerConfig {
   pub worker_memory_limit_mb: Option<usize>,
   pub decorator: bool,
   pub restrict_host_fs: bool,
+  pub otel: Option<OtelKind>,
+  pub otel_console: Option<OtelConsoleConfig>,
 }
 
 impl std::fmt::Debug for ServerConfig {
@@ -88,6 +93,8 @@ impl std::fmt::Debug for ServerConfig {
       .field("worker_memory_limit_mb", &self.worker_memory_limit_mb)
       .field("decorator", &self.decorator)
       .field("restrict_host_fs", &self.restrict_host_fs)
+      .field("otel", &self.otel)
+      .field("otel_console", &self.otel_console)
       .finish()
   }
 }
@@ -124,6 +131,8 @@ impl Default for ServerConfig {
       worker_memory_limit_mb: None,
       decorator: false,
       restrict_host_fs: false,
+      otel: None,
+      otel_console: None,
     }
   }
 }
@@ -131,8 +140,8 @@ impl Default for ServerConfig {
 impl ServerConfig {
   pub fn to_server_flags(&self) -> ServerFlags {
     ServerFlags {
-      otel: None,
-      otel_console: None,
+      otel: self.otel,
+      otel_console: self.otel_console,
       no_module_cache: self.no_module_cache,
       allow_main_inspector: self.allow_main_inspector,
       tcp_nodelay: self.tcp_nodelay,
@@ -235,6 +244,7 @@ pub fn get_version() -> String {
 }
 
 static LOG_INIT: AtomicBool = AtomicBool::new(false);
+static OTEL_INIT: AtomicBool = AtomicBool::new(false);
 
 struct ServerThreadEntry {
   join_handle: thread::JoinHandle<()>,
@@ -272,6 +282,32 @@ fn init_logging() {
     if debug_gc {
       eprintln!("[TREX-EXT] GC debugging enabled via TREX_DEBUG_GC");
     }
+  }
+}
+
+fn init_telemetry(config: &ServerConfig) {
+  if config.otel.is_none() {
+    return;
+  }
+
+  if OTEL_INIT.swap(true, Ordering::Relaxed) {
+    return;
+  }
+
+  // The process-wide exporter must be initialized with at least one signal
+  // enabled; an all-off config makes `init` a no-op and every downstream
+  // telemetry op silently drops its data. Exporter endpoint/protocol come
+  // from the standard OTEL_EXPORTER_OTLP_* environment variables.
+  if let Err(e) = deno::deno_telemetry::init(
+    &sys_traits::impls::RealSys,
+    deno::versions::otel_runtime_config(),
+    OtelConfig {
+      tracing_enabled: true,
+      console: config.otel_console.unwrap_or_default(),
+      ..Default::default()
+    },
+  ) {
+    eprintln!("[TREX-EXT] Failed to initialize OpenTelemetry exporter: {e}");
   }
 }
 
@@ -348,6 +384,7 @@ impl TrexServerManagerWrapper {
 
   pub fn start_server_sync(&self, config: ServerConfig) -> Result<String> {
     init_logging();
+    init_telemetry(&config);
     self.start_server_persistent(config)
   }
 
@@ -677,6 +714,14 @@ pub struct TrexServerConfig {
   pub decorator: bool,
   #[serde(default)]
   pub restrict_host_fs: bool,
+  /// Enable OpenTelemetry in the main and/or event workers:
+  /// "main", "event" or "both".
+  #[serde(default)]
+  pub enable_otel: Option<String>,
+  /// Console auto-instrumentation for OpenTelemetry logs:
+  /// "ignore", "capture" or "replace".
+  #[serde(default)]
+  pub otel_console: Option<String>,
 }
 
 fn default_host() -> String {
@@ -726,9 +771,41 @@ impl TrexServerConfig {
         .unwrap_or(SupervisorPolicy::PerWorker)
     });
 
+    let otel = match self
+      .enable_otel
+      .as_deref()
+      .map(str::to_ascii_lowercase)
+      .as_deref()
+    {
+      None => None,
+      Some("main") => Some(OtelKind::Main),
+      Some("event") => Some(OtelKind::Event),
+      Some("both") => Some(OtelKind::Both),
+      Some(other) => bail!(
+        "Invalid enable_otel value '{}'. Expected 'main', 'event' or 'both'",
+        other
+      ),
+    };
+
+    let otel_console = match self
+      .otel_console
+      .as_deref()
+      .map(str::to_ascii_lowercase)
+      .as_deref()
+    {
+      None => None,
+      Some("ignore") => Some(OtelConsoleConfig::Ignore),
+      Some("capture") => Some(OtelConsoleConfig::Capture),
+      Some("replace") => Some(OtelConsoleConfig::Replace),
+      Some(other) => bail!(
+        "Invalid otel_console value '{}'. Expected 'ignore', 'capture' or 'replace'",
+        other
+      ),
+    };
+
     let server_flags = ServerFlags {
-      otel: None,
-      otel_console: None,
+      otel,
+      otel_console,
       no_module_cache: self.no_module_cache,
       allow_main_inspector: self.allow_main_inspector,
       tcp_nodelay: self.tcp_nodelay,
@@ -805,6 +882,8 @@ impl TrexServerConfig {
       worker_memory_limit_mb: self.worker_memory_limit_mb,
       decorator: self.decorator,
       restrict_host_fs: self.restrict_host_fs,
+      otel,
+      otel_console,
     })
   }
 }
@@ -838,5 +917,95 @@ mod tests {
       servers.iter().all(|(_, c, _)| c.addr != other),
       "a different addr must not match"
     );
+  }
+
+  // Boots a real server (main worker + V8 isolate) against the startup
+  // snapshot. Guards the trex-feature snapshot contract: base's build.rs must
+  // bake trex_core into the snapshot or worker creation dies with
+  // ExtensionSnapshotMismatch before ever serving a request.
+  #[test]
+  fn server_boots_main_worker_from_snapshot() {
+    use std::io::{Read as _, Write as _};
+
+    let dir = tempfile::tempdir().unwrap();
+    let main = dir.path().join("index.ts");
+    std::fs::write(&main, r#"Deno.serve(() => new Response("snapshot-ok"));"#)
+      .unwrap();
+
+    let addr = "127.0.0.1:18099";
+    let mut config = ServerConfig::default();
+    config.addr = addr.parse().unwrap();
+    config.main_service_path = normalize_path(main.to_str().unwrap());
+
+    let wrapper = TrexServerManagerWrapper::new();
+    let started = wrapper.start_server_sync(config).expect("server must boot");
+    let server_id = started.rsplit(' ').next().unwrap().to_string();
+
+    let mut body = String::new();
+    for _ in 0..300 {
+      if let Ok(mut stream) = std::net::TcpStream::connect(addr) {
+        let _ = stream.write_all(
+          b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        );
+        let mut buf = String::new();
+        if stream.read_to_string(&mut buf).is_ok()
+          && buf.contains("snapshot-ok")
+        {
+          body = buf;
+          break;
+        }
+      }
+      std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+
+    let _ = wrapper.stop_server(&server_id);
+
+    assert!(
+      body.contains("snapshot-ok"),
+      "main worker must serve from the startup snapshot, got: {body}"
+    );
+  }
+
+  #[test]
+  fn otel_config_parses_and_reaches_server_flags() {
+    let config: TrexServerConfig = serde_json::from_str(
+      r#"{"enable_otel":"both","otel_console":"capture"}"#,
+    )
+    .unwrap();
+    let server_config = config.into_server_config().unwrap();
+
+    assert!(matches!(server_config.otel, Some(OtelKind::Both)));
+    assert!(matches!(
+      server_config.otel_console,
+      Some(OtelConsoleConfig::Capture)
+    ));
+
+    let flags = server_config.to_server_flags();
+    assert!(matches!(flags.otel, Some(OtelKind::Both)));
+    assert!(matches!(
+      flags.otel_console,
+      Some(OtelConsoleConfig::Capture)
+    ));
+  }
+
+  #[test]
+  fn otel_config_defaults_to_disabled() {
+    let config: TrexServerConfig = serde_json::from_str("{}").unwrap();
+    let server_config = config.into_server_config().unwrap();
+
+    assert!(server_config.otel.is_none());
+    assert!(server_config.otel_console.is_none());
+    assert!(server_config.to_server_flags().otel.is_none());
+  }
+
+  #[test]
+  fn otel_config_rejects_invalid_values() {
+    let config: TrexServerConfig =
+      serde_json::from_str(r#"{"enable_otel":"everything"}"#).unwrap();
+    assert!(config.into_server_config().is_err());
+
+    let config: TrexServerConfig =
+      serde_json::from_str(r#"{"otel_console":"tee"}"#).unwrap();
+    assert!(config.into_server_config().is_err());
   }
 }

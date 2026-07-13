@@ -424,6 +424,41 @@ Register a service in gossip without starting a server.
 SELECT trex_db_register_service('flight', '0.0.0.0', 8815);
 ```
 
+### `db_orchestrate_swarm(swarm_config_json, node_id)`
+
+Start every service extension configured for one node of a swarm, from an
+inline cluster config. This is the SQL equivalent of what the `trex` binary
+does at boot when it reads `SWARM_CONFIG`: it parses the config, finds
+`node_id`, and orchestrates that node's `extensions` list (flight, pgwire,
+trexas, etc.). Note these two functions are registered without the `trex_`
+prefix.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| swarm_config_json | VARCHAR | Cluster config JSON (`cluster_id`, `nodes` with each node's `gossip_addr` and `extensions`). |
+| node_id | VARCHAR | Which node in the config to orchestrate. |
+
+**Returns:** VARCHAR — newline-joined status of each orchestrated extension, or an error string.
+
+```sql
+SELECT db_orchestrate_swarm(
+  '{"cluster_id":"local","nodes":{"local":{"gossip_addr":"0.0.0.0:4200","extensions":[{"name":"pgwire","config":{"host":"0.0.0.0","port":5432}}]}}}',
+  'local'
+);
+```
+
+### `db_orchestrate_swarm_from_env()`
+
+Same as above, but reads the config from the environment: `SWARM_CONFIG`
+(required) and `SWARM_NODE` (default `local`). Handy for reproducing the
+binary's boot-time orchestration from a SQL session.
+
+**Returns:** VARCHAR — joined extension statuses, or an error if `SWARM_CONFIG` is unset.
+
+```sql
+SELECT db_orchestrate_swarm_from_env();
+```
+
 ## Arrow Flight SQL
 
 ### `trex_db_flight_start(host, port)`

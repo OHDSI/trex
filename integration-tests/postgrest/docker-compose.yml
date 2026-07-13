@@ -1,0 +1,59 @@
+# Differential conformance stack for the PostgREST-replacement plugin.
+#
+#   db      postgres 16 + postgis (schema.sql needs the postgis, file_fdw,
+#           ltree, isn and pgcrypto extensions), loaded with the verbatim
+#           PostgREST v12.2.3 spec fixtures via initdb/zz-load-fixtures.sh.
+#   oracle  the real postgrest/postgrest:v12.2.3, configured to mirror
+#           test/spec/SpecHelper.hs baseCfg key by key (see comments).
+#
+# The plugin side is NOT a container: it is a thin Deno server on the host
+# (serve_plugin.ts, started by `make serve`) pointing at the same db, so both
+# sides share one database. db-tx-end=rollback-allow-override keeps the data
+# pristine; entries carrying `Prefer: tx=commit` are skipped by the runner.
+
+services:
+  db:
+    # postgres:16 + postgis; plain postgres:16 cannot load schema.sql
+    # ("create extension if not exists postgis with schema extensions").
+    image: postgis/postgis:16-3.4
+    container_name: pgrst-diff-db
+    ports:
+      - "15433:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+      # Upstream loads fixtures over a trust-auth unix socket; mirror that for
+      # the TCP connections of the oracle and the plugin.
+      POSTGRES_HOST_AUTH_METHOD: trust
+      # Upstream withTools.nix: initdb --no-locale --encoding=UTF8, PGTZ=utc.
+      POSTGRES_INITDB_ARGS: "--no-locale --encoding=UTF8"
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - ./fixtures:/fixtures:ro
+      # Mounted as a single file so the postgis image's own
+      # 10_postgis.sh initdb script keeps running first.
+      - ./initdb/zz-load-fixtures.sh:/docker-entrypoint-initdb.d/zz-load-fixtures.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres && psql -U postgres -d postgres -tAc \"select 1 from pg_roles where rolname='postgrest_test_authenticator'\" | grep -q 1"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  oracle:
+    image: postgrest/postgrest:v12.2.3
+    container_name: pgrst-diff-oracle
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "13000:3000"
+    # The PGRST_* env is generated per config bucket by bucket_config.py
+    # (SpecHelper.hs baseCfg + the testCfg* overrides, key by key). `make up`
+    # writes the DEFAULT bucket; `run_diff.py --orchestrate` rewrites the file
+    # and force-recreates this service for every variant bucket.
+    env_file:
+      - path: report/oracle.env
+        # tolerate a missing file so `docker compose down` works after clean
+        required: false

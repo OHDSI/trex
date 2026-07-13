@@ -1,7 +1,7 @@
 import type { Express, Request, Response } from "express";
 import { Plugins } from "../plugin/plugin.ts";
 import { getPluginsJson } from "../plugin/ui.ts";
-import { scanPluginDirectory } from "../plugin/utils.ts";
+import { scanPluginDirectory, splitPathList } from "../plugin/utils.ts";
 import { authContext } from "../middleware/auth-context.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
@@ -28,21 +28,28 @@ export async function scanDiskPlugins(): Promise<
     { name: string; version: string; source: "dev" | "npm" }
   >();
 
-  // Dev plugins first — first entry wins
-  for (const { shortName, pkg } of await scanPluginDirectory(devPath)) {
-    diskPlugins.set(shortName, {
-      name: shortName,
-      version: pkg.version,
-      source: "dev",
-    });
+  // Dev plugins first — first entry wins (matches initPlugins priority).
+  // Both env vars may be colon-separated PATH-style lists.
+  for (const dir of splitPathList(devPath)) {
+    for (const { shortName, pkg } of await scanPluginDirectory(dir)) {
+      if (!diskPlugins.has(shortName)) {
+        diskPlugins.set(shortName, {
+          name: shortName,
+          version: pkg.version,
+          source: "dev",
+        });
+      }
+    }
   }
-  for (const { shortName, pkg } of await scanPluginDirectory(pluginsPath)) {
-    if (!diskPlugins.has(shortName)) {
-      diskPlugins.set(shortName, {
-        name: shortName,
-        version: pkg.version,
-        source: "npm",
-      });
+  for (const dir of splitPathList(pluginsPath)) {
+    for (const { shortName, pkg } of await scanPluginDirectory(dir)) {
+      if (!diskPlugins.has(shortName)) {
+        diskPlugins.set(shortName, {
+          name: shortName,
+          version: pkg.version,
+          source: "npm",
+        });
+      }
     }
   }
 

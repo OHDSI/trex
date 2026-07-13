@@ -7,8 +7,8 @@ sidebar_position: 5
 This tutorial connects an AI agent (Claude Desktop, Cursor, or any MCP
 client) to a Trex deployment and walks through a real workflow: schema
 introspection, query exploration, plugin install, and cluster operations —
-all driven by the agent picking from Trex's management tool catalog (50
-tools across 12 categories).
+all driven by the agent picking from Trex's management tool catalog (67
+tools across 15 categories).
 
 The point: when ops surfaces are exposed as typed tools instead of buried
 in a UI, an agent can do the same work a junior engineer would do
@@ -19,7 +19,7 @@ plugin, restart node-2") in one conversation.
 flowchart LR
     Agent["Claude / Cursor /<br/>any MCP client"]
     Agent -->|JSON-RPC over HTTP/SSE| MCP["Trex MCP server<br/>/trex/mcp"]
-    MCP -->|50 tools / 12 categories| Surface["Trex surface"]
+    MCP -->|67 tools / 15 categories| Surface["Trex surface"]
     Surface --> Catalog["Engine catalog"]
     Surface --> Plugins["Plugin loader"]
     Surface --> Cluster["Cluster ops (db ext)"]
@@ -78,7 +78,7 @@ curl -X POST http://localhost:8001/trex/mcp \
   }'
 ```
 
-You'll get back the management tool catalog — 50 tools across 12
+You'll get back the management tool catalog — 67 tools across 15
 categories. That's the agent's vocabulary.
 
 ## 2. Wire up Claude Desktop (2 min)
@@ -241,7 +241,7 @@ this would do, then ask before applying"* steer the agent toward
 `trex_transform_plan`, `EXPLAIN`, and similar inspection paths before
 mutating anything.
 
-**Watch token costs.** The management tool catalog (50 tools across 12
+**Watch token costs.** The management tool catalog (67 tools across 15
 categories) plus their schemas adds up. For
 agents on metered token costs, consider scoping the MCP surface — Trex
 doesn't currently support per-key tool whitelists, but you can run a

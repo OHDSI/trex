@@ -4,7 +4,6 @@ export const LABELS = {
   betterAuthSession: "trex.better-auth.session.v1",
   jwtHs256: "trex.jwt.hs256.v1",
   pgmetaAes: "trex.pgmeta.aes.v1",
-  realtimeInternal: "trex.realtime.internal.v1",
   dekWrap: "trex.dek.wrap.v1",
   devxTokenAes: "trex.devx.token.aes.v1",
   // HMAC key for the agents OAuth broker's signed `state` (anti-CSRF/replay on

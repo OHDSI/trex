@@ -17,6 +17,9 @@ import { registerRoleTools } from "./tools/roles.ts";
 import { registerSsoTools } from "./tools/sso.ts";
 import { registerAppTools } from "./tools/apps.ts";
 import { registerApiKeyTools } from "./tools/api-keys.ts";
+import { registerTransformTools } from "./tools/transforms.ts";
+import { registerObservabilityTools } from "./tools/observability.ts";
+import { registerIntrospectionTools } from "./tools/introspection.ts";
 import { registerPluginResources } from "./resources/plugins.ts";
 
 interface SessionEntry {
@@ -57,6 +60,9 @@ function createMcpServer(): McpServer {
   registerSsoTools(server);
   registerAppTools(server);
   registerApiKeyTools(server);
+  registerTransformTools(server);
+  registerObservabilityTools(server);
+  registerIntrospectionTools(server);
 
   registerPluginResources(server);
 
