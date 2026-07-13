@@ -34,14 +34,20 @@ TS
 
 echo "The fixture codeword is PLUM." > "$EVAL_WS/fixture/notes/greeting.txt"
 
-cd "$EVAL_WS/fixture"
+# The GitLog/GitDiff/GitCommit tools (plugins/devx/functions/tools/git.ts)
+# always operate on ctx.workspacePath itself (no path/cwd parameter to scope
+# into a subdirectory) — so the seeded git repo MUST live at the workspace
+# root ($EVAL_WS), not inside the fixture/ subdirectory, or the git-family
+# evals see an empty, repo-less directory (verified live, plan Task 6:
+# GitLog replied "No commits yet." when the repo was nested under fixture/).
+cd "$EVAL_WS"
 rm -rf .git
 git init -q
-git -c user.email=eval@example.com -c user.name=eval add src/
+git -c user.email=eval@example.com -c user.name=eval add fixture/src/
 git -c user.email=eval@example.com -c user.name=eval commit -qm "fixture: initial eval fixture"
-git -c user.email=eval@example.com -c user.name=eval add notes/
+git -c user.email=eval@example.com -c user.name=eval add fixture/notes/
 git -c user.email=eval@example.com -c user.name=eval commit -qm "fixture: add greeting note"
 # Leave one uncommitted change for the GitDiff eval:
-echo "Pending line for git-diff eval." >> notes/greeting.txt
+echo "Pending line for git-diff eval." >> fixture/notes/greeting.txt
 EOF
-echo "seeded: $EVAL_WS/fixture"
+echo "seeded: $EVAL_WS (git repo at workspace root, fixture/ files inside)"

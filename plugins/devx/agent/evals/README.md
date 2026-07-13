@@ -112,12 +112,27 @@ PGPASSWORD=mypass psql -h localhost -p 65443 -U postgres -d testdb -c "
 INSERT INTO agents.tool_consents (user_id, plugin, agent, tool, consent)
 VALUES
   ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Write', 'always'),
-  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Edit', 'always')
+  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Edit', 'always'),
+  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'GitCommit', 'always'),
+  ('6e6a3b1c-0000-4000-8000-0de70e0a1001', '@trex/devx', 'devx-agent', 'Bash', 'always')
 ON CONFLICT (user_id, plugin, agent, tool) DO UPDATE SET consent = EXCLUDED.consent;
 "
 ```
 
-(`plugin`/`agent` values confirmed from a live `agents.sessions` row for this eval user — `@trex/devx` / `devx-agent`.) With the row present, `store.getToolConsent` short-circuits the approval flow entirely and the tool executes immediately, same as the read-only tools. Any future eval that exercises another `needsApproval` tool (e.g. a git-mutating tool) needs its own row here — check `defaultConsent`/`modifiesState` on the tool definition in `plugins/devx/functions/tools/` if a new eval hangs for ~5 minutes before failing.
+(`plugin`/`agent` values confirmed from a live `agents.sessions` row for this eval user — `@trex/devx` / `devx-agent`.) With the row present, `store.getToolConsent` short-circuits the approval flow entirely and the tool executes immediately, same as the read-only tools. Any future eval that exercises another `needsApproval` tool needs its own row here — check `defaultConsent`/`modifiesState` on the tool definition in `plugins/devx/functions/tools/` if a new eval hangs for ~5 minutes before failing.
+
+The `GitCommit` and `Bash` rows above were added for the `tools/git/` family
+(plan Task 6): of `plugins/devx/functions/tools/git.ts`'s tools, `GitLog`,
+`GitDiff`, `GitStatus`, and `GitBranchList` are `defaultConsent: "always"`
+(no approval needed), but `GitCommit` (and `GitInit`/`GitBranchCreate`/
+`GitBranchSwitch`/`GitRevert`, unused by the current evals) is
+`defaultConsent: "ask"` and needs a sticky row exactly like Write/Edit.
+`Bash` (`plugins/devx/functions/tools/bash.ts`) is also `defaultConsent:
+"ask"`; its row is defensive — the model will reach for `Bash` to run raw
+`git` commands (its description explicitly advertises "git operations, ...")
+when a task's phrasing implies precision the coarse `GitCommit` tool can't
+give (see the `git-commit` note below), and an unconsented `Bash` call hangs
+the same 5 minutes as any other unconsented mutating tool.
 
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
@@ -188,11 +203,12 @@ from this branch) are follow-up work.
 4. `export EVE_EVAL_AUTH_TOKEN="$(plugins/devx/agent/evals/mint-eval-token.sh)"` — see auth notes.
 5. Fixture seeding: `plugins/devx/agent/evals/seed.sh` (from the repo root) — resets the fixture
    workspace. Run it before every full suite run.
-6. Sticky tool consent for mutating tools (Write/Edit): the `agents.tool_consents`
-   insert in "Mutating-tool HITL approval" above — a one-time row per `testdb`,
-   only needed again if the Postgres volume is reset. Skipping this doesn't fail
-   the `tools/files/write`/`edit` evals outright, but makes each hang for the
-   full 5-minute `approvalTimeoutMs` before failing.
+6. Sticky tool consent for mutating tools (Write/Edit/GitCommit): the
+   `agents.tool_consents` insert in "Mutating-tool HITL approval" above — a
+   one-time row per `testdb`, only needed again if the Postgres volume is
+   reset. Skipping this doesn't fail the `tools/files/write`/`edit` or
+   `tools/git/git-commit` evals outright, but makes each hang for the full
+   5-minute `approvalTimeoutMs` before failing.
 
 ## Running
 
@@ -208,8 +224,42 @@ plus per-eval `*.events.ndjson`. trex does not collect results.
 
 - `tools/web/web-fetch.eval.ts` depends on external network — exclude it
   when running offline.
-- The `tools/git/` family is order-sensitive within itself; always re-run
-  `plugins/devx/agent/evals/seed.sh` between full runs.
+- The `tools/git/` family (plan Task 6) has two live gotchas, both worked
+  around at the eval-prompt level rather than by relying on run order:
+  - **Fixture location**: `GitLog`/`GitDiff`/`GitCommit`
+    (`plugins/devx/functions/tools/git.ts`) always operate on
+    `ctx.workspacePath` directly — there is no path/cwd parameter to scope
+    into a subdirectory. `seed.sh` therefore `git init`s at the workspace
+    root (`$EVAL_WS`), with the `fixture/` tree as ordinary tracked content
+    inside that repo — NOT a separately-initialized repo nested under
+    `fixture/`, which the git tools would never see.
+  - **`GitCommit` always stages everything**: `trex_devx_git_commit`
+    (`plugins/devx-ext/src/git.rs`) runs `git add -A` unconditionally before
+    committing — there is no way, via that tool, to commit only one file.
+    Eve's discovered eval order for a directory filter is NOT the CLI's
+    positional argument order (verified: `npm run eval -- tools/git/git-log
+    tools/git/git-diff tools/git/git-commit --max-concurrency 1` still ran
+    `git-commit` first) — it appears to be alphabetical by eval id
+    (`git-commit` < `git-diff` < `git-log`), so within a single
+    `tools/git` run `git-commit` reliably executes before `git-diff`/
+    `git-log` and its `add -A` silently absorbs whatever uncommitted state
+    those two evals expect to find. The fix here is that `git-diff.eval.ts`
+    creates its own uncommitted change (via `Write`) in the same turn
+    instead of relying on `seed.sh`'s pre-seeded pending line surviving
+    until it runs, and `git-log.eval.ts` asks for "the commit message that
+    mentions the greeting note" rather than "the most recent commit
+    message" (which `git-commit`'s new commit would otherwise have become).
+    With both evals order-independent, `npm run eval -- tools/git` passes
+    3/3 regardless of scheduling — verified across three separate re-seeded
+    runs. Still re-run `seed.sh` before every run regardless, since
+    `git-commit` mutates the shared repo every time it runs.
+  - A related trap: telling the model to commit "ONLY" one file (implying
+    `GitCommit` supports partial staging) pushes it toward the `Bash` tool
+    instead (`git add <file> && git commit`) to honor that literal
+    constraint — which both breaks the `calledTool("GitCommit")` assertion
+    and hangs for 5 minutes if `Bash` has no sticky consent row (see above).
+    The `git-commit` prompt now just says to use the `GitCommit` tool (and
+    not a shell command) without claiming exclusivity.
 
 ## Harness API
 
