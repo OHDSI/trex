@@ -70,6 +70,13 @@ export interface DispatchOpts {
    * was replaced by dispatchToolCall.
    */
   auth?: AuthInfo;
+  /**
+   * Multi-tenant: the Postgres schema (memory_<name>) this request targets.
+   * Set by the HTTP transport from the /memory/<name>/mcp path. When present,
+   * dispatch runs the op through engine.withSchema so all DB work uses
+   * search_path = <schema>, pg_catalog.
+   */
+  schema?: string;
 }
 
 /**
@@ -210,6 +217,7 @@ export function buildOperationContext(
     // this fallback covers code paths that historically passed undefined.
     sourceId: opts.sourceId ?? 'default',
     auth: opts.auth,
+    schema: opts.schema,
   };
 }
 

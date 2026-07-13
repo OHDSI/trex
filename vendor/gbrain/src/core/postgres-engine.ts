@@ -911,6 +911,23 @@ export class PostgresEngine implements BrainEngine {
     }) as Promise<T>;
   }
 
+  /**
+   * Multi-tenant router: run fn against a connection pinned to `schema` via
+   * SET LOCAL search_path. Uses the same scoped-engine clone trick as
+   * transaction() so every op that reads this.sql sees the schema-bound tx.
+   */
+  async withSchema<T>(schema: string, fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    if (!isValidSchemaIdent(schema)) throw new Error(`invalid schema ident: ${schema}`);
+    const conn = this.sql;
+    return conn.begin(async (tx) => {
+      await tx.unsafe(`SET LOCAL search_path = ${schema}, pg_catalog`);
+      const scoped = Object.create(this) as PostgresEngine;
+      Object.defineProperty(scoped, 'sql', { get: () => tx });
+      Object.defineProperty(scoped, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
+      return fn(scoped);
+    }) as Promise<T>;
+  }
+
   async withReservedConnection<T>(fn: (conn: ReservedConnection) => Promise<T>): Promise<T> {
     const pool = this.sql;
     const reserved = await pool.reserve();

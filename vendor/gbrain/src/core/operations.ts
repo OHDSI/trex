@@ -391,6 +391,14 @@ export interface OperationContext {
    * satisfied even on single-source brains.
    */
   sourceId: string;
+  /**
+   * Multi-tenant: the Postgres schema (memory_<name>) this request targets.
+   * Set by the HTTP transport from the /memory/<name>/mcp path. When
+   * present, dispatch runs the op through `engine.withSchema` so all DB
+   * work uses `search_path = <schema>, pg_catalog`. Undefined for
+   * single-tenant / non-memory-plugin callers (pre-existing behavior).
+   */
+  schema?: string;
 }
 
 /**
