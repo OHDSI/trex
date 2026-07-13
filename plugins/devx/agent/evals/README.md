@@ -368,8 +368,17 @@ plus per-eval `*.events.ndjson`. trex does not collect results.
 
 ## Known-flaky
 
-- `tools/web/web-fetch.eval.ts` depends on external network — exclude it
-  when running offline.
+- `tools/web/web-fetch.eval.ts` depends on external network (fetches
+  `https://example.com` live) — exclude it when running offline; a
+  DNS/connect failure from inside the `trex` container is the expected
+  offline failure mode, not a wrong assertion. Verified live, plan Task 9,
+  2026-07-13: the dx-stack container has outbound network access (`docker
+  compose -f docker-compose.dx.yml exec trex curl -s -o /dev/null -w '%{http_code}'
+  https://example.com` → `200`), and the eval passes (3/3 gates) with the
+  `WebFetch` tool's `action.result` output showing genuine fetched content
+  (`"Example Domain ... This domain is for use in documentation examples
+  without needing permission."`), not the model fabricating a plausible
+  reply.
 - The `tools/git/` family (plan Task 6) has two live gotchas, both worked
   around at the eval-prompt level rather than by relying on run order:
   - **Fixture location**: `GitLog`/`GitDiff`/`GitCommit`
