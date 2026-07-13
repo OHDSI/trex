@@ -1,9 +1,23 @@
 -- GBrain Postgres + pgvector schema
 
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pg_trgm;
+-- Multi-tenant (memory schemas, v0.42.x+): these extensions are NOT
+-- relocatable per-schema — each lives in exactly one schema cluster-wide.
+-- `SCHEMA public` pins that location explicitly regardless of the current
+-- connection's search_path (a bare `CREATE EXTENSION IF NOT EXISTS vector`
+-- installs into whatever schema is FIRST on search_path at the time — for
+-- `initSchema(schema)` that's the tenant schema, not `public`, since the
+-- tenant schema is listed first so unqualified CREATE TABLE lands there).
+-- Left unpinned, the FIRST tenant schema ever provisioned silently claims
+-- the extension, and every subsequently-provisioned tenant schema then
+-- fails `CREATE TABLE ... vector(1536)` / `CREATE INDEX ... gin_trgm_ops`
+-- with "does not exist" because the type/opclass lives in a schema outside
+-- its search_path. `IF NOT EXISTS` still makes this a no-op (cluster-wide,
+-- regardless of the SCHEMA given) on any brain where these already exist
+-- from an older, unpinned install.
+CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public;
 -- gen_random_uuid() is core in Postgres 13+; enable pgcrypto as fallback for older versions
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
 
 -- ============================================================
 -- sources: multi-repo / multi-brain tenancy (v0.18.0)

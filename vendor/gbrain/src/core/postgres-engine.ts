@@ -324,10 +324,35 @@ export class PostgresEngine implements BrainEngine {
 
     // Multi-tenant: create the target schema and pin this DDL connection to
     // it so unqualified CREATE TABLE / triggers land in <schema>, not public.
+    //
+    // `public` is appended LAST (lowest priority, after the tenant schema)
+    // purely so extension-provided types (`vector`, from `CREATE EXTENSION
+    // vector`) resolve — pgvector is NOT relocatable-per-schema, so it lives
+    // in exactly one schema cluster-wide (conventionally `public`, wherever
+    // it was first installed) and every tenant schema needs it resolvable
+    // via search_path for `vector(1536)` columns and `::vector` casts to
+    // parse at all. This was found the hard way: with `public` excluded
+    // entirely, `CREATE EXTENSION IF NOT EXISTS vector` only actually
+    // installs the type into the FIRST schema ever created this way (since
+    // `IF NOT EXISTS` is a cluster-wide no-op after that) — every
+    // subsequently-provisioned tenant schema then fails `CREATE TABLE
+    // ... vector(1536)` with `type "vector" does not exist`. `public` stays
+    // LOWEST priority (schema listed first, `public` before `pg_catalog`),
+    // so unqualified table names (`pages`, `timeline_entries`, …) still
+    // resolve to the tenant schema's own copy first — `public` is a
+    // fallback for extension types/functions only, never a way to shadow a
+    // tenant's own tables that already exist (which they do once this
+    // CREATE SCHEMA + SCHEMA_SQL replay below completes). This does NOT
+    // touch the narrower per-function `SET search_path` pin
+    // (`__MEMORY_SEARCH_PATH__`, `pg_catalog, <schema>`, no `public`) that
+    // Patch #1 (Tasks 2-3) gives `bump_page_generation_clock_fn` and
+    // `update_page_search_vector` — those two remain the strict guarantee
+    // that the leaky triggers never fall through to `public`, independent
+    // of this connection's ambient search_path.
     if (schema) {
       if (!isValidSchemaIdent(schema)) throw new Error(`invalid schema ident: ${schema}`);
       await conn.unsafe(`CREATE SCHEMA IF NOT EXISTS ${schema}`);
-      await conn.unsafe(`SET search_path = ${schema}, pg_catalog`);
+      await conn.unsafe(`SET search_path = ${schema}, public, pg_catalog`);
     }
 
     // Advisory lock prevents concurrent initSchema() calls from deadlocking
@@ -957,7 +982,24 @@ export class PostgresEngine implements BrainEngine {
 
   async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
     const conn = this.sql;
-    return conn.begin(async (tx) => {
+    // Multi-tenant (v0.42.x+): `withSchema` pins its `SET LOCAL search_path`
+    // by opening its OWN `conn.begin(...)` transaction and handing op
+    // handlers a scoped engine whose `this.sql` is that transaction's tx
+    // object. postgres.js does NOT expose `.begin` on a tx-scoped `sql` —
+    // nested transactions use `.savepoint()` instead (it does expose
+    // `.savepoint`, attached by postgres.js's own `begin()`). Without this,
+    // any handler that opens its own `ctx.engine.transaction(...)` — e.g.
+    // put_page's `importFromContent` — throws `this.sql.begin is not a
+    // function` the moment it's dispatched through `withSchema`. Detect and
+    // fall back to `.savepoint()` so this method works both at the
+    // top-level (pool connection, real `begin`) and nested inside another
+    // transaction/withSchema scope (savepoint, same fn signature).
+    const connAny = conn as unknown as {
+      begin?: (fn: (tx: postgres.Sql) => unknown) => Promise<unknown>;
+      savepoint?: (fn: (tx: postgres.Sql) => unknown) => Promise<unknown>;
+    };
+    const beginLike = typeof connAny.begin === 'function' ? connAny.begin.bind(conn) : connAny.savepoint!.bind(conn);
+    return beginLike(async (tx) => {
       // Create a scoped engine with tx as its connection, no shared state mutation
       const txEngine = Object.create(this) as PostgresEngine;
       Object.defineProperty(txEngine, 'sql', { get: () => tx });
@@ -970,12 +1012,21 @@ export class PostgresEngine implements BrainEngine {
    * Multi-tenant router: run fn against a connection pinned to `schema` via
    * SET LOCAL search_path. Uses the same scoped-engine clone trick as
    * transaction() so every op that reads this.sql sees the schema-bound tx.
+   *
+   * `public` is appended LAST (lowest priority) for the same reason as
+   * initSchema's DDL search_path above: pgvector's `vector` type lives in
+   * exactly one schema cluster-wide (conventionally `public`), and ordinary
+   * application queries (e.g. put_page's chunk INSERT casting an embedding
+   * literal to `$N::vector`, hybridSearch's `embedding <=> $N::vector`) need
+   * it resolvable. `schema` stays first so unqualified `pages` /
+   * `timeline_entries` / etc. reads and writes still resolve to the
+   * tenant's own tables, never silently falling through to `public`'s.
    */
   async withSchema<T>(schema: string, fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
     if (!isValidSchemaIdent(schema)) throw new Error(`invalid schema ident: ${schema}`);
     const conn = this.sql;
     return conn.begin(async (tx) => {
-      await tx.unsafe(`SET LOCAL search_path = ${schema}, pg_catalog`);
+      await tx.unsafe(`SET LOCAL search_path = ${schema}, public, pg_catalog`);
       const scoped = Object.create(this) as PostgresEngine;
       Object.defineProperty(scoped, 'sql', { get: () => tx });
       Object.defineProperty(scoped, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
@@ -5294,9 +5345,17 @@ export class PostgresEngine implements BrainEngine {
   }
 
   async setPageAliases(slug: string, sourceId: string, aliasNorms: string[]): Promise<void> {
-    const sql = this.sql;
     const uniq = Array.from(new Set(aliasNorms.filter(a => a.length > 0)));
-    await sql.begin(async tx => {
+    // Routed through `this.transaction()` (not a raw `this.sql.begin(...)`)
+    // so this composes when called from inside a `withSchema`-scoped engine
+    // — `this.sql` there is already a tx, and postgres.js doesn't expose
+    // `.begin` on a tx-scoped sql (see `transaction()`'s comment). A direct
+    // `sql.begin` call here previously threw `sql.begin is not a function`
+    // (surfaced as a caught, non-fatal "page_aliases projection failed"
+    // warning from import-file.ts's caller) every time put_page ran inside
+    // a memory schema.
+    await this.transaction(async (txEngine) => {
+      const tx = (txEngine as PostgresEngine).sql;
       await tx`DELETE FROM page_aliases WHERE source_id = ${sourceId} AND slug = ${slug}`;
       if (uniq.length === 0) return;
       await tx`
