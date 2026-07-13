@@ -319,6 +319,55 @@ existed (from the `tools/files` family) and is reachable only from
 actually offered to the model); `DatabaseSchema` needs none regardless of
 mode.
 
+### Error-handling evals (`errors/` — task 13)
+
+Verified live, plan Task 13, 2026-07-13. `read-missing-file.eval.ts` and
+`sql-error.eval.ts` check that a failed tool call is surfaced honestly in
+the reply rather than hallucinated around, using the real judge API (see
+"Judge-based quality evals" above) — the plan-stage brief again put a
+`judge:` rubric string directly on `defineEval`; both files instead call
+`t.judge.autoevals.closedQA(criteria).gate()` inside `test(t)`, same shape
+as `quality/*.eval.ts`.
+
+`sql-error.eval.ts` needs `ctx.chatId` for `ExecuteSQL` exactly like
+`tools/sql/execute-sql.eval.ts` (same `t.target.fetch()` +
+`t.target.attachSession()` workaround, reusing seed.sh's fixture
+`EVAL_CHAT_ID`/`devx_app_eval` schema) — otherwise the tool would fail
+before ever reaching Postgres (`ctx.chatId` resolving to `""`), which would
+make the eval pass for the wrong reason. `t.succeeded()`/`session.succeeded()`
+holds in **both** files: a tool call erroring does not fail the turn on
+this stack — the agent catches the error and replies describing it, and
+the turn/session itself completes normally.
+
+**Live-stack gotcha found here, not anticipated by the brief**:
+`t.calledTool(name)` defaults to matching only `status: "completed"`
+(`match.js`'s `toolCallMatches`: `e.status !== (t.status ?? "completed")`).
+Inspecting the raw event ndjson for a passing vs. a failing tool call shows
+why the default (and even an explicit `status: "failed"`) never matches an
+erroring call here: a successful call emits an `action.result` event with
+`status: "completed"`, but a call that errors (missing file / missing
+table) emits **no `action.result` event at all** — the agent folds the
+error straight into its text reply without ever completing the action on
+the event stream. `eve`'s `derive-run-facts.js` seeds every tool call's
+derived status as `"pending"` from the `actions.requested` event and only
+updates it when a matching `action.result` arrives, so an
+error-without-`action.result` call is permanently stuck at `"pending"` from
+the harness's point of view — not `"failed"`. Both evals assert
+`t.calledTool(name, { status: "pending" })` accordingly. Verified live:
+`{ status: "failed" }` fails with the identical "expected a matching call"
+message as no `status` option at all; `{ status: "pending" }` passes.
+
+Verified the judge gate is real, not a soft no-op: temporarily inverting
+`read-missing-file`'s criteria to demand a fabricated "file was read
+successfully" reply scored 0 and failed the gate
+(`npm run eval -- errors/read-missing-file` → `Gates: 2 passed, 1 failed`,
+`✗ judge.autoevals.closedQA`); reverting back to the honest-error criteria
+passes 3/3 again.
+
+No new sticky consent rows needed: `Read` is `defaultConsent: "always"`
+(read-only); `ExecuteSQL`'s row already exists from the `tools/sql` family
+(task 7).
+
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
 The published dx image cannot serve the devx-agent mount as-is — run
