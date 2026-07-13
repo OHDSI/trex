@@ -180,6 +180,13 @@ services:
       # encrypt/decrypt is disabled and GitHub connect / private-repo clone fail
       # (public clone still works — the token lookup is best-effort).
       DEVX_ENCRYPTION_KEY: ${DEVX_ENCRYPTION_KEY:-}
+      # Anthropic key for the devx agent (eve mount): agent workers receive it
+      # via core's PASSTHROUGH_ENV (core/server/plugin/agents.ts) and the
+      # default model resolution (anthropic/claude-sonnet-4) falls back to it
+      # when the calling user has no devx.settings/provider_configs row.
+      # Supplied via ./.env; required for agent turns and the eval suite
+      # (plugins/devx/agent/evals/README.md).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins

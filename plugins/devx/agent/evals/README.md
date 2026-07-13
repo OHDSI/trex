@@ -3,14 +3,109 @@
 Eve-convention eval suite (`core/server/agents/README.md` §Evals). One eval
 per `*.eval.ts` file; the file path is the eval id.
 
+## Verified facts (live dx stack, plan Task 3, 2026-07-13)
+
+- **Target URL**: `http://localhost:9001/plugins/trex/devx-agent` (port 9001
+  confirmed; `/eve/v1/health` 200, `/eve/v1/info` returns
+  `"kind":"eve-agent-info"` — but only with auth, see below).
+- **Auth is required on the mount** (`pluginAuthz` 401s anonymous requests),
+  and the devx agent additionally **rejects anonymous turns** (`agent.ts`
+  `resolveModel` throws "devx agent requires an authenticated user"), so the
+  plan's "anonymous → workspace base dir" assumption does NOT hold here.
+  Two working auth paths, verified live:
+  - raw curl probes: `apikey: <auth.serviceRoleKey>` header (admin bypass;
+    key: `docker exec trex-dx-postgres-1 psql -U postgres -d testdb -tAc
+    "SELECT value #>> '{}' FROM trexdb.setting WHERE key='auth.serviceRoleKey'"`).
+    Note service_role CANNOT be sent as a Bearer token — auth-context.ts
+    rejects it on that channel by design. Sessions created this way are
+    anonymous and their turns always fail (see above); use them only for
+    health/info probing.
+  - eve runner + real turns: a minted user JWT via `EVE_EVAL_AUTH_TOKEN`
+    (the only auth mechanism eve's eval client supports):
+    `export EVE_EVAL_AUTH_TOKEN="$(./mint-eval-token.sh)"`.
+    The sub MUST be a uuid (`agents.sessions.created_by` and the devx
+    tables are uuid-typed; a non-uuid sub fails the turn with
+    "invalid input syntax for type uuid").
+- **Eval user id**: `6e6a3b1c-0000-4000-8000-0de70e0a1001` (fixed sub baked
+  into `mint-eval-token.sh`).
+- **Workspace path**: `/tmp/devx-workspaces/<userId>` →
+  `/tmp/devx-workspaces/6e6a3b1c-0000-4000-8000-0de70e0a1001` for the eval
+  user. Derivation: `plugins/devx/functions/tools/workspace.ts` uses
+  `DEVX_WORKSPACE_DIR || "/tmp/devx-workspaces"` and `DEVX_WORKSPACE_DIR` is
+  unset in the dx stack (container env verified); the compose file mounts
+  the `devx-workspaces` volume at `/tmp/devx-workspaces`. The brief's
+  WHEREAMI empirical probe needs a live LLM turn — re-run it once an API
+  key is present to double-confirm: ask the agent to `Write` a file named
+  `WHEREAMI.txt`, then
+  `docker compose -f docker-compose.dx.yml exec trex find /tmp/devx-workspaces -name WHEREAMI.txt`.
+- **Model resolution** (verified up to the provider call): with no
+  `devx.settings`/`devx.provider_configs` row the agent falls back to
+  anthropic/claude-sonnet-4-20250514 and the worker env's
+  `ANTHROPIC_API_KEY`. A raw turn walks the full chain (session insert,
+  agent load, settings lookup, model spec assembly) and fails with exactly
+  `AI_LoadAPIKeyError: Anthropic API key is missing` when no key is set —
+  the ONLY missing piece on this machine was a real key (none exists in the
+  repo/host scope; the ~/.claude OAuth token is not an API key).
+- **API key setup**: put `ANTHROPIC_API_KEY=sk-ant-...` in `./.env` at the
+  repo root (compose auto-loads it; the compose file passes it through to
+  the trex service and core's agent-worker PASSTHROUGH_ENV forwards it into
+  the agent worker), then `docker compose -f docker-compose.dx.yml up -d trex`
+  and re-run `./fix-agent-mount.sh` (see below). Per-user alternative: seed
+  a `devx.settings` row (`user_id` = the eval user uuid) with
+  `provider='anthropic'`, `model`, `api_key` via
+  `psql -h localhost -p 65443 -U postgres testdb` — matches the query at
+  `plugins/devx/agent/agent.ts:72`.
+
+## Known live-stack gaps (`fix-agent-mount.sh`)
+
+The published dx image cannot serve the devx-agent mount as-is — run
+`./fix-agent-mount.sh` (from the repo root) after EVERY trex container
+(re)start, BEFORE the first request to the mount (the worker boots lazily
+and bakes its import map at creation). It patches the staged worker copy
+under `/tmp/trex-agents-*` in the container:
+
+1. core's agent staging (`core/server/plugin/agents.ts`) copies only the
+   `agent/` dir, but the devx agent imports `../functions/**` → stages the
+   plugin's `functions/` dir alongside;
+2. the worker cannot fetch remote modules → maps the
+   `deno.land/std@0.224.0/path` import to `node:path`;
+3. `@ai-sdk/anthropic@latest` resolves to 4.x whose model spec the runtime's
+   `ai@6.0.224` rejects ("Unsupported model version v4") → pins 3.0.96;
+4. the MCP SDK is not in the image's frozen npm package set → makes
+   `dynamic-tools.ts`'s `mcp_manager` import lazy (eval users have no
+   `devx.mcp_servers` rows, so it never loads).
+
+These are container-local, boot-scoped workarounds; the upstream fixes
+(staging the sibling dir + pinning the import map) are follow-up work.
+
+## Rename (DevX → Code) live verification
+
+- `docker compose -f docker-compose.dx.yml exec trex printenv
+  TREX_WEB_NAV_EXTRA | grep -c '"label":"Code"'` → `1` (verified).
+- `curl -s http://localhost:9001/trex/api/web-config` returns
+  `{"navExtra":[{"path":"/devx","label":"Code",...}]}` — this endpoint is
+  what the web shell renders the top-nav from, so the user-visible nav says
+  "Code" (verified).
+- The SPA `<title>` at `/plugins/trex/devx/` still shows `DevX` on the live
+  stack: the published image bakes a pre-rename `dist/` build. The branch
+  source has `<title>Code</title>` (`plugins/devx/index.html`); the title
+  check passes only after the image is rebuilt from this branch.
+
 ## Prerequisites
 
 1. A running dx stack: `docker compose -f docker-compose.dx.yml up -d`
-   (from the repo root). The trex container needs `ANTHROPIC_API_KEY` set
-   (default model resolution falls back to env when no `devx.settings`
-   row exists for the calling user).
-2. Fixture seeding: `./seed.sh` (see below) — resets the fixture workspace.
-   Run it before every full suite run.
+   (from the repo root). First boot on a fresh checkout: `./secrets` is
+   created root-owned by Docker while trex-init runs as uid 1000 — if
+   trex-init exits 1 with `PermissionDenied ... /shared/root.env`, chown the
+   dir (`docker run --rm -v "$PWD/secrets:/shared" alpine chown 1000:1000 /shared`)
+   and `up -d` again; the trex container must then be recreated once more
+   (`up -d --force-recreate trex`) because compose evaluated the (then
+   missing) `secrets/*.env` env_file before trex-init wrote them.
+2. `./fix-agent-mount.sh` (from the repo root) — see "Known live-stack gaps".
+3. The trex container needs `ANTHROPIC_API_KEY` set — see "API key setup".
+4. `export EVE_EVAL_AUTH_TOKEN="$(./mint-eval-token.sh)"` — see auth notes.
+5. Fixture seeding: `./seed.sh` (from the repo root) — resets the fixture
+   workspace. Run it before every full suite run.
 
 ## Running
 
