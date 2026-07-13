@@ -228,6 +228,57 @@ from the public `session.events` list instead, mirroring eve's own
 internal `extractCompletedMessage` (`client/session-utils.js`): the last
 `message.completed` event whose `finishReason !== "tool-calls"`.
 
+### Task/Cron-tool fixture (`tools/tasks/` — TaskCreate/TaskList/CronList)
+
+Verified live, plan Task 8, 2026-07-13. Two live-stack gaps here, one a real
+product bug and one the same structural harness gap already documented above
+for `ExecuteSQL`:
+
+- **Missing tables (real bug, not an eval/fixture problem)**: `TaskCreate`/
+  `TaskGet`/`TaskList`/`TaskUpdate`/`TaskStop`
+  (`plugins/devx/functions/tools/task_tools.ts`) query `devx.agent_todos`,
+  and `CronCreate`/`CronDelete`/`CronList` (`plugins/devx/functions/tools/cron.ts`)
+  query `devx.scheduled_tasks` — neither table was ever created by any
+  migration (`plugins/devx/migrations/V1__initial_schema.sql` only has
+  `devx.todos`, a different table with a different column set, used by
+  `update_todos.ts`). Confirmed live: `psql \dt devx.*` showed no
+  `agent_todos`/`scheduled_tasks` relation before this task. `TaskCreate`/
+  `TaskList` have no `try`/`catch` around their `ctx.sql(...)` calls, so this
+  fails the turn outright ("relation ... does not exist"); `CronList` happens
+  to catch the error and return a string, which is why it alone would have
+  silently "passed" against the broken schema (always reporting zero cron
+  jobs) — not a real pass. Fixed with a new forward migration,
+  `plugins/devx/migrations/V12__task_cron_tables.sql` (per this project's
+  "never edit applied migrations" rule — V1-V11 are untouched), creating both
+  tables (`agent_todos`: `id`/`chat_id` FK → `devx.chats`/`content`/`status`/
+  timestamps; `scheduled_tasks`: `id`/`chat_id` FK/`user_id`/`schedule`/
+  `prompt`/`name`/`created_at`), applied to the live dx-stack Postgres via
+  `psql -f` (this dev stack has no migration-tracking table — `CREATE TABLE
+  IF NOT EXISTS` is applied directly, idempotently, same as `seed.sh`'s
+  fixture SQL).
+- **`ctx.chatId` gap (same root cause as `ExecuteSQL` above)**: `TaskCreate`/
+  `TaskList` scope every row by `ctx.chatId`, which a plain `t.send()` turn
+  always resolves to `""` (no `metadata` field on `SendTurnPayload`) —
+  inserting/selecting on an empty-string UUID column fails
+  ("invalid input syntax for type uuid"). `task-create.eval.ts` uses the
+  identical `t.target.fetch("/eve/v1/session", ...)` +
+  `t.target.attachSession()` workaround as `execute-sql.eval.ts`, reusing the
+  same fixture `EVAL_CHAT_ID` (`6e6a3b1c-0000-4000-8000-00000000c001`,
+  already seeded by `seed.sh` for the `tools/sql` fixture and owned by the
+  eval user) so both the `TaskCreate` and `TaskList` tool calls inside the
+  one turn see a matching, ownership-verified `chatId`. `CronList` needed no
+  such workaround — it scopes only by `ctx.userId` (the authenticated caller,
+  never client-supplied metadata), so `cron-list.eval.ts` uses a plain
+  `t.send()` like the rest of the suite.
+- **No new sticky consent rows**: `TaskCreate`, `TaskList`, and `CronList`
+  are all `defaultConsent: "always"` in their tool definitions
+  (`task_tools.ts`/`cron.ts`), which `plugins/devx/agent/lib/context.ts`'s
+  `wrap()` maps to `needsApproval: false` — none of the three requires an
+  `agents.tool_consents` row. (`CronCreate`/`CronDelete` are
+  `defaultConsent: "ask"` but are not exercised by either eval in this
+  family; a future eval touching them would need rows added here, same
+  pattern as `GitCommit`/`ExecuteSQL` above.)
+
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
 The published dx image cannot serve the devx-agent mount as-is — run
