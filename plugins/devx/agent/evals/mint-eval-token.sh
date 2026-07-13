@@ -18,7 +18,7 @@
 #   export EVE_EVAL_AUTH_TOKEN="$(./mint-eval-token.sh)"
 set -euo pipefail
 
-# Repo root = three levels up from this script's dir (plugins/devx/agent/evals).
+# Repo root = four levels up from this script's dir (plugins/devx/agent/evals).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 SECRETS="${SECRETS:-$ROOT/secrets/root.env}"
 EVAL_USER_ID="${EVAL_USER_ID:-6e6a3b1c-0000-4000-8000-0de70e0a1001}"

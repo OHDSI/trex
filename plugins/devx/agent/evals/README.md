@@ -22,7 +22,7 @@ per `*.eval.ts` file; the file path is the eval id.
     health/info probing.
   - eve runner + real turns: a minted user JWT via `EVE_EVAL_AUTH_TOKEN`
     (the only auth mechanism eve's eval client supports):
-    `export EVE_EVAL_AUTH_TOKEN="$(./mint-eval-token.sh)"`.
+    `export EVE_EVAL_AUTH_TOKEN="$(plugins/devx/agent/evals/mint-eval-token.sh)"`.
     The sub MUST be a uuid (`agents.sessions.created_by` and the devx
     tables are uuid-typed; a non-uuid sub fails the turn with
     "invalid input syntax for type uuid").
@@ -50,7 +50,7 @@ per `*.eval.ts` file; the file path is the eval id.
   repo root (compose auto-loads it; the compose file passes it through to
   the trex service and core's agent-worker PASSTHROUGH_ENV forwards it into
   the agent worker), then `docker compose -f docker-compose.dx.yml up -d trex`
-  and re-run `./fix-agent-mount.sh` (see below). Per-user alternative: seed
+  and re-run `plugins/devx/agent/evals/fix-agent-mount.sh` (see below). Per-user alternative: seed
   a `devx.settings` row (`user_id` = the eval user uuid) with
   `provider='anthropic'`, `model`, `api_key` via
   `psql -h localhost -p 65443 -U postgres testdb` — matches the query at
@@ -59,7 +59,7 @@ per `*.eval.ts` file; the file path is the eval id.
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
 The published dx image cannot serve the devx-agent mount as-is — run
-`./fix-agent-mount.sh` (from the repo root) after EVERY trex container
+`plugins/devx/agent/evals/fix-agent-mount.sh` (from the repo root) after EVERY trex container
 (re)start, BEFORE the first request to the mount (the worker boots lazily
 and bakes its import map at creation). It patches the staged worker copy
 under `/tmp/trex-agents-*` in the container:
@@ -101,10 +101,10 @@ These are container-local, boot-scoped workarounds; the upstream fixes
    and `up -d` again; the trex container must then be recreated once more
    (`up -d --force-recreate trex`) because compose evaluated the (then
    missing) `secrets/*.env` env_file before trex-init wrote them.
-2. `./fix-agent-mount.sh` (from the repo root) — see "Known live-stack gaps".
+2. `plugins/devx/agent/evals/fix-agent-mount.sh` (from the repo root) — see "Known live-stack gaps".
 3. The trex container needs `ANTHROPIC_API_KEY` set — see "API key setup".
-4. `export EVE_EVAL_AUTH_TOKEN="$(./mint-eval-token.sh)"` — see auth notes.
-5. Fixture seeding: `./seed.sh` (from the repo root) — resets the fixture
+4. `export EVE_EVAL_AUTH_TOKEN="$(plugins/devx/agent/evals/mint-eval-token.sh)"` — see auth notes.
+5. Fixture seeding: `plugins/devx/agent/evals/seed.sh` (from the repo root) — resets the fixture
    workspace. Run it before every full suite run.
 
 ## Running
@@ -122,7 +122,7 @@ plus per-eval `*.events.ndjson`. trex does not collect results.
 - `tools/web/web-fetch.eval.ts` depends on external network — exclude it
   when running offline.
 - The `tools/git/` family is order-sensitive within itself; always re-run
-  `./seed.sh` between full runs.
+  `plugins/devx/agent/evals/seed.sh` between full runs.
 
 ## Harness API
 
