@@ -187,6 +187,13 @@ services:
       # Supplied via ./.env; required for agent turns and the eval suite
       # (plugins/devx/agent/evals/README.md).
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Bedrock bearer-auth alternative to ANTHROPIC_API_KEY: model.ts's
+      # bedrockModel() falls back to this env var (dummy static creds, bearer
+      # token auth) when the resolved ModelSpec has no apiKey. Also supplied
+      # via ./.env; requires a devx.settings row with provider 'bedrock' to
+      # be selected (see plugins/devx/agent/evals/README.md).
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins

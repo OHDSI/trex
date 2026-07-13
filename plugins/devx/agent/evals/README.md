@@ -43,18 +43,63 @@ per `*.eval.ts` file; the file path is the eval id.
   anthropic/claude-sonnet-4-20250514 and the worker env's
   `ANTHROPIC_API_KEY`. A raw turn walks the full chain (session insert,
   agent load, settings lookup, model spec assembly) and fails with exactly
-  `AI_LoadAPIKeyError: Anthropic API key is missing` when no key is set —
-  the ONLY missing piece on this machine was a real key (none exists in the
-  repo/host scope; the ~/.claude OAuth token is not an API key).
-- **API key setup**: put `ANTHROPIC_API_KEY=sk-ant-...` in `./.env` at the
-  repo root (compose auto-loads it; the compose file passes it through to
-  the trex service and core's agent-worker PASSTHROUGH_ENV forwards it into
-  the agent worker), then `docker compose -f docker-compose.dx.yml up -d trex`
-  and re-run `plugins/devx/agent/evals/fix-agent-mount.sh` (see below). Per-user alternative: seed
-  a `devx.settings` row (`user_id` = the eval user uuid) with
-  `provider='anthropic'`, `model`, `api_key` via
-  `psql -h localhost -p 65443 -U postgres testdb` — matches the query at
-  `plugins/devx/agent/agent.ts:72`.
+  `AI_LoadAPIKeyError: Anthropic API key is missing` when no key is set.
+
+### Model auth setup — Bedrock bearer token (recommended, live-verified)
+
+The eval target now routes through AWS Bedrock using an existing bearer
+token instead of a per-project Anthropic API key. Verified live end-to-end
+(session created → `message.appended`/`message.completed` with reply
+`"PONG."` → `turn.completed` → `session.waiting`) on 2026-07-13.
+
+1. Put `AWS_BEARER_TOKEN_BEDROCK=<token>` (and optionally `AWS_REGION`, default
+   `us-east-1`) in `./.env` at the repo root (compose auto-loads it; the
+   compose file passes both through to the trex service, and core's
+   agent-worker `PASSTHROUGH_ENV` — `core/server/plugin/agents.ts` — forwards
+   them into the agent worker). Core's `bedrockModel()`
+   (`core/server/agents/service/model.ts`) falls back to this env var
+   (bearer auth, dummy static credentials) whenever the resolved `ModelSpec`
+   has no `apiKey`.
+2. Recreate the trex service so it picks up the new env vars:
+   `docker compose -f docker-compose.dx.yml up -d trex`, wait for healthy,
+   then re-run `plugins/devx/agent/evals/fix-agent-mount.sh` (see "Known
+   live-stack gaps" below — worker import map is creation-time).
+3. Point the eval user at Bedrock: the devx agent's `resolveModel` hook
+   (`plugins/devx/agent/agent.ts:53-72`) checks `devx.provider_configs`
+   first, then falls back to the legacy `devx.settings` row — a
+   `provider_configs` row, if one exists, takes precedence and must be
+   absent/inactive for this to take effect. Insert (or update) the
+   `devx.settings` row for the eval user with `api_key` left `NULL` so the
+   agent's bedrock branch drops to the env fallback above instead of trying
+   to unpack a JSON credential blob from the column:
+
+   ```bash
+   PGPASSWORD=mypass psql -h localhost -p 65443 -U postgres -d testdb -c "
+   INSERT INTO devx.settings (user_id, provider, model, api_key, base_url)
+   VALUES ('6e6a3b1c-0000-4000-8000-0de70e0a1001', 'bedrock', 'us.anthropic.claude-sonnet-4-6', NULL, NULL)
+   ON CONFLICT (user_id) DO UPDATE
+     SET provider = EXCLUDED.provider,
+         model = EXCLUDED.model,
+         api_key = EXCLUDED.api_key,
+         base_url = EXCLUDED.base_url,
+         updated_at = now();
+   "
+   ```
+
+   (`devx.settings.user_id` has a unique constraint, so this is idempotent —
+   safe to re-run after every reseed.)
+
+### Model auth setup — Anthropic API key (alternative)
+
+Put `ANTHROPIC_API_KEY=sk-ant-...` in `./.env` at the repo root (compose
+auto-loads it; the compose file passes it through to the trex service and
+core's agent-worker `PASSTHROUGH_ENV` forwards it into the agent worker),
+then `docker compose -f docker-compose.dx.yml up -d trex` and re-run
+`plugins/devx/agent/evals/fix-agent-mount.sh` (see below). Per-user
+alternative: seed a `devx.settings` row (`user_id` = the eval user uuid)
+with `provider='anthropic'`, `model`, `api_key` via
+`psql -h localhost -p 65443 -U postgres testdb` — matches the query at
+`plugins/devx/agent/agent.ts:72`.
 
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
@@ -101,8 +146,13 @@ These are container-local, boot-scoped workarounds; the upstream fixes
    and `up -d` again; the trex container must then be recreated once more
    (`up -d --force-recreate trex`) because compose evaluated the (then
    missing) `secrets/*.env` env_file before trex-init wrote them.
-2. `plugins/devx/agent/evals/fix-agent-mount.sh` (from the repo root) — see "Known live-stack gaps".
-3. The trex container needs `ANTHROPIC_API_KEY` set — see "API key setup".
+2. The trex container needs model auth configured — either the Bedrock
+   bearer token or the Anthropic API key — see "Model auth setup" above.
+   Both recipes end with `docker compose -f docker-compose.dx.yml up -d trex`
+   (recreates the container), so do this before step 3.
+3. `plugins/devx/agent/evals/fix-agent-mount.sh` (from the repo root) — see
+   "Known live-stack gaps". Must run AFTER any trex container (re)start,
+   including the recreate in step 2.
 4. `export EVE_EVAL_AUTH_TOKEN="$(plugins/devx/agent/evals/mint-eval-token.sh)"` — see auth notes.
 5. Fixture seeding: `plugins/devx/agent/evals/seed.sh` (from the repo root) — resets the fixture
    workspace. Run it before every full suite run.
