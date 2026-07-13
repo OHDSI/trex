@@ -209,6 +209,28 @@ Deno.test("manifest: buildAgentWorkerConfig succeeds for the devx-agent trex.age
   assert(String(generated.imports["eve/tools"]).endsWith("eve-shim/tools.ts"));
 });
 
+Deno.test("buildAgentWorkerConfig excludes the authoring-only evals/ dir from the staged agent tree", async () => {
+  // plugins/devx/agent/evals/ is eve's own local dev/test harness (its own
+  // node_modules pulls in @ai-sdk/amazon-bedrock, eve, etc., ~100MB) — it
+  // must never be copied into a worker's servicePath. Use the real
+  // devx-agent dir (which actually has an evals/ subdir on disk) rather than
+  // the toy-agent testdata fixture, so this proves the exclusion against the
+  // real tree, not a synthetic one.
+  const devxPlugin = new URL("../../../plugins/devx", import.meta.url).pathname;
+  const cfg = await buildAgentWorkerConfig(devxPlugin, { name: "devx-agent", dir: "agent" }, "@trex/devx");
+  let evalsStaged = true;
+  try {
+    await Deno.stat(`${cfg.servicePath}/agent/evals`);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) evalsStaged = false;
+    else throw e;
+  }
+  assert(!evalsStaged, "staged agent dir must not contain an evals/ entry");
+  // Sanity: real agent files the worker actually needs are still staged.
+  const st = await Deno.stat(`${cfg.servicePath}/agent/instructions.md`);
+  assert(st.isFile);
+});
+
 Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async () => {
   const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
 

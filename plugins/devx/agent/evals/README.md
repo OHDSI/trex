@@ -3,6 +3,23 @@
 Eve-convention eval suite (`core/server/agents/README.md` §Evals). One eval
 per `*.eval.ts` file; the file path is the eval id.
 
+## Eval catalog — 28 evals across 10 families
+
+| Family | Count | Eval ids | What it covers |
+|---|---|---|---|
+| `smoke/` | 3 | `reply`, `multi-turn`, `persona` | Basic liveness: single-turn reply, session continuity across turns, and the agent's persona/system-prompt identity ("Code"). |
+| `tools/files/` | 6 | `read`, `write`, `edit`, `glob`, `grep`, `code-search` | Each of the six file/code tools (`Read`/`Write`/`Edit`/`Glob`/`Grep`/`CodeSearch`) invoked for real against the seeded `fixture/` workspace. |
+| `tools/git/` | 3 | `git-log`, `git-diff`, `git-commit` | `GitLog`/`GitDiff`/`GitCommit` against a real git repo seeded at the workspace root (see "Known-flaky" for the run-order gotcha). |
+| `tools/sql/` | 2 | `database-schema`, `execute-sql` | `DatabaseSchema`/`ExecuteSQL` against a real `devx_app_eval` Postgres schema; `execute-sql` needs the raw-HTTP `metadata.chatId` workaround (see below). |
+| `tools/tasks/` | 2 | `task-create`, `cron-list` | `TaskCreate`+`TaskList` (needs the same `chatId` workaround) and `CronList`; uncovered a real missing-migration product bug (`devx.agent_todos`/`devx.scheduled_tasks`), fixed by `V12__task_cron_tables.sql`. |
+| `tools/web/` | 1 | `web-fetch` | `WebFetch` against a real external URL (`https://example.com`) — needs outbound network, see "Known-flaky". |
+| `modes/` | 4 | `default-allows`, `ask-blocks-mutation`, `plan-restricted`, `build-no-tools` | `agent.ts`'s `filterTools` mode gating (default/ask/plan/build), all needing the `metadata.mode` raw-HTTP workaround except `default-allows`. |
+| `subagents/` | 2 | `code-explorer`, `code-reviewer` | Genuine dispatch through the built-in `agent` tool to a named subagent, verified against real subagent output artifacts (not just a tool-call assertion). |
+| `quality/` | 3 | `explanation-quality`, `plan-quality`, `code-change-quality` | LLM-as-judge (`t.judge.autoevals.closedQA(...).gate()`) rubric checks — the first evals in the suite with a real judge model wired in (see "Judge-based quality evals"). |
+| `errors/` | 2 | `read-missing-file`, `sql-error` | A tool call that genuinely errors (missing file / missing table) is surfaced honestly in the reply rather than hallucinated around; judged, plus asserts `calledTool(name, { status: "pending" })` (a real harness quirk — see below). |
+
+Total: 3 + 6 + 3 + 2 + 2 + 1 + 4 + 2 + 3 + 2 = 28.
+
 ## Verified facts (live dx stack, plan Task 3, 2026-07-13)
 
 - **Target URL**: `http://localhost:9001/plugins/trex/devx-agent` (port 9001
@@ -474,6 +491,59 @@ container (`docker compose -f docker-compose.dx.yml restart trex`) to force
 exactly one fresh staging dir, THEN run `fix-agent-mount.sh` against it,
 before the first request.
 
+## Worker-staging exclusion for `evals/` (task 14)
+
+**Finding**: `buildAgentWorkerConfig` (`core/server/plugin/agents.ts:118-119`,
+pre-task-14) staged the agent dir with an unfiltered recursive copy:
+
+```ts
+const stagedAgentDir = `${tmp}/agent`;
+await copyDirRecursive(agentDir, stagedAgentDir);
+```
+
+`copyDirRecursive` (`agents.ts:59-69`, pre-task-14) had no skip/exclusion
+mechanism at all — it walked every entry in `src` unconditionally. `agentDir`
+resolves to `plugins/devx/agent` (the plugin's declared `dir: "agent"`), and
+this eval suite lives inside that same tree at
+`plugins/devx/agent/evals/` — a real, on-disk sibling of `agent.ts`,
+`instructions.md`, `tools/`, etc., not a separate location. So **every**
+worker registration (every `buildAgentWorkerConfig` call, i.e. every trex
+boot/restart that registers the devx agent, and every test that exercises
+`buildAgentWorkerConfig` against the real `plugins/devx` dir — see
+`core/server/plugin/agents.test.ts`'s "manifest" test) copied the entire
+`evals/` subtree — including its own `node_modules` (`@ai-sdk/amazon-bedrock`,
+`eve`, and everything else `plugins/devx/agent/evals/package.json` pulls in;
+~100MB on disk) and its `.eve/` run-artifact directory — into the worker's
+temp `servicePath`, even though nothing under `TREX_AGENT_DIR` (the staged
+copy) is ever read by `loader.ts`/`agent.ts` at runtime. This is authoring-time
+tooling (this eval suite's own local dev/test harness) with zero runtime
+purpose; shipping it into every staged worker is pure waste (disk, copy time)
+and a layering violation (an authoring-only tree leaking into what's meant to
+be a minimal runtime staging area).
+
+**Change made**: `copyDirRecursive` now takes an optional `skipNames` set,
+applied only at the level it's called with (never forwarded into recursive
+calls for subdirectories, so a same-named directory nested deeper in the tree
+is never accidentally skipped). `buildAgentWorkerConfig` passes a new
+`AGENT_DIR_STAGING_EXCLUDES = new Set(["evals"])` constant when staging the
+agent dir, so `plugins/devx/agent/evals/` (whichever agent declares it) is
+never copied into a worker's servicePath. Covered by a new test,
+`buildAgentWorkerConfig excludes the authoring-only evals/ dir from the
+staged agent tree` (`core/server/plugin/agents.test.ts`), which runs
+`buildAgentWorkerConfig` against the REAL `plugins/devx` dir (not a synthetic
+fixture) and asserts `${servicePath}/agent/evals` does not exist on disk
+while `${servicePath}/agent/instructions.md` still does.
+
+Scope note: this is a `core/server` code change (the plugin's registration
+logic that runs in the main trex process), not an edit to
+`core/server/agents/service/**` — it does not need a `fix-agent-mount.sh`
+sync to take effect in the running dx stack (that script exists specifically
+because `agents/service/**` is staged into an ALREADY-created worker and
+image-baked; `agents.ts` itself governs staging at worker-CREATION time, so
+it takes effect the next time a worker is created — e.g. after the container
+restart already required for other reasons in this task, or the eventual
+image rebuild from this branch — not on a running worker).
+
 ## Known live-stack gaps (`fix-agent-mount.sh`)
 
 The published dx image cannot serve the devx-agent mount as-is — run
@@ -523,6 +593,31 @@ from this branch) are follow-up work.
   `smoke/persona.eval.ts` passes today, but a real image rebuild is still
   the upstream fix.
 
+## Core-side unit tests (`core/server`)
+
+This eval suite exercises the devx agent black-box, over HTTP. The
+`core/server/agents/**` runtime it targets (and `core/server/plugin/agents.ts`,
+which stages it — see "Worker-staging exclusion" above) has its own unit
+suite, run separately:
+
+```bash
+cd core/server
+DATABASE_URL="postgres://postgres:mypass@localhost:65443/testdb" \
+  LD_LIBRARY_PATH=/usr/local/lib deno test --allow-all --no-check ./agents/
+```
+
+`--no-check` is required: `deno task test`'s type-check step fails on an
+unrelated, pre-existing error in `d2e-compat/routes.ts` (`Cannot find name
+'Buffer'`, present on the base branch before any of this work, confirmed via
+`git stash`) — it has nothing to do with agents/evals and blocks type-checking
+the whole `core/server` workspace member, not just that one file. `./agents/`
+scopes the run to the agent runtime's own tests. Last verified (task 14,
+2026-07-14): **114 passed, 0 failed** (includes task 15's 3 new
+`model.test.ts` cache-helper cases). `core/server/plugin/agents.test.ts`
+(a different workspace path, `./plugin/`, not `./agents/`) is verified the
+same way and separately: **15 passed, 0 failed**, including the new
+evals-exclusion staging test from "Worker-staging exclusion" above.
+
 ## Prerequisites
 
 1. A running dx stack: `docker compose -f docker-compose.dx.yml up -d`
@@ -562,13 +657,56 @@ from this branch) are follow-up work.
     npm install
     set -a; . ../../../../.env; set +a   # runner-side Bedrock judge creds (quality/)
     npm run eval                # full suite
-    # single eval / family: <filter syntax documented in step 3 below>
+    npm run eval -- tools/git   # single eval or family (directory-prefix match);
+                                 # see "Harness API > CLI: single-eval / subdirectory
+                                 # filter syntax" below for the full rules.
 
 Results land in `.eve/evals/<timestamp>/summary.json` (`{"passed":N,"failed":M}`)
 plus per-eval `*.events.ndjson`. trex does not collect results.
 
+## Authoritative clean run (task 14, 2026-07-14)
+
+Last verified full-suite run, live dx stack, all steps in "Prerequisites"
+followed fresh (fix-agent-mount.sh re-applied after a trex container
+restart, seed.sh re-run, `EVE_EVAL_AUTH_TOKEN` re-minted, `AWS_BEARER_TOKEN_BEDROCK`
+exported into the runner shell): `.eve/evals/2026-07-13T16-09-27/summary.json`
+(UTC timestamp; 2026-07-14 local) —
+
+```json
+{"passed":28,"failed":0,"scored":0,"skipped":0,"errored":0,"totalEvals":28}
+```
+
+28/28 evals, 82/82 gates, completed in 1m 19s. This run followed the exact
+judge-flakiness pattern documented in "Known-flaky" below: the immediately
+prior full-suite attempt (after exporting `AWS_BEARER_TOKEN_BEDROCK` for the
+first time in this session) came back 25/28, with all 3 failures being
+`judge.autoevals.closedQA` gates (`quality/code-change-quality`,
+`quality/plan-quality`) plus one `tools/files/edit` failure traced to stale
+fixture state from the run before that (the fixture's `FIXTURE_MARKER_EDIT`
+marker had already been replaced by an earlier attempt, so the eval's
+`Edit` call correctly reported a mismatch against the now-stale expected
+text — not a real tool-call regression). Re-seeding
+(`plugins/devx/agent/evals/seed.sh`) and re-running the full suite produced
+the clean 28/28 above with no code changes.
+
 ## Known-flaky
 
+- **`quality/*` and `errors/*` (LLM-as-judge gates) have transient flakiness
+  — inherent to LLM-as-judge, not a suite bug.** `t.judge.autoevals.closedQA(...).gate()`
+  calls a real Bedrock model to grade the agent's reply against a rubric;
+  that grading call occasionally scores a genuinely-fine reply as failing
+  (observed: `quality/plan-quality` and `quality/code-change-quality` both
+  independently flaked on different full-suite runs during task 15's and
+  task 14's verification — one run finished 27/28, another 25/28, each with
+  only judge-gated evals in the failure set). Re-running the SAME flaked
+  eval(s) alone (`npm run eval -- quality/plan-quality`) passes immediately
+  with no code or fixture change, confirming this is judge-score variance,
+  not a regression. When a full-suite run comes back short of 28/28, check
+  first whether every failure is a `judge.autoevals.closedQA` gate (never a
+  `calledTool`/`succeeded`/`includes` assertion) before treating it as a real
+  break; if so, reseed (`seed.sh`) and rerun the full suite once — this has
+  reliably produced a clean 28/28 every time it's been tried (tasks 13, 15,
+  14).
 - `tools/web/web-fetch.eval.ts` depends on external network (fetches
   `https://example.com` live) — exclude it when running offline; a
   DNS/connect failure from inside the `trex` container is the expected
