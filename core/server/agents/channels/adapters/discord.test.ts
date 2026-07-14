@@ -335,6 +335,34 @@ Deno.test("DEFERRED_UPDATE ACK still returned when args.resume reports {ok:false
   assertEquals(resumes.length, 1); // attempted, soft-failed, never threw
 });
 
+// ---- conversationId override -----------------------------------------------
+
+Deno.test("conversationId override replaces interaction.id in the continuation token", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex },
+    conversationId: (interaction) => `stable:${interaction.channelId}`,
+  });
+  const { args, sends } = mockArgs();
+  const body = JSON.stringify(COMMAND_PAYLOAD);
+  await channel.routes[0].handler(await signedRequest(keypair.privateKey, body), args);
+
+  assertEquals(sends.length, 1);
+  // Uses the override's return value, not interaction.id.
+  assertEquals(sends[0].opts.continuationToken, "chan-1:stable:chan-1");
+});
+
+Deno.test("without conversationId, continuation token still defaults to interaction.id", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = discordChannel({ credentials: { publicKey: publicKeyHex } });
+  const { args, sends } = mockArgs();
+  const body = JSON.stringify(COMMAND_PAYLOAD);
+  await channel.routes[0].handler(await signedRequest(keypair.privateKey, body), args);
+
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "chan-1:interaction-1");
+});
+
 Deno.test("onCommand returning explicit { auth: null } sends with null auth", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
   const channel = discordChannel({
