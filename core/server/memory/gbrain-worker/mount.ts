@@ -30,6 +30,24 @@ import {
 import { scopeUrlPrefix } from "../../plugin/utils.ts";
 import { PLUGINS_BASE_PATH } from "../../config.ts";
 import type { MemoryEntry } from "../../plugin/memory.ts";
+import { materializeSource } from "../importer.ts";
+
+// H4: one manifest entry per (memory, source) staged into the worker's
+// `sources/` dir — see `stageMemorySources` below. Structurally identical to
+// (but NOT shared with) self-import.ts's own `StagedManifestEntry`: that
+// file runs worker-side and can only resolve bare specifiers through the
+// staged import map (`gbrain/...`), so even a type-only cross-import from
+// this core-side module would force `deno check`/the module graph here to
+// resolve self-import.ts's `gbrain/mcp/dispatch.ts` import against core's
+// OWN (gbrain-less) deno.json. Duplicating this one small shape at the
+// staging boundary is simpler than threading an import-map exception
+// through for a type alias.
+interface StagedManifestEntry {
+  memory: string;
+  source: string;
+  version: string;
+  slugs: string[];
+}
 
 // There is no single owning plugin for the memory worker: `trex.memory`
 // declarations are aggregated across EVERY installed plugin (see
@@ -100,6 +118,77 @@ export interface MemoryWorkerConfig {
   env: Record<string, string>;
 }
 
+// H4 Part A: core pre-stages each memory's source markdown into the
+// worker's OWN servicePath at mount time (core has git; the worker doesn't
+// — see self-import.ts's header comment). Writes:
+//   `${servicePath}/sources/<memory>/<source>/<slug>.md` — one file per
+//     materialized page.
+//   `${servicePath}/sources/manifest.json` — the flat list of
+//     `{memory, source, version, slugs}` self-import.ts reads at boot to
+//     know what to import and which version to skip-check against.
+//
+// Resilient by design, mirroring Task 12's `provisionAndImport` per-source
+// try/catch: a source that fails to materialize (bad git ref, unreadable
+// plugin dir, etc.) is logged and OMITTED from the manifest — the mount
+// still succeeds, the worker just won't have that one source's content
+// until a subsequent mount (there is no in-worker retry; see
+// task-h4-report.md's "refresh deferred" note).
+async function stageMemorySources(
+  entries: MemoryEntry[],
+  servicePath: string,
+): Promise<void> {
+  const sourcesDir = `${servicePath}/sources`;
+  await Deno.mkdir(sourcesDir, { recursive: true });
+
+  // Scratch dir for materializeSource's git checkouts (and inline-source
+  // reads) — separate from `sourcesDir` itself, since only the resolved
+  // markdown CONTENT (not a checkout's .git/ etc.) belongs in the staged
+  // servicePath. Cleaned up once every source has been read out of it.
+  const workRoot = await Deno.makeTempDir({ prefix: "trex-memory-stage-" });
+  const manifest: StagedManifestEntry[] = [];
+  try {
+    for (const entry of entries) {
+      for (const src of entry.sources) {
+        const pluginDir = src.pluginDir ?? Deno.cwd();
+        try {
+          const { files, version } = await materializeSource(
+            src,
+            pluginDir,
+            workRoot,
+          );
+          const destDir = `${sourcesDir}/${entry.name}/${src.name}`;
+          for (const f of files) {
+            const destPath = `${destDir}/${f.slug}.md`;
+            await Deno.mkdir(
+              destPath.slice(0, destPath.lastIndexOf("/")),
+              { recursive: true },
+            );
+            await Deno.writeTextFile(destPath, f.content);
+          }
+          manifest.push({
+            memory: entry.name,
+            source: src.name,
+            version,
+            slugs: files.map((f) => f.slug),
+          });
+        } catch (e) {
+          console.error(
+            `memory ${entry.name}/${src.name}: staging failed (skipped — worker will not have this source until the next mount):`,
+            e,
+          );
+        }
+      }
+    }
+  } finally {
+    await Deno.remove(workRoot, { recursive: true }).catch(() => {});
+  }
+
+  await Deno.writeTextFile(
+    `${sourcesDir}/manifest.json`,
+    JSON.stringify(manifest, null, 2),
+  );
+}
+
 /**
  * Stages a self-contained servicePath for the memory worker and returns its
  * config WITHOUT mounting it (no `_addFunction` call) — factored out so it
@@ -126,16 +215,23 @@ export async function buildMemoryWorkerConfig(
   // same order of magnitude as buildAgentWorkerConfig's runtime copy.
   await copyDirRecursive(gbrainSrc, `${tmp}/gbrain/src`);
   await Deno.copyFile(`${workerDir}handler.ts`, `${tmp}/handler.ts`);
+  // H4 Part B: stage self-import.ts (the worker-side boot importer) next to
+  // handler.ts, and pre-stage every declared memory's source markdown (Part
+  // A) so self-import.ts has something to read once the worker boots.
+  await Deno.copyFile(`${workerDir}self-import.ts`, `${tmp}/self-import.ts`);
+  await stageMemorySources(entries, tmp);
 
   // Worker entry point: mirrors core/server/agents/service/index.ts's shape
   // (construct dependencies from env, build the handler, Deno.serve it) —
   // see that file for the pattern this is intentionally parallel to.
-  const indexSrc = `// Edge-runtime worker entry for the memory plugin type. One worker serves
+  const indexSrc =
+    `// Edge-runtime worker entry for the memory plugin type. One worker serves
 // every declared memory (schema-routed per request, see handler.ts /
 // gbrain/core/multi-tenant.ts's parseMemoryPath) — unlike agents, which run
 // one worker per agent.
 import { PostgresEngine } from "gbrain/core/postgres-engine.ts";
 import { createMemoryHandler } from "./handler.ts";
+import { importStagedSources } from "./self-import.ts";
 
 const engine = new PostgresEngine();
 // Cast: EngineConfig's full shape carries fields (poolSize, etc.) this
@@ -143,6 +239,23 @@ const engine = new PostgresEngine();
 await engine.connect(
   { engine: "postgres", database_url: Deno.env.get("DATABASE_URL") } as never,
 );
+
+// H4: self-import core-staged sources (see mount.ts's stageMemorySources)
+// before serving. Never allowed to block/prevent Deno.serve below — an
+// import failure is logged and the worker still comes up serving whatever
+// content is already in gbrain from a prior boot.
+try {
+  await importStagedSources(
+    engine,
+    new URL("./sources", import.meta.url).pathname,
+    {},
+  );
+} catch (e) {
+  console.error(
+    "memory: self-import failed at boot (continuing to serve):",
+    e,
+  );
+}
 
 const allowlist = new Set(
   (Deno.env.get("GBRAIN_MEMORY_ALLOWLIST") ?? "").split(",").filter(Boolean),
@@ -175,7 +288,10 @@ Deno.serve((req) => handler(req));
   // (that one is runtime-only) — same requirement buildAgentWorkerConfig
   // documents; without this, graph creation fails with `Import "postgres"
   // not a dependency` on the staged index.ts/handler.ts.
-  await Deno.writeTextFile(`${tmp}/deno.json`, JSON.stringify({ imports }, null, 2));
+  await Deno.writeTextFile(
+    `${tmp}/deno.json`,
+    JSON.stringify({ imports }, null, 2),
+  );
 
   const env: Record<string, string> = {
     DATABASE_URL: Deno.env.get("DATABASE_URL") ?? "",

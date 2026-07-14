@@ -9,10 +9,7 @@
 // report gives for not running the edge runtime — there is nothing to
 // assert about a mounted Express route without a live worker behind it.
 import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
-import {
-  buildMemoryWorkerConfig,
-  memoryWorkerBasePath,
-} from "./mount.ts";
+import { buildMemoryWorkerConfig, memoryWorkerBasePath } from "./mount.ts";
 import type { MemoryEntry } from "../../plugin/memory.ts";
 
 const ENTRIES: MemoryEntry[] = [
@@ -46,6 +43,24 @@ Deno.test("buildMemoryWorkerConfig stages gbrain + handler + index.ts + import m
     assertStringIncludes(indexSrc, "gbrain/core/postgres-engine.ts");
     assertStringIncludes(indexSrc, "GBRAIN_MEMORY_ALLOWLIST");
     assertStringIncludes(indexSrc, "TREX_MEMORY_BASE");
+    // H4: the generated entry point self-imports staged sources (self-import.ts,
+    // staged alongside handler.ts) before Deno.serve.
+    assertStringIncludes(indexSrc, "importStagedSources(");
+    assertStringIncludes(indexSrc, "./self-import.ts");
+
+    // H4: self-import.ts itself is staged next to handler.ts.
+    const selfImportStat = await Deno.stat(`${cfg.servicePath}/self-import.ts`);
+    assert(selfImportStat.isFile);
+
+    // H4: sources/manifest.json is always written (even if empty for these
+    // ENTRIES — their "docs" dirs don't exist relative to Deno.cwd() in the
+    // test process, so materializeSource fails per-source and is skipped,
+    // non-fatally — see the dedicated staging test below for a source that
+    // DOES resolve real content).
+    const manifestStat = await Deno.stat(
+      `${cfg.servicePath}/sources/manifest.json`,
+    );
+    assert(manifestStat.isFile);
 
     // Both import-map files present (static graph creation reads deno.json;
     // the importMapPath worker option is runtime-only — see mount.ts).
@@ -91,6 +106,51 @@ Deno.test("buildMemoryWorkerConfig: empty entries still stages a valid (empty-al
     assertEquals(cfg.env.GBRAIN_MEMORY_ALLOWLIST, "");
   } finally {
     await Deno.remove(cfg.servicePath, { recursive: true });
+  }
+});
+
+Deno.test("buildMemoryWorkerConfig: H4 stages a real inline source's markdown + manifest entry", async () => {
+  // A real inline source, `dir` relative to `pluginDir` (Task 11's
+  // materializeSource contract) — set up an actual on-disk plugin dir with
+  // markdown so staging has real content to copy, unlike ENTRIES above
+  // (whose "docs" dirs don't exist and are skipped non-fatally).
+  const pluginDir = await Deno.makeTempDir({ prefix: "trex-memory-plugin-" });
+  const entries: MemoryEntry[] = [
+    {
+      name: "gamma",
+      sources: [{ name: "handbook", dir: "docs", pluginDir }],
+    },
+  ];
+  try {
+    await Deno.mkdir(`${pluginDir}/docs`, { recursive: true });
+    await Deno.writeTextFile(
+      `${pluginDir}/docs/intro.md`,
+      "# Intro\nhello staged world",
+    );
+
+    const cfg = await buildMemoryWorkerConfig(entries);
+    try {
+      const manifest = JSON.parse(
+        await Deno.readTextFile(`${cfg.servicePath}/sources/manifest.json`),
+      );
+      assertEquals(manifest.length, 1);
+      assertEquals(manifest[0].memory, "gamma");
+      assertEquals(manifest[0].source, "handbook");
+      assertEquals(manifest[0].slugs, ["intro"]);
+      assert(
+        typeof manifest[0].version === "string" &&
+          manifest[0].version.length > 0,
+      );
+
+      const staged = await Deno.readTextFile(
+        `${cfg.servicePath}/sources/gamma/handbook/intro.md`,
+      );
+      assertStringIncludes(staged, "hello staged world");
+    } finally {
+      await Deno.remove(cfg.servicePath, { recursive: true });
+    }
+  } finally {
+    await Deno.remove(pluginDir, { recursive: true });
   }
 });
 
