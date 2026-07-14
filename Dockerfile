@@ -237,6 +237,14 @@ COPY core/ ./core/
 RUN trex bundle ./core/server/index.ts ./core/server/index.eszip \
  && trex bundle ./core/event/index.ts  ./core/event/index.eszip
 
+# Vendored gbrain for the `memory` plugin type: the memory worker stages
+# vendor/gbrain/src/ plus the sibling package.json from disk at mount time
+# (core/server/memory/gbrain-worker/mount.ts:resolveGbrainSrcDir) — without
+# them every memory plugin mount fails with "cannot locate vendor/gbrain/src".
+# Only src/ + package.json are runtime inputs; tests/docs/CHANGELOG stay out.
+COPY vendor/gbrain/src/ ./vendor/gbrain/src/
+COPY vendor/gbrain/package.json ./vendor/gbrain/package.json
+
 # Copy functions
 COPY functions/ ./functions/
 
@@ -268,6 +276,10 @@ RUN DENO_DIR=/home/node/.cache/deno deno cache --config plugins-dev/postgrest/fu
 COPY plugins/pg-meta/ ./plugins-dev/pg-meta/
 COPY --from=pg-meta-builder /build/dist/ ./plugins-dev/pg-meta/postgres-meta/dist/
 COPY --from=pg-meta-builder /build/node_modules/ ./plugins-dev/pg-meta/postgres-meta/node_modules/
+# claw agent plugin (Discord facilitator driving the Code agent): loaded from
+# plugins-dev like storage/postgrest — not published to npm, no build step.
+# Dormant unless its DISCORD_*/CLAW_* env is configured at runtime.
+COPY plugins/claw/ ./plugins-dev/claw/
 
 # Entrypoint + derivation CLI scripts live under /usr/src so the final stage
 # imports them with the same COPY as the rest of the tree.
