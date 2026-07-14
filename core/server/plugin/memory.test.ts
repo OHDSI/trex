@@ -1,5 +1,28 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { normalizeMemoryValue } from "./memory.ts";
+import express from "express";
+import type { Server } from "node:http";
+import { mountMemoryProxy, normalizeMemoryValue } from "./memory.ts";
+
+function setOverride(url: string | null) {
+  (globalThis as Record<string, unknown>).__GBRAIN_BASE_URL_OVERRIDE__ = url;
+}
+function clearOverride() {
+  delete (globalThis as Record<string, unknown>).__GBRAIN_BASE_URL_OVERRIDE__;
+}
+
+function listen(app: express.Express): Promise<Server> {
+  return new Promise((resolve) => {
+    const server = app.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+function portOf(server: Server): number {
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("no port");
+  return addr.port;
+}
+function close(server: Server): Promise<void> {
+  return new Promise((resolve) => server.close(() => resolve()));
+}
 
 Deno.test("normalizes a git + inline memory", () => {
   const out = normalizeMemoryValue([{
@@ -78,4 +101,64 @@ Deno.test("normalizeMemoryValue accepts single-object form", () => {
     sources: [{ name: "s", dir: "d" }],
   });
   assertEquals(out[0].name, "m");
+});
+
+Deno.test("mountMemoryProxy forwards method/path/body to gbrain and streams the response back", async () => {
+  let seenPath = "", seenMethod = "", seenBody = "";
+  const stubAc = new AbortController();
+  const stub = Deno.serve(
+    { port: 0, signal: stubAc.signal, onListen: () => {} },
+    async (req) => {
+      seenPath = new URL(req.url).pathname;
+      seenMethod = req.method;
+      seenBody = await req.text();
+      return Response.json({ ok: true });
+    },
+  );
+  const stubPort = (stub.addr as Deno.NetAddr).port;
+  setOverride(`http://127.0.0.1:${stubPort}`);
+
+  const app = express();
+  app.use(express.json());
+  mountMemoryProxy(app);
+  const server = await listen(app);
+  const port = portOf(server);
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/memory/research/mcp`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"method":"initialize"}',
+    });
+    const json = await res.json();
+    assertEquals(res.status, 200);
+    assertEquals(json.ok, true);
+    assertEquals(seenMethod, "POST");
+    assertEquals(seenPath, "/memory/research/mcp");
+    assertEquals(seenBody, '{"method":"initialize"}');
+  } finally {
+    await close(server);
+    clearOverride();
+    stubAc.abort();
+    await stub.finished;
+  }
+});
+
+Deno.test("mountMemoryProxy returns 503 when no gbrain base url is available", async () => {
+  setOverride(null);
+
+  const app = express();
+  app.use(express.json());
+  mountMemoryProxy(app);
+  const server = await listen(app);
+  const port = portOf(server);
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/memory/x/mcp`);
+    await res.body?.cancel();
+    assertEquals(res.status, 503);
+  } finally {
+    await close(server);
+    clearOverride();
+  }
 });
