@@ -56,9 +56,15 @@ export async function resolveAgentsRuntimeDir(): Promise<string> {
   );
 }
 
-async function copyDirRecursive(src: string, dest: string): Promise<void> {
+// `skipNames`, when given, is applied only at THIS call's own level (never
+// forwarded into the recursive calls for subdirectories) — it exists so
+// callers can exclude specific top-level entries (see the `evals` exclusion
+// below) without accidentally skipping a same-named dir nested deeper in the
+// tree.
+async function copyDirRecursive(src: string, dest: string, skipNames?: ReadonlySet<string>): Promise<void> {
   await Deno.mkdir(dest, { recursive: true });
   for await (const entry of Deno.readDir(src)) {
+    if (skipNames?.has(entry.name)) continue;
     const s = `${src}/${entry.name}`;
     const d = `${dest}/${entry.name}`;
     // Deno.stat follows symlinks, so linked files/dirs are copied as content.
@@ -67,6 +73,14 @@ async function copyDirRecursive(src: string, dest: string): Promise<void> {
     else if (info.isFile) await Deno.copyFile(s, d);
   }
 }
+
+// Authoring-time-only top-level entries under an agent dir that must never
+// be staged into a worker's servicePath: an eval suite (e.g.
+// plugins/devx/agent/evals/) is eve's own local dev/test harness — its own
+// node_modules (@ai-sdk/amazon-bedrock, eve, etc., ~100MB) and .eve run
+// artifacts have no runtime purpose and would otherwise be copied into every
+// staged worker on every registration.
+const AGENT_DIR_STAGING_EXCLUDES = new Set(["evals"]);
 
 export async function buildAgentWorkerConfig(
   pluginDir: string,
@@ -116,7 +130,7 @@ export async function buildAgentWorkerConfig(
   }
   await Deno.copyFile(`${runtimeSrc}loader.ts`, `${tmp}/agents/loader.ts`);
   const stagedAgentDir = `${tmp}/agent`;
-  await copyDirRecursive(agentDir, stagedAgentDir);
+  await copyDirRecursive(agentDir, stagedAgentDir, AGENT_DIR_STAGING_EXCLUDES);
 
   const shimBase = `file://${tmp}/agents/eve-shim/`;
   const imports: Record<string, string> = {

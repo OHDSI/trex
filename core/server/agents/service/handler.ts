@@ -6,7 +6,7 @@ import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
 import { buildSdkTools, resolveInstructions } from "./toolset.ts";
-import { resolveModelForTurn } from "./model.ts";
+import { resolveModelForTurn, withBedrockCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
@@ -510,7 +510,10 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           writeData = (p) => writer.write(p);
           const result = streamText({
             model,
-            system,
+            // Task 15 3rd site: same Bedrock cache-point wrap as
+            // runner.ts/toolset.ts (see withBedrockCachePoint in model.ts) —
+            // no-op for non-bedrock models.
+            system: withBedrockCachePoint(model, system),
             messages: modelMessages,
             tools,
             stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
