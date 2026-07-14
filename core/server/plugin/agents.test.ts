@@ -1,5 +1,13 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
-import { addAgentsPlugin, agentsCoreMigrationTarget, buildAgentWorkerConfig, channelAuthExemptPattern, isTrustedScopeAgentsPlugin, normalizeAgentsValue } from "./agents.ts";
+import {
+  addAgentsPlugin,
+  agentsCoreMigrationTarget,
+  buildAgentWorkerConfig,
+  channelAuthExemptPattern,
+  isTrustedScopeAgentsPlugin,
+  normalizeAgentsValue,
+  unknownMemoryLinks,
+} from "./agents.ts";
 
 // Security-sensitive invariant: the proxy auth-exemption regex must exempt
 // channel subpaths (adapter-signature-verified) while KEEPING full trex auth on
@@ -258,6 +266,111 @@ Deno.test("manifest: buildAgentWorkerConfig succeeds for the devx-agent trex.age
   const generated = JSON.parse(await Deno.readTextFile(cfg.importMapPath));
   assert(String(generated.imports.eve).endsWith("eve-shim/mod.ts"));
   assert(String(generated.imports["eve/tools"]).endsWith("eve-shim/tools.ts"));
+});
+
+// ---------------------------------------------------------------------------
+// Task 4: linked-memory generation + env injection at staging, and
+// declared-memory allow-list validation.
+
+Deno.test("buildAgentWorkerConfig with a valid memory link stages tools/skill and injects env", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  const cfg = await buildAgentWorkerConfig(
+    toyPlugin,
+    { name: "toy", dir: "agent", memory: [{ name: "d2e", mode: "read" }] },
+    "@trex/toy-agent",
+  );
+  const stagedAgentDir = cfg.env.TREX_AGENT_DIR;
+
+  // Generated tool + skill land inside the staged agent dir.
+  for (const op of ["search", "recall", "get_page"]) {
+    const info = await Deno.stat(`${stagedAgentDir}/tools/d2e_${op}.ts`);
+    assert(info.isFile);
+  }
+  const skill = await Deno.readTextFile(`${stagedAgentDir}/skills/d2e-memory.md`);
+  assert(skill.includes("d2e"));
+
+  // Env injected only because entry.memory is non-empty.
+  assertEquals(cfg.env.TREX_AGENT_MEMORIES, "d2e");
+  assert("GBRAIN_MEMORY_TOKEN" in cfg.env);
+  assert("MEMORY_MCP_URL" in cfg.env);
+  // Sane default when GBRAIN_MEMORY_INTERNAL_URL isn't set on the host.
+  assertEquals(cfg.env.MEMORY_MCP_URL, "http://127.0.0.1:8000");
+});
+
+Deno.test("buildAgentWorkerConfig without a memory link injects no memory env", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent");
+  assert(!("TREX_AGENT_MEMORIES" in cfg.env));
+  assert(!("GBRAIN_MEMORY_TOKEN" in cfg.env));
+  assert(!("MEMORY_MCP_URL" in cfg.env));
+  // No generated memory tool/skill files either — never touches disk for a
+  // link-free agent (toy-agent's own tools/skills dirs still exist from the
+  // plain copy, so assert absence of a specific generated filename, not the
+  // dirs themselves).
+  await assertRejects(() => Deno.stat(`${cfg.env.TREX_AGENT_DIR}/tools/d2e_search.ts`), Deno.errors.NotFound);
+  await assertRejects(() => Deno.stat(`${cfg.env.TREX_AGENT_DIR}/skills/d2e-memory.md`), Deno.errors.NotFound);
+});
+
+Deno.test("buildAgentWorkerConfig respects GBRAIN_MEMORY_INTERNAL_URL override", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  Deno.env.set("GBRAIN_MEMORY_INTERNAL_URL", "http://internal-memory:9000");
+  try {
+    const cfg = await buildAgentWorkerConfig(
+      toyPlugin,
+      { name: "toy", dir: "agent", memory: [{ name: "d2e", mode: "read" }] },
+      "@trex/toy-agent",
+    );
+    assertEquals(cfg.env.MEMORY_MCP_URL, "http://internal-memory:9000");
+  } finally {
+    Deno.env.delete("GBRAIN_MEMORY_INTERNAL_URL");
+  }
+});
+
+Deno.test("unknownMemoryLinks: empty when links is undefined or all names are declared", () => {
+  assertEquals(unknownMemoryLinks(undefined, new Set(["d2e"])), []);
+  assertEquals(
+    unknownMemoryLinks([{ name: "d2e", mode: "read" }], new Set(["d2e", "notes"])),
+    [],
+  );
+});
+
+Deno.test("unknownMemoryLinks: flags a link whose name isn't in the declared-memory allow-list", () => {
+  const links = [{ name: "d2e", mode: "read" as const }, { name: "ghost", mode: "read" as const }];
+  assertEquals(unknownMemoryLinks(links, new Set(["d2e"])), [{ name: "ghost", mode: "read" }]);
+});
+
+Deno.test("addAgentsPlugin skips an agent whose memory link is not a declared memory, without crashing boot", async () => {
+  // Bogus dir: if the validation guard didn't short-circuit BEFORE
+  // buildAgentWorkerConfig, the missing instructions.md would throw and
+  // fail this test — proving the skip happens first, same trick the
+  // existing non-@trex-scope test above uses.
+  const fakeApp = { all: () => { throw new Error("must not register a route"); } };
+  await addAgentsPlugin(
+    fakeApp as never,
+    { name: "toy", dir: "does-not-exist", memory: [{ name: "unknown_mem" }] },
+    "/does/not/exist",
+    "@trex/toy-agent",
+    new Set(["some_other_memory"]),
+  );
+});
+
+Deno.test("addAgentsPlugin proceeds when the memory link IS declared (reaches buildAgentWorkerConfig)", async () => {
+  // Same bogus-dir trick in reverse: a DECLARED memory link must not be
+  // skipped, so this should fail on the missing instructions.md (proving
+  // the validation guard let it through), not silently no-op.
+  const fakeApp = { all: () => { throw new Error("must not register a route"); } };
+  await assertRejects(
+    () =>
+      addAgentsPlugin(
+        fakeApp as never,
+        { name: "toy", dir: "does-not-exist", memory: [{ name: "d2e" }] },
+        "/does/not/exist",
+        "@trex/toy-agent",
+        new Set(["d2e"]),
+      ),
+    Error,
+    "instructions.md",
+  );
 });
 
 Deno.test("buildAgentWorkerConfig excludes the authoring-only evals/ dir from the staged agent tree", async () => {

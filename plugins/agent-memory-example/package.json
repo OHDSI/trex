@@ -1,0 +1,15 @@
+{
+  "name": "@trex/agent-memory-example",
+  "version": "0.0.1",
+  "trex": {
+    "agents": [
+      {
+        "name": "librarian",
+        "dir": "agent",
+        "memory": [
+          { "name": "handbook", "mode": "readwrite" }
+        ]
+      }
+    ]
+  }
+}

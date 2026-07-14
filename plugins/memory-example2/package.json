@@ -1,0 +1,9 @@
+{
+  "name": "@trex/memory-example2",
+  "version": "0.0.1",
+  "trex": {
+    "memory": [
+      { "name": "handbook", "sources": [ { "name": "extra", "dir": "memory/extra" } ] }
+    ]
+  }
+}

@@ -1,0 +1,143 @@
+import { assertEquals, assertRejects } from "jsr:@std/assert";
+import { materializeSource } from "./importer.ts";
+
+Deno.test("materializes inline markdown into slug/content pairs", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/handbook`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/handbook/intro.md`, "# Intro\nhello");
+  await Deno.mkdir(`${dir}/handbook/deep`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/handbook/deep/topic.md`, "# Topic\nx");
+  const out = await materializeSource(
+    { name: "handbook", dir: "handbook" },
+    dir,
+    await Deno.makeTempDir(),
+  );
+  const slugs = out.files.map((f: { slug: string }) => f.slug).sort();
+  assertEquals(slugs, ["deep/topic", "intro"]);
+  assertEquals(typeof out.version, "string");
+});
+
+Deno.test("inline materialize ignores non-markdown files", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/handbook`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/handbook/intro.md`, "# Intro\nhello");
+  await Deno.writeTextFile(`${dir}/handbook/notes.txt`, "not markdown");
+  const out = await materializeSource(
+    { name: "handbook", dir: "handbook" },
+    dir,
+    await Deno.makeTempDir(),
+  );
+  assertEquals(out.files.map((f: { slug: string }) => f.slug), ["intro"]);
+});
+
+Deno.test("inline materialize version is stable across runs and changes when content changes", async () => {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/handbook`, { recursive: true });
+  await Deno.writeTextFile(`${dir}/handbook/intro.md`, "# Intro\nhello");
+  const src = { name: "handbook", dir: "handbook" };
+  const first = await materializeSource(src, dir, await Deno.makeTempDir());
+  const second = await materializeSource(src, dir, await Deno.makeTempDir());
+  assertEquals(first.version, second.version);
+
+  await Deno.writeTextFile(
+    `${dir}/handbook/intro.md`,
+    "# Intro\nhello changed",
+  );
+  const third = await materializeSource(src, dir, await Deno.makeTempDir());
+  assertEquals(first.version === third.version, false);
+});
+
+// --- git source (local throwaway repo, no network) ------------------------
+
+async function gitRun(cmd: string[], cwd: string): Promise<void> {
+  const p = new Deno.Command(cmd[0], {
+    args: cmd.slice(1),
+    cwd,
+    stdout: "piped",
+    stderr: "piped",
+  });
+  const { success, stderr } = await p.output();
+  if (!success) {
+    throw new Error(`${cmd.join(" ")}: ${new TextDecoder().decode(stderr)}`);
+  }
+}
+
+async function makeLocalRepo(): Promise<string> {
+  const repo = await Deno.makeTempDir();
+  await gitRun(["git", "init", "-q", "-b", "main", "."], repo);
+  await gitRun(["git", "config", "user.email", "t@t.com"], repo);
+  await gitRun(["git", "config", "user.name", "t"], repo);
+  await Deno.mkdir(`${repo}/docs`, { recursive: true });
+  await Deno.writeTextFile(`${repo}/docs/a.md`, "# A");
+  await gitRun(["git", "add", "-A"], repo);
+  await gitRun(["git", "commit", "-q", "-m", "init"], repo);
+  return repo;
+}
+
+Deno.test("materializes a git source (local repo, no network): clone, read *.md under dir, version = HEAD sha", async () => {
+  const repo = await makeLocalRepo();
+  const workRoot = await Deno.makeTempDir();
+  const src = { name: "docs", repo, ref: "main", dir: "docs" };
+
+  const out = await materializeSource(
+    src,
+    /* pluginDir unused for git */ "",
+    workRoot,
+  );
+  assertEquals(out.files.map((f) => f.slug), ["a"]);
+  assertEquals(out.files[0].content, "# A");
+
+  const headOut = new TextDecoder().decode(
+    (await new Deno.Command("git", {
+      args: ["-C", repo, "rev-parse", "HEAD"],
+      stdout: "piped",
+    }).output()).stdout,
+  ).trim();
+  assertEquals(out.version, headOut);
+});
+
+Deno.test("materializes a git source: a second call (already cloned) fetches/resets instead of re-cloning", async () => {
+  const repo = await makeLocalRepo();
+  const workRoot = await Deno.makeTempDir();
+  const src = { name: "docs", repo, ref: "main", dir: "docs" };
+
+  const first = await materializeSource(src, "", workRoot);
+
+  // Amend the repo with a new commit; the second materialize should pick it
+  // up via fetch+reset rather than failing (would fail if it tried to
+  // re-clone into the already-populated dest dir without handling that case).
+  await Deno.writeTextFile(`${repo}/docs/b.md`, "# B");
+  await gitRun(["git", "add", "-A"], repo);
+  await gitRun(["git", "commit", "-q", "-m", "second"], repo);
+
+  const second = await materializeSource(src, "", workRoot);
+  assertEquals(second.files.map((f) => f.slug).sort(), ["a", "b"]);
+  assertEquals(second.version === first.version, false);
+});
+
+// --- dir traversal guard ----------------------------------------------------
+
+Deno.test("materializeSource rejects an inline source dir containing a '..' segment", async () => {
+  const dir = await Deno.makeTempDir();
+  const workRoot = await Deno.makeTempDir();
+  await assertRejects(
+    () => materializeSource({ name: "handbook", dir: "../escape" }, dir, workRoot),
+    Error,
+    "must not contain a '..' segment",
+  );
+});
+
+Deno.test("materializeSource rejects a git source dir containing a '..' segment", async () => {
+  const repo = await makeLocalRepo();
+  const workRoot = await Deno.makeTempDir();
+  await assertRejects(
+    () =>
+      materializeSource(
+        { name: "docs", repo, ref: "main", dir: "../escape" },
+        "",
+        workRoot,
+      ),
+    Error,
+    "must not contain a '..' segment",
+  );
+});
