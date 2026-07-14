@@ -1,5 +1,13 @@
 import matter from 'gray-matter';
-import { safeLoad as yamlSafeLoad } from 'js-yaml';
+// Deno-compat (vendor/gbrain/PATCHES.md P5): js-yaml@3.x's CJS entry is
+// `module.exports = require('./lib/js-yaml.js')` (whole-module re-export
+// indirection). Deno's npm CJS->ESM named-export analysis doesn't surface
+// `safeLoad` as a named export through that indirection (only the default
+// import works); Bun tolerates the named import fine. Default-import +
+// destructure works under both runtimes and needs no per-consumer shim.
+import jsYaml from 'js-yaml';
+const yamlSafeLoad: (input: string) => unknown =
+  (jsYaml as any).safeLoad ?? (jsYaml as any).default?.safeLoad;
 import type { Page, PageType } from './types.ts';
 import { slugifyPath } from './sync.ts';
 

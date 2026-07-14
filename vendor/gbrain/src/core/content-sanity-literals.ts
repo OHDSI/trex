@@ -55,15 +55,18 @@
 
 import { existsSync, readFileSync } from 'fs';
 import type { OperatorLiteral } from './content-sanity.ts';
+// Deno-compat (vendor/gbrain/PATCHES.md P5): Deno defines no global `require`,
+// and Bun's require() being able to synchronously load an ESM/TS module was
+// the only reason this was lazy. Promoted to a static top-level import —
+// functionally identical, per the original comment (laziness was only to
+// avoid loading config.ts for pure-assessor callers, not for correctness).
+import { gbrainPath } from './config.ts';
 
 /** Path to the operator literals file. Honors `GBRAIN_HOME` via
  *  `gbrainPath`. Resolved at load time so test fixtures can set
  *  `GBRAIN_HOME` to a tempdir per the test-isolation conventions in
  *  CLAUDE.md. */
 function resolveLiteralsPath(): string {
-  // Lazy-import to avoid loading config.ts surface for the pure
-  // assessor's consumers that only need built-ins.
-  const { gbrainPath } = require('./config.ts');
   return gbrainPath('junk-substrings.txt');
 }
 

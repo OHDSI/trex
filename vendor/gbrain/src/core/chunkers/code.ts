@@ -27,73 +27,73 @@ import { buildQualifiedName } from './qualified-names.ts';
 // In dev, the path resolves to the source-tree file; the compiled binary
 // uses a bundler-synthesized path.
 // @ts-ignore — type: 'file' import attribute is valid Bun syntax, not in lib.d.ts
-import TREE_SITTER_WASM from '../../assets/wasm/tree-sitter.wasm' with { type: 'file' };
+const TREE_SITTER_WASM = new URL('../../assets/wasm/tree-sitter.wasm', import.meta.url).pathname;
 // 36 grammars total. Every grammar ships in the compiled binary — Bun's
 // --compile bundles each referenced asset. Layer 5 extends the 6 baseline
 // languages to all 36 tree-sitter-wasms ship.
 // @ts-ignore
-import G_BASH from '../../assets/wasm/grammars/tree-sitter-bash.wasm' with { type: 'file' };
+const G_BASH = new URL('../../assets/wasm/grammars/tree-sitter-bash.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_C from '../../assets/wasm/grammars/tree-sitter-c.wasm' with { type: 'file' };
+const G_C = new URL('../../assets/wasm/grammars/tree-sitter-c.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_CSHARP from '../../assets/wasm/grammars/tree-sitter-c_sharp.wasm' with { type: 'file' };
+const G_CSHARP = new URL('../../assets/wasm/grammars/tree-sitter-c_sharp.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_CPP from '../../assets/wasm/grammars/tree-sitter-cpp.wasm' with { type: 'file' };
+const G_CPP = new URL('../../assets/wasm/grammars/tree-sitter-cpp.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_CSS from '../../assets/wasm/grammars/tree-sitter-css.wasm' with { type: 'file' };
+const G_CSS = new URL('../../assets/wasm/grammars/tree-sitter-css.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_DART from '../../assets/wasm/grammars/tree-sitter-dart.wasm' with { type: 'file' };
+const G_DART = new URL('../../assets/wasm/grammars/tree-sitter-dart.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_ELIXIR from '../../assets/wasm/grammars/tree-sitter-elixir.wasm' with { type: 'file' };
+const G_ELIXIR = new URL('../../assets/wasm/grammars/tree-sitter-elixir.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_ELM from '../../assets/wasm/grammars/tree-sitter-elm.wasm' with { type: 'file' };
+const G_ELM = new URL('../../assets/wasm/grammars/tree-sitter-elm.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_GO from '../../assets/wasm/grammars/tree-sitter-go.wasm' with { type: 'file' };
+const G_GO = new URL('../../assets/wasm/grammars/tree-sitter-go.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_HTML from '../../assets/wasm/grammars/tree-sitter-html.wasm' with { type: 'file' };
+const G_HTML = new URL('../../assets/wasm/grammars/tree-sitter-html.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_JAVA from '../../assets/wasm/grammars/tree-sitter-java.wasm' with { type: 'file' };
+const G_JAVA = new URL('../../assets/wasm/grammars/tree-sitter-java.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_JAVASCRIPT from '../../assets/wasm/grammars/tree-sitter-javascript.wasm' with { type: 'file' };
+const G_JAVASCRIPT = new URL('../../assets/wasm/grammars/tree-sitter-javascript.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_JSON from '../../assets/wasm/grammars/tree-sitter-json.wasm' with { type: 'file' };
+const G_JSON = new URL('../../assets/wasm/grammars/tree-sitter-json.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_KOTLIN from '../../assets/wasm/grammars/tree-sitter-kotlin.wasm' with { type: 'file' };
+const G_KOTLIN = new URL('../../assets/wasm/grammars/tree-sitter-kotlin.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_LUA from '../../assets/wasm/grammars/tree-sitter-lua.wasm' with { type: 'file' };
+const G_LUA = new URL('../../assets/wasm/grammars/tree-sitter-lua.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_OCAML from '../../assets/wasm/grammars/tree-sitter-ocaml.wasm' with { type: 'file' };
+const G_OCAML = new URL('../../assets/wasm/grammars/tree-sitter-ocaml.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_PHP from '../../assets/wasm/grammars/tree-sitter-php.wasm' with { type: 'file' };
+const G_PHP = new URL('../../assets/wasm/grammars/tree-sitter-php.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_PYTHON from '../../assets/wasm/grammars/tree-sitter-python.wasm' with { type: 'file' };
+const G_PYTHON = new URL('../../assets/wasm/grammars/tree-sitter-python.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_RUBY from '../../assets/wasm/grammars/tree-sitter-ruby.wasm' with { type: 'file' };
+const G_RUBY = new URL('../../assets/wasm/grammars/tree-sitter-ruby.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_RUST from '../../assets/wasm/grammars/tree-sitter-rust.wasm' with { type: 'file' };
+const G_RUST = new URL('../../assets/wasm/grammars/tree-sitter-rust.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_SCALA from '../../assets/wasm/grammars/tree-sitter-scala.wasm' with { type: 'file' };
+const G_SCALA = new URL('../../assets/wasm/grammars/tree-sitter-scala.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_SOLIDITY from '../../assets/wasm/grammars/tree-sitter-solidity.wasm' with { type: 'file' };
+const G_SOLIDITY = new URL('../../assets/wasm/grammars/tree-sitter-solidity.wasm', import.meta.url).pathname;
 // @ts-ignore — DerekStride/tree-sitter-sql @ c2e1e08db1ea20dc23bdb8d228a81a8756e9c450,
 // built with tree-sitter-cli@v0.26.3 --abi 14 (matches web-tree-sitter 0.22.6).
 // 11 MB; substantially larger than peers because the grammar covers
 // PostgreSQL + MySQL + SQLite + T-SQL basics. See CHANGELOG for size notes.
-import G_SQL from '../../assets/wasm/grammars/tree-sitter-sql.wasm' with { type: 'file' };
+const G_SQL = new URL('../../assets/wasm/grammars/tree-sitter-sql.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_SWIFT from '../../assets/wasm/grammars/tree-sitter-swift.wasm' with { type: 'file' };
+const G_SWIFT = new URL('../../assets/wasm/grammars/tree-sitter-swift.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_TOML from '../../assets/wasm/grammars/tree-sitter-toml.wasm' with { type: 'file' };
+const G_TOML = new URL('../../assets/wasm/grammars/tree-sitter-toml.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_TSX from '../../assets/wasm/grammars/tree-sitter-tsx.wasm' with { type: 'file' };
+const G_TSX = new URL('../../assets/wasm/grammars/tree-sitter-tsx.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_TYPESCRIPT from '../../assets/wasm/grammars/tree-sitter-typescript.wasm' with { type: 'file' };
+const G_TYPESCRIPT = new URL('../../assets/wasm/grammars/tree-sitter-typescript.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_VUE from '../../assets/wasm/grammars/tree-sitter-vue.wasm' with { type: 'file' };
+const G_VUE = new URL('../../assets/wasm/grammars/tree-sitter-vue.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_YAML from '../../assets/wasm/grammars/tree-sitter-yaml.wasm' with { type: 'file' };
+const G_YAML = new URL('../../assets/wasm/grammars/tree-sitter-yaml.wasm', import.meta.url).pathname;
 // @ts-ignore
-import G_ZIG from '../../assets/wasm/grammars/tree-sitter-zig.wasm' with { type: 'file' };
+const G_ZIG = new URL('../../assets/wasm/grammars/tree-sitter-zig.wasm', import.meta.url).pathname;
 
 // Bumped whenever chunker output shape changes (new tokenizer, merge-threshold,
 // language set, etc.) so importCodeFile's content_hash re-chunks existing pages
