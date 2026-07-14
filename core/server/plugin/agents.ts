@@ -5,23 +5,28 @@
 import type { Express } from "express";
 import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_PLUGIN_SCOPES } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
+import { type AgentMemoryLink, parseMemoryLinks } from "./agent-memory.ts";
 
 export interface AgentEntry {
   name: string;
   dir: string;
   env?: Record<string, string>;
+  memory?: AgentMemoryLink[];
 }
 
 export function normalizeAgentsValue(value: unknown): AgentEntry[] {
   const arr = Array.isArray(value) ? value : [value];
   return arr.map((e) => {
-    const entry = e as { name?: string; dir?: string; env?: unknown };
+    const entry = e as { name?: string; dir?: string; env?: unknown; memory?: unknown };
     if (!entry?.name || !/^[a-z0-9][a-z0-9_-]*$/i.test(entry.name)) {
       throw new Error(`agents: each entry needs a name ([a-zA-Z0-9_-]), got ${JSON.stringify(e)}`);
     }
     const result: AgentEntry = { name: entry.name, dir: entry.dir ?? "agent" };
     if (entry.env && typeof entry.env === "object" && !Array.isArray(entry.env)) {
       result.env = entry.env as Record<string, string>;
+    }
+    if (entry.memory !== undefined) {
+      result.memory = parseMemoryLinks(entry.memory);
     }
     return result;
   });
