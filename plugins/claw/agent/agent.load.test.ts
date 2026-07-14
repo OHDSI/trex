@@ -10,7 +10,9 @@ Deno.test("claw agent loads with instructions and a model", async () => {
   assert(a.config.model || a.config.resolveModel, "a model or resolveModel must be configured");
 });
 
-Deno.test("claw agent exposes no tools yet", async () => {
+Deno.test("claw agent exposes its tools", async () => {
   const a = await loadAgent(DIR);
-  assertEquals(Object.keys(a.tools).length, 0);
+  const names = Object.keys(a.tools);
+  assertEquals(names.includes("dispatchToCode"), true);
+  assertEquals(names.includes("fetchChannelHistory"), true);
 });
