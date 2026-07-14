@@ -208,3 +208,48 @@ Deno.test("loadAgent rejects a channels/*.ts that doesn't default-export defineC
   await Deno.writeTextFile(`${tmp}/channels/bad.ts`, `export default { routes: [] };`); // unbranded
   await assertRejects(() => loadAgent(tmp), Error, "must default-export defineChannel");
 });
+
+// Regression coverage for the review fix to Task 6: a colocated *.test.ts
+// file sitting next to a real tool/channel module (the established
+// convention in this repo, e.g. plugins/claw/agent/tools/dispatchToCode.ts +
+// dispatchToCode.test.ts) must be skipped by the tools/ and channels/ scans,
+// not treated as a tool/channel module.
+
+Deno.test("loadAgent skips a colocated tools/*.test.ts file instead of loading it as a tool", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/tools`);
+  await Deno.writeTextFile(
+    `${tmp}/tools/greet.ts`,
+    `export default Object.assign(
+      { description: "greet", inputSchema: { type: "object" }, execute: () => Promise.resolve({ ok: true }) },
+      { __trexTool: true },
+    );`,
+  );
+  // A colocated test file with no branded default export — if the loader
+  // didn't skip it, this would throw "must default-export defineTool(...)".
+  await Deno.writeTextFile(
+    `${tmp}/tools/greet.test.ts`,
+    `Deno.test("greet works", () => {});`,
+  );
+  const a = await loadAgent(tmp);
+  assertEquals(Object.keys(a.tools), ["greet"]);
+});
+
+Deno.test("loadAgent skips a colocated channels/*.test.ts file instead of loading it as a channel", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/channels`);
+  await Deno.writeTextFile(
+    `${tmp}/channels/discord.ts`,
+    `export default Object.assign({ routes: [] }, { __trexChannel: true });`,
+  );
+  // A colocated test file with no branded default export — if the loader
+  // didn't skip it, this would throw "must default-export defineChannel(...)".
+  await Deno.writeTextFile(
+    `${tmp}/channels/discord.load.test.ts`,
+    `Deno.test("discord loads", () => {});`,
+  );
+  const a = await loadAgent(tmp);
+  assertEquals(Object.keys(a.channels), ["discord"]);
+});
