@@ -94,6 +94,59 @@ function loadVisualEditingScripts() {
   }
 }
 
+const PROTOTYPE_MIME: Record<string, string> = {
+  html: "text/html; charset=utf-8", htm: "text/html; charset=utf-8",
+  js: "application/javascript; charset=utf-8", mjs: "application/javascript; charset=utf-8",
+  css: "text/css; charset=utf-8", json: "application/json; charset=utf-8",
+  svg: "image/svg+xml", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  gif: "image/gif", webp: "image/webp", ico: "image/x-icon", woff: "font/woff",
+  woff2: "font/woff2", ttf: "font/ttf", map: "application/json; charset=utf-8",
+};
+
+/**
+ * Serve a static prototype file (<workspace>/prototypes/...) from disk.
+ * Returns null when the file is absent so the caller can fall through to the
+ * dev-server proxy. HTML responses get the visual-editing bridge injected so
+ * the selector/editor overlay works on mockups exactly as on the live app.
+ */
+async function servePrototypeFile(
+  userId: string,
+  appId: string,
+  proxyPath: string,
+  corsHeaders: Record<string, string>,
+): Promise<Response | null> {
+  let abs: string;
+  try {
+    abs = safeJoin(getAppWorkspacePath(userId, appId), proxyPath);
+  } catch {
+    return null; // path traversal / bad appId
+  }
+  let bytes: Uint8Array;
+  try {
+    bytes = await Deno.readFile(abs);
+  } catch {
+    return null; // not found — let the proxy handle it
+  }
+  const ext = abs.split(".").pop()?.toLowerCase() ?? "";
+  const ct = PROTOTYPE_MIME[ext] ?? "application/octet-stream";
+  const headers = new Headers(corsHeaders);
+  headers.set("Content-Type", ct);
+  if (ct.startsWith("text/html")) {
+    loadVisualEditingScripts();
+    if (selectorClientScript) {
+      let html = new TextDecoder().decode(bytes);
+      const injected = `<script>${rpcBridgeScript}</script><script>${selectorClientScript}</script><script>${visualEditorClientScript}</script>`;
+      html = html.includes("</head>")
+        ? html.replace("</head>", `${injected}</head>`)
+        : html.includes("</body>")
+        ? html.replace("</body>", `${injected}</body>`)
+        : html + injected;
+      return new Response(html, { headers });
+    }
+  }
+  return new Response(bytes, { headers });
+}
+
 const VALID_MODES = ["build", "ask", "agent", "plan"];
 
 const OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions";
@@ -2052,6 +2105,15 @@ Deno.serve(async (req: Request) => {
     if (proxyMatch && method === "GET") {
       const appId = proxyMatch[1];
       const proxyPath = proxyMatch[2] || "";
+      // Prototypes are static HTML produced by the visual-prototyping skill
+      // (<workspace>/prototypes/<name>/index.html and their relative assets).
+      // Serve them straight from disk so mockups preview without a running dev
+      // server — required for sub-apps (e.g. d2e) whose dev server can't run
+      // in-container, and simply faster for every other app.
+      if (proxyPath.startsWith("prototypes/")) {
+        const staticRes = await servePrototypeFile(userId, appId, proxyPath, corsHeaders);
+        if (staticRes) return staticRes;
+      }
       // Check Rust process manager for status (entry may not exist in this worker)
       const status = await devServerManager.getStatus(userId, appId);
       const entry = devServerManager.getEntry(userId, appId);

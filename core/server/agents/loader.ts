@@ -3,9 +3,12 @@
 // tools/*.ts|*.js (one tool per file, filename = tool name),
 // skills/<name>.md or skills/<name>/SKILL.md (metadata parsed here, content
 // loaded on demand by the built-in skill tool), subagents/<name>/ (each an
-// eve-layout dir, ONE level deep). Unsupported eve dirs (channels/,
-// connections/, sandbox/) are ignored with a log line so real eve projects
-// still load.
+// eve-layout dir, ONE level deep), channels/*.ts|*.js (one channel per file,
+// filename = channel id, default-exporting defineChannel(...)),
+// connections/*.ts|*.js (one connection per file, filename = connection name,
+// default-exporting defineMcpClientConnection/defineOpenApiConnection(...)).
+// Unsupported eve dirs (sandbox/) are ignored with a log line so real eve
+// projects still load.
 //
 // EDN alternatives (trex extension for CLJS-authored agents, spec §3): the
 // eve-native file always wins when both exist, so directories stay portable
@@ -13,6 +16,8 @@
 // string or {:instructions "..."}); skills/<name>.edn {:description "..."
 // :content "..."}.
 import { parseEDNString } from "edn-data";
+import type { ChannelDef } from "./channels/types.ts";
+import type { ConnectionDef } from "./connections/types.ts";
 import type { AgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
 
 export interface SkillMeta {
@@ -52,6 +57,14 @@ export interface LoadedAgent {
   tools: Record<string, ToolDef>;
   skills: SkillMeta[];
   subagents: Record<string, LoadedAgent>;
+  // channels/*.{ts,js} — each default-exports a defineChannel(...) result;
+  // key = filename sans ext (same shape as tools/, gated on __trexChannel).
+  channels: Record<string, ChannelDef>;
+  // connections/*.{ts,js} — each default-exports a defineMcpClientConnection /
+  // defineOpenApiConnection result; key = filename sans ext (same shape as
+  // channels/, gated on __trexConnection). The loader sets def.name from the
+  // filename (the shim reserved a name? field for exactly this).
+  connections: Record<string, ConnectionDef>;
   // H2: agent-dir-ROOT `dynamic-tools.ts`/`dynamic-tools.js` only (never
   // discovered inside tools/ — that dir is scanned separately and a
   // dynamic-tools.ts placed there is just an ordinary tools/ entry, which
@@ -60,7 +73,7 @@ export interface LoadedAgent {
   toolProvider?: ToolProviderFn;
 }
 
-const IGNORED_DIRS = ["channels", "connections", "sandbox"];
+const IGNORED_DIRS = ["sandbox"];
 
 // Description = frontmatter `description:` if a leading YAML block exists,
 // else the first non-empty, non-heading line.
@@ -163,6 +176,46 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     break;
   }
 
+  const channels: Record<string, ChannelDef> = {};
+  try {
+    for await (const entry of Deno.readDir(`${dir}/channels`)) {
+      if (!entry.isFile) continue;
+      const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
+      if (!m) continue;
+      const name = m[1];
+      const mod = await import(`file://${dir}/channels/${entry.name}`);
+      const def = mod.default;
+      if (!def || !(def as { __trexChannel?: boolean }).__trexChannel) {
+        throw new Error(`agents: ${dir}/channels/${entry.name} must default-export defineChannel(...)`);
+      }
+      channels[name] = def as ChannelDef;
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+
+  const connections: Record<string, ConnectionDef> = {};
+  try {
+    for await (const entry of Deno.readDir(`${dir}/connections`)) {
+      if (!entry.isFile) continue;
+      const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
+      if (!m) continue;
+      const name = m[1];
+      const mod = await import(`file://${dir}/connections/${entry.name}`);
+      const def = mod.default;
+      if (!def || !(def as { __trexConnection?: boolean }).__trexConnection) {
+        throw new Error(
+          `agents: ${dir}/connections/${entry.name} must default-export defineMcpClientConnection(...)/defineOpenApiConnection(...)`,
+        );
+      }
+      // The loader owns the connection's name (= filename); the shim reserved
+      // the field for exactly this so authored files don't repeat themselves.
+      connections[name] = Object.assign(def as ConnectionDef, { name });
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+
   const skills: SkillMeta[] = [];
   try {
     for await (const entry of Deno.readDir(`${dir}/skills`)) {
@@ -235,5 +288,5 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     } catch { /* absent */ }
   }
 
-  return { dir, instructions, config, tools, skills, subagents, toolProvider };
+  return { dir, instructions, config, tools, skills, subagents, channels, connections, toolProvider };
 }

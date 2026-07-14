@@ -7,7 +7,11 @@
 import pg from "npm:pg@^8";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
-import { createHandler } from "./handler.ts";
+import { createChannelStore } from "../channels/store.ts";
+import { createHandler, type OAuthBrokerDeps } from "./handler.ts";
+import { createOAuthStore } from "../connections/oauth/store.ts";
+import { decryptWithDek, encryptWithDek, initDek } from "../../auth/dek.ts";
+import { deriveSubkeyBase64, LABELS } from "../../auth/keys.ts";
 
 const agentDir = Deno.env.get("TREX_AGENT_DIR");
 if (!agentDir) throw new Error("agents: TREX_AGENT_DIR not set");
@@ -18,13 +22,36 @@ const pool = new pg.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
 // pool the rest of the worker uses (H1) — not a second connection.
 const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
 const agent = await loadAgent(agentDir);
+const basePath = Deno.env.get("TREX_AGENT_BASE") || "";
+
+// OAuth broker (Task 7) — wired only when the worker has a root key (needed to
+// unwrap the DEK for token encryption-at-rest and to derive the state secret).
+// Kept opt-in so a deployment without TREX_ROOT_KEY still boots every non-oauth
+// agent; a kind:"oauth" connection there simply reports it's not configured
+// rather than crashing the worker at boot.
+let oauth: OAuthBrokerDeps | undefined;
+if (Deno.env.get("TREX_ROOT_KEY")) {
+  try {
+    await initDek({ query: (sql, params) => pool.query(sql, params as never) });
+    const secret = await deriveSubkeyBase64(LABELS.agentsOAuthState);
+    const store = createOAuthStore(query, { encrypt: encryptWithDek, decrypt: decryptWithDek });
+    oauth = { store, secret, startUrlBase: `${basePath}/eve/v1/oauth`, basePath };
+  } catch (e) {
+    // A DEK/key failure must not take the whole agent worker down — log and
+    // leave oauth unwired (its routes 404, oauth connections skip).
+    console.error(`agents: OAuth broker init failed — oauth connections disabled: ${e instanceof Error ? e.message : e}`);
+  }
+}
+
 const handler = createHandler({
   agent,
   store: createStore(query),
+  channelStore: createChannelStore(query),
   plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
   agentName: Deno.env.get("TREX_AGENT_NAME") || "agent",
-  basePath: Deno.env.get("TREX_AGENT_BASE") || "",
+  basePath,
   sql: query,
+  oauth,
 });
 
 Deno.serve((req) => handler(req));

@@ -110,6 +110,29 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.decision ?? null;
     },
 
+    // Channel HITL resume — MODE A (by request id, channels/layer.ts). The
+    // session an approval belongs to, so a widget callback that already carries
+    // the requestId can resolve it after a channel-ownership check
+    // (channelStore.sessionInChannel). Null for an unknown request id.
+    async getApprovalSession(requestId: string): Promise<string | null> {
+      const r = await query(`SELECT session_id FROM agents.approvals WHERE request_id = $1`, [requestId]);
+      return r.rows[0]?.session_id ?? null;
+    },
+
+    // Channel HITL resume — MODE B (by token, single pending). The request id of
+    // a session's SOLE still-undecided approval, or null when there are zero or
+    // more than one. A text reply carries a decision but no requestId, so it can
+    // only be applied unambiguously when exactly one approval is pending; >1 is
+    // ambiguous (never guess which the reply answers) and 0 means the reply is an
+    // ordinary message.
+    async getSinglePendingApproval(sessionId: string): Promise<string | null> {
+      const r = await query(
+        `SELECT request_id FROM agents.approvals WHERE session_id = $1 AND decision IS NULL`,
+        [sessionId],
+      );
+      return r.rows.length === 1 ? r.rows[0].request_id : null;
+    },
+
     // H4: looks up the tool an approval request was raised for, so a sticky
     // (always/never) decision on that request can be recorded against the
     // right (user, plugin, agent, tool) key — see handler.ts's approval

@@ -888,10 +888,12 @@ jobs:
           ! echo "$OFF" | grep -q devx_ext
           docker run --rm --entrypoint sh trexsql-test:full -c \
             'test -d /usr/src/plugins-dx/devx && test -f /usr/lib/trexsql/extensions-dx/devx_ext.trex'
-          # Gate ON: devx_ext loads
+          # Gate ON: entrypoint copies the gated devx_ext into the primary
+          # extensions dir (EXTENSION_DIR can't be a list — see entrypoint.sh),
+          # so it loads from there rather than extensions-dx.
           ON=$(docker run --rm -e TREX_DX_ENABLED=true trexsql-test:full --check 2>&1) || true
           echo "$ON"
-          echo "$ON" | grep -q "Loading extension: /usr/lib/trexsql/extensions-dx/devx_ext.trex ... ok"
+          echo "$ON" | grep -q "Loading extension: /usr/lib/trexsql/extensions/devx_ext.trex ... ok"
 
       # GHCR rejects uppercase repo names. github.repository_owner preserves the
       # org's actual casing (OHDSI), so lowercase it once via shell into $IMAGE_NS.

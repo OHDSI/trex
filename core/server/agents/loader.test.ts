@@ -170,8 +170,78 @@ Deno.test("loadAgent never discovers a dynamic-tools.ts placed INSIDE tools/ as 
 Deno.test("loadAgent ignores eve dirs we don't support, without failing", async () => {
   const tmp = await Deno.makeTempDir();
   await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
-  await Deno.mkdir(`${tmp}/channels`);
+  await Deno.mkdir(`${tmp}/connections`);
   await Deno.mkdir(`${tmp}/sandbox`);
   const a = await loadAgent(tmp); // must not throw
   assertEquals(a.instructions, "hi");
+});
+
+Deno.test("loadAgent discovers channels/*.{ts,js} as branded ChannelDefs keyed by filename", async () => {
+  const a = await loadAgent(TOY);
+  // Order is Deno.readDir-dependent; assert the set, not the sequence. The toy
+  // agent ships `webhook` plus the authored `custom-hook` channel (Task 7).
+  assertEquals(Object.keys(a.channels).sort(), ["custom-hook", "webhook"]);
+  assert(a.channels.webhook.__trexChannel);
+  assertEquals(a.channels.webhook.routes[0].method, "POST");
+  assertEquals(a.channels.webhook.routes[0].path, "/message");
+});
+
+Deno.test("loadAgent no longer treats channels/ as an ignored eve dir", async () => {
+  const logs: string[] = [];
+  const orig = console.log;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await loadAgent(TOY);
+  } finally {
+    console.log = orig;
+  }
+  assert(
+    !logs.some((l) => l.includes("channels") && l.includes("not supported")),
+    `channels should not be logged as ignored; got: ${JSON.stringify(logs)}`,
+  );
+});
+
+Deno.test("loadAgent rejects a channels/*.ts that doesn't default-export defineChannel(...)", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/channels`);
+  await Deno.writeTextFile(`${tmp}/channels/bad.ts`, `export default { routes: [] };`); // unbranded
+  await assertRejects(() => loadAgent(tmp), Error, "must default-export defineChannel");
+});
+
+Deno.test("loadAgent discovers connections/*.{ts,js} as branded ConnectionDefs keyed by filename", async () => {
+  const a = await loadAgent(TOY);
+  assertEquals(Object.keys(a.connections), ["echo"]);
+  assert(a.connections.echo.__trexConnection);
+  assertEquals(a.connections.echo.type, "mcp");
+  assertEquals(a.connections.echo.url, "http://localhost:9/mcp");
+  // the loader sets `name` from the filename (the shim reserves the field)
+  assertEquals(a.connections.echo.name, "echo");
+});
+
+Deno.test("loadAgent no longer treats connections/ as an ignored eve dir", async () => {
+  const logs: string[] = [];
+  const orig = console.log;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await loadAgent(TOY);
+  } finally {
+    console.log = orig;
+  }
+  assert(
+    !logs.some((l) => l.includes("connections") && l.includes("not supported")),
+    `connections should not be logged as ignored; got: ${JSON.stringify(logs)}`,
+  );
+});
+
+Deno.test("loadAgent rejects a connections/*.ts that doesn't default-export a connection def", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/connections`);
+  await Deno.writeTextFile(`${tmp}/connections/bad.ts`, `export default { description: "x" };`); // unbranded
+  await assertRejects(
+    () => loadAgent(tmp),
+    Error,
+    "must default-export defineMcpClientConnection",
+  );
 });

@@ -40,9 +40,18 @@ async function ensureClaudeCodeServer() {
     if (s.status === "running" || s.status === "starting") return;
   } catch {}
 
-  const serverPath = "/usr/src/plugins-dev/devx/fn-claude-code/server.js";
+  // The devx plugin lives at /usr/src/plugins-dx/devx in the consolidated
+  // (TREX_DX_ENABLED) image and at /usr/src/plugins-dev/devx in source/bind
+  // layouts. Resolve whichever fn-claude-code actually exists.
+  let claudeDir = "/usr/src/plugins-dx/devx/fn-claude-code";
+  try {
+    await Deno.stat(`${claudeDir}/server.js`);
+  } catch {
+    claudeDir = "/usr/src/plugins-dev/devx/fn-claude-code";
+  }
+  const serverPath = `${claudeDir}/server.js`;
   const config = JSON.stringify({
-    path: "/usr/src/plugins-dev/devx/fn-claude-code",
+    path: claudeDir,
     command: `node ${serverPath}`,
     port: CLAUDE_PORT,
   });

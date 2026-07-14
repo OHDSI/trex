@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { parseModelString, resolveModel } from "./model.ts";
+import { isBedrockModel, parseModelString, resolveModel, withBedrockCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -40,4 +40,35 @@ Deno.test("resolveModel builds a model for each supported provider", () => {
     const m = resolveModel(s, env);
     assertEquals(typeof m.modelId, "string");
   }
+});
+
+Deno.test("isBedrockModel is true only for provider === amazon-bedrock", () => {
+  assertEquals(isBedrockModel({ provider: "amazon-bedrock" }), true);
+  assertEquals(isBedrockModel({ provider: "anthropic" }), false);
+  assertEquals(isBedrockModel({ provider: "openai" }), false);
+  assertEquals(isBedrockModel({ provider: undefined }), false);
+  assertEquals(isBedrockModel(undefined), false);
+  assertEquals(isBedrockModel(null), false);
+  assertEquals(isBedrockModel({}), false);
+});
+
+Deno.test("withBedrockCachePoint wraps system in a cache-pointed SystemModelMessage for bedrock", () => {
+  const system = "You are a helpful agent.\nFollow the rules.";
+  const wrapped = withBedrockCachePoint({ provider: "amazon-bedrock" }, system);
+  assertEquals(wrapped, {
+    role: "system",
+    content: system,
+    providerOptions: { bedrock: { cachePoint: { type: "default" } } },
+  });
+  // Text content must be byte-identical to the original — no truncation or
+  // mutation, since the cache key depends on exact bytes.
+  assertEquals((wrapped as { content: string }).content, system);
+});
+
+Deno.test("withBedrockCachePoint is a no-op (identity) for non-bedrock providers", () => {
+  const system = "You are a helpful agent.";
+  assertEquals(withBedrockCachePoint({ provider: "anthropic" }, system), system);
+  assertEquals(withBedrockCachePoint({ provider: "openai" }, system), system);
+  assertEquals(withBedrockCachePoint({ provider: undefined }, system), system);
+  assertEquals(withBedrockCachePoint(undefined, system), system);
 });

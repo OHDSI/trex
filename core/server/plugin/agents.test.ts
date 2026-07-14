@@ -3,10 +3,62 @@ import {
   addAgentsPlugin,
   agentsCoreMigrationTarget,
   buildAgentWorkerConfig,
+  channelAuthExemptPattern,
   isTrustedScopeAgentsPlugin,
   normalizeAgentsValue,
   unknownMemoryLinks,
 } from "./agents.ts";
+
+// Security-sensitive invariant: the proxy auth-exemption regex must exempt
+// channel subpaths (adapter-signature-verified) while KEEPING full trex auth on
+// the session/chat/health/info routes. A regression here silently unauthenticates
+// the session API, so it gets its own table-driven test against full paths.
+Deno.test("channelAuthExemptPattern: keeps auth on session/health/info, exempts channel subpaths", () => {
+  const basePath = "/plugins/trex/toy";
+  const re = channelAuthExemptPattern(basePath);
+  const p = (suffix: string) => `${basePath}${suffix}`;
+
+  // NOT matched → proxy auth (authContext+pluginAuthz) is KEPT.
+  const kept = [
+    "/eve/v1/session",
+    "/eve/v1/session/abc",
+    "/eve/v1/session/abc/stream",
+    "/eve/v1/session/abc/approval",
+    "/eve/v1/health",
+    "/eve/v1/info",
+    // The built-in `eve` WEB channel authenticates via trex JWT (spec §5), not a
+    // platform signature — so its routes must KEEP proxy auth, exactly like the
+    // session API. Both the create route and the per-session stream stay authed.
+    "/eve/v1/eve",
+    "/eve/v1/eve/session",
+    "/eve/v1/eve/session/x/stream",
+  ];
+  for (const s of kept) {
+    assert(!re.test(p(s)), `expected auth KEPT (no match) for ${s}`);
+  }
+
+  // MATCHED → auth EXEMPT (adapter verifies the platform signature in-worker).
+  const exempt = [
+    "/eve/v1/discord/message",
+    "/eve/v1/discord",
+    "/eve/v1/slack/events",
+    // A channel whose id merely STARTS with a reserved word is a real channel,
+    // not the reserved route — the lookahead is boundaried by `/` or end.
+    "/eve/v1/sessionx/x",
+    "/eve/v1/healthcheck/ping",
+    // Starts with the reserved word "eve" but is a distinct channel id (the
+    // `(?:/|$)` boundary stops the lookahead from swallowing it) — still exempt.
+    "/eve/v1/eventbridge/x",
+  ];
+  for (const s of exempt) {
+    assert(re.test(p(s)), `expected auth EXEMPT (match) for ${s}`);
+  }
+
+  // The exemption is anchored to THIS agent's basePath — another agent's paths
+  // (or a bare /eve/v1) must not be exempted by this pattern.
+  assert(!re.test("/plugins/trex/other/eve/v1/discord/message"));
+  assert(!re.test("/eve/v1/discord/message"));
+});
 
 Deno.test("normalizeAgentsValue accepts array and single-object forms", () => {
   assertEquals(normalizeAgentsValue([{ name: "a", dir: "agent" }]), [{ name: "a", dir: "agent" }]);
@@ -319,6 +371,28 @@ Deno.test("addAgentsPlugin proceeds when the memory link IS declared (reaches bu
     Error,
     "instructions.md",
   );
+});
+
+Deno.test("buildAgentWorkerConfig excludes the authoring-only evals/ dir from the staged agent tree", async () => {
+  // plugins/devx/agent/evals/ is eve's own local dev/test harness (its own
+  // node_modules pulls in @ai-sdk/amazon-bedrock, eve, etc., ~100MB) — it
+  // must never be copied into a worker's servicePath. Use the real
+  // devx-agent dir (which actually has an evals/ subdir on disk) rather than
+  // the toy-agent testdata fixture, so this proves the exclusion against the
+  // real tree, not a synthetic one.
+  const devxPlugin = new URL("../../../plugins/devx", import.meta.url).pathname;
+  const cfg = await buildAgentWorkerConfig(devxPlugin, { name: "devx-agent", dir: "agent" }, "@trex/devx");
+  let evalsStaged = true;
+  try {
+    await Deno.stat(`${cfg.servicePath}/agent/evals`);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) evalsStaged = false;
+    else throw e;
+  }
+  assert(!evalsStaged, "staged agent dir must not contain an evals/ entry");
+  // Sanity: real agent files the worker actually needs are still staged.
+  const st = await Deno.stat(`${cfg.servicePath}/agent/instructions.md`);
+  assert(st.isFile);
 });
 
 Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async () => {

@@ -37,6 +37,11 @@ const PASSTHROUGH_ENV = [
   "DATABASE_URL", "TREX_AGENTS_DEFAULT_MODEL",
   "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
   "GOOGLE_GENERATIVE_AI_API_KEY", "AWS_BEARER_TOKEN_BEDROCK", "AWS_REGION",
+  // OAuth broker (task-7): the worker needs the root key to unwrap the DEK
+  // (token encryption-at-rest) and derive the signed-state HMAC secret. Absent
+  // → the broker stays unwired and oauth connections are skipped (see
+  // service/index.ts) — every non-oauth agent still boots.
+  "TREX_ROOT_KEY",
 ];
 
 // Resolve the on-disk agents runtime dir (core/server/agents). import.meta.url
@@ -61,9 +66,15 @@ export async function resolveAgentsRuntimeDir(): Promise<string> {
   );
 }
 
-async function copyDirRecursive(src: string, dest: string): Promise<void> {
+// `skipNames`, when given, is applied only at THIS call's own level (never
+// forwarded into the recursive calls for subdirectories) — it exists so
+// callers can exclude specific top-level entries (see the `evals` exclusion
+// below) without accidentally skipping a same-named dir nested deeper in the
+// tree.
+async function copyDirRecursive(src: string, dest: string, skipNames?: ReadonlySet<string>): Promise<void> {
   await Deno.mkdir(dest, { recursive: true });
   for await (const entry of Deno.readDir(src)) {
+    if (skipNames?.has(entry.name)) continue;
     const s = `${src}/${entry.name}`;
     const d = `${dest}/${entry.name}`;
     // Deno.stat follows symlinks, so linked files/dirs are copied as content.
@@ -72,6 +83,14 @@ async function copyDirRecursive(src: string, dest: string): Promise<void> {
     else if (info.isFile) await Deno.copyFile(s, d);
   }
 }
+
+// Authoring-time-only top-level entries under an agent dir that must never
+// be staged into a worker's servicePath: an eval suite (e.g.
+// plugins/devx/agent/evals/) is eve's own local dev/test harness — its own
+// node_modules (@ai-sdk/amazon-bedrock, eve, etc., ~100MB) and .eve run
+// artifacts have no runtime purpose and would otherwise be copied into every
+// staged worker on every registration.
+const AGENT_DIR_STAGING_EXCLUDES = new Set(["evals"]);
 
 export async function buildAgentWorkerConfig(
   pluginDir: string,
@@ -121,7 +140,7 @@ export async function buildAgentWorkerConfig(
   }
   await Deno.copyFile(`${runtimeSrc}loader.ts`, `${tmp}/agents/loader.ts`);
   const stagedAgentDir = `${tmp}/agent`;
-  await copyDirRecursive(agentDir, stagedAgentDir);
+  await copyDirRecursive(agentDir, stagedAgentDir, AGENT_DIR_STAGING_EXCLUDES);
 
   // Linked-memory tools/skills (agent-linked-memory design, Task 3):
   // generated straight into the staged copy, never the plugin's own agent
@@ -252,6 +271,43 @@ export function unknownMemoryLinks(
   return (links ?? []).filter((l) => !declaredMemoryNames.has(l.name));
 }
 
+// Auth carve-out for channel routes (task-4). A channel route lives at
+// {basePath}/eve/v1/<channelId>/... and is authenticated by the adapter's own
+// platform-signature verify() inside the worker — NOT by a trex JWT — so it
+// must bypass authContext/pluginAuthz at the proxy, which would otherwise 401
+// an unauthenticated platform webhook (Discord/Slack/…). The session/chat/
+// health/info routes are deliberately EXCLUDED from the exemption (negative
+// lookahead) so their proxy auth is unchanged — weakening those would be a
+// serious bug. Passed to _addFunction as fncfg.authExemptPattern.
+//
+// The `eve` channel is a SPECIAL case in the reserved set: it is the built-in
+// WEB channel (adapters/eve.ts), trusted browser traffic that — unlike a
+// platform webhook — carries NO platform signature. Instead it authenticates
+// via the trex JWT exactly like the native session API (spec §5: eve-web =
+// "trex JWT (existing)"). So `eve` MUST stay reserved (auth-enforced): leaving
+// it exempt would let anyone create sessions, spend model tokens, run tools,
+// and read other users' session streams (IDOR) with no credential.
+//
+// INVARIANT: the reserved set below (session|health|info|eve) MUST stay in sync
+// with handler.ts's authenticated `/eve/v1/*` route set PLUS the built-in
+// JWT-authed `eve` web channel. If a new AUTHED `/eve/v1/<seg>` route (or a new
+// JWT-authed built-in channel) is ever added, `<seg>` MUST be added to this
+// lookahead — otherwise `/eve/v1/<seg>` becomes auth-exempt (an unauthenticated
+// hole). A channel named like a reserved word (e.g. a `sessionx` or
+// `eventbridge` channel) is unaffected: the lookahead only excludes the exact
+// segments, boundaried by `/` or end.
+//
+// The OAuth consent routes (task-7) at `/eve/v1/oauth/<connector>/{start,
+// callback}` are DELIBERATELY NOT in the reserved set: they are auth-exempt on
+// purpose (a provider's browser redirect carries no trex JWT) and are gated by
+// the signed `state` verified inside the handlers (connections/oauth/routes.ts)
+// — exactly like a channel route is gated by its adapter's signature verify.
+// `oauth` must therefore stay OUT of the lookahead.
+export function channelAuthExemptPattern(basePath: string): RegExp {
+  const esc = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info|eve)(?:/|$))[^/]+`);
+}
+
 export async function addAgentsPlugin(
   app: Express,
   value: unknown,
@@ -293,7 +349,14 @@ export async function addAgentsPlugin(
       cfg.source,
       cfg.servicePath,
       cfg.importMapPath,
-      { function: `/agents/${entry.name}`, allowHostFsAccess: true },
+      {
+        function: `/agents/${entry.name}`,
+        allowHostFsAccess: true,
+        // Channel subpaths ({basePath}/eve/v1/<channelId>/*) bypass proxy auth;
+        // the worker enforces adapter signature verification instead. session/
+        // chat/health/info keep authContext+pluginAuthz. See the pattern's doc.
+        authExemptPattern: channelAuthExemptPattern(basePath),
+      },
       dir,
       name,
       { _shared: { ...cfg.env, TREX_AGENT_BASE: basePath } },
