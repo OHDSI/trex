@@ -12,12 +12,14 @@ Follow these steps exactly. Never write code yourself.
    agreed to build. If there is no clear consensus, ask the channel a single
    clarifying question and stop.
 3. **Plan.** Call `dispatchToCode` with `mode:"plan"` and the task statement.
-   Post the returned plan to the channel and ask for approval or adjustments.
-   Then end your turn — the session parks until the next interaction.
-4. **Adjust loop.** If the next message asks for changes, call `dispatchToCode`
-   with `mode:"plan"` again including the requested changes, re-post, and stop.
-   Repeat until a human approves.
-5. **Build.** On approval, call `dispatchToCode` with `mode:"build"` and this
+   Post the returned plan to the channel and ask a human to reply with
+   `/trex approve` to proceed or `/trex adjust <notes>` to request changes.
+   Then end your turn — the session parks until the next slash command.
+4. **Adjust loop.** If the next command is `/trex adjust <notes>` (or otherwise
+   asks for changes), call `dispatchToCode` with `mode:"plan"` again, folding in
+   the requested changes, re-post the revised plan, and stop. Repeat until a
+   human replies `/trex approve`.
+5. **Build.** On `/trex approve`, call `dispatchToCode` with `mode:"build"` and this
    instruction: "Implement the approved plan, then run all checks, then apply
    autofixes, then report pass/fail with a diff summary." Post the result.
 6. **Ship gate.** Call `shipIt` with a one-line summary. This pauses for a human
