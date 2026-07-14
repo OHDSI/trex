@@ -1,0 +1,26 @@
+{
+  "name": "@trex/claw",
+  "version": "0.0.1",
+  "trex": {
+    "agents": [
+      {
+        "name": "claw",
+        "dir": "agent",
+        "env": {
+          "CLAW_MODEL_PROVIDER": "${CLAW_MODEL_PROVIDER:-anthropic}",
+          "CLAW_MODEL_ID": "${CLAW_MODEL_ID:-claude-sonnet-5}",
+          "CLAW_API_KEY": "${CLAW_API_KEY}",
+          "CLAW_MODEL_BASE_URL": "${CLAW_MODEL_BASE_URL:-}",
+          "DISCORD_BOT_TOKEN": "${DISCORD_BOT_TOKEN}",
+          "DISCORD_PUBLIC_KEY": "${DISCORD_PUBLIC_KEY}",
+          "DISCORD_APPLICATION_ID": "${DISCORD_APPLICATION_ID}"
+        }
+      }
+    ],
+    "migrations": { "schema": "claw", "database": "_config" }
+  },
+  "dependencies": {
+    "eve": "^0.19.0",
+    "ai": "^6"
+  }
+}

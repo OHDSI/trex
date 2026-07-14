@@ -112,6 +112,15 @@ export interface DiscordChannelOptions {
   events?: ChannelEventHandlers;
   /** HITL resume transport (see DEFAULT below). */
   resume?: (ctx: DiscordResumeContext) => void | Promise<void>;
+  /**
+   * Conversation id override for the send-time continuation token (mirrors the
+   * injectable `resume` override above). Given the parsed command interaction,
+   * returns the id to pair with `channelId` in `discordContinuationToken`.
+   * Defaults to `interaction.id`, so every slash command starts a NEW session;
+   * an integrator that wants multiple interactions in a channel to continue the
+   * SAME session (e.g. a stable per-channel id) can override it here.
+   */
+  conversationId?: (interaction: DiscordCommandInteraction) => string;
 }
 
 export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
@@ -239,7 +248,10 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     // Discord shows a "thinking…" state within its deadline.
     await args.send(fullMessage, {
       auth,
-      continuationToken: discordContinuationToken(interaction.channelId, interaction.id),
+      continuationToken: discordContinuationToken(
+        interaction.channelId,
+        opts.conversationId ? opts.conversationId(interaction) : interaction.id,
+      ),
       state,
     });
     return discordDeferredJson(result.ephemeral === true);

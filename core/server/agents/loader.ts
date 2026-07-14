@@ -139,6 +139,10 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
   try {
     for await (const entry of Deno.readDir(`${dir}/tools`)) {
       if (!entry.isFile) continue;
+      // Colocated test files (e.g. dispatchToCode.test.ts) are the
+      // established convention alongside tool/lib modules in this repo —
+      // skip them rather than treating them as tool definitions.
+      if (/\.test\.(ts|js|mts|mjs)$/.test(entry.name)) continue;
       const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
       if (!m) continue;
       const name = m[1];
@@ -180,6 +184,11 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
   try {
     for await (const entry of Deno.readDir(`${dir}/channels`)) {
       if (!entry.isFile) continue;
+      // Colocated test files (e.g. discord.load.test.ts) are the established
+      // convention alongside channel modules in this repo — skip them rather
+      // than treating them as channel definitions (same rationale as the
+      // tools/ scan above).
+      if (/\.test\.(ts|js|mts|mjs)$/.test(entry.name)) continue;
       const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
       if (!m) continue;
       const name = m[1];

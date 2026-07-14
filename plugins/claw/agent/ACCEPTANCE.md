@@ -1,0 +1,30 @@
+# claw — live acceptance (user environment)
+
+These require a real Discord app + a running trex stack with the Code agent; they
+cannot be unit-tested.
+
+- [ ] Register a Discord application named **trex**; set the interactions
+      endpoint to the claw channel route `{basePath}/eve/v1/discord`; register a
+      `/trex` slash command that takes a free-text `message` option (participants
+      speak to claw with `/trex <message>`); set `DISCORD_PUBLIC_KEY`,
+      `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `CLAW_API_KEY`.
+- [ ] `/trex <ask>` in a channel → claw reads recent messages, summarizes the
+      ask, and either hands the coder clear instructions or, if the ask is
+      unclear, **posts a focused clarifying question to the channel** and waits.
+- [ ] Answer claw's clarifying question with another `/trex <answer>` → claw
+      incorporates it and (once clear) delegates to the coding agent. Confirm it
+      does NOT delegate a vague ask.
+- [ ] The coding agent runs its own process (design → plan → implement → checks)
+      with its **full toolset** — verify its skills/subagents are available (they
+      are NOT in devx "plan" mode); claw posts its designs/plans/results back to
+      the channel.
+- [ ] When the coder asks a question, claw either answers it from the discussion
+      or relays it to the channel and passes the human's answer back — all on the
+      SAME coding-agent session (per-channel stable session; history retained).
+- [ ] The coder finishes (implemented, checks passing, committed/pushed if it does
+      so) → claw posts a short summary. Verify delivery still lands if a coder
+      turn exceeds ~15 min (bot-token channel-message fallback).
+- [ ] Two channels in parallel keep independent sessions/state.
+- [ ] Rotate DISCORD_BOT_TOKEN / CLAW_API_KEY on the host → confirm the change
+      takes effect only after the claw worker/plugin is restarted (env is baked
+      in at worker creation).
