@@ -4,7 +4,7 @@ import { addPlugin as addFunctionPlugin } from "./function.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { addAgentsPlugin, agentsCoreMigrationTarget } from "./agents.ts";
-import { normalizeMemoryValue, mountMemoryProxy, type MemoryEntry } from "./memory.ts";
+import { normalizeMemoryValue, type MemoryEntry } from "./memory.ts";
 import { mergeMemoryEntries, type SourceOwners } from "./memory-merge.ts";
 import { scanPluginDirectory, splitPathList } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
@@ -188,19 +188,17 @@ export class Plugins {
 
     // Start the memory runtime once, after every plugin's `trex.memory` has
     // been collected (a memory can span plugins — see MEMORY_SOURCE_OWNERS).
-    // The proxy mount is cheap and always safe to do up front; provisioning
-    // failures are logged and swallowed here (they're already surfaced loudly
-    // inside provisionAndImport per design §8) so an unrelated boot doesn't
-    // crash because gbrain or a git source is temporarily unreachable.
+    // Mounting is best-effort: a failure here is logged and swallowed so an
+    // unrelated boot doesn't crash because the worker failed to stage or a
+    // git source was temporarily unreachable (see gbrain-worker/mount.ts for
+    // the per-source resilience within the mount itself).
     if (MEMORY_ENTRIES.length > 0) {
-      const { provisionAndImport, startRefreshLoop } = await import("../memory/refresh.ts");
-      mountMemoryProxy(app);
       try {
-        await provisionAndImport(MEMORY_ENTRIES);
+        const { mountMemoryWorker } = await import("../memory/gbrain-worker/mount.ts");
+        await mountMemoryWorker(app, MEMORY_ENTRIES);
       } catch (e) {
-        console.error("memory: initial provisioning/import failed:", e);
+        console.error("memory: worker mount failed:", e);
       }
-      startRefreshLoop(MEMORY_ENTRIES);
     }
   }
 
