@@ -16,3 +16,4 @@ cannot be unit-tested.
 - [ ] Ship gate button → approve → Code commits/pushes; claw posts the result.
 - [ ] Deny the ship gate → claw reports shipping declined; nothing is pushed.
 - [ ] Two channels in parallel keep independent sessions/state.
+- [ ] Rotate DISCORD_BOT_TOKEN / CLAW_API_KEY on the host → confirm the change takes effect only after the claw worker/plugin is restarted (env is baked in at worker creation).
