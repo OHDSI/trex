@@ -999,9 +999,13 @@ export class PostgresEngine implements BrainEngine {
    * scopes to the enclosing (outer withSchema) transaction, which is the
    * desired behavior for the search-timeout GUCs below.
    *
-   * Single canonical predicate — every raw `sql.begin(...)` call site in this
-   * file MUST route through this helper instead of duplicating the
-   * begin-vs-savepoint detection.
+   * Single canonical predicate — every NESTED `sql.begin(...)` call site in
+   * this file (i.e. every site that can run either at the top level or
+   * already inside a `withSchema`/`transaction` scope) MUST route through
+   * this helper instead of duplicating the begin-vs-savepoint detection.
+   * `withSchema` below is the one deliberate exception: it IS the outer
+   * transaction entry point, so it opens its own raw `conn.begin(...)`
+   * directly rather than calling this helper.
    */
   private beginOrSavepoint<T>(fn: (tx: postgres.Sql) => Promise<T> | T): Promise<T> {
     const conn = this.sql;

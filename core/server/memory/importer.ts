@@ -1,10 +1,11 @@
-// Materializes `memory` plugin sources (git repos + inline package dirs) and
-// imports their markdown pages into gbrain via the put_page MCP tool.
+// Materializes `memory` plugin sources (git repos + inline package dirs)
+// into on-disk markdown + a version string, for mount.ts's `stageMemorySources`
+// to copy into the worker's own servicePath (see that file's header comment
+// for why staging, not an HTTP import, is the actual delivery path post the
+// subprocess->worker pivot).
 //
-// This module is deliberately narrow: materialize (resolve on-disk markdown
-// + a version string) and import (POST each page) only. Provisioning a
-// brain, choosing an import token, and driving refresh-on-change are the
-// caller's job (Task 12/13).
+// This module is deliberately narrow: materialize only. Provisioning a
+// brain and driving refresh-on-change are the caller's job.
 import type { MemorySource } from "../plugin/memory.ts";
 
 export interface MaterializedFile {
@@ -70,8 +71,7 @@ async function contentHash(files: MaterializedFile[]): Promise<string> {
 // but this is cheap defense-in-depth: reject any `..` path segment so a
 // source can never resolve outside the plugin package (inline sources) or
 // outside the cloned checkout (git sources). Covers every joinDir call site
-// (materializeSource's git + inline branches, and sourceVersion's inline
-// probe) in one place.
+// (materializeSource's git + inline branches) in one place.
 function assertNoParentTraversal(dir: string): void {
   if (dir.split("/").some((segment) => segment === "..")) {
     throw new Error(`memory source dir must not contain a '..' segment: ${dir}`);
@@ -138,95 +138,3 @@ export async function materializeSource(
   return { files, version };
 }
 
-// Cheap change-probe used by the refresh driver (Task 12): avoids a full
-// clone/read cycle just to check whether anything changed. git: ls-remote
-// SHA for the ref, no checkout needed. inline: same content hash as
-// materializeSource (there's no cheaper probe for local files).
-export async function sourceVersion(
-  src: MemorySource,
-  pluginDir: string,
-  workRoot: string,
-): Promise<string> {
-  if (src.repo) {
-    const ref = src.ref ?? "main";
-    const out = await run(["git", "ls-remote", src.repo, ref]);
-    const sha = out.split(/\s+/)[0];
-    if (sha) return sha;
-    // Ref didn't resolve via ls-remote (e.g. a commit SHA, not a branch/tag)
-    // — fall back to an actual sync to resolve it.
-    const { sha: resolved } = await syncGitCheckout(src, workRoot);
-    return resolved;
-  }
-  const root = joinDir(pluginDir, src.dir);
-  const files = await readMarkdown(root);
-  return await contentHash(files);
-}
-
-export interface ImportOpts {
-  baseUrl: string;
-  token: string;
-}
-
-// POSTs one tools/call put_page per file to <baseUrl>/memory/<memoryName>/mcp,
-// namespacing the slug as <src.name>/<file-slug>. Per-page failures (network
-// errors, non-2xx, or an MCP tool-error result) are logged and counted, but
-// never abort the remaining pages — a single bad page shouldn't sink the
-// whole source import.
-export async function importSource(
-  memoryName: string,
-  src: MemorySource,
-  files: MaterializedFile[],
-  opts: ImportOpts,
-): Promise<{ ok: number; failed: number }> {
-  let ok = 0;
-  let failed = 0;
-  for (const f of files) {
-    const slug = `${src.name}/${f.slug}`;
-    try {
-      const res = await fetch(`${opts.baseUrl}/memory/${memoryName}/mcp`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${opts.token}`,
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "tools/call",
-          params: {
-            name: "put_page",
-            arguments: { slug, content: f.content },
-          },
-        }),
-      });
-      let body: { result?: { isError?: boolean } } | undefined;
-      try {
-        body = await res.json();
-      } catch {
-        // Non-JSON body (malformed 2xx response, or a plain-text 500) —
-        // body stays undefined, which fails the `body?.result` check below
-        // regardless of res.ok. Not fatal to parse here.
-      }
-      // Require an actual `result` object, not just the absence of
-      // `isError` — otherwise a 2xx with an unparseable/empty body (body
-      // undefined, so `body?.result` is undefined too) would satisfy
-      // `!body?.result?.isError` and get miscounted as a success.
-      if (res.ok && body?.result && !body.result.isError) {
-        ok++;
-      } else {
-        failed++;
-        console.error(
-          `memory ${memoryName}/${src.name}: put_page ${f.slug} failed`,
-          body?.result ?? res.status,
-        );
-      }
-    } catch (e) {
-      failed++;
-      console.error(
-        `memory ${memoryName}/${src.name}: put_page ${f.slug} threw`,
-        e,
-      );
-    }
-  }
-  return { ok, failed };
-}

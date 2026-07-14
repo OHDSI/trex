@@ -154,6 +154,67 @@ Deno.test("buildMemoryWorkerConfig: H4 stages a real inline source's markdown + 
   }
 });
 
+Deno.test(
+  "buildMemoryWorkerConfig: staged servicePath's module graph actually resolves (deno info) — regression guard for the gbrain/package.json staging bug",
+  async () => {
+    // Every assertion above only stats individual files it already knows to
+    // look for; none of them would have caught the CRITICAL bug where
+    // vendor/gbrain/src/version.ts's
+    // `import pkg from '../package.json' with { type: 'json' }` resolved,
+    // at the staged copy, to `${servicePath}/gbrain/package.json` — a path
+    // buildMemoryWorkerConfig never staged. The worker's module loader
+    // resolves its ENTIRE static import graph at worker-create time, so a
+    // missing file anywhere in that graph is a deterministic
+    // module-not-found — the worker never boots. `deno info` builds that
+    // same static graph (no type-checking, so the ~110-120 pre-existing
+    // vendor TS errors documented in task-h2/h4-report.md don't apply here)
+    // against the REAL staged deno.json (the file the static graph builder
+    // actually reads per mount.ts's comment — not the runtime-only
+    // importMapPath), so this is the closest a unit test gets to proving
+    // the worker would actually boot.
+    const cfg = await buildMemoryWorkerConfig(ENTRIES);
+    try {
+      const cmd = new Deno.Command(Deno.execPath(), {
+        args: [
+          "info",
+          "--config",
+          `${cfg.servicePath}/deno.json`,
+          `${cfg.servicePath}/index.ts`,
+        ],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const { code, stdout, stderr } = await cmd.output();
+      const out = new TextDecoder().decode(stdout) +
+        new TextDecoder().decode(stderr);
+
+      assertEquals(code, 0, `deno info exited non-zero:\n${out}`);
+      // `deno info` marks an import that resolves to a LOCAL FILE PATH that
+      // doesn't exist on disk as "(missing)" in the printed tree — distinct
+      // from "(resolve error)", which it uses for a bare specifier that
+      // isn't in the import map at all (this vendored graph has ~14
+      // pre-existing resolve-errors for optional/dynamic imports outside
+      // the staged map — e.g. web-tree-sitter, @aws-sdk/client-s3,
+      // heic-decode — which are expected and must NOT fail this test).
+      // "(missing)" is the precise, narrow signal for exactly the
+      // package.json-not-staged failure this test guards against.
+      //
+      // Verified this actually catches the regression: temporarily
+      // deleting `${cfg.servicePath}/gbrain/package.json` before this
+      // assertion reproduces `deno info` printing
+      // ".../gbrain/package.json (missing)" (still exit 0 — deno info
+      // annotates rather than failing the process, which is exactly why the
+      // exit-code check alone is not sufficient here).
+      assert(
+        !out.includes("(missing)"),
+        `staged module graph has an unresolved local file — regression: is gbrain/package.json staged?\n${out}`,
+      );
+    } finally {
+      await Deno.remove(cfg.servicePath, { recursive: true });
+    }
+  },
+);
+
 Deno.test("memoryWorkerBasePath: scope-prefix only, matches PLUGINS_BASE_PATH/trex", () => {
   // Default PLUGINS_BASE_PATH (no env override in this test process) is
   // "/plugins"; MEMORY_PLUGIN_NAME is fixed at "@trex/memory" -> scope

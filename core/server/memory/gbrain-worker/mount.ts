@@ -214,6 +214,22 @@ export async function buildMemoryWorkerConfig(
   // `../../../../vendor/gbrain/src/`. ~799 files; acceptable per-mount cost,
   // same order of magnitude as buildAgentWorkerConfig's runtime copy.
   await copyDirRecursive(gbrainSrc, `${tmp}/gbrain/src`);
+  // vendor/gbrain/src/version.ts does
+  // `import pkg from '../package.json' with { type: 'json' }` — a relative
+  // import resolved against the FILE'S OWN location, so at the staged copy
+  // (`${tmp}/gbrain/src/version.ts`) it targets `${tmp}/gbrain/package.json`,
+  // one level ABOVE the staged `src/` (mirroring the real vendor layout,
+  // where package.json is `src/`'s sibling, not its child — see
+  // resolveGbrainSrcDir/`gbrainSrc`'s trailing `.../vendor/gbrain/src/`).
+  // The worker's module loader resolves its ENTIRE static import graph at
+  // creation time, so a missing file here isn't a lazy/runtime-only gap —
+  // without this copy the worker fails to boot with a module-not-found error
+  // on every mount. Stage it right alongside the `src/` copy.
+  const gbrainRoot = gbrainSrc.replace(/\/src\/?$/, "/");
+  await Deno.copyFile(
+    `${gbrainRoot}package.json`,
+    `${tmp}/gbrain/package.json`,
+  );
   await Deno.copyFile(`${workerDir}handler.ts`, `${tmp}/handler.ts`);
   // H4 Part B: stage self-import.ts (the worker-side boot importer) next to
   // handler.ts, and pre-stage every declared memory's source markdown (Part
@@ -399,52 +415,4 @@ export async function mountMemoryWorker(
  */
 export function memoryWorkerBasePath(): string {
   return `${PLUGINS_BASE_PATH}${scopeUrlPrefix(MEMORY_PLUGIN_NAME)}`;
-}
-
-/**
- * Boot warmup: issues an internal MCP `initialize` request per declared
- * memory so the (lazily-created, per-servicePath) worker is provisioned
- * before the first real caller hits it — same lazy-worker-creation
- * semantics `_callWorker` has for every other function-plugin route
- * (EdgeRuntime.userWorkers.create happens on first `_callWorker`, keyed by
- * servicePath). `baseUrl` is the internal address of THIS trex server
- * (e.g. `http://127.0.0.1:<port>`) — the caller (Task 13) owns knowing
- * that; this only knows the path (`memoryWorkerBasePath()` + `/memory`).
- *
- * Best-effort: a failed warmup for one memory is logged and does not throw
- * or block the others — the worker still lazily provisions on the first
- * REAL request either way, so a failed warmup only costs one cold start,
- * not availability. Not exercised by mount.test.ts (needs a live HTTP
- * listener); see task-h3-report.md's runtime-execution limitation.
- */
-export async function warmMemories(
-  baseUrl: string,
-  entries: MemoryEntry[],
-  token: string,
-): Promise<void> {
-  const base = `${baseUrl}${memoryWorkerBasePath()}/memory`;
-  for (const entry of entries) {
-    try {
-      const res = await fetch(`${base}/${entry.name}/mcp`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          ...(token ? { authorization: `Bearer ${token}` } : {}),
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: "warmup",
-          method: "initialize",
-          params: {},
-        }),
-      });
-      if (!res.ok) {
-        console.error(
-          `memory: warmup failed for ${entry.name}: HTTP ${res.status}`,
-        );
-      }
-    } catch (e) {
-      console.error(`memory: warmup failed for ${entry.name}:`, e);
-    }
-  }
 }
