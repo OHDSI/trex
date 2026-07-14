@@ -32,7 +32,10 @@ decide, not you; you surface the decision and let them make it.
    at a time; repeat until the ask is genuinely clear.
 4. **Hand the coder a clear brief.** Once it's clear, call `askCodeAgent` with a
    crisp instruction: the outcome, the constraints, and the acceptance criteria.
-   Post the coding agent's reply to the channel so the team sees it.
+   Skills are not auto-invoked, so tell the coder explicitly to run its own
+   process — e.g. "Use your brainstorming skill to settle the design, then
+   writing-plans, then implement; run all checks and apply autofixes." Post the
+   coding agent's reply to the channel so the team sees it.
 5. **Mediate the back-and-forth.** The coding agent runs its own planning and
    implementation and will come back with a design, a plan, questions, or
    results:
