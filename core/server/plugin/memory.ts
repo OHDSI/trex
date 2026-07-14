@@ -25,6 +25,14 @@ export interface MemorySource {
   repo?: string; // git source
   ref?: string; // git ref, default "main"
   dir?: string; // subdir within repo (git) OR path within the plugin package (inline)
+  // Internal: the directory of the plugin that declared this source, stamped
+  // by plugin.ts's `case "memory"` after normalizeMemoryValue returns (NOT
+  // set or required by normalizeMemoryValue itself). Needed because 2+
+  // plugins may contribute INLINE sources to the SAME memory name — a single
+  // per-memory directory would resolve a later plugin's `dir` against the
+  // wrong plugin's directory. Git sources don't need this (they resolve
+  // against the cloned checkout), but it's stamped uniformly for simplicity.
+  pluginDir?: string;
 }
 export interface MemoryEntry {
   name: string;

@@ -11,3 +11,14 @@ CREATE TABLE IF NOT EXISTS trexdb.memory_import_state (
   imported_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (memory, source)
 );
+
+-- Internal import bookkeeping, not user-facing data: PostGraphile introspects
+-- every table in trexdb, and V3__graphql_trexdb_grants.sql's ALTER DEFAULT
+-- PRIVILEGES grants SELECT/INSERT/UPDATE/DELETE on ALL (including future)
+-- trexdb tables to `authenticated`. Without this REVOKE, any authenticated
+-- JWT could read or mutate memory import state via GraphQL. Mirrors V3's
+-- defence-in-depth REVOKE block for other internal/secret-bearing tables
+-- (trexdb.setting, trexdb.event_log, etc.) — V3 only revokes those from
+-- `authenticated` (anon never has table grants to begin with; it only gets
+-- schema USAGE), so this matches that scope exactly.
+REVOKE ALL ON trexdb.memory_import_state FROM authenticated;

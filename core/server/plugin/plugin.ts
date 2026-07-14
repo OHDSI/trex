@@ -15,21 +15,12 @@ declare const Trex: any;
 // Accumulated across all plugins during a scan pass (see the `memory` case
 // in addPlugin below): every `trex.memory` declaration, merged so multiple
 // plugins can contribute sources to the same memory name (see
-// memory-merge.ts), plus the originating plugin directory per memory name
-// (needed to resolve inline `dir` sources — see materializeSource in
-// memory/importer.ts).
-//
-// KNOWN LIMITATION: this map is keyed by memory NAME, not by (memory,
-// source). If a memory spans plugins located in different directories AND
-// more than one of those plugins contributes an *inline* (non-git) source,
-// only the FIRST plugin's directory is retained here — an inline source
-// contributed by a later plugin would resolve its `dir` against the wrong
-// plugin's directory. Git sources (src.repo) are unaffected: they resolve
-// against the cloned checkout, not pluginDir. See task-13-report.md for the
-// full writeup; this is a deliberate DONE_WITH_CONCERNS punt rather than a
-// silent break of provisionAndImport's Task 12 signature.
+// memory-merge.ts). Each source is stamped with the declaring plugin's
+// directory (MemorySource.pluginDir, see memory.ts) before merging, so an
+// inline `dir` source always resolves against the plugin that declared it —
+// even when a memory spans plugins in different directories that each
+// contribute inline sources — see materializeSource in memory/importer.ts.
 const MEMORY_ENTRIES: MemoryEntry[] = [];
-const MEMORY_PLUGIN_DIRS = new Map<string, string>();
 const MEMORY_SOURCE_OWNERS: SourceOwners = new Map();
 
 interface ActivePluginEntry {
@@ -124,12 +115,12 @@ export class Plugins {
             // plugins (see MEMORY_SOURCE_OWNERS above) sees every source
             // before gbrain is warmed up.
             const entries = normalizeMemoryValue(value);
-            mergeMemoryEntries(MEMORY_ENTRIES, entries, fullName, MEMORY_SOURCE_OWNERS);
             for (const e of entries) {
-              if (!MEMORY_PLUGIN_DIRS.has(e.name)) {
-                MEMORY_PLUGIN_DIRS.set(e.name, dir);
+              for (const src of e.sources) {
+                src.pluginDir = dir;
               }
             }
+            mergeMemoryEntries(MEMORY_ENTRIES, entries, fullName, MEMORY_SOURCE_OWNERS);
             break;
           }
           default:
@@ -205,11 +196,11 @@ export class Plugins {
       const { provisionAndImport, startRefreshLoop } = await import("../memory/refresh.ts");
       mountMemoryProxy(app);
       try {
-        await provisionAndImport(MEMORY_ENTRIES, MEMORY_PLUGIN_DIRS);
+        await provisionAndImport(MEMORY_ENTRIES);
       } catch (e) {
         console.error("memory: initial provisioning/import failed:", e);
       }
-      startRefreshLoop(MEMORY_ENTRIES, MEMORY_PLUGIN_DIRS);
+      startRefreshLoop(MEMORY_ENTRIES);
     }
   }
 

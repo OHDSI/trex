@@ -61,7 +61,6 @@ async function recordVersion(
 // it means the memory's schema/proxy path is unusable.
 export async function provisionAndImport(
   entries: MemoryEntry[],
-  pluginDirs: Map<string, string>,
 ): Promise<void> {
   const { baseUrl } = await startGbrain({
     allowlist: entries.map((e) => e.name),
@@ -86,8 +85,14 @@ export async function provisionAndImport(
       );
     }
 
-    const pluginDir = pluginDirs.get(mem.name) ?? Deno.cwd();
     for (const src of mem.sources) {
+      // Each source carries the directory of the plugin that declared it
+      // (stamped by plugin.ts's `case "memory"` — see memory.ts's
+      // MemorySource.pluginDir). This matters when 2+ plugins contribute
+      // INLINE sources to the same memory: a single per-memory dir would
+      // resolve a later plugin's inline source against the wrong plugin's
+      // directory.
+      const pluginDir = src.pluginDir ?? Deno.cwd();
       try {
         const recorded = await getRecordedVersion(mem.name, src.name);
         const fresh = await sourceVersion(src, pluginDir, workRoot);
@@ -107,10 +112,20 @@ export async function provisionAndImport(
           baseUrl,
           token: IMPORT_TOKEN,
         });
-        await recordVersion(mem.name, src.name, version);
         console.log(
           `memory ${mem.name}/${src.name}: imported ${r.ok} page(s), ${r.failed} failed (version ${version})`,
         );
+        // Only record the new version when the import fully succeeded —
+        // a partial import (failed > 0) must retry on the next refresh
+        // tick rather than being marked as done. A source with zero files
+        // (ok=0, failed=0) still counts as fully successful.
+        if (r.failed === 0) {
+          await recordVersion(mem.name, src.name, version);
+        } else {
+          console.error(
+            `memory ${mem.name}/${src.name}: ${r.failed} page(s) failed — not recording version ${version}, will retry next refresh`,
+          );
+        }
       } catch (e) {
         // Git fetch/import failure keeps last-good; surfaced, retried on
         // the next refresh tick.
@@ -129,14 +144,13 @@ export async function provisionAndImport(
 // down because a source is temporarily unreachable.
 export function startRefreshLoop(
   entries: MemoryEntry[],
-  pluginDirs: Map<string, string>,
   opts?: { intervalMs?: number },
 ): void {
   const interval = opts?.intervalMs ??
     Number(Deno.env.get("MEMORY_REFRESH_MS") ?? String(5 * 60_000));
   const tick = async () => {
     try {
-      await provisionAndImport(entries, pluginDirs);
+      await provisionAndImport(entries);
     } catch (e) {
       console.error("memory: refresh tick failed (non-fatal):", e);
     }
