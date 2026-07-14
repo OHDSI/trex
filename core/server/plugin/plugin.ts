@@ -4,11 +4,33 @@ import { addPlugin as addFunctionPlugin } from "./function.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { addAgentsPlugin, agentsCoreMigrationTarget } from "./agents.ts";
+import { normalizeMemoryValue, mountMemoryProxy, type MemoryEntry } from "./memory.ts";
+import { mergeMemoryEntries, type SourceOwners } from "./memory-merge.ts";
 import { scanPluginDirectory, splitPathList } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
 import { waitForAttachedDatabase } from "../lib/db-wait.ts";
 
 declare const Trex: any;
+
+// Accumulated across all plugins during a scan pass (see the `memory` case
+// in addPlugin below): every `trex.memory` declaration, merged so multiple
+// plugins can contribute sources to the same memory name (see
+// memory-merge.ts), plus the originating plugin directory per memory name
+// (needed to resolve inline `dir` sources — see materializeSource in
+// memory/importer.ts).
+//
+// KNOWN LIMITATION: this map is keyed by memory NAME, not by (memory,
+// source). If a memory spans plugins located in different directories AND
+// more than one of those plugins contributes an *inline* (non-git) source,
+// only the FIRST plugin's directory is retained here — an inline source
+// contributed by a later plugin would resolve its `dir` against the wrong
+// plugin's directory. Git sources (src.repo) are unaffected: they resolve
+// against the cloned checkout, not pluginDir. See task-13-report.md for the
+// full writeup; this is a deliberate DONE_WITH_CONCERNS punt rather than a
+// silent break of provisionAndImport's Task 12 signature.
+const MEMORY_ENTRIES: MemoryEntry[] = [];
+const MEMORY_PLUGIN_DIRS = new Map<string, string>();
+const MEMORY_SOURCE_OWNERS: SourceOwners = new Map();
 
 interface ActivePluginEntry {
   name: string;
@@ -66,7 +88,8 @@ export class Plugins {
           case "functions": return 2;
           case "flow": return 3;
           case "agents": return 4;
-          default: return 5;
+          case "memory": return 5;
+          default: return 6;
         }
       };
       const sortedEntries = trexEntries.slice().sort(
@@ -95,6 +118,20 @@ export class Plugins {
               Plugins.migrationTargets.push(await agentsCoreMigrationTarget());
             }
             break;
+          case "memory": {
+            // Collect only — the proxy/gbrain/provisioning start once, after
+            // the full plugin scan, so a shared brain fed by multiple
+            // plugins (see MEMORY_SOURCE_OWNERS above) sees every source
+            // before gbrain is warmed up.
+            const entries = normalizeMemoryValue(value);
+            mergeMemoryEntries(MEMORY_ENTRIES, entries, fullName, MEMORY_SOURCE_OWNERS);
+            for (const e of entries) {
+              if (!MEMORY_PLUGIN_DIRS.has(e.name)) {
+                MEMORY_PLUGIN_DIRS.set(e.name, dir);
+              }
+            }
+            break;
+          }
           default:
             console.log(`Unknown plugin type: ${key}`);
         }
@@ -157,6 +194,23 @@ export class Plugins {
     // a plugin's `migrations` config is silently ignored and its tables never
     // get created — surfacing later as "relation <schema>.<table> does not exist".
     await Plugins.applyMigrations();
+
+    // Start the memory runtime once, after every plugin's `trex.memory` has
+    // been collected (a memory can span plugins — see MEMORY_SOURCE_OWNERS).
+    // The proxy mount is cheap and always safe to do up front; provisioning
+    // failures are logged and swallowed here (they're already surfaced loudly
+    // inside provisionAndImport per design §8) so an unrelated boot doesn't
+    // crash because gbrain or a git source is temporarily unreachable.
+    if (MEMORY_ENTRIES.length > 0) {
+      const { provisionAndImport, startRefreshLoop } = await import("../memory/refresh.ts");
+      mountMemoryProxy(app);
+      try {
+        await provisionAndImport(MEMORY_ENTRIES, MEMORY_PLUGIN_DIRS);
+      } catch (e) {
+        console.error("memory: initial provisioning/import failed:", e);
+      }
+      startRefreshLoop(MEMORY_ENTRIES, MEMORY_PLUGIN_DIRS);
+    }
   }
 
   /**
