@@ -7,6 +7,7 @@ import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from "./agent-memory.ts";
 import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
+import { createGatewaySigner, DiscordGatewayClient, gatewayModeEnabled } from "../agents/gateway/discord.ts";
 
 export interface AgentEntry {
   name: string;
@@ -368,6 +369,27 @@ export async function addAgentsPlugin(
     // trusted-scope mount — the guard above rejects everything else.
     const scope = `/${name.slice(1, name.indexOf("/"))}`;
     const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
+
+    // Discord GATEWAY mode (agents/gateway/discord.ts): DISCORD_GATEWAY in the
+    // agent's env (or the host env) swaps the inbound webhook for an outbound
+    // gateway WebSocket — no public URL needed. The worker's DISCORD_PUBLIC_KEY
+    // is overridden to a boot-time ephemeral key BEFORE _addFunction bakes the
+    // env, so the loopback shim is the only principal that can pass the
+    // adapter's signature-before-send gate (Discord never POSTs webhooks in
+    // this mode — no Interactions Endpoint URL is registered — so the real
+    // application key is unused). Must happen before _addFunction: worker env
+    // is creation-time only.
+    let gateway: { botToken: string; channelId: string } | null = null;
+    if (gatewayModeEnabled(cfg.env.DISCORD_GATEWAY ?? Deno.env.get("DISCORD_GATEWAY"))) {
+      const botToken = cfg.env.DISCORD_BOT_TOKEN || Deno.env.get("DISCORD_BOT_TOKEN") || "";
+      if (!botToken) {
+        console.error(`agents: agent ${entry.name} (plugin ${name}) sets DISCORD_GATEWAY but has no DISCORD_BOT_TOKEN — gateway mode disabled`);
+      } else {
+        gateway = { botToken, channelId: cfg.env.DISCORD_GATEWAY_CHANNEL || "discord" };
+      }
+    }
+    const signer = gateway ? await createGatewaySigner() : null;
+    if (signer) cfg.env.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
     _addFunction(
       app,
       cfg.source,
@@ -385,7 +407,33 @@ export async function addAgentsPlugin(
       name,
       { _shared: { ...cfg.env, TREX_AGENT_BASE: basePath } },
     );
+
+    if (gateway && signer) {
+      // Loopback base: the in-process plain-HTTP listener (same convention as
+      // GBRAIN_MEMORY_INTERNAL_URL in buildAgentWorkerConfig). The client
+      // starts fire-and-forget and reconnects on its own; keyed by basePath so
+      // a re-registration replaces the previous client instead of doubling up.
+      const loopback = Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL") ?? "http://127.0.0.1:8001";
+      startDiscordGateway(basePath, {
+        botToken: gateway.botToken,
+        forwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}`,
+        signer,
+        label: `${name}/${entry.name}`,
+      });
+    }
   }
+}
+
+// One gateway client per agent basePath; re-registering an agent (dev reload)
+// stops the old client before starting the replacement.
+const discordGateways = new Map<string, DiscordGatewayClient>();
+
+function startDiscordGateway(basePath: string, opts: ConstructorParameters<typeof DiscordGatewayClient>[0]): void {
+  discordGateways.get(basePath)?.stop();
+  const client = new DiscordGatewayClient(opts);
+  discordGateways.set(basePath, client);
+  client.start();
+  console.log(`agents: discord gateway mode enabled for ${opts.label} → ${opts.forwardUrl}`);
 }
 
 // Registered once by plugin.ts when the first agents-type plugin appears.
