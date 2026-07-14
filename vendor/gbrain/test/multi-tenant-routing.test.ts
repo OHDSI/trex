@@ -11,6 +11,8 @@ test('rejects bad names', () => {
 test('ignores non-memory paths', () => {
   expect(parseMemoryPath('/mcp')).toBeNull();
   expect(parseMemoryPath('/health')).toBeNull();
+  expect(parseMemoryPath('/memory')).toBeNull();          // no name segment
+  expect(parseMemoryPath('/notmemory/x/mcp')).toBeNull(); // unrelated prefix
 });
 test('rejects hyphenated names (schema idents are hyphen-free)', () => {
   expect(parseMemoryPath('/memory/foo-bar/mcp')).toBeNull();
