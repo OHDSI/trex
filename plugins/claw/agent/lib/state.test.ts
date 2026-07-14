@@ -20,21 +20,24 @@ Deno.test("readOrchestration returns null when no row", async () => {
 
 Deno.test("readOrchestration maps a row", async () => {
   const f = fakeSql();
-  f.setRows([{ session_id: "s1", code_session_id: "c1", plan: "the plan", status: "awaiting_ship", event_cursor: 7 }]);
+  f.setRows([{ session_id: "s1", code_session_id: "c1", event_cursor: 7 }]);
   const got = await readOrchestration(f.fn, "s1");
-  assertEquals(got, { sessionId: "s1", codeSessionId: "c1", plan: "the plan", status: "awaiting_ship", eventCursor: 7 });
+  assertEquals(got, { sessionId: "s1", codeSessionId: "c1", eventCursor: 7 });
 });
 
-Deno.test("upsertOrchestration passes all fields as params", async () => {
+Deno.test("upsertOrchestration passes session, code session, and cursor as params", async () => {
   const f = fakeSql();
-  const o: Orchestration = { sessionId: "s1", codeSessionId: "c1", plan: "p", status: "implementing", eventCursor: 3 };
+  const o: Orchestration = { sessionId: "s1", codeSessionId: "c1", eventCursor: 3 };
   await upsertOrchestration(f.fn, o);
-  assertEquals(f.calls[0].params, ["s1", "c1", "p", "implementing", 3]);
+  assertEquals(f.calls[0].params, ["s1", "c1", 3]);
 });
 
-Deno.test("renderStateForPrompt is explicit when empty and when populated", () => {
-  assertEquals(renderStateForPrompt(null).includes("No active"), true);
-  const s = renderStateForPrompt({ sessionId: "s1", codeSessionId: "c1", plan: "P", status: "awaiting_ship", eventCursor: 2 });
-  assertEquals(s.includes("awaiting_ship"), true);
-  assertEquals(s.includes("c1"), true);
+Deno.test("renderStateForPrompt distinguishes no-session from active-session", () => {
+  assertEquals(renderStateForPrompt(null).includes("No coding-agent session yet"), true);
+  assertEquals(
+    renderStateForPrompt({ sessionId: "s1", codeSessionId: null, eventCursor: 0 }).includes("No coding-agent session yet"),
+    true,
+  );
+  const active = renderStateForPrompt({ sessionId: "s1", codeSessionId: "c1", eventCursor: 2 });
+  assertEquals(active.includes("active"), true);
 });

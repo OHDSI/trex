@@ -5,20 +5,26 @@ cannot be unit-tested.
 
 - [ ] Register a Discord application named **trex**; set the interactions
       endpoint to the claw channel route `{basePath}/eve/v1/discord`; register a
-      `/trex` slash command with subcommands `build`, `approve`, and `adjust`
-      (`adjust` takes a free-text `notes` option); set `DISCORD_PUBLIC_KEY`,
+      `/trex` slash command that takes a free-text `message` option (participants
+      speak to claw with `/trex <message>`); set `DISCORD_PUBLIC_KEY`,
       `DISCORD_BOT_TOKEN`, `DISCORD_APPLICATION_ID`, `CLAW_API_KEY`.
-- [ ] `/trex build <ask>` in a channel → claw fetches history and posts a plan as
-      a message, inviting `/trex approve` or `/trex adjust <notes>`. (Plan
-      approval uses follow-up slash commands, not buttons — the framework's
-      in-turn approval button has a ~5-min timeout, too short for plan
-      deliberation; only the binary ship gate uses a button.)
-- [ ] `/trex adjust <notes>` → plan is revised on the SAME Code session and the
-      SAME claw session (history/state retained; per-channel stable session).
-- [ ] `/trex approve` → claw runs a `build` turn; the Code agent implements, runs
-      checks, autofixes, and claw posts the diff summary (verify delivery still
-      lands if the build exceeds ~15 min — bot-token channel-message fallback).
-- [ ] Ship gate button → approve → Code commits/pushes; claw posts the result.
-- [ ] Deny the ship gate → claw reports shipping declined; nothing is pushed.
+- [ ] `/trex <ask>` in a channel → claw reads recent messages, summarizes the
+      ask, and either hands the coder clear instructions or, if the ask is
+      unclear, **posts a focused clarifying question to the channel** and waits.
+- [ ] Answer claw's clarifying question with another `/trex <answer>` → claw
+      incorporates it and (once clear) delegates to the coding agent. Confirm it
+      does NOT delegate a vague ask.
+- [ ] The coding agent runs its own process (design → plan → implement → checks)
+      with its **full toolset** — verify its skills/subagents are available (they
+      are NOT in devx "plan" mode); claw posts its designs/plans/results back to
+      the channel.
+- [ ] When the coder asks a question, claw either answers it from the discussion
+      or relays it to the channel and passes the human's answer back — all on the
+      SAME coding-agent session (per-channel stable session; history retained).
+- [ ] The coder finishes (implemented, checks passing, committed/pushed if it does
+      so) → claw posts a short summary. Verify delivery still lands if a coder
+      turn exceeds ~15 min (bot-token channel-message fallback).
 - [ ] Two channels in parallel keep independent sessions/state.
-- [ ] Rotate DISCORD_BOT_TOKEN / CLAW_API_KEY on the host → confirm the change takes effect only after the claw worker/plugin is restarted (env is baked in at worker creation).
+- [ ] Rotate DISCORD_BOT_TOKEN / CLAW_API_KEY on the host → confirm the change
+      takes effect only after the claw worker/plugin is restarted (env is baked
+      in at worker creation).

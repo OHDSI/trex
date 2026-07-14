@@ -1,31 +1,26 @@
+// Per-conversation link between a claw channel session and the shared Code
+// agent session it is facilitating. claw is a facilitator, not a state machine:
+// it needs only enough to keep talking to the SAME Code session across the
+// parked Discord turns — the Code session id and the stream cursor. All the
+// conversational memory (the discussion, clarifications, decisions) lives in
+// claw's own replayed session history, not here.
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
 
-export type Status =
-  | "awaiting_plan_approval"
-  | "implementing"
-  | "awaiting_ship"
-  | "done"
-  | "failed";
-
 export interface Orchestration {
-  sessionId: string;
-  codeSessionId: string | null;
-  plan: string | null;
-  status: Status | null;
-  eventCursor: number;
+  sessionId: string; // claw session id (PK)
+  codeSessionId: string | null; // the shared Code agent session, once opened
+  eventCursor: number; // position in the Code session's event stream
 }
 
 interface Row {
   session_id: string;
   code_session_id: string | null;
-  plan: string | null;
-  status: Status | null;
   event_cursor: number | string;
 }
 
 export async function readOrchestration(sql: QueryFn, sessionId: string): Promise<Orchestration | null> {
   const { rows } = await sql(
-    `SELECT session_id, code_session_id, plan, status, event_cursor
+    `SELECT session_id, code_session_id, event_cursor
        FROM claw.orchestrations WHERE session_id = $1`,
     [sessionId],
   );
@@ -34,34 +29,25 @@ export async function readOrchestration(sql: QueryFn, sessionId: string): Promis
   return {
     sessionId: r.session_id,
     codeSessionId: r.code_session_id,
-    plan: r.plan,
-    status: r.status,
     eventCursor: Number(r.event_cursor) || 0,
   };
 }
 
 export async function upsertOrchestration(sql: QueryFn, o: Orchestration): Promise<void> {
   await sql(
-    `INSERT INTO claw.orchestrations (session_id, code_session_id, plan, status, event_cursor, updated_at)
-       VALUES ($1, $2, $3, $4, $5, now())
+    `INSERT INTO claw.orchestrations (session_id, code_session_id, event_cursor, updated_at)
+       VALUES ($1, $2, $3, now())
      ON CONFLICT (session_id) DO UPDATE SET
        code_session_id = EXCLUDED.code_session_id,
-       plan = EXCLUDED.plan,
-       status = EXCLUDED.status,
        event_cursor = EXCLUDED.event_cursor,
        updated_at = now()`,
-    [o.sessionId, o.codeSessionId, o.plan, o.status, o.eventCursor],
+    [o.sessionId, o.codeSessionId, o.eventCursor],
   );
 }
 
 export function renderStateForPrompt(o: Orchestration | null): string {
-  if (!o || !o.status) {
-    return "\n\n## Orchestration state\nNo active coding task for this conversation.";
+  if (!o || !o.codeSessionId) {
+    return "\n\n## Coding-agent session\nNo coding-agent session yet — you have not delegated anything for this conversation. Once the ask is clear, use askCodeAgent to open one.";
   }
-  return [
-    "\n\n## Orchestration state",
-    `- status: ${o.status}`,
-    `- code session: ${o.codeSessionId ?? "(none yet)"}`,
-    o.plan ? `- current plan:\n${o.plan}` : "- current plan: (none yet)",
-  ].join("\n");
+  return "\n\n## Coding-agent session\nA coding-agent session is active for this conversation (askCodeAgent continues the SAME one). Keep facilitating: relay the team's clarified answers to it and post its replies back to the channel.";
 }

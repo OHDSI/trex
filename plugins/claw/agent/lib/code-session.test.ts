@@ -34,7 +34,7 @@ function fakeClient(responses: Response[]) {
   return { client, reqs };
 }
 
-Deno.test("runCodeTurn creates a session then streams the reply", async () => {
+Deno.test("runCodeTurn creates a session then streams the reply (no mode = full tools)", async () => {
   const create = new Response(JSON.stringify({ sessionId: "code-1", continuationToken: "code-1" }), {
     headers: { "content-type": "application/json" },
   });
@@ -46,7 +46,7 @@ Deno.test("runCodeTurn creates a session then streams the reply", async () => {
   const { client, reqs } = fakeClient([create, stream]);
 
   const res = await runCodeTurn(client, {
-    codeSessionId: null, message: "build X", mode: "plan", userId: "u1", startCursor: 0,
+    codeSessionId: null, message: "build X", userId: "u1", startCursor: 0,
   });
 
   assertEquals(res.codeSessionId, "code-1");
@@ -55,7 +55,11 @@ Deno.test("runCodeTurn creates a session then streams the reply", async () => {
   // create POST
   assertEquals(reqs[0].url, `${CODE_BASE}/eve/v1/session`);
   assertEquals(reqs[0].init.method, "POST");
-  assertEquals(JSON.parse(reqs[0].init.body).metadata.mode, "plan");
+  const body = JSON.parse(reqs[0].init.body);
+  assertEquals(body.message, "build X");
+  // No devx mode is sent — an unset mode means the Code agent gets its full
+  // toolset (the only mode its superpowers skills/subagents are available in).
+  assertEquals(body.metadata, undefined);
   assertEquals(reqs[0].init.headers["x-user-id"], "u1");
   // stream GET from startIndex 0
   assertEquals(reqs[1].url, `${CODE_BASE}/eve/v1/session/code-1/stream?startIndex=0`);
@@ -73,7 +77,7 @@ Deno.test("runCodeTurn continues an existing session with startCursor", async ()
   const { client, reqs } = fakeClient([cont, stream]);
 
   const res = await runCodeTurn(client, {
-    codeSessionId: "code-1", message: "implement it", mode: "build", startCursor: 5,
+    codeSessionId: "code-1", message: "implement it", startCursor: 5,
   });
 
   assertEquals(res.codeSessionId, "code-1");
@@ -91,7 +95,7 @@ Deno.test("runCodeTurn throws on turn.failed", async () => {
   const { client } = fakeClient([create, stream]);
   let threw = "";
   try {
-    await runCodeTurn(client, { codeSessionId: null, message: "x", mode: "plan", startCursor: 0 });
+    await runCodeTurn(client, { codeSessionId: null, message: "x", startCursor: 0 });
   } catch (e) { threw = (e as Error).message; }
   assertEquals(threw.includes("boom"), true);
 });
@@ -109,7 +113,7 @@ Deno.test("runCodeTurn parses a JSON event line split across two stream chunks",
   const { client } = fakeClient([create, stream]);
 
   const res = await runCodeTurn(client, {
-    codeSessionId: null, message: "build X", mode: "plan", startCursor: 0,
+    codeSessionId: null, message: "build X", startCursor: 0,
   });
 
   assertEquals(res.codeSessionId, "code-3");
@@ -133,7 +137,7 @@ Deno.test("runCodeTurn stops reading at the terminal event and ignores trailing 
   const { client } = fakeClient([create, stream]);
 
   const res = await runCodeTurn(client, {
-    codeSessionId: null, message: "build X", mode: "plan", startCursor: 10,
+    codeSessionId: null, message: "build X", startCursor: 10,
   });
 
   assertEquals(res.codeSessionId, "code-4");
@@ -149,7 +153,7 @@ Deno.test("runCodeTurn throws on session.failed", async () => {
   const { client } = fakeClient([create, stream]);
   let threw = "";
   try {
-    await runCodeTurn(client, { codeSessionId: null, message: "x", mode: "plan", startCursor: 0 });
+    await runCodeTurn(client, { codeSessionId: null, message: "x", startCursor: 0 });
   } catch (e) { threw = (e as Error).message; }
   assertEquals(threw.includes("kaput"), true);
 });

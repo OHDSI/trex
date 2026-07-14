@@ -9,7 +9,6 @@ export interface TokioClient {
 export interface RunArgs {
   codeSessionId: string | null;
   message: string;
-  mode: "plan" | "build";
   userId?: string;
   startCursor: number;
 }
@@ -26,7 +25,14 @@ export async function runCodeTurn(
   client: TokioClient,
   args: RunArgs,
 ): Promise<{ codeSessionId: string; replyText: string; nextCursor: number }> {
-  const body = JSON.stringify({ message: args.message, metadata: { mode: args.mode } });
+  // No `metadata.mode`: an unset mode means the Code agent's readMode() returns
+  // undefined, which its filterTools treats as "allow ALL tools" (devx
+  // agent.ts:193-194). That is the ONLY mode in which the coder's superpowers
+  // skills + subagents are available — its "plan" mode strips the skill/agent
+  // tools (PLAN_MODE_TOOLS), and "build" mode strips every tool. So claw always
+  // talks to the coder with the full toolset and lets it run its own gated
+  // planning/implementation process.
+  const body = JSON.stringify({ message: args.message });
 
   // 1) Start (create) or continue the turn.
   let codeSessionId = args.codeSessionId;

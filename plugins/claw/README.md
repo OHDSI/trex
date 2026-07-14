@@ -1,8 +1,12 @@
 # @trex/claw
 
-A thin orchestration agent: turns a chat-channel discussion into a consensus
-task, drives the Code agent (`devx-agent`) through plan → approval → build
-(checks + autofixes) → ship, and reports back to the channel. See
+A thin **facilitator** agent between a team's chat channel and the coding agent
+(`devx-agent`). It reads the channel discussion, **clarifies anything unclear
+with the participants**, hands the coding agent clear instructions, and mediates
+the back-and-forth (posting the coder's designs / plans / results back to the
+channel). It never sets a coding-agent "mode" — the coder always runs with its
+full toolset (so its own superpowers skills + subagents are available) and drives
+its own gated planning/implementation. See
 `docs/superpowers/specs/2026-07-14-claw-agent-plugin-design.md`.
 
 ## Env contract
