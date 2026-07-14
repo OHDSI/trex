@@ -15,4 +15,12 @@ Deno.test("claw agent exposes its tools", async () => {
   const names = Object.keys(a.tools);
   assertEquals(names.includes("dispatchToCode"), true);
   assertEquals(names.includes("fetchChannelHistory"), true);
+  assertEquals(names.includes("shipIt"), true);
+});
+
+Deno.test("claw agent loads the delegate-coding-task skill", async () => {
+  const a = await loadAgent(DIR);
+  const skill = a.skills.find((s) => s.name === "delegate-coding-task");
+  assert(skill, "delegate-coding-task skill must be present");
+  assert(skill!.description.length > 0, "delegate-coding-task skill must have a non-empty description");
 });
