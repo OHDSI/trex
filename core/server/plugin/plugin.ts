@@ -23,6 +23,47 @@ declare const Trex: any;
 const MEMORY_ENTRIES: MemoryEntry[] = [];
 const MEMORY_SOURCE_OWNERS: SourceOwners = new Map();
 
+// Declared `trex.memory` NAMES only (not full entries — see MEMORY_ENTRIES
+// above for those), used purely as an allow-list for agent-linked-memory
+// validation (plugin/agents.ts's addAgentsPlugin/unknownMemoryLinks).
+// Populated in two ways:
+//  1. A pre-pass (collectDeclaredMemoryNames, run once at the top of
+//     initPlugins, BEFORE any plugin is dispatched) that scans every
+//     discovered plugin's package.json across all PLUGINS_DEV_PATH/
+//     PLUGINS_PATH directories. Needed because dispatch order is:
+//     WITHIN one plugin's own trex block, agents (orderRank 4) sort before
+//     memory (5); but ACROSS different plugins, scanAndRegister dispatches
+//     each plugin's whole trex block as it's found on disk — an
+//     agents-declaring plugin can be (and often is) a completely different
+//     plugin from the one declaring the memory it links, and may be scanned
+//     first. Without the pre-pass, addAgentsPlugin would see an empty
+//     allow-list for a memory that's perfectly valid but just not processed
+//     yet, and incorrectly skip the agent.
+//  2. Incrementally, in the `memory` case below (dynamic registration via
+//     registerFromPath happens after boot's pre-pass already ran).
+const DECLARED_MEMORY_NAMES: Set<string> = new Set();
+
+async function collectDeclaredMemoryNames(rawPaths: string[]): Promise<void> {
+  for (const rawPath of rawPaths) {
+    for (const dir of splitPathList(rawPath)) {
+      const scanned = await scanPluginDirectory(dir);
+      for (const { pkg } of scanned) {
+        const memoryValue = pkg?.trex?.memory;
+        if (memoryValue === undefined) continue;
+        try {
+          for (const e of normalizeMemoryValue(memoryValue)) {
+            DECLARED_MEMORY_NAMES.add(e.name);
+          }
+        } catch {
+          // Invalid `trex.memory` declaration — surfaces with a real error
+          // in the actual scan/dispatch pass below; don't double-report
+          // here, and don't let a bad manifest abort the whole pre-pass.
+        }
+      }
+    }
+  }
+}
+
 interface ActivePluginEntry {
   name: string;
   version: string;
@@ -104,7 +145,7 @@ export class Plugins {
             Plugins.registerMigrations(dir, shortName, value);
             break;
           case "agents":
-            await addAgentsPlugin(app, value, dir, fullName);
+            await addAgentsPlugin(app, value, dir, fullName, DECLARED_MEMORY_NAMES);
             if (!Plugins.migrationTargets.some((t) => t.name === "agents-core")) {
               Plugins.migrationTargets.push(await agentsCoreMigrationTarget());
             }
@@ -116,6 +157,7 @@ export class Plugins {
             // before gbrain is warmed up.
             const entries = normalizeMemoryValue(value);
             for (const e of entries) {
+              DECLARED_MEMORY_NAMES.add(e.name);
               for (const src of e.sources) {
                 src.pluginDir = dir;
               }
@@ -166,6 +208,11 @@ export class Plugins {
     const devPath = Deno.env.get("PLUGINS_DEV_PATH") || "./plugins-dev";
     const pluginsPath = Deno.env.get("PLUGINS_PATH") || "./plugins";
     console.log("Scanning and registering plugins");
+
+    // Must run before any plugin is dispatched — see DECLARED_MEMORY_NAMES's
+    // doc comment above for why a single ordered scan/dispatch pass isn't
+    // enough to validate agent-linked-memory references.
+    await collectDeclaredMemoryNames([devPath, pluginsPath]);
 
     // PLUGINS_DEV_PATH / PLUGINS_PATH may be colon-separated PATH-style lists
     // (e.g. d2e uses /usr/src/plugins-dev:/usr/src/bundled-plugins:/usr/src/plugins),

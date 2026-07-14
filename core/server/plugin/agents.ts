@@ -5,7 +5,7 @@
 import type { Express } from "express";
 import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_PLUGIN_SCOPES } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
-import { type AgentMemoryLink, parseMemoryLinks } from "./agent-memory.ts";
+import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from "./agent-memory.ts";
 
 export interface AgentEntry {
   name: string;
@@ -123,6 +123,16 @@ export async function buildAgentWorkerConfig(
   const stagedAgentDir = `${tmp}/agent`;
   await copyDirRecursive(agentDir, stagedAgentDir);
 
+  // Linked-memory tools/skills (agent-linked-memory design, Task 3):
+  // generated straight into the staged copy, never the plugin's own agent
+  // dir on disk — same "everything the worker imports lives inside
+  // servicePath" rule as the rest of this function. Validation that each
+  // link names a DECLARED `trex.memory` plugin happens one level up, in
+  // addAgentsPlugin, before this function is ever called for that entry.
+  if (entry.memory?.length) {
+    await generateMemoryArtifacts(stagedAgentDir, entry.memory);
+  }
+
   const shimBase = `file://${tmp}/agents/eve-shim/`;
   const imports: Record<string, string> = {
     "eve": `${shimBase}mod.ts`,
@@ -185,6 +195,30 @@ export async function buildAgentWorkerConfig(
   };
   Object.assign(env, reserved);
 
+  // Linked-memory env — only injected when the agent actually declares
+  // links, and set AFTER entry-specific env so a plugin manifest can't
+  // clobber them (same non-overridable treatment as `reserved` above).
+  //  - GBRAIN_MEMORY_TOKEN: the bearer token the generated tools
+  //    (agent-memory.ts's renderMemoryTool) send to the memory worker's
+  //    internal MCP endpoint. Read from the same host env var
+  //    memory/gbrain-worker/mount.ts's buildMemoryWorkerConfig reads for the
+  //    worker side, so both ends agree on the token.
+  //  - MEMORY_MCP_URL: the internal memory-service base the generated tool
+  //    fetches `${MEMORY_MCP_URL}/memory/<name>/mcp` against. RUNTIME-GATED:
+  //    the actual agent-worker -> memory-worker reachability (bypassing the
+  //    Express session layer, see mount.ts's module doc comment on
+  //    fnmap/Trex.tokioChannel) can't be exercised here (trex-runtime
+  //    submodule not checked out) — this only wires a configurable address
+  //    (GBRAIN_MEMORY_INTERNAL_URL) with a sane localhost default so the
+  //    generated tool has something to call once that path is verified.
+  //  - TREX_AGENT_MEMORIES: comma-joined linked memory names, so agent code
+  //    can enumerate its links without re-parsing the manifest.
+  if (entry.memory?.length) {
+    env.GBRAIN_MEMORY_TOKEN = Deno.env.get("GBRAIN_MEMORY_TOKEN") ?? "";
+    env.MEMORY_MCP_URL = Deno.env.get("GBRAIN_MEMORY_INTERNAL_URL") ?? "http://127.0.0.1:8000";
+    env.TREX_AGENT_MEMORIES = entry.memory.map((l) => l.name).join(",");
+  }
+
   return {
     source: `/${entry.name}`,
     servicePath: tmp,
@@ -204,11 +238,26 @@ export function isTrustedScopeAgentsPlugin(name: string): boolean {
   return isTrustedPluginScope(name);
 }
 
+// Pure — returns the subset of an agent's memory links whose name is NOT in
+// the declared-memory allow-list (see plugin.ts's DECLARED_MEMORY_NAMES,
+// populated in a pre-pass across every plugin's package.json before any
+// plugin is dispatched, since agents (orderRank 4) load before memory (5)
+// yet the two can live in different plugins scanned in either order).
+// Exported standalone so it's testable without driving addAgentsPlugin's
+// full Express-app path.
+export function unknownMemoryLinks(
+  links: AgentMemoryLink[] | undefined,
+  declaredMemoryNames: ReadonlySet<string>,
+): AgentMemoryLink[] {
+  return (links ?? []).filter((l) => !declaredMemoryNames.has(l.name));
+}
+
 export async function addAgentsPlugin(
   app: Express,
   value: unknown,
   dir: string,
   name: string,
+  declaredMemoryNames: ReadonlySet<string> = new Set(),
 ): Promise<void> {
   if (!isTrustedScopeAgentsPlugin(name)) {
     // Log and skip, don't throw: one misconfigured/malicious plugin must
@@ -217,6 +266,20 @@ export async function addAgentsPlugin(
     return;
   }
   for (const entry of normalizeAgentsValue(value)) {
+    // Mirrors the trusted-scope guard above, but per-agent rather than
+    // per-plugin: an unknown linked memory means this ONE agent is
+    // misconfigured, not the whole plugin — skip just this entry (before any
+    // filesystem work in buildAgentWorkerConfig) and keep registering the
+    // plugin's other agents.
+    const badLinks = unknownMemoryLinks(entry.memory, declaredMemoryNames);
+    if (badLinks.length > 0) {
+      for (const l of badLinks) {
+        console.error(
+          `agents: agent ${entry.name} (plugin ${name}) links unknown memory "${l.name}" — not declared by any trex.memory plugin; skipping agent`,
+        );
+      }
+      continue;
+    }
     const cfg = await buildAgentWorkerConfig(dir, entry, name);
     console.log(`add agent ${entry.name} @ ${cfg.env.TREX_AGENT_DIR}`);
     // _addFunction computes servicePath as `${dir}${fncfg.function}` and the
