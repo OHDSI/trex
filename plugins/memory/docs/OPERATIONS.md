@@ -57,6 +57,47 @@ A memory is declared by a `trex.memory` entry in a trusted-scope plugin's
   cloned checkout (git), even though manifests are already
   operator/tpm-controlled (defense-in-depth, not the primary boundary).
 
+## Linking a memory to an agent
+
+An agent (`trex.agents[]` entry, same trusted-scope requirement) links to a
+declared memory by name via a `memory` array on its manifest entry:
+
+```jsonc
+"trex": {
+  "agents": [{
+    "name": "librarian",
+    "dir": "agent",
+    "memory": [{ "name": "handbook", "mode": "readwrite" }]
+  }]
+}
+```
+
+See `plugins/agent-memory-example/` for a complete minimal example (links
+the `handbook` memory declared by `plugins/memory-example/package.json`).
+
+- `mode` is `"read"` (default) or `"readwrite"`; the link is validated at
+  boot against the declared-memory allow-list (`plugin.ts`'s
+  `DECLARED_MEMORY_NAMES`) — a link to an undeclared name is dropped with a
+  warning, not a boot failure (see `agents.ts`'s `unknownMemoryLinks`).
+- For each link, boot auto-generates and stages into the agent's own
+  directory: namespaced tools `<name>_search`, `<name>_recall`,
+  `<name>_get_page` (all modes), plus `<name>_capture` for `readwrite`
+  links only — and a `<name>-memory` skill (a short flat-file skill
+  describing when to use those tools). These are generated fresh each
+  boot and refuse to overwrite a hand-authored tool/skill file of the
+  same name.
+- Captures always land under the calling agent's own `default` source
+  inside that memory — an agent link can never overwrite imported
+  knowledge, only add to it.
+
+**Pre-production note:** the tools above call out to the memory over HTTP
+(`MEMORY_MCP_URL` + `GBRAIN_MEMORY_TOKEN`, see `agent-memory.ts`'s
+`renderMemoryTool`). Actual agent→memory HTTP reachability — whether that
+resolves via the public Express route (session-gated) or the internal
+`fnmap`/`Trex.tokioChannel` path (bearer-token-gated only) — is one of the
+runtime-gated pre-production gaps below (#2): it has not been verified
+end-to-end against a live trex edge runtime.
+
 ## Pre-production gates (require the trex edge runtime, not verifiable in dev)
 
 The H0-H4 spikes/tasks that built this feature verified everything possible
