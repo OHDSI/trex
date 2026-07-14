@@ -7,6 +7,21 @@ function ndjson(...events: unknown[]): Response {
   return new Response(body, { headers: { "content-type": "application/x-ndjson" } });
 }
 
+// Builds a Response whose body is a real ReadableStream that enqueues each
+// string in `chunks` as a separate chunk (separate reader.read() calls),
+// so cross-chunk line buffering and early-stop behavior are actually exercised.
+function ndjsonChunks(chunks: string[]): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(new TextEncoder().encode(chunk));
+      }
+      controller.close();
+    },
+  });
+  return new Response(stream, { headers: { "content-type": "application/x-ndjson" } });
+}
+
 // Records requests; returns queued responses in order.
 function fakeClient(responses: Response[]) {
   const reqs: { url: string; init: any }[] = [];
@@ -79,4 +94,62 @@ Deno.test("runCodeTurn throws on turn.failed", async () => {
     await runCodeTurn(client, { codeSessionId: null, message: "x", mode: "plan", startCursor: 0 });
   } catch (e) { threw = (e as Error).message; }
   assertEquals(threw.includes("boom"), true);
+});
+
+Deno.test("runCodeTurn parses a JSON event line split across two stream chunks", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-3" }), {
+    headers: { "content-type": "application/json" },
+  });
+  // The message.completed event's JSON is split mid-line across two chunks;
+  // only the trailing chunk completes the line and adds the terminal event.
+  const stream = ndjsonChunks([
+    '{"type":"message.comp',
+    'leted","data":{"text":"HELLO"}}\n{"type":"session.waiting","data":{}}\n',
+  ]);
+  const { client } = fakeClient([create, stream]);
+
+  const res = await runCodeTurn(client, {
+    codeSessionId: null, message: "build X", mode: "plan", startCursor: 0,
+  });
+
+  assertEquals(res.codeSessionId, "code-3");
+  assertEquals(res.replyText, "HELLO");
+  assertEquals(res.nextCursor, 2);
+});
+
+Deno.test("runCodeTurn stops reading at the terminal event and ignores trailing events", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-4" }), {
+    headers: { "content-type": "application/json" },
+  });
+  // session.waiting is the terminal event; turn.started arrives after it in
+  // the same stream (simulating a keep-alive tail that stays open). If the
+  // reader kept draining instead of stopping at the terminal event, nextCursor
+  // would count 3 events instead of 2.
+  const stream = ndjsonChunks([
+    '{"type":"message.completed","data":{"text":"DONE"}}\n' +
+      '{"type":"session.waiting","data":{}}\n' +
+      '{"type":"turn.started","data":{"turnId":"t2","sequence":99}}\n',
+  ]);
+  const { client } = fakeClient([create, stream]);
+
+  const res = await runCodeTurn(client, {
+    codeSessionId: null, message: "build X", mode: "plan", startCursor: 10,
+  });
+
+  assertEquals(res.codeSessionId, "code-4");
+  assertEquals(res.replyText, "DONE");
+  assertEquals(res.nextCursor, 12);
+});
+
+Deno.test("runCodeTurn throws on session.failed", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-5" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream = ndjson({ type: "session.failed", data: { message: "kaput" } });
+  const { client } = fakeClient([create, stream]);
+  let threw = "";
+  try {
+    await runCodeTurn(client, { codeSessionId: null, message: "x", mode: "plan", startCursor: 0 });
+  } catch (e) { threw = (e as Error).message; }
+  assertEquals(threw.includes("kaput"), true);
 });
