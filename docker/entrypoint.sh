@@ -77,10 +77,16 @@ fi
 # The full image bakes the devx plugin into /usr/src/plugins-dx and the
 # devx_ext DuckDB extension into /usr/lib/trexsql/extensions-dx. Both folders
 # sit outside the default scan paths, so devx is inert unless
-# TREX_DX_ENABLED=true (exact string) appends them here.
+# TREX_DX_ENABLED=true (exact string) exposes them here.
+#
+# PLUGINS_DEV_PATH is scanned as a colon-separated list, so appending is safe.
+# EXTENSION_DIR is NOT: the swarm orchestrator's per-service `LOAD
+# '$EXTENSION_DIR/<svc>.trex'` (plugins/db start_service_local) takes the whole
+# value as one directory, so a colon-list makes trexas/pgwire fail to start.
+# Copy the gated extension into the primary dir instead of appending.
 if [ "${TREX_DX_ENABLED:-}" = "true" ]; then
     export PLUGINS_DEV_PATH="${PLUGINS_DEV_PATH:-/usr/src/plugins-dev}:/usr/src/plugins-dx"
-    export EXTENSION_DIR="${EXTENSION_DIR:-/usr/lib/trexsql/extensions}:/usr/lib/trexsql/extensions-dx"
+    cp -n /usr/lib/trexsql/extensions-dx/*.trex /usr/lib/trexsql/extensions/ 2>/dev/null || true
     echo "STARTUP: TREX_DX_ENABLED=true — devx plugin and devx_ext extension enabled"
 fi
 

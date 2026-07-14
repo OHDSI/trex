@@ -427,11 +427,14 @@ RUN curl -fsSL https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${
     dpkg -i /tmp/gh.deb && rm /tmp/gh.deb
 
 # --- d2e flow tooling (formerly Dockerfile.dx) ---
-# yarn (via Corepack) for the d2e-ui Nx/yarn-workspaces monorepo; python3 + uv
-# + prefect to run d2e flows. NOTE: fully RUNNING flows also requires adding
-# python/uv/prefect to the devx_ext validate_command allowlist
+# corepack (yarn/pnpm) + bun for the d2e-ui monorepo; python3 + uv + prefect
+# to run d2e flows. The d2e-ui sub-app recipe installs with `bun install`
+# (plugins/devx/functions/d2e/recipes.ts), so bun must be on PATH for DevX to
+# start a UI microfrontend dev server. NOTE: fully RUNNING flows also requires
+# adding python/uv/prefect to the devx_ext validate_command allowlist
 # (plugins/devx-ext/src/validation.rs) — until then flows are context-only.
 RUN corepack enable
+RUN npm install -g bun
 RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip pipx && \
     rm -rf /var/lib/apt/lists/*
@@ -444,6 +447,12 @@ RUN pipx install uv && \
 COPY --from=devx-builder --chown=node:node /work/ /usr/src/plugins-dx/devx/
 COPY --from=devx-ext-builder /work/plugins/devx-ext/build/release/devx_ext.trex \
      /usr/lib/trexsql/extensions-dx/devx_ext.trex
+
+# entrypoint.sh copies the gated devx_ext into the primary extensions dir when
+# TREX_DX_ENABLED=true (see the DevX gate there for why it can't be appended to
+# EXTENSION_DIR). That copy runs as the container user, so the dir must be
+# writable by node — the non-root user this image runs as.
+RUN chown node:node /usr/lib/trexsql/extensions
 
 USER node
 ENTRYPOINT ["/usr/src/entrypoint.sh"]
