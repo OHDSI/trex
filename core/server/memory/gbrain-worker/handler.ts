@@ -62,7 +62,10 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 function checkBearer(req: Request, token: string): boolean {
-  const header = req.headers.get("authorization") ?? req.headers.get("Authorization");
+  // `Headers.get` is case-insensitive per the Fetch spec, so a single
+  // lowercase lookup already covers `Authorization`/`authorization`/etc. —
+  // no separate-case fallback needed.
+  const header = req.headers.get("authorization");
   if (!header || !header.startsWith("Bearer ")) return false;
   const presented = header.slice("Bearer ".length);
   return timingSafeEqual(presented, token);
@@ -92,8 +95,16 @@ async function handleMcpBody(
   try {
     body = JSON.parse(await req.text());
   } catch (e) {
+    // No `id` is available yet (the body didn't parse), so echo `id: null`
+    // per JSON-RPC convention for requests whose id couldn't be determined —
+    // still shaped like the other JSON-RPC responses below (jsonrpc + id).
     return jsonResponse(
-      { error: "parse_error", message: e instanceof Error ? e.message : "invalid JSON" },
+      {
+        error: "parse_error",
+        message: e instanceof Error ? e.message : "invalid JSON",
+        jsonrpc: "2.0",
+        id: null,
+      },
       { status: 400 },
     );
   }
@@ -131,7 +142,7 @@ async function handleMcpBody(
   }
 
   return jsonResponse(
-    { error: "unknown_method", message: `Unknown method: ${method}` },
+    { error: "unknown_method", message: `Unknown method: ${method}`, jsonrpc: "2.0", id },
     { status: 400 },
   );
 }
@@ -150,50 +161,87 @@ export function createMemoryHandler(
   const { engine, allowlist, token, basePath = "" } = opts;
 
   return async (req: Request): Promise<Response> => {
-    const url = new URL(req.url);
-    let path = url.pathname;
-
-    if (basePath) {
-      if (!path.startsWith(basePath)) return notFound();
-      path = path.slice(basePath.length) || "/";
-    }
-
-    const mem = parseMemoryPath(path, allowlist);
-    if (!mem) return notFound();
-
-    if (mem.rest === "/health") {
-      if (req.method !== "GET") return notFound();
-      try {
-        await engine.withSchema(mem.schema, (e) => e.executeRaw("SELECT 1"));
-      } catch {
-        return jsonResponse({ status: "unhealthy", memory: mem.name }, { status: 503 });
-      }
-      return jsonResponse({ status: "ok", memory: mem.name });
-    }
-
-    if (mem.rest !== "/mcp") return notFound();
-    if (req.method !== "POST") {
-      return jsonResponse({ error: "method_not_allowed" }, { status: 405 });
-    }
-
-    if (!checkBearer(req, token)) {
-      return jsonResponse(
-        { error: "invalid_token", message: "Bearer token required" },
-        { status: 401 },
-      );
-    }
-
-    // Auto-provision on first touch (idempotent — provisionSchema caches
-    // "already provisioned" in-process and re-checks via advisory lock).
     try {
-      await engine.provisionSchema(mem.name);
+      const url = new URL(req.url);
+      let path = url.pathname;
+
+      if (basePath) {
+        // Boundary-safe prefix check: a bare `startsWith` would let
+        // `/apiFOO` match a `basePath` of `/api`. Require an exact match or
+        // a `/`-delimited continuation.
+        if (path !== basePath && !path.startsWith(basePath + "/")) return notFound();
+        path = path.slice(basePath.length) || "/";
+      }
+
+      // Parse the path SHAPE first, without consulting the allow-list, so
+      // routing (health vs mcp, method) doesn't yet reveal allow-list
+      // membership. `parseMemoryPath` still rejects malformed names / bad
+      // schema idents here — that's a syntactic 404 (same for every caller,
+      // authenticated or not), not an allow-list leak.
+      const mem = parseMemoryPath(path);
+      if (!mem) return notFound();
+
+      if (mem.rest === "/health") {
+        // /health stays unauthenticated by design (matches the vendored
+        // http-transport.ts: liveness probes shouldn't need a bearer
+        // token), so there's no bearer-vs-allowlist ordering concern here —
+        // the allow-list gate can run immediately.
+        if (!allowlist.has(mem.name)) return notFound();
+        if (req.method !== "GET") return notFound();
+        try {
+          await engine.withSchema(mem.schema, (e) => e.executeRaw("SELECT 1"));
+        } catch {
+          return jsonResponse({ status: "unhealthy", memory: mem.name }, { status: 503 });
+        }
+        return jsonResponse({ status: "ok", memory: mem.name });
+      }
+
+      if (mem.rest !== "/mcp") return notFound();
+      if (req.method !== "POST") {
+        return jsonResponse({ error: "method_not_allowed" }, { status: 405 });
+      }
+
+      // Bearer check BEFORE the allow-list evaluation: this is the
+      // enumeration-oracle fix. An unauthenticated (missing/wrong token)
+      // request must get the same 401 whether `mem.name` is a declared
+      // memory or not — otherwise 401-vs-404 lets a caller with no
+      // credentials enumerate which memories exist.
+      if (!checkBearer(req, token)) {
+        return jsonResponse(
+          { error: "invalid_token", message: "Bearer token required" },
+          { status: 401 },
+        );
+      }
+
+      if (!allowlist.has(mem.name)) return notFound();
+
+      // Auto-provision on first touch (idempotent — provisionSchema caches
+      // "already provisioned" in-process and re-checks via advisory lock).
+      try {
+        await engine.provisionSchema(mem.name);
+      } catch (e) {
+        return jsonResponse(
+          { error: "provision_failed", message: e instanceof Error ? e.message : String(e) },
+          { status: 500 },
+        );
+      }
+
+      return await handleMcpBody(req, engine, mem.schema);
     } catch (e) {
+      // Backstop for anything that throws outside the narrower try/catches
+      // above — notably `engine.withSchema`'s transactional setup
+      // (conn.begin + SET LOCAL) inside `handleMcpBody`'s `tools/call`
+      // branch, which runs before `dispatchToolCall`'s own internal catch.
+      // A thrown error must never escape this returned handler function.
       return jsonResponse(
-        { error: "provision_failed", message: e instanceof Error ? e.message : String(e) },
+        {
+          error: "internal_error",
+          message: e instanceof Error ? e.message : String(e),
+          jsonrpc: "2.0",
+          id: null,
+        },
         { status: 500 },
       );
     }
-
-    return await handleMcpBody(req, engine, mem.schema);
   };
 }

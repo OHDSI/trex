@@ -1,8 +1,11 @@
 // Live-DB integration test for the H2 thin memory fetch handler. Drives
 // createMemoryHandler with real Request objects against a real Postgres
 // (gbrain_test), exercising: bearer auth, allow-list gating, auto-provision
-// on first tools/call, and a write-then-read round trip through gbrain's
-// keyword search path (no embedding provider configured — v1 keyword-only).
+// on first tools/call, a write-then-read round trip through gbrain's
+// keyword search path (no embedding provider configured — v1 keyword-only),
+// and the bearer-before-allowlist ordering fix (an unauthenticated request
+// gets the same 401 for a declared or undeclared memory name — no
+// enumeration oracle via 401-vs-404).
 //
 // Gated on GBRAIN_TEST_DATABASE_URL (or a hardcoded local default matching
 // the rest of the vendored gbrain suite's convention, e.g.
@@ -139,12 +142,51 @@ Deno.test({
       );
       assertEquals(noAuthRes.status, 401);
 
-      // 5. POST to an undeclared memory name -> 404 (allow-list gate), even
-      // with a valid bearer token.
+      // 5. POST to an undeclared memory name -> 404 (allow-list gate), given
+      // a valid bearer token.
       const undeclaredRes = await handler(
         rpcRequest("/memory/undeclared/mcp", { jsonrpc: "2.0", id: 6, method: "initialize" }),
       );
       assertEquals(undeclaredRes.status, 404);
+
+      // 6. Enumeration-oracle fix: an UNAUTHENTICATED request (no bearer) to
+      // an UNDECLARED memory name must return 401, not 404 — otherwise the
+      // 401-vs-404 split lets a caller with no credentials at all enumerate
+      // which memory names are declared on this worker. Bearer check now
+      // runs before allow-list evaluation, so this is indistinguishable
+      // from the "declared name, no auth" case in step 4.
+      const undeclaredNoAuthRes = await handler(
+        rpcRequest(
+          "/memory/undeclared/mcp",
+          { jsonrpc: "2.0", id: 7, method: "initialize" },
+          { token: null },
+        ),
+      );
+      assertEquals(
+        undeclaredNoAuthRes.status,
+        401,
+        "unauthenticated request to an undeclared name must 401 (same as a declared name), not 404",
+      );
+
+      // ... and the same undeclared name WITH a wrong bearer -> also 401,
+      // not 404 (covers both "missing" and "wrong" token, mirroring step 4).
+      const undeclaredWrongAuthRes = await handler(
+        rpcRequest(
+          "/memory/undeclared/mcp",
+          { jsonrpc: "2.0", id: 8, method: "initialize" },
+          { token: "wrong-token" },
+        ),
+      );
+      assertEquals(undeclaredWrongAuthRes.status, 401);
+
+      // 7. Confirm a VALID-bearer request to the same undeclared name still
+      // 404s (the allow-list gate still applies once auth passes — this
+      // repeats step 5 but sits next to steps 6/7 so the full
+      // 401-then-404 ordering is visible in one place).
+      const undeclaredValidAuthRes = await handler(
+        rpcRequest("/memory/undeclared/mcp", { jsonrpc: "2.0", id: 9, method: "initialize" }),
+      );
+      assertEquals(undeclaredValidAuthRes.status, 404);
     } finally {
       await engine.disconnect();
     }
