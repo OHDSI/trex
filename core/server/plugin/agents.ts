@@ -136,10 +136,19 @@ export async function buildAgentWorkerConfig(
   // required re-registration to take effect.
   const tmp = await Deno.makeTempDir({ prefix: "trex-agents-" });
   const runtimeSrc = await resolveAgentsRuntimeDir();
-  for (const sub of ["service", "eve-shim"]) {
+  // channels/connections must ride along: adapters resolve relative modules
+  // (channels/types.ts etc.) inside the servicePath — first live claw boot
+  // failed module resolution without them.
+  for (const sub of ["service", "eve-shim", "channels", "connections"]) {
     await copyDirRecursive(`${runtimeSrc}${sub}`, `${tmp}/agents/${sub}`);
   }
   await Deno.copyFile(`${runtimeSrc}loader.ts`, `${tmp}/agents/loader.ts`);
+  // service/index.ts imports ../../auth/{dek,keys}.ts — stage them at the
+  // same relative depth.
+  await Deno.mkdir(`${tmp}/auth`, { recursive: true });
+  for (const f of ["dek.ts", "keys.ts"]) {
+    await Deno.copyFile(`${runtimeSrc}../auth/${f}`, `${tmp}/auth/${f}`);
+  }
   const stagedAgentDir = `${tmp}/agent`;
   await copyDirRecursive(agentDir, stagedAgentDir, AGENT_DIR_STAGING_EXCLUDES);
 
@@ -154,10 +163,21 @@ export async function buildAgentWorkerConfig(
   }
 
   const shimBase = `file://${tmp}/agents/eve-shim/`;
+  const channelsBase = `file://${tmp}/agents/channels/`;
   const imports: Record<string, string> = {
     "eve": `${shimBase}mod.ts`,
     "eve/tools": `${shimBase}tools.ts`,
     "eve/evals": `${shimBase}evals.ts`,
+    "eve/connections": `file://${tmp}/agents/connections/shim.ts`,
+    "eve/channels": `${channelsBase}shim.ts`,
+    "eve/channels/eve": `${channelsBase}adapters/eve.ts`,
+    "eve/channels/discord": `${channelsBase}adapters/discord.ts`,
+    "eve/channels/slack": `${channelsBase}adapters/slack.ts`,
+    "eve/channels/telegram": `${channelsBase}adapters/telegram.ts`,
+    "eve/channels/twilio": `${channelsBase}adapters/twilio.ts`,
+    "eve/channels/github": `${channelsBase}adapters/github.ts`,
+    "eve/channels/linear": `${channelsBase}adapters/linear.ts`,
+    "eve/channels/teams": `${channelsBase}adapters/teams.ts`,
     "ai": "npm:ai@^6",
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@latest",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@latest",
