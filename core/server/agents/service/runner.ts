@@ -10,6 +10,7 @@ import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { buildSdkTools, resolveInstructions } from "./toolset.ts";
+import type { ConnectionProviderOpts } from "../connections/provider.ts";
 
 interface RunTurnOpts {
   agent: LoadedAgent;
@@ -37,6 +38,10 @@ interface RunTurnOpts {
   hookCtx?: HookCtx;
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
+  // Task 5/7: connection-provider opts (OAuth broker deps). Threaded into
+  // buildSdkTools via the `{ ...opts }` spread below so kind:"oauth"
+  // connections resolve/park tokens. Undefined when no broker is wired.
+  connectionOpts?: ConnectionProviderOpts;
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {

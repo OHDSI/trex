@@ -253,3 +253,40 @@ Deno.test("loadAgent skips a colocated channels/*.test.ts file instead of loadin
   const a = await loadAgent(tmp);
   assertEquals(Object.keys(a.channels), ["discord"]);
 });
+
+Deno.test("loadAgent discovers connections/*.{ts,js} as branded ConnectionDefs keyed by filename", async () => {
+  const a = await loadAgent(TOY);
+  assertEquals(Object.keys(a.connections), ["echo"]);
+  assert(a.connections.echo.__trexConnection);
+  assertEquals(a.connections.echo.type, "mcp");
+  assertEquals(a.connections.echo.url, "http://localhost:9/mcp");
+  // the loader sets `name` from the filename (the shim reserves the field)
+  assertEquals(a.connections.echo.name, "echo");
+});
+
+Deno.test("loadAgent no longer treats connections/ as an ignored eve dir", async () => {
+  const logs: string[] = [];
+  const orig = console.log;
+  console.log = (...args: unknown[]) => logs.push(args.join(" "));
+  try {
+    await loadAgent(TOY);
+  } finally {
+    console.log = orig;
+  }
+  assert(
+    !logs.some((l) => l.includes("connections") && l.includes("not supported")),
+    `connections should not be logged as ignored; got: ${JSON.stringify(logs)}`,
+  );
+});
+
+Deno.test("loadAgent rejects a connections/*.ts that doesn't default-export a connection def", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.mkdir(`${tmp}/connections`);
+  await Deno.writeTextFile(`${tmp}/connections/bad.ts`, `export default { description: "x" };`); // unbranded
+  await assertRejects(
+    () => loadAgent(tmp),
+    Error,
+    "must default-export defineMcpClientConnection",
+  );
+});

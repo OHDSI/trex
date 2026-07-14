@@ -374,16 +374,210 @@ f. **A channel's declared `state`/`metadata`/`context` are accepted but not
    table — so an author who declares them gets a silent no-op. State projection
    into session metadata / dynamic-tool resolution is not wired in v1.
 
+## Connections
+
+trex implements eve's **connections** — declarative, per-agent integrations that
+expose an *external service's* tools to the model with managed credentials kept
+out of the prompt — via a connection layer at `connections/`
+(`defineMcpClientConnection` + `defineOpenApiConnection`), an eve-native static
+auth path, and a **trex-native OAuth broker** (`trexConnect`, see below) that
+replaces Vercel Connect. Connections extend the **tool layer**, not the
+session/channel layer: each is realized as an H2-style dynamic tool provider
+(`buildConnectionProvider`, a sibling merge to `dynamic-tools.ts` in
+`service/toolset.ts`), so a broken connection logs-and-continues and never fails
+the turn. The day-to-day authoring/setup guide (how to add a connection,
+register an OAuth connector, the env/secret refs) lives in
+[README.md](./README.md)'s "Connections" section; this section is the
+reconciliation record. The manual live-acceptance steps are in
+[connections/ACCEPTANCE.md](./connections/ACCEPTANCE.md).
+
+### What we implement
+
+- **`connections/*.ts` discovery** — the loader (`loader.ts`) no longer ignores
+  `connections/` (only `sandbox/` remains in `IGNORED_DIRS`). Each file at the
+  agent-dir root default-exports a branded connection def; the filename (minus
+  extension) is the connection name (`connections/linear.ts` → `linear`, its
+  tools `linear__<tool>`). Discovery is top-level only (subagents declare none,
+  eve parity).
+- **`defineMcpClientConnection({ url, description, auth?, headers?, tools?, approval? })`**
+  — points at a remote MCP server. The default connect tries
+  `StreamableHTTPClientTransport` first, then falls back to SSE (eve's transport
+  fallback), via `@modelcontextprotocol/sdk` (already a dep, proven by the devx
+  MCP path). The server's tools are exposed as `<name>__<tool>`.
+- **`defineOpenApiConnection({ spec, description, auth?, headers?, tools?, approval?, baseUrl? })`**
+  — generates one tool per OpenAPI operation. The generator
+  (`connections/openapi.ts`) is a **fresh, readable port of eve@0.19.0's**
+  `runtime/connections/openapi-*.js` transform (a genuinely pure spec→tools
+  algorithm; see divergence 2), not vendored bytes.
+- **`connection_search` built-in** — added at depth 0 only when the agent has ≥1
+  connection (`service/toolset.ts`); input `{ query }`, returns the best-matching
+  `<name>__<tool>` names + descriptions (token-overlap ranking over each tool's
+  namespaced name, its own description, and its connection's description; a blank
+  query returns every tool). Discovery only — see limitation (e).
+- **`<name>__<tool>` naming**; **`tools: { allow: [...] } | { block: [...] }`**
+  filters (exactly one, enforced at authoring time by the shim over the *bare*
+  remote tool name); **`approval: once()`** → the tool is marked `needsApproval`
+  and rides the existing approval park/resume + H4 sticky-consent flow.
+- **Static auth** (`auth.getToken` → `Authorization: Bearer <token>`;
+  `auth.headers` / top-level `headers`, either a literal map or a function of
+  session ctx; omit both → no-auth). Resolved fresh per turn. The MCP client
+  cache is keyed by `(agentDir, connection, url, hash(resolved-headers))` so a
+  ctx-dependent `getToken`/`headers` can never reuse one caller's authenticated
+  client for another's `callTool` (tenant isolation).
+- **The trex-native OAuth broker** (`trexConnect`) — §5/§7 of the spec; detailed
+  below.
+
+### The OAuth broker (`trexConnect`)
+
+`trexConnect(connector, { principalType? })` is trex's replacement for eve's
+`connect()`. It brands a connection's `auth` as `{ kind: "oauth", connector,
+principalType }` (`principalType` defaults to `"user"`; `"app"` acts as the
+application's own service principal under the `__app__` sentinel). At tool-call
+time the broker (`connections/oauth/broker.ts`) resolves it to one of:
+
+- a valid stored token (or one it silently **refreshes** via the connector's
+  `refresh_token` when within the expiry-skew window) → the call proceeds with a
+  Bearer;
+- `authorization.required` → the tool emits a `tool.event` carrying the consent
+  URL and **parks** (polls the token store until the callback writes the token,
+  or a 5-minute timeout — mirroring the `needsApproval` park in `toolset.ts`);
+- `principal_required` → a terminal error surfaced to the model, when a
+  user-scoped connection has no resolvable principal (**fail-closed**: it never
+  borrows the app token or anyone else's).
+
+**Consent routes** are mounted on the agent worker and, like channel routes, are
+**exempt from `pluginAuthz`** (the proxy's `channelAuthExemptPattern` excludes
+only `session|health|info|eve`, so `oauth` falls through the exemption). There is
+no trex JWT on the provider's browser redirect — the **only** authenticator is a
+signed, expiring `state` (HMAC over session+principal+connector+nonce+exp, via
+`connections/oauth/state.ts`):
+
+- `GET …/eve/v1/oauth/<connector>/start?state=<signed>` → verify state → 302 to
+  the connector's `authorization_url` (`client_id`, fixed `redirect_uri`,
+  `scope`, the same `state` threaded through). Nothing is written here.
+- `GET …/eve/v1/oauth/<connector>/callback?code=…&state=…` → verify state →
+  exchange `code` at `token_url` → encrypt + store the token under the exact
+  `(principalType, principalId)` the state was signed with → the parked turn's
+  poll observes it and resumes. A bad/expired/forged state, a missing code, an
+  unset client secret, or a failed exchange all return an error and write
+  **nothing** (the parked turn is left to time out — never silently resumed).
+
+**Data model** (`migrations/V5__connections.sql`, agents schema, follows
+channels' `V4`):
+
+- `agents.oauth_tokens (principal_type, principal_id, connector,
+  access_token_enc, refresh_token_enc, expires_at, scopes, …,
+  PK(principal_type, principal_id, connector))` — `*_enc` columns are AES-GCM
+  ciphertext produced by the DEK layer (`core/server/auth/dek.ts`); tokens are
+  **never** stored plaintext. App-scoped tokens use `principal_id = '__app__'`.
+- `agents.oauth_connectors (id, authorization_url, token_url, client_id,
+  client_secret_ref, scopes, principal_scope, …)` — `client_secret_ref` is an
+  **env-var name**, not the secret; the secret is resolved from the environment
+  at use time and never persisted (an unset/empty ref is a hard error at exchange
+  and refresh time — never send `client_secret=`).
+
+**`TREX_ROOT_KEY` gates the whole broker.** The worker wires it only when
+`TREX_ROOT_KEY` is set (`service/index.ts`), because it needs the root key to
+unwrap the DEK (token encryption-at-rest) and to derive the HMAC state secret
+(`deriveSubkeyBase64(LABELS.agentsOAuthState)`). Without it — or if DEK init
+fails — the broker is left unwired: the `/oauth/*` routes 404 and a
+`kind:"oauth"` connection reports "not configured" and skips its tools, but every
+non-oauth agent still boots. **Env vars:** `TREX_ROOT_KEY` (broker + DEK), plus
+each connector's own `client_secret_ref` env key.
+
+### Deliberate divergences from eve
+
+1. **`trexConnect` REPLACES eve's `connect()`.** eve's Vercel Connect is
+   proprietary; trex ships its own broker instead. This is the one intentional
+   authoring-API break: a connection file that uses **static auth** or plain
+   **MCP/OpenAPI** is byte-portable to real eve, but a file using
+   `trexConnect(...)` is **NOT portable to real eve** without swapping back to
+   `connect(...)` — the whole broker (routes, token store, signed state, refresh)
+   has no real-eve equivalent to fall back to. `trexConnect` is exported from the
+   `eve/connections` shim (`connections/shim.ts`); on real eve that import
+   wouldn't resolve.
+2. **The OpenAPI generator is a trex fresh port, pinned to eve@0.19.0's
+   algorithm.** `connections/openapi.ts` re-implements eve@0.19.0's
+   `runtime/connections/openapi-*.js` transform (operation naming with the
+   `opId → method_pathslug`/64-char-cap fallback, `$ref` deref with cycle guard +
+   depth cap, param/requestBody → JSON Schema, Swagger `host`/`basePath` +
+   OpenAPI `servers` extraction, apiKey/http-basic/bearer/oauth2 security
+   placement, response shaping). It ships trex `ToolDef`s, not ai-sdk `Tool`s.
+   Behavior tracks that pinned version; the shipped eve dist is minified-only, so
+   this is a readable port against it as reference, not vendored bytes.
+3. **MCP client via `@modelcontextprotocol/sdk`, not eve's `mcp-client.js`.**
+   eve's `mcp-client.js` is the one coupled file in its connection tree (imports
+   `#compiled/@ai-sdk/mcp`, `#context/*`, `#runtime/connections/*`), so it is
+   NOT reused; trex connects with the SDK directly, reusing the shipping devx
+   posture (lazy connect, per-`(agent, connection, auth)` client cache,
+   connect-error → skip that connection). Only eve's small pure helpers
+   (`passesToolFilter`, the http→sse transport fallback) are mirrored.
+4. **`authorization.required` is a `tool.event`, not a first-class stream
+   event.** eve documents it as a distinct connection-OAuth challenge event;
+   trex surfaces it through the additive `tool.event` mechanism (divergence 10)
+   from inside the parked tool's `execute()`. There is no `authorization.completed`
+   event at all (see "What we ignore entirely").
+
+### Connections — known v1 limitations
+
+These are real, shipped-with gaps, not cosmetic:
+
+a. **Channel-initiated OAuth fails closed.** The channel principal is not yet
+   threaded into `HookCtx.principal` — `buildHookCtx` (`service/handler.ts`) only
+   derives the principal from the native `x-user-id`. So OAuth connections work
+   for **web sessions** (an `x-user-id`-authenticated caller), but a session
+   started by a **channel** (Discord/Slack/…) has no principal and a user-scoped
+   `trexConnect` connection fails closed with `principal_required` until that
+   threading lands. App-scoped (`principalType: "app"`) connections are
+   unaffected (they key on `__app__`, not the end user).
+b. **MCP + OAuth cold-start chicken-egg.** An MCP connection cannot enumerate its
+   tools before it has connected, and it cannot connect without a token — so an
+   oauth-gated **MCP** connection with no token yet cannot list any tools; its
+   tools appear only on the turn *after* the principal has authorized (the
+   provider resolves-or-skips at build time, no park). An oauth-gated **OpenAPI**
+   connection has no such problem: it enumerates from its static spec and parks
+   cleanly from cold at the first tool call.
+c. **`redirect_uri` is derived from the worker request origin.** The fixed
+   per-connector callback URL is built server-side from the incoming request's
+   own `origin` + the worker mount prefix. Behind a proxy whose public origin
+   differs from what the worker sees, the redirect_uri won't match what's
+   registered at the provider — a `PUBLIC_URL`-style override is needed and is a
+   follow-up (not wired in v1).
+d. **OpenAPI spec source is inline-object / JSON-string only.** Remote-URL specs,
+   file-path specs, and YAML documents are deferred — `openapi.ts`'s `parse()`
+   throws a clear error for anything but an inline document object or a JSON
+   string.
+e. **`connection_search` is discovery-only.** The `<name>__<tool>` tools are
+   still realized **eagerly** by the provider and stay directly callable —
+   `connection_search` only helps the model *name* them, it does not gate their
+   availability (full lazy-gating is deferred past v1). One consequence: a
+   `filterTools` hook runs *after* the connection merge, so `connection_search`
+   can list a tool that `filterTools` later drops from the callable set.
+f. **No connector-registration route.** `agents.oauth_connectors` rows are seeded
+   by an operator via SQL; the admin route set spec §5 sketched (mirroring devx
+   `provider_config_routes`) is deferred. The store exposes only `getConnector`
+   (read) — there is no write path outside migrations/tests. Connectors are
+   admin infrastructure, so SQL-seeding is the v1 workflow.
+g. **Consent routes are not rate-limited.** `/eve/v1/oauth/<connector>/{start,
+   callback}` reject any request without a valid signed `state` before any token
+   write, so the exposed surface is only cheap HMAC-verify CPU (no credential or
+   token exposure) — but per-IP throttling (spec §5 Security) is a v1.1 follow-up.
+
 ## What we ignore entirely
 
-- **`connections/`** (MCP, OpenAPI) — not loaded; skipped the same way.
 - **`sandbox/`** — not loaded; no seeded `/workspace`, no sandboxed tool
   execution.
 - **`schedules/`** — not implemented; no cron-driven turns, no
   `dispatchSchedule`.
 - **`hooks/`** — not implemented.
-- **`authorization.required`/`authorization.completed`** (connection OAuth
-  challenges) — unreachable since we don't implement `connections/`.
+- **`authorization.completed`** — no distinct "consent finished" stream event.
+  `authorization.required` *is* now surfaced (as a `tool.event` from an
+  oauth-gated connection tool — see the "Connections" section), but the
+  completion side is signaled implicitly: the parked turn resumes when the
+  callback writes the token, with no separate `authorization.completed` event.
+
+(**`connections/`** — MCP and OpenAPI — are now implemented; see the
+"Connections" section above. They are no longer in this list.)
 - **`compaction.requested`/`compaction.completed`** — no context-window
   compaction; a long session relies on the model's own context window with no
   summarization.

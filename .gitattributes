@@ -1,0 +1,7 @@
+# Vendored third-party source (e.g. gbrain, imported wholesale for the memory
+# plugin type). Mark generated+vendored so GitHub code scanning (CodeQL default
+# setup) skips it, and it's excluded from language stats / collapsed in diffs.
+# We carry only the minimal functional patches in vendor/*/PATCHES.md; upstream
+# quality findings are noise (matches the codeql-config.yml paths-ignore intent).
+vendor/** linguist-generated=true
+vendor/** linguist-vendored=true

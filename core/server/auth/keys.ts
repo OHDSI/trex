@@ -6,6 +6,10 @@ export const LABELS = {
   pgmetaAes: "trex.pgmeta.aes.v1",
   dekWrap: "trex.dek.wrap.v1",
   devxTokenAes: "trex.devx.token.aes.v1",
+  // HMAC key for the agents OAuth broker's signed `state` (anti-CSRF/replay on
+  // the auth-exempt consent routes). Derived from the root key so no separate
+  // secret needs provisioning; rotating the root key rotates it.
+  agentsOAuthState: "trex.agents.oauth.state.v1",
 } as const;
 
 export type SubkeyLabel = typeof LABELS[keyof typeof LABELS];

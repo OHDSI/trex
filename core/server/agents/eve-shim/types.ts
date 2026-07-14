@@ -17,6 +17,15 @@ export interface HookCtx {
   bearerToken?: string;
   userId?: string;
   metadata?: unknown;
+  // The resolved end-user principal for this turn, used by the OAuth broker
+  // (connections/oauth) to key per-principal tokens. Derived from x-user-id
+  // for native sessions (handler.ts's buildHookCtx sets {principalType:"user",
+  // principalId:userId}); a channel principal would populate this too. Absent
+  // when the request carries no principal — a user-scoped oauth connection then
+  // fails closed (principal_required). Distinct from userId (which is strictly
+  // the trex x-user-id) so a non-trex channel principal can flow here without
+  // masquerading as a trex user id elsewhere.
+  principal?: { principalType: string; principalId: string };
   env: (k: string) => string | undefined;
   sql: QueryFn;
 }

@@ -4,11 +4,65 @@ import { addPlugin as addFunctionPlugin } from "./function.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { addAgentsPlugin, agentsCoreMigrationTarget } from "./agents.ts";
+import { normalizeMemoryValue, type MemoryEntry } from "./memory.ts";
+import { mergeMemoryEntries, type SourceOwners } from "./memory-merge.ts";
 import { scanPluginDirectory, splitPathList } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
 import { waitForAttachedDatabase } from "../lib/db-wait.ts";
 
 declare const Trex: any;
+
+// Accumulated across all plugins during a scan pass (see the `memory` case
+// in addPlugin below): every `trex.memory` declaration, merged so multiple
+// plugins can contribute sources to the same memory name (see
+// memory-merge.ts). Each source is stamped with the declaring plugin's
+// directory (MemorySource.pluginDir, see memory.ts) before merging, so an
+// inline `dir` source always resolves against the plugin that declared it —
+// even when a memory spans plugins in different directories that each
+// contribute inline sources — see materializeSource in memory/importer.ts.
+const MEMORY_ENTRIES: MemoryEntry[] = [];
+const MEMORY_SOURCE_OWNERS: SourceOwners = new Map();
+
+// Declared `trex.memory` NAMES only (not full entries — see MEMORY_ENTRIES
+// above for those), used purely as an allow-list for agent-linked-memory
+// validation (plugin/agents.ts's addAgentsPlugin/unknownMemoryLinks).
+// Populated in two ways:
+//  1. A pre-pass (collectDeclaredMemoryNames, run once at the top of
+//     initPlugins, BEFORE any plugin is dispatched) that scans every
+//     discovered plugin's package.json across all PLUGINS_DEV_PATH/
+//     PLUGINS_PATH directories. Needed because dispatch order is:
+//     WITHIN one plugin's own trex block, agents (orderRank 4) sort before
+//     memory (5); but ACROSS different plugins, scanAndRegister dispatches
+//     each plugin's whole trex block as it's found on disk — an
+//     agents-declaring plugin can be (and often is) a completely different
+//     plugin from the one declaring the memory it links, and may be scanned
+//     first. Without the pre-pass, addAgentsPlugin would see an empty
+//     allow-list for a memory that's perfectly valid but just not processed
+//     yet, and incorrectly skip the agent.
+//  2. Incrementally, in the `memory` case below (dynamic registration via
+//     registerFromPath happens after boot's pre-pass already ran).
+const DECLARED_MEMORY_NAMES: Set<string> = new Set();
+
+async function collectDeclaredMemoryNames(rawPaths: string[]): Promise<void> {
+  for (const rawPath of rawPaths) {
+    for (const dir of splitPathList(rawPath)) {
+      const scanned = await scanPluginDirectory(dir);
+      for (const { pkg } of scanned) {
+        const memoryValue = pkg?.trex?.memory;
+        if (memoryValue === undefined) continue;
+        try {
+          for (const e of normalizeMemoryValue(memoryValue)) {
+            DECLARED_MEMORY_NAMES.add(e.name);
+          }
+        } catch {
+          // Invalid `trex.memory` declaration — surfaces with a real error
+          // in the actual scan/dispatch pass below; don't double-report
+          // here, and don't let a bad manifest abort the whole pre-pass.
+        }
+      }
+    }
+  }
+}
 
 interface ActivePluginEntry {
   name: string;
@@ -66,7 +120,8 @@ export class Plugins {
           case "functions": return 2;
           case "flow": return 3;
           case "agents": return 4;
-          default: return 5;
+          case "memory": return 5;
+          default: return 6;
         }
       };
       const sortedEntries = trexEntries.slice().sort(
@@ -90,11 +145,26 @@ export class Plugins {
             Plugins.registerMigrations(dir, shortName, value);
             break;
           case "agents":
-            await addAgentsPlugin(app, value, dir, fullName);
+            await addAgentsPlugin(app, value, dir, fullName, DECLARED_MEMORY_NAMES);
             if (!Plugins.migrationTargets.some((t) => t.name === "agents-core")) {
               Plugins.migrationTargets.push(await agentsCoreMigrationTarget());
             }
             break;
+          case "memory": {
+            // Collect only — the proxy/gbrain/provisioning start once, after
+            // the full plugin scan, so a shared brain fed by multiple
+            // plugins (see MEMORY_SOURCE_OWNERS above) sees every source
+            // before gbrain is warmed up.
+            const entries = normalizeMemoryValue(value);
+            for (const e of entries) {
+              DECLARED_MEMORY_NAMES.add(e.name);
+              for (const src of e.sources) {
+                src.pluginDir = dir;
+              }
+            }
+            mergeMemoryEntries(MEMORY_ENTRIES, entries, fullName, MEMORY_SOURCE_OWNERS);
+            break;
+          }
           default:
             console.log(`Unknown plugin type: ${key}`);
         }
@@ -139,6 +209,11 @@ export class Plugins {
     const pluginsPath = Deno.env.get("PLUGINS_PATH") || "./plugins";
     console.log("Scanning and registering plugins");
 
+    // Must run before any plugin is dispatched — see DECLARED_MEMORY_NAMES's
+    // doc comment above for why a single ordered scan/dispatch pass isn't
+    // enough to validate agent-linked-memory references.
+    await collectDeclaredMemoryNames([devPath, pluginsPath]);
+
     // PLUGINS_DEV_PATH / PLUGINS_PATH may be colon-separated PATH-style lists
     // (e.g. d2e uses /usr/src/plugins-dev:/usr/src/bundled-plugins:/usr/src/plugins),
     // so scan each entry. Dev paths have highest priority — scanned first.
@@ -157,6 +232,21 @@ export class Plugins {
     // a plugin's `migrations` config is silently ignored and its tables never
     // get created — surfacing later as "relation <schema>.<table> does not exist".
     await Plugins.applyMigrations();
+
+    // Start the memory runtime once, after every plugin's `trex.memory` has
+    // been collected (a memory can span plugins — see MEMORY_SOURCE_OWNERS).
+    // Mounting is best-effort: a failure here is logged and swallowed so an
+    // unrelated boot doesn't crash because the worker failed to stage or a
+    // git source was temporarily unreachable (see gbrain-worker/mount.ts for
+    // the per-source resilience within the mount itself).
+    if (MEMORY_ENTRIES.length > 0) {
+      try {
+        const { mountMemoryWorker } = await import("../memory/gbrain-worker/mount.ts");
+        await mountMemoryWorker(app, MEMORY_ENTRIES);
+      } catch (e) {
+        console.error("memory: worker mount failed:", e);
+      }
+    }
   }
 
   /**

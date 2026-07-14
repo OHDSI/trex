@@ -17,6 +17,7 @@ import { createHandler } from "./handler.ts";
 import { buildSdkTools } from "./toolset.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
+import { _resetMcpCache, type McpClient, type McpConnectFn } from "../connections/mcp.ts";
 import { createStore } from "./store.ts";
 import { subscribe } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
@@ -388,6 +389,92 @@ Deno.test("buildSdkTools: a subagent's own dynamic-tools.ts provider does NOT ru
   assert(filterCalls > 0, "filterTools must still run at subagent depth 1, unlike the provider");
   assert(!("weather" in nested), "the provider never ran, so its tool must be absent");
   assert(!("shout" in nested), "filterTools dropped the subagent's own shout tool");
+});
+
+// ---------------------------------------------------------------------------
+// buildSdkTools (toolset.ts): Task 5 — the connection_search built-in. Gated
+// to depth 0 and only when the agent has connections; an authored
+// tools/connection_search wins (logged); the search surfaces the eagerly
+// realized <conn>__<tool> names. The toy fixture ships an `echo` MCP
+// connection, so a fake MCP connect stands in for the real transport.
+// ---------------------------------------------------------------------------
+
+const CONN_REMOTE_TOOLS = [
+  { name: "ping", description: "Ping the echo server", inputSchema: { type: "object", properties: {} } },
+  { name: "danger", description: "A destructive op", inputSchema: { type: "object", properties: {} } },
+];
+
+function fakeMcpConnect(tools = CONN_REMOTE_TOOLS): McpConnectFn {
+  return () => {
+    const client: McpClient = {
+      listTools: () => Promise.resolve({ tools }),
+      callTool: () => Promise.resolve({ content: [{ type: "text", text: "pong" }] }),
+    };
+    return Promise.resolve(client);
+  };
+}
+
+Deno.test("buildSdkTools: connection_search is present at depth 0 and a query returns matching <conn>__<tool> entries", async () => {
+  _resetMcpCache();
+  const agent = await loadAgent(TOY); // ships the `echo` MCP connection fixture
+  assert(Object.keys(agent.connections).length > 0, "toy fixture must have a connection for this test");
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx(),
+    connectionOpts: { connect: fakeMcpConnect() },
+  });
+  assert("connection_search" in tools, "connection_search must be present at depth 0 when the agent has connections");
+  const res = await (tools.connection_search as { execute: (i: unknown) => Promise<{ matches: { name: string }[] }> })
+    .execute({ query: "ping" });
+  const names = res.matches.map((m) => m.name);
+  assertEquals(names[0], "echo__ping", "the ping tool must rank first for a 'ping' query");
+  assert(!names.includes("echo__danger"), "the unrelated danger tool must not match 'ping'");
+});
+
+Deno.test("buildSdkTools: connection_search is absent when the agent has no connections", async () => {
+  const agent = await loadAgent(TOY);
+  agent.connections = {};
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  assert(!("connection_search" in tools), "no connections → no connection_search built-in");
+});
+
+Deno.test("buildSdkTools: a subagent (depth 1) does not get connection_search even if it has connections", async () => {
+  _resetMcpCache();
+  const agent = await loadAgent(TOY);
+  const shouter = agent.subagents.shouter;
+  shouter.connections = agent.connections; // give the subagent a connection too
+  const nested = await buildSdkTools({
+    agent: shouter, sessionId: "s-1", depth: 1, hookCtx: fakeHookCtx(),
+    connectionOpts: { connect: fakeMcpConnect() },
+  });
+  assert(!("connection_search" in nested), "connection_search is a top-level-only (depth 0) built-in");
+});
+
+Deno.test("buildSdkTools: an authored tools/connection_search wins over the built-in (logged)", async () => {
+  _resetMcpCache();
+  const agent = await loadAgent(TOY);
+  agent.tools.connection_search = {
+    description: "authored connection_search",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve({ from: "authored" }),
+  };
+  const logged: string[] = [];
+  const origLog = console.log;
+  console.log = (...a: unknown[]) => logged.push(a.map(String).join(" "));
+  let tools: Record<string, unknown>;
+  try {
+    tools = await buildSdkTools({
+      agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx(),
+      connectionOpts: { connect: fakeMcpConnect() },
+    });
+  } finally {
+    console.log = origLog;
+  }
+  const result = await (tools.connection_search as { execute: (i: unknown) => Promise<unknown> }).execute({ query: "x" });
+  assertEquals(result, { from: "authored" }, "the authored tool must run, not the built-in");
+  assert(
+    logged.some((l) => l.includes("overrides the built-in connection_search")),
+    "the override must be logged, not silently dropped",
+  );
 });
 
 // ---------------------------------------------------------------------------
