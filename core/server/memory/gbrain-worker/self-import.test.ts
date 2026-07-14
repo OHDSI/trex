@@ -419,3 +419,60 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  // Regression guard: gbrain's put_page lowercases the slug in validateSlug but
+  // upsertChunks' raw SELECT does not, so a mixed-case slug (e.g. from an
+  // UpperCase.md filename) rolls the write back. self-import lowercases the slug
+  // before writing, matching gbrain's canonical form — so the page imports.
+  name: "importStagedSources: mixed-case slug is lowercased (no gbrain rollback)",
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const MC = "h4mixed";
+    const engine = new PostgresEngine();
+    await engine.connect(
+      { engine: "postgres", database_url: DATABASE_URL } as never,
+    );
+    await engine.executeRaw(`DROP SCHEMA IF EXISTS memory_${MC} CASCADE`);
+    await engine.executeRaw(
+      `DELETE FROM trexdb.memory_import_state WHERE memory = $1`,
+      [MC],
+    );
+    const tmp = await Deno.makeTempDir({ prefix: "trex-memory-mixedcase-" });
+    const manifest: StagedManifestEntry[] = [
+      { memory: MC, source: "default", version: "v1", slugs: ["MixedCaseDoc"] },
+    ];
+    try {
+      await writeStagedSources(tmp, manifest, {
+        [`${MC}/default/MixedCaseDoc.md`]: "# Mixed\nmixed-case slug content",
+      });
+      await importStagedSources(engine, tmp, {});
+
+      const schema = `memory_${MC}`;
+      // Retrieve at the LOWERCASED slug — proves the guard lowercased it and
+      // the write did not roll back.
+      const page = await engine.withSchema(
+        schema,
+        (s) =>
+          dispatchToolCall(s, "get_page", { slug: "default/mixedcasedoc" }, {
+            schema,
+            sourceId: "default",
+          }),
+      );
+      assert(
+        !page.isError,
+        `get_page (lowercased slug) failed — mixed-case slug likely rolled back: ${
+          JSON.stringify(page)
+        }`,
+      );
+      const text = JSON.parse((page.content[0] as { text: string }).text);
+      assert(
+        String(text.compiled_truth ?? "").includes("mixed-case slug content"),
+        `imported page content missing: ${JSON.stringify(text)}`,
+      );
+    } finally {
+      await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    }
+  },
+});

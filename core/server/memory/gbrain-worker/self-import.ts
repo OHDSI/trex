@@ -152,11 +152,19 @@ export async function importStagedSources(
           const path = `${sourcesRoot}/${memory}/${entry.source}/${slug}.md`;
           try {
             const content = await Deno.readTextFile(path);
+            // Lowercase the page slug before writing. gbrain's put_page
+            // lowercases the slug in validateSlug, but upsertChunks' raw SELECT
+            // does not — a mixed-case slug (e.g. from an UpperCase.md filename)
+            // makes the two disagree and rolls the write back. Sending an
+            // already-lowercased slug matches gbrain's own canonical form and
+            // avoids that. (Source names are lowercase-regex'd already; this
+            // guards the file-derived slug segment.)
+            const pageSlug = `${entry.source}/${slug}`.toLowerCase();
             const result = await engine.withSchema(
               schema,
               (s) =>
                 dispatchToolCall(s, "put_page", {
-                  slug: `${entry.source}/${slug}`,
+                  slug: pageSlug,
                   content,
                 }, {
                   schema,
