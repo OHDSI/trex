@@ -253,6 +253,153 @@ Deno.test({
 
 Deno.test({
   name:
+    "importStagedSources: two plugins' sources land in ONE shared memory schema, isolated from another memory",
+  // This is the shape mount.ts's stageMemorySources would produce when TWO
+  // plugins (e.g. memory-example + memory-example2) both declare
+  // `trex.memory` entries for the SAME memory name with DISTINCT source
+  // names — mergeMemoryEntries (core/server/plugin/memory-merge.ts) unions
+  // their sources into one MemoryEntry, and stageMemorySources emits one
+  // manifest entry per (memory, source). Proves the "one shared brain fed by
+  // multiple plugins" claim end-to-end against the real importer, without
+  // needing the plugin loader or mount.ts itself.
+  sanitizeResources: false,
+  sanitizeOps: false,
+  fn: async () => {
+    const engine = new PostgresEngine();
+    await engine.connect(
+      { engine: "postgres", database_url: DATABASE_URL } as never,
+    );
+
+    // Namespaced per-feature (am6 = agent-linked-memory Task 6) so a rerun
+    // doesn't collide with h4test's schema/state, mirroring that test's own
+    // "unique-ish per test run" convention.
+    const SHARED = "am6shared";
+    const OTHER = "am6other";
+    // Lowercase-kebab, matching this codebase's slug convention (and gbrain's
+    // own validateSlug, which lowercases stored slugs) — a mixed-case source
+    // name here would surface a real vendored-gbrain inconsistency (putPage
+    // lowercases via validateSlug; upsertChunks's raw SELECT does not), which
+    // is out of scope to fix from this test.
+    const SOURCE_A = "docs-a";
+    const SOURCE_B = "docs-b";
+    const OTHER_SOURCE = "solo";
+
+    await engine.executeRaw(`DROP SCHEMA IF EXISTS memory_${SHARED} CASCADE`);
+    await engine.executeRaw(`DROP SCHEMA IF EXISTS memory_${OTHER} CASCADE`);
+    await engine.executeRaw(
+      `DELETE FROM trexdb.memory_import_state
+       WHERE (memory = $1 AND source IN ($2, $3)) OR (memory = $4 AND source = $5)`,
+      [SHARED, SOURCE_A, SOURCE_B, OTHER, OTHER_SOURCE],
+    );
+
+    const tmp = await Deno.makeTempDir({
+      prefix: "trex-memory-shared-brain-test-",
+    });
+    const manifest: StagedManifestEntry[] = [
+      { memory: SHARED, source: SOURCE_A, version: "v1", slugs: ["intro"] },
+      { memory: SHARED, source: SOURCE_B, version: "v1", slugs: ["intro"] },
+      { memory: OTHER, source: OTHER_SOURCE, version: "v1", slugs: ["intro"] },
+    ];
+
+    try {
+      await writeStagedSources(tmp, manifest, {
+        [`${SHARED}/${SOURCE_A}/intro.md`]:
+          "# Docs A\ncontributed by plugin memory-example",
+        [`${SHARED}/${SOURCE_B}/intro.md`]:
+          "# Docs B\ncontributed by plugin memory-example2",
+        [`${OTHER}/${OTHER_SOURCE}/intro.md`]:
+          "# Other memory\nunrelated brain, must stay isolated",
+      });
+
+      await importStagedSources(engine, tmp, {});
+
+      const sharedSchema = `memory_${SHARED}`;
+      const otherSchema = `memory_${OTHER}`;
+
+      // Both sources' pages landed in the SAME shared schema (one brain).
+      const countRows = await engine.executeRaw<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ${sharedSchema}.pages`,
+      );
+      assertEquals(
+        countRows[0]?.n,
+        2,
+        `expected 2 pages in ${sharedSchema}, got ${JSON.stringify(countRows)}`,
+      );
+
+      const pageA = await engine.withSchema(
+        sharedSchema,
+        (s) =>
+          dispatchToolCall(s, "get_page", { slug: `${SOURCE_A}/intro` }, {
+            schema: sharedSchema,
+            sourceId: "default",
+          }),
+      );
+      assert(
+        !pageA.isError,
+        `get_page ${SOURCE_A}/intro failed: ${JSON.stringify(pageA)}`,
+      );
+      const pageAText = JSON.parse(
+        (pageA.content[0] as { text: string }).text,
+      );
+      assert(
+        String(pageAText.compiled_truth ?? "").includes("Docs A"),
+        `expected docsA's page content, got: ${JSON.stringify(pageAText)}`,
+      );
+
+      const pageB = await engine.withSchema(
+        sharedSchema,
+        (s) =>
+          dispatchToolCall(s, "get_page", { slug: `${SOURCE_B}/intro` }, {
+            schema: sharedSchema,
+            sourceId: "default",
+          }),
+      );
+      assert(
+        !pageB.isError,
+        `get_page ${SOURCE_B}/intro failed: ${JSON.stringify(pageB)}`,
+      );
+      const pageBText = JSON.parse(
+        (pageB.content[0] as { text: string }).text,
+      );
+      assert(
+        String(pageBText.compiled_truth ?? "").includes("Docs B"),
+        `expected docsB's page content, got: ${JSON.stringify(pageBText)}`,
+      );
+
+      // Isolation: the OTHER memory got its own schema with its own page —
+      // a distinct memory name is never pulled into the shared schema.
+      const otherCountRows = await engine.executeRaw<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ${otherSchema}.pages`,
+      );
+      assertEquals(
+        otherCountRows[0]?.n,
+        1,
+        `expected 1 page in ${otherSchema}, got ${
+          JSON.stringify(otherCountRows)
+        }`,
+      );
+
+      // And the shared schema does NOT contain the other memory's page —
+      // cross-memory isolation holds in both directions.
+      const crossCheck = await engine.executeRaw<{ n: number }>(
+        `SELECT count(*)::int AS n FROM ${sharedSchema}.pages WHERE slug LIKE $1`,
+        [`${OTHER_SOURCE}/%`],
+      );
+      assertEquals(
+        crossCheck[0]?.n,
+        0,
+        `shared schema must not contain the other memory's page: ${
+          JSON.stringify(crossCheck)
+        }`,
+      );
+    } finally {
+      await Deno.remove(tmp, { recursive: true }).catch(() => {});
+    }
+  },
+});
+
+Deno.test({
+  name:
     "importStagedSources: missing manifest is logged and non-fatal (no throw)",
   sanitizeResources: false,
   sanitizeOps: false,
