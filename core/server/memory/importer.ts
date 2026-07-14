@@ -66,8 +66,21 @@ async function contentHash(files: MaterializedFile[]): Promise<string> {
     .join("");
 }
 
+// Manifest `dir` is operator/tpm-controlled (trusted-scope plugins only),
+// but this is cheap defense-in-depth: reject any `..` path segment so a
+// source can never resolve outside the plugin package (inline sources) or
+// outside the cloned checkout (git sources). Covers every joinDir call site
+// (materializeSource's git + inline branches, and sourceVersion's inline
+// probe) in one place.
+function assertNoParentTraversal(dir: string): void {
+  if (dir.split("/").some((segment) => segment === "..")) {
+    throw new Error(`memory source dir must not contain a '..' segment: ${dir}`);
+  }
+}
+
 function joinDir(base: string, sub?: string): string {
   if (!sub) return base.replace(/\/+$/, "");
+  assertNoParentTraversal(sub);
   return `${base}/${sub}`.replace(/\/+/g, "/").replace(/\/+$/, "");
 }
 
@@ -190,10 +203,15 @@ export async function importSource(
       try {
         body = await res.json();
       } catch {
-        // Non-JSON body (e.g. a plain-text 500) — treated as a failure
-        // below via res.ok, not fatal to parse.
+        // Non-JSON body (malformed 2xx response, or a plain-text 500) —
+        // body stays undefined, which fails the `body?.result` check below
+        // regardless of res.ok. Not fatal to parse here.
       }
-      if (res.ok && !body?.result?.isError) {
+      // Require an actual `result` object, not just the absence of
+      // `isError` — otherwise a 2xx with an unparseable/empty body (body
+      // undefined, so `body?.result` is undefined too) would satisfy
+      // `!body?.result?.isError` and get miscounted as a success.
+      if (res.ok && body?.result && !body.result.isError) {
         ok++;
       } else {
         failed++;

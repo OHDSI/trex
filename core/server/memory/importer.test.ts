@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "jsr:@std/assert";
 import { importSource, materializeSource } from "./importer.ts";
 
 Deno.test("materializes inline markdown into slug/content pairs", async () => {
@@ -235,4 +235,49 @@ Deno.test("importSource counts a network-level failure (non-2xx) without throwin
   } finally {
     await stopStub(stub);
   }
+});
+
+Deno.test("importSource counts a 2xx response with malformed JSON as a failure, not ok", async () => {
+  // res.ok is true (status 200) but the body isn't valid JSON, so
+  // res.json() throws inside importSource. Pre-fix this miscounted as ok
+  // because `!body?.result?.isError` is true when body is undefined.
+  const stub = startStub(() => new Response("not-json{", { status: 200 }));
+  try {
+    const src = { name: "handbook", dir: "handbook" };
+    const files = [{ slug: "intro", content: "# Intro" }];
+    const result = await importSource("research", src, files, {
+      baseUrl: stub.baseUrl,
+      token: "test-token",
+    });
+    assertEquals(result, { ok: 0, failed: 1 });
+  } finally {
+    await stopStub(stub);
+  }
+});
+
+// --- dir traversal guard ----------------------------------------------------
+
+Deno.test("materializeSource rejects an inline source dir containing a '..' segment", async () => {
+  const dir = await Deno.makeTempDir();
+  const workRoot = await Deno.makeTempDir();
+  await assertRejects(
+    () => materializeSource({ name: "handbook", dir: "../escape" }, dir, workRoot),
+    Error,
+    "must not contain a '..' segment",
+  );
+});
+
+Deno.test("materializeSource rejects a git source dir containing a '..' segment", async () => {
+  const repo = await makeLocalRepo();
+  const workRoot = await Deno.makeTempDir();
+  await assertRejects(
+    () =>
+      materializeSource(
+        { name: "docs", repo, ref: "main", dir: "../escape" },
+        "",
+        workRoot,
+      ),
+    Error,
+    "must not contain a '..' segment",
+  );
 });

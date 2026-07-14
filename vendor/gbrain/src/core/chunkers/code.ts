@@ -10,89 +10,66 @@
  * Supports: TypeScript, TSX, JavaScript, Python, Ruby, Go.
  * Falls back to recursive text chunker for unsupported languages.
  *
- * WASM loading (v0.19.0, Layer 2):
- * Uses Bun's embedded-asset pattern via `import ... with { type: 'file' }`.
- * WASMs live at `src/assets/wasm/` and are committed to the repo. At
- * `bun --compile` time, Bun bundles them into the binary. In dev, the
- * imports resolve to the repo paths directly. No node_modules dependency
- * at runtime.
+ * WASM loading (v0.19.0 Layer 2; Deno-compat P5 patch, see
+ * vendor/gbrain/PATCHES.md):
+ * Each grammar path is a plain `new URL('<relative-wasm-path>',
+ * import.meta.url).pathname` string constant, resolved relative to this
+ * module's own URL. WASMs live at `src/assets/wasm/` and are committed to
+ * the repo; in dev (and under Deno) the path resolves straight to the
+ * repo file. No node_modules dependency at runtime.
+ *
+ * Upstream previously used Bun's embedded-asset import attribute
+ * (`import ... with { type: 'file' }`), which `bun build --compile` bundles
+ * into a compiled binary. That attribute is Bun-specific syntax Deno
+ * rejects outright, so the P5 patch replaced it with the plain URL form
+ * above — behavior-identical under Bun, but it means `bun build --compile`
+ * of this vendored tree no longer embeds the WASM assets (see PATCHES.md's
+ * "Known, accepted divergence" note: trex never compiles this tree, it
+ * hosts it from source as a Deno edge worker).
  */
 
 import { chunkText as recursiveChunk } from './recursive.ts';
 import { buildQualifiedName } from './qualified-names.ts';
 
-// Embed the tree-sitter runtime + per-language grammars as files.
-// `with { type: 'file' }` returns a path (string) at runtime. Bun bundles
-// the referenced file into the compiled binary during `bun build --compile`.
-// In dev, the path resolves to the source-tree file; the compiled binary
-// uses a bundler-synthesized path.
-// @ts-ignore — type: 'file' import attribute is valid Bun syntax, not in lib.d.ts
+// Tree-sitter runtime + per-language grammar paths. See the doc-header above
+// for why these are plain `new URL(...).pathname` constants rather than
+// `with { type: 'file' }` imports.
 const TREE_SITTER_WASM = new URL('../../assets/wasm/tree-sitter.wasm', import.meta.url).pathname;
-// 36 grammars total. Every grammar ships in the compiled binary — Bun's
-// --compile bundles each referenced asset. Layer 5 extends the 6 baseline
-// languages to all 36 tree-sitter-wasms ship.
-// @ts-ignore
+// 36 grammars total. Layer 5 extends the 6 baseline languages to all 36
+// tree-sitter-wasms ship.
 const G_BASH = new URL('../../assets/wasm/grammars/tree-sitter-bash.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_C = new URL('../../assets/wasm/grammars/tree-sitter-c.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_CSHARP = new URL('../../assets/wasm/grammars/tree-sitter-c_sharp.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_CPP = new URL('../../assets/wasm/grammars/tree-sitter-cpp.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_CSS = new URL('../../assets/wasm/grammars/tree-sitter-css.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_DART = new URL('../../assets/wasm/grammars/tree-sitter-dart.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_ELIXIR = new URL('../../assets/wasm/grammars/tree-sitter-elixir.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_ELM = new URL('../../assets/wasm/grammars/tree-sitter-elm.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_GO = new URL('../../assets/wasm/grammars/tree-sitter-go.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_HTML = new URL('../../assets/wasm/grammars/tree-sitter-html.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_JAVA = new URL('../../assets/wasm/grammars/tree-sitter-java.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_JAVASCRIPT = new URL('../../assets/wasm/grammars/tree-sitter-javascript.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_JSON = new URL('../../assets/wasm/grammars/tree-sitter-json.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_KOTLIN = new URL('../../assets/wasm/grammars/tree-sitter-kotlin.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_LUA = new URL('../../assets/wasm/grammars/tree-sitter-lua.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_OCAML = new URL('../../assets/wasm/grammars/tree-sitter-ocaml.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_PHP = new URL('../../assets/wasm/grammars/tree-sitter-php.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_PYTHON = new URL('../../assets/wasm/grammars/tree-sitter-python.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_RUBY = new URL('../../assets/wasm/grammars/tree-sitter-ruby.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_RUST = new URL('../../assets/wasm/grammars/tree-sitter-rust.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_SCALA = new URL('../../assets/wasm/grammars/tree-sitter-scala.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_SOLIDITY = new URL('../../assets/wasm/grammars/tree-sitter-solidity.wasm', import.meta.url).pathname;
-// @ts-ignore — DerekStride/tree-sitter-sql @ c2e1e08db1ea20dc23bdb8d228a81a8756e9c450,
+// DerekStride/tree-sitter-sql @ c2e1e08db1ea20dc23bdb8d228a81a8756e9c450,
 // built with tree-sitter-cli@v0.26.3 --abi 14 (matches web-tree-sitter 0.22.6).
 // 11 MB; substantially larger than peers because the grammar covers
 // PostgreSQL + MySQL + SQLite + T-SQL basics. See CHANGELOG for size notes.
 const G_SQL = new URL('../../assets/wasm/grammars/tree-sitter-sql.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_SWIFT = new URL('../../assets/wasm/grammars/tree-sitter-swift.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_TOML = new URL('../../assets/wasm/grammars/tree-sitter-toml.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_TSX = new URL('../../assets/wasm/grammars/tree-sitter-tsx.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_TYPESCRIPT = new URL('../../assets/wasm/grammars/tree-sitter-typescript.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_VUE = new URL('../../assets/wasm/grammars/tree-sitter-vue.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_YAML = new URL('../../assets/wasm/grammars/tree-sitter-yaml.wasm', import.meta.url).pathname;
-// @ts-ignore
 const G_ZIG = new URL('../../assets/wasm/grammars/tree-sitter-zig.wasm', import.meta.url).pathname;
 
 // Bumped whenever chunker output shape changes (new tokenizer, merge-threshold,
@@ -1184,9 +1161,9 @@ async function ensureInit(): Promise<void> {
     initPromise = (async () => {
       const P = await getParser();
       // v0.22.x: init takes locateFile for the WASM module.
-      // TREE_SITTER_WASM is a path resolved by Bun's embedded-file loader — it
-      // points at the real file in dev, and the bundler-synthesized path in
-      // the compiled binary. Either way tree-sitter can read it.
+      // TREE_SITTER_WASM is a `new URL(...).pathname` string resolved
+      // relative to this module's own URL (see the file's doc-header) — it
+      // points at the real repo file under both Bun and Deno.
       await (P as any).init({ locateFile: () => TREE_SITTER_WASM });
       initDone = true;
     })();

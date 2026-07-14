@@ -90,3 +90,32 @@ against a live Postgres test DB) against these in-tree files, using a
 mapped directly to `npm:js-yaml@^3.14.2`, completed end-to-end
 ("ALL STEPS SUCCEEDED"), proving the patches make gbrain Deno-native
 without redirection shims.
+
+**Known, accepted divergence — `bun build --compile` no longer embeds the
+tree-sitter WASM assets (H0).** Patch 1 above replaces the 31
+`import X from '....wasm' with { type: 'file' }` statements in
+`src/core/chunkers/code.ts` with plain `new URL(...).pathname` string
+constants. Upstream relies on the `with { type: 'file' }` import attribute
+specifically so `bun build --compile` bundles each referenced WASM into the
+compiled binary (see upstream's `docs/architecture/KEY_FILES.md` entry for
+`src/assets/wasm/`); a plain `new URL(...).pathname` is just a path string at
+both dev-time and compile-time, so **`bun build --compile` no longer embeds
+the WASM assets into the binary** — the grammars would have to ship
+alongside the binary as loose files instead. Upstream's CI guard
+`scripts/check-wasm-embedded.sh` (invoked from `check:wasm` /
+`scripts/ci-local.sh`) exists precisely to catch this class of regression
+and **will flag a `bun build --compile` of this vendored tree**.
+
+This is intentional and accepted here: trex never runs
+`bun build --compile` against `vendor/gbrain`. trex hosts this vendored
+gbrain core **from source**, loaded directly by a trex Deno edge-runtime
+worker (`core/server/memory/gbrain-worker/`) — there is no compiled Bun
+binary in the trex deployment path, so `check-wasm-embedded.sh`'s failure
+mode never triggers in trex's own CI. Flagging this here so a future
+maintainer who re-vendors/upgrades gbrain and reflexively runs
+`bun run check:all` (which includes `check:wasm`) understands why it fails
+and does not "fix" it by reverting patch 1 (which would break the Deno
+hosting path this vendoring exists for). If gbrain is ever additionally
+shipped via a compiled Bun binary in this repo, the WASM assets would need
+to be copied alongside the binary explicitly (or patch 1 reverted for that
+build target only).
