@@ -142,6 +142,22 @@ Deno.test({
       );
       assertEquals(noAuthRes.status, 401);
 
+      // ... and an UNSET token fails closed: empty configured secret must
+      // reject an empty presented secret (the route is proxy-auth-exempt).
+      const emptyTokenHandler = createMemoryHandler({
+        engine,
+        allowlist: new Set(["h2test"]),
+        token: "",
+      });
+      const emptyRes = await emptyTokenHandler(
+        rpcRequest(
+          "/memory/h2test/mcp",
+          { jsonrpc: "2.0", id: 6, method: "initialize" },
+          { token: "" },
+        ),
+      );
+      assertEquals(emptyRes.status, 401);
+
       // 5. POST to an undeclared memory name -> 404 (allow-list gate), given
       // a valid bearer token.
       const undeclaredRes = await handler(

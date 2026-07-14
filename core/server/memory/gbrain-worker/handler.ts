@@ -62,6 +62,9 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 function checkBearer(req: Request, token: string): boolean {
+  // Fail closed when GBRAIN_MEMORY_TOKEN is unset ("" would otherwise match
+  // an empty presented secret) — this check is the route's only auth gate.
+  if (!token) return false;
   // `Headers.get` is case-insensitive per the Fetch spec, so a single
   // lowercase lookup already covers `Authorization`/`authorization`/etc. —
   // no separate-case fallback needed.

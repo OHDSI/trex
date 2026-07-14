@@ -256,19 +256,10 @@ await engine.connect(
   { engine: "postgres", database_url: Deno.env.get("DATABASE_URL") } as never,
 );
 
-// H4: self-import core-staged sources (see mount.ts's stageMemorySources)
-// before serving. Never allowed to block/prevent Deno.serve below — an
-// import failure is logged and the worker still comes up serving whatever
-// content is already in gbrain from a prior boot.
-//
-// Path resolution: TREX_MEMORY_SOURCES (the ORIGINAL staged servicePath's
-// sources dir, set by buildMemoryWorkerConfig) first. The meta-relative
-// fallback is NOT valid in the packaged runtime: the worker executes from
-// the runtime's compile dir (/var/tmp/sb-compile-trex/<staged>), which
-// carries only the MODULE GRAPH — sources/*.md and manifest.json never get
-// copied there, so ./sources resolves to a dir that doesn't exist. Reading
-// the original /tmp servicePath works because the worker is created with
-// allowHostFsAccess and both paths are in the same container.
+// H4: self-import core-staged sources before serving; failures are logged,
+// never fatal. TREX_MEMORY_SOURCES points at the original staged servicePath
+// — the runtime's compile dir carries only the module graph, so the
+// meta-relative ./sources fallback only works outside the packaged runtime.
 try {
   await importStagedSources(
     engine,
@@ -326,29 +317,16 @@ Deno.serve((req) => handler(req));
     // plugins — never an arbitrary caller-supplied name.
     GBRAIN_MEMORY_ALLOWLIST: entries.map((e) => e.name).join(","),
     GBRAIN_MEMORY_TOKEN: Deno.env.get("GBRAIN_MEMORY_TOKEN") ?? "",
-    // Where self-import reads staged sources from — the ORIGINAL staged
-    // servicePath, NOT worker-code-relative (see the entry-point comment:
-    // the runtime's compile dir only carries the module graph).
     TREX_MEMORY_SOURCES: `${tmp}/sources`,
   };
 
   return { servicePath: tmp, importMapPath, env };
 }
 
-// Worker permissions: rely on the runtime's UserWorker DEFAULTS — no
-// `permissions` option is passed to the worker create call. This closed the
-// OPERATIONS.md "worker permissions shape" pre-production gate: the previous
-// best-effort object here (`{allow_net: true, ...}`, authored while the
-// trex-runtime submodule wasn't checked out) failed live worker creation
-// with `serde_v8 error: invalid type; expected: array, got: Boolean` — the
-// runtime deserializes each field as Deno's `Option<Vec<String>>`
-// (`crates/base/src/runtime/permissions.rs`), where booleans are invalid.
-// The UserWorker defaults there (`get_default_permissions(UserWorker)`)
-// already grant exactly what this worker needs: allow-all env/net/read/write
-// /import plus `allow_sys: ["hostname","userInfo","cpus"]` — covering the
-// unconditional os.hostname() @ai-sdk/gateway -> @vercel/oidc calls at
-// import time (task-h2-report.md "Deviations" #3). Agent workers
-// (plugin/agents.ts) run on the same defaults.
+// No `permissions` option is passed to the worker create call: the runtime
+// deserializes each field as Option<Vec<String>> (booleans fail worker
+// creation), and the UserWorker defaults already cover this worker's needs
+// including allow_sys "hostname" (os.hostname() fires at import time).
 
 /**
  * Mounts the memory worker at `${PLUGINS_BASE_PATH}/trex/memory` (see the
@@ -410,6 +388,10 @@ export async function mountMemoryWorker(
     {
       function: "",
       allowHostFsAccess: true,
+      // Worker owns auth (fail-closed GBRAIN_MEMORY_TOKEN bearer, see
+      // handler.ts) — proxy session auth would 401 agent workers, which
+      // hold only the bearer. Same model as the agents channel routes.
+      authExemptPattern: new RegExp(`^${basePath}/memory/`),
     },
     cfg.servicePath,
     MEMORY_PLUGIN_NAME,

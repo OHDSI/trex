@@ -6,6 +6,7 @@ import type { Express } from "express";
 import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_PLUGIN_SCOPES } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from "./agent-memory.ts";
+import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
 
 export interface AgentEntry {
   name: string;
@@ -234,7 +235,10 @@ export async function buildAgentWorkerConfig(
   //    can enumerate its links without re-parsing the manifest.
   if (entry.memory?.length) {
     env.GBRAIN_MEMORY_TOKEN = Deno.env.get("GBRAIN_MEMORY_TOKEN") ?? "";
-    env.MEMORY_MCP_URL = Deno.env.get("GBRAIN_MEMORY_INTERNAL_URL") ?? "http://127.0.0.1:8000";
+    // 8001 is the in-container plain-HTTP port (8000 is TLS), and the base
+    // needs the mount prefix — the generated tool appends /memory/<name>/mcp.
+    env.MEMORY_MCP_URL = Deno.env.get("GBRAIN_MEMORY_INTERNAL_URL") ??
+      `http://127.0.0.1:8001${memoryWorkerBasePath()}`;
     env.TREX_AGENT_MEMORIES = entry.memory.map((l) => l.name).join(",");
   }
 
