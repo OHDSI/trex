@@ -41,7 +41,9 @@ slash commands, and approval buttons. Only the transport differs:
   route `{base}/plugins/trex/claw/eve/v1/discord`. Requires setting that URL as
   the app's *Interactions Endpoint URL* in the developer portal, which means the
   deployment must be publicly reachable. `DISCORD_PUBLIC_KEY` is required.
-- **Gateway mode** (`DISCORD_GATEWAY=1`): the server opens an *outbound*
+- **Gateway mode** (`DISCORD_GATEWAY=1`): opt-in **per agent** — the switch only
+  takes effect through the agent's own manifest env block (this plugin passes it
+  through; a host-wide env var alone enables nothing). The server opens an *outbound*
   WebSocket to Discord's gateway (`core/server/agents/gateway/discord.ts`) and
   interactions arrive over it — no public URL, works behind NAT/firewalls.
   Leave the *Interactions Endpoint URL* **unset** in the portal (Discord routes

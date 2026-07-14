@@ -371,8 +371,14 @@ export async function addAgentsPlugin(
     const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
 
     // Discord GATEWAY mode (agents/gateway/discord.ts): DISCORD_GATEWAY in the
-    // agent's env (or the host env) swaps the inbound webhook for an outbound
-    // gateway WebSocket — no public URL needed. The worker's DISCORD_PUBLIC_KEY
+    // agent's OWN manifest env swaps the inbound webhook for an outbound
+    // gateway WebSocket — no public URL needed. Deliberately NO host-env
+    // fallback: with one, a single host-wide DISCORD_GATEWAY=1 opened a
+    // gateway client for EVERY registered agent on the same bot token —
+    // identify rate-limit 429s, and each interaction fanned out to every
+    // agent's route (racing callbacks, N sessions per command). An agent opts
+    // in by passing the var through its trex.agents[].env block
+    // (`"DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}"`). The worker's DISCORD_PUBLIC_KEY
     // is overridden to a boot-time ephemeral key BEFORE _addFunction bakes the
     // env, so the loopback shim is the only principal that can pass the
     // adapter's signature-before-send gate (Discord never POSTs webhooks in
@@ -380,7 +386,7 @@ export async function addAgentsPlugin(
     // application key is unused). Must happen before _addFunction: worker env
     // is creation-time only.
     let gateway: { botToken: string; channelId: string } | null = null;
-    if (gatewayModeEnabled(cfg.env.DISCORD_GATEWAY ?? Deno.env.get("DISCORD_GATEWAY"))) {
+    if (gatewayModeEnabled(cfg.env.DISCORD_GATEWAY)) {
       const botToken = cfg.env.DISCORD_BOT_TOKEN || Deno.env.get("DISCORD_BOT_TOKEN") || "";
       if (!botToken) {
         console.error(`agents: agent ${entry.name} (plugin ${name}) sets DISCORD_GATEWAY but has no DISCORD_BOT_TOKEN — gateway mode disabled`);
