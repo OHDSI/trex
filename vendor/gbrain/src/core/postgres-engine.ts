@@ -980,32 +980,47 @@ export class PostgresEngine implements BrainEngine {
     }
   }
 
-  async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+  /**
+   * Run `fn` in a transaction against the CURRENT connection (`this.sql`).
+   *
+   * Multi-tenant (v0.42.x+): `withSchema` pins its `SET LOCAL search_path` by
+   * opening its OWN `conn.begin(...)` transaction and handing op handlers a
+   * scoped engine whose `this.sql` is that transaction's tx object.
+   * postgres.js does NOT expose `.begin` on a tx-scoped `sql` — nested
+   * transactions use `.savepoint()` instead (it does expose `.savepoint`,
+   * attached by postgres.js's own `begin()`). Without this, ANY site that
+   * calls `this.sql.begin(...)` directly — `transaction()`'s own callers
+   * (e.g. put_page's `importFromContent`), the read-path search methods, or
+   * the facts/takes writers — throws `this.sql.begin is not a function` the
+   * moment it's dispatched through `withSchema`. Detect and fall back to
+   * `.savepoint()` so callers work both at the top-level (pool connection,
+   * real `begin`) and nested inside another transaction/withSchema scope
+   * (savepoint, same fn signature). `SET LOCAL` inside a savepoint still
+   * scopes to the enclosing (outer withSchema) transaction, which is the
+   * desired behavior for the search-timeout GUCs below.
+   *
+   * Single canonical predicate — every raw `sql.begin(...)` call site in this
+   * file MUST route through this helper instead of duplicating the
+   * begin-vs-savepoint detection.
+   */
+  private beginOrSavepoint<T>(fn: (tx: postgres.Sql) => Promise<T> | T): Promise<T> {
     const conn = this.sql;
-    // Multi-tenant (v0.42.x+): `withSchema` pins its `SET LOCAL search_path`
-    // by opening its OWN `conn.begin(...)` transaction and handing op
-    // handlers a scoped engine whose `this.sql` is that transaction's tx
-    // object. postgres.js does NOT expose `.begin` on a tx-scoped `sql` —
-    // nested transactions use `.savepoint()` instead (it does expose
-    // `.savepoint`, attached by postgres.js's own `begin()`). Without this,
-    // any handler that opens its own `ctx.engine.transaction(...)` — e.g.
-    // put_page's `importFromContent` — throws `this.sql.begin is not a
-    // function` the moment it's dispatched through `withSchema`. Detect and
-    // fall back to `.savepoint()` so this method works both at the
-    // top-level (pool connection, real `begin`) and nested inside another
-    // transaction/withSchema scope (savepoint, same fn signature).
     const connAny = conn as unknown as {
       begin?: (fn: (tx: postgres.Sql) => unknown) => Promise<unknown>;
       savepoint?: (fn: (tx: postgres.Sql) => unknown) => Promise<unknown>;
     };
     const beginLike = typeof connAny.begin === 'function' ? connAny.begin.bind(conn) : connAny.savepoint!.bind(conn);
-    return beginLike(async (tx) => {
+    return beginLike(fn) as Promise<T>;
+  }
+
+  async transaction<T>(fn: (engine: BrainEngine) => Promise<T>): Promise<T> {
+    return this.beginOrSavepoint(async (tx) => {
       // Create a scoped engine with tx as its connection, no shared state mutation
       const txEngine = Object.create(this) as PostgresEngine;
       Object.defineProperty(txEngine, 'sql', { get: () => tx });
       Object.defineProperty(txEngine, '_sql', { value: tx as unknown as ReturnType<typeof postgres>, writable: false });
       return fn(txEngine);
-    }) as Promise<T>;
+    });
   }
 
   /**
@@ -1839,7 +1854,7 @@ export class PostgresEngine implements BrainEngine {
 
     // Search-only timeout. SET LOCAL inside sql.begin() scopes the GUC
     // to the transaction so it can never leak onto a pooled connection.
-    const rows = await sql.begin(async sql => {
+    const rows = await this.beginOrSavepoint(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
       return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
@@ -1963,7 +1978,7 @@ export class PostgresEngine implements BrainEngine {
       OFFSET ${offsetParam}
     `;
 
-    const rows = await sql.begin(async sql => {
+    const rows = await this.beginOrSavepoint(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
       return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
@@ -2135,7 +2150,7 @@ export class PostgresEngine implements BrainEngine {
       OFFSET ${offsetParam}
     `;
 
-    const rows = await sql.begin(async sql => {
+    const rows = await this.beginOrSavepoint(async sql => {
       await sql`SET LOCAL statement_timeout = '8s'`;
       return await sql.unsafe(rawQuery, params as Parameters<typeof sql.unsafe>[1]);
     });
@@ -4038,7 +4053,7 @@ export class PostgresEngine implements BrainEngine {
     if (ctx.supersedeId !== undefined) {
       // Per-entity advisory lock + atomic insert + supersede in one txn.
       const supersedeId = ctx.supersedeId;
-      const newId = await sql.begin(async (tx) => {
+      const newId = await this.beginOrSavepoint(async (tx) => {
         if (entitySlug) {
           await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ctx.source_id} || ':' || ${entitySlug}, 0))`;
         }
@@ -4064,7 +4079,7 @@ export class PostgresEngine implements BrainEngine {
     }
 
     // Plain insert path with optional advisory lock for the dedup window.
-    const id = await sql.begin(async (tx) => {
+    const id = await this.beginOrSavepoint(async (tx) => {
       if (entitySlug) {
         await tx`SELECT pg_advisory_xact_lock(hashtextextended(${ctx.source_id} || ':' || ${entitySlug}, 0))`;
       }
@@ -4167,7 +4182,7 @@ export class PostgresEngine implements BrainEngine {
     // readable; batch sizes are small (5-30 rows per page in practice).
     // No supersede flow in this path — fence reconciliation is the
     // canonical source-of-truth direction, not the consolidator path.
-    const ids = await sql.begin(async (tx) => {
+    const ids = await this.beginOrSavepoint(async (tx) => {
       const out: number[] = [];
       for (const input of rows) {
         const validFrom = input.valid_from ?? new Date();
@@ -4881,8 +4896,7 @@ export class PostgresEngine implements BrainEngine {
     oldRow: number,
     newRow: Omit<TakeBatchInput, 'page_id' | 'row_num' | 'superseded_by'>,
   ): Promise<{ oldRow: number; newRow: number }> {
-    const conn = this.sql;
-    return await conn.begin(async (tx) => {
+    return await this.beginOrSavepoint(async (tx) => {
       const [existing] = await tx`
         SELECT resolved_at FROM takes WHERE page_id = ${pageId} AND row_num = ${oldRow}
       `;

@@ -16,9 +16,19 @@
  * DIFFERENT connections. Worst case: the 8s GUC sticks on some pooled
  * connection and clips the next caller's long-running query; or the
  * reset to 0 lands on a connection that other code expected to be
- * protected. The fix wraps each query in sql.begin() and uses
+ * protected. The fix wraps each query in a transaction (`sql.begin()`,
+ * or `this.beginOrSavepoint()` as of Task 7b — see below) and uses
  * SET LOCAL so the GUC is transaction-scoped and auto-resets on
  * COMMIT/ROLLBACK, regardless of error path.
+ *
+ * Task 7b: raw `sql.begin(...)` throws `TypeError: sql.begin is not a
+ * function` when `this.sql` is already a withSchema/transaction-scoped
+ * handle (postgres.js exposes `.savepoint()`, not `.begin()`, there). Every
+ * multi-tenant MCP call runs inside `withSchema(...)`, so searchKeyword /
+ * searchVector now route through `this.beginOrSavepoint()` (defined near
+ * `transaction()`), which picks `.begin()` or `.savepoint()` on whichever
+ * the current connection actually exposes. Still transaction-scoped, still
+ * SET LOCAL — just composable when nested.
  */
 
 import { describe, test, expect } from 'bun:test';
@@ -48,14 +58,18 @@ describe('postgres-engine / search path timeout isolation', () => {
     expect(bare).toBeNull();
   });
 
-  test('searchKeyword wraps its query in sql.begin()', () => {
+  test('searchKeyword wraps its query in a transaction (sql.begin() or beginOrSavepoint())', () => {
+    // Task 7b: routed through `this.beginOrSavepoint()` so this composes
+    // under `withSchema` (nested tx uses `.savepoint()`, not `.begin()`).
+    // Accept either spelling — the invariant under test is "transaction-
+    // wrapped", not the specific begin/savepoint dispatch mechanism.
     const fn = extractMethod(SRC, 'searchKeyword');
-    expect(fn).toMatch(/sql\.begin\s*\(\s*async\s+sql\s*=>/);
+    expect(fn).toMatch(/(?:sql\.begin|this\.beginOrSavepoint)\s*\(\s*async\s+sql\s*=>/);
   });
 
-  test('searchVector wraps its query in sql.begin()', () => {
+  test('searchVector wraps its query in a transaction (sql.begin() or beginOrSavepoint())', () => {
     const fn = extractMethod(SRC, 'searchVector');
-    expect(fn).toMatch(/sql\.begin\s*\(\s*async\s+sql\s*=>/);
+    expect(fn).toMatch(/(?:sql\.begin|this\.beginOrSavepoint)\s*\(\s*async\s+sql\s*=>/);
   });
 
   test('both search methods use SET LOCAL for the timeout', () => {
