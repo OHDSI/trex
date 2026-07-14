@@ -1,5 +1,11 @@
-import { assert, assertEquals, assertThrows } from "jsr:@std/assert";
-import { curatedOps, parseMemoryLinks, renderMemorySkill, renderMemoryTool } from "./agent-memory.ts";
+import { assert, assertEquals, assertRejects, assertThrows } from "jsr:@std/assert";
+import {
+  curatedOps,
+  generateMemoryArtifacts,
+  parseMemoryLinks,
+  renderMemorySkill,
+  renderMemoryTool,
+} from "./agent-memory.ts";
 
 Deno.test("parseMemoryLinks parses an array, defaulting mode to read", () => {
   const links = parseMemoryLinks([{ name: "d2e" }, { name: "notes", mode: "readwrite" }]);
@@ -91,4 +97,66 @@ Deno.test("renderMemorySkill (readwrite) documents capture", () => {
   assert(!/read-only/i.test(md));
   assert(/capture/i.test(md));
   assert(/default/i.test(md));
+});
+
+// ---------------------------------------------------------------------------
+// Task 3: generateMemoryArtifacts — stages rendered tools/skills onto disk.
+
+Deno.test("generateMemoryArtifacts writes curated tools + skill per link, read vs readwrite", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    await generateMemoryArtifacts(tmp, [
+      { name: "d2e", mode: "read" },
+      { name: "notes", mode: "readwrite" },
+    ]);
+
+    // read link: search/recall/get_page present, no capture.
+    for (const op of ["search", "recall", "get_page"]) {
+      const path = `${tmp}/tools/d2e_${op}.ts`;
+      const info = await Deno.stat(path);
+      assert(info.isFile);
+      const src = await Deno.readTextFile(path);
+      assert(src.includes("d2e"));
+    }
+    await assertRejects(() => Deno.stat(`${tmp}/tools/d2e_capture.ts`), Deno.errors.NotFound);
+
+    // readwrite link: capture present too.
+    const capturePath = `${tmp}/tools/notes_capture.ts`;
+    const captureInfo = await Deno.stat(capturePath);
+    assert(captureInfo.isFile);
+    const captureSrc = await Deno.readTextFile(capturePath);
+    assert(captureSrc.includes("notes"));
+    for (const op of ["search", "recall", "get_page"]) {
+      const info = await Deno.stat(`${tmp}/tools/notes_${op}.ts`);
+      assert(info.isFile);
+    }
+
+    // skills for both links.
+    const d2eSkill = await Deno.readTextFile(`${tmp}/skills/d2e-memory.md`);
+    assert(d2eSkill.includes("d2e"));
+    const notesSkill = await Deno.readTextFile(`${tmp}/skills/notes-memory.md`);
+    assert(notesSkill.includes("notes"));
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("generateMemoryArtifacts throws on collision with a hand-authored tool file", async () => {
+  const tmp = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${tmp}/tools`, { recursive: true });
+    await Deno.writeTextFile(`${tmp}/tools/d2e_search.ts`, "// hand-authored, do not clobber\n");
+
+    await assertRejects(
+      () => generateMemoryArtifacts(tmp, [{ name: "d2e", mode: "read" }]),
+      Error,
+      "d2e_search.ts",
+    );
+
+    // Must not have been overwritten.
+    const src = await Deno.readTextFile(`${tmp}/tools/d2e_search.ts`);
+    assertEquals(src, "// hand-authored, do not clobber\n");
+  } finally {
+    await Deno.remove(tmp, { recursive: true });
+  }
 });

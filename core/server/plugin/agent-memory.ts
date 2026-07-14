@@ -222,3 +222,47 @@ description: ${description}
 ${bodyLines.join("\n")}
 `;
 }
+
+// ---------------------------------------------------------------------------
+// Task 3: stages the rendered tools/skills for each linked memory into the
+// agent's own staged directory (see agents.ts's buildAgentWorkerConfig for
+// where `stagedAgentDir` comes from). All I/O is confined to
+// `stagedAgentDir` — this never touches anything outside it.
+export async function generateMemoryArtifacts(
+  stagedAgentDir: string,
+  links: AgentMemoryLink[],
+): Promise<void> {
+  const toolsDir = `${stagedAgentDir}/tools`;
+  const skillsDir = `${stagedAgentDir}/skills`;
+  await Deno.mkdir(toolsDir, { recursive: true });
+  await Deno.mkdir(skillsDir, { recursive: true });
+
+  for (const link of links) {
+    for (const spec of curatedOps(link.mode)) {
+      const toolName = spec.tool(link.name);
+      const toolPath = `${toolsDir}/${toolName}.ts`;
+      // Collision guard: an agent may have hand-authored a tool of this
+      // exact name — never clobber it.
+      let exists = true;
+      try {
+        await Deno.stat(toolPath);
+      } catch (e) {
+        if (e instanceof Deno.errors.NotFound) {
+          exists = false;
+        } else {
+          throw e;
+        }
+      }
+      if (exists) {
+        throw new Error(
+          `agent-memory: refusing to overwrite hand-authored tool "${toolPath}" ` +
+            `(collides with generated memory tool "${toolName}" for link "${link.name}")`,
+        );
+      }
+      await Deno.writeTextFile(toolPath, renderMemoryTool(link.name, spec));
+    }
+
+    const skillPath = `${skillsDir}/${link.name}-memory.md`;
+    await Deno.writeTextFile(skillPath, renderMemorySkill(link));
+  }
+}
