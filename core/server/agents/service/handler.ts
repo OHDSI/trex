@@ -9,6 +9,9 @@ import { buildSdkTools, resolveInstructions } from "./toolset.ts";
 import { resolveModelForTurn } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
+import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
+import type { ChannelStore } from "../channels/store.ts";
+import { resolveApprovalDecision } from "./approvals.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -26,6 +29,13 @@ interface Deps {
   // fails loudly at call time instead of silently no-oping.
   sql?: QueryFn;
   env?: EnvFn;
+  // Channel layer (task-4). Optional so existing createHandler callers/tests
+  // that never exercise channels keep working; when set, {basePath}/eve/v1/
+  // <channelId>/* is dispatched to the channel layer (see the channel branch
+  // below). channel routes are auth-exempt at the proxy — see plugin/agents.ts.
+  channelStore?: ChannelStore;
+  // Task 6 delivery-registration hook, threaded straight through to the layer.
+  onSessionStarted?: (info: ChannelSessionStarted) => void;
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -59,7 +69,7 @@ async function historyForModel(store: AgentStore, sessionId: string): Promise<an
 // client actually reads the final reply off — see events.ts) rather than
 // the incremental message.appended deltas eve's live stream would have
 // shown; a replaying client never sees those deltas, only the final text.
-function stepToEvent(row: { turn_id: string; kind: string; name: string | null; payload: unknown; usage?: unknown }): unknown {
+export function stepToEvent(row: { turn_id: string; kind: string; name: string | null; payload: unknown; usage?: unknown }): unknown {
   const p = (row.payload ?? {}) as Record<string, unknown>;
   const turnId = row.turn_id;
   switch (row.kind) {
@@ -102,43 +112,32 @@ function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerTo
   };
 }
 
-// H4 (sticky tool-consent decisions — task-h4-brief.md): shared by both
-// approval resolve sites — the standalone POST .../approval route and the
-// inputResponses follow-up on POST /eve/v1/session/:id — so the two can't
-// drift on what "always"/"never" mean. `decision` is the wire-level verb
-// (approve|deny|always|never); `approve`/`deny` persist as-is (unchanged
-// from pre-H4 behavior). `always`/`never` require an authenticated userId
-// (no x-user-id header => 400, checked by the caller BEFORE calling this —
-// see both call sites) and, once the pending request resolves, additionally
-// upsert agents.tool_consents keyed on (userId, deps.plugin, deps.agentName,
-// the approval's own tool — looked up via getApprovalTool since the
-// approvals table doesn't carry plugin/agent). agents.approvals.decision's
-// CHECK constraint stays approve/deny — the sticky verbs never reach it.
-async function resolveApprovalDecision(
+function startTurn(
   deps: Deps,
   sessionId: string,
-  requestId: string,
-  decision: "approve" | "deny" | "always" | "never",
-  userId: string | undefined,
-): Promise<boolean> {
-  const sticky = decision === "always" || decision === "never";
-  const persistedDecision = sticky ? (decision === "always" ? "approve" : "deny") : decision;
-  const ok = await deps.store.resolveApproval(requestId, persistedDecision, sessionId);
-  if (ok && sticky) {
-    // userId is guaranteed present here — callers 400 before reaching this
-    // function when sticky is requested without one.
-    const tool = await deps.store.getApprovalTool(requestId);
-    if (tool) await deps.store.setToolConsent(userId!, deps.plugin, deps.agentName, tool, decision);
-  }
-  return ok;
-}
-
-function startTurn(deps: Deps, sessionId: string, message: unknown, metadata: unknown, bearerToken?: string, userId?: string) {
+  message: unknown,
+  metadata: unknown,
+  bearerToken?: string,
+  userId?: string,
+  onTurnCreated?: (turnId: string) => void,
+) {
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
     const history = await historyForModel(deps.store, sessionId);
     const turn = await deps.store.addTurn(sessionId, message, metadata);
+    // Surface the freshly-created turn id to the caller (the channel layer uses
+    // it to scope its background delivery to THIS turn) BEFORE publishing any
+    // event, so a subscriber registered here can't miss the turn's events.
+    // Isolated: delivery registration runs synchronous adapter code
+    // (buildChannelCtx). A throw there must NEVER abort the turn — otherwise the
+    // IIFE unwinds before turn.started/runTurn and the turn dies with no
+    // turn.failed/session.failed, hanging every /stream reader. Log and carry on.
+    try {
+      onTurnCreated?.(turn.id);
+    } catch (e) {
+      console.error(`agents: channel delivery registration failed for turn ${turn.id}:`, e);
+    }
     publish(sessionId, { type: "turn.started", data: { turnId: turn.id, sequence: turn.seq } });
     const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
     try {
@@ -166,6 +165,25 @@ function startTurn(deps: Deps, sessionId: string, message: unknown, metadata: un
 
 export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
   const { agent, store, basePath } = deps;
+
+  // Channel dispatch is only wired when a channelStore is configured (index.ts
+  // always sets one; unit tests that don't exercise channels leave it unset).
+  const channelHandler = deps.channelStore
+    ? createChannelHandler({
+        agent,
+        store,
+        channelStore: deps.channelStore,
+        plugin: deps.plugin,
+        agentName: deps.agentName,
+        basePath,
+        // Channel sessions have no trex user, so no bearerToken/userId here.
+        startTurn: (sessionId, message, metadata, onTurnCreated) =>
+          startTurn(deps, sessionId, message, metadata, undefined, undefined, onTurnCreated),
+        subscribe,
+        env: deps.env,
+        onSessionStarted: deps.onSessionStarted,
+      })
+    : undefined;
 
   return async (req: Request): Promise<Response> => {
     const url = new URL(req.url);
@@ -319,7 +337,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           if ((r.optionId === "always" || r.optionId === "never") && !createdBy) {
             return json({ error: "always/never decisions require an authenticated user" }, 400);
           }
-          await resolveApprovalDecision(deps, sessionId, r.requestId, r.optionId, createdBy);
+          await resolveApprovalDecision(
+            store,
+            sessionId,
+            { requestId: r.requestId, decision: r.optionId },
+            { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy },
+          );
         }
       }
       if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken, createdBy);
@@ -347,7 +370,12 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if ((body.decision === "always" || body.decision === "never") && !createdBy) {
         return json({ error: "always/never decisions require an authenticated user" }, 400);
       }
-      const ok = await resolveApprovalDecision(deps, sessionId, body.requestId, body.decision, createdBy);
+      const { ok } = await resolveApprovalDecision(
+        store,
+        sessionId,
+        { requestId: body.requestId, decision: body.decision },
+        { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy },
+      );
       return ok ? json({ resolved: true }) : json({ error: "unknown or already-decided request" }, 404);
     }
 
@@ -507,6 +535,22 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         },
       });
       return createUIMessageStreamResponse({ stream: uiStream });
+    }
+
+    // Channel branch (task-4): {basePath}/eve/v1/{channelId}{routePath}, where
+    // channelId is one of the agent's loaded channels (never `session`/`health`/
+    // `info`, which the explicit routes above already handled). Served WITHOUT
+    // the x-user-id/JWT the session/chat routes rely on: the proxy exempts these
+    // subpaths from pluginAuthz (see plugin/agents.ts) and the adapter's own
+    // signature verify() authenticates the caller inside the route handler. The
+    // session/chat routes above are untouched — their proxy auth is unchanged.
+    if (channelHandler) {
+      const ch = path.match(/^\/eve\/v1\/([^/]+)(?:\/.*)?$/);
+      // Object.hasOwn (not a truthy index): a request to /eve/v1/constructor/x
+      // must NOT match an inherited prototype key — that would enter the layer
+      // and 500 on undefined routes. Inherited/unknown keys fall through to the
+      // final 404 below. The layer re-guards the same way as defense in depth.
+      if (ch && Object.hasOwn(agent.channels, ch[1])) return channelHandler(req);
     }
 
     return json({ error: "not found" }, 404);

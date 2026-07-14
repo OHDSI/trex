@@ -199,6 +199,36 @@ export function isTrustedScopeAgentsPlugin(name: string): boolean {
   return isTrustedPluginScope(name);
 }
 
+// Auth carve-out for channel routes (task-4). A channel route lives at
+// {basePath}/eve/v1/<channelId>/... and is authenticated by the adapter's own
+// platform-signature verify() inside the worker — NOT by a trex JWT — so it
+// must bypass authContext/pluginAuthz at the proxy, which would otherwise 401
+// an unauthenticated platform webhook (Discord/Slack/…). The session/chat/
+// health/info routes are deliberately EXCLUDED from the exemption (negative
+// lookahead) so their proxy auth is unchanged — weakening those would be a
+// serious bug. Passed to _addFunction as fncfg.authExemptPattern.
+//
+// The `eve` channel is a SPECIAL case in the reserved set: it is the built-in
+// WEB channel (adapters/eve.ts), trusted browser traffic that — unlike a
+// platform webhook — carries NO platform signature. Instead it authenticates
+// via the trex JWT exactly like the native session API (spec §5: eve-web =
+// "trex JWT (existing)"). So `eve` MUST stay reserved (auth-enforced): leaving
+// it exempt would let anyone create sessions, spend model tokens, run tools,
+// and read other users' session streams (IDOR) with no credential.
+//
+// INVARIANT: the reserved set below (session|health|info|eve) MUST stay in sync
+// with handler.ts's authenticated `/eve/v1/*` route set PLUS the built-in
+// JWT-authed `eve` web channel. If a new AUTHED `/eve/v1/<seg>` route (or a new
+// JWT-authed built-in channel) is ever added, `<seg>` MUST be added to this
+// lookahead — otherwise `/eve/v1/<seg>` becomes auth-exempt (an unauthenticated
+// hole). A channel named like a reserved word (e.g. a `sessionx` or
+// `eventbridge` channel) is unaffected: the lookahead only excludes the exact
+// segments, boundaried by `/` or end.
+export function channelAuthExemptPattern(basePath: string): RegExp {
+  const esc = basePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info|eve)(?:/|$))[^/]+`);
+}
+
 export async function addAgentsPlugin(
   app: Express,
   value: unknown,
@@ -225,7 +255,14 @@ export async function addAgentsPlugin(
       cfg.source,
       cfg.servicePath,
       cfg.importMapPath,
-      { function: `/agents/${entry.name}`, allowHostFsAccess: true },
+      {
+        function: `/agents/${entry.name}`,
+        allowHostFsAccess: true,
+        // Channel subpaths ({basePath}/eve/v1/<channelId>/*) bypass proxy auth;
+        // the worker enforces adapter signature verification instead. session/
+        // chat/health/info keep authContext+pluginAuthz. See the pattern's doc.
+        authExemptPattern: channelAuthExemptPattern(basePath),
+      },
       dir,
       name,
       { _shared: { ...cfg.env, TREX_AGENT_BASE: basePath } },

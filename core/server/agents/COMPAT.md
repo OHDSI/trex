@@ -254,12 +254,128 @@ live-tail by event shape.
     `/chat` is ever called; the `resolveModel` throw is the backstop — see
     `plugins/devx/agent/README.md`'s "Bedrock auth" section.
 
+## Channels
+
+trex implements eve's **channels** — inbound platform entry points that
+start/resume a session and deliver the reply back — via a `defineChannel` layer
+(`channels/`) plus eight built-in adapters (`eve`-web, `discord`, `slack`,
+`telegram`, `twilio`-SMS, `github`, `linear`, `teams`) and a `custom` layer-only
+path. **Channel files are eve-portable**: the `defineChannel`/`POST`/`GET`
+authoring API and the adapter factory names (`discordChannel(...)`, …) match
+eve, so a `channels/*.ts` file authored here loads on real eve and vice versa.
+The day-to-day setup guide (env vars, route URLs to register per platform) lives
+in [README.md](./README.md)'s "Channels" section; this section is the
+reconciliation record.
+
+### Vendored vs. reimplemented per-platform logic
+
+Adapters reuse eve's **pure, per-platform** helpers (signature verify, payload
+parse, REST/message formatting, HITL encode/decode) by vendoring them under
+`channels/vendor/<platform>/`, each file carrying an Apache-2.0 attribution
+header. eve's **runtime** factories (`defineChannel`, `<platform>Channel.js`,
+`dist/src/channel/*`) are NOT vendored — trex's `channels/adapters/*.ts` supply
+that wiring. The vendored copies are **pinned to eve@0.19.0**; behavior tracks
+that version until re-synced, and `channels/vendor/VENDOR.md` records the exact
+copied files and local edits so a re-sync is mechanical (bump the version,
+re-copy, re-apply the edit categories).
+
+Not every adapter could vendor cleanly — several of eve's "pure" helpers turned
+out to import compiled-coupled runtime primitives (`#compiled/@chat-adapter/*`,
+`#compiled/jose`) or `#internal/logging`, which are not vendorable in a Deno
+worker. Those pieces are **reimplemented** (trex-owned, standard algorithms),
+honestly labelled as such in VENDOR.md:
+
+- **discord** — cleanest split; all pure helpers vendored (Ed25519 verify moved
+  from Node `node:crypto` to WebCrypto, so `verifyDiscordSignature` is now async).
+- **slack** — `verify`/`api` **reimplemented** (eve wraps
+  `#compiled/@chat-adapter/slack/*`); pure parsers/HITL vendored. mrkdwn↔GFM is a
+  **passthrough** (eve's `slackMrkdwnToGfm` wraps a compiled format engine).
+- **telegram** — mostly vendored; `hitl` **reimplemented** as a stateless compact
+  `callback_data` encoding (eve's is stateful per-session channel state, which the
+  trex layer doesn't expose).
+- **twilio** — the odd one out: `verify`/`api`/`inbound`/`twiml` **reimplemented**
+  from eve's minified `#compiled/@chat-adapter/twilio/*` chunks; SMS HITL is
+  **invented for trex** (eve's Twilio channel has no HITL widget). SMS only.
+- **github** — most helpers vendored; `verify` (HMAC) and `auth` (RS256 App-JWT
+  mint) **reimplemented** on WebCrypto. The App-JWT reimplementation also converts
+  a PKCS1 GitHub key to PKCS8 in-process (WebCrypto `importKey` accepts only
+  PKCS8; Node's `createSign` accepted both). Comment HITL **invented for trex**.
+- **linear** — a **model mismatch**, not just runtime coupling: eve@0.19.0's
+  Linear channel is built on Linear's **Agent Session** platform (consumes
+  `AgentSessionEvent` webhooks, delivers via `agentActivityCreate`). The trex
+  adapter uses the CLASSIC **Comment/Issue webhook + `commentCreate`** model
+  instead, so only the model-agnostic pieces (verify algorithm, credential
+  resolvers, GraphQL transport) are reused; inbound parse, delivery mutation,
+  HITL, and auth projection are all trex-shaped for the comment model. Adds a
+  config-free echo/loop guard (a hidden marker on every outgoing comment) eve's
+  agent-session model never needed.
+- **teams** — the Bot Framework JWT validator is **reimplemented** on WebCrypto
+  (eve validates with `#compiled/jose`), including `alg:none` rejection, JWKS
+  fetch+cache, and full claim checks; everything else (Activity parse,
+  client-credentials delivery, Adaptive-Card HITL) is vendored.
+
+### Channel-level divergences from eve
+
+1. **`waitUntil`-backed background delivery vs eve's Nitro.** eve delivers
+   replies from a Nitro/H3 `waitUntil` after ACKing the webhook; trex reproduces
+   the same "ACK in 3s, run in background" contract on its own edge-runtime
+   `waitUntil`-style primitive. Same contract, different host primitive; if the
+   primitive is absent the design falls back to a persisted delivery-pending
+   marker drained by a poller. Delivery is **best-effort / at-least-once**, not
+   eve's exact Nitro internals (spec §4.2, §9).
+2. **Platform-signature route auth replaces trex `pluginAuthz`.** Channel webhook
+   routes (`…/eve/v1/<channelId>/*`) are exempted from `authContext`/`pluginAuthz`
+   and authenticated by the adapter's own signature verify (Discord Ed25519,
+   Slack signing secret, Telegram secret token, GitHub/Linear HMAC-SHA256, Twilio
+   signature, Teams Azure JWT) — which must pass before any `send()` work, so a
+   bad signature 401s first. The **`eve` web channel is the exception**: it
+   carries no platform signature and stays behind the trex JWT exactly like the
+   native session API (it is excluded from the auth carve-out).
+3. **WebSocket channels + Twilio voice deferred to v1.1.** All eight built-in
+   adapters are HTTP webhooks. The `WS()` route helper is stubbed (throws a clear
+   "not supported in v1"), and Twilio's voice-call / transcription / media-stream
+   surface is not implemented (SMS only).
+4. **`continuationToken` addressing.** The layer namespaces an adapter's raw
+   continuation token with the channel id and maps `(channel, token)` → session
+   via `agents.channel_sessions`; a channel's `auth` principal is stored on new
+   `agents.sessions.principal_type/principal_id/authenticator` columns (distinct
+   from the trex `x-user-id`).
+
+### Channels — known v1 limitations
+
+These are real, shipped-with gaps, not cosmetic:
+
+a. **HITL over channels does NOT close end-to-end.** The channel layer has no
+   token→session RESUME primitive a webhook route can call — `send()` always
+   starts a *fresh* turn. So every adapter renders its HITL widget but exposes an
+   injectable `opts.resume` seam whose **default is a loud no-op**: it warns and
+   drops the approval rather than POSTing to a route that would 404. Wiring HITL
+   fully today requires supplying `opts.resume` (which calls the native approval
+   route). This is the single biggest channels gap; a first-class resume
+   primitive is the follow-up.
+b. **Concurrent same-session turns can cross-cancel delivery.** A rapid
+   double-message on one continuation token (two turns racing on the same
+   session) can cross-cancel the background delivery — turn serialization per
+   session is a follow-up.
+c. **Cross-user session-stream ownership is not enforced on the stream routes.**
+   The `created_by`/principal scoping that guards approval resolution on the
+   session API (divergence 14) is not applied to the channel stream routes — a
+   leaked stream URL is readable cross-user.
+d. **Slack mrkdwn is a passthrough** (eve's compiled mrkdwn↔GFM engine isn't
+   vendored), so a GFM-formatted reply renders imperfectly on Slack; Slack event
+   de-dup is deferred (a redelivered event can drive a duplicate turn).
+e. **Linear delivery is mock-tested only.** The `commentCreate` fields have not
+   been confirmed against live Linear; the adapter's inbound/verify/loop-guard
+   are unit-tested, but end-to-end delivery is unverified against the real API.
+f. **A channel's declared `state`/`metadata`/`context` are accepted but not
+   projected (spec §6).** `ChannelDef.state`, `metadata(state)`, and
+   `context(state, session)` pass through `defineChannel` and type-check, but the
+   runtime never invokes `.metadata(`/`.context(` and there is no `channel_state`
+   table — so an author who declares them gets a silent no-op. State projection
+   into session metadata / dynamic-tool resolution is not wired in v1.
+
 ## What we ignore entirely
 
-- **`channels/`** — no channel layer (Slack/Discord/Teams/Telegram/Twilio/
-  GitHub/Linear/custom/eve's own web channel). Every session is driven
-  directly over the HTTP session API; `loader.ts` logs and skips a
-  `channels/` directory if present.
 - **`connections/`** (MCP, OpenAPI) — not loaded; skipped the same way.
 - **`sandbox/`** — not loaded; no seeded `/workspace`, no sandboxed tool
   execution.
