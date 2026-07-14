@@ -98,10 +98,14 @@ async function handleMcpBody(
     // No `id` is available yet (the body didn't parse), so echo `id: null`
     // per JSON-RPC convention for requests whose id couldn't be determined —
     // still shaped like the other JSON-RPC responses below (jsonrpc + id).
+    // Do NOT echo the parse error's message back to the caller — a caught
+    // error's text can carry stack/internal detail (js/stack-trace-exposure).
+    // Static client message; nothing server-side worth logging for a bad body.
+    void e;
     return jsonResponse(
       {
         error: "parse_error",
-        message: e instanceof Error ? e.message : "invalid JSON",
+        message: "invalid JSON body",
         jsonrpc: "2.0",
         id: null,
       },
@@ -220,8 +224,11 @@ export function createMemoryHandler(
       try {
         await engine.provisionSchema(mem.name);
       } catch (e) {
+        // Log the detail server-side; return a generic message so error/stack
+        // internals aren't exposed to the caller (js/stack-trace-exposure).
+        console.error(`[memory-worker] provisionSchema(${mem.name}) failed:`, e);
         return jsonResponse(
-          { error: "provision_failed", message: e instanceof Error ? e.message : String(e) },
+          { error: "provision_failed", message: "provisioning failed" },
           { status: 500 },
         );
       }
@@ -233,10 +240,13 @@ export function createMemoryHandler(
       // (conn.begin + SET LOCAL) inside `handleMcpBody`'s `tools/call`
       // branch, which runs before `dispatchToolCall`'s own internal catch.
       // A thrown error must never escape this returned handler function.
+      // Log the detail server-side; return a generic message so error/stack
+      // internals aren't exposed to the caller (js/stack-trace-exposure).
+      console.error("[memory-worker] unhandled error:", e);
       return jsonResponse(
         {
           error: "internal_error",
-          message: e instanceof Error ? e.message : String(e),
+          message: "internal error",
           jsonrpc: "2.0",
           id: null,
         },
