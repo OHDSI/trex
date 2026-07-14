@@ -116,8 +116,11 @@ export function PreviewTab({ appId, app, devServer, onEditWithAI, onComponentsSe
       .catch(() => setPrototypes([]));
   }, [appId, selectedPrototype]);
 
+  // Prototypes are static HTML served from the workspace, independent of the
+  // dev server — load them whenever the app is open so mockups preview even
+  // when no dev server is running (e.g. d2e sub-apps that can't run one).
   useEffect(() => {
-    if (isRunning) loadPrototypes();
+    loadPrototypes();
   }, [isRunning, refreshSignal, loadPrototypes]);
 
   const handleRefresh = useCallback(() => {
@@ -603,7 +606,7 @@ export function PreviewTab({ appId, app, devServer, onEditWithAI, onComponentsSe
                   variant={selectedPrototype ? "secondary" : "ghost"}
                   size="sm"
                   className="gap-1.5 h-7 text-xs"
-                  disabled={!isRunning}
+                  disabled={!isRunning && prototypes.length === 0}
                   title={
                     prototypes.length === 0
                       ? "No prototypes yet — ask the assistant to build one"
@@ -819,7 +822,7 @@ export function PreviewTab({ appId, app, devServer, onEditWithAI, onComponentsSe
             onMouseUp={handleCanvasMouseUp}
             onMouseLeave={handleCanvasMouseUp}
           >
-            {isRunning ? (
+            {(isRunning || selectedPrototype) ? (
               <>
                 <div style={{
                   transform: `translate(${canvasPan.x}px, ${canvasPan.y}px) scale(${canvasScale})`,
