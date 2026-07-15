@@ -75,16 +75,19 @@ Unlike the JWT-signing-key rotation above, these mutations replace a single
 key in place without touching the signing key or forcing a stack restart.
 All are exposed as GraphQL mutations (admin-only):
 
-| Mutation                 | Replaces                                            |
-|---------------------------|-----------------------------------------------------|
-| `rotateAnonKey`            | The legacy `anon` JWT (`trexdb.setting.auth.anonKey`) |
-| `rotateServiceRoleKey`     | The legacy `service_role` JWT (`auth.serviceRoleKey`) |
-| `rotatePublishableKey`     | The `sb_publishable_…` key (`auth.publishableKey`)  |
-| `rotateSecretKey`          | The `sb_secret_…` key (`auth.secretKey`)            |
+| Mutation               | Replaces                                              |
+|------------------------|-------------------------------------------------------|
+| `rotateAnonKey`        | The legacy `anon` JWT (`trexdb.setting.auth.anonKey`) |
+| `rotateServiceRoleKey` | The legacy `service_role` JWT (`auth.serviceRoleKey`) |
+| `rotatePublishableKey` | The `sb_publishable_…` key (`auth.publishableKey`)    |
+| `rotateSecretKey`      | The `sb_secret_…` key (`auth.secretKey`)              |
 
-For all four: the prior key is invalidated the instant the new one is
-persisted — any client still presenting the old value is rejected on its
-next request.
+Invalidation timing differs by key type. `rotatePublishableKey` /
+`rotateSecretKey` are validated by timing-safe equality against the stored
+value, so the prior key is invalidated the instant the new one is persisted.
+`rotateAnonKey` / `rotateServiceRoleKey` only re-issue the *published* legacy
+JWT — the old JWT remains valid (HMAC-verified against the shared JWT secret)
+until the JWT signing key itself is rotated via the procedure above.
 
 - `rotateAnonKey` / `rotateServiceRoleKey` also invalidate the in-process
   memoized legacy-key cache (`invalidateAuthKeysCache`), so the PostgREST and

@@ -70,6 +70,10 @@ curl -s "http://localhost:8001/trex/rest/v1/?apikey=ignored" -H "apikey: $SB_SEC
 # Expected: 200 (root schema listing as service_role), not 401
 
 # 4. Legacy keys still work everywhere (regression check): repeat 2-3 with the legacy anon/service_role JWTs.
+
+# 5. Settings endpoint returns all four keys (regression check for the JSONB-parsing 500):
+curl -s "http://localhost:8001/trex/api/settings/auth-keys" -H "authorization: Bearer $ADMIN_JWT" | jq
+# Expected: 200 with auth.anonKey, auth.serviceRoleKey, auth.publishableKey, auth.secretKey all populated
 ```
 
 Also open Studio → Project Settings → API Keys: the Publishable and Secret

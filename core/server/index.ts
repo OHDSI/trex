@@ -8,7 +8,12 @@ import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
 import { ensureAuthKeys } from "./auth/api-keys.ts";
-import { ensureSbKeys, resolveApiCredential, translateSbHeaders } from "./auth/sb-keys.ts";
+import {
+  ensureSbKeys,
+  resolveApiCredential,
+  type SbKeyRecord,
+  translateSbHeaders,
+} from "./auth/sb-keys.ts";
 import { verifyAccessToken } from "./auth/jwt.ts";
 import { initDek } from "./auth/dek.ts";
 import { getJwtSecret } from "./auth/jwt.ts";
@@ -344,9 +349,9 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
     );
     const keys: Record<string, string> = {};
     for (const row of result.rows) {
-      const value = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
-      // sb keys are stored as {id, key, inserted_at}; legacy keys as bare strings.
-      keys[row.key] = typeof value === "object" && value !== null ? value.key : value;
+      // pg pre-parses JSONB: legacy rows arrive as bare strings, sb rows as objects.
+      const value = row.value;
+      keys[row.key] = typeof value === "object" && value !== null ? (value as SbKeyRecord).key : value;
     }
     res.json(keys);
   } catch (err) {

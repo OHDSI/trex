@@ -1413,9 +1413,9 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
 
         async rotateAnonKey(_parent: any, _args: any, context: any) {
           assertAdmin(context);
-          // Returns the freshly issued anon key, signed with the active JWT
-          // signing key. Holders of the previous anon key are immediately
-          // invalidated. See operations/secret-rotation.md.
+          // Re-issues the published anon key, signed with the active JWT
+          // signing key. Previously issued anon JWTs stay valid until the
+          // JWT signing key itself is rotated. See operations/secret-rotation.md.
           const key = await rotateAnonKey();
           invalidateAuthKeysCache();
           return key;
@@ -1423,9 +1423,9 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
 
         async rotateServiceRoleKey(_parent: any, _args: any, context: any) {
           assertAdmin(context);
-          // Returns the freshly issued service_role key, signed with the
-          // active JWT signing key. Holders of the previous service_role
-          // key are immediately invalidated.
+          // Re-issues the published service_role key, signed with the active
+          // JWT signing key. Previously issued service_role JWTs stay valid
+          // until the JWT signing key itself is rotated.
           const key = await rotateServiceRoleKey();
           invalidateAuthKeysCache();
           return key;
