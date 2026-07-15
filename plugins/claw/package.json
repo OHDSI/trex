@@ -16,14 +16,11 @@
           "DISCORD_APPLICATION_ID": "${DISCORD_APPLICATION_ID}",
           "DISCORD_ALLOWED_USERS": "${DISCORD_ALLOWED_USERS:-}",
           "DISCORD_ALLOWED_CHANNELS": "${DISCORD_ALLOWED_CHANNELS:-}",
-          "DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}"
+          "DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}",
+          "CLAW_CODE_USER_ID": "${CLAW_CODE_USER_ID:-}"
         }
       }
     ],
     "migrations": { "schema": "claw", "database": "_config" }
-  },
-  "dependencies": {
-    "eve": "^0.19.0",
-    "ai": "^6"
   }
 }

@@ -17,6 +17,14 @@ Deno.test("channelAllows: conversations list gates conversationId", () => {
   assertEquals(channelAllows({ conversations: ["c1"] }, { conversationId: "c2" }), false);
 });
 
+Deno.test("channelAllows: a sub-conversation passes via its parent id", () => {
+  // Discord thread of an allow-listed channel: conversationId is the thread,
+  // conversationParentId the channel.
+  assertEquals(channelAllows({ conversations: ["c1"] }, { conversationId: "t1", conversationParentId: "c1" }), true);
+  assertEquals(channelAllows({ conversations: ["c1"] }, { conversationId: "t1", conversationParentId: "c2" }), false);
+  assertEquals(channelAllows({ conversations: ["c1"] }, { conversationId: "t1" }), false);
+});
+
 Deno.test("channelAllows: both lists must match (AND)", () => {
   const allow = { users: ["u1"], conversations: ["c1"] };
   assertEquals(channelAllows(allow, { userId: "u1", conversationId: "c1" }), true);

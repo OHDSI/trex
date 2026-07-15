@@ -66,6 +66,28 @@ Deno.test("runCodeTurn creates a session then streams the reply (no mode = full 
   assertEquals(reqs[1].init.method, "GET");
 });
 
+Deno.test("runCodeTurn sends metadata.appId on create AND continue when an app is chosen", async () => {
+  const create = new Response(JSON.stringify({ sessionId: "code-1" }), {
+    headers: { "content-type": "application/json" },
+  });
+  const stream1 = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client, reqs } = fakeClient([create, stream1]);
+  await runCodeTurn(client, { codeSessionId: null, message: "build X", startCursor: 0, appId: "app-7" });
+  assertEquals(JSON.parse(reqs[0].init.body).metadata, { appId: "app-7" });
+
+  const cont = new Response(JSON.stringify({ accepted: true }), { status: 202 });
+  const stream2 = ndjson(
+    { type: "message.completed", data: { text: "ok" } },
+    { type: "session.waiting", data: {} },
+  );
+  const { client: client2, reqs: reqs2 } = fakeClient([cont, stream2]);
+  await runCodeTurn(client2, { codeSessionId: "code-1", message: "continue", startCursor: 2, appId: "app-7" });
+  assertEquals(JSON.parse(reqs2[0].init.body).metadata, { appId: "app-7" });
+});
+
 Deno.test("runCodeTurn continues an existing session with startCursor", async () => {
   const cont = new Response(JSON.stringify({ accepted: true }), {
     status: 202, headers: { "content-type": "application/json" },

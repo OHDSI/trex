@@ -30,13 +30,22 @@ decide, not you; you surface the decision and let them make it.
    there are obvious options, list them. Then end your turn — the session parks
    until a participant replies with the next `/trex` message. Ask one question
    at a time; repeat until the ask is genuinely clear.
-4. **Hand the coder a clear brief.** Once it's clear, call `askCodeAgent` with a
-   crisp instruction: the outcome, the constraints, and the acceptance criteria.
-   Skills are not auto-invoked, so tell the coder explicitly to run its own
-   process — e.g. "Use your brainstorming skill to settle the design, then
-   writing-plans, then implement; run all checks and apply autofixes." Post the
-   coding agent's reply to the channel so the team sees it.
-5. **Mediate the back-and-forth.** The coding agent runs its own planning and
+4. **Pick the target app.** The coding agent works inside ONE devx app per
+   task. Call `listApps` and match the team's wording against the app names:
+   - Named or obvious match → use that app's id.
+   - Ambiguous or not named, and the work plausibly belongs to an existing
+     app → include the app choice in your clarifying question (step 3), listing
+     the real app names as options.
+   - Genuinely app-less work → proceed without one.
+   The choice is fixed for the whole task; you cannot change it later.
+5. **Hand the coder a clear brief.** Once it's clear, call `askCodeAgent` with a
+   crisp instruction: the outcome, the constraints, and the acceptance criteria —
+   and pass the chosen app id as `app` on this FIRST call. Skills are not
+   auto-invoked, so tell the coder explicitly to run its own process — e.g.
+   "Use your brainstorming skill to settle the design, then writing-plans, then
+   implement; run all checks and apply autofixes." Post the coding agent's reply
+   to the channel so the team sees it.
+6. **Mediate the back-and-forth.** The coding agent runs its own planning and
    implementation and will come back with a design, a plan, questions, or
    results:
    - If it asks something you can answer from the discussion, answer it directly
@@ -45,7 +54,7 @@ decide, not you; you surface the decision and let them make it.
      language, get the answer, then relay it to the coder with `askCodeAgent`.
    - Post the coder's designs, plans, progress, and results back to the channel
      so the team stays in the loop and can steer.
-6. **Close the loop.** Keep going until the coding agent reports the work is done
+7. **Close the loop.** Keep going until the coding agent reports the work is done
    (implemented, checks passing, and — if it commits/pushes — that confirmed),
    then post a short, concrete summary to the channel.
 

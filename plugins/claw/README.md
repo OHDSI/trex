@@ -28,9 +28,23 @@ the agent worker at registration time via `${VAR:-default}` substitution
 | `DISCORD_ALLOWED_USERS` | — (optional) | Comma-separated user-id allow-list |
 | `DISCORD_ALLOWED_CHANNELS` | — (optional) | Comma-separated channel-id allow-list |
 | `DISCORD_GATEWAY` | — (optional) | Set to `1` to receive interactions over the gateway WebSocket instead of the webhook (below) |
+| `CLAW_CODE_USER_ID` | — (recommended) | devx user id (uuid) the Code sessions run as — Discord sessions carry no trex user, and apps/workspaces are user-scoped, so set this to YOUR devx user id so `listApps` and the coder's workspace match the devx UI |
 
 See `plugins/claw/agent/ACCEPTANCE.md` for the live-acceptance checklist that
 exercises this contract end-to-end against a real Discord app and Code agent.
+
+## Thread per task
+
+A `/trex` in a regular channel creates a **public thread** for the task and the
+whole conversation (claw's replies, clarifying questions, approval buttons)
+happens there; the command's response in the channel is a pointer to the
+thread. Each thread is its own session, so tasks run **in parallel** — one per
+thread. A `/trex` inside a thread continues that thread's session. Falls back
+to the in-channel session when thread creation fails (missing permission, DMs).
+
+Bot permissions needed: View Channels, Send Messages, Read Message History,
+**Create Public Threads**, **Send Messages in Threads**. Allow-listing a
+channel in `DISCORD_ALLOWED_CHANNELS` covers the task threads inside it.
 
 ## Webhook vs. gateway mode
 

@@ -138,12 +138,8 @@ Deno.test("gateway: op 1 heartbeat request is answered immediately", async () =>
 
 // ---- interaction forwarding -------------------------------------------------
 
-Deno.test("gateway: INTERACTION_CREATE → signed loopback POST → callback with the route's body", async () => {
-  const signer = await createGatewaySigner();
-  const { fn, calls } = fakeFetch((req) => {
-    if (req.url.endsWith("/eve/v1/discord")) return Response.json({ type: 5, data: { flags: 64 } });
-    return new Response(null, { status: 204 });
-  });
+function interactionClient(signer: Awaited<ReturnType<typeof createGatewaySigner>>, respond: (req: CapturedRequest) => Response) {
+  const { fn, calls } = fakeFetch(respond);
   const sockets: FakeSocket[] = [];
   const client = new DiscordGatewayClient({
     botToken: "t",
@@ -158,6 +154,15 @@ Deno.test("gateway: INTERACTION_CREATE → signed loopback POST → callback wit
       return s;
     },
   });
+  return { client, sockets, calls };
+}
+
+Deno.test("gateway: command → pre-ACK deferred → signed loopback POST → deferred route response dropped", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets, calls } = interactionClient(signer, (req) => {
+    if (req.url.endsWith("/eve/v1/discord")) return Response.json({ type: 5, data: { flags: 64 } });
+    return new Response(null, { status: 204 });
+  });
   client.start();
   await until(() => sockets.length === 1);
   const s = sockets[0];
@@ -167,16 +172,25 @@ Deno.test("gateway: INTERACTION_CREATE → signed loopback POST → callback wit
     id: "inter-1",
     token: "inter-token",
     type: 2,
+    application_id: "app-1",
     channel_id: "chan-1",
     data: { name: "claw" },
     member: { user: { id: "user-1", username: "peter" } },
   };
   s.emit({ op: 0, t: "INTERACTION_CREATE", s: 1, d: interaction });
   await until(() => calls.length === 2);
+  await new Promise((r) => setTimeout(r, 30));
 
-  // Leg 1: the loopback POST, signed exactly like a Discord webhook — verified
+  // Leg 1: the IMMEDIATE deferred ACK — sent before the route runs so a cold
+  // worker boot can't blow Discord's 3s interaction deadline.
+  const ack = calls[0];
+  assertEquals(ack.method, "POST");
+  assertEquals(ack.url, "https://discord.test/api/v10/interactions/inter-1/inter-token/callback");
+  assertEquals(JSON.parse(ack.body), { type: 5 });
+
+  // Leg 2: the loopback POST, signed exactly like a Discord webhook — verified
   // with the vendored WebCrypto verify the adapter itself runs.
-  const loop = calls[0];
+  const loop = calls[1];
   assertEquals(loop.method, "POST");
   assertEquals(loop.url, "http://127.0.0.1:8001/plugins/trex/claw/eve/v1/discord");
   assertEquals(JSON.parse(loop.body), interaction);
@@ -188,43 +202,95 @@ Deno.test("gateway: INTERACTION_CREATE → signed loopback POST → callback wit
   });
   assert(ok, "loopback signature must verify against the signer public key");
 
-  // Leg 2: the route's response body forwarded verbatim to the REST callback.
-  const cb = calls[1];
-  assertEquals(cb.method, "POST");
-  assertEquals(cb.url, "https://discord.test/api/v10/interactions/inter-1/inter-token/callback");
-  assertEquals(JSON.parse(cb.body), { type: 5, data: { flags: 64 } });
-
+  // The route's response was the same deferred ACK — nothing further is sent.
+  assertEquals(calls.length, 2);
   client.stop();
 });
 
-Deno.test("gateway: a rejected loopback POST (401) sends NO callback", async () => {
+Deno.test("gateway: route message response (type 4) after pre-ACK is PATCHed onto the deferred original", async () => {
   const signer = await createGatewaySigner();
-  const { fn, calls } = fakeFetch((req) => {
-    if (req.url.endsWith("/eve/v1/discord")) return new Response("unauthorized", { status: 401 });
+  const { client, sockets, calls } = interactionClient(signer, (req) => {
+    if (req.url.endsWith("/eve/v1/discord")) {
+      return Response.json({ type: 4, data: { content: "You are not authorized to use this bot here.", flags: 64 } });
+    }
     return new Response(null, { status: 204 });
-  });
-  const sockets: FakeSocket[] = [];
-  const client = new DiscordGatewayClient({
-    botToken: "t",
-    forwardUrl: "http://local/eve/v1/discord",
-    signer,
-    apiBaseUrl: "https://discord.test/api/v10",
-    gatewayUrl: "wss://gateway.test",
-    fetch: fn,
-    createSocket: () => {
-      const s = new FakeSocket();
-      sockets.push(s);
-      return s;
-    },
   });
   client.start();
   await until(() => sockets.length === 1);
   sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
-  sockets[0].emit({ op: 0, t: "INTERACTION_CREATE", s: 1, d: { id: "i", token: "tok" } });
-  await until(() => calls.length === 1);
-  // Give a would-be second leg a chance to (wrongly) fire.
+  sockets[0].emit({
+    op: 0,
+    t: "INTERACTION_CREATE",
+    s: 1,
+    d: { id: "inter-2", token: "tok-2", type: 2, application_id: "app-1" },
+  });
+  await until(() => calls.length === 3);
+  const edit = calls[2];
+  assertEquals(edit.method, "PATCH");
+  assertEquals(edit.url, "https://discord.test/api/v10/webhooks/app-1/tok-2/messages/@original");
+  assertEquals(JSON.parse(edit.body).content, "You are not authorized to use this bot here.");
+  client.stop();
+});
+
+Deno.test("gateway: component interaction pre-ACKs with DEFERRED_UPDATE_MESSAGE (type 6)", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets, calls } = interactionClient(signer, (req) => {
+    if (req.url.endsWith("/eve/v1/discord")) return Response.json({ type: 6 });
+    return new Response(null, { status: 204 });
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({
+    op: 0,
+    t: "INTERACTION_CREATE",
+    s: 1,
+    d: { id: "inter-3", token: "tok-3", type: 3, application_id: "app-1" },
+  });
+  await until(() => calls.length === 2);
+  assertEquals(JSON.parse(calls[0].body), { type: 6 });
+  client.stop();
+});
+
+Deno.test("gateway: modal submit (type 5) is NOT pre-ACKed — the route's response IS the callback", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets, calls } = interactionClient(signer, (req) => {
+    if (req.url.endsWith("/eve/v1/discord")) {
+      return Response.json({ type: 4, data: { content: "Answer received.", flags: 64 } });
+    }
+    return new Response(null, { status: 204 });
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({
+    op: 0,
+    t: "INTERACTION_CREATE",
+    s: 1,
+    d: { id: "inter-4", token: "tok-4", type: 5, application_id: "app-1" },
+  });
+  await until(() => calls.length === 2);
+  // Leg 1 is the loopback (no pre-ACK); leg 2 is the route response as callback.
+  assert(calls[0].url.endsWith("/eve/v1/discord"));
+  assertEquals(calls[1].url, "https://discord.test/api/v10/interactions/inter-4/tok-4/callback");
+  assertEquals(JSON.parse(calls[1].body), { type: 4, data: { content: "Answer received.", flags: 64 } });
+  client.stop();
+});
+
+Deno.test("gateway: a rejected loopback POST (401) sends nothing beyond the pre-ACK", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets, calls } = interactionClient(signer, (req) => {
+    if (req.url.endsWith("/eve/v1/discord")) return new Response("unauthorized", { status: 401 });
+    return new Response(null, { status: 204 });
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({ op: 0, t: "INTERACTION_CREATE", s: 1, d: { id: "i", token: "tok", type: 2 } });
+  await until(() => calls.length === 2);
+  // Give a would-be third leg a chance to (wrongly) fire.
   await new Promise((r) => setTimeout(r, 30));
-  assertEquals(calls.length, 1);
+  assertEquals(calls.length, 2); // pre-ACK + rejected loopback, nothing else
   client.stop();
 });
 
