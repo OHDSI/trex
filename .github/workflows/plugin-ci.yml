@@ -176,7 +176,11 @@ jobs:
         with:
           node-version: "22.x"
       - name: Install core/server node deps
-        run: cd core/server && npm ci
+        # npm ci covers package.json; deno install additionally materializes the
+        # deno.json npm: imports (ai, @ai-sdk/*, edn-data, …) into node_modules —
+        # nodeModulesDir is "manual", so deno test resolves them from there and
+        # fails with "Could not find a matching package for 'npm:ai@^6'" otherwise.
+        run: cd core/server && npm ci && deno install
       - name: Prepare test database (trexdb schema + memory import-state table)
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
