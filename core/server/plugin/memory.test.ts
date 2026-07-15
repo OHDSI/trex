@@ -1,5 +1,13 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { normalizeMemoryValue } from "./memory.ts";
+import { isTrustedScopeMemoryPlugin, normalizeMemoryValue } from "./memory.ts";
+
+Deno.test("isTrustedScopeMemoryPlugin accepts the trusted scopes and rejects everything else", () => {
+  assertEquals(isTrustedScopeMemoryPlugin("@trex/memory-example"), true);
+  assertEquals(isTrustedScopeMemoryPlugin("@ohdsi/pythia-memory"), true);
+  assertEquals(isTrustedScopeMemoryPlugin("@evil/memory"), false);
+  assertEquals(isTrustedScopeMemoryPlugin("unscoped-memory"), false);
+  assertEquals(isTrustedScopeMemoryPlugin(""), false);
+});
 
 Deno.test("normalizes a git + inline memory", () => {
   const out = normalizeMemoryValue([{

@@ -4,7 +4,12 @@ import { addPlugin as addFunctionPlugin } from "./function.ts";
 import { addTransformPlugin } from "./transform.ts";
 import { addPlugin as addUIPlugin } from "./ui.ts";
 import { addAgentsPlugin, agentsCoreMigrationTarget } from "./agents.ts";
-import { normalizeMemoryValue, type MemoryEntry } from "./memory.ts";
+import { TRUSTED_PLUGIN_SCOPES } from "./function.ts";
+import {
+  isTrustedScopeMemoryPlugin,
+  normalizeMemoryValue,
+  type MemoryEntry,
+} from "./memory.ts";
 import { mergeMemoryEntries, type SourceOwners } from "./memory-merge.ts";
 import { scanPluginDirectory, splitPathList } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
@@ -50,6 +55,10 @@ async function collectDeclaredMemoryNames(rawPaths: string[]): Promise<void> {
       for (const { pkg } of scanned) {
         const memoryValue = pkg?.trex?.memory;
         if (memoryValue === undefined) continue;
+        // Same trusted-scope requirement as the `memory` dispatch case below
+        // (which reports the skip loudly) — an untrusted plugin's names must
+        // not enter the allow-list via this pre-pass either.
+        if (!isTrustedScopeMemoryPlugin(pkg?.name ?? "")) continue;
         try {
           for (const e of normalizeMemoryValue(memoryValue)) {
             DECLARED_MEMORY_NAMES.add(e.name);
@@ -151,6 +160,16 @@ export class Plugins {
             }
             break;
           case "memory": {
+            // Same trust requirement as agents (agents.ts's
+            // isTrustedScopeAgentsPlugin): memory names become Postgres
+            // schemas served by the shared worker, so an untrusted plugin
+            // must not be able to declare (or feed sources into) one.
+            if (!isTrustedScopeMemoryPlugin(fullName)) {
+              console.error(
+                `plugins: memory declarations from ${fullName} skipped — trex.memory requires a trusted scope (${TRUSTED_PLUGIN_SCOPES.join(", ")})`,
+              );
+              break;
+            }
             // Collect only — the proxy/gbrain/provisioning start once, after
             // the full plugin scan, so a shared brain fed by multiple
             // plugins (see MEMORY_SOURCE_OWNERS above) sees every source

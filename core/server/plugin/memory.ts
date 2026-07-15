@@ -11,8 +11,19 @@
 //    hyphen is illegal.
 //  - SOURCE_NAME_RE allows hyphens: a source name is a namespace within a
 //    memory, not a schema identifier.
+import { isTrustedPluginScope } from "./function.ts";
+
 const MEMORY_NAME_RE = /^[a-z0-9][a-z0-9_]*$/;
 const SOURCE_NAME_RE = /^[a-z0-9][a-z0-9_-]*$/;
+
+// Same trust requirement as agents (agents.ts's isTrustedScopeAgentsPlugin):
+// a memory name becomes a Postgres schema served by the shared worker, so
+// only trusted-scope plugins may declare one or feed sources into one.
+// Enforced by plugin.ts in both the pre-pass (collectDeclaredMemoryNames)
+// and the dispatch `case "memory"`.
+export function isTrustedScopeMemoryPlugin(name: string): boolean {
+  return isTrustedPluginScope(name);
+}
 
 export interface MemorySource {
   name: string;
