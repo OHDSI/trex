@@ -1,5 +1,5 @@
 import type { Pool } from "pg";
-import type { AccessTokenClaims } from "../auth/jwt.ts";
+import type { ResolvedCredential } from "../auth/sb-keys.ts";
 import { type Channel, onJoinHooks } from "./channel.ts";
 
 // db.ts throws at import time if DATABASE_URL is unset (it constructs the shared
@@ -38,7 +38,7 @@ function getPool(): Promise<Pool> {
 const ALLOWED_ROLES = new Set(["authenticated", "anon", "service_role"]);
 
 export async function checkAuthorization(
-  claims: AccessTokenClaims,
+  claims: ResolvedCredential,
   topic: string, // the sub-topic (channel name without "realtime:")
 ): Promise<{ read: boolean; write: boolean }> {
   // Fail closed BEFORE any DB access: an unexpected/NULL role never gets to

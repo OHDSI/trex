@@ -2,7 +2,7 @@ import express from "express";
 import type { Express, Request, Response } from "express";
 import { BASE_PATH } from "../config.ts";
 import { handleUpgrade } from "./socket.ts";
-import { verifyAccessToken } from "../auth/jwt.ts";
+import { resolveApiCredential } from "../auth/sb-keys.ts";
 import { broadcastToTopic } from "./broadcast.ts";
 import { checkAuthorization } from "./authz.ts";
 import { applyRealtimeMigrations } from "./migrations.ts";
@@ -37,7 +37,7 @@ export function mountRealtime(app: Express): void {
     const authHeader = req.headers["authorization"] as string | undefined;
     const apikey = req.headers["apikey"] as string | undefined;
     const token = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : apikey ?? "";
-    const claims = await verifyAccessToken(token);
+    const claims = await resolveApiCredential(token);
     if (!claims) return res.status(401).json({ error: "unauthorized" });
     const messages = req.body?.messages;
     if (!Array.isArray(messages)) return res.status(422).json({ error: "messages array required" });
