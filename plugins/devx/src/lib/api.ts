@@ -635,8 +635,13 @@ export async function updatePlanStatus(planId: string, status: Plan["status"]): 
 
 /** Start an agent-driven run that implements the plan via the subagent-driven
  * skill. Returns the new agent-run id (surfaces in the Agents tab). */
-export async function executePlan(planId: string): Promise<{ runId: string }> {
-  return apiFetch(`/plans/${planId}/execute`, { method: "POST" });
+export async function executePlan(planId: string, appId?: string): Promise<{ runId: string }> {
+  // File-backed plans (id "file:…") have no DB row, so the server needs appId
+  // to read the markdown and anchor the run. Harmless for DB plans.
+  return apiFetch(`/plans/${planId}/execute`, {
+    method: "POST",
+    ...(appId ? { body: JSON.stringify({ appId }) } : {}),
+  });
 }
 
 // Security

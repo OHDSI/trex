@@ -201,7 +201,8 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
   // subagent-driven skill. It appears as an agent in the Agents tab.
   const runPlan = async (plan: Plan) => {
     try {
-      await api.executePlan(plan.id);
+      // File-backed plans need appId so the server can read the markdown.
+      await api.executePlan(plan.id, appId ?? undefined);
       toast.success("Agent run started — see the Agents tab");
       setPlans((prev) => prev.map((p) => (p.id === plan.id ? { ...p, status: "accepted" } : p)));
     } catch {
@@ -265,19 +266,28 @@ export function PlanTab({ appId, livePlanContent, onFixPrompt }: PlanTabProps) {
                       <FileText className="h-3 w-3" />
                       Read-only — edit the markdown file directly
                     </span>
-                    {onFixPrompt && (
-                      <div className="flex items-center gap-2 ml-auto">
+                    <div className="flex items-center gap-2 ml-auto">
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="h-7 text-xs gap-1.5"
+                        onClick={() => runPlan(plan)}
+                      >
+                        <Sparkles className="h-3 w-3" />
+                        Implement with agents
+                      </Button>
+                      {onFixPrompt && (
                         <Button
                           size="sm"
-                          variant="default"
+                          variant="outline"
                           className="h-7 text-xs gap-1.5"
                           onClick={() => implementInChat(plan)}
                         >
                           <Play className="h-3 w-3" />
                           Implement in chat
                         </Button>
-                      </div>
-                    )}
+                      )}
+                    </div>
                   </div>
                 )}
                 {/* Draft: Accept/Reject buttons (DB plans only) */}
