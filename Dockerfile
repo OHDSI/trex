@@ -90,6 +90,22 @@ COPY plugins/pg-meta/postgres-meta/ ./
 RUN npm install --ignore-scripts --no-audit --no-fund && npm run build && \
     npm prune --omit=dev --ignore-scripts --no-audit --no-fund
 
+# Build the storage plugin's dist + prod node_modules. Its edge function imports
+# ./dist (per the plugin's deno.json import map, which also sets
+# nodeModulesDir:manual), so without a build step the image ships no dist and the
+# storage worker fails to bootstrap — every studio storage/bucket call 500s.
+# node ./build.js (esbuild transpile, bundle:false) + resolve-tspaths yields the
+# runtime dist; we skip `npm run build`'s leading `tsc -noEmit` (not needed for
+# the artifact and it scans test files). patch-package applies the vendored
+# patches (normally the postinstall), then dev deps are pruned so only the
+# runtime tree ships.
+FROM node:22-trixie-slim AS storage-builder
+WORKDIR /build
+COPY plugins/storage/supabase-storage/ ./
+RUN npm install --ignore-scripts --no-audit --no-fund && npx patch-package && \
+    node ./build.js && node_modules/.bin/resolve-tspaths && \
+    npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+
 # Stage 6: Build the Studio Next.js static export.
 FROM node:22-trixie-slim AS studio-builder
 WORKDIR /build
@@ -267,6 +283,8 @@ COPY plugins/studio/functions/ ./plugins-dev/studio/functions/
 COPY plugins/studio/build/ ./plugins-dev/studio/build/
 COPY --from=studio-builder /build/build_static/ ./plugins-dev/studio/build_static/
 COPY plugins/storage/ ./plugins-dev/storage/
+COPY --from=storage-builder /build/dist/ ./plugins-dev/storage/supabase-storage/dist/
+COPY --from=storage-builder /build/node_modules/ ./plugins-dev/storage/supabase-storage/node_modules/
 COPY plugins/postgrest/ ./plugins-dev/postgrest/
 # Pre-warm the postgrest worker's npm deps (pg/jose are npm: specifiers in
 # functions/deno.json — the worker runtime stages the source WITHOUT
