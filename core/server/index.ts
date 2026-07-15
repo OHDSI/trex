@@ -8,7 +8,7 @@ import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
 import { ensureAuthKeys } from "./auth/api-keys.ts";
-import { ensureSbKeys, resolveApiCredential } from "./auth/sb-keys.ts";
+import { ensureSbKeys, resolveApiCredential, translateSbHeaders } from "./auth/sb-keys.ts";
 import { verifyAccessToken } from "./auth/jwt.ts";
 import { initDek } from "./auth/dek.ts";
 import { getJwtSecret } from "./auth/jwt.ts";
@@ -409,6 +409,9 @@ app.all(
           headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
         }
       }
+      // New-format sb keys → legacy JWT of the same role; the vendored PostgREST
+      // plugin only validates legacy JWTs.
+      await translateSbHeaders(headers);
       // supabase-js sends apikey header + Authorization header.
       // If no Authorization header, use apikey as Bearer token so the plugin can determine the role.
       const apikey = headers.get("apikey");
@@ -622,6 +625,9 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
         headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
       }
     }
+    // Same sb→legacy swap as the PostgREST proxy — supabase-storage validates
+    // legacy JWTs itself.
+    await translateSbHeaders(headers);
 
     let body: Blob | undefined;
     if (req.method !== "GET" && req.method !== "HEAD") {
