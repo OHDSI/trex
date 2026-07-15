@@ -1,4 +1,4 @@
-import { assertEquals, assertNotEquals, assertMatch } from "jsr:@std/assert";
+import { assertEquals, assertMatch, assertNotEquals } from "jsr:@std/assert";
 import {
   _setSbKeysCacheForTest,
   generatePublishableKey,
@@ -7,12 +7,28 @@ import {
   resolveApiCredential,
   resolveSbKeyRole,
 } from "./sb-keys.ts";
+import {
+  ensureSbKeys,
+  rotateSecretKey,
+  translateSbHeaders,
+} from "./sb-keys.ts";
 
-Deno.env.set("TREX_ROOT_KEY", btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i))));
+Deno.env.set(
+  "TREX_ROOT_KEY",
+  btoa(String.fromCharCode(...new Uint8Array(32).map((_, i) => i))),
+);
 
 const TEST_KEYS = {
-  publishable: { id: "pk-1", key: "sb_publishable_testA", inserted_at: "2026-01-01T00:00:00Z" },
-  secret: { id: "sk-1", key: "sb_secret_testB", inserted_at: "2026-01-01T00:00:00Z" },
+  publishable: {
+    id: "pk-1",
+    key: "sb_publishable_testA",
+    inserted_at: "2026-01-01T00:00:00Z",
+  },
+  secret: {
+    id: "sk-1",
+    key: "sb_secret_testB",
+    inserted_at: "2026-01-01T00:00:00Z",
+  },
 };
 
 Deno.test("generatePublishableKey format: prefix + 32+ base64url chars, unique", () => {
@@ -39,7 +55,10 @@ Deno.test("resolveSbKeyRole maps keys to roles, rejects unknown", async () => {
   assertEquals(await resolveSbKeyRole(TEST_KEYS.publishable.key), "anon");
   assertEquals(await resolveSbKeyRole(TEST_KEYS.secret.key), "service_role");
   assertEquals(await resolveSbKeyRole("sb_secret_wrong"), null);
-  assertEquals(await resolveSbKeyRole("sb_publishable_" + "A".repeat(32)), null);
+  assertEquals(
+    await resolveSbKeyRole("sb_publishable_" + "A".repeat(32)),
+    null,
+  );
   _setSbKeysCacheForTest(null);
 });
 
@@ -52,4 +71,45 @@ Deno.test("resolveApiCredential: sb key yields role, garbage yields null", async
   assertEquals(await resolveApiCredential("sb_secret_nope"), null);
   assertEquals(await resolveApiCredential("not-a-jwt-not-a-key"), null);
   _setSbKeysCacheForTest(null);
+});
+
+Deno.test("translateSbHeaders swaps valid sb keys for legacy JWTs", async () => {
+  _setSbKeysCacheForTest(TEST_KEYS);
+  const legacy = {
+    anonKey: "legacy-anon-jwt",
+    serviceRoleKey: "legacy-service-jwt",
+  };
+
+  const h = new Headers();
+  h.set("apikey", TEST_KEYS.publishable.key);
+  h.set("authorization", `Bearer ${TEST_KEYS.secret.key}`);
+  await translateSbHeaders(h, legacy);
+  assertEquals(h.get("apikey"), "legacy-anon-jwt");
+  assertEquals(h.get("authorization"), "Bearer legacy-service-jwt");
+
+  // Unknown sb key and non-sb values pass through untouched (fail closed downstream).
+  const h2 = new Headers();
+  h2.set("apikey", "sb_secret_unknown0");
+  h2.set("authorization", "Bearer eyJuser.jwt.here");
+  await translateSbHeaders(h2, legacy);
+  assertEquals(h2.get("apikey"), "sb_secret_unknown0");
+  assertEquals(h2.get("authorization"), "Bearer eyJuser.jwt.here");
+  _setSbKeysCacheForTest(null);
+});
+
+Deno.test({
+  name:
+    "ensureSbKeys is idempotent; rotateSecretKey changes only the secret key",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const first = await ensureSbKeys();
+    const second = await ensureSbKeys();
+    assertEquals(first.publishable.key, second.publishable.key);
+    assertEquals(first.secret.key, second.secret.key);
+    const rotated = await rotateSecretKey();
+    assertNotEquals(rotated, first.secret.key);
+    const third = await ensureSbKeys();
+    assertEquals(third.secret.key, rotated);
+    assertEquals(third.publishable.key, first.publishable.key);
+  },
 });
