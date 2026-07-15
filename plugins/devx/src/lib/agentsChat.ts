@@ -216,9 +216,27 @@ export function uiMessageToLegacyMessage(chatId: string, message: DevxUIMessage)
 }
 
 export function extractUsage(message: DevxUIMessage): { promptTokens?: number; completionTokens?: number } | null {
-  const usage = message.metadata?.usage;
+  const usage = message.metadata?.usage as
+    | {
+        inputTokens?: number;
+        outputTokens?: number;
+        cacheReadInputTokens?: number;
+        cacheWriteInputTokens?: number;
+      }
+    | undefined;
   if (!usage) return null;
-  return { promptTokens: usage.inputTokens, completionTokens: usage.outputTokens };
+  // The context-window usage is dominated by cache-read tokens for a caching
+  // agent (claude-code); inputTokens alone is just the small non-cached delta
+  // per turn and massively understates the context. Sum the cached input so the
+  // context indicator reflects the real tokens resident in the window.
+  const promptTokens =
+    (usage.inputTokens ?? 0) +
+    (usage.cacheReadInputTokens ?? 0) +
+    (usage.cacheWriteInputTokens ?? 0);
+  return {
+    promptTokens: promptTokens || usage.inputTokens,
+    completionTokens: usage.outputTokens,
+  };
 }
 
 /** Devx-authored tools whose completion should trigger a preview refresh —
