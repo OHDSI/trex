@@ -190,8 +190,16 @@ jobs:
             -c 'CREATE SCHEMA IF NOT EXISTS trexdb;' \
             -c 'DO $$ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END $$;' \
             -f core/schema/V6__memory_import_state.sql
+      # --no-check like the gbrain-worker/claw legs below: the deno workspace
+      # root is core/ (its deno.json declares the workspace, so its
+      # nodeModulesDir wins) and TYPE-REFERENCE directives from npm packages
+      # (/// <reference types="node">) resolve against core/node_modules,
+      # which only exists on dev machines (deno install residue) — npm ci in
+      # core/server can never satisfy them. Runtime npm: resolution works from
+      # core/server/node_modules either way. Typechecking runs on dev machines
+      # via the same command without --no-check.
       - name: core/server tests (agents, plugin loader, memory importer)
-        run: cd core/server && deno test --allow-all agents/ plugin/ memory/importer.test.ts
+        run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts
       # The gbrain worker suite runs under its OWN import map (gbrain/ alias +
       # npm: pins) — it is not a member of the core deno workspace, so it
       # cannot run under core/server/deno.json (see gbrain-worker/deno.json).
