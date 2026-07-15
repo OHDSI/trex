@@ -134,7 +134,17 @@ class DevServerManager {
 
     const k = this.key(userId, appId);
     const existing = this.servers.get(k);
-    if (existing && (existing.status === "running" || existing.status === "starting")) {
+    if (existing && existing.status === "running") {
+      return { status: existing.status, port: existing.port };
+    }
+    if (existing && existing.status === "starting") {
+      // A prior start can leave the entry stuck on "starting" (stdout-based
+      // detection missed the URL). If the port is actually up, recover it to
+      // "running" here rather than reporting stale "starting" forever.
+      if (existing.port > 0 && await this.portInUse(existing.port)) {
+        existing.status = "running";
+        this.emit(existing, { type: "status_change", data: "running", timestamp: Date.now() });
+      }
       return { status: existing.status, port: existing.port };
     }
 
@@ -262,9 +272,14 @@ class DevServerManager {
               timestamp: line.ts || Date.now(),
             });
 
-            // Detect URL from output
-            const urlMatch = clean.match(/https?:\/\/localhost:(\d+)/);
-            if (urlMatch && !entry.detectedUrl) {
+            // Detect the dev server URL from output. Vite prints its "Local:"
+            // URLs under whatever host it's configured with (localhost,
+            // localhost.localdomain, lvh.me, …), so match ANY host — a bare
+            // "localhost:" match misses readiness on custom-host apps and leaves
+            // them stuck on "starting". Require the URL's port to be the port we
+            // allocated so unrelated URLs in build output don't false-positive.
+            const urlMatch = clean.match(/https?:\/\/[A-Za-z0-9.-]+:(\d+)\//);
+            if (urlMatch && Number(urlMatch[1]) === entry.port && !entry.detectedUrl) {
               entry.detectedUrl = urlMatch[0];
               entry.status = "running";
               this.emit(entry, { type: "status_change", data: "running", timestamp: Date.now() });
@@ -299,6 +314,15 @@ class DevServerManager {
           if (statusResult.url && !entry.detectedUrl) {
             entry.detectedUrl = statusResult.url;
           }
+          this.emit(entry, { type: "status_change", data: "running", timestamp: Date.now() });
+        }
+
+        // Robust readiness fallback: if the allocated port is actually accepting
+        // connections, the dev server IS up — regardless of what it printed to
+        // stdout. Stdout parsing alone misses custom-host URLs, quiet servers,
+        // and IPv6-only binds, which is what leaves apps stuck on "starting".
+        if (entry.status === "starting" && entry.port > 0 && await this.portInUse(entry.port)) {
+          entry.status = "running";
           this.emit(entry, { type: "status_change", data: "running", timestamp: Date.now() });
         }
       } catch (pollErr) {
@@ -351,15 +375,28 @@ class DevServerManager {
         `SELECT * FROM trex_devx_process_status('${escapeSql(k)}', '')`
       ));
       if (statusResult.pid) {
-        // Process exists in Rust registry
+        // Process exists in Rust registry. Rust's own readiness detection can
+        // miss custom-host URLs / IPv6-only binds and stay "starting" forever —
+        // and this is what the UI badge polls — so treat a bound allocated port
+        // as "running" (matching the poll-loop fallback), and never downgrade an
+        // entry we already flipped to running.
+        const port = statusResult.port || entry?.port;
+        let status = statusResult.status;
+        if (
+          status !== "running" &&
+          ((entry && entry.status === "running") ||
+            (port && port > 0 && (await this.portInUse(port))))
+        ) {
+          status = "running";
+        }
         if (entry) {
-          entry.status = statusResult.status === "running" ? "running" : statusResult.status;
+          entry.status = status;
           if (statusResult.url) entry.detectedUrl = statusResult.url;
         }
         return {
-          status: statusResult.status,
-          port: statusResult.port || entry?.port,
-          url: statusResult.url || undefined,
+          status,
+          port,
+          url: statusResult.url || entry?.detectedUrl || undefined,
         };
       }
     } catch { /* devx_ext not loaded or query failed */ }

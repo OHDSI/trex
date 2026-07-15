@@ -13,6 +13,7 @@ trex edge runtime.
 | `DATABASE_URL` | trex core (forwarded to the worker) | Postgres connection string the memory worker's `PostgresEngine` connects with. Same database as the rest of trex; memories live in their own schemas (see below), not a separate DB. |
 | `GBRAIN_MEMORY_ALLOWLIST` | trex core, **auto-set** | Comma-separated list of declared memory names, derived automatically from every installed plugin's `trex.memory` manifest entries at mount time (`buildMemoryWorkerConfig` in `core/server/memory/gbrain-worker/mount.ts`). Not operator-configured directly — it exists so the worker only ever serves/provisions names that were actually declared by a trusted-scope plugin (design §8: never provision an arbitrary request-path name). Empty string when no plugin declares any memory. |
 | `GBRAIN_MEMORY_TOKEN` | trex core (forwarded to the worker) | Internal shared-secret bearer token for the trex-to-memory-worker hop (`handler.ts`'s `timingSafeEqual` check). Not a user-facing credential — see the auth-path gate below for how a real caller reaches the worker at all. |
+| `TREX_MEMORY_SOURCES` | trex core, **auto-set** | Absolute path to the staged `sources/` directory the worker self-imports at boot. Set by `buildMemoryWorkerConfig` to `<servicePath>/sources`; needed because the packaged runtime's compile dir carries only the module graph, so the worker can't resolve `./sources` relative to its own module URL there. |
 | `GBRAIN_PORT` | — | **No longer used.** Leftover from the abandoned Bun-subprocess hosting model (pre-pivot plan, `serve --http` on a fixed port). The current in-runtime worker has no listening TCP port of its own — it's invoked in-process via `EdgeRuntime.userWorkers` / the `fnmap` inter-service call path. Safe to ignore if seen in older docs/notes. |
 
 ## Routing: `/memory/<name>` → schema `memory_<name>`
@@ -90,49 +91,41 @@ the `handbook` memory declared by `plugins/memory-example/package.json`).
   inside that memory — an agent link can never overwrite imported
   knowledge, only add to it.
 
-**Pre-production note:** the tools above call out to the memory over HTTP
-(`MEMORY_MCP_URL` + `GBRAIN_MEMORY_TOKEN`, see `agent-memory.ts`'s
-`renderMemoryTool`). Actual agent→memory HTTP reachability — whether that
-resolves via the public Express route (session-gated) or the internal
-`fnmap`/`Trex.tokioChannel` path (bearer-token-gated only) — is one of the
-runtime-gated pre-production gaps below (#2): it has not been verified
-end-to-end against a live trex edge runtime.
+The tools above call out to the memory over HTTP (`MEMORY_MCP_URL` +
+`GBRAIN_MEMORY_TOKEN`, see `agent-memory.ts`'s `renderMemoryTool`).
+`MEMORY_MCP_URL` defaults to the in-container loopback
+(`http://127.0.0.1:8001` + `memoryWorkerBasePath()`); set
+`GBRAIN_MEMORY_INTERNAL_URL` to override it. The memory route is
+auth-exempt at the proxy (`mount.ts`'s `authExemptPattern`) — the worker's
+own bearer check gates it, and fails closed when the token is unset. See
+gate #2 below for the live verification.
 
-## Pre-production gates (require the trex edge runtime, not verifiable in dev)
+## Pre-production gates
 
 The H0-H4 spikes/tasks that built this feature verified everything possible
 at the disk/type-check/unit-test level (`vendor/gbrain` patches, the thin
 fetch handler, the worker staging pipeline, the boot self-import) without a
-live `trex-runtime` submodule checkout or a running core server. The
-following are real, open verification gaps — not yet exercised end-to-end —
-and must be closed before this ships to production:
+live `trex-runtime` submodule checkout or a running core server. Gates #1,
+#2, and #4 were then closed by live e2e runs against the built image
+(#153); #3 remains deferred:
 
-1. **Worker `permissions` shape.** `mount.ts` passes a `permissions` object
-   (`allow_net`/`allow_env`/`allow_read`/`allow_sys: true`) to
-   `EdgeRuntime.userWorkers.create`. `allow_sys` is required because
-   importing gbrain's dispatch/operations closure pulls in
-   `@ai-sdk/gateway` → `@vercel/oidc`, which calls `os.hostname()`
-   unconditionally at import time. The exact field names/shape this option
-   expects are defined in the `plugins/runtime/trex-runtime` Rust
-   edge-runtime crate, which was **not checked out** when this was written
-   — the key names are inferred from Deno's own permission-flag naming and
-   the `supabase-edge-runtime` lineage the `EdgeRuntime.userWorkers` API
-   name suggests, but were never verified against the real crate. Verify
-   once the submodule is populated; the worker may fail to construct (or
-   silently ignore the `permissions` object) if the shape is wrong.
-2. **Agent → memory auth path.** The public Express route is gated by
-   `authContext`+`pluginAuthz` (requires a valid trex session) layered ON
-   TOP OF the worker's own `GBRAIN_MEMORY_TOKEN` bearer check — so a caller
-   with only the bearer token and no trex session is 401'd before reaching
-   the worker at all over HTTP. The design's actual intended caller (an
-   agent referencing a memory by name) is expected to reach it via
-   worker-to-worker / the `fnmap` inter-service call path
-   (`Trex.tokioChannel`), which bypasses Express middleware and is gated
-   purely by the bearer token — same as any other first-party inter-service
-   call. This has NOT been verified end-to-end: no live agent has actually
-   called into a memory worker yet. If agents instead need to reach memory
-   over the public HTTP route (not the internal fnmap path), they need a
-   real trex session, which the current design doesn't provide a path for.
+1. **Worker `permissions` shape — RESOLVED (#153).** `mount.ts` no longer
+   passes a `permissions` object to `EdgeRuntime.userWorkers.create` at all:
+   the runtime deserializes each permission field as `Option<Vec<String>>`
+   (the earlier best-effort boolean shape would have failed worker
+   creation), and the UserWorker defaults already cover this worker's needs
+   — including `allow_sys` `"hostname"`, required because importing gbrain's
+   dispatch/operations closure pulls in `@ai-sdk/gateway` → `@vercel/oidc`,
+   which calls `os.hostname()` unconditionally at import time.
+2. **Agent → memory auth path — RESOLVED (#153).** The memory route is now
+   `authExempt` at the function proxy, so the generated agent tools reach it
+   with the bearer token alone — the worker's `GBRAIN_MEMORY_TOKEN` check
+   gates every request and fails closed when the token is unset (regression
+   test in `handler.test.ts`). `MEMORY_MCP_URL` defaults to the
+   in-container loopback (`http://127.0.0.1:8001`; port 8000 is TLS
+   in-container, which the old default couldn't reach). Verified live:
+   bearer-only query from inside the container returns results; a wrong
+   bearer 401s; an undeclared memory name 404s.
 3. **Refresh-on-change is deferred.** The worker self-imports every staged
    source exactly once, at boot (`self-import.ts`'s `importStagedSources`,
    wired into the generated worker entry point in `mount.ts`). There is no
@@ -140,23 +133,28 @@ and must be closed before this ships to production:
    updates on the next full worker mount/restart. A scheduled refresh loop
    (re-stage + re-mount, or a push-based signal) is explicit future work,
    not present in this wave.
-4. **Full worker-boot e2e.** Nobody has yet: mounted a real memory worker
-   against a live Express app, issued an HTTP request through it, watched
-   `EdgeRuntime.userWorkers.create` actually accept the staged servicePath
-   + import maps + `permissions` object, confirmed `PostgresEngine.connect`
-   succeeds inside the sandboxed worker process, or exercised the
-   `put_page`/`query` MCP round-trip against a live schema. Everything
-   verified so far is disk-level (staged file contents), type-check-level
-   (`deno check`), and isolated-unit-test-level (stubbed HTTP servers,
-   local git repos) — never a running worker.
+4. **Full worker-boot e2e — RESOLVED (#153).** Verified end-to-end in the
+   built image: mount → worker boot → self-import (version-tracked skip on
+   re-boot) → `put_page`/`query` via `/plugins/trex/memory/<name>/mcp`
+   (send `apikey: <serviceRoleKey>` plus
+   `Authorization: Bearer $GBRAIN_MEMORY_TOKEN`). This run is what caught
+   gates #1 and #2 plus a missed gbrain trigger
+   (`bump_page_generation_fn` retemplated to `__MEMORY_SEARCH_PATH__`).
 
-## Image/Dockerfile follow-up (documented, not yet done)
+**Deployment requirement:** the stack's Postgres **must ship pgvector** —
+gbrain provisioning runs `CREATE EXTENSION vector`, and the stock
+`postgres:16` compose image does not include it.
+
+## Image/Dockerfile — DONE (#153)
 
 Hosting gbrain as an in-runtime Deno worker (rather than a Bun subprocess)
-means the image build needs to stage `vendor/gbrain` + the
-`gbrain-worker/` handler under the Deno runtime's asset layout the same way
-`plugins/runtime` stages other edge-worker sources — and it means **no Bun
-binary needs to ship in the image for this feature** (the previous
-subprocess-based plan would have required one). This Dockerfile/image
-change is a documented follow-up for the image build; it has not been made
-in this wave.
+means **no Bun binary ships in the image for this feature**. The image build
+now stages the worker's runtime inputs: `Dockerfile` copies
+`vendor/gbrain/src/` plus the sibling `package.json` (the memory worker
+resolves them from disk at mount time via
+`gbrain-worker/mount.ts:resolveGbrainSrcDir`; tests/docs/CHANGELOG stay out
+of the image). The `gbrain-worker/` handler itself ships with the rest of
+`core/`. CI also gained a `core-server-tests` leg (`plugin-ci.yml`) that
+runs the memory importer + gbrain-worker suites against a live pgvector
+Postgres — the disk/unit-level gaps below remain runtime-gated, not
+CI-gated.

@@ -72,6 +72,12 @@ function loadVisualEditingScripts() {
   _visualEditingScriptsLoaded = true;
   const candidates = [
     new URL("./visual_editing/selector_client.js", import.meta.url).pathname,
+    // The devx plugin is mounted at /usr/src/plugins-dx in the dx image; the
+    // import.meta.url path resolves into the eszip compile dir where these .js
+    // assets aren't materialized, so this concrete path is what actually works.
+    // Keep the legacy plugins-dev path as a last resort. Without a working path
+    // the scripts load empty and the visual-editing overlay silently no-ops.
+    "/usr/src/plugins-dx/devx/functions/visual_editing/selector_client.js",
     "/usr/src/plugins-dev/devx/functions/visual_editing/selector_client.js",
   ];
   for (const path of candidates) {

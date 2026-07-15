@@ -510,6 +510,38 @@ COMPAT.md's "Channels" note). `LINEAR_API_KEY` (a `lin_api_…` personal key) an
 an OAuth agent token are both accepted; the adapter picks the auth scheme by
 prefix.
 
+Every adapter also honors an optional inbound allow-list
+(`core/server/agents/channels/allow.ts`): `<PREFIX>_ALLOWED_USERS` /
+`<PREFIX>_ALLOWED_CHANNELS` env vars (e.g. `DISCORD_ALLOWED_USERS`,
+comma-separated platform ids) restrict who can trigger the agent; neither set
+means unrestricted. Allow-listing a conversation covers platform
+sub-conversations (e.g. Discord threads) spawned inside it.
+
+### Discord gateway mode (no public URL)
+
+For deployments without a publicly reachable URL, the `discord` channel can
+receive interactions over an *outbound* gateway WebSocket instead of the
+inbound webhook (`core/server/agents/gateway/discord.ts`). Set
+`DISCORD_GATEWAY=1` in the agent's manifest `env` block — the switch is
+deliberately **per-agent only**, with no host-env fallback (a host-wide flag
+would open a gateway client for every registered agent on the same bot token)
+— and leave the app's Interactions Endpoint URL unset in the developer portal
+(Discord routes interactions to the gateway exactly when no endpoint URL is
+registered). Same bot, token, slash commands, and HITL widgets; only the
+transport differs.
+
+The gateway client runs in the main server process (not the worker — a worker
+isolate can be reclaimed and can't hold a persistent socket) and forwards each
+interaction to the unchanged channel adapter as a loopback POST signed with a
+boot-time ephemeral Ed25519 key; the worker's `DISCORD_PUBLIC_KEY` is
+overridden to that ephemeral public key at registration, so `DISCORD_PUBLIC_KEY`
+does not need to be set in gateway mode. `DISCORD_GATEWAY_CHANNEL` picks the
+channel id the interaction is forwarded to (default `discord`);
+`DISCORD_GATEWAY_LOOPBACK_URL` overrides the loopback base (default
+`http://127.0.0.1:8001`). `DISCORD_BOT_TOKEN` is required — it authenticates
+the gateway connection. `plugins/claw/README.md` has the operator-facing
+webhook-vs-gateway comparison.
+
 ### HITL over channels (v1 limitation — read this)
 
 The adapters render human-in-the-loop approvals as native platform widgets
@@ -677,6 +709,26 @@ until after the first authorization (OpenAPI parks cleanly from cold); and the
 callback `redirect_uri` is derived from the worker's request origin (behind a
 proxy with a different public origin, a `PUBLIC_URL` override — a follow-up — is
 needed). `connections/ACCEPTANCE.md` is the manual live-acceptance checklist.
+
+## Linked memories
+
+An agent's manifest entry (`trex.agents[]` in `package.json`, not the agent
+directory) can link declared `memory`-plugin brains by name:
+
+```json
+{ "name": "librarian", "dir": "agent", "memory": [{ "name": "handbook", "mode": "readwrite" }] }
+```
+
+Each link auto-generates namespaced tools (`<name>_search`, `<name>_recall`,
+`<name>_get_page`, plus `<name>_capture` for `readwrite`) and a `<name>-memory`
+skill, staged into the agent's directory at boot — generation refuses to
+overwrite hand-authored files of the same name. The tools forward to the
+memory worker's MCP endpoint; captures land in the agent's own `default`
+source and never overwrite imported knowledge. This is a trex-only manifest
+extension (real eve has no equivalent — the generated files are plain eve
+tools/skills, so a staged directory still loads there). See
+`plugins/memory/docs/OPERATIONS.md` for declaring memories, env vars, and the
+open verification gaps.
 
 ## Tool extensions and eve portability
 

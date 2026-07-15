@@ -152,10 +152,57 @@ export async function handlePlanRoutes(path, method, req, userId, sql, corsHeade
   if (execMatch && method === "POST") {
     const planId = execMatch[1];
     if (planId.startsWith("file:")) {
-      return Response.json(
-        { error: "Filesystem plans can't be executed — use Implement in chat instead" },
-        { status: 400, headers: corsHeaders },
+      // File-backed plans have no DB row. The client passes { appId } so we can
+      // read the markdown from the app workspace and anchor an agent run to it.
+      // (subagent_runs.parent_chat_id is NOT NULL, so reuse or create a chat.)
+      const body = await req.json().catch(() => ({}));
+      const appId = body?.appId;
+      if (!appId) {
+        return Response.json(
+          { error: "appId required to run a filesystem plan" },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+      const appChk = await sql(
+        `SELECT id FROM devx.apps WHERE id = $1 AND user_id = $2`,
+        [appId, userId],
       );
+      if (appChk.rows.length === 0) {
+        return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+      }
+      // id shape: file:<kind>:<name>
+      const fileName = planId.split(":").slice(2).join(":");
+      const wsPath = getAppWorkspacePath(userId, appId);
+      let fileContent = "";
+      for (const sub of ["trex/plans", "trex/specs", "docs/devx/plans", "docs/devx/specs"]) {
+        try {
+          fileContent = await Deno.readTextFile(`${wsPath}/${sub}/${fileName}`);
+          break;
+        } catch { /* try next location */ }
+      }
+      if (!fileContent) {
+        return Response.json({ error: "Plan file not found" }, { status: 404, headers: corsHeaders });
+      }
+      const chatSel = await sql(
+        `SELECT id FROM devx.chats WHERE app_id = $1 AND user_id = $2 ORDER BY updated_at DESC LIMIT 1`,
+        [appId, userId],
+      );
+      let fileChatId = chatSel.rows[0]?.id;
+      if (!fileChatId) {
+        const newChat = await sql(
+          `INSERT INTO devx.chats (app_id, user_id, title) VALUES ($1, $2, $3) RETURNING id`,
+          [appId, userId, `Plan: ${fileName.replace(/\.md$/, "")}`],
+        );
+        fileChatId = newChat.rows[0].id;
+      }
+      const fileRun = await sql(
+        `INSERT INTO devx.subagent_runs
+           (parent_chat_id, agent_name, task, user_id, app_id, skill_name, run_kind, status)
+         VALUES ($1, $2, $3, $4, $5, $6, 'agent', 'running')
+         RETURNING id`,
+        [fileChatId, "Plan executor", fileContent, userId, appId, "subagent-driven-development"],
+      );
+      return Response.json({ runId: fileRun.rows[0].id }, { headers: corsHeaders });
     }
     // Load the plan + its chat/app, scoped to the user.
     const planRes = await sql(
