@@ -25,6 +25,14 @@ cannot be unit-tested.
       so) → claw posts a short summary. Verify delivery still lands if a coder
       turn exceeds ~15 min (bot-token channel-message fallback).
 - [ ] Two channels in parallel keep independent sessions/state.
+- [ ] `/trex <ask>` in a regular channel → a public thread named after the ask
+      is created, the deferred response becomes a `Started <#thread>` pointer,
+      and claw's replies/questions/buttons land IN the thread.
+- [ ] `/trex` inside the task thread continues the SAME session; a second
+      `/trex` in the channel spawns a SECOND thread whose task proceeds in
+      parallel with its own Code-agent session.
+- [ ] With `DISCORD_ALLOWED_CHANNELS` set to the parent channel id, `/trex`
+      inside its task threads still passes the allow-list.
 - [ ] Rotate DISCORD_BOT_TOKEN / CLAW_API_KEY on the host → confirm the change
       takes effect only after the claw worker/plugin is restarted (env is baked
       in at worker creation).

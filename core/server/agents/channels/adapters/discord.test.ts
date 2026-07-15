@@ -149,6 +149,129 @@ Deno.test("command interaction → send() with the message + discord continuatio
   assertEquals((call.opts.state as { interactionToken?: string }).interactionToken, "interaction-token-1");
 });
 
+// ---- threads (thread-per-task) ----------------------------------------------
+
+function threadFetchMock(opts: { failCreate?: boolean } = {}) {
+  const calls: Array<{ url: string; method: string; body: unknown; auth: string | null }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    const url = String(input);
+    calls.push({
+      url,
+      method: init?.method ?? "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+      auth: new Headers(init?.headers).get("authorization"),
+    });
+    if (url.endsWith("/threads")) {
+      if (opts.failCreate) return Promise.resolve(new Response("{}", { status: 403 }));
+      return Promise.resolve(new Response(JSON.stringify({ id: "thread-9" }), { status: 201 }));
+    }
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  return { calls, fetchMock };
+}
+
+Deno.test("threads: command in a regular channel creates a thread and keys the session to it", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const { calls, fetchMock } = threadFetchMock();
+  const waits: Promise<unknown>[] = [];
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1", applicationId: "app-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+    threads: true,
+  });
+  const { args, sends } = mockArgs();
+  args.waitUntil = (p) => { waits.push(p); };
+  // Regular guild text channel (type 0).
+  const payload = { ...COMMAND_PAYLOAD, channel: { id: "chan-1", type: 0 } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals((await res.json()).type, 5); // deferred ACK
+
+  // Thread created with bot auth, named after the ask.
+  const create = calls.find((c) => c.url.endsWith("/channels/chan-1/threads"))!;
+  assertExists(create);
+  assertEquals(create.auth, "Bot bot-1");
+  assertEquals((create.body as { name: string; type: number }).name, "what is the weather");
+  assertEquals((create.body as { type: number }).type, 11);
+
+  // Session keyed to the THREAD id; delivery state points at the thread and
+  // carries NO interaction token (replies must not land in the parent channel).
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "thread-9:thread-9");
+  const state = sends[0].opts.state as { channelId?: string; interactionToken?: string; initialResponseSent?: boolean };
+  assertEquals(state.channelId, "thread-9");
+  assertEquals(state.interactionToken, undefined);
+  assertEquals(state.initialResponseSent, true);
+  assertEquals(sends[0].opts.title, "what is the weather");
+
+  // The deferred original response becomes a pointer to the thread.
+  await Promise.all(waits);
+  const pointer = calls.find((c) => c.url.endsWith("/webhooks/app-1/interaction-token-1/messages/@original"))!;
+  assertExists(pointer);
+  assertEquals((pointer.body as { content: string }).content.includes("<#thread-9>"), true);
+});
+
+Deno.test("threads: command already inside a thread does NOT create another one", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const { calls, fetchMock } = threadFetchMock();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+    threads: true,
+  });
+  const { args, sends } = mockArgs();
+  // Interaction from within a public thread (type 11).
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-7", channel: { id: "thread-7", type: 11, parent_id: "chan-1" } };
+  await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(calls.filter((c) => c.url.endsWith("/threads")).length, 0);
+  // Normal path: session continues on the thread's own channel id.
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken.startsWith("thread-7:"), true);
+});
+
+Deno.test("threads: creation failure falls back to the in-channel session", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const { fetchMock } = threadFetchMock({ failCreate: true });
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+    threads: true,
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel: { id: "chan-1", type: 0 } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals((await res.json()).type, 5);
+  assertEquals(sends.length, 1);
+  // Today's behavior: token keyed to the channel + interaction, state keeps
+  // the interaction token for deferred-original delivery.
+  assertEquals(sends[0].opts.continuationToken, "chan-1:interaction-1");
+  const state = sends[0].opts.state as { interactionToken?: string };
+  assertEquals(state.interactionToken, "interaction-token-1");
+});
+
+Deno.test("threads: allow-listed parent channel admits interactions from its threads", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const { fetchMock } = threadFetchMock();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+    threads: true,
+    allow: { conversations: ["chan-1"] },
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-7", channel: { id: "thread-7", type: 11, parent_id: "chan-1" } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1, "thread of an allow-listed channel must pass");
+
+  // A thread of a DIFFERENT channel is still rejected.
+  const { args: args2, sends: sends2 } = mockArgs();
+  const other = { ...COMMAND_PAYLOAD, channel_id: "thread-8", channel: { id: "thread-8", type: 11, parent_id: "chan-2" } };
+  const res2 = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(other)), args2);
+  const body2 = await res2.json();
+  assertEquals(sends2.length, 0);
+  assertEquals((body2.data.content as string).includes("not authorized"), true);
+});
+
 // ---- delivery: message.completed ------------------------------------------
 
 Deno.test("message.completed delivers split content via edit + followup", async () => {

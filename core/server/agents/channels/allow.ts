@@ -6,17 +6,17 @@ import type { ChannelAllowList } from "./types.ts";
 
 export function channelAllows(
   allow: ChannelAllowList | undefined,
-  id: { userId?: string; conversationId?: string },
+  id: { userId?: string; conversationId?: string; conversationParentId?: string },
 ): boolean {
   if (!allow) return true;
   if (allow.users?.length && (!id.userId || !allow.users.includes(id.userId))) {
     return false;
   }
-  if (
-    allow.conversations?.length &&
-    (!id.conversationId || !allow.conversations.includes(id.conversationId))
-  ) {
-    return false;
+  if (allow.conversations?.length) {
+    // A platform sub-conversation (e.g. a Discord thread) carries its parent's
+    // id here so allow-listing a channel covers the threads spawned inside it.
+    const candidates = [id.conversationId, id.conversationParentId].filter((v): v is string => !!v);
+    if (!candidates.some((c) => allow.conversations!.includes(c))) return false;
   }
   return true;
 }

@@ -59,6 +59,7 @@ import {
   isDiscordFreeformComponent,
   renderInputRequestComponents,
 } from "../vendor/discord/hitl.ts";
+import { createDiscordThread, interactionChannelInfo, isThreadChannel, threadNameForTask } from "./discord-threads.ts";
 import { defaultDiscordAuth } from "../vendor/discord/defaults.ts";
 import { discordDeferredJson, discordJson, discordJsonBody, readMessageContent } from "../vendor/discord/responses.ts";
 import { verifyDiscordInbound } from "../vendor/discord/verifyInbound.ts";
@@ -126,8 +127,22 @@ export interface DiscordChannelOptions {
    * Inbound access filter (user ids / channel ids). Falls back to
    * DISCORD_ALLOWED_USERS / DISCORD_ALLOWED_CHANNELS env (comma-separated);
    * absent = everyone. Applied to every interaction type before dispatch.
+   * For interactions inside a thread, the thread's PARENT channel id also
+   * satisfies the conversation check — allow-listing a channel covers its
+   * task threads.
    */
   allow?: ChannelAllowList;
+  /**
+   * Thread-per-task mode: a command in a regular guild channel creates a
+   * public thread, keys the session to the THREAD id (parallel threads =
+   * parallel sessions), and delivers the whole conversation there; the
+   * deferred original response becomes a pointer to the thread. A command
+   * already inside a thread continues that thread's session. Falls back to
+   * the in-channel behavior when thread creation fails (missing permission,
+   * DMs). Needs the bot permissions "Create Public Threads" + "Send Messages
+   * in Threads".
+   */
+  threads?: boolean;
 }
 
 export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
@@ -246,6 +261,50 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       username: interaction.user.username,
     });
     const fullMessage = [contextBlock, ...(result.context ?? []), message].join("\n\n");
+
+    // Thread-per-task (opts.threads): a command in a regular guild channel
+    // gets its own public thread; the session is keyed to the THREAD id so
+    // every task is an independent session and tasks run in parallel. A
+    // command already inside a thread skips creation (its channelId IS the
+    // thread id, so the normal path below continues that thread's session).
+    // Creation failure falls back to the in-channel session — never drops
+    // the command.
+    if (opts.threads === true && interaction.guildId && !isThreadChannel(interactionChannelInfo(interaction.raw))) {
+      let threadId: string | null = null;
+      const threadName = threadNameForTask(message);
+      try {
+        threadId = (await createDiscordThread({ ...apiOpts(), channelId: interaction.channelId, name: threadName })).id;
+      } catch (e) {
+        console.warn("discord: task-thread creation failed — falling back to in-channel session:", e);
+      }
+      if (threadId !== null) {
+        // Delivery goes to the thread via bot-token channel messages — the
+        // interaction token would land replies in the PARENT channel, so it
+        // stays out of the state (initialResponseSent: true keeps deliver()
+        // off the deferred original). Ephemeral is meaningless in a public
+        // thread and is ignored.
+        const state: DiscordDeliveryState = {
+          channelId: threadId,
+          applicationId: interaction.applicationId,
+          guildId: interaction.guildId ?? null,
+          initialResponseSent: true,
+          ephemeral: false,
+        };
+        await args.send(fullMessage, {
+          auth,
+          continuationToken: discordContinuationToken(threadId, threadId),
+          state,
+          title: threadName,
+        });
+        // Turn the deferred original response into a pointer so the channel
+        // sees where the task went. Retried: in webhook mode the deferred
+        // response only materializes once this handler's return value reaches
+        // Discord (in gateway mode the pre-ACK already exists).
+        args.waitUntil(pointToThread(interaction.token, threadId));
+        return discordDeferredJson(false);
+      }
+    }
+
     const state: DiscordDeliveryState = {
       channelId: interaction.channelId,
       applicationId: interaction.applicationId,
@@ -266,6 +325,22 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       state,
     });
     return discordDeferredJson(result.ephemeral === true);
+  }
+
+  // Edits the deferred original response into a link to the task thread.
+  // Retried because in webhook mode the deferred response is created from this
+  // handler's OWN return value, which Discord may not have processed yet when
+  // the background task runs.
+  async function pointToThread(interactionToken: string, threadId: string): Promise<void> {
+    const body = { content: `Started <#${threadId}> for this task.` };
+    for (const delayMs of [0, 500, 1500, 3000]) {
+      if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
+      try {
+        await editDiscordOriginalResponse({ ...apiOpts(), interactionToken, body });
+        return;
+      } catch { /* deferred response not materialized yet — retry */ }
+    }
+    console.warn("discord: could not edit the original response into a thread pointer (gave up after retries)");
   }
 
   async function handleComponent(
@@ -362,9 +437,17 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         }
 
         // 3) allow-list — gates every interaction type (commands, HITL
-        // buttons, modals) before any send()/resume().
+        // buttons, modals) before any send()/resume(). Inside a thread the
+        // parent channel id also satisfies the conversation check.
         const allow = opts.allow ?? envAllowList("DISCORD");
-        if (!channelAllows(allow, { userId: interaction.user.id, conversationId: interaction.channelId })) {
+        const parentId = interactionChannelInfo(interaction.raw).parentId;
+        if (
+          !channelAllows(allow, {
+            userId: interaction.user.id,
+            conversationId: interaction.channelId,
+            ...(parentId ? { conversationParentId: parentId } : {}),
+          })
+        ) {
           return discordJson({ content: "You are not authorized to use this bot here.", ephemeral: true });
         }
 
