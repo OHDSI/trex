@@ -66,15 +66,14 @@ endpoint. Every request path is checked against an allow-list derived from
 the declared memory names (`GBRAIN_MEMORY_ALLOWLIST`, auto-set at mount time)
 — an undeclared name 404s, and there is no request-driven schema creation.
 
-Two auth layers apply:
+The route is exempt from the standard session middleware at the function
+proxy; instead the worker itself requires an internal shared-secret bearer
+token (`GBRAIN_MEMORY_TOKEN`) on every request and fails closed when the
+token is unset. This is what the generated agent memory tools authenticate
+with. A wrong bearer gets a 401; an undeclared memory name a 404.
 
-- The **public Express route** is guarded by the standard `authContext` +
-  `pluginAuthz` middleware (a valid Trex session is required), on top of the
-  worker's own check.
-- The worker itself requires an internal shared-secret bearer token
-  (`GBRAIN_MEMORY_TOKEN`) on every request — this is what gates
-  worker-to-worker calls (e.g. agent memory tools) that arrive over the
-  internal inter-service path and bypass Express middleware.
+The deployment's Postgres must ship **pgvector** — provisioning a memory
+schema runs `CREATE EXTENSION vector`.
 
 Sources are imported at boot (each staged source is self-imported once when
 the worker starts). There is no polling or webhook refresh yet — content
