@@ -375,8 +375,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 COPY plugins/extension-ci-tools/ /work/plugins/extension-ci-tools/
 COPY plugins/devx-ext/ /work/plugins/devx-ext/
-RUN make configure EXTENSION_VERSION="${DEVX_EXT_VERSION}" && \
-    make release   EXTENSION_VERSION="${DEVX_EXT_VERSION}" && \
+# EXTENSION_VERSION lands in a FIXED 32-BYTE metadata field appended to the
+# .trex (extension-ci-tools append_extension_metadata.py pads with `32 - len`
+# bytes — silently NEGATIVE for the 40-char github.sha CI passes, so the
+# oversized field shifts the whole footer by 8 bytes and the engine reads
+# garbage where the ABI type belongs: "Unknown ABI type: '_UNSTABLE…'".
+# It only ever loaded because the layer had been cache-hit since March (a
+# short autodetected sha); any cache-busted rebuild produced a corrupt
+# extension. Truncate to 12 chars — same as a short git sha, always < 32.
+RUN EXTENSION_VERSION="$(printf %.12s "${DEVX_EXT_VERSION}")" && \
+    make configure EXTENSION_VERSION="${EXTENSION_VERSION}" && \
+    make release   EXTENSION_VERSION="${EXTENSION_VERSION}" && \
     test -f build/release/devx_ext.trex
 
 # Stage 10: Build the devx plugin (SPA dist + fn-* runtime deps)
