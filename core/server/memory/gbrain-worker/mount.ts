@@ -256,14 +256,15 @@ await engine.connect(
   { engine: "postgres", database_url: Deno.env.get("DATABASE_URL") } as never,
 );
 
-// H4: self-import core-staged sources (see mount.ts's stageMemorySources)
-// before serving. Never allowed to block/prevent Deno.serve below — an
-// import failure is logged and the worker still comes up serving whatever
-// content is already in gbrain from a prior boot.
+// H4: self-import core-staged sources before serving; failures are logged,
+// never fatal. TREX_MEMORY_SOURCES points at the original staged servicePath
+// — the runtime's compile dir carries only the module graph, so the
+// meta-relative ./sources fallback only works outside the packaged runtime.
 try {
   await importStagedSources(
     engine,
-    new URL("./sources", import.meta.url).pathname,
+    Deno.env.get("TREX_MEMORY_SOURCES") ??
+      new URL("./sources", import.meta.url).pathname,
     {},
   );
 } catch (e) {
@@ -316,29 +317,16 @@ Deno.serve((req) => handler(req));
     // plugins — never an arbitrary caller-supplied name.
     GBRAIN_MEMORY_ALLOWLIST: entries.map((e) => e.name).join(","),
     GBRAIN_MEMORY_TOKEN: Deno.env.get("GBRAIN_MEMORY_TOKEN") ?? "",
+    TREX_MEMORY_SOURCES: `${tmp}/sources`,
   };
 
   return { servicePath: tmp, importMapPath, env };
 }
 
-// The worker needs `--allow-sys` (@ai-sdk/gateway -> @vercel/oidc calls
-// os.hostname() at import time, unconditionally, per task-h2-report.md's
-// "Deviations" #3 — a real cost of importing gbrain's dispatch/operations
-// table wholesale, not something this mount can avoid) plus the obvious
-// net/env/read a Postgres-backed HTTP worker needs. NOTE: the exact shape
-// `EdgeRuntime.userWorkers.create`'s `permissions` option expects is defined
-// in the `trex-runtime` submodule (plugins/runtime/trex-runtime), which is
-// NOT checked out in this environment (see task-h3-report.md) — this object
-// is best-effort, modeled on Deno's own permission-flag names (the
-// `EdgeRuntime.userWorkers` API's supabase-edge-runtime lineage uses the
-// same `allow_*` naming), and MUST be verified once the runtime is
-// available (deferred, same gate as live worker execution).
-export const MEMORY_WORKER_PERMISSIONS = {
-  allow_net: true,
-  allow_env: true,
-  allow_read: true,
-  allow_sys: true,
-};
+// No `permissions` option is passed to the worker create call: the runtime
+// deserializes each field as Option<Vec<String>> (booleans fail worker
+// creation), and the UserWorker defaults already cover this worker's needs
+// including allow_sys "hostname" (os.hostname() fires at import time).
 
 /**
  * Mounts the memory worker at `${PLUGINS_BASE_PATH}/trex/memory` (see the
@@ -400,7 +388,10 @@ export async function mountMemoryWorker(
     {
       function: "",
       allowHostFsAccess: true,
-      permissions: MEMORY_WORKER_PERMISSIONS,
+      // Worker owns auth (fail-closed GBRAIN_MEMORY_TOKEN bearer, see
+      // handler.ts) — proxy session auth would 401 agent workers, which
+      // hold only the bearer. Same model as the agents channel routes.
+      authExemptPattern: new RegExp(`^${basePath}/memory/`),
     },
     cfg.servicePath,
     MEMORY_PLUGIN_NAME,

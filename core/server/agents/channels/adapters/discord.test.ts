@@ -376,3 +376,50 @@ Deno.test("onCommand returning explicit { auth: null } sends with null auth", as
   // Explicit null is honored, NOT collapsed into the default discord identity.
   assertEquals(sends[0].opts.auth, null);
 });
+
+// ---- allow-list -------------------------------------------------------------
+
+Deno.test("allow-list: non-allowed user gets an ephemeral rejection, no send()", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex },
+    allow: { users: ["someone-else"] },
+  });
+  const { args, sends } = mockArgs();
+  const res = await channel.routes[0].handler(
+    await signedRequest(keypair.privateKey, JSON.stringify(COMMAND_PAYLOAD)),
+    args,
+  );
+  const body = await res.json();
+  assertEquals(body.data.flags, 64); // ephemeral
+  assertEquals(body.data.content.includes("not authorized"), true);
+  assertEquals(sends.length, 0);
+});
+
+Deno.test("allow-list: allowed user + channel passes through to send()", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex },
+    allow: { users: ["user-1"], conversations: ["chan-1"] },
+  });
+  const { args, sends } = mockArgs();
+  await channel.routes[0].handler(
+    await signedRequest(keypair.privateKey, JSON.stringify(COMMAND_PAYLOAD)),
+    args,
+  );
+  assertEquals(sends.length, 1);
+});
+
+Deno.test("allow-list: allowed user in a non-allowed channel is rejected", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex },
+    allow: { users: ["user-1"], conversations: ["other-chan"] },
+  });
+  const { args, sends } = mockArgs();
+  await channel.routes[0].handler(
+    await signedRequest(keypair.privateKey, JSON.stringify(COMMAND_PAYLOAD)),
+    args,
+  );
+  assertEquals(sends.length, 0);
+});

@@ -178,7 +178,7 @@ CREATE TABLE IF NOT EXISTS pages (
 -- content columns IS DISTINCT FROM (allow-list widened per D6 + codex #3
 -- to include title/type/page_kind/corpus_generation/content_hash) so
 -- read-time mutations don't invalidate every cache row.
-CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger SET search_path = pg_catalog, public AS \$func\$
+CREATE OR REPLACE FUNCTION bump_page_generation_fn() RETURNS trigger SET search_path = __MEMORY_SEARCH_PATH__ AS \$func\$
 BEGIN
   IF (TG_OP = 'INSERT') THEN
     NEW.generation := COALESCE((SELECT MAX(generation) FROM pages), 0) + 1;

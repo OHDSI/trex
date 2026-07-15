@@ -83,6 +83,14 @@ export type ChannelEventHandlers = Record<
   (eventData: any, channel: any, ctx?: any) => void | Promise<void>
 >;
 
+// Inbound access filter: which platform principals may talk to the agent
+// through a channel. Empty/absent list = no restriction on that dimension;
+// both set = both must match. Enforced by each adapter before send().
+export interface ChannelAllowList {
+  users?: string[];
+  conversations?: string[];
+}
+
 // What a channel's `receive` hook returns for a cross-channel hand-off (§4.5).
 // `continuationToken` is the RAW token (adapter-owned format) — the runtime
 // namespaces it with the target channel id, exactly like send()'s opts token —

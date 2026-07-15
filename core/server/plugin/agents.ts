@@ -6,6 +6,8 @@ import type { Express } from "express";
 import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_PLUGIN_SCOPES } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from "./agent-memory.ts";
+import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
+import { createGatewaySigner, DiscordGatewayClient, gatewayModeEnabled } from "../agents/gateway/discord.ts";
 
 export interface AgentEntry {
   name: string;
@@ -135,10 +137,19 @@ export async function buildAgentWorkerConfig(
   // required re-registration to take effect.
   const tmp = await Deno.makeTempDir({ prefix: "trex-agents-" });
   const runtimeSrc = await resolveAgentsRuntimeDir();
-  for (const sub of ["service", "eve-shim"]) {
+  // channels/connections must ride along: adapters resolve relative modules
+  // (channels/types.ts etc.) inside the servicePath — first live claw boot
+  // failed module resolution without them.
+  for (const sub of ["service", "eve-shim", "channels", "connections"]) {
     await copyDirRecursive(`${runtimeSrc}${sub}`, `${tmp}/agents/${sub}`);
   }
   await Deno.copyFile(`${runtimeSrc}loader.ts`, `${tmp}/agents/loader.ts`);
+  // service/index.ts imports ../../auth/{dek,keys}.ts — stage them at the
+  // same relative depth.
+  await Deno.mkdir(`${tmp}/auth`, { recursive: true });
+  for (const f of ["dek.ts", "keys.ts"]) {
+    await Deno.copyFile(`${runtimeSrc}../auth/${f}`, `${tmp}/auth/${f}`);
+  }
   const stagedAgentDir = `${tmp}/agent`;
   await copyDirRecursive(agentDir, stagedAgentDir, AGENT_DIR_STAGING_EXCLUDES);
 
@@ -153,10 +164,21 @@ export async function buildAgentWorkerConfig(
   }
 
   const shimBase = `file://${tmp}/agents/eve-shim/`;
+  const channelsBase = `file://${tmp}/agents/channels/`;
   const imports: Record<string, string> = {
     "eve": `${shimBase}mod.ts`,
     "eve/tools": `${shimBase}tools.ts`,
     "eve/evals": `${shimBase}evals.ts`,
+    "eve/connections": `file://${tmp}/agents/connections/shim.ts`,
+    "eve/channels": `${channelsBase}shim.ts`,
+    "eve/channels/eve": `${channelsBase}adapters/eve.ts`,
+    "eve/channels/discord": `${channelsBase}adapters/discord.ts`,
+    "eve/channels/slack": `${channelsBase}adapters/slack.ts`,
+    "eve/channels/telegram": `${channelsBase}adapters/telegram.ts`,
+    "eve/channels/twilio": `${channelsBase}adapters/twilio.ts`,
+    "eve/channels/github": `${channelsBase}adapters/github.ts`,
+    "eve/channels/linear": `${channelsBase}adapters/linear.ts`,
+    "eve/channels/teams": `${channelsBase}adapters/teams.ts`,
     "ai": "npm:ai@^6",
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@latest",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@latest",
@@ -234,7 +256,10 @@ export async function buildAgentWorkerConfig(
   //    can enumerate its links without re-parsing the manifest.
   if (entry.memory?.length) {
     env.GBRAIN_MEMORY_TOKEN = Deno.env.get("GBRAIN_MEMORY_TOKEN") ?? "";
-    env.MEMORY_MCP_URL = Deno.env.get("GBRAIN_MEMORY_INTERNAL_URL") ?? "http://127.0.0.1:8000";
+    // 8001 is the in-container plain-HTTP port (8000 is TLS), and the base
+    // needs the mount prefix — the generated tool appends /memory/<name>/mcp.
+    env.MEMORY_MCP_URL = Deno.env.get("GBRAIN_MEMORY_INTERNAL_URL") ??
+      `http://127.0.0.1:8001${memoryWorkerBasePath()}`;
     env.TREX_AGENT_MEMORIES = entry.memory.map((l) => l.name).join(",");
   }
 
@@ -344,6 +369,33 @@ export async function addAgentsPlugin(
     // trusted-scope mount — the guard above rejects everything else.
     const scope = `/${name.slice(1, name.indexOf("/"))}`;
     const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
+
+    // Discord GATEWAY mode (agents/gateway/discord.ts): DISCORD_GATEWAY in the
+    // agent's OWN manifest env swaps the inbound webhook for an outbound
+    // gateway WebSocket — no public URL needed. Deliberately NO host-env
+    // fallback: with one, a single host-wide DISCORD_GATEWAY=1 opened a
+    // gateway client for EVERY registered agent on the same bot token —
+    // identify rate-limit 429s, and each interaction fanned out to every
+    // agent's route (racing callbacks, N sessions per command). An agent opts
+    // in by passing the var through its trex.agents[].env block
+    // (`"DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}"`). The worker's DISCORD_PUBLIC_KEY
+    // is overridden to a boot-time ephemeral key BEFORE _addFunction bakes the
+    // env, so the loopback shim is the only principal that can pass the
+    // adapter's signature-before-send gate (Discord never POSTs webhooks in
+    // this mode — no Interactions Endpoint URL is registered — so the real
+    // application key is unused). Must happen before _addFunction: worker env
+    // is creation-time only.
+    let gateway: { botToken: string; channelId: string } | null = null;
+    if (gatewayModeEnabled(cfg.env.DISCORD_GATEWAY)) {
+      const botToken = cfg.env.DISCORD_BOT_TOKEN || Deno.env.get("DISCORD_BOT_TOKEN") || "";
+      if (!botToken) {
+        console.error(`agents: agent ${entry.name} (plugin ${name}) sets DISCORD_GATEWAY but has no DISCORD_BOT_TOKEN — gateway mode disabled`);
+      } else {
+        gateway = { botToken, channelId: cfg.env.DISCORD_GATEWAY_CHANNEL || "discord" };
+      }
+    }
+    const signer = gateway ? await createGatewaySigner() : null;
+    if (signer) cfg.env.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
     _addFunction(
       app,
       cfg.source,
@@ -361,7 +413,33 @@ export async function addAgentsPlugin(
       name,
       { _shared: { ...cfg.env, TREX_AGENT_BASE: basePath } },
     );
+
+    if (gateway && signer) {
+      // Loopback base: the in-process plain-HTTP listener (same convention as
+      // GBRAIN_MEMORY_INTERNAL_URL in buildAgentWorkerConfig). The client
+      // starts fire-and-forget and reconnects on its own; keyed by basePath so
+      // a re-registration replaces the previous client instead of doubling up.
+      const loopback = Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL") ?? "http://127.0.0.1:8001";
+      startDiscordGateway(basePath, {
+        botToken: gateway.botToken,
+        forwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}`,
+        signer,
+        label: `${name}/${entry.name}`,
+      });
+    }
   }
+}
+
+// One gateway client per agent basePath; re-registering an agent (dev reload)
+// stops the old client before starting the replacement.
+const discordGateways = new Map<string, DiscordGatewayClient>();
+
+function startDiscordGateway(basePath: string, opts: ConstructorParameters<typeof DiscordGatewayClient>[0]): void {
+  discordGateways.get(basePath)?.stop();
+  const client = new DiscordGatewayClient(opts);
+  discordGateways.set(basePath, client);
+  client.start();
+  console.log(`agents: discord gateway mode enabled for ${opts.label} → ${opts.forwardUrl}`);
 }
 
 // Registered once by plugin.ts when the first agents-type plugin appears.

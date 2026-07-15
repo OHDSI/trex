@@ -42,6 +42,7 @@ export function WS(path: string, _handler: unknown): ChannelRoute {
 }
 
 export type {
+  ChannelAllowList,
   ChannelAuth,
   ChannelConfig,
   ChannelDef,

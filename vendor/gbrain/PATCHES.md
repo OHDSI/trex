@@ -7,10 +7,21 @@ Re-apply each on upgrade. Never edit `src/core/schema-embedded.ts` (generated)
 or `src/core/migrate.ts` migration bodies (checksum-verified).
 
 ## P1 — schema-safe triggers (src/schema.sql)
-`bump_page_generation_clock_fn` and `update_page_search_vector` had pinned
-`SET search_path = pg_catalog, public` yet referenced schema-scoped objects
-(`page_generation_clock_seq`, `timeline_entries`). Retemplated so the apply
-layer injects the deploy schema. See Task 2.
+`bump_page_generation_clock_fn`, `update_page_search_vector`, and
+`bump_page_generation_fn` had pinned `SET search_path = pg_catalog, public`
+yet referenced schema-scoped objects (`page_generation_clock_seq`,
+`timeline_entries`, `pages`). Retemplated so the apply layer injects the
+deploy schema. See Task 2.
+
+`bump_page_generation_fn` was originally MISSED by this patch and found in
+the first live worker e2e (2026-07-15): its `SELECT MAX(generation) FROM
+pages` failed with `relation "pages" does not exist` on EVERY put_page into
+a tenant schema once its trigger attached — but only after a SECOND
+provision replay, because the first (partial) replay had not reached the
+CREATE TRIGGER statement, which is how it slipped past the initial
+verification. `update_chunk_search_vector` and `notify_minion_job_change`
+keep the `pg_catalog, public` pin deliberately — their bodies only touch
+NEW/OLD and pg_catalog builtins, no schema-scoped objects.
 
 ## P2 — schema templating + schema-aware provisioning (src/core/postgres-engine.ts)
 `getPostgresSchema(dims, model, schema?)`, `initSchema(schema?)`,

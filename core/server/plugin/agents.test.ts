@@ -294,7 +294,7 @@ Deno.test("buildAgentWorkerConfig with a valid memory link stages tools/skill an
   assert("GBRAIN_MEMORY_TOKEN" in cfg.env);
   assert("MEMORY_MCP_URL" in cfg.env);
   // Sane default when GBRAIN_MEMORY_INTERNAL_URL isn't set on the host.
-  assertEquals(cfg.env.MEMORY_MCP_URL, "http://127.0.0.1:8000");
+  assertEquals(cfg.env.MEMORY_MCP_URL, "http://127.0.0.1:8001/plugins/trex");
 });
 
 Deno.test("buildAgentWorkerConfig without a memory link injects no memory env", async () => {

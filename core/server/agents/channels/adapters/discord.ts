@@ -30,7 +30,8 @@
 // never thrown). See task-8-report.md / task-18-report.md.
 
 import { defineChannel, POST } from "eve/channels";
-import type { ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
+import type { ChannelAllowList, ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
+import { channelAllows, envAllowList } from "../allow.ts";
 
 import {
   type DiscordCredentials,
@@ -121,6 +122,12 @@ export interface DiscordChannelOptions {
    * SAME session (e.g. a stable per-channel id) can override it here.
    */
   conversationId?: (interaction: DiscordCommandInteraction) => string;
+  /**
+   * Inbound access filter (user ids / channel ids). Falls back to
+   * DISCORD_ALLOWED_USERS / DISCORD_ALLOWED_CHANNELS env (comma-separated);
+   * absent = everyone. Applied to every interaction type before dispatch.
+   */
+  allow?: ChannelAllowList;
 }
 
 export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
@@ -350,7 +357,14 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
           return discordJson({ content: "Unsupported Discord interaction.", ephemeral: true });
         }
 
-        // 3) dispatch
+        // 3) allow-list — gates every interaction type (commands, HITL
+        // buttons, modals) before any send()/resume().
+        const allow = opts.allow ?? envAllowList("DISCORD");
+        if (!channelAllows(allow, { userId: interaction.user.id, conversationId: interaction.channelId })) {
+          return discordJson({ content: "You are not authorized to use this bot here.", ephemeral: true });
+        }
+
+        // 4) dispatch
         if (interaction.type === DISCORD_INTERACTION_TYPE.APPLICATION_COMMAND) {
           return handleCommand(interaction, args);
         }
