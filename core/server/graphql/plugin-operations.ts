@@ -7,6 +7,8 @@ import { REGISTERED_FUNCTIONS, ROLE_SCOPES, REQUIRED_URL_SCOPES } from "../plugi
 import { REGISTERED_UI_ROUTES, getPluginsJson } from "../plugin/ui.ts";
 import { REGISTERED_FLOWS } from "../plugin/flow.ts";
 import { rotateAnonKey, rotateServiceRoleKey } from "../auth/jwt.ts";
+import { rotatePublishableKey, rotateSecretKey } from "../auth/sb-keys.ts";
+import { invalidateAuthKeysCache } from "../auth/api-keys.ts";
 import { sessionsQuery, sessionDetailQueries } from "./agent-runs-sql.ts";
 
 declare const Trex: any;
@@ -352,6 +354,8 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
         loadExtension(extensionName: String!): ServiceActionResult!
         rotateAnonKey: String!
         rotateServiceRoleKey: String!
+        rotatePublishableKey: String!
+        rotateSecretKey: String!
       }
     `,
     resolvers: {
@@ -1412,7 +1416,9 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
           // Returns the freshly issued anon key, signed with the active JWT
           // signing key. Holders of the previous anon key are immediately
           // invalidated. See operations/secret-rotation.md.
-          return await rotateAnonKey();
+          const key = await rotateAnonKey();
+          invalidateAuthKeysCache();
+          return key;
         },
 
         async rotateServiceRoleKey(_parent: any, _args: any, context: any) {
@@ -1420,7 +1426,19 @@ export const pluginOperationsPlugin = makeExtendSchemaPlugin(() => ({
           // Returns the freshly issued service_role key, signed with the
           // active JWT signing key. Holders of the previous service_role
           // key are immediately invalidated.
-          return await rotateServiceRoleKey();
+          const key = await rotateServiceRoleKey();
+          invalidateAuthKeysCache();
+          return key;
+        },
+
+        async rotatePublishableKey(_parent: any, _args: any, context: any) {
+          assertAdmin(context);
+          return await rotatePublishableKey();
+        },
+
+        async rotateSecretKey(_parent: any, _args: any, context: any) {
+          assertAdmin(context);
+          return await rotateSecretKey();
         },
       },
     },
