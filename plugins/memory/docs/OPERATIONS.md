@@ -13,6 +13,7 @@ trex edge runtime.
 | `DATABASE_URL` | trex core (forwarded to the worker) | Postgres connection string the memory worker's `PostgresEngine` connects with. Same database as the rest of trex; memories live in their own schemas (see below), not a separate DB. |
 | `GBRAIN_MEMORY_ALLOWLIST` | trex core, **auto-set** | Comma-separated list of declared memory names, derived automatically from every installed plugin's `trex.memory` manifest entries at mount time (`buildMemoryWorkerConfig` in `core/server/memory/gbrain-worker/mount.ts`). Not operator-configured directly — it exists so the worker only ever serves/provisions names that were actually declared by a trusted-scope plugin (design §8: never provision an arbitrary request-path name). Empty string when no plugin declares any memory. |
 | `GBRAIN_MEMORY_TOKEN` | trex core (forwarded to the worker) | Internal shared-secret bearer token for the trex-to-memory-worker hop (`handler.ts`'s `timingSafeEqual` check). Not a user-facing credential — see the auth-path gate below for how a real caller reaches the worker at all. |
+| `TREX_MEMORY_SOURCES` | trex core, **auto-set** | Absolute path to the staged `sources/` directory the worker self-imports at boot. Set by `buildMemoryWorkerConfig` to `<servicePath>/sources`; needed because the packaged runtime's compile dir carries only the module graph, so the worker can't resolve `./sources` relative to its own module URL there. |
 | `GBRAIN_PORT` | — | **No longer used.** Leftover from the abandoned Bun-subprocess hosting model (pre-pivot plan, `serve --http` on a fixed port). The current in-runtime worker has no listening TCP port of its own — it's invoked in-process via `EdgeRuntime.userWorkers` / the `fnmap` inter-service call path. Safe to ignore if seen in older docs/notes. |
 
 ## Routing: `/memory/<name>` → schema `memory_<name>`
@@ -107,19 +108,14 @@ live `trex-runtime` submodule checkout or a running core server. The
 following are real, open verification gaps — not yet exercised end-to-end —
 and must be closed before this ships to production:
 
-1. **Worker `permissions` shape.** `mount.ts` passes a `permissions` object
-   (`allow_net`/`allow_env`/`allow_read`/`allow_sys: true`) to
-   `EdgeRuntime.userWorkers.create`. `allow_sys` is required because
-   importing gbrain's dispatch/operations closure pulls in
-   `@ai-sdk/gateway` → `@vercel/oidc`, which calls `os.hostname()`
-   unconditionally at import time. The exact field names/shape this option
-   expects are defined in the `plugins/runtime/trex-runtime` Rust
-   edge-runtime crate, which was **not checked out** when this was written
-   — the key names are inferred from Deno's own permission-flag naming and
-   the `supabase-edge-runtime` lineage the `EdgeRuntime.userWorkers` API
-   name suggests, but were never verified against the real crate. Verify
-   once the submodule is populated; the worker may fail to construct (or
-   silently ignore the `permissions` object) if the shape is wrong.
+1. **Worker `permissions` shape — RESOLVED (#153).** `mount.ts` no longer
+   passes a `permissions` object to `EdgeRuntime.userWorkers.create` at all:
+   the runtime deserializes each permission field as `Option<Vec<String>>`
+   (the earlier best-effort boolean shape would have failed worker
+   creation), and the UserWorker defaults already cover this worker's needs
+   — including `allow_sys` `"hostname"`, required because importing gbrain's
+   dispatch/operations closure pulls in `@ai-sdk/gateway` → `@vercel/oidc`,
+   which calls `os.hostname()` unconditionally at import time.
 2. **Agent → memory auth path.** The public Express route is gated by
    `authContext`+`pluginAuthz` (requires a valid trex session) layered ON
    TOP OF the worker's own `GBRAIN_MEMORY_TOKEN` bearer check — so a caller
@@ -150,13 +146,16 @@ and must be closed before this ships to production:
    (`deno check`), and isolated-unit-test-level (stubbed HTTP servers,
    local git repos) — never a running worker.
 
-## Image/Dockerfile follow-up (documented, not yet done)
+## Image/Dockerfile — DONE (#153)
 
 Hosting gbrain as an in-runtime Deno worker (rather than a Bun subprocess)
-means the image build needs to stage `vendor/gbrain` + the
-`gbrain-worker/` handler under the Deno runtime's asset layout the same way
-`plugins/runtime` stages other edge-worker sources — and it means **no Bun
-binary needs to ship in the image for this feature** (the previous
-subprocess-based plan would have required one). This Dockerfile/image
-change is a documented follow-up for the image build; it has not been made
-in this wave.
+means **no Bun binary ships in the image for this feature**. The image build
+now stages the worker's runtime inputs: `Dockerfile` copies
+`vendor/gbrain/src/` plus the sibling `package.json` (the memory worker
+resolves them from disk at mount time via
+`gbrain-worker/mount.ts:resolveGbrainSrcDir`; tests/docs/CHANGELOG stay out
+of the image). The `gbrain-worker/` handler itself ships with the rest of
+`core/`. CI also gained a `core-server-tests` leg (`plugin-ci.yml`) that
+runs the memory importer + gbrain-worker suites against a live pgvector
+Postgres — the disk/unit-level gaps below remain runtime-gated, not
+CI-gated.

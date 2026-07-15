@@ -594,7 +594,7 @@ Before publishing v1.0:
 
 A real, distributable Trex plugin that:
 
-- Combines all five plugin types in one package.
+- Combines several plugin types in one package.
 - Authors its own authorization model with scoped roles.
 - Carries its own schema migrations, owned by the plugin.
 - Exposes a UI, two HTTP routes, and a transform endpoint.
