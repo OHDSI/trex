@@ -8,6 +8,7 @@ import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
 import { ensureAuthKeys } from "./auth/api-keys.ts";
+import { ensureSbKeys } from "./auth/sb-keys.ts";
 import { verifyAccessToken } from "./auth/jwt.ts";
 import { initDek } from "./auth/dek.ts";
 import { getJwtSecret } from "./auth/jwt.ts";
@@ -339,11 +340,13 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
       return;
     }
     const result = await pool.query(
-      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
+      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.publishableKey', 'auth.secretKey')`,
     );
     const keys: Record<string, string> = {};
     for (const row of result.rows) {
-      keys[row.key] = typeof row.value === "string" ? row.value : JSON.parse(row.value);
+      const value = typeof row.value === "string" ? JSON.parse(row.value) : row.value;
+      // sb keys are stored as {id, key, inserted_at}; legacy keys as bare strings.
+      keys[row.key] = typeof value === "object" && value !== null ? value.key : value;
     }
     res.json(keys);
   } catch (err) {
@@ -1272,9 +1275,10 @@ try {
   console.error("[boot] failed to reconcile stored JWT secret; continuing anyway:", err);
 }
 
-// Initialize auth keys (anon key, service_role key) + cache for edge functions
+// Initialize auth keys (anon key, service_role key, sb keys) + cache for edge functions
 try {
   const authKeys = await ensureAuthKeys();
+  const sbKeys = await ensureSbKeys();
   console.log("[auth] Auth keys initialized");
 
   // Cache Supabase-compatible env vars for edge function workers
@@ -1283,6 +1287,8 @@ try {
     ["SUPABASE_URL", supabaseUrl],
     ["SUPABASE_ANON_KEY", authKeys.anonKey],
     ["SUPABASE_SERVICE_ROLE_KEY", authKeys.serviceRoleKey],
+    ["SUPABASE_PUBLISHABLE_KEY", sbKeys.publishable.key],
+    ["SUPABASE_SECRET_KEY", sbKeys.secret.key],
     ["SUPABASE_DB_URL", Deno.env.get("DATABASE_URL") || ""],
   ];
   console.log("[functions] Supabase-compatible env vars cached for edge functions");
