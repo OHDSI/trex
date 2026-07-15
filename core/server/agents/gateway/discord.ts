@@ -306,12 +306,44 @@ export class DiscordGatewayClient {
   // interaction object Discord would POST to a webhook endpoint, so the
   // channel route parses it unchanged; only the ACK travels differently
   // (REST callback instead of the HTTP response).
+  //
+  // PRE-ACK: Discord voids an interaction ~3s after dispatch, and the loopback
+  // POST can exceed that on a cold worker boot (staging + module graph + DB) —
+  // the first live /trex died exactly this way ("Unknown interaction" 10062,
+  // then the delivery fallbacks). So commands are ACKed deferred (type 5) and
+  // components deferred-update (type 6) IMMEDIATELY, before the route runs; the
+  // route's real response is reconciled afterwards: an identical deferred ACK
+  // is dropped, a message (type 4 — the adapter's error/ignored replies) is
+  // PATCHed onto the deferred original, anything else (e.g. a freeform-HITL
+  // modal, undeliverable after an ACK) is logged. Modal submits are not
+  // pre-ACKed: their route path is a fast resume on an already-warm worker and
+  // their response must be the callback itself.
   async #forwardInteraction(d: unknown): Promise<void> {
-    const interaction = d as { id?: string; token?: string };
+    const interaction = d as { id?: string; token?: string; type?: number; application_id?: string };
     if (!interaction?.id || !interaction?.token) {
       console.warn(`${this.#label}: interaction without id/token dropped`);
       return;
     }
+    const api = this.#opts.apiBaseUrl ?? "https://discord.com/api/v10";
+    const callbackUrl = `${api}/interactions/${interaction.id}/${interaction.token}/callback`;
+    const postJson = (url: string, payload: unknown, method = "POST") =>
+      this.#fetch(url, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
+
+    // 2 = APPLICATION_COMMAND → DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE (5);
+    // 3 = MESSAGE_COMPONENT → DEFERRED_UPDATE_MESSAGE (6).
+    const ackType = interaction.type === 2 ? 5 : interaction.type === 3 ? 6 : null;
+    let acked = false;
+    if (ackType !== null) {
+      const ack = await postJson(callbackUrl, { type: ackType });
+      if (ack.ok) {
+        acked = true;
+        await ack.body?.cancel();
+      } else {
+        const text = await ack.text().catch(() => "");
+        console.warn(`${this.#label}: pre-ACK failed (${ack.status}): ${text.slice(0, 200)} — falling back to post-route callback`);
+      }
+    }
+
     const body = JSON.stringify(d);
     const timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await this.#opts.signer.sign(timestamp, body);
@@ -329,25 +361,46 @@ export class DiscordGatewayClient {
       console.error(`${this.#label}: channel route rejected interaction (${res.status}): ${text.slice(0, 300)}`);
       return;
     }
-    let callback: unknown;
+    let callback: { type?: number; data?: unknown };
     try {
       callback = await res.json();
     } catch {
       console.error(`${this.#label}: channel route returned a non-JSON body — no callback sent`);
       return;
     }
-    const api = this.#opts.apiBaseUrl ?? "https://discord.com/api/v10";
-    const cb = await this.#fetch(`${api}/interactions/${interaction.id}/${interaction.token}/callback`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(callback),
-    });
-    if (!cb.ok) {
-      const text = await cb.text().catch(() => "");
-      console.error(`${this.#label}: interaction callback failed (${cb.status}): ${text.slice(0, 300)}`);
-    } else {
-      await cb.body?.cancel();
+
+    if (!acked) {
+      const cb = await postJson(callbackUrl, callback);
+      if (!cb.ok) {
+        const text = await cb.text().catch(() => "");
+        console.error(`${this.#label}: interaction callback failed (${cb.status}): ${text.slice(0, 300)}`);
+      } else {
+        await cb.body?.cancel();
+      }
+      return;
     }
+
+    // Reconcile the route's response with the ACK already sent.
+    if (callback.type === 5 || callback.type === 6) return; // same deferred ACK — nothing to add
+    if (callback.type === 4 && interaction.application_id) {
+      // CHANNEL_MESSAGE_WITH_SOURCE (the adapter's immediate replies: handler
+      // failure, ignored command, allow-list rejection) — deliver by editing
+      // the deferred original. Ephemerality is lost (the deferred ACK was
+      // public); acceptable for these error surfaces.
+      const edit = await postJson(
+        `${api}/webhooks/${interaction.application_id}/${interaction.token}/messages/@original`,
+        callback.data ?? {},
+        "PATCH",
+      );
+      if (!edit.ok) {
+        const text = await edit.text().catch(() => "");
+        console.error(`${this.#label}: post-ACK message edit failed (${edit.status}): ${text.slice(0, 300)}`);
+      } else {
+        await edit.body?.cancel();
+      }
+      return;
+    }
+    console.error(`${this.#label}: route returned callback type ${callback.type} which cannot be delivered after a deferred ACK — dropped`);
   }
 }
 

@@ -135,7 +135,11 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
 
   const credentials = (): DiscordCredentials => ({
     applicationId: opts.credentials?.applicationId,
-    botToken: opts.credentials?.botToken,
+    // Resolve the env fallback HERE: callDiscordApi only attaches bot auth when
+    // a token is present in its input — with env-provided credentials (the
+    // documented default) an undefined botToken meant typing + channel-message
+    // delivery went out with NO Authorization header at all (Discord 401).
+    botToken: opts.credentials?.botToken ?? getEnv("DISCORD_BOT_TOKEN"),
     publicKey: opts.credentials?.publicKey,
   });
   const apiOpts = () => ({ apiBaseUrl: opts.api?.apiBaseUrl, credentials: credentials(), fetch: opts.api?.fetch });

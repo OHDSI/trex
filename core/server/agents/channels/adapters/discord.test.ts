@@ -182,6 +182,33 @@ Deno.test("message.completed delivers split content via edit + followup", async 
   assertEquals((calls[1].body as { content: string }).content.startsWith("B"), true);
 });
 
+Deno.test("message.completed channel-message fallback sends bot auth from env credentials", async () => {
+  // Regression: with env-provided credentials (the documented default) the
+  // adapter passed botToken: undefined and callDiscordApi skipped the
+  // Authorization header entirely — Discord 401'd every typing/channel-message
+  // call. The credentials() builder must resolve the env fallback itself.
+  const headers: Array<string | null> = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    headers.push(new Headers(init?.headers).get("authorization"));
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const prev = Deno.env.get("DISCORD_BOT_TOKEN");
+  Deno.env.set("DISCORD_BOT_TOKEN", "env-bot-token");
+  try {
+    const channel = discordChannel({
+      api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+    });
+    // No interactionToken in state → delivery goes through the bot-token
+    // channel-message path.
+    const channelCtx = { state: { channelId: "chan-9" } };
+    await channel.events!["message.completed"]({ turnId: "t1", message: "hi", finishReason: "stop" }, channelCtx);
+  } finally {
+    if (prev === undefined) Deno.env.delete("DISCORD_BOT_TOKEN");
+    else Deno.env.set("DISCORD_BOT_TOKEN", prev);
+  }
+  assertEquals(headers, ["Bot env-bot-token"]);
+});
+
 Deno.test("message.completed with tool-calls finishReason posts nothing", async () => {
   let called = 0;
   const fetchMock: typeof fetch = () => {
