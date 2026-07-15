@@ -8,7 +8,7 @@ import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
 import { ensureAuthKeys } from "./auth/api-keys.ts";
-import { ensureSbKeys } from "./auth/sb-keys.ts";
+import { ensureSbKeys, resolveApiCredential } from "./auth/sb-keys.ts";
 import { verifyAccessToken } from "./auth/jwt.ts";
 import { initDek } from "./auth/dek.ts";
 import { getJwtSecret } from "./auth/jwt.ts";
@@ -1060,7 +1060,7 @@ async function invokeEdgeFunction(req: any, res: any) {
         res.status(401).json({ error: "Invalid JWT" });
         return;
       }
-      const claims = await verifyAccessToken(token);
+      const claims = await resolveApiCredential(token);
       if (!claims) {
         res.status(401).json({ error: "Invalid JWT" });
         return;
@@ -1076,7 +1076,7 @@ async function invokeEdgeFunction(req: any, res: any) {
       res.status(401).json({ error: "Invalid JWT" });
       return;
     }
-    const claims = await verifyAccessToken(token);
+    const claims = await resolveApiCredential(token);
     if (!claims) {
       res.status(401).json({ error: "Invalid JWT" });
       return;
