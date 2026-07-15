@@ -15,7 +15,7 @@ function fakeSql() {
       return Promise.resolve({ rows: r ? [r] : [] });
     }
     store.set(String(params[0]), {
-      session_id: params[0], code_session_id: params[1], event_cursor: params[2],
+      session_id: params[0], code_session_id: params[1], event_cursor: params[2], app_id: params[3] ?? null,
     });
     return Promise.resolve({ rows: [] });
   };
@@ -46,6 +46,41 @@ Deno.test("askCore opens a code session on first use and stores its id + cursor"
   const row = sql.store.get("s1");
   assertEquals(row.code_session_id, "code-1");
   assertEquals(row.event_cursor, 2);
+});
+
+Deno.test("askCore passes the chosen app on first call and persists it", async () => {
+  let seenBody: any;
+  const client: TokioClient = {
+    req(url, init) {
+      if (url.endsWith("/eve/v1/session")) {
+        seenBody = JSON.parse((init as any).body);
+        return Promise.resolve(new Response(JSON.stringify({ sessionId: "code-1" })));
+      }
+      return Promise.resolve(ndjson({ type: "message.completed", data: { text: "ok" } }, { type: "session.waiting", data: {} }));
+    },
+  };
+  const sql = fakeSql();
+  await askCore(client, sql.fn, { sessionId: "s1", userId: "u1" }, { message: "Build X", app: "app-7" });
+  assertEquals(seenBody.metadata, { appId: "app-7" });
+  assertEquals(sql.store.get("s1").app_id, "app-7");
+});
+
+Deno.test("askCore keeps the stored app once the session exists (mid-task change ignored)", async () => {
+  const sql = fakeSql();
+  sql.store.set("s1", { session_id: "s1", code_session_id: "code-1", event_cursor: 2, app_id: "app-7" });
+  let seenBody: any;
+  const client: TokioClient = {
+    req(url, init) {
+      if (url.includes("/stream")) {
+        return Promise.resolve(ndjson({ type: "message.completed", data: { text: "ok" } }, { type: "session.waiting", data: {} }));
+      }
+      seenBody = JSON.parse((init as any).body);
+      return Promise.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
+    },
+  };
+  await askCore(client, sql.fn, { sessionId: "s1", userId: "u1" }, { message: "continue", app: "app-9" });
+  assertEquals(seenBody.metadata, { appId: "app-7" });
+  assertEquals(sql.store.get("s1").app_id, "app-7");
 });
 
 Deno.test("askCore continues the SAME code session from the stored cursor", async () => {

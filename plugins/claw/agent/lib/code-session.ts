@@ -11,6 +11,8 @@ export interface RunArgs {
   message: string;
   userId?: string;
   startCursor: number;
+  /** devx app (devx.apps.id) the Code session works in; sent as metadata.appId on EVERY turn. */
+  appId?: string | null;
 }
 
 interface Event { type: string; data?: Record<string, unknown> }
@@ -32,7 +34,15 @@ export async function runCodeTurn(
   // tools (PLAN_MODE_TOOLS), and "build" mode strips every tool. So claw always
   // talks to the coder with the full toolset and lets it run its own gated
   // planning/implementation process.
-  const body = JSON.stringify({ message: args.message });
+  //
+  // metadata.appId scopes the coder to a devx app: its buildInstructions loads
+  // that app's project rules and its tools run in the app workspace. Metadata
+  // is read per TURN (handler.ts's addTurn), so it rides every request, not
+  // just session create.
+  const body = JSON.stringify({
+    message: args.message,
+    ...(args.appId ? { metadata: { appId: args.appId } } : {}),
+  });
 
   // 1) Start (create) or continue the turn.
   let codeSessionId = args.codeSessionId;

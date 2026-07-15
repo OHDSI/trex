@@ -10,17 +10,19 @@ export interface Orchestration {
   sessionId: string; // claw session id (PK)
   codeSessionId: string | null; // the shared Code agent session, once opened
   eventCursor: number; // position in the Code session's event stream
+  appId: string | null; // devx app the Code session is scoped to (fixed per task)
 }
 
 interface Row {
   session_id: string;
   code_session_id: string | null;
   event_cursor: number | string;
+  app_id: string | null;
 }
 
 export async function readOrchestration(sql: QueryFn, sessionId: string): Promise<Orchestration | null> {
   const { rows } = await sql(
-    `SELECT session_id, code_session_id, event_cursor
+    `SELECT session_id, code_session_id, event_cursor, app_id
        FROM claw.orchestrations WHERE session_id = $1`,
     [sessionId],
   );
@@ -30,18 +32,20 @@ export async function readOrchestration(sql: QueryFn, sessionId: string): Promis
     sessionId: r.session_id,
     codeSessionId: r.code_session_id,
     eventCursor: Number(r.event_cursor) || 0,
+    appId: r.app_id ?? null,
   };
 }
 
 export async function upsertOrchestration(sql: QueryFn, o: Orchestration): Promise<void> {
   await sql(
-    `INSERT INTO claw.orchestrations (session_id, code_session_id, event_cursor, updated_at)
-       VALUES ($1, $2, $3, now())
+    `INSERT INTO claw.orchestrations (session_id, code_session_id, event_cursor, app_id, updated_at)
+       VALUES ($1, $2, $3, $4, now())
      ON CONFLICT (session_id) DO UPDATE SET
        code_session_id = EXCLUDED.code_session_id,
        event_cursor = EXCLUDED.event_cursor,
+       app_id = EXCLUDED.app_id,
        updated_at = now()`,
-    [o.sessionId, o.codeSessionId, o.eventCursor],
+    [o.sessionId, o.codeSessionId, o.eventCursor, o.appId],
   );
 }
 

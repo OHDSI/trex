@@ -28,6 +28,7 @@ the agent worker at registration time via `${VAR:-default}` substitution
 | `DISCORD_ALLOWED_USERS` | — (optional) | Comma-separated user-id allow-list |
 | `DISCORD_ALLOWED_CHANNELS` | — (optional) | Comma-separated channel-id allow-list |
 | `DISCORD_GATEWAY` | — (optional) | Set to `1` to receive interactions over the gateway WebSocket instead of the webhook (below) |
+| `CLAW_CODE_USER_ID` | — (recommended) | devx user id (uuid) the Code sessions run as — Discord sessions carry no trex user, and apps/workspaces are user-scoped, so set this to YOUR devx user id so `listApps` and the coder's workspace match the devx UI |
 
 See `plugins/claw/agent/ACCEPTANCE.md` for the live-acceptance checklist that
 exercises this contract end-to-end against a real Discord app and Code agent.
