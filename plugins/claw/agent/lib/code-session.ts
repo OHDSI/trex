@@ -1,6 +1,10 @@
 // plugins/claw/agent/lib/code-session.ts
 export const CODE_SERVICE = "devx/agents/devx-agent";
-export const CODE_BASE = "/plugins/trex/devx-agent";
+// Absolute base: the request rides the intra-cluster Trex.req channel, where the
+// listener rebuilds it via `new Request(url)` — which rejects a bare path. Routing
+// is keyed on CODE_SERVICE, and the receiving handler anchors on url.pathname, so
+// the placeholder host is inert; only an absolute URL clears the Request ctor.
+export const CODE_BASE = "http://localhost/plugins/trex/devx-agent";
 
 export interface TokioClient {
   req(url: string, init: { method: string; headers?: Record<string, string>; body?: string }): Promise<Response>;

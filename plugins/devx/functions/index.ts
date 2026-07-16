@@ -376,6 +376,9 @@ Deno.serve(async (req: Request) => {
       const body = await req.json();
       const prompt = body.prompt;
       const streamContext = body.context;
+      // claw sets this so the coder works in a stable per-chat git worktree
+      // (isolated feature branch) instead of the shared app working tree.
+      const streamUseWorktree = body.useWorktree === true;
 
       // Verify chat belongs to user
       const chatCheck = await sql(
@@ -781,6 +784,7 @@ Deno.serve(async (req: Request) => {
                 skillContext,
                 commandOverride,
                 hasComponentSelection,
+                useWorktree: streamUseWorktree,
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;
