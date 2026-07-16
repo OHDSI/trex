@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { isBedrockModel, parseModelString, resolveModel, withBedrockCachePoint } from "./model.ts";
+import { isAnthropicModel, isBedrockModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -52,9 +52,23 @@ Deno.test("isBedrockModel is true only for provider === amazon-bedrock", () => {
   assertEquals(isBedrockModel({}), false);
 });
 
-Deno.test("withBedrockCachePoint wraps system in a cache-pointed SystemModelMessage for bedrock", () => {
+Deno.test("isAnthropicModel is true only for provider === anthropic.messages", () => {
+  // "anthropic.messages" is what @ai-sdk/anthropic's language-model objects
+  // actually report (see isAnthropicModel's comment) — a bare "anthropic"
+  // never occurs on a model object and must NOT match.
+  assertEquals(isAnthropicModel({ provider: "anthropic.messages" }), true);
+  assertEquals(isAnthropicModel({ provider: "anthropic" }), false);
+  assertEquals(isAnthropicModel({ provider: "amazon-bedrock" }), false);
+  assertEquals(isAnthropicModel({ provider: "openai" }), false);
+  assertEquals(isAnthropicModel({ provider: undefined }), false);
+  assertEquals(isAnthropicModel(undefined), false);
+  assertEquals(isAnthropicModel(null), false);
+  assertEquals(isAnthropicModel({}), false);
+});
+
+Deno.test("withSystemCachePoint wraps system in a cache-pointed SystemModelMessage for bedrock", () => {
   const system = "You are a helpful agent.\nFollow the rules.";
-  const wrapped = withBedrockCachePoint({ provider: "amazon-bedrock" }, system);
+  const wrapped = withSystemCachePoint({ provider: "amazon-bedrock" }, system);
   assertEquals(wrapped, {
     role: "system",
     content: system,
@@ -65,10 +79,23 @@ Deno.test("withBedrockCachePoint wraps system in a cache-pointed SystemModelMess
   assertEquals((wrapped as { content: string }).content, system);
 });
 
-Deno.test("withBedrockCachePoint is a no-op (identity) for non-bedrock providers", () => {
+Deno.test("withSystemCachePoint wraps system with an ephemeral cacheControl for anthropic", () => {
+  const system = "You are a helpful agent.\nFollow the rules.";
+  const wrapped = withSystemCachePoint({ provider: "anthropic.messages" }, system);
+  assertEquals(wrapped, {
+    role: "system",
+    content: system,
+    providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+  });
+  // Same byte-identity requirement as the bedrock branch — the cache key
+  // depends on exact prefix bytes.
+  assertEquals((wrapped as { content: string }).content, system);
+});
+
+Deno.test("withSystemCachePoint is a no-op (identity) for providers without caching support", () => {
   const system = "You are a helpful agent.";
-  assertEquals(withBedrockCachePoint({ provider: "anthropic" }, system), system);
-  assertEquals(withBedrockCachePoint({ provider: "openai" }, system), system);
-  assertEquals(withBedrockCachePoint({ provider: undefined }, system), system);
-  assertEquals(withBedrockCachePoint(undefined, system), system);
+  assertEquals(withSystemCachePoint({ provider: "openai" }, system), system);
+  assertEquals(withSystemCachePoint({ provider: "google" }, system), system);
+  assertEquals(withSystemCachePoint({ provider: undefined }, system), system);
+  assertEquals(withSystemCachePoint(undefined, system), system);
 });

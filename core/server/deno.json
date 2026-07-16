@@ -3,9 +3,9 @@
   "imports": {
     "ai": "npm:ai@^6",
     "ai/test": "npm:ai@^6/test",
-    "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^4",
-    "@ai-sdk/openai": "npm:@ai-sdk/openai@^4",
-    "@ai-sdk/google": "npm:@ai-sdk/google@^4",
+    "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^3",
+    "@ai-sdk/openai": "npm:@ai-sdk/openai@^3",
+    "@ai-sdk/google": "npm:@ai-sdk/google@^3",
     "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",
     "@modelcontextprotocol/sdk/client/index.js": "npm:@modelcontextprotocol/sdk@1/client/index.js",
     "@modelcontextprotocol/sdk/client/sse.js": "npm:@modelcontextprotocol/sdk@1/client/sse.js",

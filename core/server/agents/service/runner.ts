@@ -4,7 +4,7 @@
 // plugins/devx/functions/agent.ts.
 // deno-lint-ignore-file no-explicit-any
 import { streamText, stepCountIs } from "ai";
-import { resolveModelForTurn, withBedrockCachePoint } from "./model.ts";
+import { resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
@@ -95,16 +95,17 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // (opts already carries hookCtx — see RunTurnOpts — so ToolBuildCtx picks
   // it up via the spread).
   const tools = await buildSdkTools({ ...opts, model, toolEmit });
-  // Task 15: cache the stable TOOLS+SYSTEM prefix on bedrock (no-op on every
-  // other provider — see withBedrockCachePoint in model.ts). `system` here is
-  // identical across every step of this turn AND across turns for the same
-  // agent+metadata, making it (together with `tools`, cached transitively —
-  // see withBedrockCachePoint) the high-value cache target the brief calls
-  // for; per-turn `messages` are deliberately left uncached since they change
+  // Task 15: cache the stable TOOLS+SYSTEM prefix on bedrock and the direct
+  // anthropic provider (no-op on every other provider — see
+  // withSystemCachePoint in model.ts). `system` here is identical across
+  // every step of this turn AND across turns for the same agent+metadata,
+  // making it (together with `tools`, cached transitively — see
+  // withSystemCachePoint) the high-value cache target the brief calls for;
+  // per-turn `messages` are deliberately left uncached since they change
   // every turn.
   const result = streamText({
     model,
-    system: withBedrockCachePoint(model, system),
+    system: withSystemCachePoint(model, system),
     messages,
     tools,
     stopWhen: stepCountIs(agent.config.maxSteps ?? 25),

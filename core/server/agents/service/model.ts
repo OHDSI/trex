@@ -136,26 +136,44 @@ function bedrockModel(modelId: string, env: EnvFn, bearerTokenOverride?: string)
 // provider = 'amazon-bedrock'`) is the only signal callers have for which
 // wire format streamText will use; there's no separate "is this bedrock"
 // flag threaded through resolveModelForTurn/resolveModel. Gate on it here so
-// non-bedrock model objects (anthropic/openai/google) are left completely
-// untouched by the caller — see withBedrockCachePoint.
+// model objects of other providers are left completely untouched by the
+// caller — see withSystemCachePoint (anthropic gets its own cacheControl
+// branch via isAnthropicModel below; openai/google stay plain strings).
 // deno-lint-ignore no-explicit-any
 export function isBedrockModel(model: any): boolean {
   return model?.provider === "amazon-bedrock";
 }
 
-// A SystemModelMessage carrying a Bedrock cache point, or the plain-string
-// no-op for every other provider.
+// The direct Anthropic provider. Its language-model objects report
+// provider === "anthropic.messages" — NOT "anthropic" — verified against the
+// installed @ai-sdk/anthropic@4.0.15: createAnthropic's providerName defaults
+// to "anthropic.messages" and is passed through as the model's `provider`
+// (and confirmed at runtime via a stub-fetch streamText probe). The
+// providerOptions key it reads cacheControl from is still the plain
+// "anthropic" (get-cache-control.ts reads providerMetadata.anthropic), so
+// only this predicate — not the marker below — uses the dotted name.
+// deno-lint-ignore no-explicit-any
+export function isAnthropicModel(model: any): boolean {
+  return model?.provider === "anthropic.messages";
+}
+
+// A SystemModelMessage carrying a provider cache marker (Bedrock cachePoint
+// or Anthropic cacheControl), or the plain-string no-op for every other
+// provider.
 export type SystemPrompt = string | {
   role: "system";
   content: string;
-  providerOptions: { bedrock: { cachePoint: { type: "default" } } };
+  providerOptions:
+    | { bedrock: { cachePoint: { type: "default" } } }
+    | { anthropic: { cacheControl: { type: "ephemeral" } } };
 };
 
 // Wraps a plain system-prompt string in the AI SDK's SystemModelMessage
-// shape with a Bedrock cache point covering everything up to and including
-// the system block — when (and only when) the resolved model is bedrock;
-// returns the original string unchanged for every other provider (a true
-// no-op: anthropic/openai/google never see a providerOptions.bedrock key).
+// shape with a provider cache marker covering everything up to and including
+// the system block — a Bedrock cachePoint when the resolved model is bedrock,
+// an Anthropic ephemeral cacheControl when it's the direct anthropic
+// provider; returns the original string unchanged for every other provider
+// (a true no-op: openai/google never see a providerOptions key).
 //
 // Why a cache point on `system` also covers the TOOLS prefix (the other half
 // of the brief's "cache the stable TOOLS+SYSTEM prefix" target): the
@@ -178,11 +196,28 @@ export type SystemPrompt = string | {
 // bearer-token custom fetch above never touches (it only rewrites
 // `parsed.messages`), so the marker survives that rewrite unmodified.
 // deno-lint-ignore no-explicit-any
-export function withBedrockCachePoint(model: any, system: string): SystemPrompt {
-  if (!isBedrockModel(model)) return system;
-  return {
-    role: "system",
-    content: system,
-    providerOptions: { bedrock: { cachePoint: { type: "default" } } },
-  };
+export function withSystemCachePoint(model: any, system: string): SystemPrompt {
+  if (isBedrockModel(model)) {
+    return {
+      role: "system",
+      content: system,
+      providerOptions: { bedrock: { cachePoint: { type: "default" } } },
+    };
+  }
+  // Anthropic prompt caching: an ephemeral cache_control on the system block
+  // caches the stable TOOLS+SYSTEM prefix (Anthropic composes context in the
+  // same tools -> system -> messages order as Bedrock's Converse API), so a
+  // multi-turn session only pays to write that prefix once and reads it back
+  // cheaply thereafter. Verified against the installed @ai-sdk/anthropic@4:
+  // convert-to-anthropic-messages-api reads providerOptions.anthropic
+  // .cacheControl on a system message and emits `cache_control` on the wire
+  // system text block. openai/google fall through to the plain string below.
+  if (isAnthropicModel(model)) {
+    return {
+      role: "system",
+      content: system,
+      providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+    };
+  }
+  return system;
 }
