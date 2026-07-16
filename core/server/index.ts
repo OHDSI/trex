@@ -8,6 +8,12 @@ import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
 import { ensureAuthKeys } from "./auth/api-keys.ts";
+import {
+  ensureSbKeys,
+  resolveApiCredential,
+  type SbKeyRecord,
+  translateSbHeaders,
+} from "./auth/sb-keys.ts";
 import { verifyAccessToken } from "./auth/jwt.ts";
 import { initDek } from "./auth/dek.ts";
 import { getJwtSecret } from "./auth/jwt.ts";
@@ -339,11 +345,13 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
       return;
     }
     const result = await pool.query(
-      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
+      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.publishableKey', 'auth.secretKey')`,
     );
     const keys: Record<string, string> = {};
     for (const row of result.rows) {
-      keys[row.key] = typeof row.value === "string" ? row.value : JSON.parse(row.value);
+      // pg pre-parses JSONB: legacy rows arrive as bare strings, sb rows as objects.
+      const value = row.value;
+      keys[row.key] = typeof value === "object" && value !== null ? (value as SbKeyRecord).key : value;
     }
     res.json(keys);
   } catch (err) {
@@ -406,6 +414,9 @@ app.all(
           headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
         }
       }
+      // New-format sb keys → legacy JWT of the same role; the vendored PostgREST
+      // plugin only validates legacy JWTs.
+      await translateSbHeaders(headers);
       // supabase-js sends apikey header + Authorization header.
       // If no Authorization header, use apikey as Bearer token so the plugin can determine the role.
       const apikey = headers.get("apikey");
@@ -619,6 +630,9 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
         headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
       }
     }
+    // Same sb→legacy swap as the PostgREST proxy — supabase-storage validates
+    // legacy JWTs itself.
+    await translateSbHeaders(headers);
 
     let body: Blob | undefined;
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -1057,7 +1071,7 @@ async function invokeEdgeFunction(req: any, res: any) {
         res.status(401).json({ error: "Invalid JWT" });
         return;
       }
-      const claims = await verifyAccessToken(token);
+      const claims = await resolveApiCredential(token);
       if (!claims) {
         res.status(401).json({ error: "Invalid JWT" });
         return;
@@ -1073,7 +1087,7 @@ async function invokeEdgeFunction(req: any, res: any) {
       res.status(401).json({ error: "Invalid JWT" });
       return;
     }
-    const claims = await verifyAccessToken(token);
+    const claims = await resolveApiCredential(token);
     if (!claims) {
       res.status(401).json({ error: "Invalid JWT" });
       return;
@@ -1272,9 +1286,10 @@ try {
   console.error("[boot] failed to reconcile stored JWT secret; continuing anyway:", err);
 }
 
-// Initialize auth keys (anon key, service_role key) + cache for edge functions
+// Initialize auth keys (anon key, service_role key, sb keys) + cache for edge functions
 try {
   const authKeys = await ensureAuthKeys();
+  const sbKeys = await ensureSbKeys();
   console.log("[auth] Auth keys initialized");
 
   // Cache Supabase-compatible env vars for edge function workers
@@ -1283,6 +1298,8 @@ try {
     ["SUPABASE_URL", supabaseUrl],
     ["SUPABASE_ANON_KEY", authKeys.anonKey],
     ["SUPABASE_SERVICE_ROLE_KEY", authKeys.serviceRoleKey],
+    ["SUPABASE_PUBLISHABLE_KEY", sbKeys.publishable.key],
+    ["SUPABASE_SECRET_KEY", sbKeys.secret.key],
     ["SUPABASE_DB_URL", Deno.env.get("DATABASE_URL") || ""],
   ];
   console.log("[functions] Supabase-compatible env vars cached for edge functions");
