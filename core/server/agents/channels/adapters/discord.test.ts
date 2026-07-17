@@ -788,6 +788,36 @@ Deno.test("messages route: anchored thread creation failure falls back to a plai
   assertEquals(sends[0].opts.continuationToken, "thread-plain:thread-plain");
 });
 
+Deno.test("messages route: both thread creations failing falls back to an in-channel session", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    "/messages/msg-22/threads": () => new Response("missing permission", { status: 403 }),
+    "/channels/chan-1/threads": () => new Response("missing permission", { status: 403 }),
+  });
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-22",
+        channel_id: "chan-1",
+        guild_id: "guild-1",
+        content: "<@app-1> ship it anyway",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "chan-1:chan-1");
+  const state = sends[0].opts.state as { channelId?: string };
+  assertEquals(state.channelId, "chan-1");
+  assert(sends[0].message.includes("ship it anyway"));
+});
+
 Deno.test("messages route: allow-list miss is silently ignored", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
   const channel = discordChannel({
