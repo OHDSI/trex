@@ -12,6 +12,9 @@ export interface DiscordMessageEvent {
   author: { id: string; bot: boolean; username: string };
   content: string;
   mentionIds: readonly string[];
+  // Role ids mentioned by the message (Discord's `mention_roles`). A user typing
+  // "@trex" often hits the bot's auto-created managed role, not the bot user.
+  mentionRoleIds: readonly string[];
   // Discord message type (0 = DEFAULT, 19 = REPLY, 6 = pin-add notice, …).
   // Absent for events built by test helpers / other callers.
   type?: number;
@@ -35,18 +38,26 @@ export function parseDiscordMessageEvent(value: unknown): DiscordMessageEvent | 
       .filter((m): m is Record<string, unknown> => isObject(m))
       .map((m) => m.id)
       .filter((id): id is string => isNonEmptyString(id)),
+    mentionRoleIds: (Array.isArray(value.mention_roles) ? value.mention_roles : [])
+      .filter((id): id is string => isNonEmptyString(id)),
     ...(typeof value.type === "number" ? { type: value.type } : {}),
   };
 }
 
 const mentionPattern = (applicationId: string) => new RegExp(`<@!?${applicationId}>`, "g");
 
-export function mentionsBot(event: DiscordMessageEvent, applicationId: string): boolean {
-  return event.mentionIds.includes(applicationId) || mentionPattern(applicationId).test(event.content);
+export function mentionsBot(event: DiscordMessageEvent, applicationId: string, botRoleId?: string): boolean {
+  return event.mentionIds.includes(applicationId) ||
+    (botRoleId !== undefined && event.mentionRoleIds.includes(botRoleId)) ||
+    mentionPattern(applicationId).test(event.content);
 }
 
-export function stripBotMention(content: string, applicationId: string): string {
-  return content.replace(mentionPattern(applicationId), " ").replace(/\s+/g, " ").trim();
+const roleMentionPattern = (roleId: string) => new RegExp(`<@&${roleId}>`, "g");
+
+export function stripBotMention(content: string, applicationId: string, botRoleId?: string): string {
+  let out = content.replace(mentionPattern(applicationId), " ");
+  if (botRoleId !== undefined) out = out.replace(roleMentionPattern(botRoleId), " ");
+  return out.replace(/\s+/g, " ").trim();
 }
 
 /** The slice of GET /channels/{id} the trigger decision needs. */
@@ -69,8 +80,10 @@ export function decideMessageTrigger(input: {
   event: DiscordMessageEvent;
   applicationId: string;
   channel: DiscordChannelSnapshot;
+  /** The bot's managed integration role id, so "@trex" (the role) counts as a mention. */
+  botRoleId?: string;
 }): MessageTrigger {
-  const { event, applicationId, channel } = input;
+  const { event, applicationId, channel, botRoleId } = input;
   if (event.author.bot) return { kind: "ignore" };
   // System/notice messages (pin-add, thread-created, …) and anything but a
   // plain message or a reply carry no user turn — never worth a model turn.
@@ -82,10 +95,10 @@ export function decideMessageTrigger(input: {
       if (event.content.trim() === "") return { kind: "ignore" };
       return { kind: "thread-turn" };
     }
-    if (mentionsBot(event, applicationId)) return { kind: "mention-in-thread" };
+    if (mentionsBot(event, applicationId, botRoleId)) return { kind: "mention-in-thread" };
     return { kind: "ignore" };
   }
-  if (mentionsBot(event, applicationId) && stripBotMention(event.content, applicationId) !== "") {
+  if (mentionsBot(event, applicationId, botRoleId) && stripBotMention(event.content, applicationId, botRoleId) !== "") {
     return { kind: "mention-in-channel" };
   }
   return { kind: "ignore" };
@@ -115,6 +128,42 @@ export async function getChannelSnapshot(
   };
   cache?.set(channelId, snapshot);
   return snapshot;
+}
+
+/**
+ * Resolves the bot's own managed integration role (auto-created and named after
+ * the bot when it joins a guild), or null if the guild has none. Cached per
+ * guild — a managed role's id is stable for the bot's lifetime in the guild.
+ * Lets a "@trex" role mention drive the bot the same as an @user mention.
+ */
+export async function resolveBotManagedRoleId(
+  api: DiscordApiOptions,
+  guildId: string,
+  applicationId: string,
+  cache?: Map<string, string | null>,
+): Promise<string | null> {
+  const hit = cache?.get(guildId);
+  if (hit !== undefined) return hit;
+  const result = await callDiscordApi({
+    apiBaseUrl: api.apiBaseUrl,
+    botToken: api.credentials?.botToken,
+    fetch: api.fetch,
+    method: "GET",
+    path: `/guilds/${encodeURIComponent(guildId)}/roles`,
+  });
+  if (!result.ok) throw new Error(`Discord guild roles lookup failed with HTTP ${result.status}.`);
+  const rows = Array.isArray(result.body) ? result.body : [];
+  let roleId: string | null = null;
+  for (const r of rows) {
+    if (!isObject(r)) continue;
+    const tags = isObject(r.tags) ? r.tags : {};
+    if (r.managed === true && tags.bot_id === applicationId && isNonEmptyString(r.id)) {
+      roleId = r.id;
+      break;
+    }
+  }
+  cache?.set(guildId, roleId);
+  return roleId;
 }
 
 export interface HistoryMessage {
@@ -169,6 +218,68 @@ export function formatMessagesBlock(
   return [`<${tag}>`, ...lines, `</${tag}>`].join("\n");
 }
 
+function isPipeRow(line: string | undefined): boolean {
+  return typeof line === "string" && line.includes("|") && line.trim() !== "";
+}
+
+function splitTableCells(row: string): string[] {
+  let s = row.trim();
+  if (s.startsWith("|")) s = s.slice(1);
+  if (s.endsWith("|")) s = s.slice(0, -1);
+  return s.split("|").map((c) => c.trim());
+}
+
+function isSeparatorRow(line: string | undefined): boolean {
+  if (!isPipeRow(line)) return false;
+  const cells = splitTableCells(line as string);
+  return cells.length > 0 && cells.every((c) => /^:?-+:?$/.test(c));
+}
+
+function renderMonospaceTable(rows: string[]): string {
+  const header = splitTableCells(rows[0]);
+  const data = rows.slice(2).map(splitTableCells); // rows[1] is the separator
+  const cols = header.length;
+  const widths = Array.from({ length: cols }, (_, c) =>
+    Math.max(header[c]?.length ?? 0, ...data.map((r) => r[c]?.length ?? 0)));
+  const fmt = (r: string[]) => r.map((cell, c) => (cell ?? "").padEnd(widths[c])).join("  ").replace(/\s+$/, "");
+  const sep = widths.map((w) => "-".repeat(Math.max(w, 3))).join("  ");
+  return ["```", fmt(header), sep, ...data.map(fmt), "```"].join("\n");
+}
+
+/**
+ * Discord renders no Markdown tables (pipes show as raw text), but text inside a
+ * ``` code block is monospace, so a space-aligned table lines up. Rewrite each
+ * GitHub-flavored Markdown table (header row + `---` separator + rows) as a
+ * fenced, column-aligned plain-text table; leave everything else — including
+ * tables already inside a code fence — untouched.
+ */
+export function markdownTablesToCodeBlocks(text: string): string {
+  const lines = text.split("\n");
+  const out: string[] = [];
+  let inFence = false;
+  let i = 0;
+  while (i < lines.length) {
+    if (/^\s*```/.test(lines[i])) {
+      inFence = !inFence;
+      out.push(lines[i]);
+      i++;
+      continue;
+    }
+    if (!inFence && isPipeRow(lines[i]) && isSeparatorRow(lines[i + 1])) {
+      const block: string[] = [];
+      while (i < lines.length && isPipeRow(lines[i])) {
+        block.push(lines[i]);
+        i++;
+      }
+      out.push(renderMonospaceTable(block));
+      continue;
+    }
+    out.push(lines[i]);
+    i++;
+  }
+  return out.join("\n");
+}
+
 /** Message-flavored <discord_context> (mirrors the interaction block, no interaction fields). */
 export function formatDiscordMessageContextBlock(ctx: {
   userId: string;
@@ -180,7 +291,7 @@ export function formatDiscordMessageContextBlock(ctx: {
   return [
     `<discord_context>`,
     `response_medium: discord`,
-    `response_instructions: Reply for Discord in concise Markdown. Avoid mass mentions, long tables, and messages that need more than a few short posts.`,
+    `response_instructions: Reply for Discord in concise Markdown. Markdown tables are fine — they are auto-rendered as aligned monospace, so keep them to a few columns. Avoid mass mentions and messages that need more than a few short posts.`,
     `user_id: ${ctx.userId}`,
     ...(ctx.username ? [`username: ${ctx.username}`] : []),
     `channel_id: ${ctx.channelId}`,

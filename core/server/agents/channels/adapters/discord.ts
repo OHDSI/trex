@@ -75,7 +75,9 @@ import {
   formatMessagesBlock,
   getChannelSnapshot,
   type HistoryMessage,
+  markdownTablesToCodeBlocks,
   parseDiscordMessageEvent,
+  resolveBotManagedRoleId,
   stripBotMention,
 } from "./discord-messages.ts";
 import { defaultDiscordAuth } from "../vendor/discord/defaults.ts";
@@ -193,6 +195,9 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   // Deliver one Discord message body for a session, editing the deferred
   // original response first (then following up), else posting to the channel.
   async function deliver(state: DiscordDeliveryState, body: DiscordMessageBody) {
+    // A user-facing message (or approval buttons) ends the "working" state, and
+    // the message itself clears Discord's typing indicator — stop the heartbeat.
+    stopTyping(state.channelId);
     const token = state.interactionToken;
     if (token) {
       try {
@@ -221,15 +226,49 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     }
   }
 
+  // Discord expires "typing" after ~10s, but a turn can block far longer (the
+  // coder runs a full agentic turn behind askCodeAgent). Re-trigger on a
+  // heartbeat so the channel keeps showing activity until the turn delivers,
+  // then stop. Keyed by channel id; a new turn replaces any prior heartbeat.
+  const typingHeartbeats = new Map<string, number>();
+  const TYPING_INTERVAL_MS = 8_000;
+  const TYPING_MAX_TICKS = 75; // ~10 min cap, then give up so a parked/idle turn can't type forever.
+
+  function stopTyping(channelId: string | undefined) {
+    if (!channelId) return;
+    const handle = typingHeartbeats.get(channelId);
+    if (handle !== undefined) {
+      clearInterval(handle);
+      typingHeartbeats.delete(channelId);
+    }
+  }
+
+  async function startTyping(state: DiscordDeliveryState) {
+    if (!opts.credentials?.botToken && !getEnv("DISCORD_BOT_TOKEN")) return;
+    if (!state.channelId) return;
+    const channelId = state.channelId;
+    stopTyping(channelId);
+    await tryTyping(state);
+    let ticks = 0;
+    const handle = setInterval(() => {
+      if (++ticks >= TYPING_MAX_TICKS) {
+        stopTyping(channelId);
+        return;
+      }
+      void tryTyping(state);
+    }, TYPING_INTERVAL_MS);
+    typingHeartbeats.set(channelId, handle);
+  }
+
   const stateOf = (channelCtx: unknown): DiscordDeliveryState =>
     ((channelCtx as { state?: DiscordDeliveryState } | undefined)?.state ?? {}) as DiscordDeliveryState;
 
   const builtinEvents: ChannelEventHandlers = {
     async "turn.started"(_data, channelCtx) {
-      await tryTyping(stateOf(channelCtx));
+      await startTyping(stateOf(channelCtx));
     },
     async "actions.requested"(_data, channelCtx) {
-      await tryTyping(stateOf(channelCtx));
+      await startTyping(stateOf(channelCtx));
     },
     async "input.requested"(data, channelCtx) {
       const state = stateOf(channelCtx);
@@ -260,9 +299,21 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       // Mid-turn tool-call steps carry no user-facing message; skip them.
       if (finishReason === "tool-calls" || !message) return;
       const state = stateOf(channelCtx);
-      for (const content of splitDiscordMessageContent(message)) {
+      for (const content of splitDiscordMessageContent(markdownTablesToCodeBlocks(message))) {
         await deliver(state, { content });
       }
+    },
+    // Turn boundaries stop the typing heartbeat even when the turn parked without
+    // an adapter delivery — e.g. claw posts a dropdown/approval directly via its
+    // own tools and then waits on the human. Otherwise "typing…" would linger.
+    async "turn.completed"(_data, channelCtx) {
+      stopTyping(stateOf(channelCtx).channelId);
+    },
+    async "turn.failed"(_data, channelCtx) {
+      stopTyping(stateOf(channelCtx).channelId);
+    },
+    async "session.failed"(_data, channelCtx) {
+      stopTyping(stateOf(channelCtx).channelId);
     },
   };
 
@@ -472,6 +523,8 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   // Per-worker channel snapshot cache: thread kind/owner is immutable for our
   // purposes (a thread never changes owner), so a Map without eviction is fine.
   const channelSnapshots = new Map<string, DiscordChannelSnapshot>();
+  // guildId → the bot's managed role id (or null when the guild has none).
+  const botRoleIds = new Map<string, string | null>();
 
   async function handleMessage(event: NonNullable<ReturnType<typeof parseDiscordMessageEvent>>, args: ChannelRouteArgs): Promise<Response> {
     const ignored = () => discordJsonBody({ ignored: true });
@@ -497,7 +550,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       })
     ) return ignored();
 
-    const trigger = decideMessageTrigger({ event, applicationId, channel: snapshot });
+    // The bot's managed role, so "@trex" (the auto-created role) is a mention
+    // too — Discord autocomplete often picks the role over the bot user.
+    let botRoleId: string | undefined;
+    if (event.guildId) {
+      try {
+        botRoleId = (await resolveBotManagedRoleId(apiOpts(), event.guildId, applicationId, botRoleIds)) ?? undefined;
+      } catch (e) {
+        console.warn("discord: bot role resolution failed — role mentions won't trigger for this message:", e);
+      }
+    }
+
+    const trigger = decideMessageTrigger({ event, applicationId, channel: snapshot, botRoleId });
     if (trigger.kind === "ignore") return ignored();
 
     const auth: ChannelAuth = {
@@ -506,7 +570,7 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       principalId: event.author.id,
       attributes: { username: event.author.username, ...(event.guildId ? { guildId: event.guildId } : {}) },
     };
-    const text = stripBotMention(event.content, applicationId);
+    const text = stripBotMention(event.content, applicationId, botRoleId);
     const contextBlock = formatDiscordMessageContextBlock({
       userId: event.author.id,
       username: event.author.username,
