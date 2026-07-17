@@ -385,13 +385,19 @@ export async function addAgentsPlugin(
     // this mode — no Interactions Endpoint URL is registered — so the real
     // application key is unused). Must happen before _addFunction: worker env
     // is creation-time only.
-    let gateway: { botToken: string; channelId: string } | null = null;
+    let gateway: { botToken: string; channelId: string; messages: boolean } | null = null;
     if (gatewayModeEnabled(cfg.env.DISCORD_GATEWAY)) {
       const botToken = cfg.env.DISCORD_BOT_TOKEN || Deno.env.get("DISCORD_BOT_TOKEN") || "";
       if (!botToken) {
         console.error(`agents: agent ${entry.name} (plugin ${name}) sets DISCORD_GATEWAY but has no DISCORD_BOT_TOKEN — gateway mode disabled`);
       } else {
-        gateway = { botToken, channelId: cfg.env.DISCORD_GATEWAY_CHANNEL || "discord" };
+        gateway = {
+          botToken,
+          channelId: cfg.env.DISCORD_GATEWAY_CHANNEL || "discord",
+          // Messages mode is gateway-only (Discord never webhooks messages) and
+          // needs the privileged MESSAGE_CONTENT intent enabled in the portal.
+          messages: gatewayModeEnabled(cfg.env.DISCORD_MESSAGES),
+        };
       }
     }
     const signer = gateway ? await createGatewaySigner() : null;
@@ -425,6 +431,13 @@ export async function addAgentsPlugin(
         forwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}`,
         signer,
         label: `${name}/${entry.name}`,
+        ...(gateway.messages
+          ? {
+            // GUILD_MESSAGES | MESSAGE_CONTENT — interactions still need none.
+            intents: (1 << 9) | (1 << 15),
+            messageForwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}/messages`,
+          }
+          : {}),
       });
     }
   }
