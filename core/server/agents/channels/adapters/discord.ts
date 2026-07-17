@@ -40,6 +40,7 @@ import {
   createDiscordFollowupMessage,
   editDiscordOriginalResponse,
   type DiscordMessageBody,
+  resolveDiscordApplicationId,
   sendDiscordChannelMessage,
   splitDiscordMessageContent,
   triggerDiscordTypingIndicator,
@@ -59,7 +60,24 @@ import {
   isDiscordFreeformComponent,
   renderInputRequestComponents,
 } from "../vendor/discord/hitl.ts";
-import { createDiscordThread, interactionChannelInfo, isThreadChannel, threadNameForTask } from "./discord-threads.ts";
+import {
+  createDiscordThread,
+  createDiscordThreadFromMessage,
+  interactionChannelInfo,
+  isThreadChannel,
+  threadNameForTask,
+} from "./discord-threads.ts";
+import {
+  decideMessageTrigger,
+  type DiscordChannelSnapshot,
+  fetchMessagesBefore,
+  formatDiscordMessageContextBlock,
+  formatMessagesBlock,
+  getChannelSnapshot,
+  type HistoryMessage,
+  parseDiscordMessageEvent,
+  stripBotMention,
+} from "./discord-messages.ts";
 import { defaultDiscordAuth } from "../vendor/discord/defaults.ts";
 import { discordDeferredJson, discordJson, discordJsonBody, readMessageContent } from "../vendor/discord/responses.ts";
 import { verifyDiscordInbound } from "../vendor/discord/verifyInbound.ts";
@@ -143,6 +161,14 @@ export interface DiscordChannelOptions {
    * in Threads".
    */
   threads?: boolean;
+  /**
+   * MESSAGE_CREATE mode (gateway-only): adds a POST "<route>/messages" route
+   * fed by the host gateway client's signed loopback. @mentions behave like
+   * /trex (task thread per mention); any human message in a bot-owned task
+   * thread drives that thread's session. Discord never webhooks messages, so
+   * this is inert in webhook mode.
+   */
+  messages?: boolean;
 }
 
 // custom_id of a postChoice string-select (claw's Gate-1 option picker). Unlike
@@ -422,6 +448,120 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     return discordJson({ content: "Answer received.", ephemeral: true });
   }
 
+  // Per-worker channel snapshot cache: thread kind/owner is immutable for our
+  // purposes (a thread never changes owner), so a Map without eviction is fine.
+  const channelSnapshots = new Map<string, DiscordChannelSnapshot>();
+
+  async function handleMessage(event: NonNullable<ReturnType<typeof parseDiscordMessageEvent>>, args: ChannelRouteArgs): Promise<Response> {
+    const ignored = () => discordJsonBody({ ignored: true });
+    if (event.author.bot) return ignored();
+
+    const applicationId = await resolveDiscordApplicationId(opts.credentials?.applicationId);
+    let snapshot: DiscordChannelSnapshot;
+    try {
+      snapshot = await getChannelSnapshot(apiOpts(), event.channelId, channelSnapshots);
+    } catch (e) {
+      console.warn("discord: channel snapshot fetch failed — message dropped:", e);
+      return ignored();
+    }
+
+    // Allow-list before any send(); thread parent satisfies the conversation
+    // check, same as the interactions route. Silent on miss (no reply spam).
+    const allow = opts.allow ?? envAllowList("DISCORD");
+    if (
+      !channelAllows(allow, {
+        userId: event.author.id,
+        conversationId: event.channelId,
+        ...(snapshot.parentId ? { conversationParentId: snapshot.parentId } : {}),
+      })
+    ) return ignored();
+
+    const trigger = decideMessageTrigger({ event, applicationId, channel: snapshot });
+    if (trigger.kind === "ignore") return ignored();
+
+    const auth: ChannelAuth = {
+      authenticator: "discord",
+      principalType: "user",
+      principalId: event.author.id,
+      attributes: { username: event.author.username, ...(event.guildId ? { guildId: event.guildId } : {}) },
+    };
+    const text = stripBotMention(event.content, applicationId);
+    const contextBlock = formatDiscordMessageContextBlock({
+      userId: event.author.id,
+      username: event.author.username,
+      channelId: event.channelId,
+      guildId: event.guildId,
+      messageId: event.id,
+    });
+    const sendToThread = (threadId: string, parts: string[], title?: string) =>
+      args.send(parts.filter((p) => p.length > 0).join("\n\n"), {
+        auth,
+        continuationToken: discordContinuationToken(threadId, threadId),
+        state: {
+          channelId: threadId,
+          applicationId,
+          guildId: event.guildId ?? null,
+          initialResponseSent: true,
+          ephemeral: false,
+        } satisfies DiscordDeliveryState,
+        ...(title ? { title } : {}),
+      });
+    const history = async (channelId: string, limit: number): Promise<HistoryMessage[]> => {
+      try {
+        return await fetchMessagesBefore(apiOpts(), channelId, { before: event.id, limit });
+      } catch (e) {
+        console.warn("discord: history fetch failed — continuing without context block:", e);
+        return [];
+      }
+    };
+
+    if (trigger.kind === "thread-turn") {
+      // Every prior human message already drove its own turn — no history block.
+      await sendToThread(event.channelId, [contextBlock, text || event.content]);
+      return ignored();
+    }
+    if (trigger.kind === "mention-in-thread") {
+      const block = formatMessagesBlock("thread_messages", await history(event.channelId, 50));
+      await sendToThread(event.channelId, [contextBlock, block, text]);
+      return ignored();
+    }
+    // mention-in-channel: task thread anchored to the mention message, falling
+    // back to a plain thread, falling back to an in-channel session.
+    const threadName = threadNameForTask(text);
+    let threadId: string | null = null;
+    try {
+      threadId = (await createDiscordThreadFromMessage({
+        ...apiOpts(),
+        channelId: event.channelId,
+        messageId: event.id,
+        name: threadName,
+      })).id;
+    } catch {
+      try {
+        threadId = (await createDiscordThread({ ...apiOpts(), channelId: event.channelId, name: threadName })).id;
+      } catch (e) {
+        console.warn("discord: mention-thread creation failed — falling back to in-channel session:", e);
+      }
+    }
+    const block = formatMessagesBlock("channel_messages", await history(event.channelId, 20));
+    if (threadId !== null) {
+      await sendToThread(threadId, [contextBlock, block, text], threadName);
+    } else {
+      await args.send([contextBlock, block, text].filter((p) => p.length > 0).join("\n\n"), {
+        auth,
+        continuationToken: discordContinuationToken(event.channelId, event.channelId),
+        state: {
+          channelId: event.channelId,
+          applicationId,
+          guildId: event.guildId ?? null,
+          initialResponseSent: true,
+          ephemeral: false,
+        } satisfies DiscordDeliveryState,
+      });
+    }
+    return ignored();
+  }
+
   async function runResume(ctx: DiscordResumeContext) {
     try {
       if (opts.resume) {
@@ -446,55 +586,70 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     }
   }
 
-  return defineChannel({
-    events,
-    routes: [
-      POST(route, async (req, args) => {
-        // 1) SIGNATURE FIRST — 401 before any parse or send().
-        const rawBody = await verifyDiscordInbound(req, opts.credentials);
-        if (rawBody === null) return new Response("unauthorized", { status: 401 });
+  const routes = [
+    POST(route, async (req, args) => {
+      // 1) SIGNATURE FIRST — 401 before any parse or send().
+      const rawBody = await verifyDiscordInbound(req, opts.credentials);
+      if (rawBody === null) return new Response("unauthorized", { status: 401 });
 
-        // 2) parse
-        let payload: unknown;
-        try {
-          payload = JSON.parse(rawBody);
-        } catch {
-          return discordJson({ content: "invalid request", ephemeral: true });
-        }
-        if ((payload as { type?: number })?.type === DISCORD_INTERACTION_TYPE.PING) {
-          return discordJson({ type: DISCORD_INTERACTION_RESPONSE_TYPE.PONG });
-        }
-        const interaction = parseDiscordInteraction(payload);
-        if (interaction === null) {
-          return discordJson({ content: "Unsupported Discord interaction.", ephemeral: true });
-        }
+      // 2) parse
+      let payload: unknown;
+      try {
+        payload = JSON.parse(rawBody);
+      } catch {
+        return discordJson({ content: "invalid request", ephemeral: true });
+      }
+      if ((payload as { type?: number })?.type === DISCORD_INTERACTION_TYPE.PING) {
+        return discordJson({ type: DISCORD_INTERACTION_RESPONSE_TYPE.PONG });
+      }
+      const interaction = parseDiscordInteraction(payload);
+      if (interaction === null) {
+        return discordJson({ content: "Unsupported Discord interaction.", ephemeral: true });
+      }
 
-        // 3) allow-list — gates every interaction type (commands, HITL
-        // buttons, modals) before any send()/resume(). Inside a thread the
-        // parent channel id also satisfies the conversation check.
-        const allow = opts.allow ?? envAllowList("DISCORD");
-        const parentId = interactionChannelInfo(interaction.raw).parentId;
-        if (
-          !channelAllows(allow, {
-            userId: interaction.user.id,
-            conversationId: interaction.channelId,
-            ...(parentId ? { conversationParentId: parentId } : {}),
-          })
-        ) {
-          return discordJson({ content: "You are not authorized to use this bot here.", ephemeral: true });
-        }
+      // 3) allow-list — gates every interaction type (commands, HITL
+      // buttons, modals) before any send()/resume(). Inside a thread the
+      // parent channel id also satisfies the conversation check.
+      const allow = opts.allow ?? envAllowList("DISCORD");
+      const parentId = interactionChannelInfo(interaction.raw).parentId;
+      if (
+        !channelAllows(allow, {
+          userId: interaction.user.id,
+          conversationId: interaction.channelId,
+          ...(parentId ? { conversationParentId: parentId } : {}),
+        })
+      ) {
+        return discordJson({ content: "You are not authorized to use this bot here.", ephemeral: true });
+      }
 
-        // 4) dispatch
-        if (interaction.type === DISCORD_INTERACTION_TYPE.APPLICATION_COMMAND) {
-          return handleCommand(interaction, args);
-        }
-        if (interaction.type === DISCORD_INTERACTION_TYPE.MESSAGE_COMPONENT) {
-          return handleComponent(interaction, args, req);
-        }
-        return handleModal(interaction, args, req);
-      }),
-    ],
-  });
+      // 4) dispatch
+      if (interaction.type === DISCORD_INTERACTION_TYPE.APPLICATION_COMMAND) {
+        return handleCommand(interaction, args);
+      }
+      if (interaction.type === DISCORD_INTERACTION_TYPE.MESSAGE_COMPONENT) {
+        return handleComponent(interaction, args, req);
+      }
+      return handleModal(interaction, args, req);
+    }),
+  ];
+  if (opts.messages === true) {
+    const messagesPath = route === "/" ? "/messages" : `${route.replace(/\/+$/, "")}/messages`;
+    routes.push(POST(messagesPath, async (req, args) => {
+      // SIGNATURE FIRST — only the gateway loopback signer can pass this gate.
+      const rawBody = await verifyDiscordInbound(req, opts.credentials);
+      if (rawBody === null) return new Response("unauthorized", { status: 401 });
+      let payload: unknown;
+      try {
+        payload = JSON.parse(rawBody);
+      } catch {
+        return discordJsonBody({ ignored: true });
+      }
+      const event = parseDiscordMessageEvent(payload);
+      if (event === null) return discordJsonBody({ ignored: true });
+      return handleMessage(event, args);
+    }));
+  }
+  return defineChannel({ events, routes });
 }
 
 // Maps the vendored Discord auth context to the layer's ChannelAuth (issuer is
