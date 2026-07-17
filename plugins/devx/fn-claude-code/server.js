@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import crypto from "node:crypto";
+import { execSync } from "node:child_process";
 import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { kbMcpServer } from "./kb_mcp.js";
@@ -36,7 +37,45 @@ function materializeSkills() {
 // conversation, so contexts don't bleed across chats and a corrupt session can
 // only affect the one chat it belongs to (not every chat, as a single global
 // session id did).
-const chatSessions = new Map();
+//
+// Persisted to ~/.claude (a mounted volume, same place the agent SDK writes its
+// session transcripts) so the mapping SURVIVES a sidecar/container restart. The
+// transcripts persist regardless; without this map the server would forget which
+// transcript belongs to which chat and start every chat fresh after a restart,
+// losing the whole conversation context (only committed git work would remain).
+const SESSIONS_FILE = path.join(process.env.HOME || "/home/node", ".claude", "claw-chat-sessions.json");
+
+function loadChatSessions() {
+  try {
+    return new Map(Object.entries(JSON.parse(fs.readFileSync(SESSIONS_FILE, "utf8"))));
+  } catch {
+    return new Map(); // no file yet / unreadable — start empty
+  }
+}
+
+const chatSessions = loadChatSessions();
+
+function persistChatSessions() {
+  try {
+    fs.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
+    fs.writeFileSync(SESSIONS_FILE, JSON.stringify(Object.fromEntries(chatSessions)));
+  } catch (err) {
+    console.warn("[claude-code-server] could not persist chat sessions:", err?.message || err);
+  }
+}
+
+// Record a chat's session id and persist the map so a restart can resume it.
+function rememberSession(sessionKey, sessionId) {
+  if (!sessionId || chatSessions.get(sessionKey) === sessionId) return;
+  chatSessions.set(sessionKey, sessionId);
+  persistChatSessions();
+}
+
+function forgetSession(sessionKey) {
+  if (!chatSessions.has(sessionKey)) return;
+  chatSessions.delete(sessionKey);
+  persistChatSessions();
+}
 
 function sendSSE(res, event, data) {
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -175,9 +214,7 @@ const server = http.createServer(async (req, res) => {
       const pendingTools = new Map(); // callId -> { name, args }
 
       for await (const message of query({ prompt, options: opts })) {
-        if (message.session_id && !chatSessions.get(sessionKey)) {
-          chatSessions.set(sessionKey, message.session_id);
-        }
+        if (message.session_id) rememberSession(sessionKey, message.session_id);
 
         if (message.type === "assistant" && message.message) {
           // When a new assistant message arrives, any pending tools from the
@@ -270,10 +307,10 @@ const server = http.createServer(async (req, res) => {
       // an answer; subsequent messages then resume the new healthy session.
       if (!fullContent && opts.resume) {
         console.error(`[claude-code-server] empty result while resuming ${opts.resume}; clearing session and retrying fresh`);
-        chatSessions.delete(sessionKey);
+        forgetSession(sessionKey);
         delete opts.resume;
         for await (const message of query({ prompt, options: opts })) {
-          if (message.session_id && !chatSessions.get(sessionKey)) chatSessions.set(sessionKey, message.session_id);
+          if (message.session_id) rememberSession(sessionKey, message.session_id);
           if (message.type === "assistant" && message.message) {
             for (const block of message.message.content) {
               if (block.type === "text") {
@@ -322,7 +359,63 @@ const server = http.createServer(async (req, res) => {
   res.end();
 });
 
+// Repo policy: the coder's commits and PRs must NOT carry any tool co-author
+// trailer or generated-by footer. The agent SDK adds those by default;
+// settingSources:["user"] makes it read the user settings dir, so setting
+// includeCoAuthoredBy=false there suppresses both the commit trailer and the PR
+// footer.
+function disableCoderAttribution() {
+  try {
+    const dir = path.join(process.env.HOME || "/home/node", ".claude");
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "settings.json");
+    let settings = {};
+    try { settings = JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* none yet */ }
+    if (settings.includeCoAuthoredBy !== false) {
+      settings.includeCoAuthoredBy = false;
+      fs.writeFileSync(file, JSON.stringify(settings, null, 2));
+      console.log("[coder-server] disabled commit/PR co-author attribution");
+    }
+  } catch (err) {
+    console.warn("[claude-code-server] could not disable co-authored-by:", err?.message || err);
+  }
+}
+
+// When the container's gh is authenticated (volume-backed /root/.config/gh),
+// wire it in as git's credential helper so the coder's `git push` authenticates
+// non-interactively, and attribute commits to the connected GitHub user rather
+// than the container's default `root`. ~/.gitconfig is not on a volume, so this
+// re-applies on every sidecar start. Best-effort: no gh auth → no-op.
+function setupGitCredentials() {
+  try {
+    execSync("gh auth status", { stdio: "ignore" });
+  } catch {
+    return;
+  }
+  try {
+    execSync("gh auth setup-git", { stdio: "ignore" });
+    try {
+      const user = JSON.parse(execSync("gh api user", { encoding: "utf8" }));
+      if (user && user.login) {
+        const name = user.name || user.login;
+        // GitHub no-reply email keeps commits linked to the account without
+        // exposing a private address.
+        const email = `${user.id}+${user.login}@users.noreply.github.com`;
+        execSync(`git config --global user.name ${JSON.stringify(name)}`);
+        execSync(`git config --global user.email ${JSON.stringify(email)}`);
+      }
+    } catch (e) {
+      console.warn("[claude-code-server] could not set git identity from gh user:", e?.message || e);
+    }
+    console.log("[claude-code-server] git configured (credentials + identity)");
+  } catch (err) {
+    console.warn("[claude-code-server] gh auth setup-git failed:", err?.message || err);
+  }
+}
+
 server.listen(PORT, () => {
   materializeSkills();
+  disableCoderAttribution();
+  setupGitCredentials();
   console.log(`[claude-code-server] listening on port ${PORT}`);
 });

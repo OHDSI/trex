@@ -142,9 +142,17 @@ class GitOps {
     return r.output || "";
   }
 
-  async worktreeAdd(repoRoot: string, worktreePath: string, branch: string): Promise<string> {
+  // Fetch a ref from a remote (best-effort; caller decides how to handle failure).
+  async fetch(repoRoot: string, remote: string, ref: string): Promise<void> {
+    await this.runGit(repoRoot, `git fetch ${remote} ${ref}`);
+  }
+
+  // `startPoint` (e.g. "origin/develop") bases the new branch there instead of
+  // the repo's current HEAD, so a feature worktree starts from an up-to-date tree.
+  async worktreeAdd(repoRoot: string, worktreePath: string, branch: string, startPoint?: string): Promise<string> {
     validateBranchName(branch);
-    await this.runGit(repoRoot, `git worktree add ${worktreePath} -b ${branch}`);
+    const from = startPoint ? ` ${startPoint}` : "";
+    await this.runGit(repoRoot, `git worktree add ${worktreePath} -b ${branch}${from}`);
     return worktreePath;
   }
 
