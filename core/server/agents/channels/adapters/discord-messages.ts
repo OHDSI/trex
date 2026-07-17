@@ -12,6 +12,9 @@ export interface DiscordMessageEvent {
   author: { id: string; bot: boolean; username: string };
   content: string;
   mentionIds: readonly string[];
+  // Discord message type (0 = DEFAULT, 19 = REPLY, 6 = pin-add notice, …).
+  // Absent for events built by test helpers / other callers.
+  type?: number;
 }
 
 /** Parses one gateway MESSAGE_CREATE `d` payload. Null on anything unusable. */
@@ -32,6 +35,7 @@ export function parseDiscordMessageEvent(value: unknown): DiscordMessageEvent | 
       .filter((m): m is Record<string, unknown> => isObject(m))
       .map((m) => m.id)
       .filter((id): id is string => isNonEmptyString(id)),
+    ...(typeof value.type === "number" ? { type: value.type } : {}),
   };
 }
 
@@ -68,9 +72,16 @@ export function decideMessageTrigger(input: {
 }): MessageTrigger {
   const { event, applicationId, channel } = input;
   if (event.author.bot) return { kind: "ignore" };
+  // System/notice messages (pin-add, thread-created, …) and anything but a
+  // plain message or a reply carry no user turn — never worth a model turn.
+  if (event.type !== undefined && event.type !== 0 && event.type !== 19) return { kind: "ignore" };
   const isThread = channel.type !== undefined && THREAD_TYPES.has(channel.type);
   if (isThread) {
-    if (channel.ownerId === applicationId) return { kind: "thread-turn" };
+    if (channel.ownerId === applicationId) {
+      // Image-only / embed-only posts arrive with empty content — nothing to prompt with.
+      if (event.content.trim() === "") return { kind: "ignore" };
+      return { kind: "thread-turn" };
+    }
     if (mentionsBot(event, applicationId)) return { kind: "mention-in-thread" };
     return { kind: "ignore" };
   }
@@ -112,18 +123,19 @@ export interface HistoryMessage {
   content: string;
 }
 
-/** Fetches up to `limit` messages before `before`, returned OLDEST-first. */
+/** Fetches up to `limit` messages (before `before` when given), returned OLDEST-first. */
 export async function fetchMessagesBefore(
   api: DiscordApiOptions,
   channelId: string,
-  opts: { before: string; limit: number },
+  opts: { before?: string; limit: number },
 ): Promise<HistoryMessage[]> {
+  const beforeParam = opts.before !== undefined ? `&before=${encodeURIComponent(opts.before)}` : "";
   const result = await callDiscordApi({
     apiBaseUrl: api.apiBaseUrl,
     botToken: api.credentials?.botToken,
     fetch: api.fetch,
     method: "GET",
-    path: `/channels/${encodeURIComponent(channelId)}/messages?limit=${opts.limit}&before=${encodeURIComponent(opts.before)}`,
+    path: `/channels/${encodeURIComponent(channelId)}/messages?limit=${opts.limit}${beforeParam}`,
   });
   if (!result.ok) throw new Error(`Discord message history fetch failed with HTTP ${result.status}.`);
   const rows = Array.isArray(result.body) ? result.body : [];

@@ -513,6 +513,65 @@ Deno.test("without conversationId, continuation token still defaults to interact
   assertEquals(sends[0].opts.continuationToken, "chan-1:interaction-1");
 });
 
+// ---- commands inside a thread + messages:true (thread-history injection) ---
+
+Deno.test("command inside a FOREIGN thread with messages:true gets thread history injected", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    // More specific key first — "/channels/thread-2" is a prefix of the
+    // messages URL below, so it must be checked after the longer match.
+    "/channels/thread-2/messages?": () =>
+      Response.json([{ id: "9", content: "earlier stuff", author: { username: "bob", bot: false } }]),
+    "/channels/thread-2": () => Response.json({ type: 11, parent_id: "chan-1", owner_id: "someone-else" }),
+  });
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: rest.fn },
+    messages: true,
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-2", channel: { type: 11, parent_id: "chan-1" } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assert(sends[0].message.includes("<thread_messages>"));
+  assert(sends[0].message.includes("[bob] earlier stuff"));
+});
+
+Deno.test("command inside a BOT-OWNED thread with messages:true gets no thread history", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    "/channels/thread-2": () => Response.json({ type: 11, parent_id: "chan-1", owner_id: "app-1" }),
+  });
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: rest.fn },
+    messages: true,
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-2", channel: { type: 11, parent_id: "chan-1" } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assert(!sends[0].message.includes("<thread_messages>"));
+});
+
+Deno.test("command inside a thread with messages:false (regression): no history fetches, message unchanged", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: rest.fn },
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-2", channel: { type: 11, parent_id: "chan-1" } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(rest.calls.length, 0);
+  assert(!sends[0].message.includes("<thread_messages>"));
+});
+
 Deno.test("onCommand returning explicit { auth: null } sends with null auth", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
   const channel = discordChannel({

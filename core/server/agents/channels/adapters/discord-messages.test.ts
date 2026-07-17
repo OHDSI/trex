@@ -59,6 +59,15 @@ Deno.test("parseDiscordMessageEvent: empty content tolerated (no MESSAGE_CONTENT
   assertEquals(e.content, "");
 });
 
+Deno.test("parseDiscordMessageEvent: retains the message type when numeric, undefined when absent", () => {
+  const withType = parseDiscordMessageEvent({ ...RAW_MESSAGE, type: 6 });
+  assert(withType !== null);
+  assertEquals(withType.type, 6);
+  const withoutType = parseDiscordMessageEvent(RAW_MESSAGE);
+  assert(withoutType !== null);
+  assertEquals(withoutType.type, undefined);
+});
+
 // ---- mention detection / stripping --------------------------------------
 
 Deno.test("mentionsBot: via mentions array and via raw content", () => {
@@ -132,6 +141,30 @@ Deno.test("decideMessageTrigger: regular channel needs a mention with a non-empt
   );
 });
 
+Deno.test("decideMessageTrigger: a non-default/reply type is ignored even in an owned thread", () => {
+  // type 6 = pinned-message notice — a system message, not a human turn.
+  assertEquals(
+    decideMessageTrigger({ event: event({ type: 6 }), applicationId: "app-1", channel: CLAW_THREAD }).kind,
+    "ignore",
+  );
+  // type 19 = REPLY — a normal human turn, must still fire.
+  assertEquals(
+    decideMessageTrigger({ event: event({ type: 19 }), applicationId: "app-1", channel: CLAW_THREAD }).kind,
+    "thread-turn",
+  );
+});
+
+Deno.test("decideMessageTrigger: empty/whitespace content in an owned thread is ignored", () => {
+  assertEquals(
+    decideMessageTrigger({ event: event({ content: "" }), applicationId: "app-1", channel: CLAW_THREAD }).kind,
+    "ignore",
+  );
+  assertEquals(
+    decideMessageTrigger({ event: event({ content: "   " }), applicationId: "app-1", channel: CLAW_THREAD }).kind,
+    "ignore",
+  );
+});
+
 // ---- history block ---------------------------------------------------------
 
 Deno.test("formatMessagesBlock: oldest-first, bot label, 500-char cap, empty → empty string", () => {
@@ -200,4 +233,11 @@ Deno.test("fetchMessagesBefore reverses to oldest-first and maps authors", async
   assert(calls[0].includes("/channels/thread-1/messages?limit=50&before=msg-4"));
   assertEquals(out.map((m) => m.content), ["oldest", "reply", "newest"]);
   assertEquals(out[1], { author: "trex", bot: true, content: "reply" });
+});
+
+Deno.test("fetchMessagesBefore without `before` omits the before param", async () => {
+  const { fn, calls } = fakeApiFetch(() => Response.json([]));
+  await fetchMessagesBefore({ credentials: { botToken: "tok" }, fetch: fn }, "thread-1", { limit: 50 });
+  assert(calls[0].includes("limit=50"));
+  assert(!calls[0].includes("before="));
 });

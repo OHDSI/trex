@@ -336,6 +336,24 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       }
     }
 
+    // /command inside an existing thread: when messages mode is on, a thread
+    // the bot does not own carries discussion claw has never seen — inject it.
+    let threadContext = "";
+    if (opts.messages === true && isThreadChannel(interactionChannelInfo(interaction.raw))) {
+      try {
+        const snapshot = await getChannelSnapshot(apiOpts(), interaction.channelId, channelSnapshots);
+        const applicationId = await resolveDiscordApplicationId(opts.credentials?.applicationId);
+        if (snapshot.ownerId !== applicationId) {
+          threadContext = formatMessagesBlock(
+            "thread_messages",
+            await fetchMessagesBefore(apiOpts(), interaction.channelId, { limit: 50 }),
+          );
+        }
+      } catch (e) {
+        console.warn("discord: thread history for a command failed — continuing without it:", e);
+      }
+    }
+
     const state: DiscordDeliveryState = {
       channelId: interaction.channelId,
       applicationId: interaction.applicationId,
@@ -347,14 +365,17 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     // send() FIRST resolves-or-creates the session + starts the turn; the reply
     // is delivered later by the events handlers. Return the deferred ACK so
     // Discord shows a "thinking…" state within its deadline.
-    await args.send(fullMessage, {
-      auth,
-      continuationToken: discordContinuationToken(
-        interaction.channelId,
-        opts.conversationId ? opts.conversationId(interaction) : interaction.id,
-      ),
-      state,
-    });
+    await args.send(
+      [contextBlock, threadContext, ...(result.context ?? []), message].filter((p) => p.length > 0).join("\n\n"),
+      {
+        auth,
+        continuationToken: discordContinuationToken(
+          interaction.channelId,
+          opts.conversationId ? opts.conversationId(interaction) : interaction.id,
+        ),
+        state,
+      },
+    );
     return discordDeferredJson(result.ephemeral === true);
   }
 
