@@ -11,9 +11,9 @@
 // metadata.appId. Once the session exists the stored app wins; a different
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
-import { runCodeTurn, type TokioClient } from "../lib/code-session.ts";
-import { makeTokioClient } from "../lib/tokio.ts";
+import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
 import { readOrchestration, upsertOrchestration, type QueryFn } from "../lib/state.ts";
+import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 
 interface Input {
   message: string;
@@ -32,29 +32,32 @@ export function effectiveUserId(ctxUserId: string | undefined, env: (k: string) 
 }
 
 export async function askCore(
-  client: TokioClient,
   sql: QueryFn,
-  ctx: { sessionId: string; userId?: string },
+  ctx: { sessionId: string; userId: string },
   input: Input,
+  // Injected for testability (defaults to the real /stream turn); tests pass a
+  // stub so askCore's orchestration can be exercised without a live coder.
+  runTurn: (args: CodeTurnArgs) => Promise<{ chatId: string; replyText: string }> = runCodeTurn,
 ): Promise<{ reply: string }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
-  // The stored app wins once the Code session exists; the input picks it on
-  // first use only.
+  // codeSessionId now holds the devx chat id; the stored app wins once the chat
+  // exists, the input picks it on first use only.
   const appId = prior?.codeSessionId ? prior.appId : (input.app ?? prior?.appId ?? null);
   if (prior?.codeSessionId && input.app && input.app !== prior.appId) {
-    console.warn(`claw: askCodeAgent ignored app change '${input.app}' — session is fixed to '${prior.appId}'`);
+    console.warn(`claw: askCodeAgent ignored app change '${input.app}' — chat is fixed to '${prior.appId}'`);
   }
-  const { codeSessionId, replyText, nextCursor } = await runCodeTurn(client, {
-    codeSessionId: prior?.codeSessionId ?? null,
+  const { chatId, replyText } = await runTurn({
+    chatId: prior?.codeSessionId ?? null,
     message: input.message,
     userId: ctx.userId,
-    startCursor: prior?.eventCursor ?? 0,
     appId,
   });
+  // eventCursor is unused on the /stream path (each turn streams to completion);
+  // the column is retained for schema compatibility.
   await upsertOrchestration(sql, {
     sessionId: ctx.sessionId,
-    codeSessionId,
-    eventCursor: nextCursor,
+    codeSessionId: chatId,
+    eventCursor: 0,
     appId,
   });
   return { reply: replyText };
@@ -63,19 +66,21 @@ export async function askCore(
 export default defineTool({
   description:
     "Send a message to the shared coding-agent session and return its reply verbatim. " +
-    "Use this to hand the coding agent CLEAR, unambiguous instructions once the ask is " +
-    "understood, and to relay the participants' clarified answers to the coding agent's " +
-    "own questions. The coding agent runs its full planning + implementation process " +
-    "(with its own skills and gates); it continues the SAME session across calls. " +
-    "Pass `app` (a devx app id from listApps) on the FIRST call when the task targets an " +
-    "existing app — it fixes the coder's workspace and project rules for the whole task " +
-    "and cannot be changed later.",
+    "It continues the SAME session across calls, so drive the coder ONE gated step at a " +
+    "time: tell it exactly which superpowers skill to run now and to STOP for approval " +
+    "(e.g. 'run your brainstorming skill and present options, do not write code, stop'; " +
+    "then, after the channel approves, 'run writing-plans for option B, stop'; then, after " +
+    "approval, 'implement the approved plan with subagent-driven-development'). Relay each " +
+    "reply to the channel and wait for the humans before the next step. Also use this to " +
+    "relay the participants' answers. Pass `app` (a devx app id from listApps) on the FIRST " +
+    "call when the task targets an existing app — it fixes the coder's workspace and project " +
+    "rules for the whole task and cannot be changed later.",
   inputSchema: {
     type: "object",
     properties: {
       message: {
         type: "string",
-        description: "The clear instruction, answer, or message for the coding agent.",
+        description: "The clear single-step instruction, answer, or message for the coding agent.",
       },
       app: {
         type: "string",
@@ -86,11 +91,12 @@ export default defineTool({
     required: ["message"],
   },
   execute: (input, ctx) => {
-    const g = globalThis as any;
-    if (!g.Trex?.req) throw new Error("askCodeAgent: Trex.req unavailable (not a user worker)");
+    if (isEvalMode(ctx)) return evalStubs.askCodeAgent((input as Input).message);
     if (!ctx?.sql) throw new Error("askCodeAgent: ctx.sql unavailable");
-    const client = makeTokioClient(g.Trex.req.bind(g.Trex));
     const userId = effectiveUserId(ctx.userId, (k) => Deno.env.get(k));
-    return askCore(client, ctx.sql, { sessionId: ctx.sessionId, userId }, input as Input);
+    // The coder chat is user-scoped (workspaces, app ownership, minted token
+    // subject); without a resolvable user there is nothing to talk to.
+    if (!userId) throw new Error("askCodeAgent: no user id (set CLAW_CODE_USER_ID)");
+    return askCore(ctx.sql, { sessionId: ctx.sessionId, userId }, input as Input);
   },
 });

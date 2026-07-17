@@ -1,0 +1,8 @@
+{
+  "name": "@trex/claw-evals",
+  "private": true,
+  "description": "eve eval suite for the claw facilitator agent — runs against a live stack",
+  "scripts": {
+    "eval": "eve eval --url \"${EVE_TARGET_URL:-http://localhost:9001/plugins/trex/claw}\""
+  }
+}

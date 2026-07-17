@@ -6,9 +6,46 @@
  */
 import { duckdb, escapeSql } from "./duckdb.ts";
 import { constructSystemPrompt } from "./prompts.ts";
-import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
+import {
+  ensureWorkspace,
+  ensureAppWorkspace,
+  ensureWorktreeParent,
+  getAppWorkspacePath,
+  getRunWorktreePath,
+  readProjectRules,
+} from "./tools/workspace.ts";
+import { gitOps } from "./git.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
+
+// Pin a chat to a stable, isolated git worktree so a feature's work persists
+// across turns — each /stream turn otherwise resets the coder's cwd to the app
+// root — and parallel chats on the same app don't collide on one working tree.
+// Best-effort: returns null (→ caller keeps the app workspace) when the app is
+// not a git repo or the worktree can't be created. The branch/worktree are keyed
+// on the chat id, created once and reused thereafter.
+async function ensureChatWorktree(userId: string, appId: string, chatId: string): Promise<string | null> {
+  const repoRoot = getAppWorkspacePath(userId, appId);
+  try {
+    await Deno.stat(`${repoRoot}/.git`);
+  } catch {
+    return null; // not a git repo — nothing to branch from
+  }
+  const worktree = getRunWorktreePath(userId, appId, chatId);
+  try {
+    await Deno.stat(worktree);
+    return worktree; // already created for this chat
+  } catch { /* create below */ }
+  try {
+    await ensureWorktreeParent(userId, appId);
+    const branch = `claw/${chatId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40)}`;
+    await gitOps.worktreeAdd(repoRoot, worktree, branch);
+    return worktree;
+  } catch (err) {
+    console.warn("[claude_code_agent] worktree create failed, using app workspace:", err?.message || err);
+    return null;
+  }
+}
 
 const CLAUDE_PORT = 4322;
 const CLAUDE_PROCESS = "claude-code-node-server";
@@ -69,7 +106,7 @@ async function ensureClaudeCodeServer() {
 
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-  skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
+  skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree,
 }) {
   const mode = chatMode || "agent";
   const maxSteps = settings.max_steps || 100;
@@ -78,11 +115,17 @@ export async function streamClaudeCodeChat({
     : settings;
 
   // Optional isolated workspace (git worktree for an agent-driven run).
-  const workspacePath = workspacePathOverride
+  let workspacePath = workspacePathOverride
     ? workspacePathOverride
     : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
+  // Facilitated (claw) sessions pin to a stable per-chat worktree so feature
+  // work stays isolated and survives the cwd reset between turns.
+  if (!workspacePathOverride && useWorktree && appId && chatId) {
+    const wt = await ensureChatWorktree(userId, appId, chatId);
+    if (wt) workspacePath = wt;
+  }
 
   let aiRules = effectiveSettings.ai_rules || undefined;
   if (appId) {

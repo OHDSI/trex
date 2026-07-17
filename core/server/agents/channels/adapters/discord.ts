@@ -145,6 +145,11 @@ export interface DiscordChannelOptions {
   threads?: boolean;
 }
 
+// custom_id of a postChoice string-select (claw's Gate-1 option picker). Unlike
+// HITL approvals (verb-restricted to approve/deny), a choice carries an arbitrary
+// value, so the click resumes the session via a message (see handleComponent).
+const CHOICE_CUSTOM_ID = "eve_choice";
+
 export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   const route = opts.route ?? "/";
 
@@ -348,6 +353,34 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     args: ChannelRouteArgs,
     req: Request,
   ): Promise<Response> {
+    // Option pick (postChoice): resume the session with the chosen value as a
+    // message. HITL approvals are verb-restricted (approve/deny), so a free-form
+    // A/B/C choice can't ride them — instead it drives a turn via args.send, the
+    // same primitive a /trex command uses, keyed to the identical
+    // channelId:conversationId token the session was opened with.
+    if (interaction.customId === CHOICE_CUSTOM_ID) {
+      // Join for multi-select (max_values > 1); a single pick is just one value.
+      const value = interaction.values.join(", ");
+      if (value) {
+        await args.send(`The team selected: ${value}`, {
+          auth: toChannelAuth(interaction as unknown as DiscordCommandInteraction),
+          continuationToken: discordContinuationToken(
+            interaction.channelId,
+            opts.conversationId
+              ? opts.conversationId(interaction as unknown as DiscordCommandInteraction)
+              : interaction.channelId,
+          ),
+          state: {
+            channelId: interaction.channelId,
+            applicationId: interaction.applicationId,
+            guildId: interaction.guildId ?? null,
+            initialResponseSent: true,
+            ephemeral: false,
+          },
+        });
+      }
+      return discordJsonBody({ type: DISCORD_INTERACTION_RESPONSE_TYPE.DEFERRED_UPDATE_MESSAGE });
+    }
     // Freeform HITL: open a modal so the user can type an answer.
     if (isDiscordFreeformComponent(interaction.customId)) {
       const prompt = readMessageContent(interaction.raw);
