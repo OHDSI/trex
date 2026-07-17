@@ -5,6 +5,7 @@
 import { defineTool } from "eve/tools";
 import type { QueryFn } from "../lib/state.ts";
 import { effectiveUserId } from "./askCodeAgent.ts";
+import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 
 export interface AppRow {
   id: string;
@@ -42,6 +43,7 @@ export default defineTool({
     "these as options in your clarifying question. Pass the chosen id as askCodeAgent's `app`.",
   inputSchema: { type: "object", properties: {} },
   execute: (_input, ctx) => {
+    if (isEvalMode(ctx)) return evalStubs.listApps(ctx);
     if (!ctx?.sql) throw new Error("listApps: ctx.sql unavailable");
     const userId = effectiveUserId(ctx.userId, (k) => Deno.env.get(k));
     return listAppsCore(ctx.sql, userId);
