@@ -1,6 +1,6 @@
 ---
 name: d2e
-description: Use when working in a Data2Evidence (d2e) app — explains d2e platform architecture, the three artifact types (ui/functions/flows), conventions, and how to run/iterate each within devx.
+description: Use when working in a Data2Evidence (d2e) app — explains d2e platform architecture, the three artifact types (ui/functions/flows), conventions, and how to run/test each, both standalone and against a full d2e stack running locally in the same trex.
 ---
 
 # Data2Evidence (d2e)
@@ -32,6 +32,57 @@ devx runs **ONE subprocess per app inside the trex container** — there is no D
 
 - **OHDSI/d2e** (the platform repo: functions + compose) is **public**.
 - The **d2e-ui** and **d2e-flows** repos are **private** — cloning and installing them needs a connected **GitHub token** (for private `@portal/*` packages, see UI section). If install fails with `401`/`@portal`/authentication errors, connect GitHub in Settings.
+
+---
+
+## Running & testing when the full d2e stack is local (facilitated / claw coder)
+
+The "External API" model above is for **standalone devx**. When the **whole d2e
+stack is already running in this same trex container** — which is the case for a
+facilitated (claw) run — the backend, database, functions, and portal are all
+**local and live**, so do NOT point at an external d2e. Confirm once:
+`env | grep '^PG__'` and `curl -s -o /dev/null -w '%{http_code}' http://localhost:33001/`.
+
+What's in-process locally:
+- **Postgres** at `PG__HOST:PG__PORT` (e.g. `alp-minerva-postgres-1:5432`, db `alp`); `PG__*` is already exported, so a function's `_shared` `PostgresConnection` reaches **real local data**.
+- **trex gateway** on `:33001` — serves the portal (`/portal`) and every function by path.
+- **Logto** for auth (real JWTs).
+
+### Test a function against local data
+d2e functions do NOT run under plain `deno run` — they execute in trex's embedded
+**edge runtime** (`EdgeRuntime.userWorkers`), which gives them `EdgeRuntime`, the
+worker/`envVars` model, decorator metadata, and the `_shared` import resolution.
+`deno run index.ts` lacks all of that, so it is NOT a faithful test — use it only
+for **pure-logic unit tests** (`deno test` on `*.test.ts`), never to validate a
+route.
+
+To exercise a function for real, it must be **served by trex** (an edge worker):
+1. Edit it in the app's `plugins/functions/<name>/`.
+2. Mount it into the running trex at its real path:
+   `POST http://localhost:33001${BASE_PATH:-/trex}/api/plugins/register` body
+   `{"path":"<abs worktree function dir>"}` — needs an **admin JWT**, and the dir
+   must be under `/tmp/devx-workspaces`. Then hit the function's real route on
+   `:33001`; because `PG__*` is set, DB-backed routes return real local data.
+3. **Iterating after an edit:** the edge worker caches modules and is pooled, so
+   an edit to an already-served function is NOT picked up live — restart trex to
+   reload it (safe; the coder session persists across restarts). Use `deno test`
+   for fast logic iteration and the served route for the real integration check.
+4. **Restore the original function when you are done testing.** If your test
+   changed the function only to exercise it (a temporary probe/version marker, a
+   loosened check), revert that edit so the running stack is left exactly as the
+   real change intends — never leave a scratch/debug edit mounted in the shared
+   local deployment.
+
+### Run / test a UI against the local backend
+1. Install once at the UI monorepo root (`yarn`; needs `GITHUB_TOKEN` for `@portal/*`).
+2. Start the app's dev server from `plugins/ui/apps/<app>` (see the port table below — vue-mri-ui-lib :8081, jobs :5173, portal :4000 …).
+3. Point its API base at the **local** gateway, not an external URL:
+   - in-container calls: `http://localhost:33001`
+   - browser / Playwright (from the host): the caddy URL (`https://localhost:<CADDY_PORT>`).
+   Set via the app's `apiBase` / `VITE_D2E_API_BASE` (`.env.local`).
+4. Verify visually with Playwright: screenshot the changed views into `trex/screenshots/` (claw relays them with `postScreenshots`).
+5. Unit tests: `npm run test:unit` (vitest) in the app dir.
+6. Module-federation remotes (`flow`/`analysis`/`mapping`) still need `portal` running too for a faithful render.
 
 ---
 
