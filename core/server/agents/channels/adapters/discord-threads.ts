@@ -61,3 +61,24 @@ export async function createDiscordThread(
   if (typeof id !== "string" || !id) throw new Error("Discord thread create returned no id.");
   return { id };
 }
+
+/**
+ * Creates a public thread anchored to an existing message (the @mention that
+ * started the task) — POST /channels/{id}/messages/{msgId}/threads. Same bot
+ * permissions as createDiscordThread.
+ */
+export async function createDiscordThreadFromMessage(
+  input: DiscordApiOptions & { readonly channelId: string; readonly messageId: string; readonly name: string },
+): Promise<{ id: string }> {
+  const result = await callDiscordApi({
+    apiBaseUrl: input.apiBaseUrl,
+    body: { auto_archive_duration: 1440, name: input.name },
+    botToken: input.credentials?.botToken,
+    fetch: input.fetch,
+    path: `/channels/${encodeURIComponent(input.channelId)}/messages/${encodeURIComponent(input.messageId)}/threads`,
+  });
+  if (!result.ok) throw new Error(`Discord message-thread create failed with HTTP ${result.status}.`);
+  const id = (result.body as { id?: unknown })?.id;
+  if (typeof id !== "string" || !id) throw new Error("Discord message-thread create returned no id.");
+  return { id };
+}

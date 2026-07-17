@@ -162,3 +162,42 @@ Deno.test("formatDiscordMessageContextBlock carries message identity, no interac
   assert(block.includes("message_id: msg-1"));
   assert(!block.includes("interaction_id"));
 });
+
+import { fetchMessagesBefore, getChannelSnapshot } from "./discord-messages.ts";
+
+function fakeApiFetch(respond: (url: string) => Response) {
+  const calls: string[] = [];
+  const fn = ((input: URL | RequestInfo, _init?: RequestInit) => {
+    calls.push(String(input));
+    return Promise.resolve(respond(String(input)));
+  }) as typeof fetch;
+  return { fn, calls };
+}
+
+Deno.test("getChannelSnapshot maps type/parent/owner and caches", async () => {
+  const { fn, calls } = fakeApiFetch(() => Response.json({ type: 11, parent_id: "chan-1", owner_id: "app-1" }));
+  const cache = new Map();
+  const api = { credentials: { botToken: "tok" }, fetch: fn };
+  const s1 = await getChannelSnapshot(api, "thread-1", cache);
+  const s2 = await getChannelSnapshot(api, "thread-1", cache);
+  assertEquals(s1, { type: 11, parentId: "chan-1", ownerId: "app-1" });
+  assertEquals(s2, s1);
+  assertEquals(calls.length, 1); // second call served from cache
+});
+
+Deno.test("fetchMessagesBefore reverses to oldest-first and maps authors", async () => {
+  const { fn, calls } = fakeApiFetch(() =>
+    Response.json([
+      { id: "3", content: "newest", author: { username: "bob", bot: false } },
+      { id: "2", content: "reply", author: { username: "trex", bot: true } },
+      { id: "1", content: "oldest", author: { username: "alice", bot: false } },
+    ])
+  );
+  const out = await fetchMessagesBefore({ credentials: { botToken: "tok" }, fetch: fn }, "thread-1", {
+    before: "msg-4",
+    limit: 50,
+  });
+  assert(calls[0].includes("/channels/thread-1/messages?limit=50&before=msg-4"));
+  assertEquals(out.map((m) => m.content), ["oldest", "reply", "newest"]);
+  assertEquals(out[1], { author: "trex", bot: true, content: "reply" });
+});
