@@ -36,3 +36,10 @@ cannot be unit-tested.
 - [ ] Rotate DISCORD_BOT_TOKEN / CLAW_API_KEY on the host → confirm the change
       takes effect only after the claw worker/plugin is restarted (env is baked
       in at worker creation).
+- [ ] @trex mention in an allow-listed channel creates a task thread anchored
+      to the mention and claw replies in it
+- [ ] a plain (unmentioned) message in that thread gets a claw reply
+- [ ] a message from a non-allow-listed user in the thread is silently ignored
+- [ ] two parallel task threads produce two distinct coder worktrees
+      (`claw/<chatId>` branches)
+- [ ] with DISCORD_MESSAGES unset, /trex still works and plain messages do nothing

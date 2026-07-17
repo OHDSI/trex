@@ -16,6 +16,10 @@ export default discordChannel({
   // credentials (publicKey / applicationId / botToken) fall back to DISCORD_*
   // env, same as the reference adapter default.
   threads: true,
+  // Gateway-only: @trex mentions + plain messages in claw task threads
+  // (requires DISCORD_GATEWAY=1 + DISCORD_MESSAGES=1 + the portal's
+  // MESSAGE CONTENT intent). Inert in webhook mode.
+  messages: true,
   conversationId: (interaction) =>
     stableConversationId({ channelId: interaction.channelId, interactionId: interaction.id }),
 });

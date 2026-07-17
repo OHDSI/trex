@@ -86,6 +86,8 @@ export interface DiscordGatewayClientOptions {
   gatewayUrl?: string;
   /** Gateway intents. Interactions need none — default 0. */
   intents?: number;
+  /** When set, MESSAGE_CREATE dispatches are signed and POSTed here (messages mode). */
+  messageForwardUrl?: string;
   /** Log prefix, e.g. "@trex/claw/claw". */
   label?: string;
   fetch?: typeof fetch;
@@ -297,6 +299,11 @@ export class DiscordGatewayClient {
           console.error(`${this.#label}: interaction forwarding failed:`, e);
         });
         break;
+      case "MESSAGE_CREATE":
+        void this.#forwardMessage(d).catch((e) => {
+          console.error(`${this.#label}: message forwarding failed:`, e);
+        });
+        break;
       default:
         break;
     }
@@ -401,6 +408,34 @@ export class DiscordGatewayClient {
       return;
     }
     console.error(`${this.#label}: route returned callback type ${callback.type} which cannot be delivered after a deferred ACK — dropped`);
+  }
+
+  // Messages have no interaction token: no pre-ACK, no callback — one signed
+  // loopback POST and done. Bot-authored messages (incl. our own replies) are
+  // dropped HERE so the loop-prevention holds even if the route changes.
+  async #forwardMessage(d: unknown): Promise<void> {
+    const url = this.#opts.messageForwardUrl;
+    if (!url) return;
+    const message = d as { id?: string; author?: { bot?: boolean } };
+    if (!message?.id || message.author?.bot === true) return;
+    const body = JSON.stringify(d);
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    const signature = await this.#opts.signer.sign(timestamp, body);
+    const res = await this.#fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-signature-ed25519": signature,
+        "x-signature-timestamp": timestamp,
+      },
+      body,
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      console.error(`${this.#label}: messages route rejected message (${res.status}): ${text.slice(0, 300)}`);
+      return;
+    }
+    await res.body?.cancel();
   }
 }
 

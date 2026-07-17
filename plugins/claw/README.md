@@ -28,6 +28,7 @@ the agent worker at registration time via `${VAR:-default}` substitution
 | `DISCORD_ALLOWED_USERS` | — (optional) | Comma-separated user-id allow-list |
 | `DISCORD_ALLOWED_CHANNELS` | — (optional) | Comma-separated channel-id allow-list |
 | `DISCORD_GATEWAY` | — (optional) | Set to `1` to receive interactions over the gateway WebSocket instead of the webhook (below) |
+| `DISCORD_MESSAGES` | — (optional) | Set to `1` to also receive @trex mentions and task-thread messages (gateway mode only; requires the privileged **Message Content** intent in the developer portal) |
 | `CLAW_CODE_USER_ID` | — (recommended) | devx user id (uuid) the Code sessions run as — Discord sessions carry no trex user, and apps/workspaces are user-scoped, so set this to YOUR devx user id so `listApps` and the coder's workspace match the devx UI |
 
 See `plugins/claw/agent/ACCEPTANCE.md` for the live-acceptance checklist that
@@ -45,6 +46,15 @@ to the in-channel session when thread creation fails (missing permission, DMs).
 Bot permissions needed: View Channels, Send Messages, Read Message History,
 **Create Public Threads**, **Send Messages in Threads**. Allow-listing a
 channel in `DISCORD_ALLOWED_CHANNELS` covers the task threads inside it.
+
+With `DISCORD_MESSAGES=1` (gateway mode only) two more entry points open up:
+an `@trex <task>` mention in a channel behaves exactly like `/trex` (the task
+thread is anchored to the mention message), and **any** message a teammate
+posts inside a claw task thread continues that thread's session — no mention
+or slash command needed. Discord never delivers regular messages to webhook
+endpoints, so both require gateway mode, plus the privileged *Message
+Content* intent (Bot → Privileged Gateway Intents) — without it the gateway
+connection is refused (close code 4014).
 
 ## Webhook vs. gateway mode
 

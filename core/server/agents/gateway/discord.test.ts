@@ -75,6 +75,8 @@ function makeClient(opts: {
   respond?: (req: CapturedRequest) => Response;
   signer: Awaited<ReturnType<typeof createGatewaySigner>>;
   gatewayUrl?: string;
+  intents?: number;
+  messageForwardUrl?: string;
 }) {
   const sockets: FakeSocket[] = [];
   const { fn, calls } = fakeFetch(opts.respond ?? (() => Response.json({ type: 5 })));
@@ -86,6 +88,8 @@ function makeClient(opts: {
     gatewayUrl: opts.gatewayUrl ?? "wss://gateway.test",
     fetch: fn,
     reconnectBaseMs: 1,
+    intents: opts.intents,
+    messageForwardUrl: opts.messageForwardUrl,
     createSocket: (url) => {
       const s = new FakeSocket();
       (s as FakeSocket & { url?: string }).url = url;
@@ -386,4 +390,87 @@ Deno.test("gateway: discovers the URL via GET /gateway/bot when none is configur
 Deno.test("gatewayModeEnabled accepts 1/true/gateway/yes/on and rejects the rest", () => {
   for (const v of ["1", "true", "TRUE", "gateway", "yes", "on"]) assert(gatewayModeEnabled(v), v);
   for (const v of [undefined, "", "0", "false", "webhook", "off"]) assert(!gatewayModeEnabled(v), String(v));
+});
+
+// ---- message forwarding ------------------------------------------------------
+
+const MESSAGE_EVENT = {
+  id: "msg-1",
+  channel_id: "thread-1",
+  guild_id: "guild-1",
+  content: "<@app-1> hello",
+  author: { id: "user-1", username: "alice", bot: false },
+  mentions: [{ id: "app-1" }],
+};
+
+Deno.test("gateway: MESSAGE_CREATE is signed and forwarded to messageForwardUrl, no callback leg", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets, calls } = makeClient({
+    signer,
+    messageForwardUrl: "http://127.0.0.1:8001/plugins/trex/claw/eve/v1/discord/messages",
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({ op: 0, t: "MESSAGE_CREATE", s: 1, d: MESSAGE_EVENT });
+  await until(() => calls.some((c) => c.url.endsWith("/discord/messages")));
+  const fwd = calls.find((c) => c.url.endsWith("/discord/messages"))!;
+  assertEquals(fwd.method, "POST");
+  assertEquals(JSON.parse(fwd.body).id, "msg-1");
+  // Signed with the ephemeral key — verify with the SAME vendored verifier.
+  const ok = await verifyDiscordSignature({
+    publicKey: signer.publicKeyHex,
+    signature: fwd.headers["x-signature-ed25519"],
+    timestamp: fwd.headers["x-signature-timestamp"],
+    body: fwd.body,
+  });
+  assert(ok);
+  // No interaction-callback POST for messages.
+  assert(!calls.some((c) => c.url.includes("/interactions/")));
+  client.stop();
+});
+
+Deno.test("gateway: bot-authored MESSAGE_CREATE is dropped before forwarding", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets, calls } = makeClient({
+    signer,
+    messageForwardUrl: "http://127.0.0.1:8001/x/messages",
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({
+    op: 0,
+    t: "MESSAGE_CREATE",
+    s: 1,
+    d: { ...MESSAGE_EVENT, author: { id: "app-1", username: "trex", bot: true } },
+  });
+  // Give the (non-)forwarding a beat, then confirm nothing went out.
+  await new Promise((r) => setTimeout(r, 50));
+  assert(!calls.some((c) => c.url.includes("/messages")));
+  client.stop();
+});
+
+Deno.test("gateway: IDENTIFY carries the configured intents", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets } = makeClient({ signer, intents: (1 << 9) | (1 << 15) });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  await until(() => sockets[0].sent.some((m) => m.op === 2));
+  const identify = sockets[0].sent.find((m) => m.op === 2)!;
+  assertEquals((identify.d as { intents: number }).intents, 33280);
+  client.stop();
+});
+
+Deno.test("gateway: MESSAGE_CREATE without messageForwardUrl is ignored", async () => {
+  const signer = await createGatewaySigner();
+  const { client, sockets, calls } = makeClient({ signer });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({ op: 0, t: "MESSAGE_CREATE", s: 1, d: MESSAGE_EVENT });
+  await new Promise((r) => setTimeout(r, 50));
+  assertEquals(calls.filter((c) => c.method === "POST").length, 0);
+  client.stop();
 });

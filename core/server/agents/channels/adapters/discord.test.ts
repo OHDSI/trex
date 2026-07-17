@@ -2,7 +2,7 @@
 // opts.api.fetch, and Ed25519 signatures are produced with a locally-generated
 // keypair so the vendored WebCrypto verify path runs for real.
 
-import { assertEquals, assertExists } from "jsr:@std/assert";
+import { assert, assertEquals, assertExists } from "jsr:@std/assert";
 import { discordChannel } from "./discord.ts";
 import type { ChannelAuth, ChannelRouteArgs } from "eve/channels";
 import { renderInputRequestComponents } from "../vendor/discord/hitl.ts";
@@ -513,6 +513,65 @@ Deno.test("without conversationId, continuation token still defaults to interact
   assertEquals(sends[0].opts.continuationToken, "chan-1:interaction-1");
 });
 
+// ---- commands inside a thread + messages:true (thread-history injection) ---
+
+Deno.test("command inside a FOREIGN thread with messages:true gets thread history injected", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    // More specific key first — "/channels/thread-2" is a prefix of the
+    // messages URL below, so it must be checked after the longer match.
+    "/channels/thread-2/messages?": () =>
+      Response.json([{ id: "9", content: "earlier stuff", author: { username: "bob", bot: false } }]),
+    "/channels/thread-2": () => Response.json({ type: 11, parent_id: "chan-1", owner_id: "someone-else" }),
+  });
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: rest.fn },
+    messages: true,
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-2", channel: { type: 11, parent_id: "chan-1" } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assert(sends[0].message.includes("<thread_messages>"));
+  assert(sends[0].message.includes("[bob] earlier stuff"));
+});
+
+Deno.test("command inside a BOT-OWNED thread with messages:true gets no thread history", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    "/channels/thread-2": () => Response.json({ type: 11, parent_id: "chan-1", owner_id: "app-1" }),
+  });
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: rest.fn },
+    messages: true,
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-2", channel: { type: 11, parent_id: "chan-1" } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assert(!sends[0].message.includes("<thread_messages>"));
+});
+
+Deno.test("command inside a thread with messages:false (regression): no history fetches, message unchanged", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: rest.fn },
+  });
+  const { args, sends } = mockArgs();
+  const payload = { ...COMMAND_PAYLOAD, channel_id: "thread-2", channel: { type: 11, parent_id: "chan-1" } };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(rest.calls.length, 0);
+  assert(!sends[0].message.includes("<thread_messages>"));
+});
+
 Deno.test("onCommand returning explicit { auth: null } sends with null auth", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
   const channel = discordChannel({
@@ -571,5 +630,266 @@ Deno.test("allow-list: allowed user in a non-allowed channel is rejected", async
     await signedRequest(keypair.privateKey, JSON.stringify(COMMAND_PAYLOAD)),
     args,
   );
+  assertEquals(sends.length, 0);
+});
+
+// ---- MESSAGE_CREATE route ----------------------------------------------
+
+const MESSAGE_IN_CLAW_THREAD = {
+  id: "msg-10",
+  channel_id: "thread-1",
+  guild_id: "guild-1",
+  content: "please also add tests",
+  author: { id: "user-1", username: "alice", bot: false },
+  mentions: [],
+};
+
+// Discord REST fake: channel lookup says thread-1 is a bot-owned public thread.
+function discordRestFetch(overrides: Record<string, (url: string, init?: RequestInit) => Response> = {}) {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const fn = ((input: URL | RequestInfo, init?: RequestInit) => {
+    const url = String(input);
+    calls.push({ url, init });
+    for (const [needle, respond] of Object.entries(overrides)) {
+      if (url.includes(needle)) return Promise.resolve(respond(url, init));
+    }
+    if (url.endsWith("/channels/thread-1")) {
+      return Promise.resolve(Response.json({ type: 11, parent_id: "chan-1", owner_id: "app-1" }));
+    }
+    if (url.endsWith("/channels/chan-1")) {
+      return Promise.resolve(Response.json({ type: 0 }));
+    }
+    if (url.includes("/messages?")) return Promise.resolve(Response.json([]));
+    return Promise.resolve(Response.json({}));
+  }) as typeof fetch;
+  return { fn, calls };
+}
+
+function messagesChannel(publicKeyHex: string, fetchFn: typeof fetch) {
+  return discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: fetchFn },
+    messages: true,
+  });
+}
+
+function messagesRouteOf(channel: ReturnType<typeof discordChannel>) {
+  const r = channel.routes.find((x) => x.path === "/messages");
+  assertExists(r);
+  return r!;
+}
+
+async function signedMessagesRequest(privateKey: CryptoKey, body: string): Promise<Request> {
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const data = new TextEncoder().encode(`${timestamp}${body}`);
+  const sig = new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, data));
+  return new Request("https://worker.example/base/eve/v1/discord/messages", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-signature-ed25519": Array.from(sig).map((b) => b.toString(16).padStart(2, "0")).join(""),
+      "x-signature-timestamp": timestamp,
+    },
+    body,
+  });
+}
+
+Deno.test("messages route: absent unless opts.messages, and routes[0] stays interactions", async () => {
+  const { publicKeyHex } = await genKeypair();
+  const off = discordChannel({ credentials: { publicKey: publicKeyHex } });
+  assertEquals(off.routes.length, 1);
+  const on = messagesChannel(publicKeyHex, discordRestFetch().fn);
+  assertEquals(on.routes[0].path, "/");
+  assertEquals(on.routes.length, 2);
+  assertEquals(on.routes[1].path, "/messages");
+});
+
+Deno.test("messages route: unsigned POST → 401, no send", async () => {
+  const { publicKeyHex } = await genKeypair();
+  const channel = messagesChannel(publicKeyHex, discordRestFetch().fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    new Request("https://worker.example/base/eve/v1/discord/messages", {
+      method: "POST",
+      body: JSON.stringify(MESSAGE_IN_CLAW_THREAD),
+    }),
+    args,
+  );
+  assertEquals(res.status, 401);
+  assertEquals(sends.length, 0);
+});
+
+Deno.test("messages route: human message in bot-owned thread → send keyed to thread id", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = messagesChannel(publicKeyHex, discordRestFetch().fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(keypair.privateKey, JSON.stringify(MESSAGE_IN_CLAW_THREAD)),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "thread-1:thread-1");
+  assert(sends[0].message.includes("please also add tests"));
+  assert(sends[0].message.includes("message_id: msg-10"));
+  assert(!sends[0].message.includes("<thread_messages>")); // plain thread turn: no history block
+  const state = sends[0].opts.state as { channelId?: string; initialResponseSent?: boolean };
+  assertEquals(state.channelId, "thread-1");
+  assertEquals(state.initialResponseSent, true);
+  assertEquals(sends[0].opts.auth?.principalId, "user-1");
+});
+
+Deno.test("messages route: bot-authored message ignored", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = messagesChannel(publicKeyHex, discordRestFetch().fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({ ...MESSAGE_IN_CLAW_THREAD, author: { id: "app-1", username: "trex", bot: true } }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0);
+});
+
+Deno.test("messages route: @mention in regular channel creates message-anchored thread with channel history", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    "/messages/msg-20/threads": () => Response.json({ id: "thread-new" }),
+    "/channels/chan-1/messages?": () =>
+      Response.json([
+        { id: "5", content: "we should automate this", author: { username: "bob", bot: false } },
+      ]),
+  });
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-20",
+        channel_id: "chan-1",
+        guild_id: "guild-1",
+        content: "<@app-1> build the report exporter",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "thread-new:thread-new");
+  assert(sends[0].message.includes("build the report exporter"));
+  assert(!sends[0].message.includes("<@app-1>")); // mention stripped
+  assert(sends[0].message.includes("<channel_messages>"));
+  assert(sends[0].message.includes("[bob] we should automate this"));
+  assertEquals(sends[0].opts.title, "build the report exporter");
+});
+
+Deno.test("messages route: @mention in foreign thread → send keyed to that thread with thread history", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    // Order matters: discordRestFetch matches by first-substring-wins, and
+    // "/channels/thread-2" is itself a prefix of the messages URL below — the
+    // more specific key must come first or it never gets checked.
+    "/channels/thread-2/messages?": () =>
+      Response.json([{ id: "7", content: "earlier discussion", author: { username: "bob", bot: false } }]),
+    "/channels/thread-2": () => Response.json({ type: 11, parent_id: "chan-1", owner_id: "someone-else" }),
+  });
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-30",
+        channel_id: "thread-2",
+        guild_id: "guild-1",
+        content: "<@app-1> what do you think?",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends[0].opts.continuationToken, "thread-2:thread-2");
+  assert(sends[0].message.includes("<thread_messages>"));
+  assert(sends[0].message.includes("[bob] earlier discussion"));
+});
+
+Deno.test("messages route: anchored thread creation failure falls back to a plain thread", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    "/messages/msg-21/threads": () => new Response("missing permission", { status: 403 }),
+    "/channels/chan-1/threads": () => Response.json({ id: "thread-plain" }),
+  });
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-21",
+        channel_id: "chan-1",
+        guild_id: "guild-1",
+        content: "<@app-1> ship it",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends[0].opts.continuationToken, "thread-plain:thread-plain");
+});
+
+Deno.test("messages route: both thread creations failing falls back to an in-channel session", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    "/messages/msg-22/threads": () => new Response("missing permission", { status: 403 }),
+    "/channels/chan-1/threads": () => new Response("missing permission", { status: 403 }),
+  });
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-22",
+        channel_id: "chan-1",
+        guild_id: "guild-1",
+        content: "<@app-1> ship it anyway",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "chan-1:chan-1");
+  const state = sends[0].opts.state as { channelId?: string };
+  assertEquals(state.channelId, "chan-1");
+  assert(sends[0].message.includes("ship it anyway"));
+});
+
+Deno.test("messages route: allow-list miss is silently ignored", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, applicationId: "app-1", botToken: "tok" },
+    api: { fetch: discordRestFetch().fn },
+    messages: true,
+    allow: { users: ["someone-else"] },
+  });
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(keypair.privateKey, JSON.stringify(MESSAGE_IN_CLAW_THREAD)),
+    args,
+  );
+  assertEquals(res.status, 200);
   assertEquals(sends.length, 0);
 });

@@ -18,7 +18,9 @@ decide, not you; you surface the decision and let them make it.
 ## Steps
 
 1. **Read the discussion.** Call `fetchChannelHistory` for the current channel
-   and read the recent messages. Work out what the team actually wants.
+   and read the recent messages. Work out what the team actually wants. When
+   the prompt already carries a `<thread_messages>` or `<channel_messages>`
+   block, that IS the recent discussion — do not re-fetch it.
 2. **Summarize the ask** back to yourself in one or two concrete sentences: the
    outcome the team wants, plus any constraints or acceptance criteria they
    stated.
