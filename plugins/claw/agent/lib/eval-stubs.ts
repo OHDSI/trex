@@ -67,6 +67,9 @@ export const evalStubs = {
     }
     return { reply: "Implemented on the feature worktree. Build green, tests pass." };
   },
+  postUpdate() {
+    return { posted: true, stub: true };
+  },
   postChoice() {
     return { posted: 0, stub: true };
   },

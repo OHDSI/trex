@@ -39,7 +39,16 @@ async function ensureChatWorktree(userId: string, appId: string, chatId: string)
   try {
     await ensureWorktreeParent(userId, appId);
     const branch = `claw/${chatId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40)}`;
-    await gitOps.worktreeAdd(repoRoot, worktree, branch);
+    // Base the feature worktree on the latest origin/develop so work always
+    // starts from an up-to-date tree, not whatever the app workspace was left at.
+    let startPoint: string | undefined;
+    try {
+      await gitOps.fetch(repoRoot, "origin", "develop");
+      startPoint = "origin/develop";
+    } catch (e) {
+      console.warn("[claude_code_agent] fetch origin/develop failed; basing worktree on current HEAD:", e?.message || e);
+    }
+    await gitOps.worktreeAdd(repoRoot, worktree, branch, startPoint);
     return worktree;
   } catch (err) {
     console.warn("[claude_code_agent] worktree create failed, using app workspace:", err?.message || err);

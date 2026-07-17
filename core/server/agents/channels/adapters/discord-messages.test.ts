@@ -6,6 +6,7 @@ import {
   type DiscordMessageEvent,
   formatDiscordMessageContextBlock,
   formatMessagesBlock,
+  markdownTablesToCodeBlocks,
   mentionsBot,
   parseDiscordMessageEvent,
   stripBotMention,
@@ -28,6 +29,7 @@ function event(overrides: Partial<DiscordMessageEvent> = {}): DiscordMessageEven
     author: { id: "user-1", bot: false, username: "alice" },
     content: "hello",
     mentionIds: [],
+    mentionRoleIds: [],
     ...overrides,
   };
 }
@@ -43,6 +45,13 @@ Deno.test("parseDiscordMessageEvent: full payload", () => {
   assertEquals(e.author, { id: "user-1", bot: false, username: "alice" });
   assertEquals(e.content, "<@app-1> please fix the login bug");
   assertEquals(e.mentionIds, ["app-1"]);
+  assertEquals(e.mentionRoleIds, []);
+});
+
+Deno.test("parseDiscordMessageEvent: captures mention_roles", () => {
+  const e = parseDiscordMessageEvent({ ...RAW_MESSAGE, mention_roles: ["role-1", "role-2"] });
+  assert(e !== null);
+  assertEquals(e.mentionRoleIds, ["role-1", "role-2"]);
 });
 
 Deno.test("parseDiscordMessageEvent: missing id/author/channel → null", () => {
@@ -80,6 +89,56 @@ Deno.test("stripBotMention removes <@id> and <@!id> forms and trims", () => {
   assertEquals(stripBotMention("<@app-1> fix the bug", "app-1"), "fix the bug");
   assertEquals(stripBotMention("fix <@!app-1>  the bug", "app-1"), "fix the bug");
   assertEquals(stripBotMention("<@app-1>", "app-1"), "");
+});
+
+Deno.test("mentionsBot: via the bot's managed role mention", () => {
+  assert(mentionsBot(event({ mentionRoleIds: ["role-1"] }), "app-1", "role-1"));
+  // A different role mention (not the bot's) is not a bot mention.
+  assert(!mentionsBot(event({ mentionRoleIds: ["role-2"] }), "app-1", "role-1"));
+  // Without a known bot role id, a role mention alone never triggers.
+  assert(!mentionsBot(event({ mentionRoleIds: ["role-1"] }), "app-1"));
+});
+
+Deno.test("stripBotMention also removes the bot's <@&roleId> mention", () => {
+  assertEquals(stripBotMention("<@&role-1> fix the bug", "app-1", "role-1"), "fix the bug");
+  assertEquals(stripBotMention("<@app-1> and <@&role-1> hi", "app-1", "role-1"), "and hi");
+});
+
+// ---- markdown table rendering -------------------------------------------
+
+Deno.test("markdownTablesToCodeBlocks: converts a GFM table to an aligned code block", () => {
+  const input = [
+    "Here are the controls:",
+    "",
+    "| Control | Vuetify 3 | Notes |",
+    "| --- | --- | --- |",
+    "| button | v-btn | drop-in |",
+    "| select | v-select | needs items |",
+    "",
+    "Done.",
+  ].join("\n");
+  const out = markdownTablesToCodeBlocks(input);
+  assert(out.includes("```"), "should wrap the table in a code fence");
+  assert(!out.includes("| Control |"), "raw pipe header should be gone");
+  // Columns are space-aligned: 'button' and 'select' start at the same offset.
+  const lines = out.split("\n");
+  const btn = lines.find((l) => l.startsWith("button"))!;
+  const sel = lines.find((l) => l.startsWith("select"))!;
+  assertEquals(btn.indexOf("v-btn"), sel.indexOf("v-select"));
+  // Surrounding prose is preserved.
+  assert(out.startsWith("Here are the controls:"));
+  assert(out.trimEnd().endsWith("Done."));
+});
+
+Deno.test("markdownTablesToCodeBlocks: leaves non-table text and fenced tables untouched", () => {
+  const noTable = "Just a list:\n- a\n- b\n";
+  assertEquals(markdownTablesToCodeBlocks(noTable), noTable);
+  // A pipe line without a separator row is not a table.
+  const notATable = "a | b is not a table\nsecond line";
+  assertEquals(markdownTablesToCodeBlocks(notATable), notATable);
+  // Already inside a fence: left as-is (no double conversion).
+  const fenced = "```\n| a | b |\n| - | - |\n| 1 | 2 |\n```";
+  assertEquals(markdownTablesToCodeBlocks(fenced), fenced);
 });
 
 // ---- trigger decision ----------------------------------------------------
@@ -134,6 +193,48 @@ Deno.test("decideMessageTrigger: regular channel needs a mention with a non-empt
   assertEquals(
     decideMessageTrigger({
       event: event({ content: "<@app-1>", mentionIds: ["app-1"] }),
+      applicationId: "app-1",
+      channel: REGULAR_CHANNEL,
+    }).kind,
+    "ignore",
+  );
+});
+
+Deno.test("decideMessageTrigger: a bot managed-role mention counts as a mention", () => {
+  // Regression: "@trex" autocompletes to the bot's managed role (<@&roleId>),
+  // not the bot user — mentions=[] but mention_roles=[botRole]. Must still fire.
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ content: "<@&role-1> build a dashboard", mentionRoleIds: ["role-1"] }),
+      applicationId: "app-1",
+      channel: REGULAR_CHANNEL,
+      botRoleId: "role-1",
+    }).kind,
+    "mention-in-channel",
+  );
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ mentionRoleIds: ["role-1"] }),
+      applicationId: "app-1",
+      channel: FOREIGN_THREAD,
+      botRoleId: "role-1",
+    }).kind,
+    "mention-in-thread",
+  );
+  // A role mention with no task text is still ignored in a channel.
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ content: "<@&role-1>", mentionRoleIds: ["role-1"] }),
+      applicationId: "app-1",
+      channel: REGULAR_CHANNEL,
+      botRoleId: "role-1",
+    }).kind,
+    "ignore",
+  );
+  // Without the bot role id resolved, the role mention does nothing.
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ content: "<@&role-1> hi", mentionRoleIds: ["role-1"] }),
       applicationId: "app-1",
       channel: REGULAR_CHANNEL,
     }).kind,

@@ -6,6 +6,7 @@ import { defineTool } from "eve/tools";
 import { postChannelMessage, type AttachmentUpload } from "../lib/discord-rest.ts";
 import { readOrchestration } from "../lib/state.ts";
 import { workspaceRoot, safeRelative } from "../lib/workspace.ts";
+import { markdownTablesToCodeBlocks } from "../lib/discord-format.ts";
 import { effectiveUserId } from "./askCodeAgent.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 
@@ -40,8 +41,10 @@ export default defineTool({
     const token = (globalThis as any).Deno?.env?.get?.("DISCORD_BOT_TOKEN");
     if (!token) throw new Error("postPlan: DISCORD_BOT_TOKEN not set");
 
-    const truncated = text.length > DESC_MAX;
-    const description = truncated ? `${text.slice(0, DESC_MAX - 40)}\n\n… (full plan attached)` : text;
+    // Discord won't render Markdown tables; convert them to aligned code blocks.
+    const rendered = markdownTablesToCodeBlocks(text);
+    const truncated = rendered.length > DESC_MAX;
+    const description = truncated ? `${rendered.slice(0, DESC_MAX - 40)}\n\n… (full plan attached)` : rendered;
     const embed = {
       title: title.slice(0, TITLE_MAX),
       description,

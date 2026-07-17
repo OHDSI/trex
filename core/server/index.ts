@@ -1132,14 +1132,19 @@ async function invokeEdgeFunction(req: any, res: any) {
     }
   } catch { /* no eszip bundle — use regular servicePath */ }
 
+  // Dev hot-reload: fresh, cache-bypassing worker per request for functions
+  // served from the devx workspace, so the coder's source edits go live without a
+  // restart. Scoped to the workspace dir; baked platform functions are untouched.
+  const _wsDir = Deno.env.get("DEVX_WORKSPACE_DIR") || "/tmp/devx-workspaces";
+  const _hotReload = Deno.env.get("DEVX_HOT_RELOAD") === "true" && servicePath.startsWith(_wsDir);
   const createWorker = async () => {
     const workerOpts: Record<string, unknown> = {
       servicePath,
       memoryLimitMb: 150,
       workerTimeoutMs: 5 * 60 * 1000,
-      noModuleCache: false,
+      noModuleCache: _hotReload,
       envVars: await getSupabaseEnvVars(),
-      forceCreate: false,
+      forceCreate: _hotReload,
       cpuTimeSoftLimitMs: 10000,
       cpuTimeHardLimitMs: 20000,
       importMapPath,
@@ -1149,8 +1154,9 @@ async function invokeEdgeFunction(req: any, res: any) {
       },
     };
 
-    // If ESZIP bundle exists, pass it to the worker
-    if (maybeEszip) {
+    // If ESZIP bundle exists, pass it to the worker (skipped under hot-reload so
+    // edited source always wins).
+    if (maybeEszip && !_hotReload) {
       workerOpts.maybeEszip = maybeEszip;
       workerOpts.maybeEntrypoint = maybeEntrypoint;
     }

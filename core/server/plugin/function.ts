@@ -280,11 +280,25 @@ async function _callWorker(
     _workerEpoch.set(servicePath, epoch);
   }
 
+  // Dev hot-reload: with DEVX_HOT_RELOAD on, spin a fresh edge worker on every
+  // request for functions served from the devx workspace, so source edits are
+  // picked up live without a restart or rebuild. Scoped to the workspace dir so
+  // the baked platform functions (pooled, cached) are untouched. A fresh worker
+  // loads source from servicePath; an eszip bundle still overrides source, so
+  // hot-reload applies to unbundled (source) dev functions only.
+  const _wsDir = Deno.env.get("DEVX_WORKSPACE_DIR") || "/tmp/devx-workspaces";
+  const _hotReload = Deno.env.get("DEVX_HOT_RELOAD") === "true" &&
+    (servicePath.startsWith(_wsDir) || dir.startsWith(_wsDir));
+  if (_hotReload) forceCreate = true;
+
   const options: any = {
     servicePath,
     memoryLimitMb: fncfg.memoryLimitMb ?? 4096,
     workerTimeoutMs: 30 * 60 * 1000,
-    noModuleCache: false,
+    // Hot-reload needs BOTH a fresh worker (forceCreate) AND a source re-read:
+    // with the module cache on, a fresh worker still loads the cached module, so
+    // the file edit is invisible. Bypass the cache only for hot-reloaded workers.
+    noModuleCache: _hotReload,
     importMapPath: imports,
     envVars: _myenv,
     forceCreate,
@@ -309,8 +323,9 @@ async function _callWorker(
     },
   };
 
-  if (fncfg.eszip) {
+  if (fncfg.eszip && !_hotReload) {
     // Prebuilt eszip; fall back to source if absent (e.g. unbundled dev plugin).
+    // Skipped under hot-reload so edits to source are always what runs.
     try {
       options.maybeEszip = await readEszipCached(`${dir}${fncfg.eszip}`);
     } catch {

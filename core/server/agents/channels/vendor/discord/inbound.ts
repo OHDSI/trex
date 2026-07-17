@@ -120,7 +120,7 @@ export function formatDiscordContextBlock(context: DiscordInboundContext): strin
   return [
     `<discord_context>`,
     `response_medium: discord`,
-    `response_instructions: Reply for Discord in concise Markdown. Avoid mass mentions, long tables, and messages that need more than a few short posts.`,
+    `response_instructions: Reply for Discord in concise Markdown. Markdown tables are fine — they are auto-rendered as aligned monospace, so keep them to a few columns. Avoid mass mentions and messages that need more than a few short posts.`,
     `user_id: ${context.userId}`,
     ...(context.username ? [`username: ${context.username}`] : []),
     `channel_id: ${context.channelId}`,
