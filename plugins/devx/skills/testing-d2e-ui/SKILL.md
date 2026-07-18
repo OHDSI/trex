@@ -1,96 +1,83 @@
 ---
 name: testing-d2e-ui
-description: Use when running or testing a Data2Evidence (d2e) UI app locally — building the shared libs first, the per-app dev-server command and base path, Logto login, and Playwright screenshots of changed views (including the in-container login shim), plus vitest unit tests.
+description: Use when verifying or screenshotting a Data2Evidence (d2e) UI change locally — the default flow is build the app + overwrite the served resources at :41100, then screenshot the real route with Playwright + Logto login. (For the interactive hot-reload preview panel, see d2e-ui-preview instead.)
 ---
 
-# Testing d2e UIs locally
+# Testing / screenshotting d2e UI changes
 
 For what the UI monorepo IS (frameworks, module federation, portal context props,
-styling), see the `d2e` skill. This covers how to **run** a UI app and
-**screenshot** your changes against a full local d2e stack. All steps below are
-verified in-container against the live stack.
+styling), see the `d2e` skill. **Default flow for verifying a change: build the app
+and overwrite the served resources, then screenshot the real `:41100` route.** This is
+faithful (real config, backend data, login, portal shell, module-federation wiring —
+byte-for-byte what ships) and uniform across every app. The only cost is a build per
+change. Do NOT reach for a standalone dev server to take screenshots — most d2e apps
+render blank/404 on their own; the dev server is only for the interactive preview panel
+(`d2e-ui-preview`).
 
-## 0. Build the shared libs FIRST (the #1 gotcha)
-The apps import two workspace libs — `@portal/components` (`libs/portal-components`)
-and `@portal/plugin` (`libs/portal-plugin`) — that ship **only as build output**
-(`dist/`). If they're not built, dependent apps fail hard: `portal` (CRA) won't
-compile (`Can't resolve '@portal/components'`), `mapping`/`concept-mapping` vite
-won't even start (`Failed to resolve entry for package "@portal/plugin"`), and
-`concept-sets`/`analysis-ui`/`notebook-ui` show the vite HMR overlay
-`Failed to resolve @portal/components`. Build them once from `plugins/ui`:
+## 0. Build the shared libs once (prerequisite)
+`@portal/components` (`libs/portal-components`) and `@portal/plugin`
+(`libs/portal-plugin`) ship as build output only. Apps won't compile/start until
+they're built. From `plugins/ui`:
 ```
 bunx nx run-many --targets=build --projects=@portal/components,@portal/plugin
 ```
-Root deps are usually already installed (`plugins/ui/node_modules`); if not, `yarn`
-once at the repo root (needs `GITHUB_TOKEN` for `@portal/*`).
 
-## 1. Per-app dev server
-Run from `plugins/ui/apps/<app>`; the `start` script is authoritative. Most apps are
-Vite (default 5173 — pass `--port <n>` so several don't collide); `portal` is CRA.
-**Each app serves under its own base path** (e.g. `jobs` at `/jobs/`) — don't assume
-`/`; read the exact `Local:` URL the dev server prints and use that.
+## 1. Build + overwrite the served resources (the default)
+trex serves each app's built assets from
+`/usr/src/bundled-plugins/d2e-ui/resources/<app>/` (writable). Each app's production
+build outputs to the workspace `plugins/ui/resources/<app>/` (see the app's
+`vite.config` `build.outDir`; portal is CRA and needs `PUBLIC_URL=/d2e/portal`).
 
-| app | command | standalone render (tested) |
-|---|---|---|
-| `vue-mri-ui-lib` | `npx vite --port 8081 --host 0.0.0.0` | ✅ renders (Atlas), login works |
-| `wizards` | `npx vite --port <n>` | ✅ renders fully (no backend needed for landing) |
-| `analysis-ui` `concept-sets` `notebook-ui` | `npx vite --port <n>` | ⚠️ compiles + serves, but **blank / 404 / data errors** standalone — has a "Standalone Development" harness yet still needs portal context (token/datasetId/apiBase) + backend |
-| `mapping` `concept-mapping` | `npx vite --port <n>` | ⚠️ start only after the libs are built; render needs portal context |
-| `jobs` | `npx vite --port 5173` | ⚠️ renders a mock shell but routes to a portal path → 404; needs `portal` |
-| `flow` | `npx vite --port <n>` | ⚠️ module-fed remote — root 404 standalone; needs `portal` |
-| `portal` | `npm start` (react-scripts, :4000) | ⚠️ compiles + serves but **blank** — needs trex-injected runtime config; screenshot portal-hosted views via the **served** portal, not a bare dev server |
-| `mri-pa-ui` | (no dev server) | library, not a runnable app |
-| `webr-notebook` | `build` + `bun preview` | preview of a build, not a live dev server |
+1. Edit the app source in the workspace (`plugins/ui/apps/<app>`).
+2. Build it: `cd apps/<app> && npm run build` (vite, ~1–3 s for small apps) or
+   `PUBLIC_URL=/d2e/portal npx nx build portal` (CRA, minutes).
+3. **Back up + overwrite** the served dir:
+   `cp -r /usr/src/bundled-plugins/d2e-ui/resources/<app>{,.bak}` then copy the fresh
+   `plugins/ui/resources/<app>/*` over `/usr/src/bundled-plugins/d2e-ui/resources/<app>/`.
+4. Screenshot the served route (§2).
+5. **Restore**: move the `.bak` back. Leave the served tree as you found it.
 
-**Bottom line:** only `vue-mri-ui-lib` and `wizards` render meaningfully as bare dev
-servers. The portal-embedded apps compile and serve once the libs are built, but for
-a faithful view of a change you either provide the portal context they read or view
-the change through the **served** portal at `https://localhost:41100/d2e/portal`
-(through the proxy in §3), whose backend + config are live.
+Verify the overwrite took by grepping the served bundle for a unique string from your
+change before screenshotting.
 
-Point `apiBase` / `VITE_D2E_API_BASE` (app `.env`) at the local backend —
-in-container `http://localhost:33001`.
+**New code, not stale (verified).** trex serves these bundles from
+`https://localhost:41100/resources/<app>/…` (portal at `/d2e/portal/`, jobs at
+`/d2e/jobs/`) with `Cache-Control: public, max-age=0` + ETag, so browsers revalidate
+every load and get the fresh file after an overwrite — confirmed end-to-end that the
+overwritten bytes are served (not a stale server cache) for the fixed-name bundles
+`wizards`/`analysis-ui`/`notebook-ui` `lifecycles.js` and `concept-mapping/module.js`.
+portal/jobs use content-hashed filenames (new build → new names) so they can't go
+stale by construction. Use a **fresh Playwright context** (no persistent profile) so
+there's no client-side cache either. If you ever DO see old code, hard-reload / clear
+the context — don't assume the overwrite failed.
 
-## 2. Auth / OIDC
-Vite apps read `VITE_CLIENT_ID`; it must be the local Logto app client (`alp-app` =
-`LOGTO__ALP_APP__CLIENT_ID`, e.g. `xfkpim00zdhwmo26kla1q`) — if empty, Logto rejects
-login with `invalid_client`. (`portal` is CRA and uses `REACT_APP_*` runtime config
-instead, injected by trex when served — hence blank as a bare dev server.) The
-dev-server origin (e.g. `https://localhost:8081`) must be a registered redirect URI
-on that client; register missing dev ports via the Logto management API (M2M creds
-`LOGTO_API_M2M_*`, token from `alp-logto:3001/oidc/token`, then
-`PATCH alp-logto:3001/api/applications/<id>` merging into
-`oidcClientMetadata.redirectUris`). Local login: **`admin` / `Updatepassword12345`**.
-
-## 3. Screenshot the changed view with Playwright (works in-container)
-Playwright is at `/usr/src/node_modules`; launch chromium with
+## 2. Screenshot the served route (Playwright + login)
+Apps are served under the portal, e.g. portal shell at
+`https://localhost:41100/d2e/portal/`, micro-frontends at
+`…/d2e/portal/<route>/`. Playwright is at `/usr/src/node_modules`; launch chromium with
 `executablePath: "/usr/lib/playwright-browsers/chromium-1217/chrome-linux64/chrome"`,
-`args: ["--no-sandbox"]`, context `ignoreHTTPSErrors: true`. Run the script from
-`/usr/src` so bare `import { chromium } from "playwright"` resolves. Navigate to the
-**served `Local:` URL** (base path included) for the view you changed, then screenshot
-into `trex/screenshots/` (claw relays them with `postScreenshots`).
+`args: ["--no-sandbox"]`, context `ignoreHTTPSErrors: true`; run the script from
+`/usr/src` so bare `import { chromium } from "playwright"` resolves. Save shots into
+`trex/screenshots/` (claw relays them with `postScreenshots`).
 
-- **No-auth views** render directly against `https://localhost:<devport>/<base>/`.
-- **Authenticated / data views need one shim.** The d2e + Logto flow is hardwired to
-  `https://localhost:41100`, which in-container is the container itself. Start a TCP
-  proxy that forwards it to caddy (TLS passes through, SNI=`localhost` so caddy
-  serves it):
-  ```
-  node -e 'const n=require("net");n.createServer(c=>{const u=n.connect(443,"alp-caddy");c.pipe(u);u.pipe(c);c.on("error",()=>u.destroy());u.on("error",()=>c.destroy())}).listen(41100,"127.0.0.1")' &
-  ```
-  Then `goto` the app → it redirects to the Logto sign-in → fill the username +
-  password fields with **`admin` / `Updatepassword12345`** → click **Sign in** → it
-  lands back on the app authenticated (a `logout` control appears). No
-  client-credentials or session injection needed. **Verified** end-to-end against
-  `vue-mri-ui-lib` on `:8081` (Atlas loaded, authenticated).
+The d2e + Logto flow is hardwired to `https://localhost:41100`, which in-container is
+the container itself — start a TCP proxy to caddy first (TLS passes through,
+SNI=`localhost`):
+```
+node -e 'const n=require("net");n.createServer(c=>{const u=n.connect(443,"alp-caddy");c.pipe(u);u.pipe(c);c.on("error",()=>u.destroy());u.on("error",()=>c.destroy())}).listen(41100,"127.0.0.1")' &
+```
+Then `goto` the route → it redirects to the Logto sign-in → fill the username + password
+fields with **`admin` / `Updatepassword12345`** → **Sign in** → back on the route
+authenticated (a `logout` control appears). Verified end-to-end (Atlas login; wizards
+build→overwrite→served-bundle-replaced).
 
-## Container notes / gotchas
-- No `ps`/`pkill`/`pgrep` in the trex image — find PIDs by scanning `/proc/<pid>/cmdline`
-  and use the `kill` builtin. Note a vite server's real worker is `node .../.bin/vite`
-  (the port may not appear in its cmdline), so match on `.bin/vite`, not `--port <n>`,
-  or you leak servers that keep holding the port.
-- Several apps' vite serve **http** (not https) — take the scheme from the printed URL.
+**Reaching the changed view.** Navigate the way a user does. Deep-linking a
+feature-flagged micro-frontend (e.g. `…/portal/wizards/`) may render blank because
+single-spa hasn't mounted it and/or no dataset/study is selected — click through the
+portal to the view, and pick a change site on a route that actually renders.
 
-## Unit tests
-`npm run test:unit` (vitest) in the app dir — no server/login needed. Iterate logic
-there; use the dev server + screenshot only for the real visual/integration check.
+## Other
+- Unit tests: `npm run test:unit` (vitest) in the app dir — no server/login needed.
+- No `ps`/`pkill` in the trex image: scan `/proc/<pid>/cmdline` + `kill` builtin; match
+  a vite worker on `.bin/vite` (its cmdline may lack `--port`).
+- Interactive hot-reload preview panel (not for screenshots): see **`d2e-ui-preview`**.
