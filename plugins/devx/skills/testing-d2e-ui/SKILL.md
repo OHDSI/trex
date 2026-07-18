@@ -85,19 +85,42 @@ fields with **`admin` / `Updatepassword12345`** → **Sign in** → back on the 
 authenticated (a `logout` control appears). Verified end-to-end (Atlas login; wizards
 build→overwrite→served-bundle-replaced).
 
-**Reaching the changed view.** Navigate the way a user does. After login, select the
-dataset (e.g. click "Demo dataset"); the embedded apps mount at portal routes —
-`/d2e/portal/researcher/concepts` (concept-sets), `…/researcher/notebook`
-(notebook-ui), `…/researcher/analysis` (analysis-ui), etc. Deep-linking a
-feature-flagged micro-frontend (e.g. `…/portal/wizards/`) may render blank because
-single-spa hasn't mounted it and/or no dataset is selected.
+**Reaching the changed view.** Navigate the way a user does: after login, click
+"Demo dataset" to enter the researcher context, THEN go to the app's route. Deep-linking
+before a dataset is selected (or with the app's feature flag off) renders blank.
 
-**Verified end-to-end** on `portal` (banner change on the authenticated shell with
-live data) AND on a portal-embedded micro-frontend — `concept-sets` rebuilt with
-`NODE_ENV=production bunx vite build`, overwritten, then screenshotted at
-`/researcher/concepts` showing the edited tab label over a live RxNorm concept table.
-The only thing that made the micro-frontend mount was the `NODE_ENV=production` build
-above; everything else (file set, overwrite, navigation) was already correct.
+## Per-app render map (where each UI mounts + how to screenshot it)
+Verified end-to-end (edit → `NODE_ENV=production bunx vite build` → overwrite →
+Playwright): **portal, concept-sets, analysis-ui, wizards, notebook-ui**.
+
+| app | type | how to reach for a screenshot | prereq |
+|---|---|---|---|
+| `portal` | CRA shell | `/d2e/portal/` (renders directly after login) | build with `PUBLIC_URL=/d2e/portal` |
+| `concept-sets` | portal micro-frontend | login → Demo dataset → `/d2e/portal/researcher/concepts` | `conceptSets` flag (on) |
+| `analysis-ui` | portal micro-frontend | → `/d2e/portal/researcher/analysis` | `strategus` flag (on) |
+| `notebook` | portal micro-frontend | → `/d2e/portal/researcher/notebook` | `notebook` flag (on) |
+| `notebook-ui` | portal micro-frontend | → `/d2e/portal/researcher/starboard` | **`starboard` flag (enable, off by default)** |
+| `wizards` | portal micro-frontend | → `/d2e/portal/researcher/wizards` | **`wizards` flag (enable, off by default)** |
+| `concept-mapping` `mapping` `flow` | module-federation remotes | NO own route — loaded inside a host app; edit + rebuild the remote and view it inside its host (concept-sets / analysis) | host's flag |
+| `jobs` | standalone (Prefect UI) | `/d2e/jobs/` (bare route shows only the portal header; content needs a job/study context) | — |
+| `vue-mri-ui-lib` (Atlas) | MRI/Vue plugin | renders after login at the patient-analytics route | — |
+| `webr-notebook` | build + `bun preview` | preview of a build, not portal-mounted | — |
+| `mri-pa-ui` | library | no runnable UI — nothing to screenshot | — |
+
+Note `notebook` (`resources/notebook`, route `notebook`) and `notebook-ui`
+(`resources/notebook-ui`, route `starboard`) are DIFFERENT apps.
+
+## Enabling a feature flag (for `starboard` / `wizards` / etc.)
+Flags live in Postgres `portal.feature` (`feature`, `is_enabled`, plus NOT-NULL
+`created_by`/`modified_by`); an ABSENT flag = off. There's no `psql` in the image —
+use deno + `npm:pg` with the superuser (`PG_SUPER_USER`/`PG_SUPER_PASSWORD`, db
+`PG__DB_NAME` on `PG__HOST`):
+```ts
+await c.query(`insert into portal.feature (feature, is_enabled, created_by, modified_by)
+  values ($1, true, 'devx', 'devx') on conflict (feature) do update set is_enabled=true`, [flag]);
+```
+(or `POST /d2e/system-portal/feature` with an admin session). Delete the row again to
+restore the instance when done. A flag change takes effect on the next portal load.
 
 ## Other
 - Unit tests: `npm run test:unit` (vitest) in the app dir — no server/login needed.
