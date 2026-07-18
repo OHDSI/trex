@@ -29,8 +29,22 @@ build outputs to the workspace `plugins/ui/resources/<app>/` (see the app's
 `vite.config` `build.outDir`; portal is CRA and needs `PUBLIC_URL=/d2e/portal`).
 
 1. Edit the app source in the workspace (`plugins/ui/apps/<app>`).
-2. Build it: `cd apps/<app> && npm run build` (vite, ~1–3 s for small apps) or
-   `PUBLIC_URL=/d2e/portal npx nx build portal` (CRA, minutes).
+2. Build it with **bun** and **`NODE_ENV=production`** (both matter — see below):
+   - Vite apps: `cd apps/<app> && NODE_ENV=production bunx vite build`
+   - portal (CRA): `PUBLIC_URL=/d2e/portal bunx nx build portal` (react-scripts sets
+     production itself; minutes to build)
+   Use `bunx vite build` (not `npm run build`) — some apps' `build` script runs
+   `vitest` first (e.g. concept-sets: `vitest run && vite build`) and a failing test
+   blocks the build.
+
+   **Why `NODE_ENV=production` is mandatory for the micro-frontends.** `@vitejs/plugin-react`
+   keys its dev/prod JSX transform on `process.env.NODE_ENV`, NOT on vite's `mode` — so
+   `vite build` / `bunx vite build` / even `--mode production` still emit **`jsxDEV`**
+   calls unless `NODE_ENV=production` is set (vite's `mode` only drives `isProduction`
+   for outDir/minify). The portal host shares its **production** React, which has no
+   `jsxDEV`, so a dev-JSX bundle crashes at mount with `TypeError: …jsxDEV is not a
+   function` → blank content pane. Verify with `grep -c jsxDEV resources/<app>/lifecycles*.js`
+   (must be 0). The d2e CI sets `NODE_ENV=production` globally; ad-hoc builds must set it.
 3. **Back up + overwrite** the served dir:
    `cp -r /usr/src/bundled-plugins/d2e-ui/resources/<app>{,.bak}` then copy the fresh
    `plugins/ui/resources/<app>/*` over `/usr/src/bundled-plugins/d2e-ui/resources/<app>/`.
@@ -78,17 +92,12 @@ dataset (e.g. click "Demo dataset"); the embedded apps mount at portal routes �
 feature-flagged micro-frontend (e.g. `…/portal/wizards/`) may render blank because
 single-spa hasn't mounted it and/or no dataset is selected.
 
-**Verified reliably only for `portal`.** The self-contained CRA shell rebuilds and
-renders the edit end-to-end (confirmed: a banner change showed on the authenticated
-portal with live data). The **portal-embedded micro-frontends are NOT reliable via a
-bare `vite build` + overwrite**: even when the build succeeds and the served file set
-matches the original, the freshly-built bundle may fail to mount in the portal (blank
-content pane) — likely because the real d2e build configures module-federation shared
-singletons / base / API that a plain `vite build` doesn't reproduce. So for a
-micro-frontend, build it with its real production build (the `nx build <app>` d2e uses,
-with the right env), not an ad-hoc `vite build`, and verify it mounts before trusting
-the screenshot. Also note some apps' `npm run build` runs `vitest` first (e.g.
-concept-sets: `vitest run && vite build`) — a failing test blocks the build.
+**Verified end-to-end** on `portal` (banner change on the authenticated shell with
+live data) AND on a portal-embedded micro-frontend — `concept-sets` rebuilt with
+`NODE_ENV=production bunx vite build`, overwritten, then screenshotted at
+`/researcher/concepts` showing the edited tab label over a live RxNorm concept table.
+The only thing that made the micro-frontend mount was the `NODE_ENV=production` build
+above; everything else (file set, overwrite, navigation) was already correct.
 
 ## Other
 - Unit tests: `npm run test:unit` (vitest) in the app dir — no server/login needed.
