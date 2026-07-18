@@ -233,6 +233,19 @@ function isStreamingContentType(contentType: string): boolean {
   return contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson");
 }
 
+// Serialize hot-reload worker (re)creation per servicePath. A forceCreate worker
+// recompiles the function into the shared /var/tmp/sb-compile-trex/<fn> dir, so
+// two parallel requests recreating the SAME function at once would race and
+// clobber each other's build. Chain them per path so each waits its turn; the
+// fetch runs once the worker exists. Bounded: one tail-promise per servicePath.
+const _hotReloadGate = new Map<string, Promise<unknown>>();
+function serializeHotReload<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const prev = _hotReloadGate.get(key) ?? Promise.resolve();
+  const run = prev.then(task, task); // run after the previous holder settles (ok or error)
+  _hotReloadGate.set(key, run.then(() => {}, () => {}));
+  return run;
+}
+
 async function _callWorker(
   req: globalThis.Request,
   servicePath: string,
@@ -339,17 +352,20 @@ async function _callWorker(
   // behavior.
   const fetchSignal = signal ?? new AbortController().signal;
 
+  // deno-lint-ignore no-explicit-any
+  const spawn = () => (globalThis as any).EdgeRuntime.userWorkers.create(options);
+  // Under hot-reload every request forceCreates a fresh worker (recompile), so
+  // serialize creation per servicePath; otherwise reuse the pool as before.
+  const makeWorker = () => (_hotReload ? serializeHotReload(servicePath, spawn) : spawn());
   try {
-    // deno-lint-ignore no-explicit-any
-    const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
+    const worker = await makeWorker();
     return await worker.fetch(req, { signal: fetchSignal });
   } catch (e: any) {
     // Retry once on WorkerRequestCancelled, same as before — but only if
     // the caller's own signal isn't already aborted (client gone): retrying
     // a dead request just wastes a worker slot on a response nobody reads.
     if (e instanceof (Deno.errors as any).WorkerRequestCancelled && !fetchSignal.aborted) {
-      // deno-lint-ignore no-explicit-any
-      const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
+      const worker = await makeWorker();
       return await worker.fetch(req, { signal: fetchSignal });
     }
     console.error("Worker call error:", e);
