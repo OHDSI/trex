@@ -71,10 +71,24 @@ fields with **`admin` / `Updatepassword12345`** → **Sign in** → back on the 
 authenticated (a `logout` control appears). Verified end-to-end (Atlas login; wizards
 build→overwrite→served-bundle-replaced).
 
-**Reaching the changed view.** Navigate the way a user does. Deep-linking a
+**Reaching the changed view.** Navigate the way a user does. After login, select the
+dataset (e.g. click "Demo dataset"); the embedded apps mount at portal routes —
+`/d2e/portal/researcher/concepts` (concept-sets), `…/researcher/notebook`
+(notebook-ui), `…/researcher/analysis` (analysis-ui), etc. Deep-linking a
 feature-flagged micro-frontend (e.g. `…/portal/wizards/`) may render blank because
-single-spa hasn't mounted it and/or no dataset/study is selected — click through the
-portal to the view, and pick a change site on a route that actually renders.
+single-spa hasn't mounted it and/or no dataset is selected.
+
+**Verified reliably only for `portal`.** The self-contained CRA shell rebuilds and
+renders the edit end-to-end (confirmed: a banner change showed on the authenticated
+portal with live data). The **portal-embedded micro-frontends are NOT reliable via a
+bare `vite build` + overwrite**: even when the build succeeds and the served file set
+matches the original, the freshly-built bundle may fail to mount in the portal (blank
+content pane) — likely because the real d2e build configures module-federation shared
+singletons / base / API that a plain `vite build` doesn't reproduce. So for a
+micro-frontend, build it with its real production build (the `nx build <app>` d2e uses,
+with the right env), not an ad-hoc `vite build`, and verify it mounts before trusting
+the screenshot. Also note some apps' `npm run build` runs `vitest` first (e.g.
+concept-sets: `vitest run && vite build`) — a failing test blocks the build.
 
 ## Other
 - Unit tests: `npm run test:unit` (vitest) in the app dir — no server/login needed.
