@@ -91,24 +91,35 @@ before a dataset is selected (or with the app's feature flag off) renders blank.
 
 ## Per-app render map (where each UI mounts + how to screenshot it)
 Verified end-to-end (edit → `NODE_ENV=production bunx vite build` → overwrite →
-Playwright): **portal, concept-sets, analysis-ui, wizards, notebook-ui**.
+Playwright, marker rendered): **portal, concept-sets, analysis-ui, wizards,
+notebook-ui, jobs, vue-mri-ui-lib**.
 
-| app | type | how to reach for a screenshot | prereq |
+| app | serves | how to reach for a screenshot | prereq |
 |---|---|---|---|
-| `portal` | CRA shell | `/d2e/portal/` (renders directly after login) | build with `PUBLIC_URL=/d2e/portal` |
-| `concept-sets` | portal micro-frontend | login → Demo dataset → `/d2e/portal/researcher/concepts` | `conceptSets` flag (on) |
-| `analysis-ui` | portal micro-frontend | → `/d2e/portal/researcher/analysis` | `strategus` flag (on) |
-| `notebook` | portal micro-frontend | → `/d2e/portal/researcher/notebook` | `notebook` flag (on) |
-| `notebook-ui` | portal micro-frontend | → `/d2e/portal/researcher/starboard` | **`starboard` flag (enable, off by default)** |
-| `wizards` | portal micro-frontend | → `/d2e/portal/researcher/wizards` | **`wizards` flag (enable, off by default)** |
-| `concept-mapping` `mapping` `flow` | module-federation remotes | NO own route — loaded inside a host app; edit + rebuild the remote and view it inside its host (concept-sets / analysis) | host's flag |
-| `jobs` | standalone (Prefect UI) | `/d2e/jobs/` (bare route shows only the portal header; content needs a job/study context) | — |
-| `vue-mri-ui-lib` (Atlas) | MRI/Vue plugin | renders after login at the patient-analytics route | — |
-| `webr-notebook` | build + `bun preview` | preview of a build, not portal-mounted | — |
-| `mri-pa-ui` | library | no runnable UI — nothing to screenshot | — |
+| `portal` | `resources/portal` | `/d2e/portal/` (renders directly after login) | build with `PUBLIC_URL=/d2e/portal` |
+| `concept-sets` | `resources/concept-sets` | login → Demo dataset → `/d2e/portal/researcher/concepts` | `conceptSets` flag (on) |
+| `analysis-ui` | `resources/analysis-ui` | → `/d2e/portal/researcher/analysis` | `strategus` flag (on) |
+| `notebook` | `resources/notebook` | → `/d2e/portal/researcher/notebook` | `notebook` flag (on) |
+| `notebook-ui` | `resources/notebook-ui` | → `/d2e/portal/researcher/starboard` | **`starboard` flag (enable, off by default)** |
+| `wizards` | `resources/wizards` | → `/d2e/portal/researcher/wizards` | **`wizards` flag (enable, off by default)** |
+| `jobs` | `resources/jobs` | `/d2e/portal/systemadmin/jobs/runs` (Prefect UI, renders real job runs) | — |
+| `vue-mri-ui-lib` = **Cohorts** | `resources/mri` | Demo dataset → `/d2e/portal/researcher/cohort` | — |
+| `concept-mapping` `mapping` `flow` | see below | rendered inside an editor, NOT an isolatable `resources/<app>` overwrite | — |
+| `webr-notebook` | `resources/webr-notebook` | build + `bun preview` — not portal-mounted | — |
+| `mri-pa-ui` | — | a library, no runnable UI | — |
 
-Note `notebook` (`resources/notebook`, route `notebook`) and `notebook-ui`
-(`resources/notebook-ui`, route `starboard`) are DIFFERENT apps.
+Notes:
+- `vue-mri-ui-lib` is the **Cohorts** feature (NOT Atlas — Atlas is a separate plugin
+  served at `/atlas`). It builds to `resources/mri` (served at `/mri`), edit strings
+  live in `src/lib/i18n.ts`.
+- `notebook` (`resources/notebook`, route `notebook`) and `notebook-ui`
+  (`resources/notebook-ui`, route `starboard`) are DIFFERENT apps.
+- **`flow` / `mapping` / `concept-mapping`** are the ETL/analysis flow editors
+  (React-Flow canvas: ETL → `Create dataflow`, Analysis → `Create strategus flow`).
+  They render and are screenshottable, but their code is bundled into the host — no
+  `/resources/flow|mapping/` bundle loads at runtime — so the build+overwrite loop
+  can't target them in isolation the way the apps above can; screenshot them live
+  after opening the editor, or find which host bundle carries them first.
 
 ## Enabling a feature flag (for `starboard` / `wizards` / etc.)
 Flags live in Postgres `portal.feature` (`feature`, `is_enabled`, plus NOT-NULL
