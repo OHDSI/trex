@@ -94,7 +94,10 @@ portal for a faithful view (see `testing-d2e-ui`). Only `vue-mri-ui-lib` and
 
 **Build output:** built assets go to `resources/<app>/`.
 
-**Running / testing (dev server, login, Playwright screenshots):** see **`testing-d2e-ui`**.
+**Verifying / screenshotting a UI change:** default is build + overwrite the served
+resources, then screenshot the real `:41100` route — see **`testing-d2e-ui`**. The
+interactive hot-reload preview dev server is a separate concern — see
+**`d2e-ui-preview`**.
 
 ---
 
