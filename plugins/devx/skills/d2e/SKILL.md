@@ -63,10 +63,14 @@ To exercise a function for real, it must be **served by trex** (an edge worker):
    `{"path":"<abs worktree function dir>"}` — needs an **admin JWT**, and the dir
    must be under `/tmp/devx-workspaces`. Then hit the function's real route on
    `:33001`; because `PG__*` is set, DB-backed routes return real local data.
-3. **Iterating after an edit:** the edge worker caches modules and is pooled, so
-   an edit to an already-served function is NOT picked up live — restart trex to
-   reload it (safe; the coder session persists across restarts). Use `deno test`
-   for fast logic iteration and the served route for the real integration check.
+3. **Hot-reload (edits go live, no restart):** with `DEVX_HOT_RELOAD` on (default
+   in local dev), an edit to a served workspace function is picked up on the
+   **next request** — no restart, no re-register — because each request spins a
+   fresh, module-cache-bypassing edge worker that re-reads source. Concurrent
+   requests to the same function are serialized so they don't clobber each other's
+   rebuild. Applies to source (unbundled) functions; an eszip-bundled function
+   still needs a rebuild. Use `deno test` for fast logic iteration and the served
+   route for the real integration check.
 4. **Restore the original function when you are done testing.** If your test
    changed the function only to exercise it (a temporary probe/version marker, a
    loosened check), revert that edit so the running stack is left exactly as the
