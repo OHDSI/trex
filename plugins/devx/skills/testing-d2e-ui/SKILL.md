@@ -91,35 +91,37 @@ before a dataset is selected (or with the app's feature flag off) renders blank.
 
 ## Per-app render map (where each UI mounts + how to screenshot it)
 Verified end-to-end (edit → `NODE_ENV=production bunx vite build` → overwrite →
-Playwright, marker rendered): **portal, concept-sets, analysis-ui, wizards,
-notebook-ui, jobs, vue-mri-ui-lib**.
+Playwright, marker rendered): **portal, concept-sets, analysis-ui, notebook-ui,
+wizards, jobs, vue-mri-ui-lib, webr-notebook, flow** (9 apps).
 
 | app | serves | how to reach for a screenshot | prereq |
 |---|---|---|---|
 | `portal` | `resources/portal` | `/d2e/portal/` (renders directly after login) | build with `PUBLIC_URL=/d2e/portal` |
 | `concept-sets` | `resources/concept-sets` | login → Demo dataset → `/d2e/portal/researcher/concepts` | `conceptSets` flag (on) |
 | `analysis-ui` | `resources/analysis-ui` | → `/d2e/portal/researcher/analysis` | `strategus` flag (on) |
-| `notebook` | `resources/notebook` | → `/d2e/portal/researcher/notebook` | `notebook` flag (on) |
+| `webr-notebook` = **Notebooks** | `resources/notebook` | → `/d2e/portal/researcher/notebook` | `notebook` flag (on) |
 | `notebook-ui` | `resources/notebook-ui` | → `/d2e/portal/researcher/starboard` | **`starboard` flag (enable, off by default)** |
 | `wizards` | `resources/wizards` | → `/d2e/portal/researcher/wizards` | **`wizards` flag (enable, off by default)** |
-| `jobs` | `resources/jobs` | `/d2e/portal/systemadmin/jobs/runs` (Prefect UI, renders real job runs) | — |
+| `jobs` | `resources/jobs` | `/d2e/portal/systemadmin/jobs/runs` (Prefect UI, real job runs) | — |
 | `vue-mri-ui-lib` = **Cohorts** | `resources/mri` | Demo dataset → `/d2e/portal/researcher/cohort` | — |
-| `concept-mapping` `mapping` `flow` | see below | rendered inside an editor, NOT an isolatable `resources/<app>` overwrite | — |
-| `webr-notebook` | `resources/webr-notebook` | build + `bun preview` — not portal-mounted | — |
+| `flow` = the **ETL dataflow editor** | `resources/flow` | `/d2e/portal/systemadmin/etl` → open a dataflow (toolbar `Add node`/`Create subflow` are flow strings) | — |
+| `mapping` / `concept-mapping` | `resources/mapping` / `resources/concept-mapping` (`module.js`) | inside the flow editor — see below | — |
 | `mri-pa-ui` | — | a library, no runnable UI | — |
 
 Notes:
-- `vue-mri-ui-lib` is the **Cohorts** feature (NOT Atlas — Atlas is a separate plugin
-  served at `/atlas`). It builds to `resources/mri` (served at `/mri`), edit strings
-  live in `src/lib/i18n.ts`.
-- `notebook` (`resources/notebook`, route `notebook`) and `notebook-ui`
-  (`resources/notebook-ui`, route `starboard`) are DIFFERENT apps.
-- **`flow` / `mapping` / `concept-mapping`** are the ETL/analysis flow editors
-  (React-Flow canvas: ETL → `Create dataflow`, Analysis → `Create strategus flow`).
-  They render and are screenshottable, but their code is bundled into the host — no
-  `/resources/flow|mapping/` bundle loads at runtime — so the build+overwrite loop
-  can't target them in isolation the way the apps above can; screenshot them live
-  after opening the editor, or find which host bundle carries them first.
+- **`webr-notebook` builds to `resources/notebook`** and IS the **Notebooks** tab
+  (`/researcher/notebook`). `notebook-ui` (`resources/notebook-ui`) is a DIFFERENT app,
+  the `starboard` route.
+- `vue-mri-ui-lib` is **Cohorts** (NOT Atlas — Atlas is a separate `/atlas` plugin);
+  builds to `resources/mri`, edit strings in `src/lib/i18n.ts`.
+- **`mapping` / `concept-mapping`** DO build+overwrite cleanly (`module.js`,
+  `NODE_ENV=production`, `jsxDEV`=0 — same as any app). They render as module-federation
+  remotes **inside the flow editor's node drawer** (`flow/.../DataMappingNode/DataMappingDrawer`
+  loads `path="/mapping/module.js"`): open a dataflow → `Add node` → tick **Show
+  experimental** → **White Rabbit / Rabbit in a Hat** (mapping) or **Concept mapping**
+  (concept-mapping) → open that node's settings drawer to mount the remote. The
+  build+overwrite half is verified; the drawer is several interaction-levels deep, so
+  driving Playwright to it is the only remaining fiddly bit.
 
 ## Enabling a feature flag (for `starboard` / `wizards` / etc.)
 Flags live in Postgres `portal.feature` (`feature`, `is_enabled`, plus NOT-NULL
