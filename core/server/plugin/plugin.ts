@@ -38,8 +38,8 @@ const MEMORY_SOURCE_OWNERS: SourceOwners = new Map();
 //     initPlugins, BEFORE any plugin is dispatched) that scans every
 //     discovered plugin's package.json across all PLUGINS_DEV_PATH/
 //     PLUGINS_PATH directories. Needed because dispatch order is:
-//     WITHIN one plugin's own trex block, agents (orderRank 4) sort before
-//     memory (5); but ACROSS different plugins, scanAndRegister dispatches
+//     WITHIN one plugin's own trex block, agents (orderRank 5) sort before
+//     memory (6); but ACROSS different plugins, scanAndRegister dispatches
 //     each plugin's whole trex block as it's found on disk — an
 //     agents-declaring plugin can be (and often is) a completely different
 //     plugin from the one declaring the memory it links, and may be scanned

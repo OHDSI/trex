@@ -281,7 +281,7 @@ export function isTrustedScopeAgentsPlugin(name: string): boolean {
 // Pure — returns the subset of an agent's memory links whose name is NOT in
 // the declared-memory allow-list (see plugin.ts's DECLARED_MEMORY_NAMES,
 // populated in a pre-pass across every plugin's package.json before any
-// plugin is dispatched, since agents (orderRank 4) load before memory (5)
+// plugin is dispatched, since agents (orderRank 5) load before memory (6)
 // yet the two can live in different plugins scanned in either order).
 // Exported standalone so it's testable without driving addAgentsPlugin's
 // full Express-app path.
