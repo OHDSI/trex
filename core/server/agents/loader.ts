@@ -91,6 +91,15 @@ export function parseSkillDescription(markdown: string): string {
   return "";
 }
 
+// A skill staged from a skills-plugin pack is named `<pack>--<skill>`
+// (plugin/skill-packs.ts's staging convention; "--" is rejected in pack and
+// pack-skill names, and reserved — hand-authored skills should not use it).
+// Returns the pack name, or null for a hand-authored skill.
+export function packOfSkillName(name: string): string | null {
+  const i = name.indexOf("--");
+  return i > 0 ? name.slice(0, i) : null;
+}
+
 export async function loadAgent(dir: string, opts: { depth?: number } = {}): Promise<LoadedAgent> {
   const depth = opts.depth ?? 0;
   let instructions: string | null = null;
