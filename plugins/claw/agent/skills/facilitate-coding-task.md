@@ -197,7 +197,26 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     is committed on the branch and summarized (or linked) in the PR description.
     Report the PR link (or say why it couldn't — e.g. no git remote configured)."
     Post the PR link to the channel. Deny → leave the branch uncommitted and say so.
-13. **Close the loop.** Keep going until the coding agent reports the work is done
+13. **Offer a live demo deployment — after the PR is open, not before.** Once the PR
+    link is posted (and the screenshots from step 11 are in the channel), offer to stand
+    the branch up as a clickable environment: `postChoice` with `Deploy a demo
+    environment` (value "deploy") and `Not now` (value "no deploy"). Frame the cost
+    honestly — roughly **1.5–2.5 hours** before a URL exists.
+    Two things gate it, and both must be said out loud rather than assumed:
+    - **The PR must be READY, not draft.** Draft PRs build no images, so they cannot be
+      deployed at all. If the PR is draft, say so and offer to mark it ready first.
+    - **The images must have finished building** (~1–1.5 h after the PR is ready). Do not
+      dispatch before that; the deploy fails on a missing tag.
+    On "deploy", hand it to the coder: "Use your `deploying-d2e-branch` skill to deploy
+    PR <n> / branch <branch>. Wait for the Docker Build to finish first, then dispatch and
+    report the tunnel URL once the environment is actually up."
+    **Do not block the channel on it.** Post the build/run link immediately so people can
+    watch progress, then carry on and close the loop (step 14) as normal — the deployment
+    is a long-running side task, not a reason to hold the conversation open. Post one
+    interim note if the wait runs long, and post the URL, its expiry, and the login when
+    it finally lands. If the deploy fails, say so with the failing step rather than
+    quietly dropping it.
+14. **Close the loop.** Keep going until the coding agent reports the work is done
     (implemented, checks/reviews handled, committed/PR'd if approved), then post
     a short, concrete summary to the channel.
 
