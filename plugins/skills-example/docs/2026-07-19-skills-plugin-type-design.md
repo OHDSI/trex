@@ -158,10 +158,17 @@ primitive. The `trex_plugin_install`/uninstall SQL surface stays untouched.
 - Pack targets no registered agent → registers quietly and waits; log at info
   level so it is diagnosable.
 - Re-stage failure (collision, bad pack) → the swap never happens; the running
-  agent keeps its current dir and the install call returns the error. No
-  partial state.
+  agent keeps its current dir. No partial state: `addSkillsPlugin` validates
+  every pack before registering any. ACCEPTED DEVIATION (final review): the
+  dynamic install surface (`registerFromPath` → `addPlugin`) logs registration
+  errors rather than returning them — a pre-existing core convention shared by
+  every plugin type, not changed by this feature; operators find the error in
+  server logs.
 - Two packs shipping a same-named skill cannot collide (pack prefix). A pack
-  colliding with a hand-authored file throws at stage time.
+  colliding with a hand-authored file throws at stage time; at boot that skips
+  just the affected agent (per-entry isolation in `addAgentsPlugin`), and the
+  pre-pass skips packs that fail dir validation so a malformed pack cannot
+  block targeted agents from registering.
 - `"*"` packs apply to agents from any trusted plugin, including ones installed
   later — stated explicitly in docs since it changes other plugins' prompt
   surface.
