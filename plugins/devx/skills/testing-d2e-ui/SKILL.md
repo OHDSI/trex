@@ -1,9 +1,15 @@
 ---
 name: testing-d2e-ui
-description: Use when verifying or screenshotting a Data2Evidence (d2e) UI change locally — the default flow is build the app + overwrite the served resources at :41100, then screenshot the real route with Playwright + Logto login. (For the interactive hot-reload preview panel, see d2e-ui-preview instead.)
+description: Use after ANY Data2Evidence (d2e) UI change — drive the feature with Playwright to prove it works, and capture screenshots. The flow is build the app + overwrite the served resources at :41100, then exercise the real route with Playwright + Logto login. (For the interactive hot-reload preview panel, see d2e-ui-preview instead.)
 ---
 
 # Testing / screenshotting d2e UI changes
+
+**Every UI change gets exercised in a browser before you call it done.** Rendering a
+page is the floor, not the bar: click the thing you changed, assert the resulting state,
+and capture a screenshot when it helps a human review it (new/changed visuals, a bug
+reproduction, a before/after). A build that compiles and a page that loads prove
+nothing about the feature — see "Testing the feature" below.
 
 For what the UI monorepo IS (frameworks, module federation, portal context props,
 styling), see the `d2e` skill. **Default flow for verifying a change: build the app
@@ -88,6 +94,32 @@ build→overwrite→served-bundle-replaced).
 **Reaching the changed view.** Navigate the way a user does: after login, click
 "Demo dataset" to enter the researcher context, THEN go to the app's route. Deep-linking
 before a dataset is selected (or with the app's feature flag off) renders blank.
+
+## 3. Testing the feature (not just rendering it)
+A 200 and a screenshot only prove the bundle loaded. For a feature change, drive it:
+
+1. **Reach the exact view you changed** (per-app routes below), logged in, with a
+   dataset selected where the app needs one.
+2. **Interact like a user** — click the control, type in the field, submit the form,
+   switch the tab. Prefer role/text locators (`getByRole("button",{name:/save/i})`,
+   `getByText(...)`) over CSS; they survive restyling and fail loudly when the label
+   you changed didn't render.
+3. **Assert the outcome**, not just absence of errors: the new element appears, the
+   text changed, the row count moved, the dialog closed. Read it back from the DOM
+   (`innerText`, `locator(...).count()`), and print it so the result is in the log.
+4. **Fail loudly.** Collect `page.on("pageerror")` and console errors and report them —
+   a feature that renders while throwing is not working. Watch for a `…/module.js`
+   response when the change is in a module-federation remote, to prove the *edited*
+   bundle actually mounted (see the remotes note below).
+5. **Screenshot when it helps a human**: new or changed visuals, an empty/error state,
+   before/after for a fix. Skip it for pure logic changes that produce no visual delta —
+   an assertion is the better evidence there.
+
+Guard against false positives: verify your edited string is in the served bundle before
+believing a negative, and use a **fresh browser context** so nothing is cached. If your
+marker doesn't appear, first ask whether you are looking at the right component — flow
+and mapping both ship a `ScanDataDialog`, and the portal-hosted copy may not be the one
+you edited.
 
 ## Per-app render map (where each UI mounts + how to screenshot it)
 Verified end-to-end (edit → `NODE_ENV=production bunx vite build` → overwrite →
