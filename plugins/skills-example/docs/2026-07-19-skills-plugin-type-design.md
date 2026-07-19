@@ -79,8 +79,14 @@ attaches if/when that agent appears.
 
 ### 2. Registration & validation
 
-- New `case "skills":` in the `addPlugin` switch (plugin.ts:139-189), handler
-  module `core/server/plugin/skills.ts`, orderRank 6 (after `memory`).
+- New `case "skills":` in the `addPlugin` switch (plugin.ts:139-189). Two
+  modules, split to avoid an import cycle: `core/server/plugin/skill-packs.ts`
+  (pack model, registry, staging — imported by `agents.ts`) and
+  `core/server/plugin/skills.ts` (dispatch orchestration — imports
+  `agents.ts`). orderRank 4, BEFORE `agents`: at boot the pre-pass makes
+  ordering irrelevant, but a dynamically registered plugin declaring both its
+  own packs and its own agents then registers packs first and stages each
+  agent exactly once.
 - Trusted-scope gate: same `isTrustedPluginScope` check as agents/memory
   (`@trex`/`@ohdsi` scopes only) — packs inject prompt content and MCP
   connections into other plugins' agents.
@@ -193,8 +199,10 @@ primitive. The `trex_plugin_install`/uninstall SQL surface stays untouched.
 
 | File | Change |
 | --- | --- |
-| `core/server/plugin/plugin.ts` | `case "skills"`, orderRank 6, `collectDeclaredSkillPacks` pre-pass |
-| `core/server/plugin/skills.ts` | new: normalize, validate, runtime attach/detach orchestration |
+| `core/server/plugin/plugin.ts` | `case "skills"`, orderRank 4 (before agents), pre-pass call |
+| `core/server/plugin/skill-packs.ts` | new: pack model, declaration registry, validation, staging |
+| `core/server/plugin/skills.ts` | new: dispatch orchestration, dynamic re-stage of mounted agents |
+| `core/server/plugin/function.ts` | `LiveWorkerConfig` indirection in `_addFunction` (both call sites) |
 | `core/server/plugin/agents.ts` | stage matching packs in `buildAgentWorkerConfig`; per-agent mount registry + `mountRef` indirection |
 | `core/server/agents/service/handler.ts` | `pack` provenance in `/eve/v1/info` |
 | `core/server/agents/README.md` | authoring/operating docs for skill packs |
