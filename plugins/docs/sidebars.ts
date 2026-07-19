@@ -95,6 +95,7 @@ const sidebars: SidebarsConfig = {
         "plugins/transform-plugins",
         "plugins/agent-plugins",
         "plugins/memory-plugins",
+        "plugins/skill-plugins",
       ],
     },
     {
