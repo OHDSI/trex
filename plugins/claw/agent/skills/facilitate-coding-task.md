@@ -97,8 +97,13 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    `askCodeAgent`: "Run your writing-plans skill to write a detailed plan/spec
    for <the chosen option>, and SAVE it into the repo (e.g. `docs/plans/<feature>.md`)
    so it is committed with the work and can go in the PR. Do NOT implement — stop
-   after presenting the plan." Show it with `postPlan` (pass the plan markdown as
-   `text`, and the saved repo path as `attachPath` so the full file is attached).
+   after presenting the plan, and report the exact saved path." Then `postPlan` and
+   **ALWAYS attach the whole plan as a `.md` file**: pass a readable view (the plan, or a
+   summary if it is long) as `text` AND the saved repo path as `attachPath` so the
+   complete plan file is attached every time. Showing the text or a summary alone is not
+   enough — the full plan must always go up as an attachment, so the team can read and the
+   PR can reference the exact spec. If the coder did not report a saved path, ask it to
+   save the plan and give you the path before you post.
    Then call `awaitApproval` (`what: "the plan"`).
    - Answer any question you can settle from the discussion with another
      `askCodeAgent` call yourself; escalate to the channel only for real
@@ -131,16 +136,24 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
      channel, continue). "Should I keep going?" is not a new decision — keep going.
    - If progress stalls (a continue returns the same remaining tasks, or the coder
      reports it is blocked), stop and report the blocker to the channel plainly.
-   When the coder reports all tasks complete, do NOT offer a PR yet — the review
-   checks come first. Go straight to step 8 (browser verification), then step 9, even if the coder already committed
-   each task as it went (committed work still gets reviewed before a PR).
+   **"Implementation complete" is a MIDPOINT, not the end — do NOT post a "done" /
+   "finished implementing" message and stop.** Coding finished only means you have
+   reached step 8. When the coder reports all tasks complete, say nothing that sounds
+   like the task is over; instead **immediately proceed to step 8 (browser verification +
+   screenshots), then step 9 (checks)**, even if the coder already committed each task as
+   it went. Do not offer a PR yet, and do not close the loop (step 14) — steps 8-13 still
+   remain. If you catch yourself about to announce completion right after implementation,
+   that is the signal you are skipping the gates: go to step 8 instead.
 8. **Exercise the feature in a browser, then show it — expected, not optional, for
    any UI change.** When the change touches something the team can see (a component,
    a page, styling — a component migration like Button → VButton counts), ask the
    coder to **drive the feature with Playwright and report what it observed**, before
-   any PR. Tell it to use its UI testing skill (`testing-d2e-ui` for d2e) so it picks
-   the right method rather than inventing one — for d2e that is build + overwrite the
-   served resources, then exercise the real route logged in.
+   any PR. Instruct it explicitly (not just "take screenshots"): **use the `testing-d2e-ui`
+   skill — build the app and overwrite the served resources, then drive and screenshot the
+   real `:41100` route logged in. Do NOT start a dev server to screenshot** — the dev
+   server is only the interactive preview panel (`d2e-ui-preview`) and most apps render
+   blank standalone. If the coder reports it is "starting the dev server" to capture
+   screenshots, stop it and have it redo the build + overwrite flow.
    Require back, in the coder's own words: the route it drove, the interaction it
    performed, the assertion that passed (what actually changed in the DOM), and
    whether any console/page errors fired. "It builds" or "the page loads" is NOT a

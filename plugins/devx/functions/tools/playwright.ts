@@ -103,13 +103,13 @@ async function runPlaywright(
 export const browserNavigateTool: ToolDefinition<{ url: string }> = {
   name: "BrowserNavigate",
   description:
-    "Navigate to a URL in the browser and return the page's text content, links, and form elements. Use this to load a page and see what's on it.",
+    "Navigate to a URL in the browser and return the page's text content, links, and form elements. Use this to load a page and see what's on it. To verify or screenshot a d2e UI change, do NOT start a dev server — build the app and overwrite the served resources, then navigate the real served route at https://localhost:41100/... (see the testing-d2e-ui skill). A running dev server (http://localhost:<port>) is only for the interactive preview panel or a review pass.",
   parameters: {
     type: "object",
     properties: {
       url: {
         type: "string",
-        description: "The URL to navigate to (e.g., http://localhost:3001)",
+        description: "The URL to navigate to — e.g. https://localhost:41100/d2e/portal/ for a served d2e route (the default for verification/screenshots), or http://localhost:<port> for a running dev server.",
       },
     },
     required: ["url"],
