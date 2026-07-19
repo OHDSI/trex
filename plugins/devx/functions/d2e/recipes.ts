@@ -11,7 +11,8 @@ import type { SubAppRun, PortStyle } from "./types.ts";
  * env instead of `--port`/`--base` flags, which react-scripts ignores. */
 export const UI_RECIPES: Record<string, { name: string; framework: string; devCommand: string; port: number; portStyle: PortStyle; notes?: string }> = {
   portal:            { name: "Portal (shell)",         framework: "react-cra",  devCommand: "bun run start", port: 4000, portStyle: "cra" },
-  "vue-mri-ui-lib":  { name: "Patient Analytics (MRI)",framework: "vue-vite",   devCommand: "bun run start", port: 8081, portStyle: "vite" },
+  // vue-mri-ui-lib has NO `start` script — its dev server is `serve`.
+  "vue-mri-ui-lib":  { name: "Cohorts (MRI)",           framework: "vue-vite",   devCommand: "bun run serve", port: 8081, portStyle: "vite" },
   jobs:              { name: "Jobs (Prefect UI)",      framework: "vue-vite",   devCommand: "bun run start", port: 5173, portStyle: "vite" },
   flow:              { name: "Flow (dataflow)",        framework: "react-vite", devCommand: "bun run start", port: 4900, portStyle: "vite", notes: "module-federation remote; usually loaded inside Portal" },
   "analysis-ui":     { name: "Analysis (Strategus)",   framework: "react-vite", devCommand: "bun run start", port: 4800, portStyle: "vite", notes: "module-federation remote; usually loaded inside Portal" },
@@ -20,6 +21,12 @@ export const UI_RECIPES: Record<string, { name: string; framework: string; devCo
   "concept-mapping": { name: "Concept Mapping",        framework: "react-vite", devCommand: "bun run start", port: 4601, portStyle: "vite", notes: "micro-frontend; usually loaded inside Portal" },
   "notebook-ui":     { name: "Notebook UI",            framework: "react-vite", devCommand: "bun run start", port: 4602, portStyle: "vite", notes: "micro-frontend; usually loaded inside Portal" },
   wizards:           { name: "Wizards",                framework: "react-vite", devCommand: "bun run start", port: 4603, portStyle: "vite" },
+  // webr-notebook has NO `start` script either, and its `dev` is a
+  // build:watch + vite-preview combo (not a dev server that accepts --port/--base),
+  // so drive vite directly.
+  // `bun x` (not `bunx`): the process manager's command allowlist permits `bun`,
+  // and validation.rs rejects a bare `bunx` first-word.
+  "webr-notebook":   { name: "Notebooks (WebR)",       framework: "react-vite", devCommand: "bun x vite",    port: 4604, portStyle: "vite" },
 };
 
 /** Build a UI sub-app run spec. installCwd is the monorepo root (uiRoot). */

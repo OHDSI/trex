@@ -2141,28 +2141,34 @@ Deno.serve(async (req: Request) => {
       const buildUrl = (scheme: string) => `${scheme}://localhost:${proxyPort}${proxyBase}${proxyPath}${url.search}`;
       const getHttpsClient = async (): Promise<Deno.HttpClient | undefined> => {
         const cache: Map<string, Deno.HttpClient> = ((globalThis as any).__devxHttpsClients ??= new Map());
-        if (cache.has(appId)) return cache.get(appId);
-        const caCerts: string[] = [];
+        // Resolve the ACTIVE sub-app first: a d2e app has many sub-apps and each
+        // vite dev server mints its own basicSsl cert, so the client must be keyed
+        // per sub-app. Keying by appId alone reuses the first sub-app's CA for every
+        // later one, which fails TLS validation and surfaces as a 502 preview.
+        let devAbs: string | undefined;
         try {
           const cfgRes = await sql(`SELECT config FROM devx.apps WHERE id = $1 AND user_id = $2`, [appId, userId]);
           const d2e = cfgRes.rows[0]?.config?.d2e;
           const sa = d2e?.subApps?.find((s: any) => s.key === d2e.activeSubApp);
-          if (sa?.run?.devCwd) {
-            const devAbs = safeJoin(getAppWorkspacePath(userId, appId), sa.run.devCwd);
-            for (const certDir of [`${devAbs}/.devServer/cert`, `${devAbs}/node_modules/.vite/basic-ssl`]) {
-              try {
-                for await (const e of Deno.readDir(certDir)) {
-                  if (e.isFile && e.name.endsWith(".pem")) {
-                    try { caCerts.push(await Deno.readTextFile(`${certDir}/${e.name}`)); } catch { /* skip */ }
-                  }
-                }
-              } catch { /* dir absent */ }
-            }
-          }
+          if (sa?.run?.devCwd) devAbs = safeJoin(getAppWorkspacePath(userId, appId), sa.run.devCwd);
         } catch { /* best-effort */ }
+        const cacheKey = `${appId}:${devAbs ?? ""}`;
+        if (cache.has(cacheKey)) return cache.get(cacheKey);
+        const caCerts: string[] = [];
+        if (devAbs) {
+          for (const certDir of [`${devAbs}/.devServer/cert`, `${devAbs}/node_modules/.vite/basic-ssl`]) {
+            try {
+              for await (const e of Deno.readDir(certDir)) {
+                if (e.isFile && e.name.endsWith(".pem")) {
+                  try { caCerts.push(await Deno.readTextFile(`${certDir}/${e.name}`)); } catch { /* skip */ }
+                }
+              }
+            } catch { /* dir absent */ }
+          }
+        }
         if (!caCerts.length) return undefined;
         const client = Deno.createHttpClient({ caCerts });
-        cache.set(appId, client);
+        cache.set(cacheKey, client);
         return client;
       };
       try {
