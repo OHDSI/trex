@@ -45,11 +45,34 @@ POST /logs/filter                            -> {"logs":{"flow_run_id":{"any_":[
 Terminal states: `COMPLETED | FAILED | CRASHED | CANCELLED`. Assert `COMPLETED`; on
 anything else dump the logs — the real error is in the last few lines.
 
+**Where to run these from.** They're container-internal, so `docker exec` into `alp-trex`
+or `alp-dataflow-gen-worker` (both have `curl`; `PREFECT_API_URL` is already set on the
+worker). **Neither has `jq`**, and the worker's `python3` is not on `PATH` (only under
+`…/baked/.pixi/envs/default/bin`). Either pipe `docker exec … curl` output to host-side
+`jq`, or `docker exec -i … python3` with a heredoc — note the **`-i`**, without it the
+heredoc is silently empty and you get no output at all.
+
 **Don't invent `parameters`.** Most flows take one required `options` object with many
 required keys. Copy it from a previous successful run of the same deployment
 (`/flow_runs/filter`, take `parameters`) and edit what you need.
 
+**But check which branch the cribbed params exercise** — this produces false negatives.
+Flows commonly switch on an action field (`options.flowActionType`), and different
+branches populate different fields. Example: every stored run of
+`create_cachedb_file_plugin` used `get_version_info`, where `options.schema_name` is
+**null** and the schema lives in `options.datasets[].schemaName`. Code you added reading
+`schema_name` logs `None`, and you conclude your edit never ran when it ran fine. Compare
+the cribbed params against the deployment's `parameter_openapi_schema`, and make sure the
+branch you edited is the branch you triggered.
+
 ## The authtoken input — the trap that costs you 5 minutes
+**If you only need to prove your code ran, you do NOT need a real token.** Send a
+throwaway value: the wait resolves instantly and the run fails fast at
+`[401] PortalServerAPI`. That is late enough to be harmless, because `get_auth_token()`
+is called **lazily** (inside `daobase.py` / `BaseAPI.py`), not at module import — so flow
+entry, imports, and any logging you added there all execute first. Read on for a real
+token only if your change touches a portal callback.
+
 Flows wait for a Prefect **run input** named exactly `authtoken` and use it to call back
 into the portal. `create_flow_run` alone does NOT supply it (the portal sends it
 separately), so the run sits in `RUNNING`, logs stop after a line like
@@ -128,8 +151,13 @@ trex, which mounts it at `/usr/src/flows-dev`):
 Two things to know:
 - **Source-only.** The overlay excludes `.pixi/` and `.d2e-env-ready` and reuses the
   resolved dir's provisioned env, so dependency changes still need a re-provision.
-- **It MUTATES the baked dir.** The overlaid files stay after the run. Either revert them
-  or recreate the worker to get back to pristine baked code.
+- **It MUTATES the baked dir — snapshot the pristine file BEFORE you overlay it.**
+  `docker exec <worker> cat <baked path> > pristine.py` (plus its `md5sum`) as your very
+  first step. There is no second copy in the container; once you have overlaid, the
+  original is gone and only a worker recreate brings it back. Revert with the snapshot,
+  confirm by `md5sum`, and delete the stale `__pycache__/*.pyc` left next to it.
+  The overlay is `rsync -a` with **no `--delete`**, so only files you actually place get
+  clobbered — reverting is file-scoped, not directory-scoped.
 - If you have hot-patched trex by `docker cp`-ing files into `/usr/src/plugins-dx` or
   `/usr/src/plugins-dev`, **recreating trex to pick up the mount drops those patches** —
   they live in the image, not a volume. Re-copy them afterwards. `/root/.claude` (the
@@ -143,4 +171,6 @@ throwaway `authtoken`: the wait resolves instantly and the run fails fast at
 Runs and their inputs persist in Prefect. Give test runs an obvious `name`
 (e.g. `devx-…`) so they're identifiable, and delete the `authtoken` input when done the
 way the portal does (`DELETE /flow_runs/{id}/input/authtoken`) rather than leaving user
-tokens sitting in Prefect.
+tokens sitting in Prefect. Note the cribbed `options` object usually carries a `token`
+field and tenant/dataset identifiers too, and those persist on the run — delete the whole
+run if that matters, rather than only the input.

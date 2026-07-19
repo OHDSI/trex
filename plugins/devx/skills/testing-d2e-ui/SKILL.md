@@ -20,10 +20,19 @@ change. Do NOT reach for a standalone dev server to take screenshots — most d2
 render blank/404 on their own; the dev server is only for the interactive preview panel
 (`d2e-ui-preview`).
 
-## 0. Build the shared libs once (prerequisite)
-`@portal/components` (`libs/portal-components`) and `@portal/plugin`
-(`libs/portal-plugin`) ship as build output only. Apps won't compile/start until
-they're built. From `plugins/ui`:
+## 0. Prerequisites
+**`plugins/ui` means `<d2e repo>/plugins/ui`** — the **d2e** repo (Data2Evidence), NOT
+the trex repo this skill file lives in. Several d2e checkouts/worktrees may exist on the
+machine; use the one the stack is actually running (`docker inspect alp-trex` and read the
+bind-mount sources) — otherwise you edit one tree and screenshot another.
+
+1. **Install the workspace**: `bun install` in `plugins/ui`. A rollup error like
+   `failed to resolve import "@fontsource-variable/…"` on a dep that IS declared in the
+   app's `package.json` means a **stale install**, not a code bug. Do not reach for
+   `npm install` — this workspace fails it on an ERESOLVE peer conflict.
+2. **Build the shared libs.** `@portal/components` (`libs/portal-components`) and
+   `@portal/plugin` (`libs/portal-plugin`) ship as build output only; apps won't compile
+   until they're built. From `plugins/ui`:
 ```
 bunx nx run-many --targets=build --projects=@portal/components,@portal/plugin
 ```
@@ -51,11 +60,23 @@ build outputs to the workspace `plugins/ui/resources/<app>/` (see the app's
    `jsxDEV`, so a dev-JSX bundle crashes at mount with `TypeError: …jsxDEV is not a
    function` → blank content pane. Verify with `grep -c jsxDEV resources/<app>/lifecycles*.js`
    (must be 0). The d2e CI sets `NODE_ENV=production` globally; ad-hoc builds must set it.
-3. **Back up + overwrite** the served dir:
-   `cp -r /usr/src/bundled-plugins/d2e-ui/resources/<app>{,.bak}` then copy the fresh
-   `plugins/ui/resources/<app>/*` over `/usr/src/bundled-plugins/d2e-ui/resources/<app>/`.
+3. **Back up + overwrite** the served dir. Use these commands literally — the naive
+   forms are wrong (see below):
+   ```
+   D=/usr/src/bundled-plugins/d2e-ui/resources/<app>
+   cp -r "$D" "$D.bak"
+   rm -rf "$D" && cp -r plugins/ui/resources/<app> "$D"   # replace, don't merge
+   ```
+   Copying *over* the existing dir is a **merge**, so stale content-hashed chunks from
+   the previous build survive alongside the new ones.
 4. Screenshot the served route (§2).
-5. **Restore**: move the `.bak` back. Leave the served tree as you found it.
+5. **Restore**: `rm -rf "$D" && mv "$D.bak" "$D"`. A bare `mv "$D.bak" "$D"` while `$D`
+   still exists **nests** the backup inside it instead of replacing it. Verify: your
+   marker is gone and no `.bak` is left behind.
+6. **Check `git status`.** Some apps regenerate a **tracked** file during `vite build` —
+   e.g. concept-sets' `vite.config.ts` runs `basicSsl({ certDir: "./.devServer/cert" })`
+   on build, rewriting the tracked `apps/concept-sets/.devServer/cert/_cert.pem`. Simply
+   following this recipe dirties the tree; `git checkout --` the cert before you finish.
 
 Verify the overwrite took by grepping the served bundle for a unique string from your
 change before screenshotting.
@@ -66,8 +87,12 @@ change before screenshotting.
 every load and get the fresh file after an overwrite — confirmed end-to-end that the
 overwritten bytes are served (not a stale server cache) for the fixed-name bundles
 `wizards`/`analysis-ui`/`notebook-ui` `lifecycles.js` and `concept-mapping/module.js`.
-portal/jobs use content-hashed filenames (new build → new names) so they can't go
-stale by construction. Use a **fresh Playwright context** (no persistent profile) so
+Several apps additionally emit **content-hashed chunks** next to the fixed-name entry
+(concept-sets' `lifecycles.js` is only a ~250 kB shim; the app itself is in
+`lifecycles-<hash>.js`), and portal/jobs are fully hashed. Hashed names can't go stale by
+construction — and they make a **stronger** freshness proof: a new build yields a
+filename that did not exist before, so seeing the browser fetch it `200` rules out any
+cached artifact. Use a **fresh Playwright context** (no persistent profile) so
 there's no client-side cache either. If you ever DO see old code, hard-reload / clear
 the context — don't assume the overwrite failed.
 
@@ -78,7 +103,16 @@ Apps are served under the portal, e.g. portal shell at
 `executablePath: "/usr/lib/playwright-browsers/chromium-1217/chrome-linux64/chrome"`,
 `args: ["--no-sandbox"]`, context `ignoreHTTPSErrors: true`; run the script from
 `/usr/src` so bare `import { chromium } from "playwright"` resolves. Save shots into
-`trex/screenshots/` (claw relays them with `postScreenshots`).
+`trex/screenshots/` (claw relays them with `postScreenshots`); `docker cp` them out if
+you owe someone a host path.
+
+**Use this scripted in-container flow, not MCP/agent browser tools.** Caddy's cert is
+self-signed and the MCP Playwright tools expose no `ignoreHTTPSErrors` option, so they
+fail outright with `net::ERR_CERT_AUTHORITY_INVALID`. The `ignoreHTTPSErrors: true` above
+only applies to a hand-written script. (Alternative: trust the root CA at
+`d2e-caddy-root-ca.crt`.)
+
+Login fields: the sign-in form's username input is `input[name="identifier"]`.
 
 The d2e + Logto flow is hardwired to `https://localhost:41100`, which in-container is
 the container itself — start a TCP proxy to caddy first (TLS passes through,
