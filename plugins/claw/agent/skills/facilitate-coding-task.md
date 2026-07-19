@@ -131,9 +131,14 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
      channel, continue). "Should I keep going?" is not a new decision — keep going.
    - If progress stalls (a continue returns the same remaining tasks, or the coder
      reports it is blocked), stop and report the blocker to the channel plainly.
-   When the coder reports all tasks complete, do NOT offer a PR yet — the review
-   checks come first. Go straight to step 8 (browser verification), then step 9, even if the coder already committed
-   each task as it went (committed work still gets reviewed before a PR).
+   **"Implementation complete" is a MIDPOINT, not the end — do NOT post a "done" /
+   "finished implementing" message and stop.** Coding finished only means you have
+   reached step 8. When the coder reports all tasks complete, say nothing that sounds
+   like the task is over; instead **immediately proceed to step 8 (browser verification +
+   screenshots), then step 9 (checks)**, even if the coder already committed each task as
+   it went. Do not offer a PR yet, and do not close the loop (step 14) — steps 8-13 still
+   remain. If you catch yourself about to announce completion right after implementation,
+   that is the signal you are skipping the gates: go to step 8 instead.
 8. **Exercise the feature in a browser, then show it — expected, not optional, for
    any UI change.** When the change touches something the team can see (a component,
    a page, styling — a component migration like Button → VButton counts), ask the
