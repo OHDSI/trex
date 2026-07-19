@@ -32,13 +32,17 @@ bind-mount sources) — otherwise you edit one tree and screenshot another.
    Repair with `bun install` in `plugins/ui`. Do **not** reach for `npm install`: this
    workspace fails it on an ERESOLVE peer conflict.
 
-   **Known blocker:** `bun install` currently fails the whole workspace with
-   `@trex/notebook@workspace:* failed to resolve`. `libs/react-notebook` is a git
-   **submodule** (`OHDSI/trex-notebook`); if it is uninitialized, its dir may hold a stub
-   `package.json` naming the package `react-notebook` instead of `@trex/notebook`, so bun
-   finds a workspace package under the wrong name. Fix with
-   `git submodule update --init plugins/ui/libs/react-notebook` (clearing the stub first
-   if it blocks the checkout). Until that is done, no dependency can be installed.
+   **If `bun install` fails with `@trex/notebook@workspace:* failed to resolve`**, the
+   `libs/react-notebook` **submodule** (`OHDSI/trex-notebook`) is uninitialized. Its dir
+   may hold a stub `package.json` naming the package `react-notebook` rather than
+   `@trex/notebook`, so bun finds a workspace package under the wrong name and refuses the
+   **entire** install — no dependency in the monorepo can be installed until it's fixed.
+   ```
+   rm plugins/ui/libs/react-notebook/package.json      # only if the stub is present
+   git submodule update --init plugins/ui/libs/react-notebook
+   ```
+   Verified: after this, `bun install --frozen-lockfile` completes (no lock churn) and
+   `NODE_ENV=production bunx vite build` in `apps/concept-sets` succeeds in ~4s.
 
    **`node_modules` is gitignored.** Repairing it is environment maintenance, not a test
    mutation — **keep the fix, don't revert it**. Only revert edits to *tracked* files.
