@@ -9,6 +9,7 @@ import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from 
 import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
 import { createGatewaySigner, DiscordGatewayClient, gatewayModeEnabled } from "../agents/gateway/discord.ts";
 import { copyDirRecursive } from "./utils.ts";
+import { packsForAgent, stageSkillPacks, type SkillPackEntry } from "./skill-packs.ts";
 
 export interface AgentEntry {
   name: string;
@@ -81,6 +82,7 @@ export async function buildAgentWorkerConfig(
   pluginDir: string,
   entry: AgentEntry,
   pluginFullName: string,
+  skillPacks: SkillPackEntry[] = packsForAgent(entry.name),
 ): Promise<{ source: string; servicePath: string; importMapPath: string; env: Record<string, string> }> {
   const agentDir = `${pluginDir}/${entry.dir}`;
   // Fail registration early with a clear message rather than at first request.
@@ -144,6 +146,16 @@ export async function buildAgentWorkerConfig(
   // addAgentsPlugin, before this function is ever called for that entry.
   if (entry.memory?.length) {
     await generateMemoryArtifacts(stagedAgentDir, entry.memory);
+  }
+
+  // Skill packs (skills plugin type): every declared `trex.skills` pack
+  // targeting this agent (exact name or "*") is staged into the agent's
+  // staged dir — same servicePath-confinement rule as the linked-memory
+  // artifacts above. The default comes from the global pack registry
+  // (pre-pass-populated, so plugin scan order doesn't matter — see
+  // skill-packs.ts); tests and explicit re-stage flows can inject.
+  if (skillPacks.length) {
+    await stageSkillPacks(stagedAgentDir, skillPacks);
   }
 
   const shimBase = `file://${tmp}/agents/eve-shim/`;

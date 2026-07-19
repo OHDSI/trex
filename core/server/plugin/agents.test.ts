@@ -409,3 +409,52 @@ Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async
   assertEquals(cfg.env.TREX_AGENT_DIR, `${cfg.servicePath}/agent`);
   assertEquals(cfg.env.TREX_AGENT_NAME, "a");
 });
+
+// ---------------------------------------------------------------------------
+// Task 5: skill packs (skills plugin type)
+
+import {
+  _clearDeclaredSkillPacksForTest,
+  registerSkillPack,
+  type SkillPackEntry,
+} from "./skill-packs.ts";
+
+async function writeTestPack(name: string, agents: string[]): Promise<SkillPackEntry> {
+  const srcDir = await Deno.makeTempDir();
+  await Deno.mkdir(`${srcDir}/skills/greeting/references`, { recursive: true });
+  await Deno.writeTextFile(
+    `${srcDir}/skills/greeting/SKILL.md`,
+    "---\ndescription: How to greet.\n---\n\n# Greeting\n",
+  );
+  await Deno.writeTextFile(`${srcDir}/skills/greeting/references/styles.md`, "- formal\n");
+  return { name, dir: "pack", agents, srcDir, pluginName: "@trex/skilltest" };
+}
+
+Deno.test("buildAgentWorkerConfig stages explicitly passed skill packs into the staged agent dir", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  const p = await writeTestPack("mypack", ["toy"]);
+  const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent", [p]);
+  const md = await Deno.readTextFile(`${cfg.env.TREX_AGENT_DIR}/skills/mypack--greeting/SKILL.md`);
+  assert(md.includes("How to greet"));
+  const ref = await Deno.readTextFile(`${cfg.env.TREX_AGENT_DIR}/skills/mypack--greeting/references/styles.md`);
+  assert(ref.includes("formal"));
+});
+
+Deno.test("buildAgentWorkerConfig defaults to the declared-pack registry, honoring targeting", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  _clearDeclaredSkillPacksForTest();
+  try {
+    registerSkillPack(await writeTestPack("forall", ["*"]));
+    registerSkillPack(await writeTestPack("fortoy", ["toy"]));
+    registerSkillPack(await writeTestPack("forother", ["someone-else"]));
+    const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent");
+    await Deno.stat(`${cfg.env.TREX_AGENT_DIR}/skills/forall--greeting/SKILL.md`);
+    await Deno.stat(`${cfg.env.TREX_AGENT_DIR}/skills/fortoy--greeting/SKILL.md`);
+    await assertRejects(
+      () => Deno.stat(`${cfg.env.TREX_AGENT_DIR}/skills/forother--greeting/SKILL.md`),
+      Deno.errors.NotFound,
+    );
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+  }
+});
