@@ -73,12 +73,25 @@ Use a real Logto/portal token. Reliable way to get one: log into the portal with
 Playwright (see `testing-d2e-ui` for the login recipe) and capture the `Authorization`
 header off any authenticated request:
 ```js
+let tok = null;
 p.on("request", r => { const a=r.headers()["authorization"];
                        if (a && /^bearer /i.test(a) && !tok) tok=a; });
+// ...log in, THEN make the app issue an authenticated call:
+const demo = p.getByText("Demo dataset",{exact:false}).first();
+if (await demo.count()) { await demo.click().catch(()=>{}); await p.waitForTimeout(5000); }
 ```
-It is not in `localStorage` — the Logto SDK doesn't put it there. The portal's own
-implementation is `plugins/functions/jobplugins/src/api/PrefectAPI.ts`
+**Logging in is not enough** — the listener only fires once the app calls its API, so
+click into a dataset (or any data view) or `tok` stays `null`. The token is RS256 and
+~1.7k chars; it is NOT in `localStorage` (the Logto SDK doesn't put it there).
+
+`thirdpartytoken` / `thirdpartyrefreshtoken` are decoded by the portal from the user
+token's `thirdPartyToken` / `thirdPartyRefreshToken` claims. Empty strings were enough
+for the flow verified here; supply them for flows that reach a third-party system
+(e.g. HANA-backed runs) rather than assuming empty always works.
+
+The portal's own implementation is `plugins/functions/jobplugins/src/api/PrefectAPI.ts`
 (`createInputAuthToken` / `deleteInputAuthToken`) — read it if the shape ever changes.
+Tokens expire (~1h), so capture one per test session rather than caching it.
 
 ## Pure logic — no infra
 For flow logic that doesn't need the platform, use `prefect_test_harness()` against an
