@@ -115,13 +115,18 @@ Notes:
 - `vue-mri-ui-lib` is **Cohorts** (NOT Atlas — Atlas is a separate `/atlas` plugin);
   builds to `resources/mri`, edit strings in `src/lib/i18n.ts`.
 - **`mapping` / `concept-mapping`** DO build+overwrite cleanly (`module.js`,
-  `NODE_ENV=production`, `jsxDEV`=0 — same as any app). They render as module-federation
-  remotes **inside the flow editor's node drawer** (`flow/.../DataMappingNode/DataMappingDrawer`
-  loads `path="/mapping/module.js"`): open a dataflow → `Add node` → tick **Show
+  `NODE_ENV=production`, `jsxDEV`=0 — same as any app). Reaching their *rendered* UI is
+  the catch. In the flow editor: open a dataflow → `Add node` → tick **Show
   experimental** → **White Rabbit / Rabbit in a Hat** (mapping) or **Concept mapping**
-  (concept-mapping) → open that node's settings drawer to mount the remote. The
-  build+overwrite half is verified; the drawer is several interaction-levels deep, so
-  driving Playwright to it is the only remaining fiddly bit.
+  (concept-mapping) → open the node's settings drawer (click `.node__setting`). BUT that
+  drawer and its "Scan Data" config wizard are **flow's own bundled components**
+  (`flow/src/components/Dialog/ScanDataDialog`, served from `resources/flow` — flow ships
+  a duplicate) — editing `apps/mapping` does NOT change them. The `mapping`/`concept-mapping`
+  **remotes** (`/mapping/module.js`) mount the actual mapping GRID that appears only
+  **after** you configure a source + scan tables — a full data-mapping workflow, not a
+  quick click path. So: build+overwrite is verified, but a rendered-edit screenshot of
+  the remote needs a complete scan/mapping run to reach (not automated here). The other
+  9 apps have no such barrier.
 
 ## Enabling a feature flag (for `starboard` / `wizards` / etc.)
 Flags live in Postgres `portal.feature` (`feature`, `is_enabled`, plus NOT-NULL
