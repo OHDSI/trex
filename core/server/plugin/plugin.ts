@@ -11,6 +11,8 @@ import {
   type MemoryEntry,
 } from "./memory.ts";
 import { mergeMemoryEntries, type SourceOwners } from "./memory-merge.ts";
+import { addSkillsPlugin } from "./skills.ts";
+import { collectDeclaredSkillPacks } from "./skill-packs.ts";
 import { scanPluginDirectory, splitPathList } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
 import { waitForAttachedDatabase } from "../lib/db-wait.ts";
@@ -128,9 +130,10 @@ export class Plugins {
           case "transform": return 1;
           case "functions": return 2;
           case "flow": return 3;
-          case "agents": return 4;
-          case "memory": return 5;
-          default: return 6;
+          case "skills": return 4;
+          case "agents": return 5;
+          case "memory": return 6;
+          default: return 7;
         }
       };
       const sortedEntries = trexEntries.slice().sort(
@@ -158,6 +161,9 @@ export class Plugins {
             if (!Plugins.migrationTargets.some((t) => t.name === "agents-core")) {
               Plugins.migrationTargets.push(await agentsCoreMigrationTarget());
             }
+            break;
+          case "skills":
+            await addSkillsPlugin(app, value, dir, fullName);
             break;
           case "memory": {
             // Same trust requirement as agents (agents.ts's
@@ -232,6 +238,10 @@ export class Plugins {
     // doc comment above for why a single ordered scan/dispatch pass isn't
     // enough to validate agent-linked-memory references.
     await collectDeclaredMemoryNames([devPath, pluginsPath]);
+
+    // Same pre-pass rationale as collectDeclaredMemoryNames directly above,
+    // for `trex.skills` packs (see skill-packs.ts).
+    await collectDeclaredSkillPacks([devPath, pluginsPath]);
 
     // PLUGINS_DEV_PATH / PLUGINS_PATH may be colon-separated PATH-style lists
     // (e.g. d2e uses /usr/src/plugins-dev:/usr/src/bundled-plugins:/usr/src/plugins),

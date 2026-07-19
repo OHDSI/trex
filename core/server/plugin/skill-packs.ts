@@ -7,7 +7,8 @@
 // dispatch-time orchestration (trust gate, dynamic re-stage) lives in
 // skills.ts, kept separate so agents.ts can import THIS module without an
 // import cycle (skills.ts imports agents.ts).
-import { copyDirRecursive } from "./utils.ts";
+import { copyDirRecursive, scanPluginDirectory, splitPathList } from "./utils.ts";
+import { isTrustedPluginScope } from "./function.ts";
 
 // Same alphabet as agents.ts's agent-name regex. "--" is additionally
 // rejected: it is the reserved separator in staged `skills/<pack>--<skill>/`
@@ -201,6 +202,32 @@ export async function stageSkillPacks(stagedAgentDir: string, packs: SkillPackEn
       }
     } catch (e) {
       if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+  }
+}
+
+// Boot pre-pass, run once at the top of initPlugins BEFORE any plugin is
+// dispatched (same rationale as plugin.ts's collectDeclaredMemoryNames: the
+// pack-declaring plugin and the agent-declaring plugin can be scanned in
+// either order, and buildAgentWorkerConfig must see every pack when it
+// stages an agent). Invalid declarations are swallowed here — they surface
+// with a real error when the dispatch pass reaches that plugin.
+export async function collectDeclaredSkillPacks(rawPaths: string[]): Promise<void> {
+  for (const rawPath of rawPaths) {
+    for (const dir of splitPathList(rawPath)) {
+      const scanned = await scanPluginDirectory(dir);
+      for (const { dir: pluginDir, pkg } of scanned) {
+        const value = pkg?.trex?.skills;
+        if (value === undefined) continue;
+        if (!isTrustedPluginScope(pkg?.name ?? "")) continue;
+        try {
+          for (const decl of normalizeSkillsValue(value)) {
+            registerSkillPack({ ...decl, srcDir: `${pluginDir}/${decl.dir}`, pluginName: pkg.name });
+          }
+        } catch {
+          // Reported by addSkillsPlugin in the dispatch pass.
+        }
+      }
     }
   }
 }
