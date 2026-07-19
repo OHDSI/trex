@@ -1,5 +1,5 @@
-// The `skills` plugin type (design: plugins/skills-example/docs/
-// 2026-07-19-skills-plugin-type-design.md): a plugin declares named packs of
+// The `skills` plugin type (docs: core/server/agents/README.md, "Skill
+// packs" section): a plugin declares named packs of
 // agent skills (markdown + supporting files, optionally MCP connections),
 // and the PACK names its target agents — inverted relative to memory links
 // (agent-memory.ts), so a pack can be deployed after its target agent is
