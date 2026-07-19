@@ -8,6 +8,7 @@ import { PLUGINS_BASE_PATH } from "../config.ts";
 import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from "./agent-memory.ts";
 import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
 import { createGatewaySigner, DiscordGatewayClient, gatewayModeEnabled } from "../agents/gateway/discord.ts";
+import { copyDirRecursive } from "./utils.ts";
 
 export interface AgentEntry {
   name: string;
@@ -66,24 +67,6 @@ export async function resolveAgentsRuntimeDir(): Promise<string> {
   throw new Error(
     `agents: cannot locate the agents runtime dir (tried ${candidates.join(", ")})`,
   );
-}
-
-// `skipNames`, when given, is applied only at THIS call's own level (never
-// forwarded into the recursive calls for subdirectories) — it exists so
-// callers can exclude specific top-level entries (see the `evals` exclusion
-// below) without accidentally skipping a same-named dir nested deeper in the
-// tree.
-async function copyDirRecursive(src: string, dest: string, skipNames?: ReadonlySet<string>): Promise<void> {
-  await Deno.mkdir(dest, { recursive: true });
-  for await (const entry of Deno.readDir(src)) {
-    if (skipNames?.has(entry.name)) continue;
-    const s = `${src}/${entry.name}`;
-    const d = `${dest}/${entry.name}`;
-    // Deno.stat follows symlinks, so linked files/dirs are copied as content.
-    const info = entry.isSymlink ? await Deno.stat(s) : entry;
-    if (info.isDirectory) await copyDirRecursive(s, d);
-    else if (info.isFile) await Deno.copyFile(s, d);
-  }
 }
 
 // Authoring-time-only top-level entries under an agent dir that must never
