@@ -67,3 +67,21 @@ export async function waitfor(url: string): Promise<string> {
 export function splitPathList(val: string): string[] {
   return val.split(":").map((s) => s.trim()).filter(Boolean);
 }
+
+// `skipNames`, when given, is applied only at THIS call's own level (never
+// forwarded into the recursive calls for subdirectories) — it exists so
+// callers can exclude specific top-level entries (see agents.ts's `evals`
+// exclusion) without accidentally skipping a same-named dir nested deeper in
+// the tree.
+export async function copyDirRecursive(src: string, dest: string, skipNames?: ReadonlySet<string>): Promise<void> {
+  await Deno.mkdir(dest, { recursive: true });
+  for await (const entry of Deno.readDir(src)) {
+    if (skipNames?.has(entry.name)) continue;
+    const s = `${src}/${entry.name}`;
+    const d = `${dest}/${entry.name}`;
+    // Deno.stat follows symlinks, so linked files/dirs are copied as content.
+    const info = entry.isSymlink ? await Deno.stat(s) : entry;
+    if (info.isDirectory) await copyDirRecursive(s, d);
+    else if (info.isFile) await Deno.copyFile(s, d);
+  }
+}

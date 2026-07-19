@@ -356,20 +356,29 @@ Deno.test("addAgentsPlugin skips an agent whose memory link is not a declared me
 
 Deno.test("addAgentsPlugin proceeds when the memory link IS declared (reaches buildAgentWorkerConfig)", async () => {
   // Same bogus-dir trick in reverse: a DECLARED memory link must not be
-  // skipped, so this should fail on the missing instructions.md (proving
-  // the validation guard let it through), not silently no-op.
+  // skipped, so buildAgentWorkerConfig IS reached and fails on the missing
+  // instructions.md (proving the validation guard let it through). Fix 2's
+  // per-entry isolation now catches and logs that failure instead of
+  // rejecting the whole addAgentsPlugin call — assert on the logged message
+  // rather than a rejection.
   const fakeApp = { all: () => { throw new Error("must not register a route"); } };
-  await assertRejects(
-    () =>
-      addAgentsPlugin(
-        fakeApp as never,
-        { name: "toy", dir: "does-not-exist", memory: [{ name: "d2e" }] },
-        "/does/not/exist",
-        "@trex/toy-agent",
-        new Set(["d2e"]),
-      ),
-    Error,
-    "instructions.md",
+  const logged: unknown[][] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args);
+  try {
+    await addAgentsPlugin(
+      fakeApp as never,
+      { name: "toy", dir: "does-not-exist", memory: [{ name: "d2e" }] },
+      "/does/not/exist",
+      "@trex/toy-agent",
+      new Set(["d2e"]),
+    );
+  } finally {
+    console.error = origError;
+  }
+  assert(
+    logged.some((args) => args.some((a) => typeof a === "string" && a.includes("instructions.md"))),
+    "expected the missing-instructions.md failure to be logged",
   );
 });
 
@@ -408,4 +417,135 @@ Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async
   // evil override
   assertEquals(cfg.env.TREX_AGENT_DIR, `${cfg.servicePath}/agent`);
   assertEquals(cfg.env.TREX_AGENT_NAME, "a");
+});
+
+// ---------------------------------------------------------------------------
+// Skill packs (skills plugin type)
+
+import {
+  _clearDeclaredSkillPacksForTest,
+  registerSkillPack,
+  type SkillPackEntry,
+} from "./skill-packs.ts";
+
+async function writeTestPack(name: string, agents: string[]): Promise<SkillPackEntry> {
+  const srcDir = await Deno.makeTempDir();
+  await Deno.mkdir(`${srcDir}/skills/greeting/references`, { recursive: true });
+  await Deno.writeTextFile(
+    `${srcDir}/skills/greeting/SKILL.md`,
+    "---\ndescription: How to greet.\n---\n\n# Greeting\n",
+  );
+  await Deno.writeTextFile(`${srcDir}/skills/greeting/references/styles.md`, "- formal\n");
+  return { name, dir: "pack", agents, srcDir, pluginName: "@trex/skilltest" };
+}
+
+Deno.test("buildAgentWorkerConfig stages explicitly passed skill packs into the staged agent dir", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  const p = await writeTestPack("mypack", ["toy"]);
+  const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent", [p]);
+  const md = await Deno.readTextFile(`${cfg.env.TREX_AGENT_DIR}/skills/mypack--greeting/SKILL.md`);
+  assert(md.includes("How to greet"));
+  const ref = await Deno.readTextFile(`${cfg.env.TREX_AGENT_DIR}/skills/mypack--greeting/references/styles.md`);
+  assert(ref.includes("formal"));
+});
+
+Deno.test("buildAgentWorkerConfig defaults to the declared-pack registry, honoring targeting", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  _clearDeclaredSkillPacksForTest();
+  try {
+    registerSkillPack(await writeTestPack("forall", ["*"]));
+    registerSkillPack(await writeTestPack("fortoy", ["toy"]));
+    registerSkillPack(await writeTestPack("forother", ["someone-else"]));
+    const cfg = await buildAgentWorkerConfig(toyPlugin, { name: "toy", dir: "agent" }, "@trex/toy-agent");
+    await Deno.stat(`${cfg.env.TREX_AGENT_DIR}/skills/forall--greeting/SKILL.md`);
+    await Deno.stat(`${cfg.env.TREX_AGENT_DIR}/skills/fortoy--greeting/SKILL.md`);
+    await assertRejects(
+      () => Deno.stat(`${cfg.env.TREX_AGENT_DIR}/skills/forother--greeting/SKILL.md`),
+      Deno.errors.NotFound,
+    );
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+  }
+});
+
+import { _clearAgentMountsForTest, AGENT_MOUNTS, rebuildAgentMount } from "./agents.ts";
+
+// Route-registering app stub: _addFunction's app.all(...) must succeed but
+// nothing is served — these tests exercise mount bookkeeping, not HTTP.
+const stubApp = { all: () => {} } as never;
+
+Deno.test("addAgentsPlugin records an AgentMountRecord whose live config matches the mount", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  _clearAgentMountsForTest();
+  _clearDeclaredSkillPacksForTest();
+  await addAgentsPlugin(stubApp, { name: "toy", dir: "agent" }, toyPlugin, "@trex/toy-agent");
+  const rec = AGENT_MOUNTS.get("@trex/toy-agent/toy");
+  assert(rec, "mount record must exist");
+  assertEquals(rec.pluginDir, toyPlugin);
+  assertEquals(rec.basePath, "/plugins/trex/toy");
+  assertEquals(rec.envOverrides.TREX_AGENT_BASE, "/plugins/trex/toy");
+  // Live config points at the staged dir and carries the merged worker env.
+  assertEquals(rec.live.importMapPath, `${rec.live.servicePath}/import_map.json`);
+  const shared = (rec.live.xenv as { _shared: Record<string, string> })._shared;
+  assertEquals(shared.TREX_AGENT_DIR, `${rec.live.servicePath}/agent`);
+  assertEquals(shared.TREX_AGENT_BASE, "/plugins/trex/toy");
+});
+
+Deno.test("addAgentsPlugin isolates a per-entry staging failure — other agents in the same plugin still register", async () => {
+  // Two agents declared by the same plugin; "toy" is targeted by a pack whose
+  // srcDir doesn't exist, so buildAgentWorkerConfig's stageSkillPacks call
+  // throws for it — this must not abort "ednagent" registered right after it.
+  const pluginDir = await Deno.makeTempDir();
+  for (const sub of ["agent", "agent2"]) {
+    await Deno.mkdir(`${pluginDir}/${sub}`, { recursive: true });
+    await Deno.writeTextFile(`${pluginDir}/${sub}/instructions.md`, "You are a test agent.\n");
+  }
+  _clearAgentMountsForTest();
+  _clearDeclaredSkillPacksForTest();
+  try {
+    registerSkillPack({
+      name: "brokenpack",
+      dir: "pack",
+      agents: ["toy"],
+      srcDir: `${pluginDir}/does-not-exist`,
+      pluginName: "@trex/two-agents",
+    });
+    await addAgentsPlugin(
+      stubApp,
+      [{ name: "toy", dir: "agent" }, { name: "ednagent", dir: "agent2" }],
+      pluginDir,
+      "@trex/two-agents",
+    );
+    assertEquals(AGENT_MOUNTS.has("@trex/two-agents/toy"), false);
+    assertEquals(AGENT_MOUNTS.has("@trex/two-agents/ednagent"), true);
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+    _clearAgentMountsForTest();
+  }
+});
+
+Deno.test("rebuildAgentMount swaps the live config to a freshly staged dir (and can stage new packs)", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  _clearAgentMountsForTest();
+  _clearDeclaredSkillPacksForTest();
+  try {
+    await addAgentsPlugin(stubApp, { name: "toy", dir: "agent" }, toyPlugin, "@trex/toy-agent");
+    const rec = AGENT_MOUNTS.get("@trex/toy-agent/toy")!;
+    const oldPath = rec.live.servicePath;
+    // Pack deployed AFTER the agent was mounted:
+    registerSkillPack(await writeTestPack("latepack", ["toy"]));
+    await rebuildAgentMount(rec, { cleanupDelayMs: 0 });
+    assert(rec.live.servicePath !== oldPath, "servicePath must be swapped");
+    // New staged dir has the late pack; env re-derived against the new dir,
+    // with mount-time overrides re-applied.
+    await Deno.stat(`${rec.live.servicePath}/agent/skills/latepack--greeting/SKILL.md`);
+    const shared = (rec.live.xenv as { _shared: Record<string, string> })._shared;
+    assertEquals(shared.TREX_AGENT_DIR, `${rec.live.servicePath}/agent`);
+    assertEquals(shared.TREX_AGENT_BASE, "/plugins/trex/toy");
+    // Old staged dir removed (cleanupDelayMs: 0 → immediate).
+    await assertRejects(() => Deno.stat(oldPath), Deno.errors.NotFound);
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+    _clearAgentMountsForTest();
+  }
 });

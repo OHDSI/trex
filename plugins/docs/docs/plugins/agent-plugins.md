@@ -6,7 +6,7 @@ sidebar_position: 6
 
 Agent plugins register long-running AI agents that run as isolated Deno
 EdgeRuntime workers on the core-shipped agents runtime. Each declared agent
-exposes an [eve](https://github.com/gestalt-labs/eve)-compatible HTTP surface —
+exposes an eve-compatible HTTP surface —
 session creation, turns, human-in-the-loop approvals, and an SSE event stream —
 plus a stateless `POST /chat` endpoint for the Vercel AI SDK UIMessage stream.
 Sessions, turns, and steps are persisted so runs can be replayed and audited
@@ -275,6 +275,14 @@ The `memory` array on a `trex.agents[]` entry (see
 [memory plugin](./memory-plugins) brains. The generated tools call the memory
 worker's MCP endpoint over the internal inter-service path; captures land in
 the agent's own `default` source and never overwrite imported knowledge.
+
+## Skill Packs
+
+Skills can also arrive from *other* plugins: a [skill plugin](./skill-plugins)
+declares packs that name their target agents and get staged into the agent's
+worker directory as `skills/<pack>--<skill>/` — even after the agent is
+already running. The agent's own `skills/` directory always wins on
+collision, and `GET /eve/v1/info` reports the injecting pack per skill.
 
 ## Persistence & Dashboard
 
