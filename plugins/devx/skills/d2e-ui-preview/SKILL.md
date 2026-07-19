@@ -28,15 +28,30 @@ manager injects the allocated port/base by `portStyle`:
 use bun) — it runs the app's own `start` script, so there's no coupling to nx project
 names. Install runs once at the monorepo root (`bun install`).
 
-**Verified end-to-end**: minted a trex token (`signAccessToken`, subject = the devx
-user), `POST /plugins/trex/devx-api/apps/<id>/server/start` → the manager spawned the
-dev server (`bun run start -- --port <p> --base <proxyBase>`) → `GET …/proxy/` returned
-`200` + the full vite app shell (HMR/react-refresh) for `notebook-ui`. The recipe fix
-is validated too: the old `jobs` recipe (`npx nx dev jobs`) makes the server **exit**
-(no such nx target); `bun run start`+vite runs; portal with `portStyle:"cra"` runs
-(the old `nx` style bound the wrong port). One known wrinkle: some apps' vite dev
-server (e.g. `jobs`) isn't reachable through the proxy (`502`) even though it starts —
-an app-specific dev-server quirk, not the recipe; `notebook-ui` proxies cleanly.
+**How to drive it manually**: mint a trex token (`signAccessToken`, subject = the devx
+user), then `POST /plugins/trex/devx-api/apps/<id>/server/start`, poll
+`…/server/status` until `"running"`, and `GET …/proxy/`.
+
+**Recipe fix validated**: the old `jobs` recipe (`npx nx dev jobs`) makes the server
+**exit** (no such nx target); `bun run start`+vite runs; portal with `portStyle:"cra"`
+runs (the old `nx` style bound the wrong port).
+
+**Measured state of the preview across 9 apps — most do NOT render.** Servers start
+for 7/9, but the proxy only serves 2/9:
+
+| app | dev server | proxy |
+|---|---|---|
+| `notebook-ui`, `concept-sets` | running | **200 + app shell** |
+| `portal` | running | 401 |
+| `analysis-ui`, `wizards`, `flow`, `jobs` | running | 502 |
+| `vue-mri-ui-lib`, `webr-notebook` | **never start** | — |
+
+So treat the preview as working only for some apps. Leading hypothesis for the 502s:
+those apps' vite dev servers come up on self-signed **HTTPS** (basic-ssl) while the
+dev-server proxy connects plain HTTP — a direct fetch to the jobs dev server fails on
+both http and https, consistent with a TLS/self-signed mismatch. Unconfirmed; fixing
+it (proxy over TLS ignoring self-signed) would likely unblock most of the panel.
+**For screenshots use `testing-d2e-ui` (build + overwrite), which works for every app.**
 
 ## Prerequisites (or the preview won't render)
 1. **Build the shared libs first**: `@portal/components` + `@portal/plugin` ship as

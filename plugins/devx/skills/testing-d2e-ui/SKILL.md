@@ -92,7 +92,8 @@ before a dataset is selected (or with the app's feature flag off) renders blank.
 ## Per-app render map (where each UI mounts + how to screenshot it)
 Verified end-to-end (edit → `NODE_ENV=production bunx vite build` → overwrite →
 Playwright, marker rendered): **portal, concept-sets, analysis-ui, notebook-ui,
-wizards, jobs, vue-mri-ui-lib, webr-notebook, flow** (9 apps).
+wizards, jobs, vue-mri-ui-lib, webr-notebook, flow, mapping, concept-mapping** —
+i.e. every runnable app (`mri-pa-ui` is a library with no UI).
 
 | app | serves | how to reach for a screenshot | prereq |
 |---|---|---|---|
@@ -105,7 +106,8 @@ wizards, jobs, vue-mri-ui-lib, webr-notebook, flow** (9 apps).
 | `jobs` | `resources/jobs` | `/d2e/portal/systemadmin/jobs/runs` (Prefect UI, real job runs) | — |
 | `vue-mri-ui-lib` = **Cohorts** | `resources/mri` | Demo dataset → `/d2e/portal/researcher/cohort` | — |
 | `flow` = the **ETL dataflow editor** | `resources/flow` | `/d2e/portal/systemadmin/etl` → open a dataflow (toolbar `Add node`/`Create subflow` are flow strings) | — |
-| `mapping` / `concept-mapping` | `resources/mapping` / `resources/concept-mapping` (`module.js`) | inside the flow editor — see below | — |
+| `mapping` | `resources/mapping` (`module.js`) | ETL → dataflow → Show experimental → **Rabbit in a Hat** → `.node__setting` | — |
+| `concept-mapping` | `resources/concept-mapping` (`module.js`) | same, pick **Concept mapping**; select "Demo dataset" first | a dataset must exist |
 | `mri-pa-ui` | — | a library, no runnable UI | — |
 
 Notes:
@@ -114,19 +116,27 @@ Notes:
   the `starboard` route.
 - `vue-mri-ui-lib` is **Cohorts** (NOT Atlas — Atlas is a separate `/atlas` plugin);
   builds to `resources/mri`, edit strings in `src/lib/i18n.ts`.
-- **`mapping` / `concept-mapping`** DO build+overwrite cleanly (`module.js`,
-  `NODE_ENV=production`, `jsxDEV`=0 — same as any app). Reaching their *rendered* UI is
-  the catch. In the flow editor: open a dataflow → `Add node` → tick **Show
-  experimental** → **White Rabbit / Rabbit in a Hat** (mapping) or **Concept mapping**
-  (concept-mapping) → open the node's settings drawer (click `.node__setting`). BUT that
-  drawer and its "Scan Data" config wizard are **flow's own bundled components**
-  (`flow/src/components/Dialog/ScanDataDialog`, served from `resources/flow` — flow ships
-  a duplicate) — editing `apps/mapping` does NOT change them. The `mapping`/`concept-mapping`
-  **remotes** (`/mapping/module.js`) mount the actual mapping GRID that appears only
-  **after** you configure a source + scan tables — a full data-mapping workflow, not a
-  quick click path. So: build+overwrite is verified, but a rendered-edit screenshot of
-  the remote needs a complete scan/mapping run to reach (not automated here). The other
-  9 apps have no such barrier.
+- **`mapping` / `concept-mapping`** — verified end-to-end; **no data scan is required**.
+  Both mount inside the flow editor's node drawer. Path: `/systemadmin/etl` → create a
+  dataflow → the "Select node type" dialog opens → tick **Show experimental** → pick the
+  node → click `.node__setting` on the node to open its drawer. Confirm the remote
+  actually mounted by watching for a `…/module.js` response.
+  - **`mapping` → use the "Rabbit in a Hat" node** (NOT White Rabbit). `rabbit_in_a_hat`
+    maps to `DataMappingNode`, whose `DataMappingDrawer` renders
+    `<PluginRenderer path="/mapping/module.js">` **directly**. With nothing connected
+    upstream it falls through to the remote's own `TableSourceNode`, which renders
+    "Please scan data or open mapping to see Source tables" + SCAN DATA / OPEN MAPPING
+    (and the CDM-version panel). Edit target: `mapping/src/Nodes/TableSourceNode.tsx`.
+    **"White Rabbit" is a trap** — its "Configure White Rabbit" drawer and Scan Data
+    wizard are flow's OWN bundled components (`flow/src/components/Dialog/ScanDataDialog`);
+    flow ships a duplicate, so editing `apps/mapping` never changes them.
+  - **`concept-mapping` → the "Concept mapping" node.** Its drawer renders the remote
+    (dataset selector, Save to database, MAPPING / SAVED MAPPINGS tabs, CSV dropzone).
+    It needs a **dataset to exist**: `Overview.tsx` early-returns `null` when
+    `!selectedDatasetId`, so click "Demo dataset" once before navigating. Edit target:
+    `concept-mapping/src/Context/state/translation-state.ts` (capital `Context`).
+    Two independent blank-render traps to distinguish from a mount failure: no dataset,
+    and empty `pluginMetadata` (logs "Plugin metadata is empty" and returns null).
 
 ## Enabling a feature flag (for `starboard` / `wizards` / etc.)
 Flags live in Postgres `portal.feature` (`feature`, `is_enabled`, plus NOT-NULL
