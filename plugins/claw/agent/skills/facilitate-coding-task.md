@@ -97,8 +97,13 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    `askCodeAgent`: "Run your writing-plans skill to write a detailed plan/spec
    for <the chosen option>, and SAVE it into the repo (e.g. `docs/plans/<feature>.md`)
    so it is committed with the work and can go in the PR. Do NOT implement — stop
-   after presenting the plan." Show it with `postPlan` (pass the plan markdown as
-   `text`, and the saved repo path as `attachPath` so the full file is attached).
+   after presenting the plan, and report the exact saved path." Then `postPlan` and
+   **ALWAYS attach the whole plan as a `.md` file**: pass a readable view (the plan, or a
+   summary if it is long) as `text` AND the saved repo path as `attachPath` so the
+   complete plan file is attached every time. Showing the text or a summary alone is not
+   enough — the full plan must always go up as an attachment, so the team can read and the
+   PR can reference the exact spec. If the coder did not report a saved path, ask it to
+   save the plan and give you the path before you post.
    Then call `awaitApproval` (`what: "the plan"`).
    - Answer any question you can settle from the discussion with another
      `askCodeAgent` call yourself; escalate to the channel only for real

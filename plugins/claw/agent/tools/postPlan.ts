@@ -22,16 +22,17 @@ export default defineTool({
     "Display a plan, brainstorm, or set of options in the Discord channel as a rich embed " +
     "(titled, formatted) instead of plain text — use this at each planning gate so the team " +
     "can read it clearly. `text` is the markdown to show (headings, lists, and code render). " +
-    "If the coder saved the full plan to a file (e.g. trex/plans/foo.md), pass its " +
-    "workspace-relative path as `attachPath` and the complete file is attached alongside the " +
-    "embed. Post the approval buttons separately with awaitApproval.",
+    "For a PLAN, ALWAYS also pass `attachPath` — the workspace-relative path to the full " +
+    "plan .md the coder saved (e.g. trex/plans/foo.md) — so the complete plan is attached " +
+    "as a file alongside the embed; the embed text may be a summary, but the whole plan " +
+    "must always go up as an attachment. Post the approval buttons separately with awaitApproval.",
   inputSchema: {
     type: "object",
     properties: {
       channelId: { type: "string", description: "The current channel id." },
       title: { type: "string", description: "Short heading for the embed, e.g. 'Plan: dashboard filters' or 'Design options'." },
       text: { type: "string", description: "The plan/options as markdown. Truncated to Discord's 4096-char embed limit (attach the file for the full version)." },
-      attachPath: { type: "string", description: "Optional workspace-relative path to the full plan .md to attach, e.g. 'trex/plans/filters.md'." },
+      attachPath: { type: "string", description: "Workspace-relative path to the full plan .md to attach, e.g. 'trex/plans/filters.md'. REQUIRED when posting a plan (always attach the whole plan); optional only for a brainstorm/options post with no saved file." },
     },
     required: ["channelId", "title", "text"],
   },
