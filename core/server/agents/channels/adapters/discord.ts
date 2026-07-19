@@ -630,7 +630,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     }
     const block = formatMessagesBlock("channel_messages", await history(event.channelId, 20));
     if (threadId !== null) {
-      await sendToThread(threadId, [contextBlock, block, text], threadName);
+      // The context block tells the agent "the current channel id", which its explicit
+      // post tools (postChoice/postPlan/postScreenshots) target directly. For a task
+      // thread that must be the THREAD id, not the parent channel — otherwise those posts
+      // land in the main channel even though the session's own deliveries go to the thread.
+      const threadContextBlock = formatDiscordMessageContextBlock({
+        userId: event.author.id,
+        username: event.author.username,
+        channelId: threadId,
+        guildId: event.guildId,
+        messageId: event.id,
+      });
+      await sendToThread(threadId, [threadContextBlock, block, text], threadName);
     } else {
       await args.send([contextBlock, block, text].filter((p) => p.length > 0).join("\n\n"), {
         auth,
