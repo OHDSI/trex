@@ -408,99 +408,114 @@ export async function addAgentsPlugin(
       }
       continue;
     }
-    const cfg = await buildAgentWorkerConfig(dir, entry, name);
-    console.log(`add agent ${entry.name} @ ${cfg.env.TREX_AGENT_DIR}`);
-    // _addFunction computes servicePath as `${dir}${fncfg.function}` and the
-    // mounted URL from `source` + plugin scope; TREX_AGENT_BASE tells the
-    // worker its mount point so it can strip the prefix. Always the
-    // trusted-scope mount — the guard above rejects everything else.
-    const scope = `/${name.slice(1, name.indexOf("/"))}`;
-    const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
+    // Per-entry failure isolation (same rationale as the unknown-memory-link
+    // skip above): a staging failure for THIS agent (e.g. a skill pack
+    // collision, see skill-packs.ts's assertVacant) must not abort the whole
+    // plugin — the remaining entries still deserve a chance to register.
+    try {
+      const cfg = await buildAgentWorkerConfig(dir, entry, name);
+      console.log(`add agent ${entry.name} @ ${cfg.env.TREX_AGENT_DIR}`);
+      // _addFunction computes servicePath as `${dir}${fncfg.function}` and the
+      // mounted URL from `source` + plugin scope; TREX_AGENT_BASE tells the
+      // worker its mount point so it can strip the prefix. Always the
+      // trusted-scope mount — the guard above rejects everything else.
+      const scope = `/${name.slice(1, name.indexOf("/"))}`;
+      const basePath = `${PLUGINS_BASE_PATH}${scope}${cfg.source}`;
 
-    // Discord GATEWAY mode (agents/gateway/discord.ts): DISCORD_GATEWAY in the
-    // agent's OWN manifest env swaps the inbound webhook for an outbound
-    // gateway WebSocket — no public URL needed. Deliberately NO host-env
-    // fallback: with one, a single host-wide DISCORD_GATEWAY=1 opened a
-    // gateway client for EVERY registered agent on the same bot token —
-    // identify rate-limit 429s, and each interaction fanned out to every
-    // agent's route (racing callbacks, N sessions per command). An agent opts
-    // in by passing the var through its trex.agents[].env block
-    // (`"DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}"`). The worker's DISCORD_PUBLIC_KEY
-    // is overridden to a boot-time ephemeral key BEFORE _addFunction bakes the
-    // env, so the loopback shim is the only principal that can pass the
-    // adapter's signature-before-send gate (Discord never POSTs webhooks in
-    // this mode — no Interactions Endpoint URL is registered — so the real
-    // application key is unused). Must happen before _addFunction: worker env
-    // is creation-time only.
-    let gateway: { botToken: string; channelId: string; messages: boolean } | null = null;
-    if (gatewayModeEnabled(cfg.env.DISCORD_GATEWAY)) {
-      const botToken = cfg.env.DISCORD_BOT_TOKEN || Deno.env.get("DISCORD_BOT_TOKEN") || "";
-      if (!botToken) {
-        console.error(`agents: agent ${entry.name} (plugin ${name}) sets DISCORD_GATEWAY but has no DISCORD_BOT_TOKEN — gateway mode disabled`);
-      } else {
-        gateway = {
-          botToken,
-          channelId: cfg.env.DISCORD_GATEWAY_CHANNEL || "discord",
-          // Messages mode is gateway-only (Discord never webhooks messages) and
-          // needs the privileged MESSAGE_CONTENT intent enabled in the portal.
-          messages: gatewayModeEnabled(cfg.env.DISCORD_MESSAGES),
-        };
+      // Discord GATEWAY mode (agents/gateway/discord.ts): DISCORD_GATEWAY in the
+      // agent's OWN manifest env swaps the inbound webhook for an outbound
+      // gateway WebSocket — no public URL needed. Deliberately NO host-env
+      // fallback: with one, a single host-wide DISCORD_GATEWAY=1 opened a
+      // gateway client for EVERY registered agent on the same bot token —
+      // identify rate-limit 429s, and each interaction fanned out to every
+      // agent's route (racing callbacks, N sessions per command). An agent opts
+      // in by passing the var through its trex.agents[].env block
+      // (`"DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}"`). The worker's DISCORD_PUBLIC_KEY
+      // is overridden to a boot-time ephemeral key BEFORE _addFunction bakes the
+      // env, so the loopback shim is the only principal that can pass the
+      // adapter's signature-before-send gate (Discord never POSTs webhooks in
+      // this mode — no Interactions Endpoint URL is registered — so the real
+      // application key is unused). Must happen before _addFunction: worker env
+      // is creation-time only.
+      let gateway: { botToken: string; channelId: string; messages: boolean } | null = null;
+      if (gatewayModeEnabled(cfg.env.DISCORD_GATEWAY)) {
+        const botToken = cfg.env.DISCORD_BOT_TOKEN || Deno.env.get("DISCORD_BOT_TOKEN") || "";
+        if (!botToken) {
+          console.error(`agents: agent ${entry.name} (plugin ${name}) sets DISCORD_GATEWAY but has no DISCORD_BOT_TOKEN — gateway mode disabled`);
+        } else {
+          gateway = {
+            botToken,
+            channelId: cfg.env.DISCORD_GATEWAY_CHANNEL || "discord",
+            // Messages mode is gateway-only (Discord never webhooks messages) and
+            // needs the privileged MESSAGE_CONTENT intent enabled in the portal.
+            messages: gatewayModeEnabled(cfg.env.DISCORD_MESSAGES),
+          };
+        }
       }
-    }
-    const signer = gateway ? await createGatewaySigner() : null;
-    const envOverrides: Record<string, string> = { TREX_AGENT_BASE: basePath };
-    if (signer) {
-      cfg.env.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
-      envOverrides.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
-    }
-    const live: LiveWorkerConfig = {
-      servicePath: cfg.servicePath,
-      importMapPath: cfg.importMapPath,
-      xenv: { _shared: { ...cfg.env, ...envOverrides } },
-    };
-    // Re-registration (dev reload) overwrites the record — same idempotency
-    // convention as the discordGateways map below.
-    AGENT_MOUNTS.set(`${name}/${entry.name}`, {
-      entry, pluginDir: dir, pluginFullName: name, basePath, envOverrides, live,
-    });
-    _addFunction(
-      app,
-      cfg.source,
-      cfg.servicePath,
-      cfg.importMapPath,
-      {
-        function: `/agents/${entry.name}`,
-        allowHostFsAccess: true,
-        // Channel subpaths ({basePath}/eve/v1/<channelId>/*) bypass proxy auth;
-        // the worker enforces adapter signature verification instead. session/
-        // chat/health/info keep authContext+pluginAuthz. See the pattern's doc.
-        authExemptPattern: channelAuthExemptPattern(basePath),
-        liveConfig: live,
-      },
-      dir,
-      name,
-      live.xenv,
-    );
-
-    if (gateway && signer) {
-      // Loopback base: the in-process plain-HTTP listener (same convention as
-      // GBRAIN_MEMORY_INTERNAL_URL in buildAgentWorkerConfig). The client
-      // starts fire-and-forget and reconnects on its own; keyed by basePath so
-      // a re-registration replaces the previous client instead of doubling up.
-      const loopback = Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL") ?? "http://127.0.0.1:8001";
-      startDiscordGateway(basePath, {
-        botToken: gateway.botToken,
-        forwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}`,
-        signer,
-        label: `${name}/${entry.name}`,
-        ...(gateway.messages
-          ? {
-            // GUILD_MESSAGES | MESSAGE_CONTENT — interactions still need none.
-            intents: (1 << 9) | (1 << 15),
-            messageForwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}/messages`,
-          }
-          : {}),
+      const signer = gateway ? await createGatewaySigner() : null;
+      const envOverrides: Record<string, string> = { TREX_AGENT_BASE: basePath };
+      if (signer) {
+        cfg.env.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
+        envOverrides.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
+      }
+      const live: LiveWorkerConfig = {
+        servicePath: cfg.servicePath,
+        importMapPath: cfg.importMapPath,
+        xenv: { _shared: { ...cfg.env, ...envOverrides } },
+      };
+      // Re-registration (dev reload) overwrites the record. This is NOT a full
+      // re-registration story on its own: Express keeps serving the FIRST
+      // registered route's handler/ref regardless of what this map holds
+      // afterward, and there is no re-registration path today anyway —
+      // _addFunction's registerFromPath early-returns on a duplicate route.
+      AGENT_MOUNTS.set(`${name}/${entry.name}`, {
+        entry, pluginDir: dir, pluginFullName: name, basePath, envOverrides, live,
       });
+      _addFunction(
+        app,
+        cfg.source,
+        cfg.servicePath,
+        cfg.importMapPath,
+        {
+          function: `/agents/${entry.name}`,
+          allowHostFsAccess: true,
+          // Channel subpaths ({basePath}/eve/v1/<channelId>/*) bypass proxy auth;
+          // the worker enforces adapter signature verification instead. session/
+          // chat/health/info keep authContext+pluginAuthz. See the pattern's doc.
+          authExemptPattern: channelAuthExemptPattern(basePath),
+          liveConfig: live,
+        },
+        dir,
+        name,
+        live.xenv,
+      );
+
+      if (gateway && signer) {
+        // Loopback base: the in-process plain-HTTP listener (same convention as
+        // GBRAIN_MEMORY_INTERNAL_URL in buildAgentWorkerConfig). The client
+        // starts fire-and-forget and reconnects on its own; keyed by basePath so
+        // a re-registration replaces the previous client instead of doubling up.
+        const loopback = Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL") ?? "http://127.0.0.1:8001";
+        startDiscordGateway(basePath, {
+          botToken: gateway.botToken,
+          forwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}`,
+          signer,
+          label: `${name}/${entry.name}`,
+          ...(gateway.messages
+            ? {
+              // GUILD_MESSAGES | MESSAGE_CONTENT — interactions still need none.
+              intents: (1 << 9) | (1 << 15),
+              messageForwardUrl: `${loopback}${basePath}/eve/v1/${gateway.channelId}/messages`,
+            }
+            : {}),
+        });
+      }
+    } catch (e) {
+      console.error(
+        `agents: agent ${entry.name} (plugin ${name}) failed to register — skipping:`,
+        e instanceof Error ? e.message : e,
+      );
+      continue;
     }
   }
 }

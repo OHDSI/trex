@@ -36,9 +36,12 @@ export function normalizeSkillsValue(value: unknown): SkillPackDecl[] {
   const seen = new Set<string>();
   return arr.map((e) => {
     const entry = e as { name?: string; dir?: string; agents?: unknown };
-    if (!entry?.name || !SKILL_PACK_NAME_RE.test(entry.name) || entry.name.includes("--")) {
+    if (
+      !entry?.name || !SKILL_PACK_NAME_RE.test(entry.name) || entry.name.includes("--") ||
+      /[-_]$/.test(entry.name)
+    ) {
       throw new Error(
-        `skills: each pack needs a name ([a-zA-Z0-9_-], no "--"), got ${JSON.stringify(e)}`,
+        `skills: each pack needs a name ([a-zA-Z0-9_-], no "--", no trailing - or _), got ${JSON.stringify(e)}`,
       );
     }
     if (seen.has(entry.name)) {
@@ -52,6 +55,16 @@ export function normalizeSkillsValue(value: unknown): SkillPackDecl[] {
       throw new Error(
         `skills: pack "${entry.name}" needs agents: ["<agent-name>" | "*", ...] (non-empty), got ${JSON.stringify(entry.agents)}`,
       );
+    }
+    if (entry.dir !== undefined) {
+      const d = entry.dir;
+      if (typeof d !== "string" || d.length === 0 || d.startsWith("/") || d.includes("..")) {
+        throw new Error(
+          `skills: pack "${entry.name}" has invalid dir (must be non-empty, not start with "/", no ".."), got ${
+            JSON.stringify(d)
+          }`,
+        );
+      }
     }
     return { name: entry.name, dir: entry.dir ?? "pack", agents: agents as string[] };
   });
@@ -210,8 +223,13 @@ export async function stageSkillPacks(stagedAgentDir: string, packs: SkillPackEn
 // dispatched (same rationale as plugin.ts's collectDeclaredMemoryNames: the
 // pack-declaring plugin and the agent-declaring plugin can be scanned in
 // either order, and buildAgentWorkerConfig must see every pack when it
-// stages an agent). Invalid declarations are swallowed here — they surface
-// with a real error when the dispatch pass reaches that plugin.
+// stages an agent). Invalid declarations — a malformed decl (normalizeSkillsValue
+// throws) OR a pack that fails dir validation (validateSkillPackDir throws,
+// e.g. a typo'd `dir`) — are skipped here rather than registered; they
+// surface with a real error when the dispatch pass reaches that plugin.
+// Skipping a pack that WOULD fail validation matters: registering it anyway
+// would make buildAgentWorkerConfig throw for every agent it targets, at
+// every registration, until the bad pack is fixed and the process restarts.
 export async function collectDeclaredSkillPacks(rawPaths: string[]): Promise<void> {
   for (const rawPath of rawPaths) {
     for (const dir of splitPathList(rawPath)) {
@@ -222,10 +240,17 @@ export async function collectDeclaredSkillPacks(rawPaths: string[]): Promise<voi
         if (!isTrustedPluginScope(pkg?.name ?? "")) continue;
         try {
           for (const decl of normalizeSkillsValue(value)) {
-            registerSkillPack({ ...decl, srcDir: `${pluginDir}/${decl.dir}`, pluginName: pkg.name });
+            const pack = { ...decl, srcDir: `${pluginDir}/${decl.dir}`, pluginName: pkg.name };
+            try {
+              await validateSkillPackDir(pack);
+              registerSkillPack(pack);
+            } catch {
+              // Reported by addSkillsPlugin in the dispatch pass.
+            }
           }
         } catch {
-          // Reported by addSkillsPlugin in the dispatch pass.
+          // normalizeSkillsValue threw for the whole declared value (malformed
+          // manifest) — reported by addSkillsPlugin in the dispatch pass.
         }
       }
     }

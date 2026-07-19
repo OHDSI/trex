@@ -32,12 +32,24 @@ export async function addSkillsPlugin(
     );
     return;
   }
-  const fresh: SkillPackEntry[] = [];
-  for (const decl of normalizeSkillsValue(value)) {
-    const pack: SkillPackEntry = { ...decl, srcDir: `${dir}/${decl.dir}`, pluginName: name };
+  // Phase 1: build and validate EVERY declared pack before registering any.
+  // Registering pack 1 and then throwing on pack 2's validation would leave
+  // pack 1 registered-but-never-staged: registerSkillPack returns false on a
+  // later retry with the identical decl, so a targeted agent never picks it
+  // up until the process restarts.
+  const packs: SkillPackEntry[] = normalizeSkillsValue(value).map((decl) => ({
+    ...decl,
+    srcDir: `${dir}/${decl.dir}`,
+    pluginName: name,
+  }));
+  for (const pack of packs) {
     await validateSkillPackDir(pack);
+  }
+  // Phase 2: every pack validated — now register.
+  const fresh: SkillPackEntry[] = [];
+  for (const pack of packs) {
     if (registerSkillPack(pack)) fresh.push(pack);
-    console.log(`skills: pack "${decl.name}" (${name}) declared for agents: ${decl.agents.join(", ")}`);
+    console.log(`skills: pack "${pack.name}" (${name}) declared for agents: ${pack.agents.join(", ")}`);
   }
   if (fresh.length === 0) return;
   for (const [key, rec] of AGENT_MOUNTS) {

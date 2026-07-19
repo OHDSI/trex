@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertThrows, assertRejects } from "jsr:@std/assert";
 import {
   _clearDeclaredSkillPacksForTest,
+  collectDeclaredSkillPacks,
   hasFrontmatterDescription,
   normalizeSkillsValue,
   packsForAgent,
@@ -34,6 +35,17 @@ Deno.test("normalizeSkillsValue rejects bad names, '--', missing/empty/invalid a
     Error,
     "duplicate",
   );
+});
+
+Deno.test("normalizeSkillsValue rejects trailing -/_ in names and invalid dir values", () => {
+  // Trailing dash/underscore would make the staged dir "<pack>---<skill>"
+  // (pack name already ends in the "--" separator's first char), and
+  // packOfSkillName would then misreport provenance.
+  assertThrows(() => normalizeSkillsValue([{ name: "abc-", agents: ["toy"] }]), Error, "needs a name");
+  assertThrows(() => normalizeSkillsValue([{ name: "abc_", agents: ["toy"] }]), Error, "needs a name");
+  assertThrows(() => normalizeSkillsValue([{ name: "a", dir: "", agents: ["toy"] }]), Error, "invalid dir");
+  assertThrows(() => normalizeSkillsValue([{ name: "a", dir: "../x", agents: ["toy"] }]), Error, "invalid dir");
+  assertThrows(() => normalizeSkillsValue([{ name: "a", dir: "/abs", agents: ["toy"] }]), Error, "invalid dir");
 });
 
 Deno.test("registerSkillPack: new → true; identical re-registration → false; cross-plugin name clash → throws", () => {
@@ -143,4 +155,43 @@ Deno.test("stageSkillPacks throws on collision instead of overwriting", async ()
   const staged = `${tmp}/agent`;
   await Deno.mkdir(`${staged}/skills/mypack--greeting`, { recursive: true });
   await assertRejects(() => stageSkillPacks(staged, [p]), Error, "refusing to overwrite");
+});
+
+Deno.test("collectDeclaredSkillPacks skips a pack that fails dir validation, still registers the good one", async () => {
+  const root = await Deno.makeTempDir();
+  const pluginsDir = `${root}/plugins`;
+
+  // Good plugin: valid pack dir with a real skill.
+  const goodDir = `${pluginsDir}/@trex/goodskills`;
+  await Deno.mkdir(`${goodDir}/pack/skills/greeting`, { recursive: true });
+  await Deno.writeTextFile(
+    `${goodDir}/pack/skills/greeting/SKILL.md`,
+    "---\ndescription: How to greet.\n---\n\n# Greeting\n",
+  );
+  await Deno.writeTextFile(
+    `${goodDir}/package.json`,
+    JSON.stringify({
+      name: "@trex/goodskills",
+      trex: { skills: [{ name: "goodpack", dir: "pack", agents: ["toy"] }] },
+    }),
+  );
+
+  // Bad plugin: declares a pack whose dir doesn't exist on disk.
+  const badDir = `${pluginsDir}/@trex/badskills`;
+  await Deno.mkdir(badDir, { recursive: true });
+  await Deno.writeTextFile(
+    `${badDir}/package.json`,
+    JSON.stringify({
+      name: "@trex/badskills",
+      trex: { skills: [{ name: "badpack", dir: "nonexistent-dir", agents: ["toy"] }] },
+    }),
+  );
+
+  _clearDeclaredSkillPacksForTest();
+  try {
+    await collectDeclaredSkillPacks([pluginsDir]);
+    assertEquals(packsForAgent("toy").map((p) => p.name), ["goodpack"]);
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+  }
 });

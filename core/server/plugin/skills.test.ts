@@ -10,7 +10,8 @@ import { _clearAgentMountsForTest, addAgentsPlugin, AGENT_MOUNTS } from "./agent
 
 const stubApp = { all: () => {} } as never;
 
-// Writes a plugin dir declaring one pack targeting `agents`, returns its dir.
+// Writes a pack source dir (skills/greeting) and returns the plugin dir; the
+// pack decl itself is passed to addSkillsPlugin separately by each test.
 async function writeSkillsPluginDir(): Promise<string> {
   const dir = await Deno.makeTempDir();
   await Deno.mkdir(`${dir}/pack/skills/greeting`, { recursive: true });
@@ -91,6 +92,39 @@ Deno.test("addSkillsPlugin does NOT rebuild mounted agents the pack doesn't targ
   } finally {
     _clearDeclaredSkillPacksForTest();
     _clearAgentMountsForTest();
+  }
+});
+
+Deno.test("addSkillsPlugin validates every pack before registering any (no partial registration)", async () => {
+  _clearDeclaredSkillPacksForTest();
+  const dir = await Deno.makeTempDir();
+  // First pack is valid; second pack's dir doesn't exist on disk.
+  await Deno.mkdir(`${dir}/goodpack/skills/greeting`, { recursive: true });
+  await Deno.writeTextFile(
+    `${dir}/goodpack/skills/greeting/SKILL.md`,
+    "---\ndescription: How to greet.\n---\n\n# Greeting\n",
+  );
+  try {
+    await assertRejects(
+      () =>
+        addSkillsPlugin(
+          stubApp,
+          [
+            { name: "firstpack", dir: "goodpack", agents: ["toy"] },
+            { name: "secondpack", dir: "does-not-exist", agents: ["toy"] },
+          ],
+          dir,
+          "@trex/skills-test",
+        ),
+      Error,
+      "secondpack",
+    );
+    // The first pack must NOT be registered either: otherwise it's stuck
+    // registered-but-never-staged until the process restarts (registerSkillPack
+    // returns false on a later retry with the identical decl).
+    assertEquals(packsForAgent("toy"), []);
+  } finally {
+    _clearDeclaredSkillPacksForTest();
   }
 });
 

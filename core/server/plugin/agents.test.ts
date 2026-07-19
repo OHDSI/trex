@@ -356,20 +356,29 @@ Deno.test("addAgentsPlugin skips an agent whose memory link is not a declared me
 
 Deno.test("addAgentsPlugin proceeds when the memory link IS declared (reaches buildAgentWorkerConfig)", async () => {
   // Same bogus-dir trick in reverse: a DECLARED memory link must not be
-  // skipped, so this should fail on the missing instructions.md (proving
-  // the validation guard let it through), not silently no-op.
+  // skipped, so buildAgentWorkerConfig IS reached and fails on the missing
+  // instructions.md (proving the validation guard let it through). Fix 2's
+  // per-entry isolation now catches and logs that failure instead of
+  // rejecting the whole addAgentsPlugin call — assert on the logged message
+  // rather than a rejection.
   const fakeApp = { all: () => { throw new Error("must not register a route"); } };
-  await assertRejects(
-    () =>
-      addAgentsPlugin(
-        fakeApp as never,
-        { name: "toy", dir: "does-not-exist", memory: [{ name: "d2e" }] },
-        "/does/not/exist",
-        "@trex/toy-agent",
-        new Set(["d2e"]),
-      ),
-    Error,
-    "instructions.md",
+  const logged: unknown[][] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args);
+  try {
+    await addAgentsPlugin(
+      fakeApp as never,
+      { name: "toy", dir: "does-not-exist", memory: [{ name: "d2e" }] },
+      "/does/not/exist",
+      "@trex/toy-agent",
+      new Set(["d2e"]),
+    );
+  } finally {
+    console.error = origError;
+  }
+  assert(
+    logged.some((args) => args.some((a) => typeof a === "string" && a.includes("instructions.md"))),
+    "expected the missing-instructions.md failure to be logged",
   );
 });
 
@@ -480,6 +489,39 @@ Deno.test("addAgentsPlugin records an AgentMountRecord whose live config matches
   const shared = (rec.live.xenv as { _shared: Record<string, string> })._shared;
   assertEquals(shared.TREX_AGENT_DIR, `${rec.live.servicePath}/agent`);
   assertEquals(shared.TREX_AGENT_BASE, "/plugins/trex/toy");
+});
+
+Deno.test("addAgentsPlugin isolates a per-entry staging failure — other agents in the same plugin still register", async () => {
+  // Two agents declared by the same plugin; "toy" is targeted by a pack whose
+  // srcDir doesn't exist, so buildAgentWorkerConfig's stageSkillPacks call
+  // throws for it — this must not abort "ednagent" registered right after it.
+  const pluginDir = await Deno.makeTempDir();
+  for (const sub of ["agent", "agent2"]) {
+    await Deno.mkdir(`${pluginDir}/${sub}`, { recursive: true });
+    await Deno.writeTextFile(`${pluginDir}/${sub}/instructions.md`, "You are a test agent.\n");
+  }
+  _clearAgentMountsForTest();
+  _clearDeclaredSkillPacksForTest();
+  try {
+    registerSkillPack({
+      name: "brokenpack",
+      dir: "pack",
+      agents: ["toy"],
+      srcDir: `${pluginDir}/does-not-exist`,
+      pluginName: "@trex/two-agents",
+    });
+    await addAgentsPlugin(
+      stubApp,
+      [{ name: "toy", dir: "agent" }, { name: "ednagent", dir: "agent2" }],
+      pluginDir,
+      "@trex/two-agents",
+    );
+    assertEquals(AGENT_MOUNTS.has("@trex/two-agents/toy"), false);
+    assertEquals(AGENT_MOUNTS.has("@trex/two-agents/ednagent"), true);
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+    _clearAgentMountsForTest();
+  }
 });
 
 Deno.test("rebuildAgentMount swaps the live config to a freshly staged dir (and can stage new packs)", async () => {
