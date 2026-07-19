@@ -140,8 +140,18 @@ interface DecodedCustomId {
   optionId?: string;
 }
 
+// Payload is packed as `requestId` (optionally + \u001f + optionId) rather than JSON:
+// a UUID requestId plus an "approve"/"deny" optionId, JSON-wrapped and base64url'd,
+// exceeds Discord's 100-char custom_id cap (~106 chars), so every approval-button
+// render threw. The compact form keeps a UUID + verb at ~70 chars. \u001f can't
+// appear in a UUID or an option id, so it is an unambiguous separator.
+const HITL_FIELD_SEP = "\u001f"; // US (0x1f)
+
 function encodeHitlCustomId(prefix: string, payload: DecodedCustomId): string {
-  const encoded = `${prefix}${utf8ToBase64Url(JSON.stringify(payload))}`;
+  const raw = payload.optionId === undefined
+    ? payload.requestId
+    : `${payload.requestId}${HITL_FIELD_SEP}${payload.optionId}`;
+  const encoded = `${prefix}${utf8ToBase64Url(raw)}`;
   if (encoded.length > 100) {
     throw new Error("discordChannel: HITL custom_id exceeded Discord's 100-character limit.");
   }
@@ -151,11 +161,10 @@ function encodeHitlCustomId(prefix: string, payload: DecodedCustomId): string {
 function decodeHitlCustomId(customId: string, prefix: string): DecodedCustomId | null {
   if (!customId.startsWith(prefix)) return null;
   try {
-    const json = base64UrlToUtf8(customId.slice(prefix.length));
-    const parsed = JSON.parse(json);
-    if (typeof parsed.requestId !== "string" || parsed.requestId.length === 0) return null;
-    const base: DecodedCustomId = { requestId: parsed.requestId };
-    return typeof parsed.optionId === "string" ? { ...base, optionId: parsed.optionId } : base;
+    const raw = base64UrlToUtf8(customId.slice(prefix.length));
+    const [requestId, optionId] = raw.split(HITL_FIELD_SEP);
+    if (typeof requestId !== "string" || requestId.length === 0) return null;
+    return typeof optionId === "string" ? { requestId, optionId } : { requestId };
   } catch {
     return null;
   }
