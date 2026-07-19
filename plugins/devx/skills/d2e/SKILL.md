@@ -109,7 +109,12 @@ interactive hot-reload preview dev server is a separate concern — see
 
 **Data access:** via `DBDao` — **Ibis** for Postgres, **SQLAlchemy** for HANA/DuckDB.
 
-**Testing:** use `prefect_test_harness()` to validate flow logic against an ephemeral Prefect backend. **Full flow execution is out of scope in devx** — the Rust process manager's command allowlist lacks `python`/`prefect`, so real runs need an image rebuild; the platform runs flows via a Prefect server (`:41120`) + a Docker worker pool.
+**Testing:** see **`testing-d2e-flows`** — you CAN run a real flow end-to-end by
+triggering it over the Prefect REST API (no UI); the trap is the `authtoken` run input
+the flow blocks ~300s on. Use `prefect_test_harness()` for pure logic. Note devx cannot
+execute a flow as a sub-app process (the Rust command allowlist has no `python`/`prefect`,
+which is why the flow run recipe is a literal `echo`); execution happens on the Prefect
+**pixi process worker** (`process-pool`), with the server at `:41120`.
 
 ---
 
