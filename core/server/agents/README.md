@@ -730,6 +730,57 @@ tools/skills, so a staged directory still loads there). See
 `plugins/memory/docs/OPERATIONS.md` for declaring memories, env vars, and the
 open verification gaps.
 
+## Skill packs (`trex.skills`)
+
+A plugin can declare named packs of skills that get injected into OTHER
+plugins' agents — the pack names its targets, so you deploy the agent first
+and skills to it afterwards:
+
+```json
+{
+  "name": "@trex/ohdsi-skills",
+  "trex": {
+    "skills": [
+      { "name": "ohdsi-cohorts", "dir": "pack", "agents": ["claw", "coder"] },
+      { "name": "house-style",   "dir": "style", "agents": ["*"] }
+    ]
+  }
+}
+```
+
+Pack layout (directory-form skills only, so supporting files travel with the
+skill; `connections/` is optional):
+
+```
+pack/
+  skills/
+    cohort-building/
+      SKILL.md            # frontmatter `description:` + body
+      references/*.md     # supporting files, referenced by relative path
+  connections/
+    atlas.ts              # defineMcpClientConnection(...) — tools surface as
+                          #   <pack>--atlas__<tool>
+```
+
+Semantics:
+
+- `agents` lists exact agent names, or `"*"` for every agent on the
+  deployment (including agents from plugins installed later — a `"*"` pack
+  changes other plugins' prompt surface by design; declare deliberately).
+- Trusted scopes only (`@trex/`, `@ohdsi/`) — packs inject prompt content
+  and MCP connections.
+- Staged skills are namespaced `skills/<pack>--<skill>/` (`--` is reserved;
+  don't use it in hand-authored skill names). `/eve/v1/info` reports the
+  pack per skill in `skills.static[].pack`.
+- A pack colliding with a hand-authored file fails the deployment loudly;
+  the agent is left unchanged.
+- Deploying a skills plugin after its target agent is running re-stages that
+  agent's worker dir and swaps it in atomically; the next request runs with
+  the new skills (sessions are DB-backed — nothing is lost). Removing the
+  plugin takes effect at next boot.
+- A pack targeting an agent that doesn't exist yet simply waits; it attaches
+  when that agent appears.
+
 ## Tool extensions and eve portability
 
 `defineTool` accepts eve's real fields (`description`, `inputSchema`, `execute`, `needsApproval`)

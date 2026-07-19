@@ -3,6 +3,8 @@ import { addSkillsPlugin } from "./skills.ts";
 import {
   _clearDeclaredSkillPacksForTest,
   packsForAgent,
+  normalizeSkillsValue,
+  validateSkillPackDir,
 } from "./skill-packs.ts";
 import { _clearAgentMountsForTest, addAgentsPlugin, AGENT_MOUNTS } from "./agents.ts";
 
@@ -90,4 +92,12 @@ Deno.test("addSkillsPlugin does NOT rebuild mounted agents the pack doesn't targ
     _clearDeclaredSkillPacksForTest();
     _clearAgentMountsForTest();
   }
+});
+
+Deno.test("manifest: the real plugins/skills-example pack normalizes and validates", async () => {
+  const pluginDir = new URL("../../../plugins/skills-example", import.meta.url).pathname;
+  const pkg = JSON.parse(await Deno.readTextFile(`${pluginDir}/package.json`));
+  const decls = normalizeSkillsValue(pkg.trex.skills);
+  assertEquals(decls, [{ name: "examplepack", dir: "pack", agents: ["toy"] }]);
+  await validateSkillPackDir({ ...decls[0], srcDir: `${pluginDir}/pack`, pluginName: pkg.name });
 });
