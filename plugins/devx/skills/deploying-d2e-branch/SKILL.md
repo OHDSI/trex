@@ -65,23 +65,32 @@ gh run view <run-id> --repo OHDSI/Data2Evidence --log \
   | grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' | head -1
 ```
 
-**Verified limitation: `gh run view --log` returns nothing while the run is
-in-progress.** It only yields logs once the job has finished — by which point the tunnel
-has already been torn down. So this command **cannot** give you the URL during the window
-it is valid for. Practical consequences:
-- Read the URL from the **job's live log view in the browser** (the "Start Cloudflare
-  quick tunnel" step) or the run's step summary page, and post it from there.
-- Automating "wait, then fetch the URL, then verify" against `--log` **does not work**.
-  Don't build a watcher on it, as it will silently only ever fire after teardown.
-- A **job output does not help either** — like `--log`, outputs are only readable once
-  the job completes. The only thing retrievable mid-run is an **artifact**, which becomes
-  downloadable as soon as its upload step finishes.
-  *Pending:* Data2Evidence PR **#2915** adds exactly that — a `tunnel-url` artifact
-  published right after the tunnel starts, and a `tunnel-ready` artifact published once
-  the environment is actually usable. Once it is **merged to `develop`** (the workflow
-  runs from the default branch, so a branch copy has no effect), the reliable automation
-  becomes: poll for the `tunnel-ready` artifact, then
-  `gh run download <run-id> -n tunnel-url`, then curl the public URL.
+**Do not use `--log` or job outputs to get the URL while the run is live** — both are
+only readable once the job has **finished**, by which point the tunnel is torn down. A
+watcher built on either silently only ever fires after teardown. Use the **artifacts**
+instead (added in PR #2915, on `develop`); artifacts are downloadable as soon as their
+upload step completes.
+
+### The verified recipe
+```bash
+# 1. URL artifact — available ~2 min in, long before anything serves.
+gh run download <run-id> --repo OHDSI/Data2Evidence -n tunnel-url -D ./art
+URL=$(tr -d '\r\n' < ./art/tunnel-url.txt)
+
+# 2. Poll until the readiness artifact appears (~21 min in).
+gh api repos/OHDSI/Data2Evidence/actions/runs/<run-id>/artifacts \
+  --jq '.artifacts[].name' | grep -qw tunnel-ready
+
+# 3. Only now is the environment usable. Verify the PUBLIC url yourself.
+curl -sL -o /dev/null -w '%{http_code}\n' "$URL/d2e/portal"    # expect 301 -> 200
+```
+**Measured (run `29684827895`):** `tunnel-url` downloadable at **+2 min**; probing the
+URL then returned **HTTP 502** — routable but nothing behind it. `tunnel-ready` appeared
+at **+21 min**, and the public URL answered **301 → 200** with `<title>Data2Evidence</title>`
+on the first attempt, plus `200` on `/system-portal/feature/list`.
+
+That ~19-minute gap is the whole reason for the two separate artifacts: **never post the
+URL when it first appears** — wait for `tunnel-ready`, or reviewers get a link that 502s.
 
 The URL is printed at **"Start Cloudflare quick tunnel"** — early, long before the
 environment is usable. The environment is only ready once **"Publish access details"**
@@ -127,11 +136,12 @@ succeeded**:
 So budget **~20 min of setup** on top of the image build, not the 40–60 min you might
 assume — the run above was warm-cache-free and still took 18.
 
-**Not proven by that run:** whether the URL was reachable *from the public internet*. The
-workflow's `Verify app is reachable` step curls with `--resolve "$TUNNEL_HOST:443:127.0.0.1"`,
-i.e. it bypasses Cloudflare and hits localhost — so a `301` there is consistent with a
-completely broken public tunnel. **Always curl the public URL yourself, from outside the
-runner, before sharing it with anyone.**
+**Don't trust the workflow's own `Verify app is reachable` step.** It curls with
+`--resolve "$TUNNEL_HOST:443:127.0.0.1"`, bypassing Cloudflare to hit localhost — so its
+`301` is consistent with a completely broken public tunnel. It also ends in
+`|| echo "App not reachable"`, so the step goes **green either way**. Always curl the
+public URL yourself, from outside the runner, before sharing it (run `29684827895`
+confirms the public path does work end to end).
 
 ## Failure modes worth knowing
 
