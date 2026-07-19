@@ -95,3 +95,112 @@ export function packsForAgent(agentName: string): SkillPackEntry[] {
 export function _clearDeclaredSkillPacksForTest(): void {
   DECLARED_SKILL_PACKS.clear();
 }
+
+// Frontmatter `description:` presence check — mirrors what loader.ts's
+// parseSkillDescription reads first (the one-liner shown in the system
+// prompt), kept local so plugin/ doesn't pull the whole agents loader (and
+// its edn-data dep) into the server process just to validate a manifest.
+export function hasFrontmatterDescription(markdown: string): boolean {
+  const fm = markdown.match(/^---\n([\s\S]*?)\n---/);
+  return !!fm && /^description:\s*\S/m.test(fm[1]);
+}
+
+export async function validateSkillPackDir(pack: SkillPackEntry): Promise<void> {
+  const label = `skills: pack "${pack.name}" (${pack.pluginName})`;
+  let found = 0;
+  try {
+    for await (const entry of Deno.readDir(`${pack.srcDir}/skills`)) {
+      if (!entry.isDirectory) continue;
+      if (!SKILL_PACK_NAME_RE.test(entry.name) || entry.name.includes("--")) {
+        throw new Error(`${label}: invalid skill dir name "${entry.name}" ([a-zA-Z0-9_-], no "--")`);
+      }
+      let md: string;
+      try {
+        md = await Deno.readTextFile(`${pack.srcDir}/skills/${entry.name}/SKILL.md`);
+      } catch (e) {
+        // Dir without SKILL.md: the loader skips it silently (loader.ts's
+        // skills discovery) — so do we, rather than failing the pack.
+        if (e instanceof Deno.errors.NotFound) continue;
+        throw e;
+      }
+      if (!hasFrontmatterDescription(md)) {
+        throw new Error(`${label}: skills/${entry.name}/SKILL.md needs a frontmatter "description:" line`);
+      }
+      found++;
+    }
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) {
+      throw new Error(`${label}: no ${pack.srcDir}/skills directory`);
+    }
+    throw e;
+  }
+  if (found === 0) {
+    throw new Error(`${label}: declares no skills — need at least one skills/<name>/SKILL.md`);
+  }
+  // connections/ is optional. Full __trexConnection brand validation can only
+  // happen at worker load (a same-process dynamic import can't resolve the
+  // "eve/connections" bare specifier) — a cheap content sniff catches the
+  // common mistake of dropping a non-connection file in the dir, which would
+  // otherwise break the TARGET agent's worker boot (loader.ts throws on
+  // unbranded connection modules).
+  try {
+    for await (const entry of Deno.readDir(`${pack.srcDir}/connections`)) {
+      if (!entry.isFile || !/\.(ts|js)$/.test(entry.name)) {
+        throw new Error(`${label}: connections/${entry.name} — only .ts/.js connection modules allowed`);
+      }
+      const src = await Deno.readTextFile(`${pack.srcDir}/connections/${entry.name}`);
+      if (!src.includes("eve/connections")) {
+        throw new Error(`${label}: connections/${entry.name} does not import "eve/connections" — not a connection module`);
+      }
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+}
+
+async function assertVacant(path: string, packName: string, what: string): Promise<void> {
+  let exists = true;
+  try {
+    await Deno.stat(path);
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) exists = false;
+    else throw e;
+  }
+  if (exists) {
+    throw new Error(
+      `skills: refusing to overwrite "${path}" (collides with pack "${packName}" ${what})`,
+    );
+  }
+}
+
+// Stages every given pack into an agent's STAGED dir (see agents.ts's
+// buildAgentWorkerConfig for where that comes from) — all I/O confined to
+// stagedAgentDir, same rule as agent-memory.ts's generateMemoryArtifacts.
+// Collision → throw: hand-authored agent content wins by failing loudly.
+export async function stageSkillPacks(stagedAgentDir: string, packs: SkillPackEntry[]): Promise<void> {
+  for (const pack of packs) {
+    for await (const entry of Deno.readDir(`${pack.srcDir}/skills`)) {
+      if (!entry.isDirectory) continue;
+      try {
+        await Deno.stat(`${pack.srcDir}/skills/${entry.name}/SKILL.md`);
+      } catch (e) {
+        if (e instanceof Deno.errors.NotFound) continue;
+        throw e;
+      }
+      const dest = `${stagedAgentDir}/skills/${pack.name}--${entry.name}`;
+      await assertVacant(dest, pack.name, `skill "${entry.name}"`);
+      await copyDirRecursive(`${pack.srcDir}/skills/${entry.name}`, dest);
+    }
+    try {
+      for await (const entry of Deno.readDir(`${pack.srcDir}/connections`)) {
+        if (!entry.isFile) continue;
+        const dest = `${stagedAgentDir}/connections/${pack.name}--${entry.name}`;
+        await assertVacant(dest, pack.name, `connection "${entry.name}"`);
+        await Deno.mkdir(`${stagedAgentDir}/connections`, { recursive: true });
+        await Deno.copyFile(`${pack.srcDir}/connections/${entry.name}`, dest);
+      }
+    } catch (e) {
+      if (!(e instanceof Deno.errors.NotFound)) throw e;
+    }
+  }
+}
