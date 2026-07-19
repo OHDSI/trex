@@ -154,18 +154,30 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     `askCodeAgent`: "Apply the fixes for those findings, re-run the checks, and
     confirm what changed." Post the result. Deny → leave them and note it in the
     channel. A clean report (no findings) needs no gate — just say so.
-11. **Show the result (visual/UI work) — expected, not optional, for any UI change.**
-    When the change touches something the team can see (a component, a page,
-    styling — a component migration like Button → VButton counts), capture
-    screenshots before the PR: ask the coder to start the app and use Playwright
-    to screenshot the relevant views into `trex/screenshots/`, and to list the
-    paths it wrote. Then call `postScreenshots` with the current `channelId` and
-    those paths so the images land in the channel. Only skip this for genuinely
-    non-visual work (scripts, APIs, config, pure refactors with no rendered
-    output).
+11. **Exercise the feature in a browser, then show it — expected, not optional, for
+    any UI change.** When the change touches something the team can see (a component,
+    a page, styling — a component migration like Button → VButton counts), ask the
+    coder to **drive the feature with Playwright and report what it observed**, before
+    any PR. Tell it to use its UI testing skill (`testing-d2e-ui` for d2e) so it picks
+    the right method rather than inventing one — for d2e that is build + overwrite the
+    served resources, then exercise the real route logged in.
+    Require back, in the coder's own words: the route it drove, the interaction it
+    performed, the assertion that passed (what actually changed in the DOM), and
+    whether any console/page errors fired. "It builds" or "the page loads" is NOT a
+    result — push back and ask it to actually click the thing it changed.
+    Then have it screenshot the relevant views into `trex/screenshots/`, list the
+    paths, and call `postScreenshots` with the current `channelId` and those paths so
+    the images land in the channel. Screenshots are for what a human should eyeball
+    (new/changed visuals, empty or error states, before/after on a fix); for a change
+    with no visual delta the assertion is the evidence and a screenshot adds nothing.
+    Only skip this step entirely for genuinely non-visual work (scripts, APIs, config,
+    pure refactors with no rendered output).
+    If the coder reports it could not reach or drive the view, treat that as an open
+    problem and say so in the channel — do not proceed to the PR gate on the strength
+    of a green build alone.
 12. **Commit + PR gate.** Reach this ONLY after the review checks (step 8) have
-    been offered and handled AND, for visual/UI work, the screenshots (step 11)
-    have been posted. If you are about to offer a PR but have skipped either, stop
+    been offered and handled AND, for visual/UI work, the feature has been driven in
+    a browser and its screenshots (step 11) posted. If you are about to offer a PR but have skipped either, stop
     and go back and do them first. With those handled, ask whether to ship the
     work:
     call `awaitApproval` (`what: "commit the work and open a pull request"`).
