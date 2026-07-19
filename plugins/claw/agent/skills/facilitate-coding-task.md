@@ -138,9 +138,12 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    any UI change.** When the change touches something the team can see (a component,
    a page, styling — a component migration like Button → VButton counts), ask the
    coder to **drive the feature with Playwright and report what it observed**, before
-   any PR. Tell it to use its UI testing skill (`testing-d2e-ui` for d2e) so it picks
-   the right method rather than inventing one — for d2e that is build + overwrite the
-   served resources, then exercise the real route logged in.
+   any PR. Instruct it explicitly (not just "take screenshots"): **use the `testing-d2e-ui`
+   skill — build the app and overwrite the served resources, then drive and screenshot the
+   real `:41100` route logged in. Do NOT start a dev server to screenshot** — the dev
+   server is only the interactive preview panel (`d2e-ui-preview`) and most apps render
+   blank standalone. If the coder reports it is "starting the dev server" to capture
+   screenshots, stop it and have it redo the build + overwrite flow.
    Require back, in the coder's own words: the route it drove, the interaction it
    performed, the assertion that passed (what actually changed in the DOM), and
    whether any console/page errors fired. "It builds" or "the page loads" is NOT a
