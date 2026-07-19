@@ -4,6 +4,7 @@
 // plugin proxy (_addFunction).
 import type { Express } from "express";
 import { _addFunction, isTrustedPluginScope, substituteEnvVarsInObject, TRUSTED_PLUGIN_SCOPES } from "./function.ts";
+import type { LiveWorkerConfig } from "./function.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from "./agent-memory.ts";
 import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
@@ -328,6 +329,57 @@ export function channelAuthExemptPattern(basePath: string): RegExp {
   return new RegExp(`^${esc}/eve/v1/(?!(?:session|health|info|eve)(?:/|$))[^/]+`);
 }
 
+export interface AgentMountRecord {
+  entry: AgentEntry;
+  pluginDir: string;
+  pluginFullName: string;
+  basePath: string;
+  // Mount-time env applied ON TOP of buildAgentWorkerConfig's env, re-applied
+  // verbatim on every rebuild: TREX_AGENT_BASE always; the gateway signer's
+  // DISCORD_PUBLIC_KEY when gateway mode is on (the ephemeral keypair lives
+  // in startDiscordGateway's client — a rebuild must keep the SAME public key
+  // or the loopback shim stops passing the adapter's signature gate).
+  envOverrides: Record<string, string>;
+  live: LiveWorkerConfig;
+}
+
+// One record per mounted agent, keyed `${pluginFullName}/${entry.name}`.
+// The skills plugin type (skills.ts) uses this to find and re-stage agents
+// that were already mounted when a pack targeting them is deployed.
+export const AGENT_MOUNTS = new Map<string, AgentMountRecord>();
+
+export function _clearAgentMountsForTest(): void {
+  AGENT_MOUNTS.clear();
+}
+
+// Re-stages an agent's worker dir from source (picking up newly declared
+// skill packs via buildAgentWorkerConfig's registry default) and atomically
+// repoints the mount through the shared live ref (see function.ts's
+// LiveWorkerConfig). On failure the swap never happens — the caller logs and
+// the running agent keeps serving from its current staged dir.
+export async function rebuildAgentMount(
+  rec: AgentMountRecord,
+  opts: { cleanupDelayMs?: number } = {},
+): Promise<void> {
+  const cfg = await buildAgentWorkerConfig(rec.pluginDir, rec.entry, rec.pluginFullName);
+  const old = rec.live.servicePath;
+  rec.live.servicePath = cfg.servicePath;
+  rec.live.importMapPath = cfg.importMapPath;
+  rec.live.xenv = { _shared: { ...cfg.env, ...rec.envOverrides } };
+  // The previous worker may still be mid-request against the old dir —
+  // delete after a grace period, not immediately. (First cleanup this code
+  // path has ever had: boot-time staged dirs were never removed.)
+  const delay = opts.cleanupDelayMs ?? 5 * 60_000;
+  const rm = () => Deno.remove(old, { recursive: true }).catch(() => {});
+  if (delay === 0) {
+    await rm();
+  } else {
+    const t = setTimeout(rm, delay);
+    // Cleanup must never keep the process alive.
+    Deno.unrefTimer(t);
+  }
+}
+
 export async function addAgentsPlugin(
   app: Express,
   value: unknown,
@@ -396,7 +448,21 @@ export async function addAgentsPlugin(
       }
     }
     const signer = gateway ? await createGatewaySigner() : null;
-    if (signer) cfg.env.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
+    const envOverrides: Record<string, string> = { TREX_AGENT_BASE: basePath };
+    if (signer) {
+      cfg.env.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
+      envOverrides.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
+    }
+    const live: LiveWorkerConfig = {
+      servicePath: cfg.servicePath,
+      importMapPath: cfg.importMapPath,
+      xenv: { _shared: { ...cfg.env, ...envOverrides } },
+    };
+    // Re-registration (dev reload) overwrites the record — same idempotency
+    // convention as the discordGateways map below.
+    AGENT_MOUNTS.set(`${name}/${entry.name}`, {
+      entry, pluginDir: dir, pluginFullName: name, basePath, envOverrides, live,
+    });
     _addFunction(
       app,
       cfg.source,
@@ -409,10 +475,11 @@ export async function addAgentsPlugin(
         // the worker enforces adapter signature verification instead. session/
         // chat/health/info keep authContext+pluginAuthz. See the pattern's doc.
         authExemptPattern: channelAuthExemptPattern(basePath),
+        liveConfig: live,
       },
       dir,
       name,
-      { _shared: { ...cfg.env, TREX_AGENT_BASE: basePath } },
+      live.xenv,
     );
 
     if (gateway && signer) {

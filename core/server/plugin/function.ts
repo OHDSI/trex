@@ -473,6 +473,19 @@ export function isTrustedPluginScope(name: string): boolean {
   return TRUSTED_PLUGIN_SCOPES.some((s) => name.startsWith(s));
 }
 
+// Live-config indirection (skills plugin type, re-stage-and-swap): an agents
+// mount passes fncfg.liveConfig, a MUTABLE ref whose fields are re-read on
+// every request. Swapping servicePath/importMapPath/xenv on the ref
+// atomically repoints the mount at a freshly staged dir — the worker pool
+// keys workers by servicePath, so the next request lazily creates a worker
+// from the new dir; no restart API needed. Absent liveConfig (every other
+// plugin type), behavior is unchanged.
+export interface LiveWorkerConfig {
+  servicePath: string;
+  importMapPath: string | null;
+  xenv: unknown;
+}
+
 export function _addFunction(
   app: Express,
   url: string,
@@ -485,6 +498,9 @@ export function _addFunction(
 ) {
   REGISTERED_FUNCTIONS.push({ name, source: url, function: fncfg.function });
 
+  const live = fncfg?.liveConfig as LiveWorkerConfig | undefined;
+  const cur = () => live ?? { servicePath: path, importMapPath: imports, xenv };
+
   // Worker-to-worker calls (Trex.tokioChannel) address functions by the
   // UNSCOPED plugin name + function path, e.g. `d2e-functions/portal` or
   // `fhir/fhir-gateway` — never the npm scope (`@data2evidence/...`). The plugin
@@ -495,8 +511,10 @@ export function _addFunction(
   const shortName = name.startsWith("@") && name.includes("/")
     ? name.slice(name.indexOf("/") + 1)
     : name;
-  const handler = (req: globalThis.Request) =>
-    _callWorker(req, path, imports, fncfg, dir, xenv);
+  const handler = (req: globalThis.Request) => {
+    const c = cur();
+    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv);
+  };
   fnmap[`${name}${fncfg.function}`] = handler;
   fnmap[`${shortName}${fncfg.function}`] = handler;
 
@@ -604,7 +622,8 @@ export function _addFunction(
         signal: controller.signal,
       });
 
-      const workerResponse = await _callWorker(webReq, path, imports, fncfg, dir, xenv, controller.signal);
+      const c = cur();
+      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, controller.signal);
 
       res.status(workerResponse.status);
       workerResponse.headers.forEach((value: string, key: string) => {

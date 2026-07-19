@@ -458,3 +458,52 @@ Deno.test("buildAgentWorkerConfig defaults to the declared-pack registry, honori
     _clearDeclaredSkillPacksForTest();
   }
 });
+
+import { _clearAgentMountsForTest, AGENT_MOUNTS, rebuildAgentMount } from "./agents.ts";
+
+// Route-registering app stub: _addFunction's app.all(...) must succeed but
+// nothing is served — these tests exercise mount bookkeeping, not HTTP.
+const stubApp = { all: () => {} } as never;
+
+Deno.test("addAgentsPlugin records an AgentMountRecord whose live config matches the mount", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  _clearAgentMountsForTest();
+  _clearDeclaredSkillPacksForTest();
+  await addAgentsPlugin(stubApp, { name: "toy", dir: "agent" }, toyPlugin, "@trex/toy-agent");
+  const rec = AGENT_MOUNTS.get("@trex/toy-agent/toy");
+  assert(rec, "mount record must exist");
+  assertEquals(rec.pluginDir, toyPlugin);
+  assertEquals(rec.basePath, "/plugins/trex/toy");
+  assertEquals(rec.envOverrides.TREX_AGENT_BASE, "/plugins/trex/toy");
+  // Live config points at the staged dir and carries the merged worker env.
+  assertEquals(rec.live.importMapPath, `${rec.live.servicePath}/import_map.json`);
+  const shared = (rec.live.xenv as { _shared: Record<string, string> })._shared;
+  assertEquals(shared.TREX_AGENT_DIR, `${rec.live.servicePath}/agent`);
+  assertEquals(shared.TREX_AGENT_BASE, "/plugins/trex/toy");
+});
+
+Deno.test("rebuildAgentMount swaps the live config to a freshly staged dir (and can stage new packs)", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  _clearAgentMountsForTest();
+  _clearDeclaredSkillPacksForTest();
+  try {
+    await addAgentsPlugin(stubApp, { name: "toy", dir: "agent" }, toyPlugin, "@trex/toy-agent");
+    const rec = AGENT_MOUNTS.get("@trex/toy-agent/toy")!;
+    const oldPath = rec.live.servicePath;
+    // Pack deployed AFTER the agent was mounted:
+    registerSkillPack(await writeTestPack("latepack", ["toy"]));
+    await rebuildAgentMount(rec, { cleanupDelayMs: 0 });
+    assert(rec.live.servicePath !== oldPath, "servicePath must be swapped");
+    // New staged dir has the late pack; env re-derived against the new dir,
+    // with mount-time overrides re-applied.
+    await Deno.stat(`${rec.live.servicePath}/agent/skills/latepack--greeting/SKILL.md`);
+    const shared = (rec.live.xenv as { _shared: Record<string, string> })._shared;
+    assertEquals(shared.TREX_AGENT_DIR, `${rec.live.servicePath}/agent`);
+    assertEquals(shared.TREX_AGENT_BASE, "/plugins/trex/toy");
+    // Old staged dir removed (cleanupDelayMs: 0 → immediate).
+    await assertRejects(() => Deno.stat(oldPath), Deno.errors.NotFound);
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+    _clearAgentMountsForTest();
+  }
+});
