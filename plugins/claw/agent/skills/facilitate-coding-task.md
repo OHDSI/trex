@@ -178,10 +178,20 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    The team's picks resume you with "The team selected: <checks>". For "none",
    go to step 12.
 10. **Run each chosen check and post its report.** For each check the team picked,
-    call `askCodeAgent`: "Run a <check> on the changes (use your
-    requesting-code-review skill / the matching review), wait for it, and report
-    the findings. Do NOT fix anything yet." Post each report with `postPlan`
-    (title e.g. "Security review", the findings as `text`).
+    call **`runReview`** with the app id and the matching `kind` (`code`, `security`,
+    `qa`, `design`). That runs devx's maintained review agent and stores the result in
+    the app's review history, so the team can re-open it in the devx UI. Do NOT ask the
+    coding agent to improvise a review instead — it would use a general-purpose coder
+    with none of those prompts and leave no record.
+    Reviews take minutes; run them one at a time and post each with `postPlan`
+    (title e.g. "Security review", the findings as `text`), noting the level counts.
+    `qa` and `design` drive a browser against the app's **dev server** — if it is not
+    running, `runReview` says so; either start it and retry, or tell the channel that
+    check was skipped rather than silently dropping it.
+    Note these review the devx app's own dev server. For **d2e platform UIs** the real
+    verification is step 8 (build + overwrite, exercise the route behind Logto) — do not
+    treat a `qa`/`design` pass as covering that.
+    Do NOT fix anything yet.
 11. **Ask whether to apply fixes.** After a report that has findings, call
     `awaitApproval` (`what: "apply the fixes from the <check>"`). Approve →
     `askCodeAgent`: "Apply the fixes for those findings, re-run the checks, and
