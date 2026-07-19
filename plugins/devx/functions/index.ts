@@ -1839,10 +1839,20 @@ Deno.serve(async (req: Request) => {
             startInstallCmd = sa.run.installCommand;
             startDevCmd = sa.run.devCommand;
             // Custom env is delivered via files (the Rust process manager can't take inline env).
+            // portStyle "cra" gets no --base flag (react-scripts ignores it), so the dev
+            // server would emit its package.json `homepage` base (e.g. <base href="/d2e/portal">)
+            // and the preview iframe would pull assets from the BAKED app instead of the dev
+            // server. PUBLIC_URL is CRA's equivalent of vite's --base, so point it at the proxy.
+            const envLines: string[] = [];
             if (d2e.externalApiBase) {
+              envLines.push(`D2E_API_BASE=${d2e.externalApiBase}`, `VITE_D2E_API_BASE=${d2e.externalApiBase}`);
+            }
+            if (sa.run.portStyle === "cra") {
+              envLines.push(`PUBLIC_URL=/plugins/trex/devx-api/apps/${appId}/proxy`);
+            }
+            if (envLines.length) {
               try {
-                await Deno.writeTextFile(`${devCwdAbs}/.env.local`,
-                  `D2E_API_BASE=${d2e.externalApiBase}\nVITE_D2E_API_BASE=${d2e.externalApiBase}\n`);
+                await Deno.writeTextFile(`${devCwdAbs}/.env.local`, envLines.join("\n") + "\n");
               } catch (e) { console.error("[d2e] .env.local write failed", e); }
             }
             if (sa.run.needsGithubToken) {
