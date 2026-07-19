@@ -40,6 +40,25 @@ export const evalStubs = {
     const m = evalMeta(ctx);
     return { apps: m?.evalApps ?? [{ id: "eval-app-1", name: "Sales Dashboard" }] };
   },
+  // A review with one finding by default, so the gated flow exercises the
+  // "findings -> ask whether to fix" branch rather than short-circuiting on a
+  // clean report. evalReviewFindings: [] covers the clean case.
+  runReview(ctx: { metadata?: unknown } | undefined, kind: string) {
+    const m = evalMeta(ctx);
+    const findings = m?.evalReviewFindings ?? [
+      {
+        title: "Unauthenticated endpoint exposes dataset listing",
+        level: "high",
+        description: "GET /datasets is reachable without a token.",
+      },
+    ];
+    const counts: Record<string, number> = {};
+    for (const f of findings) {
+      const level = String(f.level ?? "unknown").toLowerCase();
+      counts[level] = (counts[level] ?? 0) + 1;
+    }
+    return { kind, reviewId: "eval-review-1", findings, counts };
+  },
   // Canned coder reply keyed on the instruction so the gated flow stays coherent
   // (brainstorm -> options, writing-plans -> a plan, a review -> findings, finish
   // -> a PR link, otherwise -> implemented).

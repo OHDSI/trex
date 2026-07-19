@@ -132,40 +132,74 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    - If progress stalls (a continue returns the same remaining tasks, or the coder
      reports it is blocked), stop and report the blocker to the channel plainly.
    When the coder reports all tasks complete, do NOT offer a PR yet — the review
-   checks come first. Go straight to step 8, even if the coder already committed
+   checks come first. Go straight to step 8 (browser verification), then step 9, even if the coder already committed
    each task as it went (committed work still gets reviewed before a PR).
-8. **Ask which checks to run — required after every implementation, before any PR.**
-   When the implementation is done, never ship silently and never jump straight to
-   a PR. The FIRST thing you do after implementation is offer the review checks —
-   even if the work is already committed. Ask the team which to run: call
+8. **Exercise the feature in a browser, then show it — expected, not optional, for
+   any UI change.** When the change touches something the team can see (a component,
+   a page, styling — a component migration like Button → VButton counts), ask the
+   coder to **drive the feature with Playwright and report what it observed**, before
+   any PR. Tell it to use its UI testing skill (`testing-d2e-ui` for d2e) so it picks
+   the right method rather than inventing one — for d2e that is build + overwrite the
+   served resources, then exercise the real route logged in.
+   Require back, in the coder's own words: the route it drove, the interaction it
+   performed, the assertion that passed (what actually changed in the DOM), and
+   whether any console/page errors fired. "It builds" or "the page loads" is NOT a
+   result — push back and ask it to actually click the thing it changed.
+   Then have it screenshot the relevant views into `trex/screenshots/`, list the
+   paths, and call `postScreenshots` with the current `channelId` and those paths so
+   the images land in the channel. Screenshots are for what a human should eyeball
+   (new/changed visuals, empty or error states, before/after on a fix); for a change
+   with no visual delta the assertion is the evidence and a screenshot adds nothing.
+   Only skip this step entirely for genuinely non-visual work (scripts, APIs, config,
+   pure refactors with no rendered output).
+   If the coder reports it could not reach or drive the view, treat that as an open
+   problem and say so in the channel — do not proceed to the PR gate on the strength
+   of a green build alone.
+   **A blocked toolchain is a finding, not an obstacle to route around.** If the coder
+   hits a broken install, an unresolvable dependency, an uninitialised submodule or
+   similar, require it to report the defect rather than hand-patch its way past it
+   (unpacking a tarball into `node_modules`, stubbing a missing package, pinning around
+   a resolver error). Those workarounds hide a real repo bug and leave the next person
+   to rediscover it. Post the defect to the channel as its own item.
+   Also tell the coder to scope "leave no trace" to **tracked files**: repairing
+   gitignored build state (`node_modules`, caches) is maintenance and should be **kept**,
+   while edits to tracked source made only to exercise a feature must be reverted, with
+   `git status` shown as evidence. Undoing a legitimate environment repair to look clean
+   leaves the workspace broken for the next run.
+9. **Ask which checks to run — after the screenshots are posted, before any PR.**
+   Never ship silently and never jump straight to a PR. Ask AFTER step 8 so the team
+   decides with the screenshots in front of them — seeing the actual UI is what tells
+   someone whether a design review is worth running. Offer the checks even if the work
+   is already committed. Ask the team which to run: call
    `postChoice` with `multi: true` and the checks that fit the change:
    - `Code review` (value "code review"), `Security review` (value "security
      review"), `QA / tests` (value "QA test"), `Design review` (value "design
      review", UI only), and `None — ship it` (value "none").
    The team's picks resume you with "The team selected: <checks>". For "none",
-   go to step 11.
-9. **Run each chosen check and post its report.** For each check the team picked,
-   call `askCodeAgent`: "Run a <check> on the changes (use your
-   requesting-code-review skill / the matching review), wait for it, and report
-   the findings. Do NOT fix anything yet." Post each report with `postPlan`
-   (title e.g. "Security review", the findings as `text`).
-10. **Ask whether to apply fixes.** After a report that has findings, call
+   go to step 12.
+10. **Run each chosen check and post its report.** For each check the team picked,
+    call **`runReview`** with the app id and the matching `kind` (`code`, `security`,
+    `qa`, `design`). That runs devx's maintained review agent and stores the result in
+    the app's review history, so the team can re-open it in the devx UI. Do NOT ask the
+    coding agent to improvise a review instead — it would use a general-purpose coder
+    with none of those prompts and leave no record.
+    Reviews take minutes; run them one at a time and post each with `postPlan`
+    (title e.g. "Security review", the findings as `text`), noting the level counts.
+    `qa` and `design` drive a browser against the app's **dev server** — if it is not
+    running, `runReview` says so; either start it and retry, or tell the channel that
+    check was skipped rather than silently dropping it.
+    Note these review the devx app's own dev server. For **d2e platform UIs** the real
+    verification is step 8 (build + overwrite, exercise the route behind Logto) — do not
+    treat a `qa`/`design` pass as covering that.
+    Do NOT fix anything yet.
+11. **Ask whether to apply fixes.** After a report that has findings, call
     `awaitApproval` (`what: "apply the fixes from the <check>"`). Approve →
     `askCodeAgent`: "Apply the fixes for those findings, re-run the checks, and
     confirm what changed." Post the result. Deny → leave them and note it in the
     channel. A clean report (no findings) needs no gate — just say so.
-11. **Show the result (visual/UI work) — expected, not optional, for any UI change.**
-    When the change touches something the team can see (a component, a page,
-    styling — a component migration like Button → VButton counts), capture
-    screenshots before the PR: ask the coder to start the app and use Playwright
-    to screenshot the relevant views into `trex/screenshots/`, and to list the
-    paths it wrote. Then call `postScreenshots` with the current `channelId` and
-    those paths so the images land in the channel. Only skip this for genuinely
-    non-visual work (scripts, APIs, config, pure refactors with no rendered
-    output).
-12. **Commit + PR gate.** Reach this ONLY after the review checks (step 8) have
-    been offered and handled AND, for visual/UI work, the screenshots (step 11)
-    have been posted. If you are about to offer a PR but have skipped either, stop
+12. **Commit + PR gate.** Reach this ONLY after, for visual/UI work, the feature has
+    been driven in a browser and its screenshots (step 8) posted AND the review checks
+    (step 9) have been offered and handled. If you are about to offer a PR but have skipped either, stop
     and go back and do them first. With those handled, ask whether to ship the
     work:
     call `awaitApproval` (`what: "commit the work and open a pull request"`).
@@ -174,7 +208,26 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     is committed on the branch and summarized (or linked) in the PR description.
     Report the PR link (or say why it couldn't — e.g. no git remote configured)."
     Post the PR link to the channel. Deny → leave the branch uncommitted and say so.
-13. **Close the loop.** Keep going until the coding agent reports the work is done
+13. **Offer a live demo deployment — after the PR is open, not before.** Once the PR
+    link is posted (and the screenshots from step 8 are in the channel), offer to stand
+    the branch up as a clickable environment: `postChoice` with `Deploy a demo
+    environment` (value "deploy") and `Not now` (value "no deploy"). Frame the cost
+    honestly — roughly **1.5–2.5 hours** before a URL exists.
+    Two things gate it, and both must be said out loud rather than assumed:
+    - **The PR must be READY, not draft.** Draft PRs build no images, so they cannot be
+      deployed at all. If the PR is draft, say so and offer to mark it ready first.
+    - **The images must have finished building** (~1–1.5 h after the PR is ready). Do not
+      dispatch before that; the deploy fails on a missing tag.
+    On "deploy", run it yourself with your **`deploy-demo-tunnel`** skill — wait for the
+    Docker Build to finish, dispatch, then post the URL only once the `tunnel-ready`
+    artifact exists and you have curled the public URL successfully.
+    **Do not block the channel on it.** Post the build/run link immediately so people can
+    watch progress, then carry on and close the loop (step 14) as normal — the deployment
+    is a long-running side task, not a reason to hold the conversation open. Post one
+    interim note if the wait runs long, and post the URL, its expiry, and the login when
+    it finally lands. If the deploy fails, say so with the failing step rather than
+    quietly dropping it.
+14. **Close the loop.** Keep going until the coding agent reports the work is done
     (implemented, checks/reviews handled, committed/PR'd if approved), then post
     a short, concrete summary to the channel.
 

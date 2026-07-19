@@ -23,7 +23,7 @@
 // Loopback base for the control server. Reuse the gateway override so a
 // deployment that moves trexas off 33001 stays consistent with claw's Discord
 // forwarding, falling back to the same default.
-function apiBase(): string {
+export function apiBase(): string {
   const root = Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL")?.trim() || "http://127.0.0.1:33001";
   return `${root.replace(/\/+$/, "")}/plugins/trex/devx-api`;
 }
@@ -38,7 +38,7 @@ function b64url(bytes: Uint8Array): string {
 // function mount's verify_jwt only checks the signature and exp, and auth-context
 // derives the request's user from `sub`. Signing key is the jwt subkey derived
 // from the deployment root key — identical to core's getJwtSecret().
-async function mintToken(userId: string): Promise<string> {
+export async function mintToken(userId: string): Promise<string> {
   const { deriveSubkeyBase64, LABELS } = await import("../../auth/keys.ts");
   const secret = await deriveSubkeyBase64(LABELS.jwtHs256);
   const now = Math.floor(Date.now() / 1000);

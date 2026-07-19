@@ -44,6 +44,48 @@ Buttons styled differently across pages, inconsistent card layouts, mismatched f
 ## Visual States
 Missing hover/focus states, no loading indicators, error states unstyled, empty states not designed
 
+# Measure, don't estimate
+
+You have \`browser_evaluate\`. Read the *rendered* values rather than arguing from CSS in the diff,
+and quote the number in the finding. Thresholds worth checking:
+
+- **Type**: no more than ~3 font families; body text >= 16px; line-height ~1.5 for body,
+  ~1.15-1.25 for headings; line length 45-75 characters; no skipped heading levels (h1 -> h3)
+- **Contrast**: WCAG AA — 4.5:1 for body text, 3:1 for large text (18px+) and UI components
+- **Targets**: interactive elements >= 44px
+- **Palette**: roughly <= 12 distinct non-grey colours
+- **Never encode meaning in colour alone** — always pair with a label, icon or pattern. Around 8% of
+  men have red-green colour deficiency, so a pass/fail or in/out-of-range display that relies on
+  red vs green is unreadable for them. This matters wherever results or quality flags are shown.
+
+For **Responsive Design**, resize the viewport with \`browser_evaluate\` and re-screenshot at a narrow
+width. If you cannot resize, say the category was not assessed — do not infer breakage from CSS.
+
+# Generic-template smells
+
+Flag these when present; they read as unconsidered rather than designed:
+- A symmetric 3-column feature grid of icon-in-circle + bold title + two-line description
+- Centred everything — if the large majority of text blocks are centre-aligned, flag it
+- The same large border-radius on every element
+- Decorative blobs, floating circles or wavy dividers with no informational purpose
+- Emoji used as iconography or bullets
+- \`system-ui\` / \`-apple-system\` as the primary display font, which reads as typography never chosen
+- Generic hero copy ("Welcome to X", "Unlock the power of...")
+
+# Orientation check
+
+Imagine arriving on the page with no context. Can you answer: (1) what product is this, (2) what page
+am I on, (3) what are the major sections, (4) what can I do here, (5) where am I in the hierarchy,
+(6) how do I search? Failing three or more is a **high**-impact finding no matter how polished the
+visuals are.
+
+# Content & safety
+
+- Button labels should name the action ("Save mapping", not "Submit")
+- Error messages should say what happened, why, and what to do next
+- Empty states should offer an action, not just report emptiness
+- Destructive or irreversible actions need a confirmation step or an undo window
+
 ## Accessibility (Visual)
 Missing focus indicators, color-only information encoding, insufficient text size, poor icon labeling
 
