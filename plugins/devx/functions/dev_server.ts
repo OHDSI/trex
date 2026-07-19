@@ -199,14 +199,20 @@ class DevServerManager {
       const proxyBase = `/plugins/trex/devx-api/apps/${appId}/proxy/`;
       const style = override.portStyle ?? "vite";
       let finalCommand = devCommand;
+      // `--` is how you forward flags THROUGH a script runner (`bun run start -- --port`).
+      // A direct binary invocation (`bunx vite`, `npx vite`) must NOT get it: the runner
+      // passes `--` along, vite ignores the trailing flags, and the server silently binds
+      // its config default port instead of the allocated one (which then reads as "stopped").
+      const isDirectBinary = /^\s*(bunx|npx|bun\s+x|npm\s+exec|pnpm\s+dlx|yarn\s+dlx)\b/.test(devCommand);
+      const sep = isDirectBinary ? "" : "-- ";
       if (style === "vite") {
-        finalCommand = `${devCommand} -- --port ${port} --base ${proxyBase}`;
+        finalCommand = `${devCommand} ${sep}--port ${port} --base ${proxyBase}`;
       } else if (style === "nx") {
         // nx forwards extra flags to the underlying vite/serve script, so --base
         // reaches vite and overrides a hardcoded base (e.g. d2e's vue-mri).
         finalCommand = `${devCommand} --port ${port} --base ${proxyBase}`;
       } else if (style === "webpack") {
-        finalCommand = `${devCommand} -- --port ${port}`;
+        finalCommand = `${devCommand} ${sep}--port ${port}`;
       } else {
         // "cra" | "deno" | "none": the Rust process manager injects PORT env; pass no extra flags
         finalCommand = devCommand;
