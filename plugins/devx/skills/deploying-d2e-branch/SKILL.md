@@ -73,9 +73,15 @@ it is valid for. Practical consequences:
   quick tunnel" step) or the run's step summary page, and post it from there.
 - Automating "wait, then fetch the URL, then verify" against `--log` **does not work**.
   Don't build a watcher on it, as it will silently only ever fire after teardown.
-- The clean fix is upstream: have the workflow expose the URL as a **job output or
-  artifact** so it is retrievable while the run is live. Worth doing if this gets used
-  regularly.
+- A **job output does not help either** — like `--log`, outputs are only readable once
+  the job completes. The only thing retrievable mid-run is an **artifact**, which becomes
+  downloadable as soon as its upload step finishes.
+  *Pending:* Data2Evidence PR **#2915** adds exactly that — a `tunnel-url` artifact
+  published right after the tunnel starts, and a `tunnel-ready` artifact published once
+  the environment is actually usable. Once it is **merged to `develop`** (the workflow
+  runs from the default branch, so a branch copy has no effect), the reliable automation
+  becomes: poll for the `tunnel-ready` artifact, then
+  `gh run download <run-id> -n tunnel-url`, then curl the public URL.
 
 The URL is printed at **"Start Cloudflare quick tunnel"** — early, long before the
 environment is usable. The environment is only ready once **"Publish access details"**
