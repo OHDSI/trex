@@ -26,10 +26,24 @@ the trex repo this skill file lives in. Several d2e checkouts/worktrees may exis
 machine; use the one the stack is actually running (`docker inspect alp-trex` and read the
 bind-mount sources) — otherwise you edit one tree and screenshot another.
 
-1. **Install the workspace**: `bun install` in `plugins/ui`. A rollup error like
-   `failed to resolve import "@fontsource-variable/…"` on a dep that IS declared in the
-   app's `package.json` means a **stale install**, not a code bug. Do not reach for
-   `npm install` — this workspace fails it on an ERESOLVE peer conflict.
+1. **Check the install is current**: a rollup error like `failed to resolve import
+   "@fontsource-variable/…"` for a dep that IS declared in the app's `package.json` means
+   `node_modules` has drifted — not a code bug.
+   Repair with `bun install` in `plugins/ui`. Do **not** reach for `npm install`: this
+   workspace fails it on an ERESOLVE peer conflict.
+
+   **Known blocker:** `bun install` currently fails the whole workspace with
+   `@trex/notebook@workspace:* failed to resolve`. `libs/react-notebook` is a git
+   **submodule** (`OHDSI/trex-notebook`); if it is uninitialized, its dir may hold a stub
+   `package.json` naming the package `react-notebook` instead of `@trex/notebook`, so bun
+   finds a workspace package under the wrong name. Fix with
+   `git submodule update --init plugins/ui/libs/react-notebook` (clearing the stub first
+   if it blocks the checkout). Until that is done, no dependency can be installed.
+
+   **`node_modules` is gitignored.** Repairing it is environment maintenance, not a test
+   mutation — **keep the fix, don't revert it**. Only revert edits to *tracked* files.
+   And do not hand-unpack a tarball into `node_modules` to route around a failing install:
+   that hides a real defect. Report the defect instead.
 2. **Build the shared libs.** `@portal/components` (`libs/portal-components`) and
    `@portal/plugin` (`libs/portal-plugin`) ship as build output only; apps won't compile
    until they're built. From `plugins/ui`:

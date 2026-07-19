@@ -175,6 +175,17 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     If the coder reports it could not reach or drive the view, treat that as an open
     problem and say so in the channel — do not proceed to the PR gate on the strength
     of a green build alone.
+    **A blocked toolchain is a finding, not an obstacle to route around.** If the coder
+    hits a broken install, an unresolvable dependency, an uninitialised submodule or
+    similar, require it to report the defect rather than hand-patch its way past it
+    (unpacking a tarball into `node_modules`, stubbing a missing package, pinning around
+    a resolver error). Those workarounds hide a real repo bug and leave the next person
+    to rediscover it. Post the defect to the channel as its own item.
+    Also tell the coder to scope "leave no trace" to **tracked files**: repairing
+    gitignored build state (`node_modules`, caches) is maintenance and should be **kept**,
+    while edits to tracked source made only to exercise a feature must be reverted, with
+    `git status` shown as evidence. Undoing a legitimate environment repair to look clean
+    leaves the workspace broken for the next run.
 12. **Commit + PR gate.** Reach this ONLY after the review checks (step 8) have
     been offered and handled AND, for visual/UI work, the feature has been driven in
     a browser and its screenshots (step 11) posted. If you are about to offer a PR but have skipped either, stop
