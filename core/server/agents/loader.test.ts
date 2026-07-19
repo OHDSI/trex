@@ -1,5 +1,5 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
-import { loadAgent } from "./loader.ts";
+import { loadAgent, packOfSkillName } from "./loader.ts";
 
 const TOY = new URL("./testdata/toy-agent/agent", import.meta.url).pathname;
 
@@ -291,7 +291,6 @@ Deno.test("loadAgent rejects a connections/*.ts that doesn't default-export a co
   );
 });
 
-import { packOfSkillName } from "./loader.ts";
 
 Deno.test("packOfSkillName derives pack provenance from the reserved '--' separator", () => {
   assertEquals(packOfSkillName("mypack--greeting"), "mypack");
