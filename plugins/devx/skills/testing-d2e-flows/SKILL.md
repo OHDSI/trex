@@ -108,11 +108,16 @@ trex, which mounts it at `/usr/src/flows-dev`):
 
 1. Set `D2E_FLOWS_DEV_DIR=/var/lib/d2e-flows-dev` on the worker (in `.env.local`).
    **Unset is the default and the overlay is fully inert** — it can never shadow a real
-   artifact in a deployed environment.
-2. Drop edited source at `$D2E_FLOWS_DEV_DIR/<plugin>/<same relative path>`, e.g.
+   artifact in a deployed environment. It is not set by default, so enabling it means
+   recreating the worker (`docker compose up -d --force-recreate alp-dataflow-gen-worker`).
+2. Drop edited source at `<dev dir>/<plugin>/<same relative path>`, e.g.
    `…/d2e-flows/flows/create_cachedb_file_plugin/flow.py`. The `<plugin>` segment is the
    short name from the deployment's command (`/app/run-flow.sh d2e-flows`), **not** the
    flow name.
+   The same `flows-dev` volume is mounted in **both** containers, so you can write from
+   whichever side you are on — trex/devx at **`/usr/src/flows-dev`**, the worker at
+   **`/var/lib/d2e-flows-dev`**. Writing from trex and executing on the worker is the
+   devx path and is verified working.
 3. Trigger a run. `run-flow.sh` rsyncs the dev dir over the resolved plugin dir just
    before `exec` and logs to the worker's stderr:
    `run-flow: DEV OVERRIDE — overlaying <src> onto <plugin_dir>`
@@ -125,6 +130,10 @@ Two things to know:
   resolved dir's provisioned env, so dependency changes still need a re-provision.
 - **It MUTATES the baked dir.** The overlaid files stay after the run. Either revert them
   or recreate the worker to get back to pristine baked code.
+- If you have hot-patched trex by `docker cp`-ing files into `/usr/src/plugins-dx` or
+  `/usr/src/plugins-dev`, **recreating trex to pick up the mount drops those patches** —
+  they live in the image, not a volume. Re-copy them afterwards. `/root/.claude` (the
+  materialized skills) *is* a volume and survives.
 
 To just check that a flow reaches your code without a valid portal token, send a
 throwaway `authtoken`: the wait resolves instantly and the run fails fast at
