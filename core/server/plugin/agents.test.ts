@@ -411,7 +411,7 @@ Deno.test("buildAgentWorkerConfig entry env cannot clobber reserved keys", async
 });
 
 // ---------------------------------------------------------------------------
-// Task 5: skill packs (skills plugin type)
+// Skill packs (skills plugin type)
 
 import {
   _clearDeclaredSkillPacksForTest,
