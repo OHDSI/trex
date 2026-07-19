@@ -24,9 +24,19 @@ manager injects the allocated port/base by `portStyle`:
   react-scripts ignores `--port`/`--base`).
 - `webpack`/`nx`/`deno`/`none` also exist; d2e UIs today are all vite or cra.
 
-`devCommand` is `npm start` for every app — it runs the app's own `start` script, so
-there's no coupling to nx project names. Install runs once at the monorepo root
-(`bun install`).
+`devCommand` is **`bun run start`** for every app (d2e-ui is a bun workspace — always
+use bun) — it runs the app's own `start` script, so there's no coupling to nx project
+names. Install runs once at the monorepo root (`bun install`).
+
+**Verified end-to-end**: minted a trex token (`signAccessToken`, subject = the devx
+user), `POST /plugins/trex/devx-api/apps/<id>/server/start` → the manager spawned the
+dev server (`bun run start -- --port <p> --base <proxyBase>`) → `GET …/proxy/` returned
+`200` + the full vite app shell (HMR/react-refresh) for `notebook-ui`. The recipe fix
+is validated too: the old `jobs` recipe (`npx nx dev jobs`) makes the server **exit**
+(no such nx target); `bun run start`+vite runs; portal with `portStyle:"cra"` runs
+(the old `nx` style bound the wrong port). One known wrinkle: some apps' vite dev
+server (e.g. `jobs`) isn't reachable through the proxy (`502`) even though it starts —
+an app-specific dev-server quirk, not the recipe; `notebook-ui` proxies cleanly.
 
 ## Prerequisites (or the preview won't render)
 1. **Build the shared libs first**: `@portal/components` + `@portal/plugin` ship as
@@ -47,9 +57,12 @@ When apps are added/renamed or a framework changes, update `UI_RECIPES`. The rec
 drift from reality (they once said `flow`/`analysis` were webpack — they're Vite now,
 and `jobs` pointed at a non-existent `nx dev` target). Keep keys equal to the **app dir
 name** under `apps/`, `portStyle: "cra"` only for portal, `"vite"` for the rest, and
-`devCommand: "npm start"`. Verify a change by running, in the app dir,
-`npm start -- --port <p> --base /plugins/trex/devx-api/apps/x/proxy/` (vite) or
-`PORT=<p> npm start` (portal) and confirming it binds and serves the base path.
+`devCommand: "bun run start"`. Note the run spec is captured into each app's
+`config.d2e.subApps[].run` at **detection** time, so a recipes.ts change only reaches
+existing apps on re-detection (or a direct `devx.apps` config update). Verify a change
+by running, in the app dir,
+`bun run start -- --port <p> --base /plugins/trex/devx-api/apps/x/proxy/` (vite) or
+`PORT=<p> bun run start` (portal) and confirming it binds and serves the base path.
 
 ## Container notes
 No `ps`/`pkill` in the trex image — the manager tracks processes via the Rust side;
