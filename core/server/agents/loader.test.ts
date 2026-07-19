@@ -290,3 +290,12 @@ Deno.test("loadAgent rejects a connections/*.ts that doesn't default-export a co
     "must default-export defineMcpClientConnection",
   );
 });
+
+import { packOfSkillName } from "./loader.ts";
+
+Deno.test("packOfSkillName derives pack provenance from the reserved '--' separator", () => {
+  assertEquals(packOfSkillName("mypack--greeting"), "mypack");
+  assertEquals(packOfSkillName("hand-authored"), null);   // single dashes are fine
+  assertEquals(packOfSkillName("plain"), null);
+  assertEquals(packOfSkillName("--weird"), null);          // no empty pack name
+});

@@ -2,6 +2,7 @@
 // deno-lint-ignore-file no-explicit-any
 import { convertToModelMessages, streamText, stepCountIs, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { LoadedAgent } from "../loader.ts";
+import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
@@ -300,6 +301,9 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           static: agent.skills.map((s) => ({
             name: s.name, logicalPath: s.path, sourceKind: "module",
             description: s.description, markdown: s.content ?? "",
+            // Provenance: which skills-plugin pack injected this skill
+            // (null = hand-authored in the agent dir).
+            pack: packOfSkillName(s.name),
           })),
         },
         subagents: {
