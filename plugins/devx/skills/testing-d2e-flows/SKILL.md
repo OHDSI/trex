@@ -98,14 +98,37 @@ For flow logic that doesn't need the platform, use `prefect_test_harness()` agai
 ephemeral backend and call the `@flow`/`@task` functions directly. That is the fast
 loop; the REST path above is the integration check.
 
-## Iterating on flow code
+## Iterating on flow code — the dev overlay
 Deployments here carry **no** `plugin_artifact`, so the worker runs the **baked** env at
 `/var/lib/d2e-flows/<plugin>/baked`. Re-provisioning is stamp-based (lockfile/artifact
-sha), so editing `.py` files in that dir does **not** trigger a rebuild — the next run
-picks the change up. Caveat: that path lives inside the **worker** container, and the
-flows cache is not currently a shared volume, so trex/devx cannot write to it. Until a
-shared volume + an explicit dev-override exist, iterate with `docker exec` into the
-worker, or rebuild/redeploy the plugin.
+sha), so editing `.py` files does not trigger a rebuild — the next run picks the change up.
+
+To edit flow source **from outside the worker**, use the `flows-dev` volume (shared with
+trex, which mounts it at `/usr/src/flows-dev`):
+
+1. Set `D2E_FLOWS_DEV_DIR=/var/lib/d2e-flows-dev` on the worker (in `.env.local`).
+   **Unset is the default and the overlay is fully inert** — it can never shadow a real
+   artifact in a deployed environment.
+2. Drop edited source at `$D2E_FLOWS_DEV_DIR/<plugin>/<same relative path>`, e.g.
+   `…/d2e-flows/flows/create_cachedb_file_plugin/flow.py`. The `<plugin>` segment is the
+   short name from the deployment's command (`/app/run-flow.sh d2e-flows`), **not** the
+   flow name.
+3. Trigger a run. `run-flow.sh` rsyncs the dev dir over the resolved plugin dir just
+   before `exec` and logs to the worker's stderr:
+   `run-flow: DEV OVERRIDE — overlaying <src> onto <plugin_dir>`
+   (`docker logs alp-dataflow-gen-worker | grep "DEV OVERRIDE"`). A `print()` in a
+   `@flow(log_prints=True)` flow shows up in `/logs/filter`, which is the cheapest way to
+   prove your edit is the code that ran.
+
+Two things to know:
+- **Source-only.** The overlay excludes `.pixi/` and `.d2e-env-ready` and reuses the
+  resolved dir's provisioned env, so dependency changes still need a re-provision.
+- **It MUTATES the baked dir.** The overlaid files stay after the run. Either revert them
+  or recreate the worker to get back to pristine baked code.
+
+To just check that a flow reaches your code without a valid portal token, send a
+throwaway `authtoken`: the wait resolves instantly and the run fails fast at
+`[401] PortalServerAPI` — long after flow entry, so entry-point logging still proves out.
 
 ## Cleanup
 Runs and their inputs persist in Prefect. Give test runs an obvious `name`
