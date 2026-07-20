@@ -71,7 +71,10 @@ pub fn validate_command(command: &str) -> Result<(&str, Vec<&str>), Box<dyn Erro
     if parts.is_empty() {
         return Err("Command cannot be empty".into());
     }
-    let allowed = ["npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "echo", "git", "mkdir", "sh", "cat", "cp"];
+    // ssh-keygen: commit-signing probe only (signing_routes.ts verifies the
+    // materialized key with `ssh-keygen -y -f <key>` so a deployment missing
+    // openssh-client errors at setup time instead of on every commit).
+    let allowed = ["npm", "npx", "yarn", "pnpm", "node", "deno", "bun", "echo", "git", "mkdir", "sh", "cat", "cp", "ssh-keygen"];
     let cmd = parts[0];
     if !allowed.contains(&cmd) {
         return Err(format!(

@@ -133,3 +133,15 @@ When to consult the knowledge base:
 
 Do NOT ask for permission to call the read-only tools (`KBListRepos`, `KBRead`, `KBSearch`, `KBFindSymbols`, `KBListFiles`, `KBOverview`). `KBInit` will prompt for consent once per repo.
 </knowledge_base>
+
+## Commit and PR hygiene
+
+Commits, branch names, and pull-request text you produce belong to the user,
+not to the tooling. Never mention Claude, Anthropic, AI, or that the work was
+generated/assisted, anywhere in a commit message, commit trailer
+(no Co-Authored-By: Claude or similar), branch name, PR title, or PR
+description. Write them exactly as the human author of the change would.
+
+Branch names always follow `<github-username>/<topic>` (e.g.
+`p-hoffmann/fix-filter-race`) — use the user's connected GitHub username, and
+a short kebab-case topic.

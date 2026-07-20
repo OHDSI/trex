@@ -9,7 +9,19 @@ pub fn git_init(path: &str) -> Result<String, Box<dyn Error>> {
     // a fresh repo lands on `master` and the first push creates a mismatched branch.
     run_git(&["init", "-b", "main"], path)?;
     run_git(&["add", "-A"], path)?;
-    match run_git(&["commit", "-m", "Initial commit", "--allow-empty"], path) {
+    // The initial commit happens before any per-user config can exist (the
+    // devx include file is written into .git/ AFTER init), so it carries a
+    // scoped fallback identity. `-c` is not used on git_commit/git_revert —
+    // it outranks the repo's local config and would override the per-user
+    // identity/signing include.
+    match run_git(
+        &[
+            "-c", "user.email=devx@trex.local",
+            "-c", "user.name=DevX",
+            "commit", "-m", "Initial commit", "--allow-empty",
+        ],
+        path,
+    ) {
         Ok(_) => {}
         Err(_) => {} // May fail if nothing to commit
     }
@@ -172,4 +184,52 @@ pub fn git_set_remote(path: &str, url: &str) -> Result<String, Box<dyn Error>> {
         }
     }
     Ok(json!({"ok": true, "message": format!("Remote \"origin\" set to {}", url)}).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::subprocess::run_git;
+    use std::fs;
+
+    fn temp_repo(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!("devx-git-test-{}-{}", name, std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir.to_string_lossy().to_string()
+    }
+
+    /// git_init's initial commit must carry the scoped fallback identity —
+    /// there is no repo config yet at that point.
+    #[test]
+    fn git_init_initial_commit_uses_fallback_identity() {
+        let path = temp_repo("init-fallback");
+        git_init(&path).expect("git_init failed");
+        let author = run_git(&["log", "-1", "--format=%an <%ae>"], &path).unwrap();
+        assert_eq!(author, "DevX <devx@trex.local>");
+        let _ = fs::remove_dir_all(&path);
+    }
+
+    /// After the devx include file supplies a per-user identity, git_commit
+    /// must honor it — this is exactly what the removed GIT_CONFIG_* env
+    /// identity used to silently override.
+    #[test]
+    fn git_commit_honors_repo_local_identity_include() {
+        let path = temp_repo("include-identity");
+        git_init(&path).expect("git_init failed");
+
+        // What functions/git_identity.ts writes: an include file + include.path.
+        fs::write(
+            format!("{path}/.git/devx.gitconfig"),
+            "[user]\n\tname = \"Jane Doe\"\n\temail = jane@example.com\n",
+        )
+        .unwrap();
+        run_git(&["config", "include.path", "devx.gitconfig"], &path).unwrap();
+
+        fs::write(format!("{path}/file.txt"), "hello").unwrap();
+        git_commit(&path, "add file").expect("git_commit failed");
+        let author = run_git(&["log", "-1", "--format=%an <%ae>"], &path).unwrap();
+        assert_eq!(author, "Jane Doe <jane@example.com>");
+        let _ = fs::remove_dir_all(&path);
+    }
 }

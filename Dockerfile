@@ -316,8 +316,11 @@ ARG DUCKDB_COMMUNITY_EXTENSIONS
 ARG DUCKDB_OPTIONAL_EXTENSIONS
 
 # openssl: used by /usr/src/entrypoint.sh to generate the per-container TLS cert.
+# openssh-client: git's SSH commit signing (gpg.format=ssh) shells out to
+# ssh-keygen — without it, a user with a signing key configured fails EVERY
+# commit (devx Settings -> Integrations -> Git).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libssl3 libgomp1 ca-certificates libvulkan1 curl git unzip openssl && \
+      libssl3 libgomp1 ca-certificates libvulkan1 curl git unzip openssl openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 # Deno is required by docker/trex-init-entrypoint.sh (runs scripts/derive-secrets.ts)

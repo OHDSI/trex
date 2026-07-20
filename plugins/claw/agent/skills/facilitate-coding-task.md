@@ -83,7 +83,14 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    (pass the chosen app id as `app` on this FIRST call): "Run your brainstorming
    skill to explore the design. Present 2-3 concrete options with their
    trade-offs in your reply. Do NOT write code and do NOT run any other skill
-   yet — stop after presenting the options." Then let the team pick:
+   yet — stop after presenting the options." For a VISUAL decision (layouts,
+   component designs, style directions), use your `present-mockups` skill
+   instead: the coder mocks each option up as a prototype screen and
+   screenshots it, and you post the images to the channel before asking.
+   When the team asked only FOR mockups (design ideas, no build), that skill's
+   mockups-only mode applies — the posted images are the deliverable; stop
+   there and offer to build rather than continuing to Gate 2.
+   Then let the team pick:
    - **Multiple real options** → call `postChoice` with those options (each
      `label` a short name, `value` a self-explanatory one-liner like
      "Option B: server-side filtering"). The team picks from the dropdown and
@@ -187,7 +194,8 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    `postChoice` with `multi: true` and the checks that fit the change:
    - `Code review` (value "code review"), `Security review` (value "security
      review"), `QA / tests` (value "QA test"), `Design review` (value "design
-     review", UI only), and `None — ship it` (value "none").
+     review", UI only), `Docs update` (value "docs update", for user-visible
+     features), and `None — ship it` (value "none").
    The team's picks resume you with "The team selected: <checks>". For "none",
    go to step 12.
 10. **Run each chosen check and post its report.** For each check the team picked,
@@ -204,6 +212,14 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     Note these review the devx app's own dev server. For **d2e platform UIs** the real
     verification is step 8 (build + overwrite, exercise the route behind Logto) — do not
     treat a `qa`/`design` pass as covering that.
+    **`Docs update` is the exception — it goes through the coder, not `runReview`.**
+    The docs must land on the SAME feature branch as the implementation so they ride the
+    same PR (`runReview`'s docs agent writes to the shared workspace instead — use it only
+    for standalone docs asks outside a task). Call `askCodeAgent`: "Use your
+    documenting-d2e-features skill to document the implemented feature in the docs website
+    (docs/website), verify with a docs build, and commit on the feature branch. Report the
+    pages you added or updated." Post the reported pages with `postPlan` (title "Docs
+    update"). No apply-fixes gate needed — it writes the docs directly.
     Do NOT fix anything yet.
 11. **Ask whether to apply fixes.** After a report that has findings, call
     `awaitApproval` (`what: "apply the fixes from the <check>"`). Approve →
@@ -219,6 +235,8 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     Approve → `askCodeAgent`: "Use your finishing-a-development-branch skill to
     commit the feature worktree, push, and open a PR. Make sure the plan/spec file
     is committed on the branch and summarized (or linked) in the PR description.
+    Do not mention Claude, AI, or generated/assisted anywhere in the commit
+    messages, branch name, or PR text — write them as the human author would.
     Report the PR link (or say why it couldn't — e.g. no git remote configured)."
     Post the PR link to the channel. Deny → leave the branch uncommitted and say so.
 13. **Offer a live demo deployment — after the PR is open, not before.** Once the PR

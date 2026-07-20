@@ -1,6 +1,7 @@
 // @ts-nocheck - Deno edge function
 import type { ToolDefinition } from "./types.ts";
 import { gitOps } from "../git.ts";
+import { ensureGitConfig } from "../git_identity.ts";
 
 export const gitInitTool: ToolDefinition<Record<string, never>> = {
   name: "GitInit",
@@ -10,7 +11,12 @@ export const gitInitTool: ToolDefinition<Record<string, never>> = {
   modifiesState: true,
   getConsentPreview() { return "Initialize git repository"; },
   async execute(_args, ctx) {
-    return await gitOps.withLock(ctx.workspacePath, () => gitOps.init(ctx.workspacePath));
+    const result = await gitOps.withLock(ctx.workspacePath, () => gitOps.init(ctx.workspacePath));
+    // Apply the user's identity/signing config to the fresh repo (the initial
+    // commit inside git_init carries the scoped fallback identity — see
+    // devx-ext git.rs).
+    await ensureGitConfig(ctx.workspacePath, ctx.userId, ctx.sql).catch(() => {});
+    return result;
   },
 };
 
@@ -28,6 +34,8 @@ export const gitCommitTool: ToolDefinition<{ message: string }> = {
   modifiesState: true,
   getConsentPreview(args) { return `Commit: "${args.message}"`; },
   async execute(args, ctx) {
+    // Identity/signing config must be in place before the commit is created.
+    await ensureGitConfig(ctx.workspacePath, ctx.userId, ctx.sql).catch(() => {});
     return await gitOps.withLock(ctx.workspacePath, () => gitOps.commit(ctx.workspacePath, args.message));
   },
 };
@@ -133,6 +141,8 @@ export const gitRevertTool: ToolDefinition<{ commit_hash: string }> = {
   modifiesState: true,
   getConsentPreview(args) { return `Revert to commit: ${args.commit_hash.substring(0, 7)}`; },
   async execute(args, ctx) {
+    // The revert path creates a commit too — same config requirement.
+    await ensureGitConfig(ctx.workspacePath, ctx.userId, ctx.sql).catch(() => {});
     return await gitOps.withLock(ctx.workspacePath, () => gitOps.revert(ctx.workspacePath, args.commit_hash));
   },
 };

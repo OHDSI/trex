@@ -5,6 +5,7 @@ import { SECURITY_REVIEW_SYSTEM_PROMPT, parseSecurityFindings } from "../securit
 import { CODE_REVIEW_SYSTEM_PROMPT, parseCodeReviewFindings } from "../code_review_prompt.ts";
 import { QA_REVIEW_SYSTEM_PROMPT, parseQaFindings } from "../qa_review_prompt.ts";
 import { DESIGN_REVIEW_SYSTEM_PROMPT, parseDesignFindings } from "../design_review_prompt.ts";
+import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_update_prompt.ts";
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
 
@@ -35,6 +36,13 @@ const DESIGN_REVIEW_TOOLS = [
   // viewport, without which the Responsive Design category cannot be honestly assessed.
   "BrowserNavigate", "BrowserClick", "BrowserScreenshot", "BrowserGetText", "BrowserEvaluate",
   "Read", "Glob", "Grep", "GitDiff",
+];
+const DOCS_UPDATE_TOOLS = [
+  // The one agent in this file that WRITES: it adds/updates pages in the app's
+  // documentation website (d2e: docs/website), so it needs Write/Edit/SearchReplace
+  // on top of the explore set the code review uses.
+  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
+  "Write", "Edit", "SearchReplace",
 ];
 
 export async function handleSecurityRoutes(path, method, req, userId, sql, corsHeaders) {
@@ -486,6 +494,47 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
     }
     return Response.json(await getLatestReview(appId, "design-review"), { headers: corsHeaders });
+  }
+
+  // ── POST /apps/:id/docs/review ─────────────────────────────────────
+  // "review" in the path for uniformity with the other four kinds (claw's
+  // runReview builds /apps/:id/<kind>/review), but this agent WRITES docs;
+  // its findings are the pages it added/updated.
+
+  const docsReviewMatch = path.match(/\/apps\/([^/]+)\/docs\/review$/);
+  if (docsReviewMatch && method === "POST") {
+    const appId = docsReviewMatch[1];
+    if (!await checkApp(appId)) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const userMessage = await buildCodeReviewMessage(
+      appId,
+      "Document the recently implemented feature in this project's documentation website (d2e apps: docs/website). Read the plan and git diff to understand what was built, then add or update the documentation pages.",
+    );
+    if (!userMessage) {
+      return Response.json({ error: "No code files found to document" }, { status: 400, headers: corsHeaders });
+    }
+    return runAgentReview({
+      appId,
+      systemPrompt: DOCS_UPDATE_SYSTEM_PROMPT,
+      userMessage,
+      parseFindings: parseDocsUpdateFindings,
+      table: "docs-update",
+      eventPrefix: "docs_review",
+      allowedTools: DOCS_UPDATE_TOOLS,
+      maxSteps: 30,
+    });
+  }
+
+  // ── GET /apps/:id/docs/reviews ─────────────────────────────────────
+
+  const docsReviewsMatch = path.match(/\/apps\/([^/]+)\/docs\/reviews$/);
+  if (docsReviewsMatch && method === "GET") {
+    const appId = docsReviewsMatch[1];
+    if (!await checkApp(appId)) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    return Response.json(await getLatestReview(appId, "docs-update"), { headers: corsHeaders });
   }
 
   return null;

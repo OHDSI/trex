@@ -143,7 +143,7 @@ services:
 There is **no** standalone `trex` service in the base file — that exists only in
 `docker-compose.dev.yml`. `PGRST_JWT_SECRET` is not a literal; it is sourced from
 `./secrets/derived.env`. See the real
-[`docker-compose.yml`](https://github.com/OHDSI/trex/blob/main/docker-compose.yml)
+[`docker-compose.yml`](https://github.com/OHDSI/trex/blob/develop/docker-compose.yml)
 for the full definition.
 
 ## Development Overlay
@@ -209,5 +209,5 @@ pin the upstream native libraries.
 | pgwire (analytical engine) | `postgresql://localhost:5433/main` |
 | HTTPS (self-signed) | https://localhost:8000/trex/ |
 
-For cloud-managed deployments, see [`deploy/`](https://github.com/OHDSI/trex/tree/main/deploy)
+For cloud-managed deployments, see [`deploy/`](https://github.com/OHDSI/trex/tree/develop/deploy)
 which uses Pulumi to provision Trex on AWS ECS Fargate or Azure Container Apps.

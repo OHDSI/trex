@@ -3,6 +3,7 @@ import { gitOps } from "../git.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
 import { duckdb, escapeSql } from "../duckdb.ts";
 import { getGithubToken, injectToken } from "./github_routes.ts";
+import { ensureGitConfig } from "../git_identity.ts";
 
 export async function handleGitRoutes(path, method, req, userId, sql, corsHeaders) {
   // GET /apps/:id/git/status
@@ -142,6 +143,8 @@ export async function handleGitRoutes(path, method, req, userId, sql, corsHeader
     }
     const wsPath = getAppWorkspacePath(userId, appId);
     try {
+      // Identity/signing config must be in place before the commit is created.
+      await ensureGitConfig(wsPath, userId, sql).catch(() => {});
       const result = await gitOps.withLock(wsPath, () => gitOps.commit(wsPath, message));
       return Response.json({ ok: true, message: result }, { headers: corsHeaders });
     } catch (err) {
@@ -245,6 +248,8 @@ export async function handleGitRoutes(path, method, req, userId, sql, corsHeader
     }
     const repoRoot = getAppWorkspacePath(userId, appId);
     try {
+      // A --no-ff merge creates a commit; make sure it is signed/attributed.
+      await ensureGitConfig(repoRoot, userId, sql).catch(() => {});
       const out = await gitOps.withLock(repoRoot, async () => {
         const msg = await gitOps.mergeBranch(repoRoot, branch);
         if (wtPath) { try { await gitOps.worktreeRemove(repoRoot, wtPath, false); } catch { /* leave worktree */ } }

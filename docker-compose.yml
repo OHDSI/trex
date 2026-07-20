@@ -158,6 +158,10 @@ services:
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
       STUDIO_INTERNAL_URL: http://studio:3000
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
+      # Pythia: the agent worker proxies to the pythia plugin on the internal
+      # port (33001), and agents without an explicit model need this fallback.
+      BAO_AGENT_UPSTREAM_BASE: ${BAO_AGENT_UPSTREAM_BASE:-http://localhost:33001/plugins/ohdsi/pythia}
+      TREX_AGENTS_DEFAULT_MODEL: ${TREX_AGENTS_DEFAULT_MODEL:-bedrock/${BAO_AGENT_MODEL:-us.anthropic.claude-sonnet-4-6}}
     healthcheck:
       # /trex/api/ready returns 503 until supabaseEnvVars is populated, which is
       # set immediately after ensureAuthKeys() writes anon/service keys to

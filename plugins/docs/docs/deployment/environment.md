@@ -176,4 +176,4 @@ The `deploy/` directory contains Pulumi stacks for AWS ECS Fargate and Azure
 Container Apps. Stack-level configuration (image tag, DB URL, TLS certificates,
 auth secrets) lives in the `Pulumi.<stack>.yaml` files; runtime env vars listed
 above are still required and are populated by Pulumi into the container task
-definition. See [`deploy/README.md`](https://github.com/OHDSI/trex/tree/main/deploy).
+definition. See [`deploy/README.md`](https://github.com/OHDSI/trex/tree/develop/deploy).

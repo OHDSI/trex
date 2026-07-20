@@ -47,15 +47,9 @@ Deno.test("resolveModel: no provider_configs row falls back to legacy devx.setti
   assertEquals(spec, { provider: "google", modelId: "gemini-2.5-pro", apiKey: "g-key", baseURL: undefined });
 });
 
-Deno.test("resolveModel: no provider_configs and no devx.settings row falls back to the hardcoded legacy default", async () => {
+Deno.test("resolveModel: no provider_configs and no devx.settings row throws (no silent model fallback)", async () => {
   const ctx = fakeHookCtx({});
-  const spec = await resolveModel(ctx);
-  assertEquals(spec, {
-    provider: "anthropic",
-    modelId: "claude-sonnet-4-20250514",
-    apiKey: undefined,
-    baseURL: undefined,
-  });
+  await assertRejects(() => resolveModel(ctx), Error, "no model provider configured");
 });
 
 Deno.test("resolveModel: an unrecognized provider name maps to the OpenAI-compatible fallback", async () => {

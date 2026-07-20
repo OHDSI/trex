@@ -9,6 +9,7 @@ import {
   Palette,
   XCircle,
   Sparkles,
+  BookOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Accordion, AccordionItem, AccordionTrigger, AccordionContent } from "@/components/ui/accordion";
@@ -30,6 +31,7 @@ const ICONS: Record<ReviewType, React.ElementType> = {
   code: Eye,
   qa: TestTube2,
   design: Palette,
+  docs: BookOpen,
 };
 
 function StatusBadge({ status }: { status: "running" | "completed" | "failed" | "idle" }) {
