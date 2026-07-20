@@ -28,10 +28,11 @@ export async function postChannelMessage(
     embeds?: unknown[];
     components?: unknown[];
     files?: AttachmentUpload[];
+    allowedMentions?: { users?: string[] };
   },
-): Promise<void> {
+): Promise<{ id: string }> {
   const url = `https://discord.com/api/v10/channels/${opts.channelId}/messages`;
-  const payload: Record<string, unknown> = { allowed_mentions: { parse: [] } };
+  const payload: Record<string, unknown> = { allowed_mentions: opts.allowedMentions ?? { parse: [] } };
   if (opts.content) payload.content = opts.content;
   if (opts.embeds?.length) payload.embeds = opts.embeds;
   if (opts.components?.length) payload.components = opts.components;
@@ -53,4 +54,22 @@ export async function postChannelMessage(
     });
   }
   if (!res.ok) throw new Error(`discord message post failed: ${res.status} ${await res.text()}`);
+  const json = await res.json().catch(() => ({}));
+  return { id: String((json as { id?: string }).id ?? "") };
+}
+
+// Start a public thread from an existing message (POST /channels/:id/messages/:mid/threads).
+export async function startThreadFromMessage(
+  fetchFn: typeof fetch,
+  opts: { botToken: string; channelId: string; messageId: string; name: string },
+): Promise<{ threadId: string }> {
+  const url = `https://discord.com/api/v10/channels/${opts.channelId}/messages/${opts.messageId}/threads`;
+  const res = await fetchFn(url, {
+    method: "POST",
+    headers: { Authorization: `Bot ${opts.botToken}`, "content-type": "application/json" },
+    body: JSON.stringify({ name: opts.name.slice(0, 100) }),
+  });
+  if (!res.ok) throw new Error(`discord thread create failed: ${res.status} ${await res.text()}`);
+  const json = await res.json() as { id?: string };
+  return { threadId: String(json.id ?? "") };
 }
