@@ -34,7 +34,7 @@ export default defineTool({
     required: ["logins"],
   },
   execute: async (input, ctx) => {
-    if (isEvalMode(ctx)) return evalStubs.lookupDiscordIds(input.logins as string[]);
+    if (isEvalMode(ctx)) return evalStubs.lookupDiscordIds((input.logins as string[]) ?? []);
     const userId = effectiveUserId(ctx?.userId, (k) => Deno.env.get(k));
     if (!userId) throw new Error("lookupDiscordIds: no user id (set CLAW_CODE_USER_ID)");
     return lookupCore(input.logins as string[], userId);

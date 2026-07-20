@@ -4,7 +4,9 @@
 import { mintToken } from "./code-stream.ts";
 
 export function supportBase(): string {
-  const root = (Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL")?.trim() || "http://127.0.0.1:33001").replace(/\/+$/, "");
+  const root = (Deno.env.get("SLACK_GATEWAY_LOOPBACK_URL")?.trim() ||
+    Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL")?.trim() ||
+    "http://127.0.0.1:33001").replace(/\/+$/, "");
   return `${root}/plugins/trex/d2esupport`;
 }
 

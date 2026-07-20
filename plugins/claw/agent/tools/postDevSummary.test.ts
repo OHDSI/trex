@@ -11,7 +11,7 @@ Deno.test("posts summary with mentions, opens thread, seeds it, records the task
   const r = await postDevSummaryCore(sql, {
     supportSessionId: "s1", kind: "bug", brief: "b", summary: "Export 500s",
     nextSteps: "Check the exporter", proposedReply: "We are on it",
-    discordUserIds: ["D1"], unmappedLogins: ["bob"], threadName: "Support: export bug",
+    discordUserIds: ["D1"], unmappedLogins: ["bob"], githubLogins: ["alice", "bob"], threadName: "Support: export bug",
   }, {
     devChannelId: "DEV",
     post: async (opts) => { posts.push(opts as Record<string, unknown>); return { id: `m${posts.length}` }; },
@@ -25,4 +25,5 @@ Deno.test("posts summary with mentions, opens thread, seeds it, records the task
   assertEquals(String((posts[0] as { content?: string }).content).includes("<@D1>"), true);
   assertEquals(String((posts[0] as { content?: string }).content).includes("bob"), true);
   assertEquals(writes.length, 1);
+  assertEquals((writes[0] as unknown[])[5], '["alice","bob"]');
 });

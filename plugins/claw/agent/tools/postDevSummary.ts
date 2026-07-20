@@ -17,6 +17,7 @@ interface Input {
   proposedReply: string;
   discordUserIds: string[];
   unmappedLogins: string[];
+  githubLogins: string[];
   threadName: string;
 }
 
@@ -62,7 +63,7 @@ export async function postDevSummaryCore(sql: QueryFn, input: Input, deps: Deps)
     kind: input.kind,
     brief: input.brief,
     proposedReply: input.proposedReply,
-    githubLogins: input.unmappedLogins,
+    githubLogins: input.githubLogins,
     status: "awaiting_review",
   });
   return { threadId };
@@ -85,9 +86,10 @@ export default defineTool({
       proposedReply: { type: "string", description: "Draft user-facing answer for the devs to review." },
       discordUserIds: { type: "array", items: { type: "string" }, description: "Resolved Discord ids to mention." },
       unmappedLogins: { type: "array", items: { type: "string" }, description: "GitHub logins with no mapping." },
+      githubLogins: { type: "array", items: { type: "string" }, description: "ALL GitHub logins from the investigation, mapped and unmapped." },
       threadName: { type: "string", description: "Short thread title, e.g. 'Support: export 500'." },
     },
-    required: ["supportSessionId", "kind", "brief", "summary", "nextSteps", "proposedReply", "discordUserIds", "unmappedLogins", "threadName"],
+    required: ["supportSessionId", "kind", "brief", "summary", "nextSteps", "proposedReply", "discordUserIds", "unmappedLogins", "githubLogins", "threadName"],
   },
   execute: async (input, ctx) => {
     if (isEvalMode(ctx)) return evalStubs.postDevSummary();
