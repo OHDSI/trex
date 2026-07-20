@@ -37,7 +37,7 @@ flowchart TD
 Prerequisites: [Quickstart: Deploy](../quickstarts/deploy) running and
 basic familiarity with OMOP and FHIR. If you've never touched OHDSI tools,
 read the [Atlas overview](https://www.ohdsi.org/atlas/) and [SQL-on-FHIR
-intro](https://hl7.org/fhir/uv/sql-on-fhir/) first.
+intro](https://sql-on-fhir.org/) first.
 
 ## 1. Set up an OMOP CDM (10 min)
 
@@ -45,7 +45,7 @@ The OHDSI ecosystem ships sample datasets. The two common choices:
 
 - **[SynPUF](https://www.ohdsi.org/2018/02/26/cms-synpuf-data-sets/)**:
   CMS-generated synthetic Medicare claims. ~2.3M people. Free.
-- **[Synthea](https://synthea.mitre.org/)**: synthetic EHR data. Generate
+- **[Synthea](https://synthetichealth.github.io/synthea/)**: synthetic EHR data. Generate
   any size. Free.
 
 For this tutorial, use Synthea (it's small and the FHIR side comes for
