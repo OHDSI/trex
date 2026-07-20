@@ -421,17 +421,16 @@ Deno.serve(async (req: Request) => {
           `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
           [userId],
         );
-        settings = legacyResult.rows[0] || {
-          provider: "anthropic",
-          model: "claude-sonnet-4-20250514",
-          api_key: null,
-          base_url: null,
-          ai_rules: null,
-          auto_approve: false,
-          max_steps: 100,
-          max_tool_steps: 10,
-          auto_fix_problems: false,
-        };
+        settings = legacyResult.rows[0];
+        // No silent model fallback (kept in sync with agent.ts's resolveModel):
+        // the former hardcoded anthropic/claude-sonnet default row always died
+        // on the api_key check below anyway — error explicitly instead.
+        if (!settings) {
+          return Response.json(
+            { error: "No provider configured. Please set up your provider in Settings." },
+            { status: 400, headers: corsHeaders },
+          );
+        }
       }
 
       // Subscription-based and Bedrock providers don't require an API key
