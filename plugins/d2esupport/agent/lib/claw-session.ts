@@ -12,13 +12,21 @@ export interface ClawTurnArgs {
   clawSessionId: string | null;
   message: string;
   userId: string;
+  // Position in the claw session's event stream to resume from (mirrors
+  // claw's own code-session.ts). /stream replays ALL persisted steps, and a
+  // past turn's finish/error step replays as turn.completed/turn.failed —
+  // starting at 0 on a follow-up turn would return the PREVIOUS turn's ack
+  // instantly (or throw on an old failure) instead of observing this one.
+  startCursor: number;
   fetchImpl?: typeof fetch;
   mint?: (userId: string) => Promise<string>;
 }
 
 interface Event { type: string; data?: Record<string, unknown> }
 
-export async function runClawTurn(args: ClawTurnArgs): Promise<{ clawSessionId: string; replyText: string }> {
+export async function runClawTurn(
+  args: ClawTurnArgs,
+): Promise<{ clawSessionId: string; replyText: string; nextCursor: number }> {
   const f = args.fetchImpl ?? fetch;
   const token = await (args.mint ?? mintToken)(args.userId);
   const headers = {
@@ -31,7 +39,10 @@ export async function runClawTurn(args: ClawTurnArgs): Promise<{ clawSessionId: 
   let clawSessionId = args.clawSessionId;
   if (!clawSessionId) {
     const res = await f(`${clawBase()}/eve/v1/session`, { method: "POST", headers, body });
-    if (!res.ok) throw new Error(`claw session create failed: ${res.status}`);
+    if (!res.ok) {
+      await res.body?.cancel();
+      throw new Error(`claw session create failed: ${res.status}`);
+    }
     const j = await res.json();
     clawSessionId = j.sessionId as string;
   } else {
@@ -43,11 +54,12 @@ export async function runClawTurn(args: ClawTurnArgs): Promise<{ clawSessionId: 
     await res.body?.cancel();
   }
 
-  const res = await f(`${clawBase()}/eve/v1/session/${clawSessionId}/stream?startIndex=0`, { headers });
+  const res = await f(`${clawBase()}/eve/v1/session/${clawSessionId}/stream?startIndex=${args.startCursor}`, { headers });
   if (!res.ok || !res.body) throw new Error(`claw stream failed: ${res.status}`);
 
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
+  let read = 0;
   let replyText = "";
   try {
     while (true) {
@@ -59,6 +71,7 @@ export async function runClawTurn(args: ClawTurnArgs): Promise<{ clawSessionId: 
         const line = buf.slice(0, nl).trim();
         buf = buf.slice(nl + 1);
         if (!line) continue;
+        read++;
         const ev = JSON.parse(line) as Event;
         const d = (ev.data ?? {}) as Record<string, unknown>;
         if (ev.type === "message.completed") {
@@ -67,12 +80,12 @@ export async function runClawTurn(args: ClawTurnArgs): Promise<{ clawSessionId: 
           throw new Error(`claw turn failed: ${String(d.message ?? "unknown")}`);
         } else if (ev.type === "session.waiting" || ev.type === "turn.completed") {
           await reader.cancel();
-          return { clawSessionId, replyText };
+          return { clawSessionId, replyText, nextCursor: args.startCursor + read };
         }
       }
     }
   } finally {
     try { await reader.cancel(); } catch { /* already closed */ }
   }
-  return { clawSessionId, replyText };
+  return { clawSessionId, replyText, nextCursor: args.startCursor + read };
 }

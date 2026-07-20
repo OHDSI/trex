@@ -17,7 +17,7 @@ export async function forwardCore(
   sql: QueryFn,
   ctx: { sessionId: string; userId: string },
   input: Input,
-  runTurn: (args: ClawTurnArgs) => Promise<{ clawSessionId: string; replyText: string }> = runClawTurn,
+  runTurn: (args: ClawTurnArgs) => Promise<{ clawSessionId: string; replyText: string; nextCursor: number }> = runClawTurn,
 ): Promise<{ reply: string }> {
   const prior = await readTask(sql, ctx.sessionId);
   const message = [
@@ -28,14 +28,40 @@ export async function forwardCore(
     "brief:",
     input.brief,
   ].join("\n");
-  const { clawSessionId, replyText } = await runTurn({
-    clawSessionId: prior?.clawSessionId ?? null,
-    message,
-    userId: ctx.userId,
-  });
+  let clawSessionId: string;
+  let replyText: string;
+  let nextCursor: number;
+  try {
+    ({ clawSessionId, replyText, nextCursor } = await runTurn({
+      clawSessionId: prior?.clawSessionId ?? null,
+      message,
+      userId: ctx.userId,
+      startCursor: prior?.clawEventCursor ?? 0,
+    }));
+  } catch (turnErr) {
+    // Best-effort: record the failed attempt so a later turn (or a human)
+    // can see the task never made it, rather than the caller's throw being
+    // the only trace. Keeps the prior clawSessionId/cursor if there was one
+    // — a failed follow-up shouldn't forget the session it was following up.
+    try {
+      await upsertTask(sql, {
+        sessionId: ctx.sessionId,
+        clawSessionId: prior?.clawSessionId ?? null,
+        clawEventCursor: prior?.clawEventCursor ?? 0,
+        slackChannelId: input.slackChannelId,
+        slackThreadTs: input.slackThreadTs,
+        status: "forward_failed",
+        brief: input.brief,
+      });
+    } catch (writeErr) {
+      console.error(`forwardToClaw: failed to record forward_failed state for session ${ctx.sessionId}`, writeErr);
+    }
+    throw turnErr;
+  }
   const taskState = {
     sessionId: ctx.sessionId,
     clawSessionId,
+    clawEventCursor: nextCursor,
     slackChannelId: input.slackChannelId,
     slackThreadTs: input.slackThreadTs,
     status: "forwarded" as const,
