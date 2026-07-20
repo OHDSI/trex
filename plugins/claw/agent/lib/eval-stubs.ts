@@ -60,10 +60,19 @@ export const evalStubs = {
     return { kind, reviewId: "eval-review-1", findings, counts };
   },
   // Canned coder reply keyed on the instruction so the gated flow stays coherent
-  // (brainstorm -> options, writing-plans -> a plan, a review -> findings, finish
-  // -> a PR link, otherwise -> implemented).
+  // (mockups -> screenshot paths, brainstorm -> options, writing-plans -> a plan,
+  // a review -> findings, finish -> a PR link, otherwise -> implemented).
   askCodeAgent(message: string) {
     const m = String(message || "").toLowerCase();
+    // Before the brainstorm branch: a mockup hand-off also says "option"/"design".
+    if (/mockup|prototype|screenshot/.test(m)) {
+      return {
+        reply:
+          "Mocked both options and captured them:\n" +
+          "- Sidebar layout (filters left, denser table) -> trex/screenshots/mockup-sidebar-layout.png\n" +
+          "- Toolbar layout (filters on top, full-width table) -> trex/screenshots/mockup-toolbar-layout.png",
+      };
+    }
     if (/brainstorm|option|design/.test(m)) {
       return {
         reply:
