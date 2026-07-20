@@ -283,8 +283,6 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
   async function handleViewSubmission(payload: Record<string, unknown>, args: ChannelRouteArgs, req: Request): Promise<Response> {
     const view = parseViewSubmission(payload);
     if (!view || view.callbackId !== HITL_FREEFORM_MODAL_CALLBACK_ID) return new Response(null, { status: 200 });
-    const actorId = (payload.user as { id?: string } | undefined)?.id;
-    if (!(await allowed({ userId: actorId }))) return new Response(null, { status: 200 });
     let meta: { continuationToken?: string; channelId?: string; threadTs?: string; requestId?: string };
     try {
       meta = JSON.parse(view.privateMetadata || "{}");
@@ -293,6 +291,11 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
     }
     const text = view.values.find((v) => v.blockId === HITL_FREEFORM_MODAL_BLOCK_ID && v.actionId === HITL_FREEFORM_MODAL_ACTION_ID)?.value ?? "";
     if (!meta.continuationToken || !meta.requestId || text.length === 0) return new Response(null, { status: 200 });
+    // The channel comes from the modal's server-written metadata (set by
+    // openFreeformModal), not the payload — view_submission carries no channel,
+    // and the request already passed signature verification.
+    const actorId = (payload.user as { id?: string } | undefined)?.id;
+    if (!(await allowed({ userId: actorId, conversationId: meta.channelId }))) return new Response(null, { status: 200 });
     await runResume({
       req,
       args,
