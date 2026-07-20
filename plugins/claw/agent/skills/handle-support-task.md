@@ -15,6 +15,11 @@ Discord channel yet). The message carries `support_session`, `kind`,
    `investigate-d2e-issue` skill on the brief and to reply ONLY with the
    skill's JSON result: `{problem_summary, affected_area, suggested_next_steps,
    proposed_user_reply, github_logins}`. Include the full brief verbatim.
+   If the reply is not parseable as JSON, send ONE follow-up: "Reply with ONLY
+   the JSON object, no prose." If it still is not valid JSON, extract the
+   substance yourself from the prose (summary, next steps, proposed reply, and
+   any GitHub logins mentioned), continue the flow with those values, and use
+   an empty `github_logins` list if none were identifiable.
 2. **Resolve owners.** `lookupDiscordIds` with the `github_logins`.
 3. **Notify.** `postDevSummary` with the support session id, kind, brief, the
    investigation's summary/next steps/proposed reply, pass the investigation's full
