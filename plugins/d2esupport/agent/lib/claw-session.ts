@@ -24,6 +24,21 @@ export interface ClawTurnArgs {
 
 interface Event { type: string; data?: Record<string, unknown> }
 
+// Thrown on turn.failed/session.failed so the caller can persist the cursor
+// PAST the failed turn (and the session id, if freshly created) instead of
+// the stale cursor from before this turn started — otherwise a retry replays
+// this same failure forever instead of ever reaching the next turn.
+export class ClawTurnError extends Error {
+  nextCursor: number;
+  clawSessionId: string;
+  constructor(message: string, nextCursor: number, clawSessionId: string) {
+    super(message);
+    this.name = "ClawTurnError";
+    this.nextCursor = nextCursor;
+    this.clawSessionId = clawSessionId;
+  }
+}
+
 export async function runClawTurn(
   args: ClawTurnArgs,
 ): Promise<{ clawSessionId: string; replyText: string; nextCursor: number }> {
@@ -77,7 +92,11 @@ export async function runClawTurn(
         if (ev.type === "message.completed") {
           replyText = String(d.message ?? d.text ?? d.content ?? replyText);
         } else if (ev.type === "turn.failed" || ev.type === "session.failed") {
-          throw new Error(`claw turn failed: ${String(d.message ?? "unknown")}`);
+          throw new ClawTurnError(
+            `claw turn failed: ${String(d.message ?? "unknown")}`,
+            args.startCursor + read,
+            clawSessionId,
+          );
         } else if (ev.type === "session.waiting" || ev.type === "turn.completed") {
           await reader.cancel();
           return { clawSessionId, replyText, nextCursor: args.startCursor + read };

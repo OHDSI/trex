@@ -1,5 +1,5 @@
-import { assertEquals } from "jsr:@std/assert";
-import { runClawTurn } from "./claw-session.ts";
+import { assertEquals, assertInstanceOf } from "jsr:@std/assert";
+import { ClawTurnError, runClawTurn } from "./claw-session.ts";
 
 // Mimics handler.ts's /stream: listEvents().slice(startIndex) — every event
 // before startIndex (prior turns' replayed history) is withheld, exactly
@@ -70,4 +70,23 @@ Deno.test("a prior turn's stale failure is not surfaced when startCursor skips i
   ]);
   const r = await runClawTurn({ clawSessionId: "claw-9", message: "follow-up", userId: "u1", startCursor: 1, fetchImpl, mint: async () => "tok" });
   assertEquals(r.replyText, "this turn is fine");
+});
+
+Deno.test("a live turn.failed throws a ClawTurnError carrying the cursor past the failed turn", async () => {
+  const { fetchImpl } = fakeClaw([
+    { type: "message.completed", data: { message: "stale ack", turnId: "t-old" } },
+    { type: "turn.completed", data: { turnId: "t-old" } },
+    { type: "turn.failed", data: { turnId: "t-new", message: "boom" } },
+  ]);
+  let caught: unknown;
+  try {
+    await runClawTurn({ clawSessionId: "claw-9", message: "follow-up", userId: "u1", startCursor: 2, fetchImpl, mint: async () => "tok" });
+  } catch (e) {
+    caught = e;
+  }
+  assertInstanceOf(caught, ClawTurnError);
+  // startCursor(2) + 1 line read (the turn.failed line itself), matching the
+  // success path's "count the terminal line" convention.
+  assertEquals((caught as ClawTurnError).nextCursor, 3);
+  assertEquals((caught as ClawTurnError).clawSessionId, "claw-9");
 });

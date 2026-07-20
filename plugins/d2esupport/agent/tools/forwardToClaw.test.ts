@@ -1,5 +1,6 @@
 import { assertEquals, assertRejects } from "jsr:@std/assert";
 import { forwardCore } from "./forwardToClaw.ts";
+import { ClawTurnError } from "../lib/claw-session.ts";
 
 Deno.test("forwardCore builds the SUPPORT_TASK message and records state", async () => {
   const writes: unknown[] = [];
@@ -113,5 +114,34 @@ Deno.test("forwardCore keeps the prior claw session id when a follow-up forward 
   const w = writes[0] as unknown[];
   assertEquals(w[1], "claw-7");
   assertEquals(w[2], 4);
+  assertEquals(w[5], "forward_failed");
+});
+
+Deno.test("forwardCore persists the cursor past a live turn.failed, not the stale prior cursor", async () => {
+  const writes: unknown[] = [];
+  const sql = async (q: string, p: unknown[] = []) => {
+    if (q.includes("SELECT")) {
+      return { rows: [{ session_id: "sess-1", claw_session_id: "claw-7", claw_event_cursor: 4, slack_channel_id: "C1", slack_thread_ts: "1.2", status: "forwarded", brief: "b" }] };
+    }
+    writes.push(p);
+    return { rows: [] };
+  };
+  await assertRejects(
+    () =>
+      forwardCore(sql, { sessionId: "sess-1", userId: "u1" }, {
+        kind: "bug", brief: "more detail", slackChannelId: "C1", slackThreadTs: "1.2", slackUserId: "U1",
+      }, async () => {
+        // Simulates runClawTurn observing 3 new lines (including the
+        // terminal turn.failed) past the saved cursor of 4.
+        throw new ClawTurnError("claw turn failed: boom", 7, "claw-7");
+      }),
+    ClawTurnError,
+  );
+  assertEquals(writes.length, 1);
+  const w = writes[0] as unknown[];
+  // Positional params match state.ts's upsertTask column order: session_id,
+  // claw_session_id, claw_event_cursor, ...
+  assertEquals(w[1], "claw-7");
+  assertEquals(w[2], 7);
   assertEquals(w[5], "forward_failed");
 });

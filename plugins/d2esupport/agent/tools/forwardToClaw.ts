@@ -1,7 +1,7 @@
 // Hand the triaged task to claw and record the linkage. Blocking: the claw turn
 // includes the devx investigation and dev-channel notification (minutes).
 import { defineTool } from "eve/tools";
-import { runClawTurn, type ClawTurnArgs } from "../lib/claw-session.ts";
+import { ClawTurnError, runClawTurn, type ClawTurnArgs } from "../lib/claw-session.ts";
 import { readTask, upsertTask, type QueryFn } from "../lib/state.ts";
 import { supportUserId } from "../lib/devx-api.ts";
 
@@ -43,11 +43,15 @@ export async function forwardCore(
     // can see the task never made it, rather than the caller's throw being
     // the only trace. Keeps the prior clawSessionId/cursor if there was one
     // — a failed follow-up shouldn't forget the session it was following up.
+    // A ClawTurnError carries the cursor PAST the failed turn (and the
+    // session id, which may have just been created) — persisting the stale
+    // prior cursor here would make a retry replay this same failure forever.
+    const carried = turnErr instanceof ClawTurnError ? turnErr : undefined;
     try {
       await upsertTask(sql, {
         sessionId: ctx.sessionId,
-        clawSessionId: prior?.clawSessionId ?? null,
-        clawEventCursor: prior?.clawEventCursor ?? 0,
+        clawSessionId: carried?.clawSessionId ?? prior?.clawSessionId ?? null,
+        clawEventCursor: carried?.nextCursor ?? prior?.clawEventCursor ?? 0,
         slackChannelId: input.slackChannelId,
         slackThreadTs: input.slackThreadTs,
         status: "forward_failed",
