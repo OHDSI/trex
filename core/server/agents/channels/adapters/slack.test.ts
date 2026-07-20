@@ -327,3 +327,39 @@ Deno.test("interactivity ACK still 200 when args.resume reports {ok:false}", asy
   assertEquals(res.status, 200);
   assertEquals(resumes.length, 1); // attempted, soft-failed, never threw
 });
+
+// ---- allow-list -------------------------------------------------------------
+
+Deno.test("allow callback: denied user's message is acked but never reaches send()", async () => {
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET },
+    allow: (id) => id.userId === "U-ALLOWED",
+  });
+  const { args, sends } = mockArgs();
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(MESSAGE_EVENT)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0);
+});
+
+Deno.test("allow callback: allowed user's message reaches send()", async () => {
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET },
+    allow: (id) => id.userId === "U777", // MESSAGE_EVENT's user
+  });
+  const { args, sends } = mockArgs();
+  await channel.routes[0].handler(await signedRequest(JSON.stringify(MESSAGE_EVENT)), args);
+  assertEquals(sends.length, 1);
+});
+
+Deno.test("allow list object: denied interactivity is acked but never resumes", async () => {
+  const fetchMock: typeof fetch = () => Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET, botToken: "xoxb-1" },
+    api: { fetch: fetchMock },
+    allow: { users: ["U-ALLOWED"] }, // approveBlockActionsPayload's actor is U777
+  });
+  const { args, resumes } = mockArgs();
+  const res = await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
+  assertEquals(res.status, 200);
+  assertEquals(resumes.length, 0);
+});

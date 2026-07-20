@@ -63,6 +63,8 @@ import {
 import { buildSlackAuthContext } from "../vendor/slack/auth.ts";
 import { decodeSlackApiBody } from "../vendor/slack/api-encoding.ts";
 import { getEnv, type InputResponse } from "../vendor/slack/shared.ts";
+import { channelAllows, envAllowList } from "../allow.ts";
+import type { ChannelAllowList } from "../types.ts";
 
 // Per-session Slack routing threaded as the channel session `state` — set on
 // send() and read by the delivery (`events`) handlers to post into the thread.
@@ -92,6 +94,8 @@ export interface SlackResumeContext {
   interaction: unknown;
 }
 
+export type SlackAllowFn = (id: { userId?: string; conversationId?: string }) => boolean | Promise<boolean>;
+
 export interface SlackChannelOptions {
   /** Route path within the channel. Defaults to "/" (the channel root). */
   route?: string;
@@ -109,6 +113,8 @@ export interface SlackChannelOptions {
   events?: ChannelEventHandlers;
   /** HITL resume transport (see DEFAULT below). */
   resume?: (ctx: SlackResumeContext) => void | Promise<void>;
+  /** Inbound allow-list: a static list (default: SLACK_ALLOWED_USERS/_CHANNELS env) or an async callback. A miss is acked silently. */
+  allow?: ChannelAllowList | SlackAllowFn;
 }
 
 const OK = () => new Response("ok", { status: 200 });
@@ -120,6 +126,19 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
     credentials: { botToken: opts.credentials?.botToken },
     fetch: opts.api?.fetch,
   });
+
+  const allowOpt = opts.allow;
+  async function allowed(id: { userId?: string; conversationId?: string }): Promise<boolean> {
+    if (typeof allowOpt === "function") {
+      try {
+        return await allowOpt(id);
+      } catch (e) {
+        console.warn("slack: allow callback failed — denying:", e);
+        return false;
+      }
+    }
+    return channelAllows(allowOpt ?? envAllowList("SLACK"), id);
+  }
 
   const stateOf = (channelCtx: unknown): SlackDeliveryState =>
     ((channelCtx as { state?: SlackDeliveryState } | undefined)?.state ?? {}) as SlackDeliveryState;
@@ -196,6 +215,7 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
   // ---- inbound message (Events API) ---------------------------------------
 
   async function handleMessage(message: SlackMessage, args: ChannelRouteArgs): Promise<Response> {
+    if (!(await allowed({ userId: message.author?.userId, conversationId: message.channelId }))) return OK();
     let result: SlackCommandResult | null;
     try {
       result = opts.onCommand ? await opts.onCommand(message) : {};
@@ -232,6 +252,9 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
     const parsed = parseBlockActionsPayload(payload);
     if (!parsed) return OK();
 
+    const actorId = (payload.user as { id?: string } | undefined)?.id;
+    if (!(await allowed({ userId: actorId, conversationId: parsed.channelId }))) return OK();
+
     // Freeform "Type your answer" click → open a modal (trigger_id is short-lived,
     // so this runs inline, not under waitUntil).
     const freeform = parsed.actions.find((a) => isFreeformAction(a.actionId));
@@ -260,6 +283,8 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
   async function handleViewSubmission(payload: Record<string, unknown>, args: ChannelRouteArgs, req: Request): Promise<Response> {
     const view = parseViewSubmission(payload);
     if (!view || view.callbackId !== HITL_FREEFORM_MODAL_CALLBACK_ID) return new Response(null, { status: 200 });
+    const actorId = (payload.user as { id?: string } | undefined)?.id;
+    if (!(await allowed({ userId: actorId }))) return new Response(null, { status: 200 });
     let meta: { continuationToken?: string; channelId?: string; threadTs?: string; requestId?: string };
     try {
       meta = JSON.parse(view.privateMetadata || "{}");
