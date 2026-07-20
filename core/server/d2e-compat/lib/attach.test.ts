@@ -1,5 +1,9 @@
 import { assertEquals } from "jsr:@std/assert";
-import { ensureSourceAttached, type SourceCredential } from "./attach.ts";
+import {
+  ensureCacheAttached,
+  ensureSourceAttached,
+  type SourceCredential,
+} from "./attach.ts";
 
 function captureSql(c: SourceCredential): Promise<string[]> {
   const calls: string[] = [];
@@ -44,6 +48,33 @@ Deno.test("bigquery quote-escapes interpolated values", async () => {
   assertEquals(calls, [
     "ATTACH IF NOT EXISTS 'project=pro''j dataset=da''ta' AS bq__srcdb (TYPE bigquery, READ_ONLY)",
   ]);
+});
+
+// PR #2835: the HANA boot block attaches a `${code}_cache` catalog and creates
+// the .db file if it is missing.
+Deno.test("cache attach with createDbFileIfMissing attaches the _cache catalog", async () => {
+  const calls: string[] = [];
+  await ensureCacheAttached("myds_cache", {
+    cacheDir: "/usr/src/data/cache",
+    createDbFileIfMissing: true,
+    exec: (sql) => {
+      calls.push(sql);
+    },
+  });
+  assertEquals(calls, [
+    "ATTACH IF NOT EXISTS '/usr/src/data/cache/myds_cache.db' AS myds_cache",
+  ]);
+});
+
+Deno.test("cache attach without the flag skips a missing file", async () => {
+  const calls: string[] = [];
+  await ensureCacheAttached("myds_cache", {
+    cacheDir: "/nonexistent-cache-dir-xyz",
+    exec: (sql) => {
+      calls.push(sql);
+    },
+  });
+  assertEquals(calls, []);
 });
 
 Deno.test("postgres branch is unchanged", async () => {
