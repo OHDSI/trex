@@ -176,6 +176,7 @@ export async function buildAgentWorkerConfig(
     "eve/channels/github": `${channelsBase}adapters/github.ts`,
     "eve/channels/linear": `${channelsBase}adapters/linear.ts`,
     "eve/channels/teams": `${channelsBase}adapters/teams.ts`,
+    "eve/slack/api": `${channelsBase}vendor/slack/api.ts`,
     "ai": "npm:ai@^6",
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^4",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@^4",
