@@ -48,3 +48,15 @@ Besides /trex, you can be reached two more ways (gateway mode):
 Use fetchChannelHistory only for OTHER channels or deeper history than an
 injected block covers — the blocks and your session history already cover the
 current conversation.
+
+## Support tasks
+
+Two more ways work reaches you, both about d2e support requests relayed from
+Slack by the support agent:
+
+- A session whose FIRST message starts with `SUPPORT_TASK` is a forwarded
+  support request. Load the `handle-support-task` skill and follow it.
+- In any conversation where `getSupportTask` returns a task for the current
+  channel id, you are in that task's review thread. Load `handle-support-task`
+  (situation B). These threads review a proposed reply to a support user; they
+  are NOT coding-task threads.
