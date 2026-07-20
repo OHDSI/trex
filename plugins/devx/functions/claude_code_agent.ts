@@ -15,6 +15,7 @@ import {
   readProjectRules,
 } from "./tools/workspace.ts";
 import { gitOps } from "./git.ts";
+import { ensureGitConfig } from "./git_identity.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 
@@ -129,6 +130,18 @@ export async function streamClaudeCodeChat({
     : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
+  // Per-user git identity/signing: sync the MAIN repo's devx include file at
+  // the start of every coder turn. Worktrees share the main repo's
+  // .git/config, so this also covers commits the coder makes inside the
+  // per-chat worktree below; local repo config beats the sidecar's global
+  // gh-derived identity.
+  if (appId) {
+    try {
+      await ensureGitConfig(workspacePath, userId, sqlFn);
+    } catch (e) {
+      console.warn("[claude-code] git identity setup failed:", e?.message || e);
+    }
+  }
   // Facilitated (claw) sessions pin to a stable per-chat worktree so feature
   // work stays isolated and survives the cwd reset between turns.
   if (!workspacePathOverride && useWorktree && appId && chatId) {
@@ -147,7 +160,12 @@ export async function streamClaudeCodeChat({
   if (skillsPreamble) {
     const skillUsageRule = `<skill-usage>\nThe skills above are real and invocable via the Skill tool. When the user asks you to build a feature, component, app, or mockups, FIRST invoke the appropriate skill (e.g. the brainstorming skill to explore the idea and present design options) BEFORE writing app code. Do not jump straight to implementation, and do not write throwaway mockups into the user's app.\n</skill-usage>`;
     const askQuestionRule = `<asking-questions>\nWhenever you need to ask the user ANYTHING — a clarifying question, a choice between options, or a confirmation — you MUST use the \`mcp__ask__ask_question\` tool. Pass \`options\` for a single choice, add \`multiSelect: true\` for multiple, or omit \`options\` for free text. This applies everywhere, not only during brainstorming. NEVER write a question as plain text in your reply: plain-text questions do NOT render as an interactive prompt and the user may not answer them.\n</asking-questions>`;
-    systemPrompt = `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${skillUsageRule}\n\n${askQuestionRule}\n\n${systemPrompt}`;
+    // Belt-and-braces with the sidecar's includeCoAuthoredBy=false (server.js
+    // disableCoderAttribution): that suppresses the SDK's automatic trailer/
+    // footer; this stops the model from MENTIONING the tooling in text it
+    // writes itself.
+    const commitHygieneRule = `<commit-pr-hygiene>\nCommits, branch names, and pull-request text belong to the user, not the tooling. Never mention Claude, Anthropic, AI, or that the work was generated/assisted, anywhere in a commit message, commit trailer (no Co-Authored-By: Claude or similar), branch name, PR title, or PR description. Write them exactly as the human author of the change would. Branch names always follow <github-username>/<topic> (the connected GitHub account's username, short kebab-case topic, e.g. p-hoffmann/fix-filter-race).\n</commit-pr-hygiene>`;
+    systemPrompt = `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${skillUsageRule}\n\n${askQuestionRule}\n\n${commitHygieneRule}\n\n${systemPrompt}`;
   }
   if (hasComponentSelection) {
     systemPrompt += "\nThe user has selected specific components for editing. Focus your modifications on those components.";

@@ -7,7 +7,9 @@ import {
   Cpu,
   Plug,
   Github,
+  GitBranch,
   Check,
+  Copy,
   X,
   Trash2,
   Plus,
@@ -20,6 +22,7 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { useSettings } from "@/hooks/useSettings";
 import { useGitHub } from "@/hooks/useGitHub";
+import { useGitSigning } from "@/hooks/useGitSigning";
 import { useClaudeCode } from "@/hooks/useClaudeCode";
 import { useCopilot } from "@/hooks/useCopilot";
 import { useProviderConfigs } from "@/hooks/useProviderConfigs";
@@ -48,6 +51,7 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   const { settings, save } = useSettings();
   const github = useGitHub();
+  const gitSigning = useGitSigning();
   const claudeCode = useClaudeCode();
   const copilot = useCopilot();
   const providerConfigs = useProviderConfigs();
@@ -93,6 +97,12 @@ export default function SettingsPage() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editApiKey, setEditApiKey] = useState("");
 
+  // Git identity + signing fields
+  const [gitAuthorName, setGitAuthorName] = useState("");
+  const [gitAuthorEmail, setGitAuthorEmail] = useState("");
+  const [showImportKey, setShowImportKey] = useState(false);
+  const [importKeyText, setImportKeyText] = useState("");
+
   // MCP fields
   const [mcpName, setMcpName] = useState("");
   const [mcpTransport, setMcpTransport] = useState<"stdio" | "http">("stdio");
@@ -111,6 +121,8 @@ export default function SettingsPage() {
       setMaxToolSteps(settings.max_tool_steps ?? 10);
       setAutoFixProblems(settings.auto_fix_problems ?? false);
       setLoop(settings.loop ?? "legacy");
+      setGitAuthorName(settings.git_author_name || "");
+      setGitAuthorEmail(settings.git_author_email || "");
 
       // Unpack Bedrock credentials from api_key JSON
       if (settings.provider === "bedrock" && settings.api_key) {
@@ -170,6 +182,8 @@ export default function SettingsPage() {
         max_tool_steps: maxToolSteps,
         auto_fix_problems: autoFixProblems,
         loop,
+        git_author_name: gitAuthorName || undefined,
+        git_author_email: gitAuthorEmail || undefined,
       });
       toast.success("Settings saved");
     } catch (err) {
@@ -750,6 +764,165 @@ export default function SettingsPage() {
                     <Github className="h-3.5 w-3.5" />
                     Connect GitHub
                   </Button>
+                )}
+              </div>
+
+              <Separator />
+
+              {/* Git — author identity + commit signing */}
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <GitBranch className="h-4 w-4" />
+                  <Label className="text-base">Git</Label>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Author identity and SSH commit signing for every commit devx makes in your apps.
+                  Saved with the Save button above; the signing key applies immediately.
+                </p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="git-author-name" className="text-xs">Author name</Label>
+                    <Input
+                      id="git-author-name"
+                      placeholder="Jane Doe"
+                      value={gitAuthorName}
+                      onChange={(e) => setGitAuthorName(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="git-author-email" className="text-xs">Author email</Label>
+                    <Input
+                      id="git-author-email"
+                      type="email"
+                      placeholder="jane@example.com"
+                      value={gitAuthorEmail}
+                      onChange={(e) => setGitAuthorEmail(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  For a Verified badge on GitHub, the email must belong to the account that registers the signing key.
+                </p>
+
+                {gitSigning.status.configured ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-1.5 text-sm text-muted-foreground">
+                      <Check className="h-3.5 w-3.5 text-green-500" />
+                      Signing key configured
+                      {gitSigning.status.source && <span className="text-xs">({gitSigning.status.source})</span>}
+                    </div>
+                    <div className="flex items-start gap-2">
+                      <code className="flex-1 px-2 py-1.5 bg-muted rounded font-mono text-[11px] break-all">
+                        {gitSigning.status.public_key}
+                      </code>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 shrink-0"
+                        title="Copy public key"
+                        onClick={() => {
+                          navigator.clipboard.writeText(gitSigning.status.public_key || "");
+                          toast.success("Public key copied");
+                        }}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </Button>
+                    </div>
+                    {gitSigning.status.fingerprint && (
+                      <p className="text-xs text-muted-foreground font-mono">{gitSigning.status.fingerprint}</p>
+                    )}
+                    <p className="text-xs text-muted-foreground">
+                      Register this as a <strong>Signing Key</strong> on{" "}
+                      <a
+                        href="https://github.com/settings/ssh/new"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-primary underline inline-flex items-center gap-0.5"
+                      >
+                        GitHub → SSH and GPG keys <ExternalLink className="h-3 w-3" />
+                      </a>{" "}
+                      so your commits show as Verified.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="h-7 text-xs"
+                        disabled={gitSigning.busy}
+                        onClick={() => {
+                          if (confirm("Rotate the signing key? The current key stops signing and must be replaced on GitHub.")) {
+                            gitSigning.generate();
+                          }
+                        }}
+                      >
+                        Rotate
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs text-red-500 hover:text-red-700"
+                        disabled={gitSigning.busy}
+                        onClick={() => {
+                          if (confirm("Remove the signing key? New commits will no longer be signed.")) {
+                            gitSigning.remove();
+                          }
+                        }}
+                      >
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={gitSigning.busy}
+                        onClick={gitSigning.generate}
+                      >
+                        <GitBranch className="h-3.5 w-3.5" />
+                        {gitSigning.busy ? "Working..." : "Generate signing key"}
+                      </Button>
+                      <button
+                        type="button"
+                        className="text-xs text-muted-foreground underline"
+                        onClick={() => setShowImportKey((v) => !v)}
+                      >
+                        {showImportKey ? "cancel" : "paste an existing key instead"}
+                      </button>
+                    </div>
+                    {showImportKey && (
+                      <div className="space-y-2">
+                        <textarea
+                          className="w-full h-28 px-3 py-2 text-xs font-mono rounded-md border bg-background"
+                          placeholder={"-----BEGIN OPENSSH PRIVATE KEY-----\n(unencrypted ed25519 key)\n-----END OPENSSH PRIVATE KEY-----"}
+                          value={importKeyText}
+                          onChange={(e) => setImportKeyText(e.target.value)}
+                        />
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          disabled={gitSigning.busy || !importKeyText.trim()}
+                          onClick={async () => {
+                            await gitSigning.importKey(importKeyText);
+                            setImportKeyText("");
+                            setShowImportKey(false);
+                          }}
+                        >
+                          Import key
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {gitSigning.warning && (
+                  <p className="text-xs text-yellow-600">{gitSigning.warning}</p>
+                )}
+                {gitSigning.error && (
+                  <p className="text-xs text-red-500">{gitSigning.error}</p>
                 )}
               </div>
 
