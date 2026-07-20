@@ -9,10 +9,15 @@ export interface CheckDeps {
   mint: (userId: string) => Promise<string>;
 }
 
+const CACHE_MS = 60_000;
+const cache = new Map<string, { allowed: boolean; at: number }>();
+
 export async function checkAllowlist(userId: string | undefined, deps: CheckDeps): Promise<boolean> {
   if (!userId) return false;
   const envIds = deps.envList.split(",").map((s) => s.trim()).filter(Boolean);
   if (envIds.includes(userId)) return true;
+  const cached = cache.get(userId);
+  if (cached && Date.now() - cached.at < CACHE_MS) return cached.allowed;
   try {
     const uid = supportUserId();
     if (!uid) return false;
@@ -27,6 +32,7 @@ export async function checkAllowlist(userId: string | undefined, deps: CheckDeps
     }
     const j = await res.json() as { allowed?: boolean };
     const allowed = j.allowed === true;
+    cache.set(userId, { allowed, at: Date.now() });
     return allowed;
   } catch (e) {
     console.warn("d2esupport: allowlist check failed — denying:", e);

@@ -16,13 +16,28 @@ Deno.test("DB check drives the decision and failure denies", async () => {
     fetchImpl: async () => Response.json({ allowed: true }),
     mint: async () => "t",
   });
-  const err = await checkAllowlist("U3", {
+  const err = await checkAllowlist("U4", {
     envList: "",
     fetchImpl: async () => new Response("boom", { status: 500 }),
     mint: async () => "t",
   });
   assertEquals(yes, true);
   assertEquals(err, false);
+});
+
+Deno.test("successful result is cached for 60s: a later rejecting fetch is never reached", async () => {
+  const yes = await checkAllowlist("U5", {
+    envList: "",
+    fetchImpl: async () => Response.json({ allowed: true }),
+    mint: async () => "t",
+  });
+  const stillYes = await checkAllowlist("U5", {
+    envList: "",
+    fetchImpl: () => Promise.reject(new Error("must not be called — cached")),
+    mint: async () => "t",
+  });
+  assertEquals(yes, true);
+  assertEquals(stillYes, true);
 });
 
 Deno.test("missing user id denies", async () => {
