@@ -75,3 +75,17 @@ slash commands, and approval buttons. Only the transport differs:
   `DISCORD_PUBLIC_KEY` is not used: the host signs the loopback hand-off to the
   (unchanged) channel adapter with a boot-time ephemeral key, and the interaction
   ACK is delivered via the REST interaction callback instead of the HTTP response.
+
+## Support tasks
+
+claw also handles support tasks handed off from `@trex/d2esupport` (the Slack
+triage agent): it investigates the report, posts a summary with a real
+Discord `@mention` plus a proposed-reply review thread into
+`CLAW_DEV_CHANNEL_ID`, and — once a human approves via the thread's buttons —
+delivers the approved text back to d2esupport for posting into the original
+Slack thread. See `plugins/claw/agent/skills/handle-support-task.md` for the
+full skill and `plugins/d2esupport/README.md` for the other half of the flow
+(Slack setup, the `SUPPORT_TASK`/`APPROVED_REPLY` contracts, and the
+allowlist/user-map settings). Set `CLAW_DEV_CHANNEL_ID` to the Discord channel
+id support summaries and review threads should post into — `postDevSummary`
+throws without it.
