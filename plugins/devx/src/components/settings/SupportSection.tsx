@@ -36,6 +36,22 @@ export function SupportSection() {
     }
   };
 
+  const handleRemoveMapping = async (id: string) => {
+    try {
+      await removeMapping(id);
+    } catch {
+      toast.error("Failed to remove mapping");
+    }
+  };
+
+  const handleRemoveAllowed = async (id: string) => {
+    try {
+      await removeAllowed(id);
+    } catch {
+      toast.error("Failed to remove Slack user");
+    }
+  };
+
   return (
     <div className="space-y-8">
       <section>
@@ -48,7 +64,7 @@ export function SupportSection() {
             <div key={e.id} className="flex items-center gap-2 text-sm">
               <span className="w-48 truncate font-mono">{e.github_login}</span>
               <span className="w-48 truncate font-mono text-muted-foreground">{e.discord_user_id}</span>
-              <Button variant="ghost" size="icon" onClick={() => removeMapping(e.id)}>
+              <Button variant="ghost" size="icon" onClick={() => handleRemoveMapping(e.id)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
@@ -71,7 +87,7 @@ export function SupportSection() {
             <div key={e.id} className="flex items-center gap-2 text-sm">
               <span className="w-48 truncate font-mono">{e.slack_user_id}</span>
               <span className="flex-1 truncate text-muted-foreground">{e.note}</span>
-              <Button variant="ghost" size="icon" onClick={() => removeAllowed(e.id)}>
+              <Button variant="ghost" size="icon" onClick={() => handleRemoveAllowed(e.id)}>
                 <Trash2 className="h-4 w-4" />
               </Button>
             </div>
