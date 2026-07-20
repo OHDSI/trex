@@ -3,10 +3,8 @@
 // Unlike the other route modules these tables are NOT user-scoped — they are
 // deployment-level config consumed by the claw/d2esupport agents.
 export async function handleSupportRoutes(path, method, req, userId, sql, corsHeaders) {
-  const [cleanPath, query] = path.split("?");
-
   // GET /support/user-map
-  if (cleanPath.endsWith("/support/user-map") && method === "GET") {
+  if (path.endsWith("/support/user-map") && method === "GET") {
     const result = await sql(
       `SELECT id, github_login, discord_user_id, display_name, created_at
        FROM devx.user_map ORDER BY github_login`,
@@ -15,7 +13,7 @@ export async function handleSupportRoutes(path, method, req, userId, sql, corsHe
   }
 
   // POST /support/user-map
-  if (cleanPath.endsWith("/support/user-map") && method === "POST") {
+  if (path.endsWith("/support/user-map") && method === "POST") {
     const body = await req.json();
     const { github_login, discord_user_id, display_name } = body;
     if (!github_login?.trim() || !discord_user_id?.trim()) {
@@ -35,7 +33,7 @@ export async function handleSupportRoutes(path, method, req, userId, sql, corsHe
   }
 
   // PATCH/DELETE /support/user-map/:id
-  const mapMatch = cleanPath.match(/\/support\/user-map\/([^/]+)$/);
+  const mapMatch = path.match(/\/support\/user-map\/([^/]+)$/);
   if (mapMatch && method === "PATCH") {
     const body = await req.json();
     const sets = [];
@@ -68,8 +66,9 @@ export async function handleSupportRoutes(path, method, req, userId, sql, corsHe
   }
 
   // GET /support/discord-ids?logins=a,b
-  if (cleanPath.endsWith("/support/discord-ids") && method === "GET") {
-    const logins = (new URLSearchParams(query || "").get("logins") || "")
+  if (path.endsWith("/support/discord-ids") && method === "GET") {
+    const params = new URL(req.url).searchParams;
+    const logins = (params.get("logins") || "")
       .split(",").map((s) => s.trim()).filter(Boolean);
     if (logins.length === 0) {
       return Response.json({ mappings: {}, unmapped: [] }, { headers: corsHeaders });
@@ -85,15 +84,16 @@ export async function handleSupportRoutes(path, method, req, userId, sql, corsHe
   }
 
   // GET /support/slack-allowlist/check?user=U123  (empty list => not allowed: fail closed)
-  if (cleanPath.endsWith("/support/slack-allowlist/check") && method === "GET") {
-    const user = (new URLSearchParams(query || "").get("user") || "").trim();
+  if (path.endsWith("/support/slack-allowlist/check") && method === "GET") {
+    const params = new URL(req.url).searchParams;
+    const user = (params.get("user") || "").trim();
     if (!user) return Response.json({ allowed: false }, { headers: corsHeaders });
     const result = await sql(`SELECT id FROM devx.slack_allowlist WHERE slack_user_id = $1`, [user]);
     return Response.json({ allowed: result.rows.length > 0 }, { headers: corsHeaders });
   }
 
   // GET /support/slack-allowlist
-  if (cleanPath.endsWith("/support/slack-allowlist") && method === "GET") {
+  if (path.endsWith("/support/slack-allowlist") && method === "GET") {
     const result = await sql(
       `SELECT id, slack_user_id, note, created_at FROM devx.slack_allowlist ORDER BY created_at`,
     );
@@ -101,7 +101,7 @@ export async function handleSupportRoutes(path, method, req, userId, sql, corsHe
   }
 
   // POST /support/slack-allowlist
-  if (cleanPath.endsWith("/support/slack-allowlist") && method === "POST") {
+  if (path.endsWith("/support/slack-allowlist") && method === "POST") {
     const body = await req.json();
     if (!body.slack_user_id?.trim()) {
       return Response.json({ error: "slack_user_id required" }, { status: 400, headers: corsHeaders });
@@ -117,7 +117,7 @@ export async function handleSupportRoutes(path, method, req, userId, sql, corsHe
   }
 
   // DELETE /support/slack-allowlist/:id
-  const allowMatch = cleanPath.match(/\/support\/slack-allowlist\/([^/]+)$/);
+  const allowMatch = path.match(/\/support\/slack-allowlist\/([^/]+)$/);
   if (allowMatch && allowMatch[1] !== "check" && method === "DELETE") {
     await sql(`DELETE FROM devx.slack_allowlist WHERE id = $1`, [allowMatch[1]]);
     return Response.json({ ok: true }, { headers: corsHeaders });

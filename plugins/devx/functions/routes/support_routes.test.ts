@@ -16,6 +16,10 @@ function stubSql(rowsByMatch: Array<{ match: RegExp; rows: unknown[] }>) {
 const req = (body?: unknown) =>
   new Request("http://x/support", body ? { method: "POST", body: JSON.stringify(body) } : {});
 
+// Mirrors index.ts: the dispatcher passes url.pathname as `path`, while `req`
+// carries the real URL (with query string) that handlers must read params from.
+const reqWithUrl = (url: string) => new Request(url);
+
 Deno.test("GET /support/user-map lists mappings", async () => {
   const { sql } = stubSql([{ match: /FROM devx\.user_map/, rows: [{ id: "1", github_login: "alice", discord_user_id: "D1" }] }]);
   const res = await handleSupportRoutes("/x/support/user-map", "GET", req(), "u1", sql, CORS);
@@ -34,7 +38,14 @@ Deno.test("GET /support/discord-ids maps logins and reports unmapped", async () 
     match: /FROM devx\.user_map WHERE github_login = ANY/,
     rows: [{ github_login: "alice", discord_user_id: "D1" }],
   }]);
-  const res = await handleSupportRoutes("/x/support/discord-ids?logins=alice,bob", "GET", req(), "u1", sql, CORS);
+  const res = await handleSupportRoutes(
+    "/x/support/discord-ids",
+    "GET",
+    reqWithUrl("http://x/support/discord-ids?logins=alice,bob"),
+    "u1",
+    sql,
+    CORS,
+  );
   const j = await res!.json();
   assertEquals(j.mappings, { alice: "D1" });
   assertEquals(j.unmapped, ["bob"]);
@@ -43,8 +54,22 @@ Deno.test("GET /support/discord-ids maps logins and reports unmapped", async () 
 Deno.test("GET /support/slack-allowlist/check: allowed only when present", async () => {
   const present = stubSql([{ match: /FROM devx\.slack_allowlist WHERE slack_user_id/, rows: [{ id: "1" }] }]);
   const absent = stubSql([]);
-  const r1 = await handleSupportRoutes("/x/support/slack-allowlist/check?user=U1", "GET", req(), "u1", present.sql, CORS);
-  const r2 = await handleSupportRoutes("/x/support/slack-allowlist/check?user=U2", "GET", req(), "u1", absent.sql, CORS);
+  const r1 = await handleSupportRoutes(
+    "/x/support/slack-allowlist/check",
+    "GET",
+    reqWithUrl("http://x/support/slack-allowlist/check?user=U1"),
+    "u1",
+    present.sql,
+    CORS,
+  );
+  const r2 = await handleSupportRoutes(
+    "/x/support/slack-allowlist/check",
+    "GET",
+    reqWithUrl("http://x/support/slack-allowlist/check?user=U2"),
+    "u1",
+    absent.sql,
+    CORS,
+  );
   assertEquals((await r1!.json()).allowed, true);
   assertEquals((await r2!.json()).allowed, false);
 });
