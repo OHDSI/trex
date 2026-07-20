@@ -36,7 +36,10 @@ export async function runClawTurn(args: ClawTurnArgs): Promise<{ clawSessionId: 
     clawSessionId = j.sessionId as string;
   } else {
     const res = await f(`${clawBase()}/eve/v1/session/${clawSessionId}`, { method: "POST", headers, body });
-    if (!res.ok) throw new Error(`claw session continue failed: ${res.status}`);
+    if (!res.ok) {
+      await res.body?.cancel();
+      throw new Error(`claw session continue failed: ${res.status}`);
+    }
     await res.body?.cancel();
   }
 

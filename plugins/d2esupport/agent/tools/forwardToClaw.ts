@@ -33,14 +33,30 @@ export async function forwardCore(
     message,
     userId: ctx.userId,
   });
-  await upsertTask(sql, {
+  const taskState = {
     sessionId: ctx.sessionId,
     clawSessionId,
     slackChannelId: input.slackChannelId,
     slackThreadTs: input.slackThreadTs,
-    status: "forwarded",
+    status: "forwarded" as const,
     brief: input.brief,
-  });
+  };
+  try {
+    await upsertTask(sql, taskState);
+  } catch (firstErr) {
+    try {
+      await upsertTask(sql, taskState);
+    } catch (secondErr) {
+      console.error(
+        `forwardToClaw: state write failed twice for claw session ${clawSessionId}`,
+        firstErr,
+        secondErr,
+      );
+      throw new Error(
+        `forwardToClaw: task filed (claw session ${clawSessionId}) but state write failed: ${secondErr}`,
+      );
+    }
+  }
   return { reply: replyText };
 }
 
