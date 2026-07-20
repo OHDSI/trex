@@ -1,5 +1,10 @@
-// runReview — runs one of devx's four maintained review agents (code, security,
-// QA, design) and returns its structured findings.
+// runReview — runs one of devx's maintained check agents (code, security, QA,
+// design reviews, plus the docs-update writer) and returns its structured
+// findings. For "docs" the agent WRITES documentation into the app's docs
+// website on the SHARED workspace and its findings are the pages touched — so
+// during a facilitated task (where work lives on a feature worktree) claw
+// instead asks the coder to run its documenting skill; this kind is for
+// standalone docs updates outside a task.
 //
 // Why this exists: without it the only way for claw to get a review is to ask the
 // coding agent to "do a security review", which improvises one from a general-purpose
@@ -17,7 +22,7 @@ import { apiBase, mintToken } from "../lib/code-stream.ts";
 import { effectiveUserId } from "./askCodeAgent.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 
-const KINDS = ["code", "security", "qa", "design"] as const;
+const KINDS = ["code", "security", "qa", "design", "docs"] as const;
 export type ReviewKind = typeof KINDS[number];
 
 export interface ReviewFinding {
@@ -97,13 +102,16 @@ export async function runReviewCore(
 
 export default defineTool({
   description:
-    "Run one of devx's review agents against an app and return its findings. `kind` is " +
-    "'code', 'security', 'qa' or 'design'. Prefer this over asking the coding agent to " +
-    "review: it uses devx's maintained review prompts and stores the result in the app's " +
-    "review history, so the team can re-read it in the devx UI. Reviews take minutes. " +
+    "Run one of devx's check agents against an app and return its findings. `kind` is " +
+    "'code', 'security', 'qa', 'design' (reviews) or 'docs' (writes feature documentation " +
+    "into the app's docs website; findings list the pages touched). Prefer this over asking " +
+    "the coding agent to improvise: it uses devx's maintained prompts and stores the result " +
+    "in the app's history, so the team can re-read it in the devx UI. Runs take minutes. " +
     "'qa' and 'design' drive a browser and need the app's dev server running — they " +
-    "return an error saying so if it is not. Report the findings; do not fix anything " +
-    "without asking first.",
+    "return an error saying so if it is not. 'docs' works on the SHARED app workspace — " +
+    "during a facilitated task whose work lives on a feature worktree, have the coder run " +
+    "its documenting-d2e-features skill instead so the docs land on the feature branch. " +
+    "Report the findings; do not fix anything without asking first.",
   inputSchema: {
     type: "object",
     properties: {

@@ -13,6 +13,7 @@ import {
   Wand2,
   TestTube2,
   Palette,
+  BookOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -117,7 +118,9 @@ function formatTimeAgo(input: string): string {
 
 interface ReviewFinding {
   title: string;
-  level: "critical" | "high" | "medium" | "low";
+  // The four review kinds use severities; the docs update uses change kinds
+  // (added/updated/skipped). All badge/order helpers already take any string.
+  level: string;
   description: string;
 }
 
@@ -254,10 +257,10 @@ function ReviewSection({
 
 export function ProblemsTab({ appId, onOpenFile, onFixPrompt, reviewAgents }: ProblemsTabProps) {
   const {
-    secReview, codeReview, qaReview, designReview,
-    secReviewing, codeReviewing, qaReviewing, designReviewing,
-    secProgress, codeProgress, qaProgress, designProgress,
-    runSecurityReview, runCodeReview, runQaReview, runDesignReview,
+    secReview, codeReview, qaReview, designReview, docsReview,
+    secReviewing, codeReviewing, qaReviewing, designReviewing, docsReviewing,
+    secProgress, codeProgress, qaProgress, designProgress, docsProgress,
+    runSecurityReview, runCodeReview, runQaReview, runDesignReview, runDocsUpdate,
   } = reviewAgents;
 
   // Type check state
@@ -314,6 +317,7 @@ export function ProblemsTab({ appId, onOpenFile, onFixPrompt, reviewAgents }: Pr
   const secCount = secReview?.findings?.length ?? 0;
   const qaCount = qaReview?.findings?.length ?? 0;
   const designCount = designReview?.findings?.length ?? 0;
+  const docsCount = docsReview?.findings?.length ?? 0;
 
   const sectionStatus = (running: boolean, count: number, hasResult: boolean, review?: ReviewData | null) => {
     if (running) return <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />;
@@ -651,6 +655,36 @@ export function ProblemsTab({ appId, onOpenFile, onFixPrompt, reviewAgents }: Pr
               progress={designProgress}
               onRun={runDesignReview}
               onFix={onFixPrompt}
+            />
+          </AccordionContent>
+        </AccordionItem>
+
+        {/* Docs Update — writes documentation, entries are pages touched (no Fix All) */}
+        <AccordionItem value="docs-update">
+          <AccordionTrigger>
+            <BookOpen className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            <span className="text-xs">Docs Update</span>
+            {sectionStatus(docsReviewing, docsCount, docsReview !== null)}
+            <span className="flex items-center gap-1 ml-auto mr-1">
+              <Button
+                size="sm" variant="ghost" className="h-5 text-[10px] px-1.5 gap-1"
+                onClick={(e) => { e.stopPropagation(); runDocsUpdate(); }}
+                disabled={docsReviewing}
+              >
+                {docsReviewing ? <Loader2 className="h-3 w-3 animate-spin" /> : <BookOpen className="h-3 w-3" />}
+                {docsReviewing ? "Updating..." : "Update"}
+              </Button>
+            </span>
+          </AccordionTrigger>
+          <AccordionContent>
+            <ReviewSection
+              icon={BookOpen}
+              label="Docs Update"
+              emptyDescription="Documents implemented features in the app's documentation website (d2e: docs/website). Entries list the pages added or updated."
+              review={docsReview}
+              isRunning={docsReviewing}
+              progress={docsProgress}
+              onRun={runDocsUpdate}
             />
           </AccordionContent>
         </AccordionItem>

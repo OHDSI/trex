@@ -9,6 +9,8 @@ import type {
   CodeReview,
   QaTestReview,
   DesignReview,
+  DocsReview,
+  GitSigningStatus,
   D2EConfig,
 } from "./types";
 
@@ -496,6 +498,27 @@ export async function disconnectGitHub(): Promise<void> {
   await apiFetch("/integrations/github", { method: "DELETE" });
 }
 
+// Git commit signing. The private key never crosses this API — generate/import
+// return only the public half (+ an optional server-config warning).
+export async function getGitSigningStatus(): Promise<GitSigningStatus> {
+  return apiFetch("/integrations/git-signing/status");
+}
+
+export async function generateGitSigningKey(): Promise<{ public_key: string; fingerprint: string; warning?: string }> {
+  return apiFetch("/integrations/git-signing/generate", { method: "POST" });
+}
+
+export async function importGitSigningKey(privateKey: string): Promise<{ public_key: string; fingerprint: string; warning?: string }> {
+  return apiFetch("/integrations/git-signing/import", {
+    method: "POST",
+    body: JSON.stringify({ private_key: privateKey }),
+  });
+}
+
+export async function removeGitSigningKey(): Promise<void> {
+  await apiFetch("/integrations/git-signing", { method: "DELETE" });
+}
+
 // --- Claude Code Auth ---
 
 export async function getClaudeCodeAuthStatus(): Promise<{
@@ -943,6 +966,85 @@ export function streamDesignReview(appId: string, callbacks: DesignReviewCallbac
                   callbacks.onDone(parsed.review);
                   break;
                 case "design_review_error":
+                  callbacks.onError(parsed.error);
+                  break;
+              }
+            } catch { /* skip malformed */ }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== "AbortError") {
+        callbacks.onError(err.message);
+      }
+    });
+
+  return controller;
+}
+
+// Docs update — same SSE contract as the reviews; the agent writes docs pages
+// and its "review" payload lists the pages it added/updated.
+export async function getLatestDocsReview(appId: string): Promise<DocsReview | null> {
+  return apiFetch(`/apps/${appId}/docs/reviews`);
+}
+
+export interface DocsReviewCallbacks {
+  onProgress: (message: string) => void;
+  onDone: (review: DocsReview) => void;
+  onError: (error: string) => void;
+}
+
+export function streamDocsReview(appId: string, callbacks: DocsReviewCallbacks): AbortController {
+  const controller = new AbortController();
+
+  fetch(`${API_BASE}/apps/${appId}/docs/review`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    signal: controller.signal,
+  })
+    .then(async (res) => {
+      if (!res.ok) {
+        const body = await res.text();
+        try {
+          const parsed = JSON.parse(body);
+          callbacks.onError(parsed.error || `API error ${res.status}`);
+        } catch {
+          callbacks.onError(`API error ${res.status}: ${body}`);
+        }
+        return;
+      }
+
+      const reader = res.body?.getReader();
+      if (!reader) {
+        callbacks.onError("No response body");
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.startsWith("data: ")) {
+            try {
+              const parsed = JSON.parse(line.slice(6));
+              switch (parsed.type) {
+                case "docs_review_progress":
+                  callbacks.onProgress(parsed.message);
+                  break;
+                case "docs_review_done":
+                  callbacks.onDone(parsed.review);
+                  break;
+                case "docs_review_error":
                   callbacks.onError(parsed.error);
                   break;
               }
