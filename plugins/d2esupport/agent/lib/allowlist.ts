@@ -7,6 +7,7 @@ export interface CheckDeps {
   envList: string;
   fetchImpl: typeof fetch;
   mint: (userId: string) => Promise<string>;
+  supportUser: () => string | undefined;
 }
 
 const CACHE_MS = 60_000;
@@ -19,7 +20,7 @@ export async function checkAllowlist(userId: string | undefined, deps: CheckDeps
   const cached = cache.get(userId);
   if (cached && Date.now() - cached.at < CACHE_MS) return cached.allowed;
   try {
-    const uid = supportUserId();
+    const uid = deps.supportUser();
     if (!uid) return false;
     const token = await deps.mint(uid);
     const res = await deps.fetchImpl(
@@ -45,5 +46,6 @@ export function isAllowedSlackUser(userId?: string): Promise<boolean> {
     envList: Deno.env.get("SLACK_ALLOWED_USERS") ?? "",
     fetchImpl: fetch,
     mint: mintToken,
+    supportUser: supportUserId,
   });
 }
