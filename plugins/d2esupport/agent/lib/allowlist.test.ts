@@ -45,6 +45,18 @@ Deno.test("successful result is cached for 60s: a later rejecting fetch is never
   assertEquals(stillYes, true);
 });
 
+Deno.test("no support user configured denies without hitting the API", async () => {
+  assertEquals(
+    await checkAllowlist("U6", {
+      envList: "",
+      fetchImpl: () => Promise.reject(new Error("must not be called")),
+      mint: async () => "t",
+      supportUser: () => undefined,
+    }),
+    false,
+  );
+});
+
 Deno.test("missing user id denies", async () => {
   assertEquals(
     await checkAllowlist(undefined, {

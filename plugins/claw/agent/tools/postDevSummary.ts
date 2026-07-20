@@ -30,6 +30,16 @@ interface Deps {
   startThread: (opts: { botToken?: string; channelId: string; messageId: string; name: string }) => Promise<{ threadId: string }>;
 }
 
+// Discord's 2000-char message cap is shared by the whole message, and the
+// unmapped-logins hint is appended last — an overlong summary or nextSteps
+// alone could push it past the cap and the final .slice(0, 2000) backstop
+// would silently cut the hint off. Truncate each field on its own first so
+// the hint always survives.
+const FIELD_MAX = 800;
+function truncateField(s: string): string {
+  return s.length > FIELD_MAX ? `${s.slice(0, FIELD_MAX)}…` : s;
+}
+
 export async function postDevSummaryCore(sql: QueryFn, input: Input, deps: Deps): Promise<{ threadId: string }> {
   const mentions = input.discordUserIds.map((id) => `<@${id}>`).join(" ");
   const unmapped = input.unmappedLogins.length
@@ -38,8 +48,8 @@ export async function postDevSummaryCore(sql: QueryFn, input: Input, deps: Deps)
   const content = [
     `**Support task (${input.kind})** ${mentions}`.trim(),
     "",
-    `**Problem:** ${input.summary}`,
-    `**Suggested next steps:** ${input.nextSteps}`,
+    `**Problem:** ${truncateField(input.summary)}`,
+    `**Suggested next steps:** ${truncateField(input.nextSteps)}`,
     unmapped,
   ].join("\n").slice(0, 2000);
 

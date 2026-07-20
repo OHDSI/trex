@@ -213,7 +213,7 @@ jobs:
       # is deliberately unset here — the allowlist test suite covers both the
       # env-set and env-unset paths, and CI has no real devx user to loop back to.
       - name: d2esupport plugin tests
-        run: deno test --no-check --allow-all --import-map plugins/d2esupport/importmap.json plugins/d2esupport/
+        run: deno test --no-check --allow-all --import-map plugins/d2esupport/importmap.json --node-modules-dir=auto plugins/d2esupport/
 
   build:
     needs: [pick_runner]

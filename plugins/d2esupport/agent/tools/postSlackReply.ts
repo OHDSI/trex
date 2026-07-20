@@ -2,12 +2,12 @@
 // API, and channel delivery only rides channel-initiated turns (delivery.ts is
 // per-turn) — so the approved answer must be posted with the bot token directly.
 import { defineTool } from "eve/tools";
-import { postSlackMessage, splitSlackMessageText } from "eve/slack/api";
+import { postSlackMessage, type SlackPostedMessage, splitSlackMessageText } from "eve/slack/api";
 import { readTask, upsertTask, type QueryFn } from "../lib/state.ts";
 
 interface Input { channelId: string; threadTs: string; text: string }
 
-type PostFn = (opts: { channelId: string; threadTs?: string; text?: string }) => Promise<{ id: string }>;
+type PostFn = (opts: { channelId: string; threadTs?: string; text?: string }) => Promise<SlackPostedMessage>;
 
 export async function postReplyCore(
   sql: QueryFn,

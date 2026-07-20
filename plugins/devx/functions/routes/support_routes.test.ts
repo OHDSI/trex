@@ -16,6 +16,9 @@ function stubSql(rowsByMatch: Array<{ match: RegExp; rows: unknown[] }>) {
 const req = (body?: unknown) =>
   new Request("http://x/support", body ? { method: "POST", body: JSON.stringify(body) } : {});
 
+const patchReq = (body: unknown) =>
+  new Request("http://x/support", { method: "PATCH", body: JSON.stringify(body) });
+
 // Mirrors index.ts: the dispatcher passes url.pathname as `path`, while `req`
 // carries the real URL (with query string) that handlers must read params from.
 const reqWithUrl = (url: string) => new Request(url);
@@ -31,6 +34,33 @@ Deno.test("POST /support/user-map validates required fields", async () => {
   const { sql } = stubSql([]);
   const res = await handleSupportRoutes("/x/support/user-map", "POST", req({ github_login: "" }), "u1", sql, CORS);
   assertEquals(res!.status, 400);
+});
+
+Deno.test("PATCH /support/user-map/:id rejects an empty github_login", async () => {
+  const { sql } = stubSql([]);
+  const res = await handleSupportRoutes("/x/support/user-map/1", "PATCH", patchReq({ github_login: "   " }), "u1", sql, CORS);
+  assertEquals(res!.status, 400);
+});
+
+Deno.test("PATCH /support/user-map/:id rejects an empty discord_user_id", async () => {
+  const { sql } = stubSql([]);
+  const res = await handleSupportRoutes("/x/support/user-map/1", "PATCH", patchReq({ discord_user_id: "" }), "u1", sql, CORS);
+  assertEquals(res!.status, 400);
+});
+
+Deno.test("PATCH /support/user-map/:id trims string fields before writing", async () => {
+  const { sql, calls } = stubSql([{ match: /UPDATE devx\.user_map/, rows: [{ id: "1", github_login: "alice", discord_user_id: "D1", display_name: "Alice" }] }]);
+  const res = await handleSupportRoutes(
+    "/x/support/user-map/1",
+    "PATCH",
+    patchReq({ github_login: "  alice  ", discord_user_id: " D1 ", display_name: "  Alice  " }),
+    "u1",
+    sql,
+    CORS,
+  );
+  assertEquals(res!.status, 200);
+  const update = calls.find((c) => c.q.includes("UPDATE devx.user_map"));
+  assertEquals(update?.p.slice(0, 3), ["alice", "D1", "Alice"]);
 });
 
 Deno.test("GET /support/discord-ids maps logins and reports unmapped", async () => {

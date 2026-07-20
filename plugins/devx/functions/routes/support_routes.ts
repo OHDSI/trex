@@ -41,8 +41,12 @@ export async function handleSupportRoutes(path, method, req, userId, sql, corsHe
     let idx = 1;
     for (const field of ["github_login", "discord_user_id", "display_name"]) {
       if (body[field] !== undefined) {
+        const trimmed = typeof body[field] === "string" ? body[field].trim() : body[field];
+        if ((field === "github_login" || field === "discord_user_id") && !trimmed) {
+          return Response.json({ error: `${field} cannot be empty` }, { status: 400, headers: corsHeaders });
+        }
         sets.push(`${field} = $${idx++}`);
-        params.push(body[field]);
+        params.push(field === "display_name" ? (trimmed || null) : trimmed);
       }
     }
     if (sets.length === 0) {
