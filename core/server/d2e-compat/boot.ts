@@ -149,11 +149,15 @@ export async function d2eBoot(): Promise<void> {
     for (const ds of dbResult.rows) {
       if (ds.dialect !== "hana") continue;
       try {
-        await ensureCacheAttached(ds.id, {
+        // PR #2835: attach the HANA cache as `${code}_cache.db`. The file is
+        // created by the create_cachedb_hana_plugin flow (pgwire ATTACH cannot
+        // create it); createDbFileIfMissing only lets the re-attach proceed.
+        await ensureCacheAttached(`${ds.id}_cache`, {
           cacheDir: "/usr/src/data/cache",
+          createDbFileIfMissing: true,
           exec: hanaExec,
         });
-        log(`Attached HANA cache for '${ds.id}'`);
+        log(`Attached HANA ${ds.id} as ${ds.id}_cache`);
       } catch (e) {
         err(`Failed to attach HANA cache for '${ds.id}': ${e}`);
       }
