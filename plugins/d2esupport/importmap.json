@@ -1,0 +1,11 @@
+{
+  "imports": {
+    "ai": "npm:ai@^6",
+    "eve": "../../core/server/agents/eve-shim/mod.ts",
+    "eve/tools": "../../core/server/agents/eve-shim/tools.ts",
+    "eve/channels": "../../core/server/agents/channels/shim.ts",
+    "eve/channels/slack": "../../core/server/agents/channels/adapters/slack.ts",
+    "eve/slack/api": "../../core/server/agents/channels/vendor/slack/api.ts",
+    "edn-data": "npm:edn-data@^1"
+  }
+}
