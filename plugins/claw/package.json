@@ -18,7 +18,8 @@
           "DISCORD_ALLOWED_CHANNELS": "${DISCORD_ALLOWED_CHANNELS:-}",
           "DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}",
           "DISCORD_MESSAGES": "${DISCORD_MESSAGES:-}",
-          "CLAW_CODE_USER_ID": "${CLAW_CODE_USER_ID:-}"
+          "CLAW_CODE_USER_ID": "${CLAW_CODE_USER_ID:-}",
+          "CLAW_DEV_CHANNEL_ID": "${CLAW_DEV_CHANNEL_ID:-}"
         }
       }
     ],

@@ -623,3 +623,18 @@ export const PROVIDERS: ProviderConfig[] = [
     requiresBaseUrl: false,
   },
 ];
+
+export interface UserMapEntry {
+  id: string;
+  github_login: string;
+  discord_user_id: string;
+  display_name?: string | null;
+  created_at?: string;
+}
+
+export interface SlackAllowlistEntry {
+  id: string;
+  slack_user_id: string;
+  note?: string | null;
+  created_at?: string;
+}

@@ -1,6 +1,6 @@
 // plugins/claw/agent/lib/discord-rest.test.ts
 import { assertEquals } from "jsr:@std/assert";
-import { fetchRecentMessages, postChannelMessage } from "./discord-rest.ts";
+import { fetchRecentMessages, postChannelMessage, startThreadFromMessage } from "./discord-rest.ts";
 
 Deno.test("fetchRecentMessages calls the Discord API with auth and maps results", async () => {
   let seenUrl = ""; let seenAuth = "";
@@ -82,4 +82,29 @@ Deno.test("postChannelMessage throws on non-2xx", async () => {
   try { await postChannelMessage(fetchFn, { botToken: "T", channelId: "1", content: "x" }); }
   catch { threw = true; }
   assertEquals(threw, true);
+});
+
+Deno.test("postChannelMessage returns the created message id and honors allowedMentions", async () => {
+  let captured: { url: string; body: string } | null = null;
+  const fakeFetch = (async (url: string | URL, init?: RequestInit) => {
+    captured = { url: String(url), body: String(init?.body) };
+    return Response.json({ id: "m1" });
+  }) as typeof fetch;
+  const r = await postChannelMessage(fakeFetch, {
+    botToken: "t", channelId: "C1", content: "hi <@D1>",
+    allowedMentions: { users: ["D1"] },
+  });
+  assertEquals(r.id, "m1");
+  assertEquals(JSON.parse(captured!.body).allowed_mentions, { users: ["D1"] });
+});
+
+Deno.test("startThreadFromMessage posts to the threads endpoint and returns the thread id", async () => {
+  let url = "";
+  const fakeFetch = (async (u: string | URL) => {
+    url = String(u);
+    return Response.json({ id: "T9" });
+  }) as typeof fetch;
+  const r = await startThreadFromMessage(fakeFetch, { botToken: "t", channelId: "C1", messageId: "m1", name: "Support: export bug" });
+  assertEquals(r.threadId, "T9");
+  assertEquals(url.endsWith("/channels/C1/messages/m1/threads"), true);
 });

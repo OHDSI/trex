@@ -14,12 +14,14 @@ import {
   Trash2,
   Plus,
   ExternalLink,
+  LifeBuoy,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { SupportSection } from "@/components/settings/SupportSection";
 import { useSettings } from "@/hooks/useSettings";
 import { useGitHub } from "@/hooks/useGitHub";
 import { useGitSigning } from "@/hooks/useGitSigning";
@@ -38,13 +40,14 @@ import { cn } from "@/lib/utils";
 import { toast } from "sonner";
 import { getLanguage, setLanguage, getAvailableLanguages } from "@/lib/i18n";
 
-type Section = "general" | "ai" | "agent" | "integrations";
+type Section = "general" | "ai" | "agent" | "integrations" | "support";
 
 const SECTIONS: { id: Section; label: string; icon: React.ElementType }[] = [
   { id: "general", label: "General", icon: Settings },
   { id: "ai", label: "AI", icon: Cpu },
   { id: "agent", label: "Agent", icon: Sparkles },
   { id: "integrations", label: "Integrations", icon: Plug },
+  { id: "support", label: "Support", icon: LifeBuoy },
 ];
 
 export default function SettingsPage() {
@@ -1029,6 +1032,19 @@ export default function SettingsPage() {
                   Add Server
                 </Button>
               </div>
+            </div>
+          )}
+
+          {activeSection === "support" && (
+            <div className="space-y-6">
+              <div>
+                <h2 className="text-lg font-semibold mb-1">Support</h2>
+                <p className="text-sm text-muted-foreground">
+                  GitHub/Discord developer mapping and the Slack allowlist for data2evidence support requests.
+                </p>
+              </div>
+              <Separator />
+              <SupportSection />
             </div>
           )}
         </div>

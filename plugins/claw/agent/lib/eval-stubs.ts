@@ -107,4 +107,19 @@ export const evalStubs = {
   postScreenshots() {
     return { posted: [], skipped: [], stub: true };
   },
+  lookupDiscordIds(logins: string[]) {
+    return { mappings: {}, unmapped: logins };
+  },
+  postDevSummary() {
+    return { threadId: "eval-thread" };
+  },
+  getSupportTask() {
+    return { found: false };
+  },
+  updateSupportTask() {
+    return { updated: true };
+  },
+  replyToSupport() {
+    return { sent: true };
+  },
 };

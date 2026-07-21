@@ -12,6 +12,8 @@ import type {
   DocsReview,
   GitSigningStatus,
   D2EConfig,
+  UserMapEntry,
+  SlackAllowlistEntry,
 } from "./types";
 
 // task-u1: exported so useAgentsChat.ts can build the Authorization header
@@ -622,6 +624,35 @@ export async function deleteMcpServer(id: string): Promise<void> {
 
 export async function testMcpServer(id: string): Promise<{ ok: boolean; tools?: McpTool[]; error?: string }> {
   return apiFetch(`/mcp/servers/${id}/test`, { method: "POST" });
+}
+
+// Support settings (instance-global)
+export async function listUserMap(): Promise<UserMapEntry[]> {
+  return apiFetch("/support/user-map");
+}
+
+export async function saveUserMapEntry(entry: {
+  github_login: string;
+  discord_user_id: string;
+  display_name?: string;
+}): Promise<UserMapEntry> {
+  return apiFetch("/support/user-map", { method: "POST", body: JSON.stringify(entry) });
+}
+
+export async function deleteUserMapEntry(id: string): Promise<void> {
+  await apiFetch(`/support/user-map/${id}`, { method: "DELETE" });
+}
+
+export async function listSlackAllowlist(): Promise<SlackAllowlistEntry[]> {
+  return apiFetch("/support/slack-allowlist");
+}
+
+export async function addSlackAllowlistEntry(entry: { slack_user_id: string; note?: string }): Promise<SlackAllowlistEntry> {
+  return apiFetch("/support/slack-allowlist", { method: "POST", body: JSON.stringify(entry) });
+}
+
+export async function deleteSlackAllowlistEntry(id: string): Promise<void> {
+  await apiFetch(`/support/slack-allowlist/${id}`, { method: "DELETE" });
 }
 
 // Trex database

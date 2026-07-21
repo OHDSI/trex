@@ -9,6 +9,7 @@ import { PLUGINS_BASE_PATH } from "../config.ts";
 import { type AgentMemoryLink, generateMemoryArtifacts, parseMemoryLinks } from "./agent-memory.ts";
 import { memoryWorkerBasePath } from "../memory/gbrain-worker/mount.ts";
 import { createGatewaySigner, DiscordGatewayClient, gatewayModeEnabled } from "../agents/gateway/discord.ts";
+import { createSlackGatewaySigner, SlackGatewayClient } from "../agents/gateway/slack.ts";
 import { copyDirRecursive } from "./utils.ts";
 import { packsForAgent, stageSkillPacks, type SkillPackEntry } from "./skill-packs.ts";
 
@@ -175,6 +176,7 @@ export async function buildAgentWorkerConfig(
     "eve/channels/github": `${channelsBase}adapters/github.ts`,
     "eve/channels/linear": `${channelsBase}adapters/linear.ts`,
     "eve/channels/teams": `${channelsBase}adapters/teams.ts`,
+    "eve/slack/api": `${channelsBase}vendor/slack/api.ts`,
     "ai": "npm:ai@^6",
     "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^4",
     "@ai-sdk/openai": "npm:@ai-sdk/openai@^4",
@@ -453,10 +455,30 @@ export async function addAgentsPlugin(
         }
       }
       const signer = gateway ? await createGatewaySigner() : null;
+
+      // Slack SOCKET MODE (agents/gateway/slack.ts): same per-agent opt-in
+      // discipline as DISCORD_GATEWAY above. The worker's SLACK_SIGNING_SECRET
+      // is overridden to a boot-time ephemeral secret so the loopback shim is
+      // the only principal that can pass the slack adapter's signature gate.
+      let slackGateway: { appToken: string; channelId: string } | null = null;
+      if (gatewayModeEnabled(cfg.env.SLACK_GATEWAY)) {
+        const appToken = cfg.env.SLACK_APP_TOKEN || Deno.env.get("SLACK_APP_TOKEN") || "";
+        if (!appToken) {
+          console.error(`agents: agent ${entry.name} (plugin ${name}) sets SLACK_GATEWAY but has no SLACK_APP_TOKEN — slack gateway disabled`);
+        } else {
+          slackGateway = { appToken, channelId: cfg.env.SLACK_GATEWAY_CHANNEL || "slack" };
+        }
+      }
+      const slackSigner = slackGateway ? createSlackGatewaySigner() : null;
+
       const envOverrides: Record<string, string> = { TREX_AGENT_BASE: basePath };
       if (signer) {
         cfg.env.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
         envOverrides.DISCORD_PUBLIC_KEY = signer.publicKeyHex;
+      }
+      if (slackSigner) {
+        cfg.env.SLACK_SIGNING_SECRET = slackSigner.secret;
+        envOverrides.SLACK_SIGNING_SECRET = slackSigner.secret;
       }
       const live: LiveWorkerConfig = {
         servicePath: cfg.servicePath,
@@ -510,6 +532,17 @@ export async function addAgentsPlugin(
             : {}),
         });
       }
+
+      if (slackGateway && slackSigner) {
+        const loopback = Deno.env.get("SLACK_GATEWAY_LOOPBACK_URL") ??
+          Deno.env.get("DISCORD_GATEWAY_LOOPBACK_URL") ?? "http://127.0.0.1:8001";
+        startSlackGateway(basePath, {
+          appToken: slackGateway.appToken,
+          forwardUrl: `${loopback}${basePath}/eve/v1/${slackGateway.channelId}`,
+          signer: slackSigner,
+          label: `${name}/${entry.name}`,
+        });
+      }
     } catch (e) {
       console.error(
         `agents: agent ${entry.name} (plugin ${name}) failed to register — skipping:`,
@@ -530,6 +563,17 @@ function startDiscordGateway(basePath: string, opts: ConstructorParameters<typeo
   discordGateways.set(basePath, client);
   client.start();
   console.log(`agents: discord gateway mode enabled for ${opts.label} → ${opts.forwardUrl}`);
+}
+
+// One slack gateway client per agent basePath (same replacement discipline as discord).
+const slackGateways = new Map<string, SlackGatewayClient>();
+
+function startSlackGateway(basePath: string, opts: ConstructorParameters<typeof SlackGatewayClient>[0]): void {
+  slackGateways.get(basePath)?.stop();
+  const client = new SlackGatewayClient(opts);
+  slackGateways.set(basePath, client);
+  client.start();
+  console.log(`agents: slack gateway mode enabled for ${opts.label} → ${opts.forwardUrl}`);
 }
 
 // Registered once by plugin.ts when the first agents-type plugin appears.

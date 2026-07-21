@@ -209,6 +209,11 @@ jobs:
       # loader stages the eve shim and generates the worker import map itself.
       - name: claw plugin tests
         run: deno test --no-check --allow-all --import-map plugins/claw/importmap.json --node-modules-dir=auto plugins/claw/
+      # Same authoring/test-only import map story as claw above. D2ESUPPORT_USER_ID
+      # is deliberately unset here — the allowlist test suite covers both the
+      # env-set and env-unset paths, and CI has no real devx user to loop back to.
+      - name: d2esupport plugin tests
+        run: deno test --no-check --allow-all --import-map plugins/d2esupport/importmap.json --node-modules-dir=auto plugins/d2esupport/
 
   build:
     needs: [pick_runner]
@@ -260,6 +265,7 @@ jobs:
             RUNNER: ubuntu-24.04
             EXCLUDE_FROM_IMAGE: true
           - PKGPATH: ./plugins/claw
+          - PKGPATH: ./plugins/d2esupport
 
     runs-on: ${{ matrix.RUNNER || needs.pick_runner.outputs.random_runner }}
 
@@ -435,7 +441,7 @@ jobs:
           # artifact. Web/docs/notebook/cli/runtime/bao publish other shapes;
           # everything else is a DuckDB extension and must ship a .trex.
           case "${{ matrix.PKGPATH }}" in
-            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx|./plugins/claw)
+            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx|./plugins/claw|./plugins/d2esupport)
               echo "skip — non-extension plugin"
               ;;
             *)

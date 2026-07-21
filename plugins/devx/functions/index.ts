@@ -38,6 +38,7 @@ import { handleSkillsRoutes } from "./routes/skills_routes.ts";
 import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
 import { handleCopilotRoutes } from "./routes/copilot_routes.ts";
 import { handleProviderConfigRoutes } from "./routes/provider_config_routes.ts";
+import { handleSupportRoutes } from "./routes/support_routes.ts";
 import { syncBuiltins } from "./skills/sync.ts";
 import {
   parseSlashInput,
@@ -220,7 +221,8 @@ Deno.serve(async (req: Request) => {
       await handleVisualEditingRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handlePrototypeRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleD2ERoutes(path, method, req, userId, sql, corsHeaders) ||
-      await handleSkillsRoutes(path, method, req, userId, sql, corsHeaders);
+      await handleSkillsRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleSupportRoutes(path, method, req, userId, sql, corsHeaders);
     if (routeResult) return routeResult;
 
     // --- Chat CRUD ---

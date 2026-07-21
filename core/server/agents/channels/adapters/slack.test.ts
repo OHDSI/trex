@@ -6,7 +6,12 @@ import { assertEquals, assertExists } from "jsr:@std/assert";
 import { slackChannel } from "./slack.ts";
 import type { ChannelAuth, ChannelRouteArgs } from "eve/channels";
 import { hmacSha256Hex } from "../vendor/slack/shared.ts";
-import { renderInputRequestBlocks } from "../vendor/slack/hitl.ts";
+import {
+  HITL_FREEFORM_MODAL_ACTION_ID,
+  HITL_FREEFORM_MODAL_BLOCK_ID,
+  HITL_FREEFORM_MODAL_CALLBACK_ID,
+  renderInputRequestBlocks,
+} from "../vendor/slack/hitl.ts";
 
 const SIGNING_SECRET = "8f742231b10e8888abcd99yyyzzz85a5";
 
@@ -326,4 +331,89 @@ Deno.test("interactivity ACK still 200 when args.resume reports {ok:false}", asy
   const res = await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
   assertEquals(res.status, 200);
   assertEquals(resumes.length, 1); // attempted, soft-failed, never threw
+});
+
+// ---- allow-list -------------------------------------------------------------
+
+Deno.test("allow callback: denied user's message is acked but never reaches send()", async () => {
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET },
+    allow: (id) => id.userId === "U-ALLOWED",
+  });
+  const { args, sends } = mockArgs();
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(MESSAGE_EVENT)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0);
+});
+
+Deno.test("allow callback: allowed user's message reaches send()", async () => {
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET },
+    allow: (id) => id.userId === "U777", // MESSAGE_EVENT's user
+  });
+  const { args, sends } = mockArgs();
+  await channel.routes[0].handler(await signedRequest(JSON.stringify(MESSAGE_EVENT)), args);
+  assertEquals(sends.length, 1);
+});
+
+Deno.test("allow list object: denied interactivity is acked but never resumes", async () => {
+  const fetchMock: typeof fetch = () => Promise.resolve(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET, botToken: "xoxb-1" },
+    api: { fetch: fetchMock },
+    allow: { users: ["U-ALLOWED"] }, // approveBlockActionsPayload's actor is U777
+  });
+  const { args, resumes } = mockArgs();
+  const res = await channel.routes[0].handler(await interactionRequest(approveBlockActionsPayload()), args);
+  assertEquals(res.status, 200);
+  assertEquals(resumes.length, 0);
+});
+
+// view_submission carries no channel of its own — the freeform-modal submit
+// gate must read it from the modal's server-written privateMetadata (set by
+// openFreeformModal), not fail closed against a conversations-only allow-list.
+function freeformViewSubmissionPayload(): Record<string, unknown> {
+  return {
+    type: "view_submission",
+    user: { id: "U777" },
+    team: { id: "T123" },
+    view: {
+      callback_id: HITL_FREEFORM_MODAL_CALLBACK_ID,
+      private_metadata: JSON.stringify({
+        continuationToken: "C555:1700000000.000001",
+        channelId: "C555",
+        threadTs: "1700000000.000001",
+        requestId: "req-42",
+      }),
+      state: {
+        values: {
+          [HITL_FREEFORM_MODAL_BLOCK_ID]: { [HITL_FREEFORM_MODAL_ACTION_ID]: { value: "the freeform answer" } },
+        },
+      },
+    },
+  };
+}
+
+Deno.test("conversations allow-list: view_submission resumes using the MODAL's channel, not the (absent) payload channel", async () => {
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET },
+    allow: { conversations: ["C555"] }, // the channel carried in privateMetadata
+  });
+  const { args, resumes } = mockArgs();
+  const res = await channel.routes[0].handler(await interactionRequest(freeformViewSubmissionPayload()), args);
+  assertEquals(res.status, 200);
+  assertEquals(resumes.length, 1);
+  assertEquals(resumes[0].continuationToken, "C555:1700000000.000001");
+  assertEquals(resumes[0].input.inputResponses, [{ requestId: "req-42", optionId: undefined }]);
+});
+
+Deno.test("conversations allow-list: view_submission for a channel NOT on the list is acked but never resumes", async () => {
+  const channel = slackChannel({
+    credentials: { signingSecret: SIGNING_SECRET },
+    allow: { conversations: ["OTHER"] },
+  });
+  const { args, resumes } = mockArgs();
+  const res = await channel.routes[0].handler(await interactionRequest(freeformViewSubmissionPayload()), args);
+  assertEquals(res.status, 200);
+  assertEquals(resumes.length, 0);
 });
