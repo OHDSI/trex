@@ -543,6 +543,13 @@ export interface ProviderConfig {
   requiresBaseUrl: boolean;
 }
 
+export type ModelInfo = {
+  value: string;
+  displayName: string;
+  description: string;
+  supportsEffort?: boolean;
+};
+
 export const PROVIDERS: ProviderConfig[] = [
   {
     id: "anthropic",
