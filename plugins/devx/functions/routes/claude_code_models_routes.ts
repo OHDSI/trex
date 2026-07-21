@@ -14,7 +14,6 @@ export const SEED_RESPONSE: ModelsResponse = {
   source: "fallback",
 };
 
-// deno-lint-ignore no-explicit-any
 export async function handleClaudeCodeModelsRoutes(
   path: string,
   method: string,

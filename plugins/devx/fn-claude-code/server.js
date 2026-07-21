@@ -7,7 +7,7 @@ import { execSync } from "node:child_process";
 import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { kbMcpServer } from "./kb_mcp.js";
-import { SEED_MODELS, seedResponse, authKey, getCached, setCached } from "./models_cache.js";
+import { seedResponse, authKey, getCached, setCached } from "./models_cache.js";
 
 const modelsCache = new Map(); // authKey -> { models, expires }
 
