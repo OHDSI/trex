@@ -18,7 +18,7 @@ const SCOPES = "org:create_api_key user:profile user:inference user:sessions:cla
 const PENDING_FILE = "/tmp/.claude-pkce-pending.json";
 
 // Persisted OAuth token (written by the login-code flow, read by the agent).
-const TOKEN_PATH = "/home/node/.claude/oauth-token.json";
+const TOKEN_PATH = Deno.env.get("CLAUDE_CODE_TOKEN_PATH") ?? "/home/node/.claude/oauth-token.json";
 
 /**
  * Return a non-expired Claude Code OAuth access token, refreshing it via the
