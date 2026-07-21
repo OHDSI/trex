@@ -7,6 +7,9 @@ import { execSync } from "node:child_process";
 import { query, createSdkMcpServer, tool } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
 import { kbMcpServer } from "./kb_mcp.js";
+import { SEED_MODELS, seedResponse, authKey, getCached, setCached } from "./models_cache.js";
+
+const modelsCache = new Map(); // authKey -> { models, expires }
 
 const PORT = 4322;
 
@@ -353,6 +356,43 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
     return;
+  }
+
+  if (req.method === "POST" && req.url === "/models") {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    const { oauthToken, refresh } = JSON.parse(body || "{}");
+
+    const respond = (payload) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify(payload));
+    };
+
+    if (!oauthToken) return respond(seedResponse());
+
+    const key = authKey(oauthToken);
+    if (!refresh) {
+      const cached = getCached(modelsCache, key, Date.now());
+      if (cached) return respond({ models: cached, source: "sdk" });
+    }
+
+    process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+    let q;
+    try {
+      q = query({
+        prompt: "noop",
+        options: { maxTurns: 1, permissionMode: "bypassPermissions", settingSources: ["user"] },
+      });
+      const models = await q.supportedModels();
+      if (!Array.isArray(models) || models.length === 0) return respond(seedResponse());
+      setCached(modelsCache, key, models, Date.now());
+      return respond({ models, source: "sdk" });
+    } catch (err) {
+      console.error("[claude-code-server] /models error:", err && err.message);
+      return respond(seedResponse());
+    } finally {
+      try { if (q && q.interrupt) await q.interrupt(); } catch (_) {}
+    }
   }
 
   res.writeHead(404);
