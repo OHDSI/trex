@@ -80,7 +80,7 @@ async function loadSkillsPreamble(): Promise<string> {
   return _skillsPreamble;
 }
 
-async function ensureClaudeCodeServer() {
+export async function ensureClaudeCodeServer() {
   try {
     const raw = await duckdb(`SELECT * FROM trex_devx_process_status('${CLAUDE_PROCESS}', '')`);
     const s = JSON.parse(raw);
