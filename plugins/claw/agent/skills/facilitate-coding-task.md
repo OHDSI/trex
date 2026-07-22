@@ -125,8 +125,10 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    the engineering method is not one). Work runs in an isolated per-task git
    worktree, set up automatically and stable across turns. Call `askCodeAgent`:
    "Implement the approved plan using your subagent-driven-development skill. Work
-   through the tasks, build it, and run the tests. If you can't finish everything
-   in one turn, do as much as you can and report which tasks are done and which
+   through the tasks, build it, and run the tests. For any d2e/edge functions
+   touched, verify with the `testing-d2e-functions` skill against the live edge
+   runtime + Postgres — not just unit tests. If you can't finish everything in
+   one turn, do as much as you can and report which tasks are done and which
    remain."
 
    Then keep it moving yourself — a coder turn checkpoints after a chunk of work,
@@ -146,12 +148,23 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    **"Implementation complete" is a MIDPOINT, not the end — do NOT post a "done" /
    "finished implementing" message and stop.** Coding finished only means you have
    reached step 8. When the coder reports all tasks complete, say nothing that sounds
-   like the task is over; instead **immediately proceed to step 8 (browser verification +
-   screenshots), then step 9 (checks)**, even if the coder already committed each task as
-   it went. Do not offer a PR yet, and do not close the loop (step 14) — steps 8-13 still
-   remain. If you catch yourself about to announce completion right after implementation,
-   that is the signal you are skipping the gates: go to step 8 instead.
-8. **Exercise the feature in a browser, then show it — expected, not optional, for
+   like the task is over; instead **immediately proceed to step 8 (backend testing),
+   then step 9 (browser verification + screenshots), then step 10 (checks)**, even if
+   the coder already committed each task as it went. Do not offer a PR yet, and do not
+   close the loop (step 15) — steps 8-14 still remain. If you catch yourself about to
+   announce completion right after implementation, that is the signal you are skipping
+   the gates: go to step 8 instead.
+8. **Test changed d2e/edge functions against the live stack — mandatory before any PR,
+   for any change that touches a d2e/edge function.** When implementation is complete
+   and the change includes any d2e/edge function (even a small edit), call `askCodeAgent`:
+   "Use your `testing-d2e-functions` skill to exercise the changed function(s) against
+   the real edge runtime + Postgres. Report the route(s) you hit, the assertions that
+   passed, and any errors." Do NOT move on, call the work done, or offer a PR until
+   the coder reports backend testing complete. If the coder reports it is blocked
+   (can't reach the runtime, missing token, etc.), surface the blocker to the channel
+   rather than proceeding on the strength of unit tests alone.
+   Only skip this step for changes that touch no d2e/edge functions whatsoever.
+9. **Exercise the feature in a browser, then show it — expected, not optional, for
    any UI change.** When the change touches something the team can see (a component,
    a page, styling — a component migration like Button → VButton counts), ask the
    coder to **drive the feature with Playwright and report what it observed**, before
@@ -186,19 +199,19 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    while edits to tracked source made only to exercise a feature must be reverted, with
    `git status` shown as evidence. Undoing a legitimate environment repair to look clean
    leaves the workspace broken for the next run.
-9. **Ask which checks to run — after the screenshots are posted, before any PR.**
-   Never ship silently and never jump straight to a PR. Ask AFTER step 8 so the team
-   decides with the screenshots in front of them — seeing the actual UI is what tells
-   someone whether a design review is worth running. Offer the checks even if the work
-   is already committed. Ask the team which to run: call
-   `postChoice` with `multi: true` and the checks that fit the change:
-   - `Code review` (value "code review"), `Security review` (value "security
-     review"), `QA / tests` (value "QA test"), `Design review` (value "design
-     review", UI only), `Docs update` (value "docs update", for user-visible
-     features), and `None — ship it` (value "none").
-   The team's picks resume you with "The team selected: <checks>". For "none",
-   go to step 12.
-10. **Run each chosen check and post its report.** For each check the team picked,
+10. **Ask which checks to run — after the screenshots are posted, before any PR.**
+    Never ship silently and never jump straight to a PR. Ask AFTER step 9 so the team
+    decides with the screenshots in front of them — seeing the actual UI is what tells
+    someone whether a design review is worth running. Offer the checks even if the work
+    is already committed. Ask the team which to run: call
+    `postChoice` with `multi: true` and the checks that fit the change:
+    - `Code review` (value "code review"), `Security review` (value "security
+      review"), `QA / tests` (value "QA test"), `Design review` (value "design
+      review", UI only), `Docs update` (value "docs update", for user-visible
+      features), and `None — ship it` (value "none").
+    The team's picks resume you with "The team selected: <checks>". For "none",
+    go to step 13.
+11. **Run each chosen check and post its report.** For each check the team picked,
     call **`runReview`** with the app id and the matching `kind` (`code`, `security`,
     `qa`, `design`). That runs devx's maintained review agent and stores the result in
     the app's review history, so the team can re-open it in the devx UI. Do NOT ask the
@@ -210,7 +223,7 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     running, `runReview` says so; either start it and retry, or tell the channel that
     check was skipped rather than silently dropping it.
     Note these review the devx app's own dev server. For **d2e platform UIs** the real
-    verification is step 8 (build + overwrite, exercise the route behind Logto) — do not
+    verification is step 9 (build + overwrite, exercise the route behind Logto) — do not
     treat a `qa`/`design` pass as covering that.
     **`Docs update` is the exception — it goes through the coder, not `runReview`.**
     The docs must land on the SAME feature branch as the implementation so they ride the
@@ -221,15 +234,16 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     pages you added or updated." Post the reported pages with `postPlan` (title "Docs
     update"). No apply-fixes gate needed — it writes the docs directly.
     Do NOT fix anything yet.
-11. **Ask whether to apply fixes.** After a report that has findings, call
+12. **Ask whether to apply fixes.** After a report that has findings, call
     `awaitApproval` (`what: "apply the fixes from the <check>"`). Approve →
     `askCodeAgent`: "Apply the fixes for those findings, re-run the checks, and
     confirm what changed." Post the result. Deny → leave them and note it in the
     channel. A clean report (no findings) needs no gate — just say so.
-12. **Commit + PR gate.** Reach this ONLY after, for visual/UI work, the feature has
-    been driven in a browser and its screenshots (step 8) posted AND the review checks
-    (step 9) have been offered and handled. If you are about to offer a PR but have skipped either, stop
-    and go back and do them first. With those handled, ask whether to ship the
+13. **Commit + PR gate.** Reach this ONLY after, for visual/UI work, the feature has
+    been driven in a browser and its screenshots (step 9) posted, backend testing (step 8)
+    is done for any d2e function changes, AND the review checks (step 10) have been
+    offered and handled. If you are about to offer a PR but have skipped any of these,
+    stop and go back and do them first. With those handled, ask whether to ship the
     work:
     call `awaitApproval` (`what: "commit the work and open a pull request"`).
     Approve → `askCodeAgent`: "Use your finishing-a-development-branch skill to
@@ -239,8 +253,8 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     messages, branch name, or PR text — write them as the human author would.
     Report the PR link (or say why it couldn't — e.g. no git remote configured)."
     Post the PR link to the channel. Deny → leave the branch uncommitted and say so.
-13. **Offer a live demo deployment — after the PR is open, not before.** Once the PR
-    link is posted (and the screenshots from step 8 are in the channel), offer to stand
+14. **Offer a live demo deployment — after the PR is open, not before.** Once the PR
+    link is posted (and the screenshots from step 9 are in the channel), offer to stand
     the branch up as a clickable environment: `postChoice` with `Deploy a demo
     environment` (value "deploy") and `Not now` (value "no deploy"). Frame the cost
     honestly — roughly **1.5–2.5 hours** before a URL exists.
@@ -253,12 +267,12 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     Docker Build to finish, dispatch, then post the URL only once the `tunnel-ready`
     artifact exists and you have curled the public URL successfully.
     **Do not block the channel on it.** Post the build/run link immediately so people can
-    watch progress, then carry on and close the loop (step 14) as normal — the deployment
+    watch progress, then carry on and close the loop (step 15) as normal — the deployment
     is a long-running side task, not a reason to hold the conversation open. Post one
     interim note if the wait runs long, and post the URL, its expiry, and the login when
     it finally lands. If the deploy fails, say so with the failing step rather than
     quietly dropping it.
-14. **Close the loop.** Keep going until the coding agent reports the work is done
+15. **Close the loop.** Keep going until the coding agent reports the work is done
     (implemented, checks/reviews handled, committed/PR'd if approved), then post
     a short, concrete summary to the channel.
 

@@ -233,7 +233,7 @@ function buildArgs(
       });
     };
 
-    deps.startTurn(sessionId, message, undefined, registerForTurn);
+    deps.startTurn(sessionId, message, { channelId: sessionChannelId }, registerForTurn);
     deps.onSessionStarted?.(info);
     return { id: sessionId };
   };

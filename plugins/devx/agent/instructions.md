@@ -134,6 +134,18 @@ When to consult the knowledge base:
 Do NOT ask for permission to call the read-only tools (`KBListRepos`, `KBRead`, `KBSearch`, `KBFindSymbols`, `KBListFiles`, `KBOverview`). `KBInit` will prompt for consent once per repo.
 </knowledge_base>
 
+## d2e / edge functions
+
+For d2e work, two skills cover the key concerns:
+- `d2e` — what a d2e/edge function is: location, runtime, routing, auth, data access.
+- `testing-d2e-functions` — how to run and test one: exercising it against the live
+  edge runtime + Postgres via bind-mount or workspace registration (plus pure-logic
+  unit tests with `deno test`).
+
+After changing a d2e/edge function, test it with `testing-d2e-functions` before
+declaring the task done. Unit tests alone are not sufficient — the function must be
+exercised through the real edge runtime.
+
 ## Commit and PR hygiene
 
 Commits, branch names, and pull-request text you produce belong to the user,
