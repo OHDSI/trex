@@ -14,6 +14,7 @@ import type {
   D2EConfig,
   UserMapEntry,
   SlackAllowlistEntry,
+  ModelInfo,
 } from "./types";
 
 // task-u1: exported so useAgentsChat.ts can build the Authorization header
@@ -553,6 +554,10 @@ export async function submitClaudeCodeLoginCode(code: string): Promise<{
 
 export async function claudeCodeLogout(): Promise<{ ok: boolean; message: string }> {
   return apiFetch("/claude-code/logout", { method: "POST" });
+}
+
+export function getClaudeCodeModels(): Promise<{ models: ModelInfo[]; source: string }> {
+  return apiFetch<{ models: ModelInfo[]; source: string }>("/claude-code/models");
 }
 
 // --- GitHub Copilot Auth ---

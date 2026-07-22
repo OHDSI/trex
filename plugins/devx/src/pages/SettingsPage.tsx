@@ -26,6 +26,7 @@ import { useSettings } from "@/hooks/useSettings";
 import { useGitHub } from "@/hooks/useGitHub";
 import { useGitSigning } from "@/hooks/useGitSigning";
 import { useClaudeCode } from "@/hooks/useClaudeCode";
+import { useClaudeCodeModels } from "@/hooks/useClaudeCodeModels";
 import { useCopilot } from "@/hooks/useCopilot";
 import { useProviderConfigs } from "@/hooks/useProviderConfigs";
 import { useMcpServers } from "@/hooks/useMcpServers";
@@ -56,6 +57,7 @@ export default function SettingsPage() {
   const github = useGitHub();
   const gitSigning = useGitSigning();
   const claudeCode = useClaudeCode();
+  const claudeCodeModels = useClaudeCodeModels();
   const copilot = useCopilot();
   const providerConfigs = useProviderConfigs();
   const mcp = useMcpServers();
@@ -548,9 +550,22 @@ export default function SettingsPage() {
                   </select>
                   {(() => {
                     const pc = PROVIDERS.find((p) => p.id === newProvider);
+                    const isClaudeCode = newProvider === "claude-code";
+                    const dynamicOptions = claudeCodeModels.models; // ModelInfo[]
                     return (
                       <>
-                        {pc && pc.models.length > 0 ? (
+                        {isClaudeCode ? (
+                          claudeCodeModels.loading ? (
+                            <select disabled className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm">
+                              <option>Loading models…</option>
+                            </select>
+                          ) : (
+                            <select value={newModel} onChange={(e) => setNewModel(e.target.value)}
+                              className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm">
+                              {dynamicOptions.map((m) => <option key={m.value} value={m.value}>{m.displayName}</option>)}
+                            </select>
+                          )
+                        ) : pc && pc.models.length > 0 ? (
                           <select value={newModel} onChange={(e) => setNewModel(e.target.value)}
                             className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm">
                             {pc.models.map((m) => <option key={m} value={m}>{m}</option>)}

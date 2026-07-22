@@ -543,6 +543,13 @@ export interface ProviderConfig {
   requiresBaseUrl: boolean;
 }
 
+export type ModelInfo = {
+  value: string;
+  displayName: string;
+  description: string;
+  supportsEffort?: boolean;
+};
+
 export const PROVIDERS: ProviderConfig[] = [
   {
     id: "anthropic",
@@ -601,12 +608,7 @@ export const PROVIDERS: ProviderConfig[] = [
   {
     id: "claude-code",
     name: "Claude Code (Subscription)",
-    models: [
-      "claude-sonnet-4-6",
-      "claude-opus-4-6",
-      "sonnet",
-      "opus",
-    ],
+    models: ["default", "sonnet", "haiku"], // fallback only; real list comes from GET /claude-code/models
     requiresApiKey: false,
     requiresBaseUrl: false,
   },
