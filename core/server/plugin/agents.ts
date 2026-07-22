@@ -178,9 +178,15 @@ export async function buildAgentWorkerConfig(
     "eve/channels/teams": `${channelsBase}adapters/teams.ts`,
     "eve/slack/api": `${channelsBase}vendor/slack/api.ts`,
     "ai": "npm:ai@^6",
-    "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^4",
-    "@ai-sdk/openai": "npm:@ai-sdk/openai@^4",
-    "@ai-sdk/google": "npm:@ai-sdk/google@^4",
+    // These MUST stay on the same @ai-sdk/provider major as ai@^6 (which pins
+    // @ai-sdk/provider@3, model spec v2). @ai-sdk/openai@^4 / anthropic@^4 /
+    // google@^4 pull @ai-sdk/provider@4 (spec v4); streamText (ai@6) then
+    // rejects such a model with "Unsupported model version v4" and the turn
+    // dies silently. Keep them at ^3 to match core/server/deno.json. Bedrock's
+    // ^4.0.115 line still targets @ai-sdk/provider@3, so it stays at ^4.
+    "@ai-sdk/anthropic": "npm:@ai-sdk/anthropic@^3",
+    "@ai-sdk/openai": "npm:@ai-sdk/openai@^3",
+    "@ai-sdk/google": "npm:@ai-sdk/google@^3",
     "@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@^4.0.115",
     "zod": "npm:zod@^4",
     "pg": "npm:pg",
