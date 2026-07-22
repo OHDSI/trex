@@ -34,6 +34,29 @@ the agent worker at registration time via `${VAR:-default}` substitution
 See `plugins/claw/agent/ACCEPTANCE.md` for the live-acceptance checklist that
 exercises this contract end-to-end against a real Discord app and Code agent.
 
+## Surfacing claw chats in the devx UI
+
+claw drives its coding turns through the same `devx-api` chat endpoints the devx
+browser UI uses, so each claw task is already a real `devx.chats` row with its full
+transcript in `devx.messages`. To see those chats in devx:
+
+1. Set `CLAW_CODE_USER_ID` to the uuid of the devx user you log in as (the
+   `x-user-id` / JWT `sub` devx sends for that account). This makes claw's chats
+   owned by you instead of an anonymous bot user, so they pass the chat-list filter
+   `WHERE user_id = <you>`.
+2. Make sure that devx account has an active provider configured (Settings) —
+   claw turns use the chat owner's provider settings.
+
+The chats are titled "Discord (claw)" and, when the task targets an app, carry that
+app's `app_id`, so they appear under that app's chat list (same scoping as user chats
+created within an app) rather than the top-level sidebar. A claw chat created without
+an app (`app_id` null) appears in the top-level chat list instead. Opening one shows
+the full transcript and tool calls, and it updates live while open (see the
+poll-while-viewing behaviour in `plugins/devx/src/hooks/useMessages.ts`).
+
+Note: `CLAW_CODE_USER_ID` is deployment-wide, so every claw chat (from any Discord
+user) is owned by this single account. This suits a single-operator setup.
+
 ## Thread per task
 
 A `/trex` in a regular channel creates a **public thread** for the task and the
