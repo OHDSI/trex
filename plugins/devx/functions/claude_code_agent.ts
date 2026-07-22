@@ -116,7 +116,7 @@ export async function ensureClaudeCodeServer() {
 
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-  skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree,
+  skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel,
 }) {
   const mode = chatMode || "agent";
   const maxSteps = settings.max_steps || 100;
@@ -169,6 +169,12 @@ export async function streamClaudeCodeChat({
   }
   if (hasComponentSelection) {
     systemPrompt += "\nThe user has selected specific components for editing. Focus your modifications on those components.";
+  }
+  if (remoteChannel) {
+    // Chat-channel-driven turn (claw): the requester cannot execute anything on
+    // this machine — tell the coder it must do/verify everything itself.
+    const { REMOTE_CHANNEL_SYSTEM_PROMPT } = await import("./prompts.ts");
+    systemPrompt += `\n${REMOTE_CHANNEL_SYSTEM_PROMPT}`;
   }
 
   const messages = history

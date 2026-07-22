@@ -139,7 +139,10 @@ async function streamTurn(token: string, chatId: string, message: string): Promi
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     // useWorktree pins the coder to a stable per-chat git worktree so feature
     // work stays isolated and survives the cwd reset between turns.
-    body: JSON.stringify({ prompt: message, useWorktree: true }),
+    // remoteChannel tells the coder it is driven from a chat channel whose
+    // participants cannot execute anything on this machine (sandbox context) —
+    // it must run/verify everything itself instead of handing back commands.
+    body: JSON.stringify({ prompt: message, useWorktree: true, remoteChannel: true }),
   });
   if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status} ${res.ok ? "(no body)" : await res.text()}`);
 
