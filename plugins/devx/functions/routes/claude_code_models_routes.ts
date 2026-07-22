@@ -1,4 +1,5 @@
 import { getValidOAuthToken } from "./claude_code_routes.ts";
+import { ensureClaudeCodeServer } from "../claude_code_agent.ts";
 
 const CLAUDE_PORT = 4322;
 
@@ -28,6 +29,10 @@ export async function handleClaudeCodeModelsRoutes(
   if (!oauthToken) return Response.json(SEED_RESPONSE, { headers: corsHeaders });
 
   try {
+    // fn-claude-code is lazy-started (normally by the first chat turn). Start it
+    // here too, so the model list reflects the live subscription even before any
+    // chat has run — otherwise the fetch below is refused and we fall back to seed.
+    await ensureClaudeCodeServer();
     const resp = await fetch(`http://localhost:${CLAUDE_PORT}/models`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
