@@ -71,6 +71,7 @@ import {
   decideMessageTrigger,
   type DiscordChannelSnapshot,
   fetchMessagesBefore,
+  formatAttachmentsBlock,
   formatDiscordMessageContextBlock,
   formatMessagesBlock,
   getChannelSnapshot,
@@ -177,6 +178,14 @@ export interface DiscordChannelOptions {
 // HITL approvals (verb-restricted to approve/deny), a choice carries an arbitrary
 // value, so the click resumes the session via a message (see handleComponent).
 const CHOICE_CUSTOM_ID = "eve_choice";
+
+// custom_ids of a postQuestion open-question flow: the "Answer" button opens a
+// text modal, and the modal submit resumes the session via a message — the same
+// resume-by-message pattern as CHOICE_CUSTOM_ID (free text cannot ride the
+// verb-restricted HITL approvals either).
+const QUESTION_CUSTOM_ID = "eve_question";
+const QUESTION_MODAL_CUSTOM_ID = "eve_question_modal";
+const QUESTION_TEXT_INPUT_ID = "eve_question_text";
 
 export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   const route = opts.route ?? "/";
@@ -479,6 +488,31 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       }
       return discordJsonBody({ type: DISCORD_INTERACTION_RESPONSE_TYPE.DEFERRED_UPDATE_MESSAGE });
     }
+    // Open question (postQuestion): the "Answer" button opens a text modal;
+    // the submit resumes the session as a message (see handleModal).
+    if (interaction.customId === QUESTION_CUSTOM_ID) {
+      const prompt = readMessageContent(interaction.raw);
+      return discordJsonBody({
+        type: DISCORD_INTERACTION_RESPONSE_TYPE.MODAL,
+        data: {
+          custom_id: QUESTION_MODAL_CUSTOM_ID,
+          title: (prompt ?? "Your answer").slice(0, 45),
+          components: [{
+            type: 1, // action row
+            components: [{
+              type: 4, // text input
+              custom_id: QUESTION_TEXT_INPUT_ID,
+              label: "Answer",
+              style: 2, // paragraph
+              min_length: 1,
+              max_length: 4000,
+              placeholder: "Type your answer here...",
+              required: true,
+            }],
+          }],
+        },
+      });
+    }
     // Freeform HITL: open a modal so the user can type an answer.
     if (isDiscordFreeformComponent(interaction.customId)) {
       const prompt = readMessageContent(interaction.raw);
@@ -504,6 +538,31 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     args: ChannelRouteArgs,
     req: Request,
   ): Promise<Response> {
+    // Open-question answer (postQuestion): resume the parked session with the
+    // typed text as a message — mirror of the CHOICE_CUSTOM_ID pick above.
+    // Free text cannot ride the verb-restricted HITL approval resume.
+    if (interaction.customId === QUESTION_MODAL_CUSTOM_ID) {
+      const text = interaction.textInputs[QUESTION_TEXT_INPUT_ID]?.trim();
+      if (text) {
+        await args.send(`Answer: ${text}`, {
+          auth: toChannelAuth(interaction as unknown as DiscordCommandInteraction),
+          continuationToken: discordContinuationToken(
+            interaction.channelId,
+            opts.conversationId
+              ? opts.conversationId(interaction as unknown as DiscordCommandInteraction)
+              : interaction.channelId,
+          ),
+          state: {
+            channelId: interaction.channelId,
+            applicationId: interaction.applicationId,
+            guildId: interaction.guildId ?? null,
+            initialResponseSent: true,
+            ephemeral: false,
+          },
+        });
+      }
+      return discordJson({ content: "Answer received.", ephemeral: true });
+    }
     const inputResponses = deriveModalInputResponses(interaction);
     if (inputResponses.length > 0) {
       const conversationId = interaction.messageId ?? interaction.id;
@@ -600,14 +659,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       }
     };
 
+    // Attachment metadata rides along as a structured block (never content):
+    // the agent relays the files onward (askCodeAgent attachments) untouched.
+    const attachmentsBlock = formatAttachmentsBlock(event.attachments);
+
     if (trigger.kind === "thread-turn") {
       // Every prior human message already drove its own turn — no history block.
-      await sendToThread(event.channelId, [contextBlock, text || event.content]);
+      await sendToThread(event.channelId, [contextBlock, attachmentsBlock, text || event.content]);
       return ignored();
     }
     if (trigger.kind === "mention-in-thread") {
       const block = formatMessagesBlock("thread_messages", await history(event.channelId, 50));
-      await sendToThread(event.channelId, [contextBlock, block, text]);
+      await sendToThread(event.channelId, [contextBlock, block, attachmentsBlock, text]);
       return ignored();
     }
     // mention-in-channel: task thread anchored to the mention message, falling
@@ -641,9 +704,9 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         guildId: event.guildId,
         messageId: event.id,
       });
-      await sendToThread(threadId, [threadContextBlock, block, text], threadName);
+      await sendToThread(threadId, [threadContextBlock, block, attachmentsBlock, text], threadName);
     } else {
-      await args.send([contextBlock, block, text].filter((p) => p.length > 0).join("\n\n"), {
+      await args.send([contextBlock, block, attachmentsBlock, text].filter((p) => p.length > 0).join("\n\n"), {
         auth,
         continuationToken: discordContinuationToken(event.channelId, event.channelId),
         state: {

@@ -18,6 +18,10 @@ import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 interface Input {
   message: string;
   app?: string;
+  // Files the team attached in the channel (from an <attachments> block),
+  // relayed VERBATIM — claw never downloads, describes, or embeds them. The
+  // devx side materializes them into the coder's workspace.
+  attachments?: Array<{ name: string; url: string; contentType?: string }>;
 }
 
 // Discord sessions carry no trex user; CLAW_CODE_USER_ID pins the Code
@@ -51,6 +55,7 @@ export async function askCore(
     message: input.message,
     userId: ctx.userId,
     appId,
+    ...(input.attachments?.length ? { attachments: input.attachments } : {}),
   });
   // eventCursor is unused on the /stream path (each turn streams to completion);
   // the column is retained for schema compatibility.
@@ -86,6 +91,20 @@ export default defineTool({
         type: "string",
         description:
           "Optional devx app id (from listApps) scoping the task to that app's workspace and project rules. Only honored on the first call of a task.",
+      },
+      attachments: {
+        type: "array",
+        description:
+          "Files the team attached in the channel, copied VERBATIM from the message's <attachments> block (name/url/contentType). They are materialized into the coder's workspace automatically — do not download, describe, or paste them anywhere yourself.",
+        items: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Filename as attached, e.g. screen.png." },
+            url: { type: "string", description: "The attachment url from the <attachments> block, unchanged." },
+            contentType: { type: "string", description: "MIME type when present, e.g. image/png." },
+          },
+          required: ["name", "url"],
+        },
       },
     },
     required: ["message"],

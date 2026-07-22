@@ -5,6 +5,12 @@ import type { TagSegment } from "@/lib/devx-tag-parser";
 import { parseDevxTags, hasDevxTags } from "@/lib/devx-tag-parser";
 import * as api from "@/lib/api";
 
+// Cheap fingerprint of a transcript so polling only re-renders on real change.
+function transcriptSignature(msgs: Message[]): string {
+  const last = msgs[msgs.length - 1];
+  return `${msgs.length}:${last?.id ?? ""}:${last?.content?.length ?? 0}`;
+}
+
 export function useMessages(chatId: string | null, options?: { onAppCommand?: (command: string) => void; onBuildAction?: (action: BuildAction) => void; onModeChange?: (mode: string) => void }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
@@ -25,6 +31,12 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
   const controllerRef = useRef<AbortController | null>(null);
   const chatIdRef = useRef(chatId);
   chatIdRef.current = chatId;
+  const streamingRef = useRef(false);
+  const lastSigRef = useRef<string>("");
+
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
 
   useEffect(() => {
     // Abort any in-flight stream when switching chats
@@ -43,6 +55,7 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
     if (!chatId) {
       setMessages([]);
       setTodos([]);
+      lastSigRef.current = "";
       return;
     }
     setLoading(true);
@@ -53,6 +66,7 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
     ]).then(([msgs, chatTodos]) => {
       if (chatIdRef.current === chatId) {
         setMessages(msgs);
+        lastSigRef.current = transcriptSignature(msgs);
         setTodos(chatTodos);
         // Restore tool calls from persisted message data
         const tcMap = new Map<string, ToolCall[]>();
@@ -70,6 +84,49 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
     });
   }, [chatId]);
 
+  // Poll the persisted transcript while a chat is open so externally-driven turns
+  // (claw from Discord, or another tab) show up live without a manual reload.
+  // Paused while THIS tab is streaming (the SSE already updates the UI and onDone
+  // refetches) and while the tab is hidden. Change-detected to avoid re-renders.
+  useEffect(() => {
+    if (!chatId) return;
+    const POLL_MS = 2000;
+
+    const tick = async () => {
+      if (streamingRef.current || document.hidden) return;
+      try {
+        const [msgs, chatTodos] = await Promise.all([
+          api.listMessages(chatId),
+          api.getTodos(chatId).catch(() => null),
+        ]);
+        if (chatIdRef.current !== chatId) return; // chat switched mid-fetch
+        if (streamingRef.current) return; // a local turn started while we fetched — don't clobber it
+        const nextSig = transcriptSignature(msgs);
+        if (nextSig === lastSigRef.current) return; // nothing new
+        lastSigRef.current = nextSig;
+        setMessages(msgs);
+        if (chatTodos) setTodos(chatTodos);
+        // Restore tool calls from persisted rows (parity with the open path).
+        const tcMap = new Map<string, ToolCall[]>();
+        for (const m of msgs) {
+          if (m.tool_calls && m.tool_calls.length > 0) tcMap.set(m.id, m.tool_calls);
+        }
+        if (tcMap.size > 0) {
+          setCompletedToolCalls((prev) => {
+            const next = new Map(prev);
+            for (const [id, tc] of tcMap) next.set(id, tc);
+            return next;
+          });
+        }
+      } catch {
+        // Transient failure: keep the current transcript and retry next tick.
+      }
+    };
+
+    const interval = setInterval(tick, POLL_MS);
+    return () => clearInterval(interval);
+  }, [chatId]);
+
   const send = useCallback(
     async (prompt: string, context?: { visualEdit?: VisualEditContext; selectedComponents?: { devxId: string; devxName: string; filePath: string; line: number }[] }) => {
       if (!chatId || streaming) return;
@@ -83,6 +140,7 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
       };
       setMessages((prev) => [...prev, userMsg]);
       setStreaming(true);
+      streamingRef.current = true;
       setStreamingContent("");
       streamingContentRef.current = "";
       setToolCalls([]);
@@ -105,6 +163,7 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
           const snapshotContent = streamingContentRef.current;
           setStreamingContent("");
           setStreaming(false);
+          streamingRef.current = false;
           setToolCalls([]);
           setConsentRequest(null);
           setConsentError(null);
@@ -114,6 +173,7 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
           api.listMessages(sentChatId).then((data) => {
             if (chatIdRef.current === sentChatId) {
               setMessages(data);
+              lastSigRef.current = transcriptSignature(data);
               const lastAssistantMsg = [...data].reverse().find((m) => m.role === "assistant");
               if (lastAssistantMsg) {
                 // Associate tool calls with the last assistant message
@@ -143,6 +203,7 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
         onError(error) {
           console.error("Stream error:", error);
           setStreaming(false);
+          streamingRef.current = false;
           setStreamingContent("");
           setConsentRequest(null);
           setConsentError(null);
@@ -234,6 +295,7 @@ export function useMessages(chatId: string | null, options?: { onAppCommand?: (c
   const cancel = useCallback(() => {
     controllerRef.current?.abort();
     setStreaming(false);
+    streamingRef.current = false;
     setStreamingContent("");
     setConsentRequest(null);
   }, []);

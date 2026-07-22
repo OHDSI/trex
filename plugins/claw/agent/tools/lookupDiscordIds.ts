@@ -24,8 +24,10 @@ export async function lookupCore(
 export default defineTool({
   description:
     "Resolve GitHub logins to Discord user ids using the team mapping maintained in devx " +
-    "settings. Returns {mappings, unmapped}; mention mapped devs, list unmapped logins as " +
-    "plain text (and note they can be added in devx Settings → Support).",
+    "settings. Returns {mappings, unmapped}. To actually ping a mapped dev, write the mention " +
+    "as literal <@id> text using the returned numeric id (Discord's mention syntax) — plain " +
+    "@name text renders as dead text and pings nobody. List unmapped logins as plain text " +
+    "(and note they can be added in devx Settings → Support).",
   inputSchema: {
     type: "object",
     properties: {

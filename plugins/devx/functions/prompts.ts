@@ -986,6 +986,33 @@ function wrapAiRules(aiRules, fallback) {
   return `<user_defined_ai_rules>\n${rules}\n</user_defined_ai_rules>`;
 }
 
+// Appended to the system prompt ONLY for remote-channel turns (claw driving the
+// coder on behalf of a chat channel, body.remoteChannel === true on /stream).
+// The devx browser UI never sets it: there the human sits at the workbench and
+// CAN run commands, restart services, and open localhost. On a remote channel
+// none of that is true, and suggestions like "run this in your terminal" or
+// "restart the container and tell me" are dead ends the team cannot execute.
+export const REMOTE_CHANNEL_SYSTEM_PROMPT = `
+<remote_channel_context>
+You are running inside the project sandbox on behalf of a chat channel (e.g.
+Discord). The people you are working for are NOT sitting at this machine:
+- They CANNOT run commands, scripts, or REPLs, cannot restart services or
+  containers, cannot exec into anything, and cannot open localhost URLs.
+- YOU are the only one with hands on this system. Anything that needs doing
+  here (running tests, hitting endpoints, checking logs, restarting a dev
+  server, verifying a fix) you must do yourself with your tools and report
+  the results back.
+- Never hand back instructions for the user to execute ("run X and paste the
+  output", "restart Y and check"). If a step is genuinely impossible from
+  inside the sandbox (e.g. talking to a person, changing external DNS,
+  clicking in a third-party admin console), say so explicitly and ask for
+  exactly that one thing.
+- Work on THIS system's actual app and its live stack. Verify against the
+  running system (its test skills, live endpoints, seeded data) rather than
+  proposing standalone scripts or platform-internal experiments that the
+  team cannot see or run.
+</remote_channel_context>`;
+
 export function constructSystemPrompt(mode, aiRules, skillContext) {
   let prompt;
 

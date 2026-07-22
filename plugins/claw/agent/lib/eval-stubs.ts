@@ -101,6 +101,9 @@ export const evalStubs = {
   postChoice() {
     return { posted: 0, stub: true };
   },
+  postQuestion() {
+    return { posted: true, stub: true };
+  },
   postPlan() {
     return { posted: true, attached: null, truncated: false, stub: true };
   },
