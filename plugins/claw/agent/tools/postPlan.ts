@@ -5,7 +5,7 @@
 import { defineTool } from "eve/tools";
 import { postChannelMessage, type AttachmentUpload } from "../lib/discord-rest.ts";
 import { readOrchestration } from "../lib/state.ts";
-import { workspaceRoot, safeRelative } from "../lib/workspace.ts";
+import { readCoderFile } from "../lib/workspace.ts";
 import { markdownTablesToCodeBlocks } from "../lib/discord-format.ts";
 import { effectiveUserId } from "./askCodeAgent.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
@@ -58,15 +58,23 @@ export default defineTool({
     // had to be truncated, so nothing is lost).
     let files: AttachmentUpload[] | undefined;
     if (attachPath) {
-      const rel = safeRelative(attachPath);
       const userId = effectiveUserId(ctx?.userId, (k) => Deno.env.get(k));
-      if (rel && userId && ctx?.sql) {
+      if (userId && ctx?.sql) {
         const prior = await readOrchestration(ctx.sql, ctx.sessionId);
-        const root = workspaceRoot(userId, prior?.appId ?? null);
-        try {
-          const bytes = await Deno.readFile(`${root}/${rel}`);
-          files = [{ name: rel.split("/").pop() || "plan.md", bytes, contentType: "text/markdown" }];
-        } catch { /* file gone — embed alone still posts */ }
+        const found = await readCoderFile(userId, prior?.appId ?? null, prior?.codeSessionId ?? null, attachPath);
+        if (found) {
+          files = [{ name: found.path.split("/").pop() || "plan.md", bytes: found.bytes, contentType: "text/markdown" }];
+        } else {
+          // Don't silently drop the plan file: a worktree/path miss used to post
+          // the embed with NO attachment and no trace (the coder writes inside a
+          // per-chat worktree the old workspaceRoot read never looked in). Warn
+          // loudly; the embed itself still posts.
+          console.warn(
+            `postPlan: could not read attachPath ${JSON.stringify(attachPath)} for session ${ctx.sessionId} ` +
+              `(app=${prior?.appId ?? "none"}, code-session=${prior?.codeSessionId ?? "none"}); ` +
+              `posting the embed WITHOUT the attachment`,
+          );
+        }
       }
     }
 
