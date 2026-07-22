@@ -21,11 +21,12 @@ export default defineTool({
     "render as an embed above the menu. Each option has a `label` (shown in the dropdown) and a " +
     "short `value` (what claw is told was picked, so keep it meaningful e.g. 'Option B: server-side " +
     "filtering'). On selection, claw's session resumes with that value — continue to Gate 2 with it. " +
-    "For a plain approve/reject, use awaitApproval instead.",
+    "For a plain approve/reject, use awaitApproval instead. " +
+    "The server overrides channelId with the session's thread channel when available.",
   inputSchema: {
     type: "object",
     properties: {
-      channelId: { type: "string", description: "The current channel id." },
+      channelId: { type: "string", description: "The current channel id (the server overrides this with the session thread channel)." },
       title: { type: "string", description: "Heading for the options embed, e.g. 'Design options'." },
       intro: { type: "string", description: "Optional short markdown shown above the dropdown (e.g. a one-line summary of each option)." },
       multi: { type: "boolean", description: "Allow selecting MORE THAN ONE option (e.g. run several checks). Default false (single pick). The resume message joins the picks with commas." },
@@ -47,7 +48,8 @@ export default defineTool({
   },
   execute: async (input, ctx) => {
     if (isEvalMode(ctx)) return evalStubs.postChoice();
-    const { channelId, title, intro, options, multi } = input as Input;
+    const { title, intro, options, multi } = input as Input;
+    const channelId = (ctx?.metadata as any)?.channelId ?? (input as Input).channelId;
     const token = (globalThis as any).Deno?.env?.get?.("DISCORD_BOT_TOKEN");
     if (!token) throw new Error("postChoice: DISCORD_BOT_TOKEN not set");
     if (!options?.length) throw new Error("postChoice: at least one option is required");

@@ -17,11 +17,11 @@ export default defineTool({
     "workspace) to the Discord channel as inline image attachments, so the team sees the " +
     "result. Call this AFTER the coder reports it wrote screenshots. Pass the current " +
     "channelId and the workspace-relative paths the coder listed (e.g. trex/screenshots/home.png). " +
-    "Up to 10 images per call.",
+    "Up to 10 images per call. The server overrides channelId with the session's thread channel when available.",
   inputSchema: {
     type: "object",
     properties: {
-      channelId: { type: "string", description: "The current channel id (same one fetchChannelHistory uses)." },
+      channelId: { type: "string", description: "The current channel id (the server overrides this with the session thread channel)." },
       paths: {
         type: "array",
         items: { type: "string" },
@@ -33,7 +33,8 @@ export default defineTool({
   },
   execute: async (input, ctx) => {
     if (isEvalMode(ctx)) return evalStubs.postScreenshots();
-    const { channelId, paths, caption } = input as Input;
+    const { paths, caption } = input as Input;
+    const channelId = (ctx?.metadata as any)?.channelId ?? (input as Input).channelId;
     const token = (globalThis as any).Deno?.env?.get?.("DISCORD_BOT_TOKEN");
     if (!token) throw new Error("postScreenshots: DISCORD_BOT_TOKEN not set");
     const userId = effectiveUserId(ctx?.userId, (k) => Deno.env.get(k));
