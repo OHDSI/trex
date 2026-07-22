@@ -114,9 +114,42 @@ export async function ensureClaudeCodeServer() {
   throw new Error("Claude Code Node.js server failed to start");
 }
 
+// Materialize channel attachments (screenshots etc., relayed by claw as
+// name/url metadata) into `<workspace>/attachments/` so the coder can Read
+// them — images render multimodally through the Read tool, so nothing is ever
+// inlined into a prompt. Returns the workspace-relative paths written; failures
+// are per-file and non-fatal (the turn still runs, the miss is logged).
+const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
+async function materializeAttachments(
+  workspacePath,
+  attachments,
+) {
+  const saved = [];
+  const dir = `${workspacePath}/attachments`;
+  for (const a of attachments) {
+    // Basename only, conservative charset — the name is remote input.
+    const base = String(a.name).split(/[\\/]/).pop() || "file";
+    const safe = base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
+    try {
+      const res = await fetch(a.url);
+      if (!res.ok) throw new Error(`fetch ${res.status}`);
+      const bytes = new Uint8Array(await res.arrayBuffer());
+      if (bytes.byteLength > ATTACHMENT_MAX_BYTES) throw new Error(`too large (${bytes.byteLength} bytes)`);
+      await Deno.mkdir(dir, { recursive: true });
+      // Prefix with an index to keep same-named files from clobbering.
+      const rel = `attachments/${saved.length}-${safe}`;
+      await Deno.writeFile(`${workspacePath}/${rel}`, bytes);
+      saved.push({ path: rel, contentType: a.contentType });
+    } catch (err) {
+      console.warn(`[claude-code] attachment '${safe}' skipped:`, err?.message || err);
+    }
+  }
+  return saved;
+}
+
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-  skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel,
+  skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
 }) {
   const mode = chatMode || "agent";
   const maxSteps = settings.max_steps || 100;
@@ -181,7 +214,21 @@ export async function streamClaudeCodeChat({
     .filter((m) => m.content && (typeof m.content === "string" ? m.content.trim() !== "" : m.content.length > 0))
     .map((m) => ({ role: m.role, content: typeof m.content === "string" ? m.content : JSON.stringify(m.content) }));
   const lastUserMsg = messages.length > 0 ? messages[messages.length - 1] : null;
-  const prompt = lastUserMsg?.role === "user" ? lastUserMsg.content : "";
+  let prompt = lastUserMsg?.role === "user" ? lastUserMsg.content : "";
+
+  // Channel attachments (claw relay): download into the resolved workspace —
+  // AFTER worktree resolution so they land where the coder actually runs —
+  // and point the coder at the paths. Only paths enter the prompt, never
+  // content; the coder Reads images multimodally on its own.
+  if (attachments?.length) {
+    const saved = await materializeAttachments(workspacePath, attachments);
+    if (saved.length > 0) {
+      const listing = saved
+        .map((s) => `- ${s.path}${s.contentType ? ` (${s.contentType})` : ""}`)
+        .join("\n");
+      prompt += `\n\n<user_attachments>\nThe user attached files with this request; they are saved in the workspace:\n${listing}\nView them with the Read tool (images render visually) when they are relevant to the task.\n</user_attachments>`;
+    }
+  }
 
   // Refreshes the token in-place when expired (it lives ~1h) so long-lived
   // sessions don't start sending a stale token and 401-ing.

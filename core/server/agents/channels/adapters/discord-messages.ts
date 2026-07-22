@@ -5,6 +5,13 @@
 import { isNonEmptyString, isObject } from "../vendor/discord/shared.ts";
 import { callDiscordApi, type DiscordApiOptions } from "../vendor/discord/api.ts";
 
+export interface DiscordMessageAttachment {
+  name: string;
+  url: string;
+  contentType?: string;
+  size?: number;
+}
+
 export interface DiscordMessageEvent {
   id: string;
   channelId: string;
@@ -15,6 +22,10 @@ export interface DiscordMessageEvent {
   // Role ids mentioned by the message (Discord's `mention_roles`). A user typing
   // "@trex" often hits the bot's auto-created managed role, not the bot user.
   mentionRoleIds: readonly string[];
+  // Files attached to the message (screenshots etc.). CDN urls are signed and
+  // expire, so consumers must download promptly, not store the url. Absent for
+  // events built by test helpers / other callers.
+  attachments?: readonly DiscordMessageAttachment[];
   // Discord message type (0 = DEFAULT, 19 = REPLY, 6 = pin-add notice, …).
   // Absent for events built by test helpers / other callers.
   type?: number;
@@ -40,8 +51,33 @@ export function parseDiscordMessageEvent(value: unknown): DiscordMessageEvent | 
       .filter((id): id is string => isNonEmptyString(id)),
     mentionRoleIds: (Array.isArray(value.mention_roles) ? value.mention_roles : [])
       .filter((id): id is string => isNonEmptyString(id)),
+    attachments: (Array.isArray(value.attachments) ? value.attachments : [])
+      .filter((a): a is Record<string, unknown> => isObject(a))
+      .filter((a) => isNonEmptyString(a.url) && isNonEmptyString(a.filename))
+      .map((a) => ({
+        name: a.filename as string,
+        url: a.url as string,
+        ...(isNonEmptyString(a.content_type) ? { contentType: a.content_type } : {}),
+        ...(typeof a.size === "number" ? { size: a.size } : {}),
+      })),
     ...(typeof value.type === "number" ? { type: value.type } : {}),
   };
+}
+
+/**
+ * Renders message attachments as a structured block for the agent turn. The
+ * block carries METADATA ONLY (name/url/type) — never file content — so the
+ * orchestrator can relay the files (e.g. via askCodeAgent's `attachments`)
+ * without describing or embedding them. Empty string when there are none.
+ */
+export function formatAttachmentsBlock(attachments: readonly DiscordMessageAttachment[] | undefined): string {
+  if (!attachments || attachments.length === 0) return "";
+  const entries = attachments.map((a) => ({
+    name: a.name,
+    url: a.url,
+    ...(a.contentType ? { contentType: a.contentType } : {}),
+  }));
+  return `<attachments>\n${JSON.stringify(entries)}\n</attachments>`;
 }
 
 const mentionPattern = (applicationId: string) => new RegExp(`<@!?${applicationId}>`, "g");

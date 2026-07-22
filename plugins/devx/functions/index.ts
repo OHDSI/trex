@@ -391,6 +391,15 @@ Deno.serve(async (req: Request) => {
       // remote-channel sandbox context to the system prompt (all providers);
       // the devx browser UI never sends it.
       const streamRemoteChannel = body.remoteChannel === true;
+      // Channel attachments (metadata only: name/url/contentType), relayed by
+      // claw. Downloaded into the coder's workspace before the turn so the
+      // coder can Read them (images render multimodally); never inlined into
+      // any prompt. Capped defensively — the urls are remote input.
+      const streamAttachments = Array.isArray(body.attachments)
+        ? body.attachments
+          .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+          .slice(0, 10)
+        : [];
 
       // Verify chat belongs to user
       const chatCheck = await sql(
@@ -801,6 +810,7 @@ Deno.serve(async (req: Request) => {
                 hasComponentSelection,
                 useWorktree: streamUseWorktree,
                 remoteChannel: streamRemoteChannel,
+                attachments: streamAttachments,
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;

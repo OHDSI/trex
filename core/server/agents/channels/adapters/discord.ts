@@ -71,6 +71,7 @@ import {
   decideMessageTrigger,
   type DiscordChannelSnapshot,
   fetchMessagesBefore,
+  formatAttachmentsBlock,
   formatDiscordMessageContextBlock,
   formatMessagesBlock,
   getChannelSnapshot,
@@ -658,14 +659,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       }
     };
 
+    // Attachment metadata rides along as a structured block (never content):
+    // the agent relays the files onward (askCodeAgent attachments) untouched.
+    const attachmentsBlock = formatAttachmentsBlock(event.attachments);
+
     if (trigger.kind === "thread-turn") {
       // Every prior human message already drove its own turn — no history block.
-      await sendToThread(event.channelId, [contextBlock, text || event.content]);
+      await sendToThread(event.channelId, [contextBlock, attachmentsBlock, text || event.content]);
       return ignored();
     }
     if (trigger.kind === "mention-in-thread") {
       const block = formatMessagesBlock("thread_messages", await history(event.channelId, 50));
-      await sendToThread(event.channelId, [contextBlock, block, text]);
+      await sendToThread(event.channelId, [contextBlock, block, attachmentsBlock, text]);
       return ignored();
     }
     // mention-in-channel: task thread anchored to the mention message, falling
@@ -699,9 +704,9 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         guildId: event.guildId,
         messageId: event.id,
       });
-      await sendToThread(threadId, [threadContextBlock, block, text], threadName);
+      await sendToThread(threadId, [threadContextBlock, block, attachmentsBlock, text], threadName);
     } else {
-      await args.send([contextBlock, block, text].filter((p) => p.length > 0).join("\n\n"), {
+      await args.send([contextBlock, block, attachmentsBlock, text].filter((p) => p.length > 0).join("\n\n"), {
         auth,
         continuationToken: discordContinuationToken(event.channelId, event.channelId),
         state: {
