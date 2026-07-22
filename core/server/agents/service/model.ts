@@ -144,6 +144,22 @@ export function isBedrockModel(model: any): boolean {
   return model?.provider === "amazon-bedrock";
 }
 
+// Bedrock prompt caching is model-specific, not provider-wide: Anthropic Claude
+// on Bedrock supports it, but other Bedrock models (e.g. Z.AI `zai.glm-*`)
+// reject ANY request that carries a `cachePoint` with
+// `AccessDeniedException: "You invoked an unsupported model or your request did
+// not allow prompt caching."` — which, on a streaming turn, kills it silently
+// (typing indicator, no reply). So `isBedrockModel` alone is too broad a gate
+// for the cachePoint injection below: additionally require an Anthropic model
+// id. The tools -> system -> messages ordering this caching relies on (see
+// withSystemCachePoint) is Anthropic's Converse layout, which is exactly what
+// it was designed and verified against; non-Anthropic Bedrock models are
+// invoked plain (no cache point).
+// deno-lint-ignore no-explicit-any
+export function bedrockSupportsPromptCaching(model: any): boolean {
+  return isBedrockModel(model) && /(^|\.)anthropic\./i.test(model?.modelId ?? "");
+}
+
 // The direct Anthropic provider. Its language-model objects report
 // provider === "anthropic.messages" — NOT "anthropic" — verified against the
 // installed @ai-sdk/anthropic@4.0.15: createAnthropic's providerName defaults
@@ -170,7 +186,8 @@ export type SystemPrompt = string | {
 
 // Wraps a plain system-prompt string in the AI SDK's SystemModelMessage
 // shape with a provider cache marker covering everything up to and including
-// the system block — a Bedrock cachePoint when the resolved model is bedrock,
+// the system block — a Bedrock cachePoint when the resolved model is a
+// caching-capable (Anthropic) bedrock model,
 // an Anthropic ephemeral cacheControl when it's the direct anthropic
 // provider; returns the original string unchanged for every other provider
 // (a true no-op: openai/google never see a providerOptions key).
@@ -197,7 +214,7 @@ export type SystemPrompt = string | {
 // `parsed.messages`), so the marker survives that rewrite unmodified.
 // deno-lint-ignore no-explicit-any
 export function withSystemCachePoint(model: any, system: string): SystemPrompt {
-  if (isBedrockModel(model)) {
+  if (bedrockSupportsPromptCaching(model)) {
     return {
       role: "system",
       content: system,
