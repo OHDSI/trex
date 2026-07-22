@@ -233,7 +233,17 @@ function buildArgs(
       });
     };
 
-    deps.startTurn(sessionId, message, { channelId: sessionChannelId }, registerForTurn);
+    // Surface the adapter's REAL delivery channel (e.g. the Discord thread
+    // snowflake in `state.channelId`) as the turn's metadata channelId — tools
+    // read `ctx.metadata.channelId` as the authoritative platform post target
+    // (postPlan/postUpdate/postChoice/postScreenshots) and it lands in the
+    // system-prompt <context> block. NEVER expose the channel *registration* id
+    // (e.g. "discord"), which is a route segment, not a Discord channel, and
+    // 404s when POSTed to. Channels that carry no delivery state (e.g. the toy
+    // webhook) fall back to the registration id, preserving prior behaviour.
+    const deliveryChannelId =
+      (opts.state as { channelId?: string } | undefined)?.channelId ?? sessionChannelId;
+    deps.startTurn(sessionId, message, { channelId: deliveryChannelId }, registerForTurn);
     deps.onSessionStarted?.(info);
     return { id: sessionId };
   };
