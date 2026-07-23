@@ -16,15 +16,21 @@ import {
 } from "./tools/workspace.ts";
 import { gitOps } from "./git.ts";
 import { ensureGitConfig } from "./git_identity.ts";
+import { chatWorktreeBranch, worktreeReuseError } from "./worktree_guard.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 
 // Pin a chat to a stable, isolated git worktree so a feature's work persists
 // across turns — each /stream turn otherwise resets the coder's cwd to the app
 // root — and parallel chats on the same app don't collide on one working tree.
-// Best-effort: returns null (→ caller keeps the app workspace) when the app is
-// not a git repo or the worktree can't be created. The branch/worktree are keyed
-// on the chat id, created once and reused thereafter.
+// Returns null ONLY when the app is not a git repo (nothing to branch from —
+// the shared workspace is then the only tree). Any other failure THROWS:
+// silently continuing on the shared app workspace put an isolated task's edits
+// into whatever branch/state the shared tree happened to hold (cross-task
+// contamination), and a reused worktree is trusted only after verifying its
+// checked-out branch is this chat's own branch. The branch/worktree are keyed
+// deterministically on the chat id, created once and reused thereafter.
+
 async function ensureChatWorktree(userId: string, appId: string, chatId: string): Promise<string | null> {
   const repoRoot = getAppWorkspacePath(userId, appId);
   try {
@@ -33,13 +39,27 @@ async function ensureChatWorktree(userId: string, appId: string, chatId: string)
     return null; // not a git repo — nothing to branch from
   }
   const worktree = getRunWorktreePath(userId, appId, chatId);
+  const branch = chatWorktreeBranch(chatId);
+  let exists = false;
   try {
     await Deno.stat(worktree);
-    return worktree; // already created for this chat
+    exists = true;
   } catch { /* create below */ }
+  if (exists) {
+    // Never trust bare directory existence: verify the worktree is registered
+    // and has THIS chat's branch checked out before reusing it.
+    const entries = await gitOps.worktreeList(repoRoot);
+    const reason = worktreeReuseError(entries, worktree, branch);
+    if (reason) {
+      throw new Error(
+        `chat worktree ${worktree} is unusable: ${reason}. ` +
+          `Refusing to run the coder outside its isolated branch.`,
+      );
+    }
+    return worktree;
+  }
   try {
     await ensureWorktreeParent(userId, appId);
-    const branch = `claw/${chatId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40)}`;
     // Base the feature worktree on the latest origin/develop so work always
     // starts from an up-to-date tree, not whatever the app workspace was left at.
     let startPoint: string | undefined;
@@ -52,8 +72,12 @@ async function ensureChatWorktree(userId: string, appId: string, chatId: string)
     await gitOps.worktreeAdd(repoRoot, worktree, branch, startPoint);
     return worktree;
   } catch (err) {
-    console.warn("[claude_code_agent] worktree create failed, using app workspace:", err?.message || err);
-    return null;
+    // Do NOT fall back to the shared app workspace — that is where other
+    // branches'/tasks' state lives. Fail the turn loudly instead.
+    throw new Error(
+      `could not create the isolated worktree for this chat (${err?.message || err}). ` +
+        `Refusing to run the coder on the shared app workspace.`,
+    );
   }
 }
 

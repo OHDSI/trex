@@ -158,12 +158,20 @@ export interface DiscordChannelOptions {
    * public thread, keys the session to the THREAD id (parallel threads =
    * parallel sessions), and delivers the whole conversation there; the
    * deferred original response becomes a pointer to the thread. A command
-   * already inside a thread continues that thread's session. Falls back to
-   * the in-channel behavior when thread creation fails (missing permission,
-   * DMs). Needs the bot permissions "Create Public Threads" + "Send Messages
-   * in Threads".
+   * already inside a thread continues that thread's session. When thread
+   * creation fails (missing permission), NO session is started and the
+   * error is reported — a channel-keyed fallback session would merge
+   * distinct tasks. Needs the bot permissions "Create Public Threads" +
+   * "Send Messages in Threads".
    */
   threads?: boolean;
+  /**
+   * Whether the agent responds in direct messages. Default false: DMs have
+   * no threads, so every DM task would share one channel-keyed session (the
+   * cross-task contamination class), and DM work bypasses team visibility.
+   * DM slash commands get a short refusal; plain DM messages are ignored.
+   */
+  directMessages?: boolean;
   /**
    * MESSAGE_CREATE mode (gateway-only): adds a POST "<route>/messages" route
    * fed by the host gateway client's signed loopback. @mentions behave like
@@ -201,9 +209,21 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   });
   const apiOpts = () => ({ apiBaseUrl: opts.api?.apiBaseUrl, credentials: credentials(), fetch: opts.api?.fetch });
 
+  // Explicit <@id> user mentions in outgoing content must actually PING: the
+  // vendored senders default allowed_mentions to {parse: []} (suppressing
+  // everything), so an agent that correctly writes <@123> still pinged nobody.
+  // Allow exactly the users literally mentioned — parse stays [], keeping
+  // @everyone/@here/roles suppressed. An explicit body.allowed_mentions wins.
+  function withUserMentions(body: DiscordMessageBody): DiscordMessageBody {
+    if (body.allowed_mentions !== undefined || typeof body.content !== "string") return body;
+    const users = [...new Set([...body.content.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]))].slice(0, 25);
+    return users.length ? { ...body, allowed_mentions: { parse: [], users } } : body;
+  }
+
   // Deliver one Discord message body for a session, editing the deferred
   // original response first (then following up), else posting to the channel.
-  async function deliver(state: DiscordDeliveryState, body: DiscordMessageBody) {
+  async function deliver(state: DiscordDeliveryState, rawBody: DiscordMessageBody) {
+    const body = withUserMentions(rawBody);
     // A user-facing message (or approval buttons) ends the "working" state, and
     // the message itself clears Discord's typing indicator — stop the heartbeat.
     stopTyping(state.channelId);
@@ -329,6 +349,14 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   const events: ChannelEventHandlers = { ...builtinEvents, ...opts.events };
 
   async function handleCommand(interaction: DiscordCommandInteraction, args: ChannelRouteArgs): Promise<Response> {
+    // DMs are off by default (see DiscordChannelOptions.directMessages):
+    // guard FIRST so no hook, session, or turn ever runs for a DM command.
+    if (!interaction.guildId && opts.directMessages !== true) {
+      return discordJson({
+        content: "I only work in server channels — ask me in a channel or task thread there.",
+        ephemeral: true,
+      });
+    }
     let result: DiscordCommandResult | null;
     try {
       result = opts.onCommand ? await opts.onCommand(interaction) : {};
@@ -366,7 +394,12 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       try {
         threadId = (await createDiscordThread({ ...apiOpts(), channelId: interaction.channelId, name: threadName })).id;
       } catch (e) {
-        console.warn("discord: task-thread creation failed — falling back to in-channel session:", e);
+        console.warn("discord: task-thread creation failed — refusing to start a channel-keyed session:", e);
+      }
+      if (threadId === null) {
+        // No thread → no session (see THREAD_CREATE_FAILED_MSG rationale).
+        args.waitUntil(editOriginalWithRetry(interaction.token, THREAD_CREATE_FAILED_MSG));
+        return discordDeferredJson(false);
       }
       if (threadId !== null) {
         // Delivery goes to the thread via bot-token channel messages — the
@@ -443,8 +476,8 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   // Retried because in webhook mode the deferred response is created from this
   // handler's OWN return value, which Discord may not have processed yet when
   // the background task runs.
-  async function pointToThread(interactionToken: string, threadId: string): Promise<void> {
-    const body = { content: `Started <#${threadId}> for this task.` };
+  async function editOriginalWithRetry(interactionToken: string, content: string): Promise<void> {
+    const body = { content };
     for (const delayMs of [0, 500, 1500, 3000]) {
       if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
       try {
@@ -452,8 +485,24 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         return;
       } catch { /* deferred response not materialized yet — retry */ }
     }
-    console.warn("discord: could not edit the original response into a thread pointer (gave up after retries)");
+    console.warn("discord: could not edit the original response (gave up after retries)");
   }
+
+  function pointToThread(interactionToken: string, threadId: string): Promise<void> {
+    return editOriginalWithRetry(interactionToken, `Started <#${threadId}> for this task.`);
+  }
+
+  // Thread-per-task channels (opts.threads) key each task's session to its own
+  // thread id. When the thread cannot be created there is NO safe session key:
+  // the old fallback keyed the session to the CHANNEL, which merged every
+  // fallback task in that channel into one session — shared history, shared
+  // coder chat, shared git worktree (cross-task contamination). Fail visibly
+  // instead of degrading silently.
+  const THREAD_CREATE_FAILED_MSG =
+    "I couldn't create a task thread in this channel (missing thread permission?). " +
+    "I didn't start the task — each task needs its own thread so it can't mix with " +
+    "other conversations. Grant me thread permissions here, or ask again in a channel " +
+    "where I can create threads.";
 
   async function handleComponent(
     interaction: import("../vendor/discord/inbound.ts").DiscordComponentInteraction,
@@ -588,6 +637,9 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   async function handleMessage(event: NonNullable<ReturnType<typeof parseDiscordMessageEvent>>, args: ChannelRouteArgs): Promise<Response> {
     const ignored = () => discordJsonBody({ ignored: true });
     if (event.author.bot) return ignored();
+    // DMs are off by default (see DiscordChannelOptions.directMessages):
+    // plain DM messages are dropped silently — no session, no reply.
+    if (!event.guildId && opts.directMessages !== true) return ignored();
 
     const applicationId = await resolveDiscordApplicationId(opts.credentials?.applicationId);
     let snapshot: DiscordChannelSnapshot;
@@ -688,7 +740,7 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       try {
         threadId = (await createDiscordThread({ ...apiOpts(), channelId: event.channelId, name: threadName })).id;
       } catch (e) {
-        console.warn("discord: mention-thread creation failed — falling back to in-channel session:", e);
+        console.warn("discord: mention-thread creation failed — refusing to start a channel-keyed session:", e);
       }
     }
     const block = formatMessagesBlock("channel_messages", await history(event.channelId, 20));
@@ -706,17 +758,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       });
       await sendToThread(threadId, [threadContextBlock, block, attachmentsBlock, text], threadName);
     } else {
-      await args.send([contextBlock, block, attachmentsBlock, text].filter((p) => p.length > 0).join("\n\n"), {
-        auth,
-        continuationToken: discordContinuationToken(event.channelId, event.channelId),
-        state: {
+      // No thread → no session (see THREAD_CREATE_FAILED_MSG rationale): the
+      // old channel-keyed fallback merged every failed-thread task in this
+      // channel into ONE session.
+      try {
+        await sendDiscordChannelMessage({
+          ...apiOpts(),
           channelId: event.channelId,
-          applicationId,
-          guildId: event.guildId ?? null,
-          initialResponseSent: true,
-          ephemeral: false,
-        } satisfies DiscordDeliveryState,
-      });
+          body: { content: THREAD_CREATE_FAILED_MSG },
+        });
+      } catch (e) {
+        console.warn("discord: could not deliver the thread-creation error to the channel:", e);
+      }
     }
     return ignored();
   }

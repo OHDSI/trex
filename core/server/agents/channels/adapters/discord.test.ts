@@ -228,24 +228,71 @@ Deno.test("threads: command already inside a thread does NOT create another one"
   assertEquals(sends[0].opts.continuationToken.startsWith("thread-7:"), true);
 });
 
-Deno.test("threads: creation failure falls back to the in-channel session", async () => {
+Deno.test("DMs: a command without a guild is refused — no session, no turn", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
-  const { fetchMock } = threadFetchMock({ failCreate: true });
+  const { fetchMock } = threadFetchMock();
   const channel = discordChannel({
-    credentials: { publicKey: publicKeyHex, botToken: "bot-1" },
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1", applicationId: "app-1" },
     api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
     threads: true,
   });
   const { args, sends } = mockArgs();
+  // A DM interaction has no guild_id.
+  const dm = { ...COMMAND_PAYLOAD, guild_id: undefined, channel: { id: "dm-1", type: 1 }, channel_id: "dm-1" };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(dm)), args);
+  const body = await res.json();
+  assertEquals(body.type, 4); // immediate message response, not a deferred turn
+  assert(String(body.data?.content ?? "").includes("only work in server channels"));
+  assertEquals(sends.length, 0, "a DM must never create a session");
+});
+
+Deno.test("DMs: a plain DM message is dropped silently — no session, no reply", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch();
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-31",
+        channel_id: "dm-1",
+        content: "hey trex, do a thing",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0, "a DM must never create a session");
+  // No reply is posted back to the DM channel either.
+  const posted = rest.calls.find((c) => c.url.includes("/channels/dm-1/messages") && (c.init?.method ?? "GET") === "POST");
+  assertEquals(posted, undefined);
+});
+
+Deno.test("threads: creation failure starts NO session and reports the error (no channel-keyed fallback)", async () => {
+  // Regression: the old fallback keyed the session to the channel, merging every
+  // failed-thread task in a channel into ONE session (shared history/chat/worktree).
+  const { keypair, publicKeyHex } = await genKeypair();
+  const { calls, fetchMock } = threadFetchMock({ failCreate: true });
+  const waits: Promise<unknown>[] = [];
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1", applicationId: "app-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+    threads: true,
+  });
+  const { args, sends } = mockArgs();
+  args.waitUntil = (p) => { waits.push(p); };
   const payload = { ...COMMAND_PAYLOAD, channel: { id: "chan-1", type: 0 } };
   const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
-  assertEquals((await res.json()).type, 5);
-  assertEquals(sends.length, 1);
-  // Today's behavior: token keyed to the channel + interaction, state keeps
-  // the interaction token for deferred-original delivery.
-  assertEquals(sends[0].opts.continuationToken, "chan-1:interaction-1");
-  const state = sends[0].opts.state as { interactionToken?: string };
-  assertEquals(state.interactionToken, "interaction-token-1");
+  assertEquals((await res.json()).type, 5); // deferred ACK still returned
+  assertEquals(sends.length, 0, "no session may be created without a thread");
+  await Promise.all(waits);
+  // The deferred original is edited into the error message.
+  const edit = calls.find((c) => c.url.includes("/messages/@original"));
+  assert(edit, "expected the original response to be edited with the error");
+  assert(String((edit!.body as { content?: string })?.content).includes("couldn't create a task thread"));
 });
 
 Deno.test("threads: allow-listed parent channel admits interactions from its threads", async () => {
@@ -303,6 +350,34 @@ Deno.test("message.completed delivers split content via edit + followup", async 
   // Content was split, not concatenated.
   assertEquals((calls[0].body as { content: string }).content.startsWith("A"), true);
   assertEquals((calls[1].body as { content: string }).content.startsWith("B"), true);
+});
+
+Deno.test("message.completed: <@id> mentions in the reply are allowed to ping (roles/@everyone stay suppressed)", async () => {
+  // Regression: the vendored sender defaulted allowed_mentions to {parse: []},
+  // so an agent reply containing a correct <@id> mention pinged nobody.
+  const calls: Array<{ body: any }> = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    calls.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  const channelCtx = { state: { channelId: "chan-1", applicationId: "app-1", initialResponseSent: true } };
+
+  await channel.events!["message.completed"](
+    { turnId: "t1", message: "Please review, <@4242>!", finishReason: "stop" },
+    channelCtx,
+  );
+  assertEquals(calls[0].body.allowed_mentions, { parse: [], users: ["4242"] });
+
+  // No mention in the reply → the suppress-everything default stays.
+  await channel.events!["message.completed"](
+    { turnId: "t2", message: "done, no ping needed", finishReason: "stop" },
+    channelCtx,
+  );
+  assertEquals(calls[1].body.allowed_mentions, { parse: [] });
 });
 
 Deno.test("message.completed channel-message fallback sends bot auth from env credentials", async () => {
@@ -847,7 +922,9 @@ Deno.test("messages route: anchored thread creation failure falls back to a plai
   assertEquals(sends[0].opts.continuationToken, "thread-plain:thread-plain");
 });
 
-Deno.test("messages route: both thread creations failing falls back to an in-channel session", async () => {
+Deno.test("messages route: both thread creations failing starts NO session and posts the error", async () => {
+  // Regression: the old fallback keyed the session to `chan-1:chan-1`, merging
+  // every failed-thread mention task in the channel into ONE session.
   const { keypair, publicKeyHex } = await genKeypair();
   const rest = discordRestFetch({
     "/messages/msg-22/threads": () => new Response("missing permission", { status: 403 }),
@@ -870,11 +947,13 @@ Deno.test("messages route: both thread creations failing falls back to an in-cha
     args,
   );
   assertEquals(res.status, 200);
-  assertEquals(sends.length, 1);
-  assertEquals(sends[0].opts.continuationToken, "chan-1:chan-1");
-  const state = sends[0].opts.state as { channelId?: string };
-  assertEquals(state.channelId, "chan-1");
-  assert(sends[0].message.includes("ship it anyway"));
+  assertEquals(sends.length, 0, "no session may be created without a thread");
+  // The error lands in the channel as a bot message.
+  const post = rest.calls.find((c) =>
+    c.url.endsWith("/channels/chan-1/messages") && (c.init?.method ?? "GET") === "POST" &&
+    String(c.init?.body ?? "").includes("couldn't create a task thread")
+  );
+  assert(post, "expected the thread-creation error to be posted to the channel");
 });
 
 Deno.test("messages route: allow-list miss is silently ignored", async () => {

@@ -14,6 +14,7 @@ import { template as d2eAdminPlugin } from "./templates/d2e_admin_plugin.ts";
 import { template as atlasPlugin } from "./templates/atlas_plugin.ts";
 import { template as blank } from "./templates/blank.ts";
 import { template as strategusStudy } from "./templates/strategus_study.ts";
+import { template as d2eWizard } from "./templates/d2e_wizard.ts";
 
 export interface AppTemplate {
   id: string;
@@ -36,6 +37,7 @@ export const TEMPLATES: AppTemplate[] = [
   atlasPlugin,
   blank,
   strategusStudy,
+  d2eWizard,
 ];
 
 /**
