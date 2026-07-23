@@ -228,24 +228,28 @@ Deno.test("threads: command already inside a thread does NOT create another one"
   assertEquals(sends[0].opts.continuationToken.startsWith("thread-7:"), true);
 });
 
-Deno.test("threads: creation failure falls back to the in-channel session", async () => {
+Deno.test("threads: creation failure starts NO session and reports the error (no channel-keyed fallback)", async () => {
+  // Regression: the old fallback keyed the session to the channel, merging every
+  // failed-thread task in a channel into ONE session (shared history/chat/worktree).
   const { keypair, publicKeyHex } = await genKeypair();
-  const { fetchMock } = threadFetchMock({ failCreate: true });
+  const { calls, fetchMock } = threadFetchMock({ failCreate: true });
+  const waits: Promise<unknown>[] = [];
   const channel = discordChannel({
-    credentials: { publicKey: publicKeyHex, botToken: "bot-1" },
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1", applicationId: "app-1" },
     api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
     threads: true,
   });
   const { args, sends } = mockArgs();
+  args.waitUntil = (p) => { waits.push(p); };
   const payload = { ...COMMAND_PAYLOAD, channel: { id: "chan-1", type: 0 } };
   const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
-  assertEquals((await res.json()).type, 5);
-  assertEquals(sends.length, 1);
-  // Today's behavior: token keyed to the channel + interaction, state keeps
-  // the interaction token for deferred-original delivery.
-  assertEquals(sends[0].opts.continuationToken, "chan-1:interaction-1");
-  const state = sends[0].opts.state as { interactionToken?: string };
-  assertEquals(state.interactionToken, "interaction-token-1");
+  assertEquals((await res.json()).type, 5); // deferred ACK still returned
+  assertEquals(sends.length, 0, "no session may be created without a thread");
+  await Promise.all(waits);
+  // The deferred original is edited into the error message.
+  const edit = calls.find((c) => c.url.includes("/messages/@original"));
+  assert(edit, "expected the original response to be edited with the error");
+  assert(String((edit!.body as { content?: string })?.content).includes("couldn't create a task thread"));
 });
 
 Deno.test("threads: allow-listed parent channel admits interactions from its threads", async () => {
@@ -847,7 +851,9 @@ Deno.test("messages route: anchored thread creation failure falls back to a plai
   assertEquals(sends[0].opts.continuationToken, "thread-plain:thread-plain");
 });
 
-Deno.test("messages route: both thread creations failing falls back to an in-channel session", async () => {
+Deno.test("messages route: both thread creations failing starts NO session and posts the error", async () => {
+  // Regression: the old fallback keyed the session to `chan-1:chan-1`, merging
+  // every failed-thread mention task in the channel into ONE session.
   const { keypair, publicKeyHex } = await genKeypair();
   const rest = discordRestFetch({
     "/messages/msg-22/threads": () => new Response("missing permission", { status: 403 }),
@@ -870,11 +876,13 @@ Deno.test("messages route: both thread creations failing falls back to an in-cha
     args,
   );
   assertEquals(res.status, 200);
-  assertEquals(sends.length, 1);
-  assertEquals(sends[0].opts.continuationToken, "chan-1:chan-1");
-  const state = sends[0].opts.state as { channelId?: string };
-  assertEquals(state.channelId, "chan-1");
-  assert(sends[0].message.includes("ship it anyway"));
+  assertEquals(sends.length, 0, "no session may be created without a thread");
+  // The error lands in the channel as a bot message.
+  const post = rest.calls.find((c) =>
+    c.url.endsWith("/channels/chan-1/messages") && (c.init?.method ?? "GET") === "POST" &&
+    String(c.init?.body ?? "").includes("couldn't create a task thread")
+  );
+  assert(post, "expected the thread-creation error to be posted to the channel");
 });
 
 Deno.test("messages route: allow-list miss is silently ignored", async () => {

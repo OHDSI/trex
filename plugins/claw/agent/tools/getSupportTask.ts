@@ -18,7 +18,10 @@ export default defineTool({
   execute: async (input, ctx) => {
     if (isEvalMode(ctx)) return evalStubs.getSupportTask();
     if (!ctx?.sql) throw new Error("getSupportTask: ctx.sql unavailable");
-    const task = await readSupportTask(ctx.sql, input.channelId as string);
+    // Deterministic channel id: the server-side delivery channel wins over the
+    // model-typed input (same override as the post* tools).
+    const channelId = ((ctx?.metadata as { channelId?: string } | undefined)?.channelId ?? input.channelId) as string;
+    const task = await readSupportTask(ctx.sql, channelId);
     return task ? { found: true, ...task } : { found: false };
   },
 });
