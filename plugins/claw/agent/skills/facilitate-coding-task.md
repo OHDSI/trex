@@ -62,7 +62,14 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    - Ambiguous or not named, and the work plausibly belongs to an existing
      app → include the app choice in your clarifying question (step 3), listing
      the real app names as options.
-   - Genuinely app-less work → proceed without one.
+   - **The team names a repository/codebase that is NOT among the apps** →
+     do not start and do not improvise a workaround (no cloning it inside
+     another app, no app-less hacking on an unregistered repo). Tell the team
+     plainly: to make changes in that repository it first needs to be added as
+     an app in devx; once it is added, re-ask here (or just say so in this
+     thread) and you will pick it up. Then end your turn.
+   - Genuinely app-less work (a question, analysis, or artifact that belongs
+     to no repository) → proceed without one.
    The choice is fixed for the whole task; you cannot change it later.
    The coder runs its real planning skills (`brainstorming`, `writing-plans`,
    `subagent-driven-development`). Drive it ONE step at a time and put a gate
