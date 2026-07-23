@@ -103,10 +103,24 @@ export async function materializeSigningKey(userId: string, sql, identity?: GitI
 
   await Deno.mkdir(dir, { recursive: true });
   const keyPath = signingKeyPath(userId);
-  await Deno.writeTextFile(keyPath, privateKey);
-  // ssh-keygen refuses group/world-readable private keys. Best-effort: the
-  // edge sandbox may not expose chmod; the single-uid container mitigates.
-  await Deno.chmod?.(keyPath, 0o600)?.catch?.(() => {});
+  // ssh refuses group/world-readable private keys, but the edge sandbox
+  // BLOCKLISTS Deno.chmod — and the blocklist throws SYNCHRONOUSLY, so the
+  // old `Deno.chmod?.(..)?.catch?.()` guard didn't guard anything and 500'd
+  // the signing routes. Create the file 0600 instead: the mode option applies
+  // at creation (open) time, which the sandbox allows. Remove any prior file
+  // first — mode is ignored when overwriting an existing file, and a stale
+  // key from a pre-fix run may sit there with default perms.
+  await Deno.remove(keyPath).catch(() => {});
+  try {
+    await Deno.writeTextFile(keyPath, privateKey, { mode: 0o600 });
+  } catch {
+    // Mode-bearing open rejected (unexpected): write plainly and attempt a
+    // real chmod inside try/catch (sync-throw safe). Worst case the key is
+    // container-default perms in a single-uid container — degraded, but the
+    // route must never 500 over permissions polish.
+    await Deno.writeTextFile(keyPath, privateKey);
+    try { await Deno.chmod(keyPath, 0o600); } catch { /* single-uid container mitigates */ }
+  }
 
   // allowed_signers lets `git log --show-signature` verify locally. Principal
   // is the author email (matched against the committer), falling back to any.
