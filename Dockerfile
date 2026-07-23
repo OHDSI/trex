@@ -81,6 +81,15 @@ COPY plugins/docs/src/ ./src/
 COPY plugins/docs/static/ ./static/
 RUN npm install && npm run build
 
+# Stage 4b: Build the prometheus frontend (FHIR analytics UI plugin). The repo
+# commits a dist/, but rebuilding here guarantees the image never ships a
+# bundle that drifted from src/. Mirrors the plugin's CI job (install with
+# --ignore-scripts, vendored atlas-ui is committed, no private registry deps).
+FROM node:22-trixie-slim AS prometheus-builder
+WORKDIR /build
+COPY plugins/prometheus/ ./
+RUN npm install --ignore-scripts --no-audit --no-fund && npm run build
+
 # Stage 5: Build postgres-meta (TypeScript -> dist/)
 FROM node:22-trixie-slim AS pg-meta-builder
 WORKDIR /build
@@ -298,6 +307,12 @@ COPY --from=pg-meta-builder /build/node_modules/ ./plugins-dev/pg-meta/postgres-
 # plugins-dev like storage/postgrest — not published to npm, no build step.
 # Dormant unless its DISCORD_*/CLAW_* env is configured at runtime.
 COPY plugins/claw/ ./plugins-dev/claw/
+# prometheus (FHIR analytics UI + its functions/functions-mri workers): whole
+# plugin dir + the freshly-built dist overlaid from the builder stage. The
+# plugin scanner picks up its trex.ui.routes/functions from package.json; the
+# /prometheus nav entry is added per-deployment via TREX_WEB_NAV_EXTRA.
+COPY plugins/prometheus/ ./plugins-dev/prometheus/
+COPY --from=prometheus-builder /build/dist/ ./plugins-dev/prometheus/dist/
 
 # Entrypoint + derivation CLI scripts live under /usr/src so the final stage
 # imports them with the same COPY as the rest of the tree.
