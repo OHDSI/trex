@@ -35,6 +35,7 @@
 import {
   ensureAttached,
   ensureCacheAttached,
+  snowflakeExtrasFromRow,
   type ExecFn,
   type SourceCredential,
 } from "./lib/attach.ts";
@@ -189,6 +190,7 @@ export async function d2eBoot(): Promise<void> {
       host: string;
       port: number;
       databaseName: string;
+      extra: unknown;
       cred_username: string | null;
       cred_password_encrypted: string | null;
     }>(
@@ -198,6 +200,7 @@ export async function d2eBoot(): Promise<void> {
          d.host,
          d.port,
          d."databaseName",
+         d.extra,
          dc.username AS cred_username,
          dc.password_encrypted AS cred_password_encrypted
        FROM trexdb.database d
@@ -231,6 +234,7 @@ export async function d2eBoot(): Promise<void> {
         name: row.databaseName,
         adminUsername: row.cred_username,
         adminPassword,
+        ...(row.dialect === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
       });
     }
 
