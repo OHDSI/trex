@@ -109,3 +109,48 @@ Deno.test("slash_commands envelope is acked and dropped", async () => {
   assertEquals(JSON.parse(sockets[0].sent[0]).envelope_id, "env-3");
   client.stop();
 });
+
+Deno.test("forward retries on network error, then gives up after forwardAttempts (parity with the Discord gateway)", async () => {
+  let hits = 0;
+  const { client, sockets } = makeClient({
+    forwardAttempts: 2,
+    forwardRetryBaseMs: 1,
+    fetch: (async () => {
+      hits++;
+      throw new Error("connection refused");
+    }) as typeof fetch,
+  });
+  client.start();
+  await flush();
+  sockets[0].emit({
+    envelope_id: "env-r1",
+    type: "events_api",
+    payload: { type: "event_callback", event: { type: "app_mention", text: "hi" } },
+  });
+  // Two attempts with 1ms backoff — settle, then assert no further retries.
+  await new Promise((r) => setTimeout(r, 30));
+  assertEquals(hits, 2, "exactly forwardAttempts attempts, then give up");
+  client.stop();
+});
+
+Deno.test("forward retries a 5xx and succeeds on the second attempt", async () => {
+  let hits = 0;
+  const { client, sockets } = makeClient({
+    forwardAttempts: 3,
+    forwardRetryBaseMs: 1,
+    fetch: (async () => {
+      hits++;
+      return hits === 1 ? new Response("boom", { status: 503 }) : new Response("ok", { status: 200 });
+    }) as typeof fetch,
+  });
+  client.start();
+  await flush();
+  sockets[0].emit({
+    envelope_id: "env-r2",
+    type: "events_api",
+    payload: { type: "event_callback", event: { type: "app_mention", text: "hi" } },
+  });
+  await new Promise((r) => setTimeout(r, 30));
+  assertEquals(hits, 2, "5xx retried once, success stops the loop");
+  client.stop();
+});

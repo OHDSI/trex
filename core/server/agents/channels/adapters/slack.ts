@@ -115,6 +115,13 @@ export interface SlackChannelOptions {
   resume?: (ctx: SlackResumeContext) => void | Promise<void>;
   /** Inbound allow-list: a static list (default: SLACK_ALLOWED_USERS/_CHANNELS env) or an async callback. A miss is acked silently. */
   allow?: ChannelAllowList | SlackAllowFn;
+  /**
+   * Whether the agent responds in direct messages. Default false: DM work
+   * bypasses team visibility, and each top-level DM message starts its own
+   * disconnected session (no thread context). DM messages are acked and
+   * dropped silently; channel @mentions are unaffected.
+   */
+  directMessages?: boolean;
 }
 
 const OK = () => new Response("ok", { status: 200 });
@@ -393,7 +400,9 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
           return new Response(String(envelope.challenge ?? ""), { status: 200, headers: { "content-type": "text/plain" } });
         }
         if (envelope.type === "event_callback") {
-          const message = parseAppMentionEvent(envelope as never) ?? parseDirectMessageEvent(envelope as never);
+          // DMs are off by default (see SlackChannelOptions.directMessages).
+          const message = parseAppMentionEvent(envelope as never) ??
+            (opts.directMessages === true ? parseDirectMessageEvent(envelope as never) : null);
           if (!message) return OK();
           return handleMessage(message, args);
         }

@@ -157,6 +157,26 @@ Deno.test("message event → send() with the text + channel:thread_ts token + sl
   assertEquals(state.threadTs, "1700000000.000001");
 });
 
+Deno.test("DMs are off by default: a human DM is acked but never reaches send(); opt-in accepts it", async () => {
+  const humanDm = {
+    type: "event_callback",
+    team_id: "T1",
+    event: { type: "message", channel_type: "im", user: "U9", text: "help me", ts: "2.2", channel: "D1" },
+  };
+  // Default (directMessages unset) → dropped silently.
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET } });
+  const { args, sends } = mockArgs();
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(humanDm)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0, "a DM must not create a session by default");
+
+  // Explicit opt-in → handled.
+  const dmChannel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET }, directMessages: true });
+  const { args: args2, sends: sends2 } = mockArgs();
+  await dmChannel.routes[0].handler(await signedRequest(JSON.stringify(humanDm)), args2);
+  assertEquals(sends2.length, 1, "directMessages: true must accept the DM");
+});
+
 Deno.test("a DM message from the bot itself is ignored (no send)", async () => {
   const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET } });
   const { args, sends } = mockArgs();
