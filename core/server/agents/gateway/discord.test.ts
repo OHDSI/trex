@@ -463,6 +463,135 @@ Deno.test("gateway: IDENTIFY carries the configured intents", async () => {
   client.stop();
 });
 
+Deno.test("gateway: transient 5xx on the messages route is retried until it succeeds", async () => {
+  const signer = await createGatewaySigner();
+  let hits = 0;
+  const { fn, calls } = fakeFetch((req) => {
+    if (req.url.endsWith("/messages")) {
+      hits++;
+      // First two attempts land mid worker-recycle; third succeeds.
+      return hits < 3 ? new Response("worker recycling", { status: 503 }) : new Response(null, { status: 200 });
+    }
+    return new Response(null, { status: 204 });
+  });
+  const sockets: FakeSocket[] = [];
+  const client = new DiscordGatewayClient({
+    botToken: "t",
+    forwardUrl: "http://local/eve/v1/discord",
+    messageForwardUrl: "http://local/eve/v1/discord/messages",
+    signer,
+    apiBaseUrl: "https://discord.test/api/v10",
+    gatewayUrl: "wss://gateway.test",
+    fetch: fn,
+    forwardRetryBaseMs: 1,
+    createSocket: () => {
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    },
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({ op: 0, t: "MESSAGE_CREATE", s: 1, d: MESSAGE_EVENT });
+  await until(() => hits === 3);
+  assertEquals(calls.filter((c) => c.url.endsWith("/messages")).length, 3);
+  client.stop();
+});
+
+Deno.test("gateway: messages route down for all attempts drops the message without throwing", async () => {
+  const signer = await createGatewaySigner();
+  let hits = 0;
+  const { fn } = fakeFetch((req) => {
+    if (req.url.endsWith("/messages")) {
+      hits++;
+      throw new Error("connection refused");
+    }
+    return new Response(null, { status: 204 });
+  });
+  const sockets: FakeSocket[] = [];
+  const client = new DiscordGatewayClient({
+    botToken: "t",
+    forwardUrl: "http://local/eve/v1/discord",
+    messageForwardUrl: "http://local/eve/v1/discord/messages",
+    signer,
+    apiBaseUrl: "https://discord.test/api/v10",
+    gatewayUrl: "wss://gateway.test",
+    fetch: fn,
+    forwardRetryBaseMs: 1,
+    forwardAttempts: 2,
+    createSocket: () => {
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    },
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({ op: 0, t: "MESSAGE_CREATE", s: 1, d: MESSAGE_EVENT });
+  await until(() => hits === 2);
+  await new Promise((r) => setTimeout(r, 20));
+  assertEquals(hits, 2, "exactly forwardAttempts attempts, then give up");
+  client.stop();
+});
+
+Deno.test("gateway: connection that never READYs is closed by the watchdog and reconnects", async () => {
+  const signer = await createGatewaySigner();
+  const sockets: FakeSocket[] = [];
+  const { fn } = fakeFetch(() => new Response(null, { status: 204 }));
+  const client = new DiscordGatewayClient({
+    botToken: "t",
+    forwardUrl: "http://local/eve/v1/discord",
+    signer,
+    apiBaseUrl: "https://discord.test/api/v10",
+    gatewayUrl: "wss://gateway.test",
+    fetch: fn,
+    reconnectBaseMs: 1,
+    readyTimeoutMs: 15,
+    createSocket: () => {
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    },
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  // HELLO arrives and heartbeats run, but READY never comes (half-open session).
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  await until(() => sockets.length === 2);
+  assertEquals(sockets[0].closedWith?.code, 4903);
+  client.stop();
+});
+
+Deno.test("gateway: watchdog does not fire on a connection that reached READY", async () => {
+  const signer = await createGatewaySigner();
+  const sockets: FakeSocket[] = [];
+  const { fn } = fakeFetch(() => new Response(null, { status: 204 }));
+  const client = new DiscordGatewayClient({
+    botToken: "t",
+    forwardUrl: "http://local/eve/v1/discord",
+    signer,
+    apiBaseUrl: "https://discord.test/api/v10",
+    gatewayUrl: "wss://gateway.test",
+    fetch: fn,
+    readyTimeoutMs: 15,
+    createSocket: () => {
+      const s = new FakeSocket();
+      sockets.push(s);
+      return s;
+    },
+  });
+  client.start();
+  await until(() => sockets.length === 1);
+  sockets[0].emit({ op: 10, d: { heartbeat_interval: 60_000 } });
+  sockets[0].emit({ op: 0, t: "READY", s: 1, d: { session_id: "s", resume_gateway_url: "wss://r.test" } });
+  await new Promise((r) => setTimeout(r, 40));
+  assertEquals(sockets.length, 1, "no watchdog-triggered reconnect after READY");
+  assertEquals(sockets[0].closedWith, null);
+  client.stop();
+});
+
 Deno.test("gateway: MESSAGE_CREATE without messageForwardUrl is ignored", async () => {
   const signer = await createGatewaySigner();
   const { client, sockets, calls } = makeClient({ signer });

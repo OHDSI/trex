@@ -77,6 +77,14 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    needing input, relay that question to the channel (step 3 tools) rather
    than answering it yourself.
 
+   **Pass links verbatim.** Every URL in the team's messages (issue links,
+   PR links, docs, screenshots) goes into the hand-off text EXACTLY as
+   written — full `https://…` URL, never paraphrased away or shortened to
+   "issue #2754". The coder has its own fetch/`gh` tools and works FROM the
+   link's content; a brief that names an issue without its URL forces the
+   coder to guess or ask back. The same applies to file paths, exact copy
+   strings, and code identifiers the team provides: quote them verbatim.
+
    Display and gate with the dedicated tools, not plain text:
    - `postUpdate` posts a one-line status to the channel immediately. Call it
      right BEFORE every `askCodeAgent` hand-off (brainstorm, plan, implement, a
