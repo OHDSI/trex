@@ -53,6 +53,18 @@ def test_hana_scan_basic(node_factory):
     assert result[0][0] == 1
 
 
+def test_hana_scan_application_session_variable(node_factory):
+    """trex_hana_scan() applies client information to the HANA session."""
+    node = node_factory(load_hana=True, load_db=False)
+    result = node.execute(
+        f"SELECT * FROM trex_hana_scan("
+        f"'SELECT SESSION_CONTEXT(''APPLICATION'') AS application FROM DUMMY', "
+        f"'{HANA_TEST_URL}', session_vars_json = "
+        f"'{{\"APPLICATION\":\"WIZARD_test\"}}')"
+    )
+    assert result == [("WIZARD_test",)]
+
+
 def test_hana_query_alias(node_factory):
     """trex_hana_query() is an alias for trex_hana_scan() and returns the same result."""
     node = node_factory(load_hana=True, load_db=False)

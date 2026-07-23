@@ -9,6 +9,7 @@ use std::fmt;
 use std::sync::RwLock;
 use std::env;
 use std::panic::{self, AssertUnwindSafe};
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel {
@@ -287,6 +288,41 @@ impl HanaError {
     }
 }
 
+fn parse_session_vars(json: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
+    let trimmed = json.trim();
+    if trimmed.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)
+        .map_err(|e| HanaError::new(&format!("Invalid session_vars_json: {}", e)))?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| HanaError::new("session_vars_json must be a JSON object"))?;
+    let mut vars = BTreeMap::new();
+    for (key, value) in obj {
+        if let Some(value) = value.as_str() {
+            vars.insert(key.clone(), value.to_string());
+        } else {
+            vars.insert(key.clone(), value.to_string());
+        }
+    }
+    Ok(vars)
+}
+
+fn apply_session_vars(
+    connection: &HanaConnection,
+    session_vars: &BTreeMap<String, String>,
+) -> Result<(), Box<dyn Error>> {
+    for (key, value) in session_vars {
+        match key.as_str() {
+            "APPLICATION" => connection.set_application(value)?,
+            "APPLICATIONUSER" => connection.set_application_user(value)?,
+            _ => { /* unknown client-info key: ignore */ }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug)]
 pub struct HanaScanBindData {
     pub url: String,
@@ -303,6 +339,7 @@ pub struct HanaScanBindData {
     pub temporal_cols: Vec<bool>,
     pub batch_size: usize,
     pub max_retries: u32,
+    pub session_vars: BTreeMap<String, String>,
 }
 
 impl Clone for HanaScanBindData {
@@ -335,6 +372,7 @@ impl Clone for HanaScanBindData {
             temporal_cols: self.temporal_cols.clone(),
             batch_size: self.batch_size,
             max_retries: self.max_retries,
+            session_vars: self.session_vars.clone(),
         }
     }
 }
@@ -550,6 +588,11 @@ impl VTab for HanaScanVTab {
         // which would silently collapse the result to one varchar column.
         let query = query.trim_end().trim_end_matches(';').trim_end().to_string();
         let url = bind.get_parameter(1).to_string();
+        let session_vars_json = bind
+            .get_named_parameter("session_vars_json")
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "{}".to_string());
+        let session_vars = parse_session_vars(&session_vars_json)?;
         validate_hana_connection(&url)?;
         let (user, password, host, port, database) = parse_hana_url(&url)?;
         let batch_size = std::env::var("HANA_BATCH_SIZE")
@@ -565,6 +608,7 @@ impl VTab for HanaScanVTab {
         }
         let (column_names, column_types, temporal_cols) = match safe_hana_connect(url.clone()) {
             Ok(connection) => {
+                apply_session_vars(&connection, &session_vars)?;
                 let schema_result = match connection.prepare(&query) {
                     Ok(_prepared) => {
                         match connection.query(&format!("SELECT * FROM ({}) AS subquery LIMIT 1", query)) {
@@ -661,6 +705,7 @@ impl VTab for HanaScanVTab {
             temporal_cols,
             batch_size,
             max_retries,
+            session_vars,
         })
     }
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
@@ -671,6 +716,7 @@ impl VTab for HanaScanVTab {
             for attempt in 0..=bind_data_ref.max_retries {
                 match safe_hana_connect(bind_data_ref.url.clone()) {
                     Ok(connection) => {
+                        apply_session_vars(&connection, &bind_data_ref.session_vars)?;
                         connection_result = Some(connection);
                         break;
                     }
@@ -892,6 +938,12 @@ impl VTab for HanaScanVTab {
             duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
         ])
     }
+    fn named_parameters() -> Option<Vec<(String, duckdb::core::LogicalTypeHandle)>> {
+        Some(vec![(
+            "session_vars_json".to_string(),
+            duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        )])
+    }
 }
 
 #[cfg(test)]
@@ -1081,6 +1133,7 @@ mod tests {
             temporal_cols: vec![false, false],
             batch_size: 1024,
             max_retries: 3,
+            session_vars: BTreeMap::new(),
         };
         let cloned = bind_data.clone();
         assert_eq!(bind_data.url, cloned.url);

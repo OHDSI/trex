@@ -73,7 +73,7 @@ SELECT trex_hana_detach('omop', 'CDM');
 
 ## Functions
 
-### `trex_hana_scan(query, url)`
+### `trex_hana_scan(query, url, session_vars_json = optional)`
 
 Run a SQL query against HANA and return the results as a Trex table.
 Connection is opened, query executed, results streamed back, connection
@@ -83,13 +83,15 @@ closed — one-shot.
 |-----------|------|-------------|
 | query | VARCHAR | SAP HANA SQL. The remote side parses it, so use HANA syntax. |
 | url | VARCHAR | `hdbsqls://...` connection URL. |
+| session_vars_json | VARCHAR | Optional named parameter containing supported HANA client-information variables as JSON, such as `APPLICATION`. |
 
 **Returns:** TABLE (dynamic columns from the query schema).
 
 ```sql
 SELECT * FROM trex_hana_scan(
   'SELECT TOP 10 * FROM PATIENTS',
-  'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check'
+  'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check',
+  session_vars_json = '{"APPLICATION":"WIZARD_cross-sectional-demographics"}'
 );
 ```
 

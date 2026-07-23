@@ -271,7 +271,7 @@ export class UserDatabaseManager {
 	}
 
 
-	getConnection(db_id, schema, vocab_schema, result_schema, translationMap) {
+	getConnection(db_id, schema, vocab_schema, result_schema, translationMap, sessionVariables = {}) {
 		const dbc = this.getDatabaseCredentials();
 		const worker_id = op_acquire_worker();
 		let dialect = "duckdb";
@@ -289,7 +289,7 @@ export class UserDatabaseManager {
 			const db = new TrexDB(db_id, worker_id);
 			return new TrexConnection(db, db, schema, vocab_schema, result_schema, 'duckdb', translationMap);
 		} else {
-			const db = new HanaDB(db_id, worker_id);
+			const db = new HanaDB(db_id, worker_id, sessionVariables);
 			return new TrexConnection(db, db, schema, vocab_schema, result_schema, 'hana', translationMap);
 		}
 	}
@@ -349,8 +349,10 @@ export class TrexDB {
 }
 
 export class HanaDB extends TrexDB {
-	constructor(database, worker_id) {
+	#sessionVariables;
+	constructor(database, worker_id, sessionVariables = {}) {
 		super(database, worker_id);
+		this.#sessionVariables = sessionVariables;
 	}
 	#resolveConnectionUrl() {
 		const dbm = DatabaseManager.getDatabaseManager();
@@ -408,8 +410,9 @@ export class HanaDB extends TrexDB {
 				// Escape single quotes in SQL and connection URL to prevent SQL injection
 				const escapedSql = String(sql).replace(/'/g, "''");
 				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
-				// Read path: trex_hana_scan(query, url) returns a result set.
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from trex_hana_scan('${escapedSql}', '${escapedConnectionUrl}')`, nparams)));
+				const escapedSessionVariables = JSON.stringify(this.#sessionVariables).replace(/'/g, "''");
+				// Read path: trex_hana_scan(query, url, session_vars_json = json) returns a result set.
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from trex_hana_scan('${escapedSql}', '${escapedConnectionUrl}', session_vars_json = '${escapedSessionVariables}')`, nparams)));
 			} catch(e) {
 				reject(e);
 			}
@@ -647,4 +650,3 @@ export class TrexHttpClient {
 		return await this.request({ ...config, method: 'DELETE', url });
 	}
 }
-
