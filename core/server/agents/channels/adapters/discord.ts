@@ -158,12 +158,20 @@ export interface DiscordChannelOptions {
    * public thread, keys the session to the THREAD id (parallel threads =
    * parallel sessions), and delivers the whole conversation there; the
    * deferred original response becomes a pointer to the thread. A command
-   * already inside a thread continues that thread's session. Falls back to
-   * the in-channel behavior when thread creation fails (missing permission,
-   * DMs). Needs the bot permissions "Create Public Threads" + "Send Messages
-   * in Threads".
+   * already inside a thread continues that thread's session. When thread
+   * creation fails (missing permission), NO session is started and the
+   * error is reported — a channel-keyed fallback session would merge
+   * distinct tasks. Needs the bot permissions "Create Public Threads" +
+   * "Send Messages in Threads".
    */
   threads?: boolean;
+  /**
+   * Whether the agent responds in direct messages. Default false: DMs have
+   * no threads, so every DM task would share one channel-keyed session (the
+   * cross-task contamination class), and DM work bypasses team visibility.
+   * DM slash commands get a short refusal; plain DM messages are ignored.
+   */
+  directMessages?: boolean;
   /**
    * MESSAGE_CREATE mode (gateway-only): adds a POST "<route>/messages" route
    * fed by the host gateway client's signed loopback. @mentions behave like
@@ -329,6 +337,14 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   const events: ChannelEventHandlers = { ...builtinEvents, ...opts.events };
 
   async function handleCommand(interaction: DiscordCommandInteraction, args: ChannelRouteArgs): Promise<Response> {
+    // DMs are off by default (see DiscordChannelOptions.directMessages):
+    // guard FIRST so no hook, session, or turn ever runs for a DM command.
+    if (!interaction.guildId && opts.directMessages !== true) {
+      return discordJson({
+        content: "I only work in server channels — ask me in a channel or task thread there.",
+        ephemeral: true,
+      });
+    }
     let result: DiscordCommandResult | null;
     try {
       result = opts.onCommand ? await opts.onCommand(interaction) : {};
@@ -609,6 +625,9 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   async function handleMessage(event: NonNullable<ReturnType<typeof parseDiscordMessageEvent>>, args: ChannelRouteArgs): Promise<Response> {
     const ignored = () => discordJsonBody({ ignored: true });
     if (event.author.bot) return ignored();
+    // DMs are off by default (see DiscordChannelOptions.directMessages):
+    // plain DM messages are dropped silently — no session, no reply.
+    if (!event.guildId && opts.directMessages !== true) return ignored();
 
     const applicationId = await resolveDiscordApplicationId(opts.credentials?.applicationId);
     let snapshot: DiscordChannelSnapshot;

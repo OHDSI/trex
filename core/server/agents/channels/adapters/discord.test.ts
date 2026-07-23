@@ -228,6 +228,49 @@ Deno.test("threads: command already inside a thread does NOT create another one"
   assertEquals(sends[0].opts.continuationToken.startsWith("thread-7:"), true);
 });
 
+Deno.test("DMs: a command without a guild is refused — no session, no turn", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const { fetchMock } = threadFetchMock();
+  const channel = discordChannel({
+    credentials: { publicKey: publicKeyHex, botToken: "bot-1", applicationId: "app-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+    threads: true,
+  });
+  const { args, sends } = mockArgs();
+  // A DM interaction has no guild_id.
+  const dm = { ...COMMAND_PAYLOAD, guild_id: undefined, channel: { id: "dm-1", type: 1 }, channel_id: "dm-1" };
+  const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(dm)), args);
+  const body = await res.json();
+  assertEquals(body.type, 4); // immediate message response, not a deferred turn
+  assert(String(body.data?.content ?? "").includes("only work in server channels"));
+  assertEquals(sends.length, 0, "a DM must never create a session");
+});
+
+Deno.test("DMs: a plain DM message is dropped silently — no session, no reply", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch();
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-31",
+        channel_id: "dm-1",
+        content: "hey trex, do a thing",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0, "a DM must never create a session");
+  // No reply is posted back to the DM channel either.
+  const posted = rest.calls.find((c) => c.url.includes("/channels/dm-1/messages") && (c.init?.method ?? "GET") === "POST");
+  assertEquals(posted, undefined);
+});
+
 Deno.test("threads: creation failure starts NO session and reports the error (no channel-keyed fallback)", async () => {
   // Regression: the old fallback keyed the session to the channel, merging every
   // failed-thread task in a channel into ONE session (shared history/chat/worktree).
