@@ -104,6 +104,12 @@ export const evalStubs = {
   postQuestion() {
     return { posted: true, stub: true };
   },
+  addReaction() {
+    return { reacted: true, emoji: "👍", stub: true };
+  },
+  readReactions() {
+    return { reactions: [], stub: true };
+  },
   postPlan() {
     return { posted: true, attached: null, truncated: false, stub: true };
   },
