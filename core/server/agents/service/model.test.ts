@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { bedrockSupportsPromptCaching, isAnthropicModel, isBedrockModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -121,4 +121,27 @@ Deno.test("withSystemCachePoint is a no-op (identity) for providers without cach
   assertEquals(withSystemCachePoint({ provider: "google" }, system), system);
   assertEquals(withSystemCachePoint({ provider: undefined }, system), system);
   assertEquals(withSystemCachePoint(undefined, system), system);
+});
+
+Deno.test("isOpenAIModel matches openai.* provider ids (incl. openai-compatible gateways)", () => {
+  assertEquals(isOpenAIModel({ provider: "openai.responses" }), true);
+  assertEquals(isOpenAIModel({ provider: "openai.chat" }), true);
+  assertEquals(isOpenAIModel({ provider: "amazon-bedrock" }), false);
+  assertEquals(isOpenAIModel({ provider: "anthropic.messages" }), false);
+  assertEquals(isOpenAIModel({ provider: undefined }), false);
+  assertEquals(isOpenAIModel(undefined), false);
+});
+
+Deno.test("cacheProviderOptions returns a promptCacheKey only for openai models", () => {
+  // openai (incl. mantle/openai-compatible) → routing key under providerOptions.openai.
+  assertEquals(
+    cacheProviderOptions({ provider: "openai.responses" }, "trex-agents/claw"),
+    { openai: { promptCacheKey: "trex-agents/claw" } },
+  );
+  // Non-openai providers get no providerOptions (bedrock/anthropic cache via
+  // withSystemCachePoint's markers; a stray openai key would be meaningless).
+  assertEquals(cacheProviderOptions({ provider: "amazon-bedrock", modelId: "zai.glm-5" }, "k"), {});
+  assertEquals(cacheProviderOptions({ provider: "anthropic.messages" }, "k"), {});
+  // No key → nothing to route on, even for openai.
+  assertEquals(cacheProviderOptions({ provider: "openai.responses" }, ""), {});
 });

@@ -173,6 +173,31 @@ export function isAnthropicModel(model: any): boolean {
   return model?.provider === "anthropic.messages";
 }
 
+// deno-lint-ignore no-explicit-any
+export function isOpenAIModel(model: any): boolean {
+  // @ai-sdk/openai language models report provider "openai.responses" (default
+  // callable) or "openai.chat"; a custom baseURL (e.g. an openai-compatible
+  // gateway) keeps the same "openai.*" prefix.
+  return typeof model?.provider === "string" && model.provider.startsWith("openai");
+}
+
+// OpenAI/Responses does AUTOMATIC prompt caching for prompts over ~1024 tokens
+// (verified live: a repeated stable prefix reports ~all input tokens as
+// cachedInputTokens on the 2nd call) — there is no cachePoint to place, which
+// is why withSystemCachePoint no-ops for openai. A stable `promptCacheKey`
+// only affects cache-hit ROUTING: OpenAI routes requests sharing a key to the
+// same cache, so the stable TOOLS+SYSTEM prefix reuses its cache reliably
+// across a session's turns (and as the deployment scales to multiple backends).
+// Returns streamText-level providerOptions; empty ({}) for every non-openai
+// provider (their caching is handled by withSystemCachePoint's cache markers).
+// deno-lint-ignore no-explicit-any
+export function cacheProviderOptions(model: any, cacheKey: string): Record<string, any> {
+  if (cacheKey && isOpenAIModel(model)) {
+    return { openai: { promptCacheKey: cacheKey } };
+  }
+  return {};
+}
+
 // A SystemModelMessage carrying a provider cache marker (Bedrock cachePoint
 // or Anthropic cacheControl), or the plain-string no-op for every other
 // provider.
