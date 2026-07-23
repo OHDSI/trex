@@ -1,5 +1,5 @@
 /* End-to-end test of the webapi.trex DuckDB extension: open a trexsql/DuckDB
- * connection, LOAD the extension, then drive webapi_start/status as SQL functions.
+ * connection, LOAD the extension, then drive trex_webapi_start/status as SQL functions.
  * webapi_start dlopens libwebapi-native.so and boots the embedded WebAPI server. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -46,13 +46,13 @@ int main(void) {
     printf("EXTENSION_LOADED\n"); fflush(stdout);
 
     char *started = NULL;
-    q(con, "SELECT webapi_start()", &started);
+    q(con, "SELECT trex_webapi_start()", &started);
     printf("WEBAPI_START=%s\n", started ? started : "(null)"); fflush(stdout);
     free(started);
 
     for (int i = 0; i < 150; i++) {
         char *st = NULL;
-        q(con, "SELECT webapi_status()", &st);
+        q(con, "SELECT trex_webapi_status()", &st);
         printf("WEBAPI_STATUS=%s\n", st ? st : "(null)"); fflush(stdout);
         free(st);
         sleep(2);

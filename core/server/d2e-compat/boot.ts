@@ -51,13 +51,13 @@ export async function d2eBoot(): Promise<void> {
   const err = (m: string) => console.error(`[d2e-compat] ${m}`);
 
   // ── Block 1: native WebAPI ────────────────────────────────────────────────
-  // webapi.trex (from the trexsql base) registers webapi_start(), which starts
+  // webapi.trex (from the trexsql base) registers trex_webapi_start(), which starts
   // WebAPI on :8080. Gated by WEBAPI_NATIVE_ENABLED so builds without the
   // extension still start.
   if ((Deno.env.get("WEBAPI_NATIVE_ENABLED") ?? "true") !== "false") {
     try {
       const webapiConn = new Trex.TrexDB("memory");
-      const startRows = await webapiConn.execute("SELECT webapi_start() AS msg", []);
+      const startRows = await webapiConn.execute("SELECT trex_webapi_start() AS msg", []);
       log(`native WebAPI — ${startRows[0]?.msg}`);
     } catch (e) {
       err(`webapi_start failed: ${(e as Error).message}`);
