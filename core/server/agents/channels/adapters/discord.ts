@@ -209,9 +209,21 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   });
   const apiOpts = () => ({ apiBaseUrl: opts.api?.apiBaseUrl, credentials: credentials(), fetch: opts.api?.fetch });
 
+  // Explicit <@id> user mentions in outgoing content must actually PING: the
+  // vendored senders default allowed_mentions to {parse: []} (suppressing
+  // everything), so an agent that correctly writes <@123> still pinged nobody.
+  // Allow exactly the users literally mentioned — parse stays [], keeping
+  // @everyone/@here/roles suppressed. An explicit body.allowed_mentions wins.
+  function withUserMentions(body: DiscordMessageBody): DiscordMessageBody {
+    if (body.allowed_mentions !== undefined || typeof body.content !== "string") return body;
+    const users = [...new Set([...body.content.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]))].slice(0, 25);
+    return users.length ? { ...body, allowed_mentions: { parse: [], users } } : body;
+  }
+
   // Deliver one Discord message body for a session, editing the deferred
   // original response first (then following up), else posting to the channel.
-  async function deliver(state: DiscordDeliveryState, body: DiscordMessageBody) {
+  async function deliver(state: DiscordDeliveryState, rawBody: DiscordMessageBody) {
+    const body = withUserMentions(rawBody);
     // A user-facing message (or approval buttons) ends the "working" state, and
     // the message itself clears Discord's typing indicator — stop the heartbeat.
     stopTyping(state.channelId);

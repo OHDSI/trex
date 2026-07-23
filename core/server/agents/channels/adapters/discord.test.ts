@@ -352,6 +352,34 @@ Deno.test("message.completed delivers split content via edit + followup", async 
   assertEquals((calls[1].body as { content: string }).content.startsWith("B"), true);
 });
 
+Deno.test("message.completed: <@id> mentions in the reply are allowed to ping (roles/@everyone stay suppressed)", async () => {
+  // Regression: the vendored sender defaulted allowed_mentions to {parse: []},
+  // so an agent reply containing a correct <@id> mention pinged nobody.
+  const calls: Array<{ body: any }> = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    calls.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  const channelCtx = { state: { channelId: "chan-1", applicationId: "app-1", initialResponseSent: true } };
+
+  await channel.events!["message.completed"](
+    { turnId: "t1", message: "Please review, <@4242>!", finishReason: "stop" },
+    channelCtx,
+  );
+  assertEquals(calls[0].body.allowed_mentions, { parse: [], users: ["4242"] });
+
+  // No mention in the reply → the suppress-everything default stays.
+  await channel.events!["message.completed"](
+    { turnId: "t2", message: "done, no ping needed", finishReason: "stop" },
+    channelCtx,
+  );
+  assertEquals(calls[1].body.allowed_mentions, { parse: [] });
+});
+
 Deno.test("message.completed channel-message fallback sends bot auth from env credentials", async () => {
   // Regression: with env-provided credentials (the documented default) the
   // adapter passed botToken: undefined and callDiscordApi skipped the

@@ -91,6 +91,16 @@ export interface AttachmentUpload { name: string; bytes: Uint8Array; contentType
 // combination. With files it goes as multipart/form-data (payload_json naming
 // each attachment by index + one files[i] part each — up to 10 files / 25 MB on
 // a default guild); without files it's a plain JSON post.
+// Explicit <@id> user mentions in content must actually PING. The default
+// allowed_mentions {parse: []} suppresses everything, so a correctly-written
+// <@123> rendered as a mention but notified nobody. Allow exactly the users
+// literally mentioned — parse stays [], keeping @everyone/@here/roles
+// suppressed. An explicit allowedMentions option wins.
+export function mentionedUserIds(content: string | undefined): string[] {
+  if (!content) return [];
+  return [...new Set([...content.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]))].slice(0, 25);
+}
+
 export async function postChannelMessage(
   fetchFn: typeof fetch,
   opts: {
@@ -104,7 +114,11 @@ export async function postChannelMessage(
   },
 ): Promise<{ id: string }> {
   const url = `https://discord.com/api/v10/channels/${opts.channelId}/messages`;
-  const payload: Record<string, unknown> = { allowed_mentions: opts.allowedMentions ?? { parse: [] } };
+  const contentUsers = mentionedUserIds(opts.content);
+  const payload: Record<string, unknown> = {
+    allowed_mentions: opts.allowedMentions ??
+      (contentUsers.length ? { parse: [], users: contentUsers } : { parse: [] }),
+  };
   if (opts.content) payload.content = opts.content;
   if (opts.embeds?.length) payload.embeds = opts.embeds;
   if (opts.components?.length) payload.components = opts.components;

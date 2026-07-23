@@ -41,6 +41,33 @@ Deno.test("fetchRecentMessages calls the Discord API with auth and maps results 
   assertEquals(seenAuth, "Bot T");
 });
 
+// Regression: a correctly-written <@id> mention rendered but pinged NOBODY —
+// the default allowed_mentions {parse: []} suppressed it. Explicit user
+// mentions in content must be allowed through (roles/@everyone stay blocked).
+Deno.test("postChannelMessage allows exactly the <@id> users mentioned in content", async () => {
+  let seenBody: any;
+  const fetchFn = ((_url: string, init: any) => {
+    seenBody = JSON.parse(init.body);
+    return Promise.resolve(new Response(JSON.stringify({ id: "m9" }), { status: 200 }));
+  }) as unknown as typeof fetch;
+
+  await postChannelMessage(fetchFn, {
+    botToken: "T", channelId: "c1",
+    content: "Hey <@111> and <@!222>, thoughts? (<@111> again)",
+  });
+  assertEquals(seenBody.allowed_mentions, { parse: [], users: ["111", "222"] });
+
+  // No mentions in content → everything suppressed, as before.
+  await postChannelMessage(fetchFn, { botToken: "T", channelId: "c1", content: "no pings here" });
+  assertEquals(seenBody.allowed_mentions, { parse: [] });
+
+  // Explicit allowedMentions still wins over extraction.
+  await postChannelMessage(fetchFn, {
+    botToken: "T", channelId: "c1", content: "Hey <@111>", allowedMentions: { users: ["999"] },
+  });
+  assertEquals(seenBody.allowed_mentions, { users: ["999"] });
+});
+
 Deno.test("normalizeEmojiInput accepts unicode, name:id, and <:name:id>/<a:name:id> markup", () => {
   assertEquals(normalizeEmojiInput("👍"), "👍");
   assertEquals(normalizeEmojiInput("partyparrot:555"), "partyparrot:555");
