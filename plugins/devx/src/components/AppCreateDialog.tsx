@@ -15,6 +15,7 @@ const TEMPLATES = [
   { id: "d2e-admin-plugin", name: "D2E Admin", description: "Full-stack single-spa admin portal plugin", icon: "A", category: "D2E", color: "from-indigo-500/20 to-purple-500/20" },
   { id: "atlas-plugin", name: "Atlas Plugin", description: "OHDSI Atlas plugin with Vue 3 + Vuetify + WebAPI", icon: "A", category: "Atlas", color: "from-teal-500/20 to-blue-500/20" },
   { id: "strategus-study", name: "Strategus Study", description: "OHDSI observational study with Strategus + HADES", icon: "S", category: "OHDSI", color: "from-orange-500/20 to-red-500/20" },
+  { id: "d2e-wizard", name: "D2E Wizard", description: "Cohort wizard + Shiny cohort dashboard for the D2E portal", icon: "W", category: "D2E", color: "from-purple-500/20 to-pink-500/20" },
   { id: "blank", name: "Blank", description: "Empty project with package.json", icon: "+", category: "Other", color: "from-gray-500/20 to-gray-400/20" },
 ];
 

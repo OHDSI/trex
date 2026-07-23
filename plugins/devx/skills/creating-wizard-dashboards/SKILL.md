@@ -19,6 +19,11 @@ iframe. One wizard = three artifacts that MUST agree on one id:
 The shared id: wizard `id` (#1) == dashboard name (#2) == `templateId` the app
 sends to `/parquet-export` (#3's filename). The researcher iframe URL is
 derived from it: `/gateway/api/dataset/shiny-live/{datasetId}_cohort_{wizardId}_python/`.
+
+Starting fresh? Scaffold with the **D2E Wizard app template** (devx → new app
+→ D2E Wizard): it lays down `wizard-config.json`, `dashboard/app.py` (working
+handshake + dialect-aware fetch), and synced `sql/duckdb|hana/<id>.sql`
+starters — then follow its TREX.md rename checklist to set the real id.
 Reference implementations: the `data2evidence/wizards-dashboard` repo
 (`samples/TEMPLATE_SHINY_DASHBOARD.py` to copy; `shinylive/python/calculate-prevalence.py`
 as the best full example) and `plugins/ui/apps/wizards/wizards-config.json`

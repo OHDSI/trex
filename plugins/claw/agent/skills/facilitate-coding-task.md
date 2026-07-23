@@ -138,7 +138,10 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    **LIGHT track** → post the coder's plan with `postPlan` and call
    `awaitApproval` (`what: "the plan"`). Approve → step 7 (the spec and
    detailed-plan gates in step 6 are skipped by design); Deny → relay the
-   team's changes, have the coder revise, gate again. If while implementing
+   team's changes, have the coder revise, gate again. The LIGHT track skips
+   ONLY step 6: backend testing, browser verification, and the
+   which-checks-to-run question (steps 8-10 — code review, security review,
+   QA, design review, docs update) apply unchanged on BOTH tracks. If while implementing
    the task turns out bigger than assessed (new components, schema changes,
    surprises), stop and re-enter the FULL track at step 6 instead of pushing
    on.
