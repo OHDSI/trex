@@ -20,7 +20,7 @@ Deno.test("runD2eBoot resolves without side effects when disabled", async () => 
 // ---------------------------------------------------------------------------
 // WebAPI proxy body handling (routes.ts shouldReserializeParsedBody)
 // ---------------------------------------------------------------------------
-import { shouldReserializeParsedBody } from "./routes.ts";
+import { parseAttachBody, shouldReserializeParsedBody } from "./routes.ts";
 
 Deno.test("proxy re-serializes parsed JSON bodies, including empty {} and []", () => {
   // Non-empty JSON body (the WebAPI cache POST's schemaName case).
@@ -51,4 +51,31 @@ Deno.test("proxy streams genuinely unparsed bodies raw regardless of content typ
   assertEquals(shouldReserializeParsedBody("application/json", undefined), false);
   assertEquals(shouldReserializeParsedBody("application/json", null), false);
   assertEquals(shouldReserializeParsedBody("application/json", "raw string"), false);
+});
+
+// ---------------------------------------------------------------------------
+// POST /trex/attach body normalization (routes.ts parseAttachBody)
+// ---------------------------------------------------------------------------
+
+Deno.test("parseAttachBody — passes through string ids (the portal's attach hook shape)", () => {
+  assertEquals(
+    parseAttachBody({ cacheIds: ["cdm000111222"], connectionIds: ["alpdev_pg"] }),
+    { cacheIds: ["cdm000111222"], connectionIds: ["alpdev_pg"] },
+  );
+});
+
+Deno.test("parseAttachBody — tolerates missing/non-object bodies and absent keys", () => {
+  const empty = { cacheIds: [], connectionIds: [] };
+  assertEquals(parseAttachBody(undefined), empty);
+  assertEquals(parseAttachBody(null), empty);
+  assertEquals(parseAttachBody("raw string"), empty);
+  assertEquals(parseAttachBody({}), empty);
+  assertEquals(parseAttachBody({ cacheIds: ["c1"] }), { cacheIds: ["c1"], connectionIds: [] });
+});
+
+Deno.test("parseAttachBody — drops non-string entries and non-array values", () => {
+  assertEquals(
+    parseAttachBody({ cacheIds: ["ok", 42, null, { evil: true }], connectionIds: "not-an-array" }),
+    { cacheIds: ["ok"], connectionIds: [] },
+  );
 });

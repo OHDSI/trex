@@ -11,6 +11,7 @@
  *  /portal/plugin.json   — public      (d2e portal.ts: no authn/authz middleware)
  *  /portal/env.js        — public      (d2e portal.ts: no authn/authz middleware)
  *  /trex/db/*            — requireAdmin (d2e: authn + authz → ALP_SYSTEM_ADMIN scope required)
+ *  /trex/attach          — requireAdmin (d2e: authn + authz; portal's post-dataset-creation attach hook)
  *  /trex/log             — requireAdmin (d2e: authn + authz → trex.log.write scope, assigned to ALP_SYSTEM_ADMIN)
  *
  * Env vars consumed (d2e names → trex Deno.env key):
@@ -38,9 +39,13 @@ import express from "express";
 import { logtoAuthn, requireAdmin } from "./auth.ts";
 import { pool } from "../db.ts";
 import { getPluginsJson } from "../plugin/ui.ts";
-import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
+import { getTrexPublications, readRegistryDecrypted, syncTrexDatabaseManager } from "./dbm-sync.ts";
 import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
 import { upsertDatabaseCredential } from "./db-credential.ts";
+import { ensureAttached, type ExecFn, type SourceCredential } from "./lib/attach.ts";
+
+// Ambient EdgeRuntime global (same pattern as boot.ts).
+declare const Trex: any;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,6 +139,19 @@ export function shouldReserializeParsedBody(
   if (parsed === undefined || parsed === null || typeof parsed !== "object") return false;
   const ct = String(Array.isArray(contentType) ? contentType[0] : contentType ?? "").toLowerCase();
   return ct.includes("application/json") || ct.includes("+json");
+}
+
+// Normalize the POST /trex/attach request body: tolerate a missing/non-object
+// body and drop non-string array entries. Identifier validation itself stays in
+// lib/attach.ts (ensureCacheAttached/ensureSourceAttached throw on bad ids).
+// Exported for tests.
+export function parseAttachBody(
+  body: unknown,
+): { cacheIds: string[]; connectionIds: string[] } {
+  const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : [];
+  return { cacheIds: strings(b.cacheIds), connectionIds: strings(b.connectionIds) };
 }
 
 // ---------------------------------------------------------------------------
@@ -622,6 +640,83 @@ export function mountD2eRoutes(app: Express): void {
       "[d2e-compat] POST /trex/db/pub/:name: Trex.addDB not available — publication deferred to parity phase"
     );
     (res as any).json({ message: "ok", warning: "Publication replication is not available in this build" });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // POST /trex/attach — (re)attach dataset caches and source DBs on demand.
+  //
+  // Ported from the d2e fork's services/trex/core/server/routes/dbm.ts as fixed
+  // by d2e PR #2866 (commit 8c1fab05): the portal calls this synchronously right
+  // after creating a dataset row, so the portal-assigned cache_id catalog must
+  // exist BEFORE the omop_cdm_plugin datamodel flow writes the cache.
+  // createDbFileIfMissing: true is what creates `<cacheId>.db` for a brand-new
+  // dataset — without it the attach silently skips the missing file and
+  // "Update metadata" later fails with "Schema ... does not exist in cache"
+  // (d2e issue #2745).
+  //
+  // Best-effort per id (matching the fork and the portal's fire-and-forget
+  // caller): individual attach failures are logged and the route still
+  // returns 204.
+  // ─────────────────────────────────────────────────────────────────────────
+  app.post("/trex/attach", requireAdmin, async (req: any, res: any) => {
+    try {
+      const { cacheIds, connectionIds } = parseAttachBody((req as any).body);
+
+      const connections: SourceCredential[] = [];
+      if (connectionIds.length > 0) {
+        const all = await readRegistryDecrypted();
+        for (const id of connectionIds) {
+          const row = all.find((r: any) => r.id === id);
+          if (!row) {
+            console.log(`[trex/attach] unknown connectionId: ${id}`);
+            continue;
+          }
+          const adminCred = (row.credentials ?? []).find((x: any) => x.userScope === "Admin");
+          if (!adminCred) {
+            console.log(`[trex/attach] no Admin credential for ${id} — skipping`);
+            continue;
+          }
+          connections.push({
+            id: row.id,
+            dialect: row.dialect,
+            host: row.host,
+            port: row.port,
+            name: row.name,
+            adminUsername: adminCred.username,
+            adminPassword: adminCred.password,
+          });
+        }
+      }
+
+      // One DuckDB session reused across every ATTACH in this request.
+      const attachConn = new Trex.TrexDB("memory");
+      const attachExec: ExecFn = (sql: string) => attachConn.execute(sql, []);
+
+      for (const c of connections) {
+        try {
+          await ensureAttached({ connections: [c] }, { exec: attachExec });
+        } catch (e) {
+          console.log(`[trex/attach] connection ${c.id} attach failed: ${(e as Error).message}`);
+        }
+      }
+      for (const cid of cacheIds) {
+        try {
+          // Same cache dir boot.ts enumerates for restart re-attach, so files
+          // created here are re-attached on the next boot.
+          await ensureAttached(
+            { cacheIds: [cid] },
+            { exec: attachExec, cacheDir: "/usr/src/data/cache", createDbFileIfMissing: true },
+          );
+        } catch (e) {
+          console.log(`[trex/attach] cache ${cid} attach failed: ${(e as Error).message}`);
+        }
+      }
+
+      (res as any).status(204).end();
+    } catch (e) {
+      console.error(`[d2e-compat] POST /trex/attach: ${e}`);
+      (res as any).status(500).json({ error: "Internal server error" });
+    }
   });
 
   // ─────────────────────────────────────────────────────────────────────────

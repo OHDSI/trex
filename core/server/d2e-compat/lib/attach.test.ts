@@ -1,5 +1,6 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  ensureAttached,
   ensureCacheAttached,
   ensureSourceAttached,
   snowflakeExtrasFromRow,
@@ -144,6 +145,28 @@ Deno.test("snowflake without a private key throws a clear error", async () => {
   }
   assertEquals(threw, true);
   assertEquals(calls.length, 0);
+});
+
+// d2e #2745 / PR #2866: POST /trex/attach must attach each requested cacheId
+// with createDbFileIfMissing, so a brand-new dataset's `<cacheId>.db` is
+// created (by the ATTACH) before the omop_cdm_plugin datamodel flow writes
+// its cache into that catalog.
+Deno.test("ensureAttached over cacheIds with createDbFileIfMissing attaches every missing file", async () => {
+  const calls: string[] = [];
+  await ensureAttached(
+    { cacheIds: ["cdm000111222", "cdm000333444"] },
+    {
+      cacheDir: "/nonexistent-cache-dir-xyz",
+      createDbFileIfMissing: true,
+      exec: (sql) => {
+        calls.push(sql);
+      },
+    },
+  );
+  assertEquals(calls, [
+    "ATTACH IF NOT EXISTS '/nonexistent-cache-dir-xyz/cdm000111222.db' AS cdm000111222",
+    "ATTACH IF NOT EXISTS '/nonexistent-cache-dir-xyz/cdm000333444.db' AS cdm000333444",
+  ]);
 });
 
 Deno.test("snowflakeExtrasFromRow — reads extras directly off extra, tolerates missing", () => {
