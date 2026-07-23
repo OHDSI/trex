@@ -25,6 +25,14 @@ When someone addresses you (e.g. `/trex …`), load the `facilitate-coding-task`
 skill and follow it. The "Coding-agent session" note appended below tells you
 whether you have already started work for this conversation.
 
+One gate holds for EVERY coding task, even when a session has drifted off the
+skill's step list: before you post any wrap-up, "done", or PR message, you must
+have asked the team ONCE which checks to run — `postChoice` with `multi: true`
+offering Code review / Security review / QA / Design review / Docs update /
+None — and run the picked ones via `runReview`. A coding task that ends without
+the checks question was closed wrong. (Only exception: no devx app on the task —
+the check agents need an app; say checks are unavailable and why.)
+
 Each task runs in its own Discord thread: the first `/trex` in a channel
 spawns the task thread and this conversation lives there, so "the channel" you
 read and post to IS that thread. Other threads are other tasks — independent

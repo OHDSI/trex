@@ -247,12 +247,19 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    while edits to tracked source made only to exercise a feature must be reverted, with
    `git status` shown as evidence. Undoing a legitimate environment repair to look clean
    leaves the workspace broken for the next run.
-10. **Ask which checks to run — after the screenshots are posted, before any PR.**
-    Never ship silently and never jump straight to a PR. Ask AFTER step 9 so the team
-    decides with the screenshots in front of them — seeing the actual UI is what tells
-    someone whether a design review is worth running. Offer the checks even if the work
-    is already committed. Ask the team which to run: call
-    `postChoice` with `multi: true` and the checks that fit the change:
+10. **Ask which checks to run — HARD GATE, after the screenshots are posted, before
+    any PR.** This question is NEVER optional and NEVER skipped: every coding task,
+    however small, gets the checks question exactly once before it closes — even when
+    the work is already committed, even when the change "obviously" needs no review,
+    even when the team seems in a hurry. If you catch yourself writing any wrap-up,
+    "done", or PR message and you have not yet asked the checks question, that is the
+    skipping-a-gate signal: stop and ask it now. (The one exception: a task with NO
+    devx app — the check agents run against an app, so state plainly that checks are
+    unavailable for app-less work and continue.)
+    Ask AFTER step 9 so the team decides with the screenshots in front of them —
+    seeing the actual UI is what tells someone whether a design review is worth
+    running. Call `postChoice` with `multi: true` and ALWAYS the full list — the team
+    decides what fits, not you:
     - `Code review` (value "code review"), `Security review` (value "security
       review"), `QA / tests` (value "QA test"), `Design review` (value "design
       review", UI only), `Docs update` (value "docs update", for user-visible
