@@ -133,13 +133,28 @@ async function ensureChat(
 // life (chunks, tool calls, subagents, questionnaires); we accumulate assistant
 // text and surface a questionnaire inline so claw can relay the coder's question
 // back to the channel. The turn is done when the server closes the stream.
-async function streamTurn(token: string, chatId: string, message: string): Promise<string> {
+async function streamTurn(
+  token: string,
+  chatId: string,
+  message: string,
+  attachments?: CodeTurnArgs["attachments"],
+): Promise<string> {
   const res = await fetch(`${apiBase()}/chats/${chatId}/stream`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
     // useWorktree pins the coder to a stable per-chat git worktree so feature
     // work stays isolated and survives the cwd reset between turns.
-    body: JSON.stringify({ prompt: message, useWorktree: true }),
+    // remoteChannel tells the coder it is driven from a chat channel whose
+    // participants cannot execute anything on this machine (sandbox context) —
+    // it must run/verify everything itself instead of handing back commands.
+    // attachments (channel files, metadata only) are materialized into the
+    // coder's workspace by the devx side before the turn starts.
+    body: JSON.stringify({
+      prompt: message,
+      useWorktree: true,
+      remoteChannel: true,
+      ...(attachments?.length ? { attachments } : {}),
+    }),
   });
   if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status} ${res.ok ? "(no body)" : await res.text()}`);
 
@@ -189,6 +204,9 @@ export interface CodeTurnArgs {
   message: string;
   userId: string;
   appId: string | null;
+  // Channel attachments relayed verbatim (metadata only); the devx stream
+  // handler downloads them into the coder's workspace before the turn.
+  attachments?: Array<{ name: string; url: string; contentType?: string }>;
 }
 
 // One hand-off to the Claude Code coder. Opens the chat on first use, forces the
@@ -202,6 +220,6 @@ export async function runCodeTurn(
   const token = await mintToken(args.userId);
   await ensureClaudeCodeProvider(token);
   const chatId = await ensureChat(token, args.appId, args.chatId);
-  const replyText = await streamTurn(token, chatId, args.message);
+  const replyText = await streamTurn(token, chatId, args.message, args.attachments);
   return { chatId, replyText };
 }

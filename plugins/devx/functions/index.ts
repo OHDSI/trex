@@ -386,6 +386,20 @@ Deno.serve(async (req: Request) => {
       // claw sets this so the coder works in a stable per-chat git worktree
       // (isolated feature branch) instead of the shared app working tree.
       const streamUseWorktree = body.useWorktree === true;
+      // claw also sets this: the request originates from a chat channel whose
+      // participants cannot execute anything on this machine. Appends the
+      // remote-channel sandbox context to the system prompt (all providers);
+      // the devx browser UI never sends it.
+      const streamRemoteChannel = body.remoteChannel === true;
+      // Channel attachments (metadata only: name/url/contentType), relayed by
+      // claw. Downloaded into the coder's workspace before the turn so the
+      // coder can Read them (images render multimodally); never inlined into
+      // any prompt. Capped defensively — the urls are remote input.
+      const streamAttachments = Array.isArray(body.attachments)
+        ? body.attachments
+          .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+          .slice(0, 10)
+        : [];
 
       // Verify chat belongs to user
       const chatCheck = await sql(
@@ -702,6 +716,10 @@ Deno.serve(async (req: Request) => {
       if (hasComponentSelection) {
         systemPrompt += "\nThe user has selected specific components for editing. Component details and code snippets are in the user's message. Focus your modifications on those components.";
       }
+      if (streamRemoteChannel) {
+        const { REMOTE_CHANNEL_SYSTEM_PROMPT } = await import("./prompts.ts");
+        systemPrompt += `\n${REMOTE_CHANNEL_SYSTEM_PROMPT}`;
+      }
 
       // Get most recent messages for context (subquery to get newest, then order ascending)
       const historyResult = await sql(
@@ -791,6 +809,8 @@ Deno.serve(async (req: Request) => {
                 commandOverride,
                 hasComponentSelection,
                 useWorktree: streamUseWorktree,
+                remoteChannel: streamRemoteChannel,
+                attachments: streamAttachments,
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;

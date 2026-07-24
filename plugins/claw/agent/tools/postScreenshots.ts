@@ -5,7 +5,7 @@
 import { defineTool } from "eve/tools";
 import { postChannelMessage, type AttachmentUpload } from "../lib/discord-rest.ts";
 import { readOrchestration } from "../lib/state.ts";
-import { workspaceRoot, safeRelative } from "../lib/workspace.ts";
+import { workspaceRoot, readCoderFile } from "../lib/workspace.ts";
 import { effectiveUserId } from "./askCodeAgent.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 
@@ -43,22 +43,24 @@ export default defineTool({
 
     // The coder's app is fixed per task and stored on the orchestration row.
     const prior = await readOrchestration(ctx.sql, ctx.sessionId);
-    const root = workspaceRoot(userId, prior?.appId ?? null);
 
     const files: AttachmentUpload[] = [];
     const skipped: string[] = [];
     for (const p of paths.slice(0, 10)) {
-      const rel = safeRelative(p);
-      if (!rel) { skipped.push(p); continue; }
-      try {
-        const bytes = await Deno.readFile(`${root}/${rel}`);
-        files.push({ name: rel.split("/").pop() || "screenshot.png", bytes, contentType: "image/png" });
-      } catch {
+      // Reads the per-chat worktree the coder actually ran in, then the app root.
+      const found = await readCoderFile(userId, prior?.appId ?? null, prior?.codeSessionId ?? null, p);
+      if (found) {
+        files.push({ name: found.path.split("/").pop() || "screenshot.png", bytes: found.bytes, contentType: "image/png" });
+      } else {
         skipped.push(p);
       }
     }
     if (files.length === 0) {
-      throw new Error(`postScreenshots: no readable screenshots found (looked under ${root}); paths=${JSON.stringify(paths)}`);
+      const root = workspaceRoot(userId, prior?.appId ?? null);
+      throw new Error(
+        `postScreenshots: no readable screenshots found (looked under ${root} and ` +
+          `its .worktrees/${prior?.codeSessionId ?? "none"}); paths=${JSON.stringify(paths)}`,
+      );
     }
     await postChannelMessage(fetch, { botToken: token, channelId, content: caption, files });
     return { posted: files.map((f) => f.name), skipped };

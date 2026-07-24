@@ -7,7 +7,7 @@ import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
 import { buildSdkTools, resolveInstructions } from "./toolset.ts";
-import { resolveModelForTurn, withSystemCachePoint } from "./model.ts";
+import { cacheProviderOptions, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
@@ -550,6 +550,8 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
             messages: modelMessages,
             tools,
             stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
+            // Same openai prompt-cache routing as runner.ts, keyed by agent dir.
+            providerOptions: cacheProviderOptions(model, agent.dir),
             onFinish: async ({ text, totalUsage }) => {
               await store.addStep(turn.id, 1, "text", null, { text }, totalUsage)
                 .catch((e) => console.error("agents: chat persist failed:", e));
