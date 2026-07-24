@@ -307,6 +307,10 @@ COPY --from=pg-meta-builder /build/node_modules/ ./plugins-dev/pg-meta/postgres-
 # plugins-dev like storage/postgrest — not published to npm, no build step.
 # Dormant unless its DISCORD_*/CLAW_* env is configured at runtime.
 COPY plugins/claw/ ./plugins-dev/claw/
+# d2esupport agent plugin (Slack support triage forwarding to claw): same
+# pattern as claw — no build step, dormant unless its SLACK_*/D2ESUPPORT_*
+# env is configured at runtime.
+COPY plugins/d2esupport/ ./plugins-dev/d2esupport/
 # prometheus (FHIR analytics UI + its functions/functions-mri workers): whole
 # plugin dir + the freshly-built dist overlaid from the builder stage. The
 # plugin scanner picks up its trex.ui.routes/functions from package.json; the
