@@ -259,6 +259,14 @@ function buildArgs(
       return startChannelSession(channelId, channel, message, opts);
     },
 
+    async hasSession(continuationToken) {
+      // Read-only twin of send()'s resolve-or-create: same namespacing, but a
+      // miss stays a miss. Store fakes without getSessionByToken → false.
+      const token = namespacedToken(channelId, continuationToken);
+      const sessionId = await deps.channelStore.getSessionByToken?.(channelId, token);
+      return sessionId != null;
+    },
+
     getSession(sessionId) {
       if (!sessionId) return null;
       return {
