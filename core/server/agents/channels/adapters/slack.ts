@@ -41,7 +41,7 @@ import {
   splitSlackMessageText,
   updateSlackMessage,
 } from "../vendor/slack/api.ts";
-import { parseAppMentionEvent, parseDirectMessageEvent, type SlackMessage } from "../vendor/slack/inbound.ts";
+import { parseAppMentionEvent, parseDirectMessageEvent, parseThreadMessageEvent, type SlackMessage } from "../vendor/slack/inbound.ts";
 import {
   parseBlockActionsPayload,
   type ParsedBlockActionsPayload,
@@ -122,6 +122,15 @@ export interface SlackChannelOptions {
    * dropped silently; channel @mentions are unaffected.
    */
   directMessages?: boolean;
+  /**
+   * Thread-following: once the agent has a session for a thread (someone
+   * @mentioned it there), every human reply in that thread becomes a turn —
+   * no re-mentioning. JOIN-ONLY: a thread reply never creates a session
+   * (args.hasSession gates dispatch), so ordinary channel chatter stays
+   * ignored. Requires the Slack app to subscribe to `message.channels`
+   * (+ `message.groups` for private channels) with `channels:history`.
+   */
+  threads?: boolean;
 }
 
 const OK = () => new Response("ok", { status: 200 });
@@ -403,8 +412,18 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
           // DMs are off by default (see SlackChannelOptions.directMessages).
           const message = parseAppMentionEvent(envelope as never) ??
             (opts.directMessages === true ? parseDirectMessageEvent(envelope as never) : null);
-          if (!message) return OK();
-          return handleMessage(message, args);
+          if (message) return handleMessage(message, args);
+          // Thread-following (opts.threads): a plain human reply inside a
+          // thread reaches the agent ONLY when a session for that thread
+          // already exists — join-only, never session-creating, so ordinary
+          // channel chatter stays ignored.
+          if (opts.threads === true) {
+            const threadMsg = parseThreadMessageEvent(envelope as never);
+            if (threadMsg && await args.hasSession(slackContinuationToken(threadMsg.channelId, threadMsg.threadTs))) {
+              return handleMessage(threadMsg, args);
+            }
+          }
+          return OK();
         }
         return OK();
       }),

@@ -5,6 +5,9 @@ import { slackChannel } from "eve/channels/slack";
 import { isAllowedSlackUser } from "../lib/allowlist.ts";
 
 export default slackChannel({
+  // Once a support thread exists (user @mentioned the agent), every human
+  // reply in it reaches the agent without re-mentioning (join-only).
+  threads: true,
   allow: (id) => isAllowedSlackUser(id.userId),
   onCommand: (message) => ({
     context: [

@@ -68,6 +68,7 @@ function mockArgs(
     },
     params: {},
     waitUntil: () => {},
+    hasSession: () => Promise.resolve(false),
     requestIp: null,
   };
   return { args, sends, resumes };

@@ -48,10 +48,12 @@ interface ResumeCall {
 
 function mockArgs(
   resumeResult: { ok: boolean; error?: string } = { ok: true },
+  knownTokens: string[] = [],
 ): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[] } {
   const sends: SendCall[] = [];
   const resumes: ResumeCall[] = [];
   const args: ChannelRouteArgs = {
+    hasSession: (token) => Promise.resolve(knownTokens.includes(token)),
     send(message, opts) {
       sends.push({ message, opts });
       return Promise.resolve({ id: "session-1" });
@@ -436,4 +438,47 @@ Deno.test("conversations allow-list: view_submission for a channel NOT on the li
   const res = await channel.routes[0].handler(await interactionRequest(freeformViewSubmissionPayload()), args);
   assertEquals(res.status, 200);
   assertEquals(resumes.length, 0);
+});
+
+// ---- thread-following (opts.threads) ---------------------------------------
+
+const THREAD_REPLY = {
+  type: "event_callback",
+  team_id: "T123",
+  event: {
+    type: "message",
+    channel_type: "channel",
+    user: "U777",
+    text: "any update on this?",
+    ts: "1700000000.000200",
+    thread_ts: "1700000000.000001", // reply inside the mention's thread
+    channel: "C555",
+  },
+};
+
+Deno.test("threads: a reply in a thread WITH an existing session becomes a turn (no re-mention)", async () => {
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET }, threads: true });
+  // Session already exists for this thread's token (created by the earlier mention).
+  const { args, sends } = mockArgs({ ok: true }, ["C555:1700000000.000001"]);
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(THREAD_REPLY)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "C555:1700000000.000001");
+  assertEquals(sends[0].message.includes("any update on this?"), true);
+});
+
+Deno.test("threads: a reply in a thread WITHOUT a session is ignored (join-only, never creates)", async () => {
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET }, threads: true });
+  const { args, sends } = mockArgs({ ok: true }, [] /* no known sessions */);
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(THREAD_REPLY)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0, "unknown thread must not start a session");
+});
+
+Deno.test("threads off (default): thread replies are ignored even with an existing session", async () => {
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET } });
+  const { args, sends } = mockArgs({ ok: true }, ["C555:1700000000.000001"]);
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(THREAD_REPLY)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0);
 });
