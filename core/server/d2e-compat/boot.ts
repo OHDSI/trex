@@ -280,7 +280,7 @@ export async function d2eBoot(): Promise<void> {
     }
     for (const cid of cacheIds) {
       try {
-        await ensureAttached({ cacheIds: [cid] }, { exec: attachExec, cacheDir });
+        await ensureAttached({ cacheIds: [cid] }, { exec: attachExec, cacheDir, createDbFileIfMissing: true});
       } catch (e) {
         log(`[attach-startup] cache ${cid} attach failed: ${(e as Error).message}`);
       }

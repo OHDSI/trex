@@ -10,6 +10,7 @@
  *  /oauth/token          — public      (Logto PKCE token exchange; d2e base.ts: no authn/authz middleware)
  *  /portal/plugin.json   — public      (d2e portal.ts: no authn/authz middleware)
  *  /portal/env.js        — public      (d2e portal.ts: no authn/authz middleware)
+ *  /trex/attach          — requireAdmin (ensure source and cache catalogs are attached)
  *  /trex/db/*            — requireAdmin (d2e: authn + authz → ALP_SYSTEM_ADMIN scope required)
  *  /trex/log             — requireAdmin (d2e: authn + authz → trex.log.write scope, assigned to ALP_SYSTEM_ADMIN)
  *
@@ -41,6 +42,7 @@ import { getPluginsJson } from "../plugin/ui.ts";
 import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
 import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
 import { upsertDatabaseCredential } from "./db-credential.ts";
+import { ensureAttached, type ExecFn } from "./lib/attach.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -418,6 +420,56 @@ export function mountD2eRoutes(app: Express): void {
 
     (res as any).setHeader("Content-Type", "application/javascript");
     (res as any).send(`window.ENV_DATA = ${JSON.stringify(clientEnv)}`);
+  });
+
+  // POST /trex/attach — ensure runtime source and cache catalogs exist.
+  //
+  // Dataset creation calls this immediately after assigning a cache_id. A new
+  // cache has no DuckDB file yet, so the attach must be allowed to create it;
+  // otherwise the subsequent Prefect flow fails with "Catalog ... does not
+  // exist". ATTACH IF NOT EXISTS makes repeated requests idempotent.
+  app.post("/trex/attach", requireAdmin, async (req: any, res: any) => {
+    const body: any = (req as any).body ?? {};
+    const cacheIds = body.cacheIds ?? [];
+    const connectionIds = body.connectionIds ?? [];
+
+    if (
+      !Array.isArray(cacheIds) ||
+      !Array.isArray(connectionIds) ||
+      cacheIds.some((id: unknown) => typeof id !== "string") ||
+      connectionIds.some((id: unknown) => typeof id !== "string")
+    ) {
+      (res as any).status(400).json({ error: "cacheIds and connectionIds must be string arrays" });
+      return;
+    }
+
+    try {
+      if (connectionIds.length > 0) {
+        // The native manager owns source attachment. Re-syncing the registry is
+        // idempotent and ensures newly registered sources are visible.
+        await syncTrexDatabaseManager();
+      }
+
+      const Trex = (globalThis as any).Trex;
+      if (!Trex?.TrexDB) {
+        throw new Error("TrexDB is unavailable");
+      }
+      const attachConn = new Trex.TrexDB("memory");
+      const attachExec: ExecFn = (sql) => attachConn.execute(sql, []);
+      await ensureAttached(
+        { cacheIds },
+        {
+          exec: attachExec,
+          cacheDir: "/usr/src/data/cache",
+          createDbFileIfMissing: true,
+        },
+      );
+
+      (res as any).json({ cacheIds, connectionIds });
+    } catch (e) {
+      console.error(`[d2e-compat] POST /trex/attach: ${e}`);
+      (res as any).status(500).json({ error: "Failed to attach databases" });
+    }
   });
 
   // ─────────────────────────────────────────────────────────────────────────

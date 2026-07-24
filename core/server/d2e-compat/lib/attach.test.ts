@@ -1,5 +1,6 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  ensureAttached,
   ensureCacheAttached,
   ensureSourceAttached,
   snowflakeExtrasFromRow,
@@ -76,6 +77,24 @@ Deno.test("cache attach without the flag skips a missing file", async () => {
     },
   });
   assertEquals(calls, []);
+});
+
+Deno.test("attach request creates and attaches a missing cache catalog", async () => {
+  const cacheId = `_${crypto.randomUUID().replace(/-/g, "_")}`;
+  const calls: string[] = [];
+  await ensureAttached(
+    { cacheIds: [cacheId] },
+    {
+      cacheDir: "/usr/src/data/cache",
+      createDbFileIfMissing: true,
+      exec: (sql) => {
+        calls.push(sql);
+      },
+    },
+  );
+  assertEquals(calls, [
+    `ATTACH IF NOT EXISTS '/usr/src/data/cache/${cacheId}.db' AS ${cacheId}`,
+  ]);
 });
 
 Deno.test("postgres branch is unchanged", async () => {
