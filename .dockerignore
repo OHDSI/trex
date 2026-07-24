@@ -18,6 +18,7 @@ plugins/
 !plugins/pg-meta/
 !plugins/postgrest/
 !plugins/claw/
+!plugins/prometheus/
 !plugins/d2esupport/
 !plugins/devx-ext/build/release/devx_ext.trex
 # webapi native-lib build (Dockerfile.native-lib) needs these plugin trees +
