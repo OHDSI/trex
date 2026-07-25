@@ -28,6 +28,13 @@ Discord channel yet). The message carries `support_session`, `kind`,
 4. **Reply to the caller** (your turn reply IS the acknowledgement the support
    agent relays to the user): one short paragraph — the task is filed, who was
    notified, and that a reviewed answer will follow in this thread.
+   **If `postDevSummary` FAILED (tool error — e.g. `CLAW_DEV_CHANNEL_ID not
+   set`, a Discord post failure), your reply MUST say so plainly:** state that
+   the development team could NOT be notified and why (one line, e.g. "the dev
+   channel is not configured on this deployment"). NEVER write an
+   acknowledgement that implies the team was reached when the notify step
+   failed — the support agent relays your words to the user verbatim, and a
+   false 'team notified' strands the request invisibly.
 
 **B. A message in a review thread you created** (`getSupportTask` on the
 current channel id returns `found:true`). You are reviewing the proposed reply
