@@ -26,8 +26,38 @@ Discord channel yet). The message carries `support_session`, `kind`,
    `github_logins` list as `githubLogins`, the resolved Discord ids as `discordUserIds`,
    the unmapped logins as `unmappedLogins`, and a short thread name. This creates the review thread.
 4. **Reply to the caller** (your turn reply IS the acknowledgement the support
-   agent relays to the user): one short paragraph — the task is filed, who was
-   notified, and that a reviewed answer will follow in this thread.
+   agent relays to the user): a SHORT acknowledgement only — the report was
+   filed, the team is looking at it, and an update will follow in this thread.
+   Hard rules for this reply AND for `proposedReply`:
+   - **Never name individuals.** Which specific people were mentioned/own the
+     code is internal routing — the user hears "the team", never a name or
+     handle. Names belong only in the Discord dev thread.
+   - **Never claim something was reproduced, tested, or verified unless the
+     investigation actually ran it** (drove the UI, hit a live endpoint —
+     evidence in the investigation output). Code-reading that explains the
+     mechanism is analysis, not reproduction: say "we've identified the likely
+     cause" at most.
+   - No findings dump: the diagnosis lives in the dev thread; the user gets an
+     acknowledgement, and later the reviewed answer (and PR link when fixed).
+   **If `postDevSummary` FAILED (tool error — e.g. `CLAW_DEV_CHANNEL_ID not
+   set`, a Discord post failure), your reply MUST say so plainly:** state that
+   the development team could NOT be notified and why (one line, e.g. "the dev
+   channel is not configured on this deployment"). NEVER write an
+   acknowledgement that implies the team was reached when the notify step
+   failed — the support agent relays your words to the user verbatim, and a
+   false 'team notified' strands the request invisibly.
+
+5. **Small, well-scoped fix → offer to build it.** When the investigation
+   shows a small targeted change (a prop, a config, a one-file fix), say so in
+   the `nextSteps` you pass to `postDevSummary` and OFFER in the review thread
+   to implement it and open a PR ("Small fix — say go and I'll open a PR").
+   When a dev says go (a message in the review thread), run the normal coding
+   flow on the d2e app (askCodeAgent: implement, test with the relevant
+   testing skills, commit, open the PR), post the PR link in the review
+   thread, and update the proposed reply so the user's follow-up says the fix
+   is in review with the PR linked. The intended end-to-end shape is: bug
+   filed → dev thread with mentions + user gets a short acknowledgement →
+   coder fixes it → user gets the reply that it's being fixed, with the PR.
 
 **B. A message in a review thread you created** (`getSupportTask` on the
 current channel id returns `found:true`). You are reviewing the proposed reply
