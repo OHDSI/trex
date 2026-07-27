@@ -671,6 +671,19 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
 
 // Supabase-compatible /pg/v1/* route — calls postgres-meta worker directly.
 app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res) => {
+  // Admin-only: pg-meta runs privileged schema introspection/DDL against the
+  // database and does NOT authenticate the caller itself (unlike PostgREST on
+  // /rest/v1 and the storage worker on /storage/v1, which verify the JWT). Gate
+  // it here the same way the Studio API is gated, so an authenticated non-admin
+  // (or anon) can't reach it. authContext has already populated pgSettings.
+  const role = (req as any).pgSettings?.["app.user_role"];
+  if (role !== "admin") {
+    res.status(role ? 403 : 401).json({
+      error: role ? "forbidden" : "not_authenticated",
+      error_description: "pg-meta (/pg/v1) is admin-only",
+    });
+    return;
+  }
   const handler = fnmap["@trex/pg-meta/postgres-meta/functions"];
   if (!handler) {
     res.status(503).json({ error: "pg-meta plugin not loaded" });
