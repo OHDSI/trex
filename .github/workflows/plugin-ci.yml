@@ -1217,16 +1217,30 @@ jobs:
           cp ./trex-artifacts/*.trex d2e/.ci-overlay/
           ls -l d2e/.ci-overlay/
 
-      # d2e publishes d2e-trex only as <prefix><sha> tags (no moving ":develop"). The
-      # packages API returns versions newest-first, but the newest tag can belong to
-      # an in-flight build whose manifest isn't pushed yet (pull → "manifest unknown").
-      # Walk newest→older and pin the first tag that actually resolves. DOCKER_TAG_NAME
-      # then drives the rebundle IMG, the compose override, and the cli.js pull/start.
-      - name: Resolve latest d2e-trex image tag
+      # d2e publishes its service images only as <prefix><sha> tags (no moving
+      # ":develop"). The packages API returns versions newest-first, but the newest
+      # tag can belong to an in-flight build whose manifests aren't all pushed yet
+      # (pull → "manifest unknown"). DOCKER_TAG_NAME drives EVERY per-sha image in
+      # the d2e compose (trex, logto, logto-post-init, pg-mgmt-init, storage,
+      # gateway, dataflow-gen-worker, …), and the publishes are not atomic — a tag
+      # can have d2e-trex pushed while d2e-logto is still building (that exact race
+      # broke this job: "alp-logto … manifest unknown"). So walk newest→older and
+      # pin the first tag where the COMPLETE image set resolves, deriving the set
+      # from the checked-out compose file so it never drifts from reality.
+      - name: Resolve latest fully-published d2e image tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PREFIX="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}"
+          # Every image name tagged with DOCKER_TAG_NAME. The base compose holds
+          # the image lines; the -ci file is an overlay — scan both.
+          IMAGES=$(grep -rhoE 'image:.*\$\{DOCKER_IMAGE_PREFIX[^}]*\}[a-z0-9-]+:\$\{DOCKER_TAG_NAME' \
+              d2e/docker-compose.yml d2e/docker-compose-ci.yml 2>/dev/null \
+            | sed -E 's/.*\}([a-z0-9-]+):.*/\1/' | sort -u)
+          if [ -z "$IMAGES" ]; then
+            echo "::error::could not derive DOCKER_TAG_NAME image set from the d2e compose files"; exit 1
+          fi
+          echo "images sharing DOCKER_TAG_NAME:" $IMAGES
           TAGS=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
             --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][]')
           if [ -z "$TAGS" ]; then
@@ -1234,15 +1248,19 @@ jobs:
           fi
           TAG=""
           for t in $TAGS; do
-            if docker manifest inspect "${PREFIX}d2e-trex:${t}" >/dev/null 2>&1; then
-              TAG="$t"; break
-            fi
-            echo "skip ${t}: manifest not published yet"
+            ok=1
+            for img in $IMAGES; do
+              if ! docker manifest inspect "${PREFIX}${img}:${t}" >/dev/null 2>&1; then
+                echo "skip ${t}: ${img} manifest not published yet"
+                ok=0; break
+              fi
+            done
+            if [ "$ok" = "1" ]; then TAG="$t"; break; fi
           done
           if [ -z "$TAG" ]; then
-            echo "::error::no pullable d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*'"; exit 1
+            echo "::error::no tag matching '${D2E_TREX_TAG_PREFIX}*' has the complete image set published"; exit 1
           fi
-          echo "Using d2e-trex image: ${PREFIX}d2e-trex:${TAG}"
+          echo "Using d2e image tag: ${TAG} (all $(echo "$IMAGES" | wc -w) images resolve)"
           echo "DOCKER_TAG_NAME=$TAG" >> "$GITHUB_ENV"
 
       - name: Rebundle this branch's core (main) into fresh eszips
