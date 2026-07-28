@@ -13,38 +13,53 @@ export function getTokenSubject(token: string): string | null {
   }
 }
 
-async function exchangeToken(logtoToken: string): Promise<string | null> {
-  const webApiUrl = "http://localhost:8080/WebAPI/user/login/openidDirect";
+const WEBAPI_BASE_URL = "http://localhost:8080/WebAPI";
 
+/**
+ * WebAPI's OIDC login is a two-step handshake: `openidDirect` validates the
+ * Logto token and answers with a short-lived single-use code, which
+ * `otc` then exchanges for the WebAPI session JWT.
+ */
+async function exchangeToken(logtoToken: string): Promise<string | null> {
   try {
-    console.log(`[d2e-compat] Token exchange: calling ${webApiUrl}`);
-    const response = await fetch(webApiUrl, {
+    const codeResponse = await fetch(`${WEBAPI_BASE_URL}/user/login/openidDirect`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${logtoToken}`,
       },
     });
 
-    console.log(`[d2e-compat] Token exchange response: status=${response.status}`);
-
-    if (!response.ok) {
-      const body = await response.text();
-      console.error(`[d2e-compat] Token exchange failed: ${response.status} ${body}`);
-      return null;
-    }
-
-    const webApiToken = response.headers.get("Bearer");
-    if (!webApiToken) {
-      const headerNames: string[] = [];
-      response.headers.forEach((_v, k) => headerNames.push(k));
+    if (!codeResponse.ok) {
       console.error(
-        `[d2e-compat] Token exchange: no Bearer header in response. Response header names: ${headerNames.join(", ")}`,
+        `[d2e-compat] Token exchange failed: ${codeResponse.status} ${await codeResponse.text()}`,
       );
       return null;
     }
 
-    console.log("[d2e-compat] Token exchange: success");
-    return webApiToken;
+    const { code } = await codeResponse.json() as { code?: string };
+    if (!code) {
+      console.error("[d2e-compat] Token exchange: openidDirect returned no one-time code");
+      return null;
+    }
+
+    const jwtResponse = await fetch(
+      `${WEBAPI_BASE_URL}/user/login/otc?code=${encodeURIComponent(code)}`,
+    );
+
+    if (!jwtResponse.ok) {
+      console.error(
+        `[d2e-compat] Token exchange: one-time code rejected: ${jwtResponse.status} ${await jwtResponse.text()}`,
+      );
+      return null;
+    }
+
+    const { jwt } = await jwtResponse.json() as { jwt?: string };
+    if (!jwt) {
+      console.error("[d2e-compat] Token exchange: redeemed one-time code carried no JWT");
+      return null;
+    }
+
+    return jwt;
   } catch (err) {
     console.error(`[d2e-compat] Token exchange error: ${err}`);
     return null;
