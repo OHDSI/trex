@@ -23,6 +23,7 @@ import { Plugins } from "./plugin/plugin.ts";
 import { addPluginRoutes } from "./routes/plugin.ts";
 import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
+import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
@@ -148,8 +149,26 @@ app.get(`${BASE_PATH}/api/web-config`, apiLimiter, (_req, res) => {
   res.json({ navExtra });
 });
 
-// Mount GoTrue-compatible auth router
-app.use(`${BASE_PATH}/auth/v1`, authRouter);
+// Mount the GoTrue-compatible native auth router — but only when the native IDP
+// is explicitly enabled. Disabled by default so a deployment fronted by an
+// external IdP (d2e + Logto) ships no native login for ANY user and no usable
+// seeded admin@trex.local credential. When disabled, every native login endpoint
+// returns 403. Enable with TREX_IDP_ENABLED=true (see docker-compose.dev.yml /
+// docker-compose-local.yml for local/standalone use).
+if (nativeIdpEnabled()) {
+  app.use(`${BASE_PATH}/auth/v1`, authRouter);
+} else {
+  app.use(
+    `${BASE_PATH}/auth/v1`,
+    (_req: express.Request, res: express.Response) => {
+      res.status(403).json({
+        error: "idp_disabled",
+        error_description:
+          "Native login is disabled. Set TREX_IDP_ENABLED=true to enable it.",
+      });
+    },
+  );
+}
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
 if (typeof (globalThis as any).global === "undefined") {
