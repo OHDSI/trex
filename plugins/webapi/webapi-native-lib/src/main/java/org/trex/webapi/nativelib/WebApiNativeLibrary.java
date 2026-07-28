@@ -3,18 +3,12 @@ package org.trex.webapi.nativelib;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.security.KeyStore;
-import java.security.cert.Certificate;
-import java.security.cert.CertificateException;
-import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import javax.net.ssl.HttpsURLConnection;
 import javax.net.ssl.SSLContext;
-import javax.net.ssl.TrustManager;
-import javax.net.ssl.TrustManagerFactory;
-import javax.net.ssl.X509TrustManager;
 
 import org.graalvm.nativeimage.IsolateThread;
 import org.graalvm.nativeimage.c.function.CEntryPoint;
@@ -31,16 +25,20 @@ public final class WebApiNativeLibrary {
 
     private static final AtomicReference<ConfigurableApplicationContext> CONTEXT = new AtomicReference<>();
 
+    /** Guards the process-global TLS trust install so a start/stop/start cycle does it once. */
+    private static final AtomicBoolean TRUST_APPLIED = new AtomicBoolean(false);
+
     @CEntryPoint(name = "webapi_start")
     public static CCharPointer start(IsolateThread thread, CCharPointer argsJson) {
         if (CONTEXT.get() != null) {
             return cstr("already-running");
         }
         try {
-            // Configure JVM TLS trust BEFORE Spring (and therefore SunJSSE / the OIDC
-            // client) initializes any SSLContext. This native image bakes its default
-            // truststore at build time and ignores the OS store / update-ca-certificates,
-            // so an internal self-signed CA must be injected here at runtime.
+            // Load-bearing ordering: configure JVM TLS trust BEFORE Spring (and
+            // therefore SunJSSE / the OIDC client) initializes any SSLContext. This
+            // native image bakes its default truststore at build time and ignores the
+            // OS store / update-ca-certificates, so an internal self-signed CA must be
+            // injected here at runtime. Keep this first; nothing above it may touch TLS.
             applyExtraTrustFromEnv();
             System.setProperty("trexsql.use.pool", "true");
             SpringApplication app = new SpringApplication(WebApi.class);
@@ -82,98 +80,98 @@ public final class WebApiNativeLibrary {
     /**
      * Env-driven TLS trust for the embedded native WebAPI.
      *
-     * WEBAPI_TRUST_CERTS = path to a PEM file holding one or more CA certificates
-     * (e.g. /usr/src/cert/ca.pem, written by the trex container command). When set,
-     * a composite SSLContext is installed as the process default: it validates
-     * against the JDK's built-in roots first and falls back to these extra CA(s),
-     * so both public TLS and internal self-signed TLS (Logto/Caddy OIDC discovery,
-     * JWKS, token, userinfo) succeed. Built at runtime so it is independent of the
-     * native image's build-time truststore. Missing/empty/bad input is logged and
-     * skipped rather than aborting startup.
+     * <p>WEBAPI_TRUST_CERTS = path to a PEM file holding one or more CA certificates
+     * (e.g. /usr/src/cert/ca.pem). When set, the JVM's default trust anchors and
+     * these extra CA(s) are merged into one runtime truststore, so both public TLS
+     * and internal self-signed TLS (Logto/Caddy OIDC discovery, JWKS, token,
+     * userinfo) succeed. Built at runtime so it is independent of the native
+     * image's build-time truststore. Missing/empty/bad input is logged and skipped
+     * rather than aborting startup.
+     *
+     * <p><b>This mutates process-global JVM TLS state</b> — the default
+     * {@link SSLContext}, the default {@link HttpsURLConnection} socket factory,
+     * and the {@code javax.net.ssl.trustStore*} system properties. That is
+     * intended: a shared library has no narrower scope to configure, and the two
+     * mechanisms cover different consumers (the properties reach libraries that
+     * build their own {@code TrustManagerFactory} and never look at the default
+     * context). Trust is only ever <i>widened</i> — every anchor the JVM already
+     * had is carried over — which is what bounds the blast radius.
+     *
+     * <p>Must run before anything initializes an {@code SSLContext} or reads those
+     * system properties, i.e. before Spring bootstraps. Keep the call first in
+     * {@link #start}; a TLS consumer that runs earlier would silently miss this
+     * and reintroduce the handshake failures this exists to fix.
      */
     private static void applyExtraTrustFromEnv() {
         String caPath = System.getenv("WEBAPI_TRUST_CERTS");
         if (caPath == null || caPath.isBlank()) {
             return;
         }
+        if (!TRUST_APPLIED.compareAndSet(false, true)) {
+            System.out.println("[webapi-native-lib] runtime TLS trust already installed; skipping");
+            return;
+        }
         try {
-            CertificateFactory cf = CertificateFactory.getInstance("X.509");
-            KeyStore extraKs = KeyStore.getInstance(KeyStore.getDefaultType());
-            extraKs.load(null, null);
-            int count = 0;
+            X509Certificate[] defaults = RuntimeTrustStore.defaultTrustAnchors();
+            RuntimeTrustStore.Merged merged;
             try (InputStream in = Files.newInputStream(Path.of(caPath))) {
-                for (Certificate c : cf.generateCertificates(in)) {
-                    extraKs.setCertificateEntry("webapi-extra-ca-" + (count++), c);
-                }
+                merged = RuntimeTrustStore.merge(defaults, in);
             }
-            if (count == 0) {
+            if (merged.extraCertCount() == 0) {
                 System.err.println("[webapi-native-lib] WEBAPI_TRUST_CERTS=" + caPath
                         + " contained no certificates; skipping");
+                TRUST_APPLIED.set(false);
                 return;
             }
-
-            TrustManagerFactory defTmf =
-                    TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            defTmf.init((KeyStore) null);
-            TrustManagerFactory extraTmf =
-                    TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-            extraTmf.init(extraKs);
+            for (String warning : merged.warnings()) {
+                System.err.println("[webapi-native-lib] WEBAPI_TRUST_CERTS=" + caPath + ": " + warning);
+            }
+            for (String description : merged.descriptions()) {
+                System.out.println("[webapi-native-lib] trusting extra CA: " + description);
+            }
 
             SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, new TrustManager[] { composite(firstX509(defTmf), firstX509(extraTmf)) }, null);
+            ctx.init(null, RuntimeTrustStore.trustManagers(merged.keyStore()), null);
             SSLContext.setDefault(ctx);
             HttpsURLConnection.setDefaultSSLSocketFactory(ctx.getSocketFactory());
 
-            System.out.println("[webapi-native-lib] installed composite TLS trust (JDK roots + "
-                    + count + " cert(s) from " + caPath + ")");
+            // Reach the libraries that build their own context from the system
+            // properties rather than the default one. An operator-supplied
+            // truststore wins: its anchors are already folded into the merge above
+            // (they come back from defaultTrustAnchors), so overriding the path
+            // would only lose their explicit configuration.
+            if (System.getProperty("javax.net.ssl.trustStore") == null) {
+                // Independently non-fatal: the default SSLContext above is already
+                // installed and useful on its own, so a failure to write the PKCS12
+                // must not discard it.
+                try {
+                    RuntimeTrustStore.Persisted store = RuntimeTrustStore.persist(merged.keyStore());
+                    System.setProperty("javax.net.ssl.trustStore", store.path().toString());
+                    System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
+                    System.setProperty("javax.net.ssl.trustStorePassword", store.password());
+                    System.out.println("[webapi-native-lib] merged truststore at " + store.path());
+                } catch (Throwable t) {
+                    System.err.println("[webapi-native-lib] could not persist the merged truststore: "
+                            + t + "; the default SSLContext still trusts the extra CA(s), but"
+                            + " libraries that build their own TrustManagerFactory will not");
+                    t.printStackTrace();
+                }
+            } else {
+                System.out.println("[webapi-native-lib] javax.net.ssl.trustStore already set to "
+                        + System.getProperty("javax.net.ssl.trustStore")
+                        + "; leaving it alone — libraries that build their own TrustManagerFactory"
+                        + " will not see the extra CA(s)");
+            }
+
+            System.out.println("[webapi-native-lib] installed runtime TLS trust ("
+                    + merged.defaultAnchorCount() + " default anchors + "
+                    + merged.extraCertCount() + " cert(s) from " + caPath + ")");
         } catch (Throwable t) {
+            TRUST_APPLIED.set(false);
             System.err.println("[webapi-native-lib] failed to apply WEBAPI_TRUST_CERTS from "
                     + caPath + ": " + t);
+            t.printStackTrace();
         }
-    }
-
-    private static X509TrustManager firstX509(TrustManagerFactory tmf) {
-        for (TrustManager tm : tmf.getTrustManagers()) {
-            if (tm instanceof X509TrustManager) {
-                return (X509TrustManager) tm;
-            }
-        }
-        throw new IllegalStateException("no X509TrustManager from " + tmf.getAlgorithm());
-    }
-
-    /** X509TrustManager that accepts a chain trusted by {@code base} OR by {@code extra}. */
-    private static X509TrustManager composite(X509TrustManager base, X509TrustManager extra) {
-        return new X509TrustManager() {
-            @Override
-            public void checkClientTrusted(X509Certificate[] chain, String authType)
-                    throws CertificateException {
-                try {
-                    base.checkClientTrusted(chain, authType);
-                } catch (CertificateException e) {
-                    extra.checkClientTrusted(chain, authType);
-                }
-            }
-
-            @Override
-            public void checkServerTrusted(X509Certificate[] chain, String authType)
-                    throws CertificateException {
-                try {
-                    base.checkServerTrusted(chain, authType);
-                } catch (CertificateException e) {
-                    extra.checkServerTrusted(chain, authType);
-                }
-            }
-
-            @Override
-            public X509Certificate[] getAcceptedIssuers() {
-                X509Certificate[] a = base.getAcceptedIssuers();
-                X509Certificate[] b = extra.getAcceptedIssuers();
-                X509Certificate[] all = new X509Certificate[a.length + b.length];
-                System.arraycopy(a, 0, all, 0, a.length);
-                System.arraycopy(b, 0, all, a.length, b.length);
-                return all;
-            }
-        };
     }
 
     private static CCharPointer cstr(String s) {
