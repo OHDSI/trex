@@ -146,6 +146,9 @@ services:
       SWARM_NODE: server
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
       BASE_PATH: /trex
+      # Native email/password IDP (auth-router). Off by default in the
+      # engine; standalone/dev trex opts in so admin@trex.local can log in.
+      TREX_IDP_ENABLED: "true"
       BETTER_AUTH_URL: http://localhost:8001/trex
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
