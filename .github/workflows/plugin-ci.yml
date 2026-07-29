@@ -1349,7 +1349,7 @@ jobs:
             docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
       - name: Wait for services to be healthy
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           # The compose project name is d2e or alp depending on d2e's cli/env, so
           # discover the trex container by its name suffix instead of hardcoding it.
@@ -1362,14 +1362,37 @@ jobs:
             sleep 5
           done
           echo "$TREX is healthy"
+
+          # A healthy trex only means the gateway answers. setupdemo also needs the
+          # in-container OHDSI WebAPI (Java, :8080) — its token exchange hits it
+          # directly — which comes up AFTER the gateway. Wait for WebAPI to actually
+          # answer so setupdemo doesn't race it (the "Connection refused / Adding
+          # demo dataset 500" flake). trex reaching WebAPI but WebAPI not being up
+          # shows as a 5xx from the gateway, so treat only 2xx-4xx as ready.
+          # Best-effort: on timeout we only warn and let setupdemo's retries run,
+          # so a probe mismatch can never make the job stricter than before.
+          PORT="${CADDY_PORT:-${PORT:-443}}"
+          echo "Waiting for WebAPI at https://localhost:${PORT}/WebAPI/info ..."
+          webapi_ready=0
+          for i in $(seq 1 90); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://localhost:${PORT}/WebAPI/info" || echo 000)
+            echo "  WebAPI HTTP ${code} (attempt ${i}/90)"
+            if [ "${code}" -ge 200 ] && [ "${code}" -lt 500 ]; then webapi_ready=1; break; fi
+            sleep 5
+          done
+          if [ "${webapi_ready}" != 1 ]; then
+            echo "::warning::WebAPI did not answer within the wait window; setupdemo will rely on its retries."
+          else
+            echo "WebAPI is ready"
+          fi
           docker ps --format "{{.Names}},{{.Status}}"
 
       - name: Run setupdemo
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
-          retry_wait_seconds: 100
-          max_attempts: 2
+          retry_wait_seconds: 120
+          max_attempts: 3
           command: |
             cd d2e
             ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml setupdemo
