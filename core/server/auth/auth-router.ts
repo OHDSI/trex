@@ -9,6 +9,7 @@ import {
 } from "./jwt.ts";
 import { hashPassword, verifyPassword } from "./password.ts";
 import { authLimiter, apiLimiter } from "../middleware/rate-limit.ts";
+import { isRefreshTokenExpired } from "./refresh-token-ttl.ts";
 
 const router = Router();
 router.use(express.json());
@@ -326,7 +327,7 @@ async function handleRefreshGrant(req: any, res: any) {
     const result = await pool.query(
       `UPDATE trexdb.refresh_token SET revoked = true, "updatedAt" = NOW()
        WHERE token_hash = $1 AND revoked = false
-       RETURNING "userId", session_id`,
+       RETURNING "userId", session_id, "createdAt"`,
       [tokenHash],
     );
 
@@ -335,7 +336,15 @@ async function handleRefreshGrant(req: any, res: any) {
       return;
     }
 
-    const { userId, session_id: sessionId } = result.rows[0];
+    const { userId, session_id: sessionId, createdAt } = result.rows[0];
+
+    // Enforce an absolute lifetime: rotation alone lets a leaked-but-unused
+    // token be redeemed indefinitely. The row was just revoked above, so an
+    // expired token is consumed and rejected in one shot.
+    if (isRefreshTokenExpired(createdAt)) {
+      res.status(400).json({ error: "invalid_grant", error_description: "Refresh token expired" });
+      return;
+    }
     const user = await fetchUserById(userId);
 
     if (!user || user.banned) {

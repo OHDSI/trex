@@ -82,7 +82,7 @@ means `<plugin-dir>/foo.ts`.
 | **Flow** | `plugin/flow.ts` | Prefect deployments registered against `PREFECT_API_URL`. The image, work pool, concurrency limits, and image-tag overrides are read from the plugin config. |
 | **Transform** | `plugin/transform.ts` | dbt-like SQL projects whose models compile, materialize, and serve as JSON / CSV / Arrow HTTP endpoints. Endpoints persist across restarts via `trexdb.transform_deployment`. |
 | **Agent** | `plugin/agents.ts` | AI agents running as Deno workers on the eve-compatible agents runtime, reached through the function proxy. Sessions/turns/steps persist to the `agents` schema. `@trex`-scoped only. See [Plugins → Agent Plugins](../plugins/agent-plugins). |
-| **Memory** | `plugin/memory.ts` | Knowledge brains — each declared memory is a schema-isolated gbrain instance (`memory_<name>`) served by one shared in-runtime worker. Sources (git repos or in-package directories) import at boot; agents link to a memory by name for search/recall/capture tools. Trusted-scope only. See [Plugins → Memory Plugins](../plugins/memory-plugins). |
+| **Memory** | `plugin/memory.ts` | Knowledge brains — each declared memory is a schema-isolated knowledge store (`memory_<name>`) served by one shared in-runtime worker. Sources (git repos or in-package directories) import at boot; agents link to a memory by name for search/recall/capture tools. Trusted-scope only. See [Plugins → Memory Plugins](../plugins/memory-plugins). |
 
 A single plugin can contribute multiple types — most non-trivial plugins
 combine UI + functions. Schema migrations for a plugin-owned schema are
@@ -124,7 +124,7 @@ flowchart LR
         FnWorker2["Function worker"]
         InitWorker["Init worker"]
         AgentWorker["Agent runtime worker"]
-        MemoryWorker["Memory (gbrain) worker"]
+        MemoryWorker["Memory worker"]
     end
 
     subgraph TrexEngine["Trex Engine"]

@@ -4,7 +4,7 @@
 // endpoints cannot drift. Spec §3 (skills/subagents) + §4 (extensions).
 // deno-lint-ignore-file no-explicit-any
 import { streamText, tool, jsonSchema, stepCountIs } from "ai";
-import { resolveModel, withSystemCachePoint } from "./model.ts";
+import { cacheProviderOptions, resolveModel, withSystemCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
@@ -203,6 +203,8 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
     messages: [{ role: "user" as const, content: prompt }],
     tools,
     stopWhen: stepCountIs(target.config.maxSteps ?? 25),
+    // Same openai prompt-cache routing as runner.ts, keyed by the subagent's dir.
+    providerOptions: cacheProviderOptions(model, target.dir),
   });
   return { text: await result.text };
 }

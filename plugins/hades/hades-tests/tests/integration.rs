@@ -125,7 +125,7 @@ fn extension_loads_successfully() {
 #[test]
 fn hades_jobs_returns_empty() {
     let db = load_extension();
-    let mut stmt = db.prepare("SELECT * FROM hades_jobs()").unwrap();
+    let mut stmt = db.prepare("SELECT * FROM trex_hades_jobs()").unwrap();
     let count: usize = stmt.query_map([], |_row| Ok(())).unwrap().count();
     assert_eq!(count, 0);
 }
@@ -133,7 +133,7 @@ fn hades_jobs_returns_empty() {
 #[test]
 fn hades_envs_returns_empty_for_nonexistent_dir() {
     let db = load_extension();
-    let mut stmt = db.prepare("SELECT * FROM hades_envs('/nonexistent/path/that/does/not/exist')").unwrap();
+    let mut stmt = db.prepare("SELECT * FROM trex_hades_envs('/nonexistent/path/that/does/not/exist')").unwrap();
     let count: usize = stmt.query_map([], |_row| Ok(())).unwrap().count();
     assert_eq!(count, 0);
 }
@@ -141,7 +141,7 @@ fn hades_envs_returns_empty_for_nonexistent_dir() {
 #[test]
 fn hades_status_returns_empty_for_unknown_job() {
     let db = load_extension();
-    let mut stmt = db.prepare("SELECT * FROM hades_status('nonexistent-job-id')").unwrap();
+    let mut stmt = db.prepare("SELECT * FROM trex_hades_status('nonexistent-job-id')").unwrap();
     let count: usize = stmt.query_map([], |_row| Ok(())).unwrap().count();
     assert_eq!(count, 0);
 }
@@ -149,7 +149,7 @@ fn hades_status_returns_empty_for_unknown_job() {
 #[test]
 fn hades_cancel_returns_not_found_for_unknown_job() {
     let db = load_extension();
-    let mut stmt = db.prepare("SELECT hades_cancel('nonexistent-job-id')").unwrap();
+    let mut stmt = db.prepare("SELECT trex_hades_cancel('nonexistent-job-id')").unwrap();
     let result: String = stmt.query_row([], |row| row.get(0)).unwrap();
     assert!(result.contains("not_found_or_not_running"), "Expected not_found response, got: {result}");
 }

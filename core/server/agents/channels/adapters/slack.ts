@@ -41,7 +41,7 @@ import {
   splitSlackMessageText,
   updateSlackMessage,
 } from "../vendor/slack/api.ts";
-import { parseAppMentionEvent, parseDirectMessageEvent, type SlackMessage } from "../vendor/slack/inbound.ts";
+import { parseAppMentionEvent, parseDirectMessageEvent, parseThreadMessageEvent, type SlackMessage } from "../vendor/slack/inbound.ts";
 import {
   parseBlockActionsPayload,
   type ParsedBlockActionsPayload,
@@ -63,6 +63,8 @@ import {
 import { buildSlackAuthContext } from "../vendor/slack/auth.ts";
 import { decodeSlackApiBody } from "../vendor/slack/api-encoding.ts";
 import { getEnv, type InputResponse } from "../vendor/slack/shared.ts";
+import { channelAllows, envAllowList } from "../allow.ts";
+import type { ChannelAllowList } from "../types.ts";
 
 // Per-session Slack routing threaded as the channel session `state` — set on
 // send() and read by the delivery (`events`) handlers to post into the thread.
@@ -92,6 +94,8 @@ export interface SlackResumeContext {
   interaction: unknown;
 }
 
+export type SlackAllowFn = (id: { userId?: string; conversationId?: string }) => boolean | Promise<boolean>;
+
 export interface SlackChannelOptions {
   /** Route path within the channel. Defaults to "/" (the channel root). */
   route?: string;
@@ -109,6 +113,24 @@ export interface SlackChannelOptions {
   events?: ChannelEventHandlers;
   /** HITL resume transport (see DEFAULT below). */
   resume?: (ctx: SlackResumeContext) => void | Promise<void>;
+  /** Inbound allow-list: a static list (default: SLACK_ALLOWED_USERS/_CHANNELS env) or an async callback. A miss is acked silently. */
+  allow?: ChannelAllowList | SlackAllowFn;
+  /**
+   * Whether the agent responds in direct messages. Default false: DM work
+   * bypasses team visibility, and each top-level DM message starts its own
+   * disconnected session (no thread context). DM messages are acked and
+   * dropped silently; channel @mentions are unaffected.
+   */
+  directMessages?: boolean;
+  /**
+   * Thread-following: once the agent has a session for a thread (someone
+   * @mentioned it there), every human reply in that thread becomes a turn —
+   * no re-mentioning. JOIN-ONLY: a thread reply never creates a session
+   * (args.hasSession gates dispatch), so ordinary channel chatter stays
+   * ignored. Requires the Slack app to subscribe to `message.channels`
+   * (+ `message.groups` for private channels) with `channels:history`.
+   */
+  threads?: boolean;
 }
 
 const OK = () => new Response("ok", { status: 200 });
@@ -120,6 +142,19 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
     credentials: { botToken: opts.credentials?.botToken },
     fetch: opts.api?.fetch,
   });
+
+  const allowOpt = opts.allow;
+  async function allowed(id: { userId?: string; conversationId?: string }): Promise<boolean> {
+    if (typeof allowOpt === "function") {
+      try {
+        return await allowOpt(id);
+      } catch (e) {
+        console.warn("slack: allow callback failed — denying:", e);
+        return false;
+      }
+    }
+    return channelAllows(allowOpt ?? envAllowList("SLACK"), id);
+  }
 
   const stateOf = (channelCtx: unknown): SlackDeliveryState =>
     ((channelCtx as { state?: SlackDeliveryState } | undefined)?.state ?? {}) as SlackDeliveryState;
@@ -196,6 +231,7 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
   // ---- inbound message (Events API) ---------------------------------------
 
   async function handleMessage(message: SlackMessage, args: ChannelRouteArgs): Promise<Response> {
+    if (!(await allowed({ userId: message.author?.userId, conversationId: message.channelId }))) return OK();
     let result: SlackCommandResult | null;
     try {
       result = opts.onCommand ? await opts.onCommand(message) : {};
@@ -231,6 +267,9 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
 
     const parsed = parseBlockActionsPayload(payload);
     if (!parsed) return OK();
+
+    const actorId = (payload.user as { id?: string } | undefined)?.id;
+    if (!(await allowed({ userId: actorId, conversationId: parsed.channelId }))) return OK();
 
     // Freeform "Type your answer" click → open a modal (trigger_id is short-lived,
     // so this runs inline, not under waitUntil).
@@ -268,6 +307,11 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
     }
     const text = view.values.find((v) => v.blockId === HITL_FREEFORM_MODAL_BLOCK_ID && v.actionId === HITL_FREEFORM_MODAL_ACTION_ID)?.value ?? "";
     if (!meta.continuationToken || !meta.requestId || text.length === 0) return new Response(null, { status: 200 });
+    // The channel comes from the modal's server-written metadata (set by
+    // openFreeformModal), not the payload — view_submission carries no channel,
+    // and the request already passed signature verification.
+    const actorId = (payload.user as { id?: string } | undefined)?.id;
+    if (!(await allowed({ userId: actorId, conversationId: meta.channelId }))) return new Response(null, { status: 200 });
     await runResume({
       req,
       args,
@@ -365,9 +409,21 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
           return new Response(String(envelope.challenge ?? ""), { status: 200, headers: { "content-type": "text/plain" } });
         }
         if (envelope.type === "event_callback") {
-          const message = parseAppMentionEvent(envelope as never) ?? parseDirectMessageEvent(envelope as never);
-          if (!message) return OK();
-          return handleMessage(message, args);
+          // DMs are off by default (see SlackChannelOptions.directMessages).
+          const message = parseAppMentionEvent(envelope as never) ??
+            (opts.directMessages === true ? parseDirectMessageEvent(envelope as never) : null);
+          if (message) return handleMessage(message, args);
+          // Thread-following (opts.threads): a plain human reply inside a
+          // thread reaches the agent ONLY when a session for that thread
+          // already exists — join-only, never session-creating, so ordinary
+          // channel chatter stays ignored.
+          if (opts.threads === true) {
+            const threadMsg = parseThreadMessageEvent(envelope as never);
+            if (threadMsg && await args.hasSession(slackContinuationToken(threadMsg.channelId, threadMsg.threadTs))) {
+              return handleMessage(threadMsg, args);
+            }
+          }
+          return OK();
         }
         return OK();
       }),

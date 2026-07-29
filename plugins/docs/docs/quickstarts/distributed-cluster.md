@@ -224,5 +224,3 @@ the same plugin config and auth state.
 - [Deployment → Distributed Mode](../deployment/distributed) for production
   guidance: TLS for Flight, persistent catalogs per node, multi-AZ
   considerations.
-- See `specs/003-ballista-duckdb-distributed/spec.md` in the repo for the
-  in-progress technical spec.

@@ -9,14 +9,15 @@ pub fn run_git(args: &[&str], cwd: &str) -> Result<String, Box<dyn Error>> {
         .current_dir(cwd)
         .env("GIT_TERMINAL_PROMPT", "0")
         // Mark all directories as safe to avoid "dubious ownership" errors
-        // in container environments where git may run as a different user
-        .env("GIT_CONFIG_COUNT", "3")
+        // in container environments where git may run as a different user.
+        // Identity (user.name/email) deliberately NOT injected here: GIT_CONFIG_*
+        // env outranks .git/config, and per-user identity + SSH signing live in
+        // the repo's devx-written include file (functions/git_identity.ts).
+        // Callers that commit before that file can exist (git_init) pass a
+        // scoped `-c` fallback identity instead.
+        .env("GIT_CONFIG_COUNT", "1")
         .env("GIT_CONFIG_KEY_0", "safe.directory")
         .env("GIT_CONFIG_VALUE_0", "*")
-        .env("GIT_CONFIG_KEY_1", "user.email")
-        .env("GIT_CONFIG_VALUE_1", "devx@trex.local")
-        .env("GIT_CONFIG_KEY_2", "user.name")
-        .env("GIT_CONFIG_VALUE_2", "DevX")
         .output()
         .map_err(|e| format!("git spawn failed: {e}"))?;
 
@@ -26,7 +27,21 @@ pub fn run_git(args: &[&str], cwd: &str) -> Result<String, Box<dyn Error>> {
     if !output.status.success() {
         let raw = if stderr.is_empty() { &stdout } else { &stderr };
         let safe_err = strip_credentials(raw);
-        return Err(format!("git {} failed: {}", args[0], safe_err).into());
+        // Name the subcommand, skipping any leading `-c key=val` config pairs.
+        let subcommand = {
+            let mut it = args.iter();
+            let mut sub = args.first().copied().unwrap_or("?");
+            while let Some(a) = it.next() {
+                if *a == "-c" {
+                    it.next(); // skip the key=val
+                } else {
+                    sub = a;
+                    break;
+                }
+            }
+            sub
+        };
+        return Err(format!("git {} failed: {}", subcommand, safe_err).into());
     }
 
     Ok(stdout.trim().to_string())

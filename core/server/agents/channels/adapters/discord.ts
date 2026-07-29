@@ -71,6 +71,7 @@ import {
   decideMessageTrigger,
   type DiscordChannelSnapshot,
   fetchMessagesBefore,
+  formatAttachmentsBlock,
   formatDiscordMessageContextBlock,
   formatMessagesBlock,
   getChannelSnapshot,
@@ -157,12 +158,20 @@ export interface DiscordChannelOptions {
    * public thread, keys the session to the THREAD id (parallel threads =
    * parallel sessions), and delivers the whole conversation there; the
    * deferred original response becomes a pointer to the thread. A command
-   * already inside a thread continues that thread's session. Falls back to
-   * the in-channel behavior when thread creation fails (missing permission,
-   * DMs). Needs the bot permissions "Create Public Threads" + "Send Messages
-   * in Threads".
+   * already inside a thread continues that thread's session. When thread
+   * creation fails (missing permission), NO session is started and the
+   * error is reported — a channel-keyed fallback session would merge
+   * distinct tasks. Needs the bot permissions "Create Public Threads" +
+   * "Send Messages in Threads".
    */
   threads?: boolean;
+  /**
+   * Whether the agent responds in direct messages. Default false: DMs have
+   * no threads, so every DM task would share one channel-keyed session (the
+   * cross-task contamination class), and DM work bypasses team visibility.
+   * DM slash commands get a short refusal; plain DM messages are ignored.
+   */
+  directMessages?: boolean;
   /**
    * MESSAGE_CREATE mode (gateway-only): adds a POST "<route>/messages" route
    * fed by the host gateway client's signed loopback. @mentions behave like
@@ -178,6 +187,14 @@ export interface DiscordChannelOptions {
 // value, so the click resumes the session via a message (see handleComponent).
 const CHOICE_CUSTOM_ID = "eve_choice";
 
+// custom_ids of a postQuestion open-question flow: the "Answer" button opens a
+// text modal, and the modal submit resumes the session via a message — the same
+// resume-by-message pattern as CHOICE_CUSTOM_ID (free text cannot ride the
+// verb-restricted HITL approvals either).
+const QUESTION_CUSTOM_ID = "eve_question";
+const QUESTION_MODAL_CUSTOM_ID = "eve_question_modal";
+const QUESTION_TEXT_INPUT_ID = "eve_question_text";
+
 export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   const route = opts.route ?? "/";
 
@@ -192,9 +209,21 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   });
   const apiOpts = () => ({ apiBaseUrl: opts.api?.apiBaseUrl, credentials: credentials(), fetch: opts.api?.fetch });
 
+  // Explicit <@id> user mentions in outgoing content must actually PING: the
+  // vendored senders default allowed_mentions to {parse: []} (suppressing
+  // everything), so an agent that correctly writes <@123> still pinged nobody.
+  // Allow exactly the users literally mentioned — parse stays [], keeping
+  // @everyone/@here/roles suppressed. An explicit body.allowed_mentions wins.
+  function withUserMentions(body: DiscordMessageBody): DiscordMessageBody {
+    if (body.allowed_mentions !== undefined || typeof body.content !== "string") return body;
+    const users = [...new Set([...body.content.matchAll(/<@!?(\d+)>/g)].map((m) => m[1]))].slice(0, 25);
+    return users.length ? { ...body, allowed_mentions: { parse: [], users } } : body;
+  }
+
   // Deliver one Discord message body for a session, editing the deferred
   // original response first (then following up), else posting to the channel.
-  async function deliver(state: DiscordDeliveryState, body: DiscordMessageBody) {
+  async function deliver(state: DiscordDeliveryState, rawBody: DiscordMessageBody) {
+    const body = withUserMentions(rawBody);
     // A user-facing message (or approval buttons) ends the "working" state, and
     // the message itself clears Discord's typing indicator — stop the heartbeat.
     stopTyping(state.channelId);
@@ -320,6 +349,14 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   const events: ChannelEventHandlers = { ...builtinEvents, ...opts.events };
 
   async function handleCommand(interaction: DiscordCommandInteraction, args: ChannelRouteArgs): Promise<Response> {
+    // DMs are off by default (see DiscordChannelOptions.directMessages):
+    // guard FIRST so no hook, session, or turn ever runs for a DM command.
+    if (!interaction.guildId && opts.directMessages !== true) {
+      return discordJson({
+        content: "I only work in server channels — ask me in a channel or task thread there.",
+        ephemeral: true,
+      });
+    }
     let result: DiscordCommandResult | null;
     try {
       result = opts.onCommand ? await opts.onCommand(interaction) : {};
@@ -357,7 +394,12 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       try {
         threadId = (await createDiscordThread({ ...apiOpts(), channelId: interaction.channelId, name: threadName })).id;
       } catch (e) {
-        console.warn("discord: task-thread creation failed — falling back to in-channel session:", e);
+        console.warn("discord: task-thread creation failed — refusing to start a channel-keyed session:", e);
+      }
+      if (threadId === null) {
+        // No thread → no session (see THREAD_CREATE_FAILED_MSG rationale).
+        args.waitUntil(editOriginalWithRetry(interaction.token, THREAD_CREATE_FAILED_MSG));
+        return discordDeferredJson(false);
       }
       if (threadId !== null) {
         // Delivery goes to the thread via bot-token channel messages — the
@@ -434,8 +476,8 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   // Retried because in webhook mode the deferred response is created from this
   // handler's OWN return value, which Discord may not have processed yet when
   // the background task runs.
-  async function pointToThread(interactionToken: string, threadId: string): Promise<void> {
-    const body = { content: `Started <#${threadId}> for this task.` };
+  async function editOriginalWithRetry(interactionToken: string, content: string): Promise<void> {
+    const body = { content };
     for (const delayMs of [0, 500, 1500, 3000]) {
       if (delayMs > 0) await new Promise((r) => setTimeout(r, delayMs));
       try {
@@ -443,8 +485,24 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         return;
       } catch { /* deferred response not materialized yet — retry */ }
     }
-    console.warn("discord: could not edit the original response into a thread pointer (gave up after retries)");
+    console.warn("discord: could not edit the original response (gave up after retries)");
   }
+
+  function pointToThread(interactionToken: string, threadId: string): Promise<void> {
+    return editOriginalWithRetry(interactionToken, `Started <#${threadId}> for this task.`);
+  }
+
+  // Thread-per-task channels (opts.threads) key each task's session to its own
+  // thread id. When the thread cannot be created there is NO safe session key:
+  // the old fallback keyed the session to the CHANNEL, which merged every
+  // fallback task in that channel into one session — shared history, shared
+  // coder chat, shared git worktree (cross-task contamination). Fail visibly
+  // instead of degrading silently.
+  const THREAD_CREATE_FAILED_MSG =
+    "I couldn't create a task thread in this channel (missing thread permission?). " +
+    "I didn't start the task — each task needs its own thread so it can't mix with " +
+    "other conversations. Grant me thread permissions here, or ask again in a channel " +
+    "where I can create threads.";
 
   async function handleComponent(
     interaction: import("../vendor/discord/inbound.ts").DiscordComponentInteraction,
@@ -479,6 +537,31 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       }
       return discordJsonBody({ type: DISCORD_INTERACTION_RESPONSE_TYPE.DEFERRED_UPDATE_MESSAGE });
     }
+    // Open question (postQuestion): the "Answer" button opens a text modal;
+    // the submit resumes the session as a message (see handleModal).
+    if (interaction.customId === QUESTION_CUSTOM_ID) {
+      const prompt = readMessageContent(interaction.raw);
+      return discordJsonBody({
+        type: DISCORD_INTERACTION_RESPONSE_TYPE.MODAL,
+        data: {
+          custom_id: QUESTION_MODAL_CUSTOM_ID,
+          title: (prompt ?? "Your answer").slice(0, 45),
+          components: [{
+            type: 1, // action row
+            components: [{
+              type: 4, // text input
+              custom_id: QUESTION_TEXT_INPUT_ID,
+              label: "Answer",
+              style: 2, // paragraph
+              min_length: 1,
+              max_length: 4000,
+              placeholder: "Type your answer here...",
+              required: true,
+            }],
+          }],
+        },
+      });
+    }
     // Freeform HITL: open a modal so the user can type an answer.
     if (isDiscordFreeformComponent(interaction.customId)) {
       const prompt = readMessageContent(interaction.raw);
@@ -504,6 +587,31 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     args: ChannelRouteArgs,
     req: Request,
   ): Promise<Response> {
+    // Open-question answer (postQuestion): resume the parked session with the
+    // typed text as a message — mirror of the CHOICE_CUSTOM_ID pick above.
+    // Free text cannot ride the verb-restricted HITL approval resume.
+    if (interaction.customId === QUESTION_MODAL_CUSTOM_ID) {
+      const text = interaction.textInputs[QUESTION_TEXT_INPUT_ID]?.trim();
+      if (text) {
+        await args.send(`Answer: ${text}`, {
+          auth: toChannelAuth(interaction as unknown as DiscordCommandInteraction),
+          continuationToken: discordContinuationToken(
+            interaction.channelId,
+            opts.conversationId
+              ? opts.conversationId(interaction as unknown as DiscordCommandInteraction)
+              : interaction.channelId,
+          ),
+          state: {
+            channelId: interaction.channelId,
+            applicationId: interaction.applicationId,
+            guildId: interaction.guildId ?? null,
+            initialResponseSent: true,
+            ephemeral: false,
+          },
+        });
+      }
+      return discordJson({ content: "Answer received.", ephemeral: true });
+    }
     const inputResponses = deriveModalInputResponses(interaction);
     if (inputResponses.length > 0) {
       const conversationId = interaction.messageId ?? interaction.id;
@@ -529,6 +637,9 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   async function handleMessage(event: NonNullable<ReturnType<typeof parseDiscordMessageEvent>>, args: ChannelRouteArgs): Promise<Response> {
     const ignored = () => discordJsonBody({ ignored: true });
     if (event.author.bot) return ignored();
+    // DMs are off by default (see DiscordChannelOptions.directMessages):
+    // plain DM messages are dropped silently — no session, no reply.
+    if (!event.guildId && opts.directMessages !== true) return ignored();
 
     const applicationId = await resolveDiscordApplicationId(opts.credentials?.applicationId);
     let snapshot: DiscordChannelSnapshot;
@@ -600,14 +711,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       }
     };
 
+    // Attachment metadata rides along as a structured block (never content):
+    // the agent relays the files onward (askCodeAgent attachments) untouched.
+    const attachmentsBlock = formatAttachmentsBlock(event.attachments);
+
     if (trigger.kind === "thread-turn") {
       // Every prior human message already drove its own turn — no history block.
-      await sendToThread(event.channelId, [contextBlock, text || event.content]);
+      await sendToThread(event.channelId, [contextBlock, attachmentsBlock, text || event.content]);
       return ignored();
     }
     if (trigger.kind === "mention-in-thread") {
       const block = formatMessagesBlock("thread_messages", await history(event.channelId, 50));
-      await sendToThread(event.channelId, [contextBlock, block, text]);
+      await sendToThread(event.channelId, [contextBlock, block, attachmentsBlock, text]);
       return ignored();
     }
     // mention-in-channel: task thread anchored to the mention message, falling
@@ -625,7 +740,7 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       try {
         threadId = (await createDiscordThread({ ...apiOpts(), channelId: event.channelId, name: threadName })).id;
       } catch (e) {
-        console.warn("discord: mention-thread creation failed — falling back to in-channel session:", e);
+        console.warn("discord: mention-thread creation failed — refusing to start a channel-keyed session:", e);
       }
     }
     const block = formatMessagesBlock("channel_messages", await history(event.channelId, 20));
@@ -641,19 +756,20 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         guildId: event.guildId,
         messageId: event.id,
       });
-      await sendToThread(threadId, [threadContextBlock, block, text], threadName);
+      await sendToThread(threadId, [threadContextBlock, block, attachmentsBlock, text], threadName);
     } else {
-      await args.send([contextBlock, block, text].filter((p) => p.length > 0).join("\n\n"), {
-        auth,
-        continuationToken: discordContinuationToken(event.channelId, event.channelId),
-        state: {
+      // No thread → no session (see THREAD_CREATE_FAILED_MSG rationale): the
+      // old channel-keyed fallback merged every failed-thread task in this
+      // channel into ONE session.
+      try {
+        await sendDiscordChannelMessage({
+          ...apiOpts(),
           channelId: event.channelId,
-          applicationId,
-          guildId: event.guildId ?? null,
-          initialResponseSent: true,
-          ephemeral: false,
-        } satisfies DiscordDeliveryState,
-      });
+          body: { content: THREAD_CREATE_FAILED_MSG },
+        });
+      } catch (e) {
+        console.warn("discord: could not deliver the thread-creation error to the channel:", e);
+      }
     }
     return ignored();
   }

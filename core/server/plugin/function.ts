@@ -4,6 +4,7 @@ import type { Express, NextFunction, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
 import { pluginAuthz, d2eAuthn } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
+import { buildWorkerHeaders } from "./worker-headers.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
 import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
@@ -570,29 +571,27 @@ export function _addFunction(
       const protocol = req.protocol || "http";
       const requestUrl = `${protocol}://${host}${req.originalUrl}`;
 
-      const headers = new Headers();
-      for (const [key, val] of Object.entries(req.headers)) {
-        if (val) {
-          // Strip encoding headers — the outer proxy handles compression;
-          // letting the worker compress causes double-encoding (ERR_CONTENT_DECODING_FAILED).
-          // Also strip content-length/transfer-encoding: the body below is rebuilt
-          // (re-serialized from req.body, or re-read), so the client's original
-          // content-length no longer matches and would truncate the worker's body
-          // stream ("user body write aborted: early end"). Let fetch recompute it.
-          const lower = key.toLowerCase();
-          if (lower === "accept-encoding" || lower === "content-length" || lower === "transfer-encoding") continue;
-          headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
-        }
-      }
-
-      // Inject auth context from middleware into headers for edge functions
+      // Build the worker header set. buildWorkerHeaders strips the transport
+      // headers the proxy recomputes (accept-encoding/content-length/
+      // transfer-encoding — the body below is rebuilt) AND the injected identity
+      // headers (x-user-id/x-user-role), then sets identity ONLY from verified
+      // auth context. A client-supplied x-user-id is therefore never forwarded
+      // to a worker that trusts it. See worker-headers.ts.
+      //
+      // Identity source by path: trusted-scope plugins (authContext) carry it in
+      // pgSettings["app.user_id"] (= the native token subject); d2e-scope plugins
+      // (d2eAuthn) carry the VERIFIED Logto subject on req.logtoSubject. Both are
+      // trex-verified — a value the client set itself is never used.
       const pgSettings = (req as any).pgSettings;
-      if (pgSettings?.["app.user_id"]) {
-        headers.set("x-user-id", pgSettings["app.user_id"]);
-      }
-      if (pgSettings?.["app.user_role"]) {
-        headers.set("x-user-role", pgSettings["app.user_role"]);
-      }
+      const verifiedUserId = pgSettings?.["app.user_id"] ??
+        (req as any).logtoSubject ?? undefined;
+      const headers = buildWorkerHeaders(
+        req.headers as Record<string, unknown>,
+        {
+          userId: verifiedUserId,
+          userRole: pgSettings?.["app.user_role"],
+        },
+      );
 
       let body: Blob | string | undefined;
       if (req.method !== "GET" && req.method !== "HEAD") {

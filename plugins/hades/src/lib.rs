@@ -24,7 +24,7 @@ use std::{
 };
 
 // ---------------------------------------------------------------------------
-// Scalar: hades_setup_env(lockfile_path, env_name, base_dir) -> VARCHAR
+// Scalar: trex_hades_setup_env(lockfile_path, env_name, base_dir) -> VARCHAR
 // ---------------------------------------------------------------------------
 
 struct HadesSetupEnvScalar;
@@ -88,7 +88,7 @@ fn setup_env_impl(lockfile_path: &str, env_name: &str, base_dir: &str) -> Result
 }
 
 // ---------------------------------------------------------------------------
-// Scalar: hades_execute(spec_path, cdm_schema, work_schema, output_path,
+// Scalar: trex_hades_execute(spec_path, cdm_schema, work_schema, output_path,
 //                       db_name, env_name, env_base_dir) -> VARCHAR
 // ---------------------------------------------------------------------------
 
@@ -209,7 +209,7 @@ fn execute_impl(
 }
 
 // ---------------------------------------------------------------------------
-// Scalar: hades_cancel(job_id) -> VARCHAR
+// Scalar: trex_hades_cancel(job_id) -> VARCHAR
 // ---------------------------------------------------------------------------
 
 struct HadesCancelScalar;
@@ -275,7 +275,7 @@ fn cancel_impl(job_id: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Table: hades_status(job_id) -> one row
+// Table: trex_hades_status(job_id) -> one row
 // ---------------------------------------------------------------------------
 
 struct HadesStatusTable;
@@ -381,7 +381,7 @@ impl VTab for HadesStatusTable {
 }
 
 // ---------------------------------------------------------------------------
-// Table: hades_jobs() -> N rows
+// Table: trex_hades_jobs() -> N rows
 // ---------------------------------------------------------------------------
 
 struct HadesJobsTable;
@@ -484,7 +484,7 @@ impl VTab for HadesJobsTable {
 }
 
 // ---------------------------------------------------------------------------
-// Table: hades_envs(base_dir) -> N rows
+// Table: trex_hades_envs(base_dir) -> N rows
 // ---------------------------------------------------------------------------
 
 struct HadesEnvsTable;
@@ -579,19 +579,19 @@ fn escape_json(s: &str) -> String {
 
 #[duckdb_entrypoint_c_api(ext_name = "hades")]
 pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>> {
-    con.register_scalar_function::<HadesSetupEnvScalar>("hades_setup_env")
-        .expect("Failed to register hades_setup_env");
-    con.register_scalar_function::<HadesExecuteScalar>("hades_execute")
-        .expect("Failed to register hades_execute");
-    con.register_scalar_function::<HadesCancelScalar>("hades_cancel")
-        .expect("Failed to register hades_cancel");
+    con.register_scalar_function::<HadesSetupEnvScalar>("trex_hades_setup_env")
+        .expect("Failed to register trex_hades_setup_env");
+    con.register_scalar_function::<HadesExecuteScalar>("trex_hades_execute")
+        .expect("Failed to register trex_hades_execute");
+    con.register_scalar_function::<HadesCancelScalar>("trex_hades_cancel")
+        .expect("Failed to register trex_hades_cancel");
 
-    con.register_table_function::<HadesStatusTable>("hades_status")
-        .expect("Failed to register hades_status");
-    con.register_table_function::<HadesJobsTable>("hades_jobs")
-        .expect("Failed to register hades_jobs");
-    con.register_table_function::<HadesEnvsTable>("hades_envs")
-        .expect("Failed to register hades_envs");
+    con.register_table_function::<HadesStatusTable>("trex_hades_status")
+        .expect("Failed to register trex_hades_status");
+    con.register_table_function::<HadesJobsTable>("trex_hades_jobs")
+        .expect("Failed to register trex_hades_jobs");
+    con.register_table_function::<HadesEnvsTable>("trex_hades_envs")
+        .expect("Failed to register trex_hades_envs");
 
     Ok(())
 }

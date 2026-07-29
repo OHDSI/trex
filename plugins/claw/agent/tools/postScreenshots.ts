@@ -5,7 +5,7 @@
 import { defineTool } from "eve/tools";
 import { postChannelMessage, type AttachmentUpload } from "../lib/discord-rest.ts";
 import { readOrchestration } from "../lib/state.ts";
-import { workspaceRoot, safeRelative } from "../lib/workspace.ts";
+import { workspaceRoot, readCoderFile } from "../lib/workspace.ts";
 import { effectiveUserId } from "./askCodeAgent.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 
@@ -17,11 +17,11 @@ export default defineTool({
     "workspace) to the Discord channel as inline image attachments, so the team sees the " +
     "result. Call this AFTER the coder reports it wrote screenshots. Pass the current " +
     "channelId and the workspace-relative paths the coder listed (e.g. trex/screenshots/home.png). " +
-    "Up to 10 images per call.",
+    "Up to 10 images per call. The server overrides channelId with the session's thread channel when available.",
   inputSchema: {
     type: "object",
     properties: {
-      channelId: { type: "string", description: "The current channel id (same one fetchChannelHistory uses)." },
+      channelId: { type: "string", description: "The current channel id (the server overrides this with the session thread channel)." },
       paths: {
         type: "array",
         items: { type: "string" },
@@ -33,7 +33,8 @@ export default defineTool({
   },
   execute: async (input, ctx) => {
     if (isEvalMode(ctx)) return evalStubs.postScreenshots();
-    const { channelId, paths, caption } = input as Input;
+    const { paths, caption } = input as Input;
+    const channelId = (ctx?.metadata as any)?.channelId ?? (input as Input).channelId;
     const token = (globalThis as any).Deno?.env?.get?.("DISCORD_BOT_TOKEN");
     if (!token) throw new Error("postScreenshots: DISCORD_BOT_TOKEN not set");
     const userId = effectiveUserId(ctx?.userId, (k) => Deno.env.get(k));
@@ -42,22 +43,24 @@ export default defineTool({
 
     // The coder's app is fixed per task and stored on the orchestration row.
     const prior = await readOrchestration(ctx.sql, ctx.sessionId);
-    const root = workspaceRoot(userId, prior?.appId ?? null);
 
     const files: AttachmentUpload[] = [];
     const skipped: string[] = [];
     for (const p of paths.slice(0, 10)) {
-      const rel = safeRelative(p);
-      if (!rel) { skipped.push(p); continue; }
-      try {
-        const bytes = await Deno.readFile(`${root}/${rel}`);
-        files.push({ name: rel.split("/").pop() || "screenshot.png", bytes, contentType: "image/png" });
-      } catch {
+      // Reads the per-chat worktree the coder actually ran in, then the app root.
+      const found = await readCoderFile(userId, prior?.appId ?? null, prior?.codeSessionId ?? null, p);
+      if (found) {
+        files.push({ name: found.path.split("/").pop() || "screenshot.png", bytes: found.bytes, contentType: "image/png" });
+      } else {
         skipped.push(p);
       }
     }
     if (files.length === 0) {
-      throw new Error(`postScreenshots: no readable screenshots found (looked under ${root}); paths=${JSON.stringify(paths)}`);
+      const root = workspaceRoot(userId, prior?.appId ?? null);
+      throw new Error(
+        `postScreenshots: no readable screenshots found (looked under ${root} and ` +
+          `its .worktrees/${prior?.codeSessionId ?? "none"}); paths=${JSON.stringify(paths)}`,
+      );
     }
     await postChannelMessage(fetch, { botToken: token, channelId, content: caption, files });
     return { posted: files.map((f) => f.name), skipped };

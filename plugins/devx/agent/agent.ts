@@ -37,15 +37,6 @@ interface ProviderRow {
   base_url: string | null;
 }
 
-// functions/index.ts:322-332's hardcoded legacy default, used when a user
-// has neither a devx.provider_configs row nor a devx.settings row at all.
-const DEFAULT_PROVIDER_ROW: ProviderRow = {
-  provider: "anthropic",
-  model: "claude-sonnet-4-20250514",
-  api_key: null,
-  base_url: null,
-};
-
 // Port of functions/index.ts:290-333 (settings assembly) + functions/agent.ts's
 // createModel (:41-119), minus the Bedrock JSON-credential unpacking and the
 // OpenAI-compatible client construction itself — those become core's job
@@ -72,7 +63,14 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
       `SELECT provider, model, api_key, base_url FROM devx.settings WHERE user_id = $1`,
       [userId],
     );
-    row = (legacyResult.rows[0] as ProviderRow | undefined) ?? DEFAULT_PROVIDER_ROW;
+    row = legacyResult.rows[0] as ProviderRow | undefined;
+  }
+
+  // No silent model fallback: the former hardcoded anthropic/claude-sonnet
+  // default resolved against the worker env's ANTHROPIC_API_KEY, silently
+  // running unconfigured users on the operator's account.
+  if (!row) {
+    throw new Error("devx: no model provider configured — set up a provider in devx Settings");
   }
 
   // The UI routes these to the legacy /stream endpoint (claude_code_agent.ts /

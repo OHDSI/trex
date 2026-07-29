@@ -40,7 +40,7 @@ const noopStore = { listEvents: () => Promise.resolve([]) } as unknown as AgentS
 
 function makeLayer(agent: LoadedAgent) {
   const channelStore = fakeChannelStore();
-  const startTurns: Array<{ sessionId: string; message: unknown }> = [];
+  const startTurns: Array<{ sessionId: string; message: unknown; metadata: unknown }> = [];
   const started: Array<{ channelId: string; sessionId: string; created: boolean }> = [];
   const handler = createChannelHandler({
     agent,
@@ -49,7 +49,7 @@ function makeLayer(agent: LoadedAgent) {
     plugin: "toy-agent",
     agentName: "toy",
     basePath: BASE,
-    startTurn: (sessionId, message) => startTurns.push({ sessionId, message }),
+    startTurn: (sessionId, message, metadata) => startTurns.push({ sessionId, message, metadata }),
     subscribe: () => () => {},
     onSessionStarted: (info) => started.push({ channelId: info.channelId, sessionId: info.sessionId, created: info.created }),
   });
@@ -81,8 +81,47 @@ Deno.test("channel layer: POST to a channel route runs the handler, send() creat
   assertEquals(channelStore.calls[0].createdBy, null);
 
   // The turn was started against the resolved session, and the Task 6 hook fired.
-  assertEquals(startTurns, [{ sessionId: "sess-1", message: "hi there" }]);
+  // The toy webhook passes no delivery state, so metadata.channelId falls back to
+  // the registration id "webhook".
+  assertEquals(startTurns, [{ sessionId: "sess-1", message: "hi there", metadata: { channelId: "webhook" } }]);
   assertEquals(started, [{ channelId: "webhook", sessionId: "sess-1", created: true }]);
+});
+
+Deno.test("channel layer: turn metadata.channelId is the adapter's real delivery channel (state.channelId), not the registration id", async () => {
+  // Regression (Discord plan-posting): postPlan/postUpdate/postChoice/postScreenshots
+  // read ctx.metadata.channelId as the authoritative Discord post target. The layer
+  // must surface the adapter's real thread/channel snowflake (opts.state.channelId),
+  // NOT the channel *registration* id (e.g. "discord"/"deliv"), which 404s as a channel.
+  const agent = await loadAgent(TOY);
+  agent.channels.deliv = {
+    __trexChannel: true,
+    routes: [{
+      method: "POST",
+      path: "/in",
+      handler: async (req: Request, args: any) => {
+        const b = await req.json();
+        const s = await args.send(b.message, {
+          auth: null,
+          continuationToken: b.token,
+          state: { channelId: "1529388414531665942" },
+        });
+        return Response.json({ sessionId: s.id });
+      },
+    }],
+  } as any;
+  const { handler, startTurns } = makeLayer(agent);
+
+  const res = await handler(new Request(`${ORIGIN}${BASE}/eve/v1/deliv/in`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "go", token: "t-1" }),
+  }));
+  assertEquals(res.status, 200);
+
+  // The turn (→ ctx.metadata for tools + the system-prompt <context> block) carries
+  // the real snowflake, not the registration id "deliv".
+  assertEquals(startTurns.length, 1);
+  assertEquals((startTurns[0].metadata as any).channelId, "1529388414531665942");
 });
 
 Deno.test("channel layer: unknown channelId -> 404, no session", async () => {
