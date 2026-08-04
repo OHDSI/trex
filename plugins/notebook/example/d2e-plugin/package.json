@@ -40,7 +40,7 @@
   "dependencies": {
     "@nlux/react": "^2.17.1",
     "@nlux/themes": "^2.17.1",
-    "axios": "^1.16.0",
+    "axios": "^1.18.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "single-spa-react": "^6.0.2"
@@ -50,10 +50,10 @@
     "@tailwindcss/vite": "^4.3.2",
     "@types/react": "^19.2.5",
     "@types/react-dom": "^19.2.3",
-    "@vitejs/plugin-react": "^5.2.0",
+    "@vitejs/plugin-react": "^6.0.5",
     "tailwindcss": "^4.1.18",
     "typescript": "~5.9.3",
-    "vite": "^8.1.4",
+    "vite": "^8.2.0",
     "vite-plugin-css-injected-by-js": "^3.5.2"
   }
 }
