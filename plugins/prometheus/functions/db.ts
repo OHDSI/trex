@@ -8,18 +8,8 @@ export interface Conn {
 function leaseMemoryConnection() {
   const dbm = (globalThis as any).Trex?.databaseManager?.();
   if (!dbm) throw new Error("DuckDB not available — Trex.databaseManager() not found");
-  // Suppress the harmless "Error getting dialect for memory" log (see devx/duckdb.ts).
-  const origError = console.error;
-  console.error = (...args: unknown[]) => {
-    if (typeof args[0] === "string" && args[0].includes("Error getting dialect for memory")) return;
-    origError.apply(console, args);
-  };
-  try {
-    const c = dbm.getConnection("memory", "main", "main", "main", {});
-    return c.connection; // TrexDB instance (leases one pool session)
-  } finally {
-    console.error = origError;
-  }
+  const c = dbm.getConnection("memory", "main", "main", "main", {});
+  return c.connection; // TrexDB instance (leases one pool session)
 }
 
 /**
