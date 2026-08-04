@@ -1227,6 +1227,17 @@ jobs:
       # broke this job: "alp-logto … manifest unknown"). So walk newest→older and
       # pin the first tag where the COMPLETE image set resolves, deriving the set
       # from the checked-out compose file so it never drifts from reality.
+      #
+      # Worse than a publish race: d2e-logto and d2e-dataflow-gen-worker retain only
+      # ONE develop-* tag each (the others keep 50+), so the complete set is a moving
+      # one-tag target that rotates while this job runs. Two observed failures:
+      #   - resolve picks develop-691f668, and 8 min later `compose pull` 404s on
+      #     d2e-logto because the tag was pruned in between;
+      #   - no tag is complete at all for a window, because the scarce images have
+      #     already rotated to a sha that d2e-trex has not published yet.
+      # So: intersect the real tag lists (not just manifest probes), `docker pull`
+      # the whole set immediately to lock it into the local daemon before it can
+      # rotate, and wait for a fresh publish rather than failing the job outright.
       - name: Resolve latest fully-published d2e image tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -1241,26 +1252,48 @@ jobs:
             echo "::error::could not derive DOCKER_TAG_NAME image set from the d2e compose files"; exit 1
           fi
           echo "images sharing DOCKER_TAG_NAME:" $IMAGES
-          TAGS=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
-            --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][]')
-          if [ -z "$TAGS" ]; then
-            echo "::error::no d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*' found"; exit 1
-          fi
+
+          tags_of() {
+            gh api "/orgs/ohdsi/packages/container/$1/versions?per_page=100" \
+              --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][]'
+          }
+
           TAG=""
-          for t in $TAGS; do
-            ok=1
-            for img in $IMAGES; do
-              if ! docker manifest inspect "${PREFIX}${img}:${t}" >/dev/null 2>&1; then
-                echo "skip ${t}: ${img} manifest not published yet"
-                ok=0; break
+          # ~10 min of patience: d2e publishes continuously, so a gap where no tag is
+          # complete closes on its own once the lagging image finishes building.
+          for attempt in $(seq 1 10); do
+            TAGS=$(tags_of d2e-trex)
+            if [ -z "$TAGS" ]; then
+              echo "::error::no d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*' found"; exit 1
+            fi
+            for img in $IMAGES; do tags_of "$img" > "${RUNNER_TEMP}/tags-${img}"; done
+
+            for t in $TAGS; do
+              ok=1
+              for img in $IMAGES; do
+                if ! grep -qx "$t" "${RUNNER_TEMP}/tags-${img}"; then
+                  echo "skip ${t}: ${img} has no such tag"
+                  ok=0; break
+                fi
+              done
+              [ "$ok" = "1" ] || continue
+              # Pull the whole set NOW. A tag that merely resolved can be pruned
+              # before the later compose pull; once pulled it is ours regardless.
+              if ( for img in $IMAGES; do docker pull -q "${PREFIX}${img}:${t}" || exit 1; done ); then
+                TAG="$t"; break
               fi
+              echo "skip ${t}: rotated away mid-pull"
             done
-            if [ "$ok" = "1" ]; then TAG="$t"; break; fi
+
+            [ -n "$TAG" ] && break
+            echo "attempt ${attempt}/10: no tag has the complete image set yet; waiting for the next d2e publish"
+            sleep 60
           done
+
           if [ -z "$TAG" ]; then
             echo "::error::no tag matching '${D2E_TREX_TAG_PREFIX}*' has the complete image set published"; exit 1
           fi
-          echo "Using d2e image tag: ${TAG} (all $(echo "$IMAGES" | wc -w) images resolve)"
+          echo "Using d2e image tag: ${TAG} (all $(echo "$IMAGES" | wc -w) images pulled)"
           echo "DOCKER_TAG_NAME=$TAG" >> "$GITHUB_ENV"
 
       - name: Rebundle this branch's core (main) into fresh eszips
@@ -1330,10 +1363,14 @@ jobs:
               echo "::warning::failed to pre-pull ${img}:${{ env.VERSION }}"
           done
 
+      # Best-effort: the DOCKER_TAG_NAME image set is already pulled by the tag
+      # resolution above, and its tags can be pruned from ghcr between the two
+      # steps. A genuinely missing image still fails loudly in "Start D2E services".
       - name: Pull docker compose images
         working-directory: d2e
         run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml pull
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml pull \
+            || echo "::warning::compose pull failed; continuing on the images pulled during tag resolution"
           docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
       - name: Start D2E services
