@@ -133,6 +133,13 @@ export async function streamAgentChat({
   hasComponentSelection,
   // Optional isolated workspace (e.g. a git worktree for an agent-driven run)
   workspacePathOverride,
+  // Channel-driven (claw) fields: per-chat worktree isolation, remote-channel
+  // sandbox prompt, and relayed file attachments. Only the Claude Code agent
+  // consumes them today; dropping them here silently disabled all three for
+  // agent-mode chats (the only mode claw uses).
+  useWorktree,
+  remoteChannel,
+  attachments,
 }) {
   // Dispatch to Claude Code SDK agent when that provider is selected
   if (settings.provider === "claude-code") {
@@ -140,6 +147,7 @@ export async function streamAgentChat({
     return streamClaudeCodeChat({
       chatId, userId, appId, chatMode, settings, history, send, sqlFn,
       skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
+      useWorktree, remoteChannel, attachments,
     });
   }
 

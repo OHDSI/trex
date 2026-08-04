@@ -56,6 +56,7 @@ import {
   HITL_FREEFORM_MODAL_ACTION_ID,
   HITL_FREEFORM_MODAL_BLOCK_ID,
   HITL_FREEFORM_MODAL_CALLBACK_ID,
+  type HitlFreeformModalMetadata,
   isFreeformAction,
   isHitlAction,
   renderInputRequestBlocks,
@@ -281,7 +282,7 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
 
     const inputResponses = parsed.actions.map(deriveHitlResponse).filter((r): r is NonNullable<typeof r> => r !== null);
     if (inputResponses.length > 0) {
-      await runResume({
+      const applied = await runResume({
         req,
         args,
         channelId: parsed.channelId,
@@ -290,8 +291,9 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
         inputResponses,
         interaction: payload,
       });
-      // Best-effort: strip the interactive controls off the answered card.
-      await updateAnsweredCard(parsed).catch((e) => console.warn("slack: answered-card update failed — swallowed:", e));
+      // Best-effort: strip the interactive controls off the answered card and
+      // record the outcome — who picked what, and whether it registered.
+      await updateAnsweredCard(parsed, applied).catch((e) => console.warn("slack: answered-card update failed — swallowed:", e));
     }
     return OK();
   }
@@ -299,7 +301,7 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
   async function handleViewSubmission(payload: Record<string, unknown>, args: ChannelRouteArgs, req: Request): Promise<Response> {
     const view = parseViewSubmission(payload);
     if (!view || view.callbackId !== HITL_FREEFORM_MODAL_CALLBACK_ID) return new Response(null, { status: 200 });
-    let meta: { continuationToken?: string; channelId?: string; threadTs?: string; requestId?: string };
+    let meta: { continuationToken?: string; channelId?: string; threadTs?: string; messageTs?: string; requestId?: string; promptText?: string };
     try {
       meta = JSON.parse(view.privateMetadata || "{}");
     } catch {
@@ -312,7 +314,7 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
     // and the request already passed signature verification.
     const actorId = (payload.user as { id?: string } | undefined)?.id;
     if (!(await allowed({ userId: actorId, conversationId: meta.channelId }))) return new Response(null, { status: 200 });
-    await runResume({
+    const applied = await runResume({
       req,
       args,
       channelId: meta.channelId ?? "",
@@ -321,6 +323,25 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
       inputResponses: [{ requestId: meta.requestId, text }],
       interaction: payload,
     });
+    // Without this edit the typed answer is invisible to the rest of the
+    // channel and the "Type your answer" button stays clickable forever.
+    if (meta.channelId && meta.messageTs) {
+      const flat = text.replace(/\s+/g, " ").trim();
+      const preview = flat.length > 300 ? `${flat.slice(0, 297)}...` : flat;
+      const promptBlocks = meta.promptText
+        ? [{ type: "section", text: { type: "mrkdwn", text: meta.promptText } }]
+        : [];
+      const blocks = applied
+        ? buildAnsweredBlocks({ promptBlocks, answerLabel: preview, userId: actorId })
+        : resumeMissBlocks(promptBlocks, preview, actorId);
+      await updateSlackMessage({
+        ...apiOpts(),
+        channelId: meta.channelId,
+        ts: meta.messageTs,
+        blocks,
+        text: applied ? `Answered: ${preview}` : `Answer could not be applied: ${preview}`,
+      }).catch((e) => console.warn("slack: answered-card update failed — swallowed:", e));
+    }
     return new Response(null, { status: 200 });
   }
 
@@ -339,27 +360,68 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
         threadTs: parsed.threadTs,
         messageTs,
         requestId,
-      },
+        // Prompt text rides along (private_metadata caps at 3000 chars) so the
+        // answered-card edit after view_submission can keep the question
+        // visible — the submission payload carries no message blocks.
+        promptText: promptTextFromBlocks(parsed.messageBlocks),
+      } as HitlFreeformModalMetadata,
     });
     await openSlackView({ ...apiOpts(), triggerId, view });
   }
 
-  async function updateAnsweredCard(parsed: ParsedBlockActionsPayload) {
+  /** First section text of the prompt card, for the modal metadata. */
+  function promptTextFromBlocks(blocks: readonly unknown[] | undefined): string {
+    for (const b of findPromptBlocks(blocks ?? [])) {
+      const text = (b as { text?: { text?: unknown } } | null)?.text?.text;
+      if (typeof text === "string" && text.trim()) return text.slice(0, 1500);
+    }
+    return "";
+  }
+
+  async function updateAnsweredCard(parsed: ParsedBlockActionsPayload, applied: boolean) {
     const action = parsed.actions.find((a) => isHitlAction(a.actionId));
     if (!action?.messageTs) return;
     const answer = action.label ?? action.selectedOptionValue ?? action.value;
     if (!answer) return;
     const promptBlocks = findPromptBlocks(parsed.messageBlocks);
-    const blocks = buildAnsweredBlocks({ promptBlocks, answerLabel: answer, userId: action.user.id });
-    await updateSlackMessage({ ...apiOpts(), channelId: parsed.channelId, ts: action.messageTs, blocks, text: `Answered: ${answer}` });
+    const blocks = applied
+      ? buildAnsweredBlocks({ promptBlocks, answerLabel: answer, userId: action.user.id })
+      : resumeMissBlocks(promptBlocks, answer, action.user.id);
+    await updateSlackMessage({
+      ...apiOpts(),
+      channelId: parsed.channelId,
+      ts: action.messageTs,
+      blocks,
+      text: applied ? `Answered: ${answer}` : `Selection could not be applied: ${answer}`,
+    });
   }
 
-  async function runResume(ctx: SlackResumeContext) {
+  /** Answered-card variant for a resume miss: the pick is on record, but the
+   * parked request was gone (expired / already answered) — say so instead of
+   * implying the agent will act on it. */
+  function resumeMissBlocks(promptBlocks: readonly unknown[], answer: string, userId?: string): unknown[] {
+    const blocks: unknown[] = promptBlocks.filter((b) => b != null);
+    blocks.push({
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `:warning: *${answer}* was selected but could NOT be applied — the request may have expired or was already answered. Ask again if the agent doesn't proceed.`,
+      },
+    });
+    if (userId && userId.length > 0) {
+      blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `Selected by <@${userId}>` }] });
+    }
+    return blocks;
+  }
+
+  /** Returns true when the decision was applied (so the caller can render the
+   * outcome on the card); false when the resume missed or threw. */
+  async function runResume(ctx: SlackResumeContext): Promise<boolean> {
     try {
       if (opts.resume) {
         // An integrator override fully owns applying the decision.
         await opts.resume(ctx);
-        return;
+        return true;
       }
       // DEFAULT: apply the decoded decision to the parked session via the channel
       // layer's resume primitive. `ctx.continuationToken` is the SAME
@@ -371,9 +433,12 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
       });
       if (!result.ok) {
         console.warn(`agents/slack: HITL resume did not apply the decision: ${result.error ?? "unknown error"}`);
+        return false;
       }
+      return true;
     } catch (e) {
       console.error("slack: HITL resume failed:", e);
+      return false;
     }
   }
 

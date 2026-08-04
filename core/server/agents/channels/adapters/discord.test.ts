@@ -487,9 +487,14 @@ Deno.test("component callback derives input responses + calls resume", async () 
   const body = JSON.stringify(componentPayload);
   const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, body), args);
 
-  // Deferred update ACK.
+  // UPDATE_MESSAGE ACK: the outcome is written onto the message itself so the
+  // whole channel sees who picked what, and the controls are removed.
   const ack = await res.json();
-  assertEquals(ack.type, 6); // DEFERRED_UPDATE_MESSAGE
+  assertEquals(ack.type, 7); // UPDATE_MESSAGE
+  assertEquals(ack.data.components, []);
+  assertEquals(ack.data.content.includes("Approve `delete_file`?"), true); // original text kept
+  assertEquals(ack.data.content.includes("✅"), true);
+  assertEquals(ack.data.content.includes("by <@user-1>"), true);
 
   assertEquals(resumeCalls.length, 1);
   const responses = resumeCalls[0].inputResponses as Array<{ requestId: string; optionId: string }>;
@@ -526,15 +531,18 @@ Deno.test("default resume (no opts.resume) forwards the decoded requestId+option
     data: { custom_id: denyCustomId, component_type: 2 },
   };
   const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
-  // Deferred-update ACK preserved regardless of the resume outcome.
-  assertEquals((await res.json()).type, 6);
+  // UPDATE_MESSAGE ACK recording the pick (message had no components in this
+  // payload, so the label falls back to the decoded option id).
+  const ack = await res.json();
+  assertEquals(ack.type, 7);
+  assertEquals(ack.data.content.includes("deny"), true);
 
   assertEquals(resumes.length, 1);
   // The requestId (from the custom_id) is what the layer resolves on — not the token.
   assertEquals(resumes[0].input.inputResponses, [{ requestId: "req-7", optionId: "deny" }]);
 });
 
-Deno.test("DEFERRED_UPDATE ACK still returned when args.resume reports {ok:false}", async () => {
+Deno.test("resume {ok:false} → message updated with a NOT-applied warning, never a silent ack", async () => {
   const { keypair, publicKeyHex } = await genKeypair();
   const rendered = renderInputRequestComponents({
     requestId: "req-8",
@@ -557,7 +565,10 @@ Deno.test("DEFERRED_UPDATE ACK still returned when args.resume reports {ok:false
     data: { custom_id: approveCustomId, component_type: 2 },
   };
   const res = await channel.routes[0].handler(await signedRequest(keypair.privateKey, JSON.stringify(payload)), args);
-  assertEquals((await res.json()).type, 6);
+  const ack = await res.json();
+  assertEquals(ack.type, 7);
+  assertEquals(ack.data.content.includes("could NOT be applied"), true);
+  assertEquals(ack.data.components, []);
   assertEquals(resumes.length, 1); // attempted, soft-failed, never threw
 });
 

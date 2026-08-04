@@ -791,6 +791,9 @@ Deno.serve(async (req: Request) => {
                 skillContext,
                 commandOverride,
                 hasComponentSelection,
+                useWorktree: streamUseWorktree,
+                remoteChannel: streamRemoteChannel,
+                attachments: streamAttachments,
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls.length > 0) savedToolCalls = agentResult.toolCalls;
