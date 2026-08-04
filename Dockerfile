@@ -81,9 +81,9 @@ COPY plugins/docs/src/ ./src/
 COPY plugins/docs/static/ ./static/
 RUN npm install && npm run build
 
-# Stage 4b: Build the prometheus frontend (FHIR analytics UI plugin). The repo
-# commits a dist/, but rebuilding here guarantees the image never ships a
-# bundle that drifted from src/. Mirrors the plugin's CI job (install with
+# Stage 4b: Build the prometheus frontend (FHIR analytics UI plugin). dist/ is
+# gitignored, so this stage is the only source of the bundle the image ships.
+# Mirrors the plugin's CI job (install with
 # --ignore-scripts, vendored atlas-ui is committed, no private registry deps).
 FROM node:22-trixie-slim AS prometheus-builder
 WORKDIR /build
