@@ -235,5 +235,5 @@ The launcher reads: `TREXSQL_JAR` (jar path override), `TREX_SQL_PASSWORD`
 included in the runtime image — the CLI is a developer tool, not a runtime
 service. `plugins/cli` is a git submodule (upstream
 `github.com/p-hoffmann/cli.git`) — run `git submodule update --init plugins/cli`
-before building. See [`plugins/cli/README.md`](https://github.com/OHDSI/trex/tree/main/plugins/cli/README.md)
+before building. See [`plugins/cli/README.md`](https://github.com/p-hoffmann/cli/blob/develop/README.md)
 for build details.

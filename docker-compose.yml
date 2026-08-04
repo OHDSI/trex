@@ -44,6 +44,9 @@ services:
     entrypoint: /usr/local/bin/trex-init
     environment:
       TREX_SECRETS_DIR: /shared
+      # Prometheus (FHIR analytics UI) ships in the image under plugins-dev;
+      # this registers it in the web shell's top nav (parity with the dx compose).
+      TREX_WEB_NAV_EXTRA: '[{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
     volumes:
       - ./secrets:/shared
     restart: "no"
@@ -143,6 +146,9 @@ services:
       SWARM_NODE: server
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
       BASE_PATH: /trex
+      # Native email/password IDP (auth-router). Off by default in the
+      # engine; standalone/dev trex opts in so admin@trex.local can log in.
+      TREX_IDP_ENABLED: "true"
       BETTER_AUTH_URL: http://localhost:8001/trex
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
@@ -158,6 +164,10 @@ services:
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:8001/trex/rest/v1
       STUDIO_INTERNAL_URL: http://studio:3000
       EDGE_FUNCTIONS_MANAGEMENT_FOLDER: /app/edge-functions
+      # Pythia: the agent worker proxies to the pythia plugin on the internal
+      # port (33001), and agents without an explicit model need this fallback.
+      BAO_AGENT_UPSTREAM_BASE: ${BAO_AGENT_UPSTREAM_BASE:-http://localhost:33001/plugins/ohdsi/pythia}
+      TREX_AGENTS_DEFAULT_MODEL: ${TREX_AGENTS_DEFAULT_MODEL:-bedrock/${BAO_AGENT_MODEL:-us.anthropic.claude-sonnet-4-6}}
     healthcheck:
       # /trex/api/ready returns 503 until supabaseEnvVars is populated, which is
       # set immediately after ensureAuthKeys() writes anon/service keys to

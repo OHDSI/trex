@@ -35,11 +35,13 @@
 import {
   ensureAttached,
   ensureCacheAttached,
+  snowflakeExtrasFromRow,
   type ExecFn,
   type SourceCredential,
 } from "./lib/attach.ts";
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
+import { migrateLegacyDatabaseRegistry } from "./dbm-migrate.ts";
 
 declare const Trex: any;
 declare const EdgeRuntime: any;
@@ -49,13 +51,27 @@ export async function d2eBoot(): Promise<void> {
   const err = (m: string) => console.error(`[d2e-compat] ${m}`);
 
   // ── Block 1: native WebAPI ────────────────────────────────────────────────
-  // webapi.trex (from the trexsql base) registers webapi_start(), which starts
+  // webapi.trex (from the trexsql base) registers trex_webapi_start(), which starts
   // WebAPI on :8080. Gated by WEBAPI_NATIVE_ENABLED so builds without the
   // extension still start.
   if ((Deno.env.get("WEBAPI_NATIVE_ENABLED") ?? "true") !== "false") {
     try {
       const webapiConn = new Trex.TrexDB("memory");
-      const startRows = await webapiConn.execute("SELECT webapi_start() AS msg", []);
+      // trex_webapi_start is the primary name; webapi.trex builds from before
+      // the trex_ rename only register webapi_start. A NEW core routinely runs
+      // against an OLD extension (the e2e job rebundles this branch's core
+      // into a pulled image; rolling deploys skew the same way), and without
+      // the fallback WebAPI never starts and the whole cache pipeline strands
+      // on "Cache not ready". Try the primary, fall back on a catalog miss.
+      let startRows;
+      try {
+        startRows = await webapiConn.execute("SELECT trex_webapi_start() AS msg", []);
+      } catch (e) {
+        const msg = (e as Error).message ?? "";
+        if (!msg.includes("trex_webapi_start does not exist")) throw e;
+        log("trex_webapi_start not registered (pre-rename webapi.trex) — falling back to webapi_start()");
+        startRows = await webapiConn.execute("SELECT webapi_start() AS msg", []);
+      }
       log(`native WebAPI — ${startRows[0]?.msg}`);
     } catch (e) {
       err(`webapi_start failed: ${(e as Error).message}`);
@@ -126,6 +142,11 @@ export async function d2eBoot(): Promise<void> {
     err(`Failed to attach cdw_config_svc validation schema: ${(e as Error).message}`);
   }
 
+  // ── Block 5.5: legacy trex.db → trexdb registry migration ─────────────────
+  // Reconcile the legacy d2e `trex.db` connection registry into trexdb before
+  // the attach blocks read it, so migrated connections are attached this boot.
+  await migrateLegacyDatabaseRegistry();
+
   // ── Block 6: HANA cache attach ───────────────────────────────────────────
   // For each credential with dialect="hana", attach its DuckDB cache file.
   // Replaces d2e's DatabaseManager.get().getCredentialsDecrypted() with a
@@ -143,11 +164,15 @@ export async function d2eBoot(): Promise<void> {
     for (const ds of dbResult.rows) {
       if (ds.dialect !== "hana") continue;
       try {
-        await ensureCacheAttached(ds.id, {
+        // PR #2835: attach the HANA cache as `${code}_cache.db`. The file is
+        // created by the create_cachedb_hana_plugin flow (pgwire ATTACH cannot
+        // create it); createDbFileIfMissing only lets the re-attach proceed.
+        await ensureCacheAttached(`${ds.id}_cache`, {
           cacheDir: "/usr/src/data/cache",
+          createDbFileIfMissing: true,
           exec: hanaExec,
         });
-        log(`Attached HANA cache for '${ds.id}'`);
+        log(`Attached HANA ${ds.id} as ${ds.id}_cache`);
       } catch (e) {
         err(`Failed to attach HANA cache for '${ds.id}': ${e}`);
       }
@@ -179,6 +204,7 @@ export async function d2eBoot(): Promise<void> {
       host: string;
       port: number;
       databaseName: string;
+      extra: unknown;
       cred_username: string | null;
       cred_password_encrypted: string | null;
     }>(
@@ -188,6 +214,7 @@ export async function d2eBoot(): Promise<void> {
          d.host,
          d.port,
          d."databaseName",
+         d.extra,
          dc.username AS cred_username,
          dc.password_encrypted AS cred_password_encrypted
        FROM trexdb.database d
@@ -221,6 +248,7 @@ export async function d2eBoot(): Promise<void> {
         name: row.databaseName,
         adminUsername: row.cred_username,
         adminPassword,
+        ...(row.dialect === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
       });
     }
 

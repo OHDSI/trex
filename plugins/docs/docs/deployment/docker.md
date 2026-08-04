@@ -16,7 +16,7 @@ services. The repository ships several compose files for different scenarios.
 |------|---------|
 | `docker-compose.yml` | Default stack: a two-node Trex cluster (`trex-data` + `trex-server`) on Postgres 16, plus a Studio sidecar. The REST API and Realtime are served in-process on `trex-server` (`@trex/postgrest` plugin / native Realtime). Uses the published image. |
 | `docker-compose.dev.yml` | Development overlay. Collapses to a single-node `trex` service and live-mounts `core/server`, `core/event`, `functions`, and the prebuilt `plugins/web/dist`, `plugins/notebook/dist`, `plugins/storage`, and `plugins/postgrest` directories so changes take effect without rebuilding. |
-| `docker-compose.dx.yml` | Standalone devx stack: a single-node trex with the devx plugin and `devx_ext` extension baked into a dedicated image (`ghcr.io/ohdsi/trexsql-dx:latest`). Runs alongside the default stack (ports offset +1000 on HTTP / +20 on pg). |
+| `docker-compose.dx.yml` | Standalone devx stack: a single-node trex with the devx plugin and `devx_ext` extension activated via `TREX_DX_ENABLED=true`. The devx payload is baked into the standard image (`ghcr.io/ohdsi/trexsql:latest`) in gated folders and ignored unless that variable is set. Runs alongside the default stack (ports offset +1000 on HTTP / +20 on pg). |
 | `docker-compose.pg-trex.yml` | Replaces vanilla Postgres with the `pg-trex` image (Postgres + the Trex extensions co-located in one process). Uses gossip port `7946`. |
 
 ## Secrets
@@ -143,7 +143,7 @@ services:
 There is **no** standalone `trex` service in the base file — that exists only in
 `docker-compose.dev.yml`. `PGRST_JWT_SECRET` is not a literal; it is sourced from
 `./secrets/derived.env`. See the real
-[`docker-compose.yml`](https://github.com/OHDSI/trex/blob/main/docker-compose.yml)
+[`docker-compose.yml`](https://github.com/OHDSI/trex/blob/develop/docker-compose.yml)
 for the full definition.
 
 ## Development Overlay
@@ -209,5 +209,5 @@ pin the upstream native libraries.
 | pgwire (analytical engine) | `postgresql://localhost:5433/main` |
 | HTTPS (self-signed) | https://localhost:8000/trex/ |
 
-For cloud-managed deployments, see [`deploy/`](https://github.com/OHDSI/trex/tree/main/deploy)
+For cloud-managed deployments, see [`deploy/`](https://github.com/OHDSI/trex/tree/develop/deploy)
 which uses Pulumi to provision Trex on AWS ECS Fargate or Azure Container Apps.

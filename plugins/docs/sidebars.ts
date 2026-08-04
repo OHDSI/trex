@@ -94,6 +94,8 @@ const sidebars: SidebarsConfig = {
         "plugins/flow-plugins",
         "plugins/transform-plugins",
         "plugins/agent-plugins",
+        "plugins/memory-plugins",
+        "plugins/skill-plugins",
       ],
     },
     {

@@ -8,6 +8,12 @@ import { BASE_PATH } from "./config.ts";
 import { pool } from "./db.ts";
 import { authRouter } from "./auth/auth-router.ts";
 import { ensureAuthKeys } from "./auth/api-keys.ts";
+import {
+  ensureSbKeys,
+  resolveApiCredential,
+  type SbKeyRecord,
+  translateSbHeaders,
+} from "./auth/sb-keys.ts";
 import { verifyAccessToken } from "./auth/jwt.ts";
 import { initDek } from "./auth/dek.ts";
 import { getJwtSecret } from "./auth/jwt.ts";
@@ -17,6 +23,7 @@ import { Plugins } from "./plugin/plugin.ts";
 import { addPluginRoutes } from "./routes/plugin.ts";
 import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
+import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
@@ -142,8 +149,26 @@ app.get(`${BASE_PATH}/api/web-config`, apiLimiter, (_req, res) => {
   res.json({ navExtra });
 });
 
-// Mount GoTrue-compatible auth router
-app.use(`${BASE_PATH}/auth/v1`, authRouter);
+// Mount the GoTrue-compatible native auth router — but only when the native IDP
+// is explicitly enabled. Disabled by default so a deployment fronted by an
+// external IdP (d2e + Logto) ships no native login for ANY user and no usable
+// seeded admin@trex.local credential. When disabled, every native login endpoint
+// returns 403. Enable with TREX_IDP_ENABLED=true (see docker-compose.dev.yml /
+// docker-compose-local.yml for local/standalone use).
+if (nativeIdpEnabled()) {
+  app.use(`${BASE_PATH}/auth/v1`, authRouter);
+} else {
+  app.use(
+    `${BASE_PATH}/auth/v1`,
+    (_req: express.Request, res: express.Response) => {
+      res.status(403).json({
+        error: "idp_disabled",
+        error_description:
+          "Native login is disabled. Set TREX_IDP_ENABLED=true to enable it.",
+      });
+    },
+  );
+}
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
 if (typeof (globalThis as any).global === "undefined") {
@@ -339,11 +364,13 @@ app.get(`${BASE_PATH}/api/settings/auth-keys`, apiLimiter, async (req, res) => {
       return;
     }
     const result = await pool.query(
-      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
+      `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey', 'auth.publishableKey', 'auth.secretKey')`,
     );
     const keys: Record<string, string> = {};
     for (const row of result.rows) {
-      keys[row.key] = typeof row.value === "string" ? row.value : JSON.parse(row.value);
+      // pg pre-parses JSONB: legacy rows arrive as bare strings, sb rows as objects.
+      const value = row.value;
+      keys[row.key] = typeof value === "object" && value !== null ? (value as SbKeyRecord).key : value;
     }
     res.json(keys);
   } catch (err) {
@@ -406,6 +433,9 @@ app.all(
           headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
         }
       }
+      // New-format sb keys → legacy JWT of the same role; the vendored PostgREST
+      // plugin only validates legacy JWTs.
+      await translateSbHeaders(headers);
       // supabase-js sends apikey header + Authorization header.
       // If no Authorization header, use apikey as Bearer token so the plugin can determine the role.
       const apikey = headers.get("apikey");
@@ -619,6 +649,9 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
         headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
       }
     }
+    // Same sb→legacy swap as the PostgREST proxy — supabase-storage validates
+    // legacy JWTs itself.
+    await translateSbHeaders(headers);
 
     let body: Blob | undefined;
     if (req.method !== "GET" && req.method !== "HEAD") {
@@ -657,6 +690,19 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
 
 // Supabase-compatible /pg/v1/* route — calls postgres-meta worker directly.
 app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res) => {
+  // Admin-only: pg-meta runs privileged schema introspection/DDL against the
+  // database and does NOT authenticate the caller itself (unlike PostgREST on
+  // /rest/v1 and the storage worker on /storage/v1, which verify the JWT). Gate
+  // it here the same way the Studio API is gated, so an authenticated non-admin
+  // (or anon) can't reach it. authContext has already populated pgSettings.
+  const role = (req as any).pgSettings?.["app.user_role"];
+  if (role !== "admin") {
+    res.status(role ? 403 : 401).json({
+      error: role ? "forbidden" : "not_authenticated",
+      error_description: "pg-meta (/pg/v1) is admin-only",
+    });
+    return;
+  }
   const handler = fnmap["@trex/pg-meta/postgres-meta/functions"];
   if (!handler) {
     res.status(503).json({ error: "pg-meta plugin not loaded" });
@@ -1057,7 +1103,7 @@ async function invokeEdgeFunction(req: any, res: any) {
         res.status(401).json({ error: "Invalid JWT" });
         return;
       }
-      const claims = await verifyAccessToken(token);
+      const claims = await resolveApiCredential(token);
       if (!claims) {
         res.status(401).json({ error: "Invalid JWT" });
         return;
@@ -1073,7 +1119,7 @@ async function invokeEdgeFunction(req: any, res: any) {
       res.status(401).json({ error: "Invalid JWT" });
       return;
     }
-    const claims = await verifyAccessToken(token);
+    const claims = await resolveApiCredential(token);
     if (!claims) {
       res.status(401).json({ error: "Invalid JWT" });
       return;
@@ -1118,14 +1164,19 @@ async function invokeEdgeFunction(req: any, res: any) {
     }
   } catch { /* no eszip bundle — use regular servicePath */ }
 
+  // Dev hot-reload: fresh, cache-bypassing worker per request for functions
+  // served from the devx workspace, so the coder's source edits go live without a
+  // restart. Scoped to the workspace dir; baked platform functions are untouched.
+  const _wsDir = Deno.env.get("DEVX_WORKSPACE_DIR") || "/tmp/devx-workspaces";
+  const _hotReload = Deno.env.get("DEVX_HOT_RELOAD") === "true" && servicePath.startsWith(_wsDir);
   const createWorker = async () => {
     const workerOpts: Record<string, unknown> = {
       servicePath,
       memoryLimitMb: 150,
       workerTimeoutMs: 5 * 60 * 1000,
-      noModuleCache: false,
+      noModuleCache: _hotReload,
       envVars: await getSupabaseEnvVars(),
-      forceCreate: false,
+      forceCreate: _hotReload,
       cpuTimeSoftLimitMs: 10000,
       cpuTimeHardLimitMs: 20000,
       importMapPath,
@@ -1135,8 +1186,9 @@ async function invokeEdgeFunction(req: any, res: any) {
       },
     };
 
-    // If ESZIP bundle exists, pass it to the worker
-    if (maybeEszip) {
+    // If ESZIP bundle exists, pass it to the worker (skipped under hot-reload so
+    // edited source always wins).
+    if (maybeEszip && !_hotReload) {
       workerOpts.maybeEszip = maybeEszip;
       workerOpts.maybeEntrypoint = maybeEntrypoint;
     }
@@ -1272,9 +1324,10 @@ try {
   console.error("[boot] failed to reconcile stored JWT secret; continuing anyway:", err);
 }
 
-// Initialize auth keys (anon key, service_role key) + cache for edge functions
+// Initialize auth keys (anon key, service_role key, sb keys) + cache for edge functions
 try {
   const authKeys = await ensureAuthKeys();
+  const sbKeys = await ensureSbKeys();
   console.log("[auth] Auth keys initialized");
 
   // Cache Supabase-compatible env vars for edge function workers
@@ -1283,6 +1336,8 @@ try {
     ["SUPABASE_URL", supabaseUrl],
     ["SUPABASE_ANON_KEY", authKeys.anonKey],
     ["SUPABASE_SERVICE_ROLE_KEY", authKeys.serviceRoleKey],
+    ["SUPABASE_PUBLISHABLE_KEY", sbKeys.publishable.key],
+    ["SUPABASE_SECRET_KEY", sbKeys.secret.key],
     ["SUPABASE_DB_URL", Deno.env.get("DATABASE_URL") || ""],
   ];
   console.log("[functions] Supabase-compatible env vars cached for edge functions");

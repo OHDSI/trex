@@ -1,5 +1,5 @@
 import { WebSocketServer, type WebSocket } from "ws";
-import { verifyAccessToken, type AccessTokenClaims } from "../auth/jwt.ts";
+import { resolveApiCredential, type ResolvedCredential } from "../auth/sb-keys.ts";
 import { decodeFrame, encodeFrame, reply, type PhoenixMessage } from "./protocol.ts";
 import type { Channel } from "./channel.ts";
 
@@ -9,7 +9,7 @@ export class RealtimeSocket {
   id = crypto.randomUUID();
   channels = new Map<string, Channel>(); // key: topic
   lastSeen = Date.now();
-  constructor(private ws: WebSocket, public claims: AccessTokenClaims) {}
+  constructor(private ws: WebSocket, public claims: ResolvedCredential) {}
   send(msg: PhoenixMessage): void {
     if (this.ws.readyState !== 1) return;
     // Slow-client guard: kill rather than buffer unboundedly (spec: no backpressure into WAL pipeline)
@@ -40,7 +40,7 @@ export function handleUpgrade(req: any, socket: any, head: any, wsPath: string):
       socket.destroy();
     } catch { /* socket already gone */ }
   };
-  verifyAccessToken(token)
+  resolveApiCredential(token)
     .then((claims) => {
       // Fail closed: no claims (invalid/expired token) rejects the upgrade.
       if (!claims) {
@@ -54,7 +54,7 @@ export function handleUpgrade(req: any, socket: any, head: any, wsPath: string):
   return true;
 }
 
-function onConnection(ws: WebSocket, claims: AccessTokenClaims): void {
+function onConnection(ws: WebSocket, claims: ResolvedCredential): void {
   const sock = new RealtimeSocket(ws, claims);
   sockets.add(sock);
   const idleTimer = setInterval(() => {
@@ -78,12 +78,12 @@ async function onMessage(sock: RealtimeSocket, raw: string): Promise<void> {
     return;
   }
   if (msg.event === "access_token") {
-    // Fail closed: verifyAccessToken can throw (e.g. key-derivation failure);
+    // Fail closed: resolveApiCredential can throw (e.g. key-derivation failure);
     // treat a throw exactly like an invalid token so it never escapes the
     // uncaught `void onMessage(...)` call and crashes the process.
-    let claims: AccessTokenClaims | null = null;
+    let claims: ResolvedCredential | null = null;
     try {
-      claims = await verifyAccessToken(msg.payload?.access_token ?? "");
+      claims = await resolveApiCredential(msg.payload?.access_token ?? "");
     } catch {
       claims = null;
     }

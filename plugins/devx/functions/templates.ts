@@ -14,6 +14,7 @@ import { template as d2eAdminPlugin } from "./templates/d2e_admin_plugin.ts";
 import { template as atlasPlugin } from "./templates/atlas_plugin.ts";
 import { template as blank } from "./templates/blank.ts";
 import { template as strategusStudy } from "./templates/strategus_study.ts";
+import { template as d2eWizard } from "./templates/d2e_wizard.ts";
 
 export interface AppTemplate {
   id: string;
@@ -36,6 +37,7 @@ export const TEMPLATES: AppTemplate[] = [
   atlasPlugin,
   blank,
   strategusStudy,
+  d2eWizard,
 ];
 
 /**
@@ -103,6 +105,12 @@ export async function injectComponentTagger(targetDir: string): Promise<void> {
   let taggerSource = "";
   const taggerCandidates = [
     new URL("./visual_editing/component_tagger_plugin.js", import.meta.url).pathname,
+    // The devx plugin is mounted at /usr/src/plugins-dx in the dx image; the
+    // import.meta.url path resolves into the eszip compile dir where this asset
+    // isn't materialized. Without the plugins-dx path this read throws, the
+    // caller's non-fatal catch swallows it, and NO app ever gets the tagger —
+    // so visual editing silently produces no data-devx-id attributes.
+    "/usr/src/plugins-dx/devx/functions/visual_editing/component_tagger_plugin.js",
     "/usr/src/plugins-dev/devx/functions/visual_editing/component_tagger_plugin.js",
   ];
   for (const p of taggerCandidates) {

@@ -4,10 +4,12 @@
 // endpoints cannot drift. Spec §3 (skills/subagents) + §4 (extensions).
 // deno-lint-ignore-file no-explicit-any
 import { streamText, tool, jsonSchema, stepCountIs } from "ai";
-import { resolveModel } from "./model.ts";
+import { cacheProviderOptions, resolveModel, withSystemCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
+import { buildConnectionProvider, type ConnectionProviderOpts } from "../connections/provider.ts";
+import { type ConnectionToolMeta, searchConnectionTools } from "../connections/search.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 
@@ -56,6 +58,12 @@ export interface ToolBuildCtx {
   // "dynamic tools ctx" shape — keeps one request-context type across every
   // agent.ts/dynamic-tools.ts hook.
   hookCtx?: HookCtx;
+  // Task 5: injectable connect/fetch for the connection provider's eager
+  // realization (step 2b) — tests pass a fake MCP connect so the realized
+  // <conn>__<tool> surface (and thus connection_search's discovery output) is
+  // deterministic without a live server. Undefined in production → the
+  // provider's real SDK-backed connect / global fetch.
+  connectionOpts?: ConnectionProviderOpts;
 }
 
 export function buildSystemPrompt(agent: LoadedAgent, metadata?: unknown): string {
@@ -186,12 +194,17 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
   // which still runs against depth-1's (smaller) tool set using the same
   // hookCtx carried in via the ...ctx spread.
   const tools = await buildSdkTools({ ...ctx, agent: target, depth: 1 });
+  // Task 15: same cache-point treatment (bedrock + anthropic) as runner.ts's
+  // primary turn loop, for consistency — a subagent's system+tools prefix is
+  // just as stable/repeated (across its own steps) as the top-level turn's.
   const result = streamText({
     model,
-    system: buildSystemPrompt(target, ctx.metadata),
+    system: withSystemCachePoint(model, buildSystemPrompt(target, ctx.metadata)),
     messages: [{ role: "user" as const, content: prompt }],
     tools,
     stopWhen: stepCountIs(target.config.maxSteps ?? 25),
+    // Same openai prompt-cache routing as runner.ts, keyed by the subagent's dir.
+    providerOptions: cacheProviderOptions(model, target.dir),
   });
   return { text: await result.text };
 }
@@ -235,6 +248,33 @@ function agentTool(ctx: ToolBuildCtx): any {
   });
 }
 
+// The connection_search built-in (Task 5): discovery over an agent's
+// connection-backed tools. Closes over `toolMeta` — the <conn>__<tool> names +
+// descriptions collected from the eager connection-provider merge (step 2b) —
+// plus each connection's own description, and ranks them against the query.
+// Discovery only: the matched tools are already realized and directly
+// callable; this just helps the model NAME them (see connections/search.ts).
+function connectionSearchTool(ctx: ToolBuildCtx, toolMeta: ConnectionToolMeta[]): any {
+  const connectionDescriptions: Record<string, string> = {};
+  for (const [name, conn] of Object.entries(ctx.agent.connections)) {
+    connectionDescriptions[name] = conn.description;
+  }
+  return tool({
+    description:
+      "Search this agent's connection-backed tools by keyword to discover which ones to use. " +
+      "Returns matching { name, description } entries; a returned name is \"<connection>__<tool>\" and is directly callable.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: { query: { type: "string", description: "keywords describing the capability you need" } },
+      required: ["query"],
+    }),
+    execute: (input: unknown): Promise<unknown> => {
+      const query = (input as { query?: string }).query ?? "";
+      return Promise.resolve({ matches: searchConnectionTools(query, toolMeta, connectionDescriptions) });
+    },
+  });
+}
+
 // Synthetic ToolDefs for the two built-ins, used ONLY as the `def` argument
 // handed to filterTools (H2) — not the real SDK tool (skillTool/agentTool
 // build those directly, closing over `ctx`, since their description text is
@@ -243,6 +283,7 @@ function agentTool(ctx: ToolBuildCtx): any {
 // never needs more than this; description/inputSchema here are placeholders.
 const BUILTIN_SKILL_DEF: ToolDef = { description: "Load an on-demand skill by name (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection-backed tools by keyword (built-in).", inputSchema: { type: "object" } };
 
 // Builds the AI SDK tool set for one buildSdkTools call. Order (H2, spec
 // task-h2-brief.md):
@@ -276,6 +317,10 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   // static agent.tools) so authoredTool can withhold ToolContext.sql from
   // provider-sourced tools — see authoredTool's `isAuthored` parameter.
   const dynamicNames = new Set<string>();
+  // Task 5: names + descriptions of the realized connection tools, collected
+  // from the eager provider merge below, handed to the connection_search
+  // built-in for discovery ranking.
+  const connToolMeta: ConnectionToolMeta[] = [];
   if (depth === 0 && agent.toolProvider) {
     if (!ctx.hookCtx) {
       console.log(`agents: ${agent.dir}/dynamic-tools.ts is configured but no request hookCtx was available — skipping dynamic tools for this turn`);
@@ -292,6 +337,39 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
         }
       } catch (e) {
         console.error(`agents: ${agent.dir}/dynamic-tools.ts threw — continuing with static tools only: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }
+  }
+
+  // Step 2b: connection-backed tools (connections/*.ts → MCP + static auth,
+  // Task 3). Same depth-0-only, log+continue posture as the dynamic provider
+  // above — a broken connection never fails the turn (the provider also
+  // catches per connection). Authored/static and dynamic tools win on a name
+  // collision (`<conn>__<tool>` is namespaced, so collisions are unlikely).
+  // Tracked in dynamicNames so authoredTool withholds ToolContext.sql from
+  // these provider-sourced tools, exactly like the dynamic-tools path.
+  if (depth === 0 && Object.keys(agent.connections).length > 0) {
+    if (!ctx.hookCtx) {
+      console.log(`agents: ${agent.dir} has connections but no request hookCtx was available — skipping connection tools for this turn`);
+    } else {
+      try {
+        const connNames = Object.keys(agent.connections);
+        const connProvider = buildConnectionProvider(agent, ctx.connectionOpts);
+        const connTools = await connProvider(ctx.hookCtx);
+        for (const [name, def] of Object.entries(connTools)) {
+          if (Object.hasOwn(defs, name)) {
+            console.log(`agents: connection tool "${name}" from ${agent.dir}/connections shadowed by an existing tool`);
+            continue;
+          }
+          defs[name] = def;
+          dynamicNames.add(name);
+          // Prefix-match the owning connection (names are "<conn>__<tool>") so
+          // connection_search can weight the connection's own description.
+          const connection = connNames.find((c) => name.startsWith(`${c}__`)) ?? "";
+          connToolMeta.push({ name, connection, description: def.description ?? "" });
+        }
+      } catch (e) {
+        console.error(`agents: connection provider for ${agent.dir} threw — continuing without connection tools: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
   }
@@ -316,6 +394,14 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
       filterDefs.agent = BUILTIN_AGENT_DEF;
     } else {
       console.log("agents: a tool named \"agent\" overrides the built-in agent tool");
+    }
+    // connection_search (Task 5): only when the agent actually has connections;
+    // an authored/dynamic tool of the same name (already in `out`) wins.
+    if (Object.keys(agent.connections).length > 0 && !out.connection_search) {
+      out.connection_search = connectionSearchTool(ctx, connToolMeta);
+      filterDefs.connection_search = BUILTIN_CONNECTION_SEARCH_DEF;
+    } else if (out.connection_search) {
+      console.log("agents: a tool named \"connection_search\" overrides the built-in connection_search tool");
     }
   }
 

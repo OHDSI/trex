@@ -75,6 +75,39 @@ over env vars. Apple is supported via DB-driven config only.
 | `PLUGINS_IMAGE_TAG` | `latest` | Tag appended to flow plugin images. |
 | `PUBLIC_FQDN` | — | Substituted for `$$FQDN$$` in UI plugin config. |
 
+## Agents
+
+Host vars consumed by [agent plugins](../plugins/agent-plugins). Only the
+vars below are forwarded into agent workers — tools cannot read arbitrary
+host env.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TREX_AGENTS_DEFAULT_MODEL` | — | Fallback `provider/model-id` string when an agent declares no model. |
+| `ANTHROPIC_API_KEY` | — | Credentials for `anthropic/...` models. |
+| `OPENAI_API_KEY` / `OPENAI_BASE_URL` | — | Credentials for `openai/...` models; `OPENAI_BASE_URL` targets OpenAI-compatible gateways (also the fallback for unknown provider prefixes). |
+| `GOOGLE_GENERATIVE_AI_API_KEY` | — | Credentials for `google/...` models. |
+| `AWS_BEARER_TOKEN_BEDROCK` / `AWS_REGION` | — / `us-east-1` | Bearer-token auth for `bedrock/...` models. |
+| `DISCORD_GATEWAY_LOOPBACK_URL` | `http://127.0.0.1:8001` | Base URL the Discord gateway client (an agent with `DISCORD_GATEWAY=1` in its manifest `env`) uses to POST interactions to the local channel route. |
+
+Channel adapters (Discord, Slack, Telegram, …) and connection auth read their
+own platform credentials — per-adapter tables live in
+`core/server/agents/README.md`. `TREX_ROOT_KEY` (above) additionally gates
+the connections OAuth broker: without it, the `/oauth/*` routes 404 and
+`trexConnect` connections are skipped.
+
+## Memory
+
+Vars for the [memory plugin](../plugins/memory-plugins) worker. The
+allow-list and staged-sources path are derived at mount time, not
+operator-configured.
+
+| Variable | Set by | Description |
+|----------|--------|-------------|
+| `GBRAIN_MEMORY_TOKEN` | operator | Internal shared-secret bearer token for the trex-to-memory-worker hop. Not a user-facing credential. |
+| `GBRAIN_MEMORY_ALLOWLIST` | trex core (auto) | Comma-separated declared memory names; the worker only serves names declared by a trusted-scope plugin. |
+| `TREX_MEMORY_SOURCES` | trex core (auto) | Path to the staged sources the worker self-imports at boot. |
+
 ## REST API (`${BASE_PATH}/rest/v1/*`)
 
 The PostgREST-compatible REST API is served in-process via the
@@ -143,4 +176,4 @@ The `deploy/` directory contains Pulumi stacks for AWS ECS Fargate and Azure
 Container Apps. Stack-level configuration (image tag, DB URL, TLS certificates,
 auth secrets) lives in the `Pulumi.<stack>.yaml` files; runtime env vars listed
 above are still required and are populated by Pulumi into the container task
-definition. See [`deploy/README.md`](https://github.com/OHDSI/trex/tree/main/deploy).
+definition. See [`deploy/README.md`](https://github.com/OHDSI/trex/tree/develop/deploy).

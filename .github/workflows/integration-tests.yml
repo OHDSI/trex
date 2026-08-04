@@ -74,6 +74,11 @@ jobs:
             extra-submodules: plugins/runtime/trex-runtime
             tool: deno
             apt: libopenblas-dev
+            # base's build.rs links libtrexsql since the startup snapshot
+            # bakes in trex_core (trex-runtime#163); LD_LIBRARY_PATH because
+            # the build script runs to create the snapshot
+            libtrexsql: true
+            build-cmd: export LIBRARY_PATH=/tmp/trexsql LD_LIBRARY_PATH=/tmp/trexsql && make configure && make debug_coverage
             artifact: plugins/runtime/build/debug/extension/trexas/trexas.trex
             timeout: 60
 
@@ -148,7 +153,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ${{ matrix.apt }}
 
       - uses: ./.github/actions/setup-libtrexsql
-        if: matrix.tool == 'pgrx'
+        if: matrix.tool == 'pgrx' || matrix.libtrexsql
         with:
           version: v1.4.4-trex
 

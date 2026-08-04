@@ -3,9 +3,12 @@
 // tools/*.ts|*.js (one tool per file, filename = tool name),
 // skills/<name>.md or skills/<name>/SKILL.md (metadata parsed here, content
 // loaded on demand by the built-in skill tool), subagents/<name>/ (each an
-// eve-layout dir, ONE level deep). Unsupported eve dirs (channels/,
-// connections/, sandbox/) are ignored with a log line so real eve projects
-// still load.
+// eve-layout dir, ONE level deep), channels/*.ts|*.js (one channel per file,
+// filename = channel id, default-exporting defineChannel(...)),
+// connections/*.ts|*.js (one connection per file, filename = connection name,
+// default-exporting defineMcpClientConnection/defineOpenApiConnection(...)).
+// Unsupported eve dirs (sandbox/) are ignored with a log line so real eve
+// projects still load.
 //
 // EDN alternatives (trex extension for CLJS-authored agents, spec §3): the
 // eve-native file always wins when both exist, so directories stay portable
@@ -13,6 +16,8 @@
 // string or {:instructions "..."}); skills/<name>.edn {:description "..."
 // :content "..."}.
 import { parseEDNString } from "edn-data";
+import type { ChannelDef } from "./channels/types.ts";
+import type { ConnectionDef } from "./connections/types.ts";
 import type { AgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
 
 export interface SkillMeta {
@@ -52,6 +57,14 @@ export interface LoadedAgent {
   tools: Record<string, ToolDef>;
   skills: SkillMeta[];
   subagents: Record<string, LoadedAgent>;
+  // channels/*.{ts,js} — each default-exports a defineChannel(...) result;
+  // key = filename sans ext (same shape as tools/, gated on __trexChannel).
+  channels: Record<string, ChannelDef>;
+  // connections/*.{ts,js} — each default-exports a defineMcpClientConnection /
+  // defineOpenApiConnection result; key = filename sans ext (same shape as
+  // channels/, gated on __trexConnection). The loader sets def.name from the
+  // filename (the shim reserved a name? field for exactly this).
+  connections: Record<string, ConnectionDef>;
   // H2: agent-dir-ROOT `dynamic-tools.ts`/`dynamic-tools.js` only (never
   // discovered inside tools/ — that dir is scanned separately and a
   // dynamic-tools.ts placed there is just an ordinary tools/ entry, which
@@ -60,7 +73,7 @@ export interface LoadedAgent {
   toolProvider?: ToolProviderFn;
 }
 
-const IGNORED_DIRS = ["channels", "connections", "sandbox"];
+const IGNORED_DIRS = ["sandbox"];
 
 // Description = frontmatter `description:` if a leading YAML block exists,
 // else the first non-empty, non-heading line.
@@ -76,6 +89,15 @@ export function parseSkillDescription(markdown: string): string {
     if (t && !t.startsWith("#")) return t;
   }
   return "";
+}
+
+// A skill staged from a skills-plugin pack is named `<pack>--<skill>`
+// (plugin/skill-packs.ts's staging convention; "--" is rejected in pack and
+// pack-skill names, and reserved — hand-authored skills should not use it).
+// Returns the pack name, or null for a hand-authored skill.
+export function packOfSkillName(name: string): string | null {
+  const i = name.indexOf("--");
+  return i > 0 ? name.slice(0, i) : null;
 }
 
 export async function loadAgent(dir: string, opts: { depth?: number } = {}): Promise<LoadedAgent> {
@@ -126,6 +148,10 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
   try {
     for await (const entry of Deno.readDir(`${dir}/tools`)) {
       if (!entry.isFile) continue;
+      // Colocated test files (e.g. dispatchToCode.test.ts) are the
+      // established convention alongside tool/lib modules in this repo —
+      // skip them rather than treating them as tool definitions.
+      if (/\.test\.(ts|js|mts|mjs)$/.test(entry.name)) continue;
       const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
       if (!m) continue;
       const name = m[1];
@@ -161,6 +187,51 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     }
     toolProvider = fn as ToolProviderFn;
     break;
+  }
+
+  const channels: Record<string, ChannelDef> = {};
+  try {
+    for await (const entry of Deno.readDir(`${dir}/channels`)) {
+      if (!entry.isFile) continue;
+      // Colocated test files (e.g. discord.load.test.ts) are the established
+      // convention alongside channel modules in this repo — skip them rather
+      // than treating them as channel definitions (same rationale as the
+      // tools/ scan above).
+      if (/\.test\.(ts|js|mts|mjs)$/.test(entry.name)) continue;
+      const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
+      if (!m) continue;
+      const name = m[1];
+      const mod = await import(`file://${dir}/channels/${entry.name}`);
+      const def = mod.default;
+      if (!def || !(def as { __trexChannel?: boolean }).__trexChannel) {
+        throw new Error(`agents: ${dir}/channels/${entry.name} must default-export defineChannel(...)`);
+      }
+      channels[name] = def as ChannelDef;
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
+  }
+
+  const connections: Record<string, ConnectionDef> = {};
+  try {
+    for await (const entry of Deno.readDir(`${dir}/connections`)) {
+      if (!entry.isFile) continue;
+      const m = entry.name.match(/^(.+)\.(ts|js|mts|mjs)$/);
+      if (!m) continue;
+      const name = m[1];
+      const mod = await import(`file://${dir}/connections/${entry.name}`);
+      const def = mod.default;
+      if (!def || !(def as { __trexConnection?: boolean }).__trexConnection) {
+        throw new Error(
+          `agents: ${dir}/connections/${entry.name} must default-export defineMcpClientConnection(...)/defineOpenApiConnection(...)`,
+        );
+      }
+      // The loader owns the connection's name (= filename); the shim reserved
+      // the field for exactly this so authored files don't repeat themselves.
+      connections[name] = Object.assign(def as ConnectionDef, { name });
+    }
+  } catch (e) {
+    if (!(e instanceof Deno.errors.NotFound)) throw e;
   }
 
   const skills: SkillMeta[] = [];
@@ -235,5 +306,5 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     } catch { /* absent */ }
   }
 
-  return { dir, instructions, config, tools, skills, subagents, toolProvider };
+  return { dir, instructions, config, tools, skills, subagents, channels, connections, toolProvider };
 }

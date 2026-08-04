@@ -119,6 +119,102 @@ jobs:
           cd ./plugins/prometheus
           npm run build
 
+  # Deno unit tests for the core server's agent stack (agents/channels/
+  # connections/eve-shim), the memory plugin type (importer + gbrain worker,
+  # against a live pgvector Postgres), and the claw agent plugin. Scoped to
+  # those suites — realtime/* needs a wal_level=logical Postgres and is
+  # covered by the e2e jobs, and the devx agent eval suite is deliberately
+  # NOT run in CI (it needs live model credentials).
+  core-server-tests:
+    if: |
+      (github.ref_name == 'develop' || github.ref_name == 'main' || contains('release', github.ref_name) || github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v'))
+      || (github.event_name == 'pull_request' && !github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        # Same image/db the vendored gbrain suite targets (see
+        # vendor/gbrain/docker-compose.ci.yml). Host port 5433 matches the
+        # tests' hardcoded fallback URL.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: gbrain_test
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d gbrain_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      # agents/plugin tests only need DATABASE_URL to be SET (core/server/db.ts
+      # throws at import time without it); the gbrain worker + self-import
+      # tests actually connect.
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/gbrain_test
+      GBRAIN_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5433/gbrain_test
+    steps:
+      - uses: actions/checkout@v4
+        id: checkout_core_tests
+        continue-on-error: true
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - if: steps.checkout_core_tests.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.GIT_BRANCH_NAME }}
+          repository: ${{ env.GIT_REPO_FULL_NAME }}
+          submodules: false
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.x"
+      - name: Install core/server node deps
+        # The deno.json npm: imports (ai, @ai-sdk/*, edn-data) are declared in
+        # package.json so plain npm ci materializes them — nodeModulesDir is
+        # "manual" (byonm) and deno test resolves npm: specifiers from
+        # node_modules. Do NOT use `deno install` here: it creates deno's own
+        # node_modules/.deno layout at the workspace root, under which express
+        # loses its @types and setTimeout types shift to Node's Timeout — 22
+        # typecheck errors that npm's layout doesn't produce.
+        run: cd core/server && npm ci
+      - name: Prepare test database (trexdb schema + memory import-state table)
+        run: |
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
+            -c 'CREATE SCHEMA IF NOT EXISTS trexdb;' \
+            -c 'DO $$ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END $$;' \
+            -f core/schema/V6__memory_import_state.sql
+      # --no-check like the gbrain-worker/claw legs below: the deno workspace
+      # root is core/ (its deno.json declares the workspace, so its
+      # nodeModulesDir wins) and TYPE-REFERENCE directives from npm packages
+      # (/// <reference types="node">) resolve against core/node_modules,
+      # which only exists on dev machines (deno install residue) — npm ci in
+      # core/server can never satisfy them. Runtime npm: resolution works from
+      # core/server/node_modules either way. Typechecking runs on dev machines
+      # via the same command without --no-check.
+      - name: core/server tests (agents, plugin loader, memory importer, d2e-compat)
+        run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts d2e-compat/
+      # The gbrain worker suite runs under its OWN import map (gbrain/ alias +
+      # npm: pins) — it is not a member of the core deno workspace, so it
+      # cannot run under core/server/deno.json (see gbrain-worker/deno.json).
+      - name: gbrain memory worker tests (live DB)
+        run: cd core/server && deno test --no-check --allow-all --import-map memory/gbrain-worker/deno.json --node-modules-dir=auto memory/gbrain-worker/
+      # claw's importmap.json is authoring/test-only: at runtime the agents
+      # loader stages the eve shim and generates the worker import map itself.
+      - name: claw plugin tests
+        run: deno test --no-check --allow-all --import-map plugins/claw/importmap.json --node-modules-dir=auto plugins/claw/
+      # Same authoring/test-only import map story as claw above. D2ESUPPORT_USER_ID
+      # is deliberately unset here — the allowlist test suite covers both the
+      # env-set and env-unset paths, and CI has no real devx user to loop back to.
+      - name: d2esupport plugin tests
+        run: deno test --no-check --allow-all --import-map plugins/d2esupport/importmap.json --node-modules-dir=auto plugins/d2esupport/
+
   build:
     needs: [pick_runner]
     # PR builds run only for same-repo PRs. Fork PRs are excluded — they'd otherwise check out
@@ -168,6 +264,8 @@ jobs:
           - PKGPATH: ./plugins/devx-ext
             RUNNER: ubuntu-24.04
             EXCLUDE_FROM_IMAGE: true
+          - PKGPATH: ./plugins/claw
+          - PKGPATH: ./plugins/d2esupport
 
     runs-on: ${{ matrix.RUNNER || needs.pick_runner.outputs.random_runner }}
 
@@ -343,7 +441,7 @@ jobs:
           # artifact. Web/docs/notebook/cli/runtime/bao publish other shapes;
           # everything else is a DuckDB extension and must ship a .trex.
           case "${{ matrix.PKGPATH }}" in
-            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx)
+            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx|./plugins/claw|./plugins/d2esupport)
               echo "skip — non-extension plugin"
               ;;
             *)
@@ -842,25 +940,27 @@ jobs:
         with:
           driver: docker
 
+      # Non-pushed smoke build: keeps the lean prod target from bit-rotting.
       - name: Build prod image for testing
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: prod
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: trexsql-test:prod
+
+      - name: Build full image for testing
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           platforms: linux/${{ matrix.arch }}
           load: true
-          tags: trexsql-test:prod
-
-      - name: Build dev image for testing
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.dev
-          platforms: linux/${{ matrix.arch }}
-          load: true
-          tags: trexsql-test:dev
+          tags: trexsql-test:full
           build-args: |
-            BASE_IMAGE=trexsql-test:prod
+            DEVX_EXT_VERSION=${{ github.sha }}
 
       - name: Test extensions load (${{ matrix.arch }})
         run: |
@@ -868,14 +968,44 @@ jobs:
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -q "extension(s) loaded successfully"
 
+      - name: Verify memory + claw runtime assets (${{ matrix.arch }})
+        run: |
+          # memory plugin type: the worker stages vendor/gbrain/src + the
+          # sibling package.json from disk at mount time — a missing tree
+          # fails every memory plugin mount at boot (mount.ts probes
+          # src/core/postgres-engine.ts). claw ships via plugins-dev like
+          # storage/postgrest.
+          docker run --rm --entrypoint sh trexsql-test:full -c '
+            set -e
+            test -f /usr/src/vendor/gbrain/src/core/postgres-engine.ts
+            test -f /usr/src/vendor/gbrain/package.json
+            test -f /usr/src/plugins-dev/claw/package.json
+            test -f /usr/src/plugins-dev/claw/agent/agent.ts'
+
       - name: Verify dev tooling absent from prod image
         run: |
           # gh CLI / claude / playwright must NOT be in the prod image
           ! docker run --rm --entrypoint sh trexsql-test:prod -c 'command -v gh' >/dev/null 2>&1
           ! docker run --rm --entrypoint sh trexsql-test:prod -c 'command -v claude' >/dev/null 2>&1
-          # And SHOULD be in the dev image
-          docker run --rm --entrypoint sh trexsql-test:dev -c 'command -v gh' >/dev/null
-          docker run --rm --entrypoint sh trexsql-test:dev -c 'command -v claude' >/dev/null
+          # And SHOULD be in the full image
+          docker run --rm --entrypoint sh trexsql-test:full -c 'command -v gh' >/dev/null
+          docker run --rm --entrypoint sh trexsql-test:full -c 'command -v claude' >/dev/null
+
+      - name: Verify devx gate (${{ matrix.arch }})
+        run: |
+          # Gate OFF (default): boots clean, devx_ext NOT loaded, payload present but dormant
+          OFF=$(docker run --rm trexsql-test:full --check 2>&1) || true
+          echo "$OFF"
+          echo "$OFF" | grep -q "extension(s) loaded successfully"
+          ! echo "$OFF" | grep -q devx_ext
+          docker run --rm --entrypoint sh trexsql-test:full -c \
+            'test -d /usr/src/plugins-dx/devx && test -f /usr/lib/trexsql/extensions-dx/devx_ext.trex'
+          # Gate ON: entrypoint copies the gated devx_ext into the primary
+          # extensions dir (EXTENSION_DIR can't be a list — see entrypoint.sh),
+          # so it loads from there rather than extensions-dx.
+          ON=$(docker run --rm -e TREX_DX_ENABLED=true trexsql-test:full --check 2>&1) || true
+          echo "$ON"
+          echo "$ON" | grep -q "Loading extension: /usr/lib/trexsql/extensions/devx_ext.trex ... ok"
 
       # GHCR rejects uppercase repo names. github.repository_owner preserves the
       # org's actual casing (OHDSI), so lowercase it once via shell into $IMAGE_NS.
@@ -894,7 +1024,9 @@ jobs:
 
       # Each arch pushes an -<arch>-suffixed tag; merge-docker assembles these
       # into the multi-arch manifests (:latest, :sha-<sha>, :dev, ...).
-      - name: Build and push prod image (per-arch)
+      # Single published image: the full (default) target, with devx gated off
+      # by default. The prod target is intentionally NOT published.
+      - name: Build and push image (per-arch)
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         uses: docker/build-push-action@v6
         with:
@@ -902,19 +1034,9 @@ jobs:
           file: Dockerfile
           platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
-
-      - name: Build and push dev image (per-arch)
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.dev
-          platforms: linux/${{ matrix.arch }}
-          push: true
           build-args: |
-            BASE_IMAGE=ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
-          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:dev-sha-${{ github.sha }}-${{ matrix.arch }}
+            DEVX_EXT_VERSION=${{ github.sha }}
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
 
       - name: Build and push studio sidecar image (per-arch)
         # The studio sidecar (referenced by docker-compose.yml) ships as its own
@@ -962,9 +1084,11 @@ jobs:
           docker buildx imagetools create \
             -t "${NS}/trexsql:latest" -t "${NS}/trexsql:sha-${SHA}" \
             $(srcs "${NS}/trexsql:sha-${SHA}")
+          # :dev tags are aliases of the same full image (kept for consumers
+          # of the old dev-image tags).
           docker buildx imagetools create \
             -t "${NS}/trexsql:dev" -t "${NS}/trexsql:dev-sha-${SHA}" \
-            $(srcs "${NS}/trexsql:dev-sha-${SHA}")
+            $(srcs "${NS}/trexsql:sha-${SHA}")
           docker buildx imagetools create \
             -t "${NS}/trex-studio:latest" -t "${NS}/trex-studio:sha-${SHA}" \
             $(srcs "${NS}/trex-studio:sha-${SHA}")
@@ -1093,16 +1217,30 @@ jobs:
           cp ./trex-artifacts/*.trex d2e/.ci-overlay/
           ls -l d2e/.ci-overlay/
 
-      # d2e publishes d2e-trex only as <prefix><sha> tags (no moving ":develop"). The
-      # packages API returns versions newest-first, but the newest tag can belong to
-      # an in-flight build whose manifest isn't pushed yet (pull → "manifest unknown").
-      # Walk newest→older and pin the first tag that actually resolves. DOCKER_TAG_NAME
-      # then drives the rebundle IMG, the compose override, and the cli.js pull/start.
-      - name: Resolve latest d2e-trex image tag
+      # d2e publishes its service images only as <prefix><sha> tags (no moving
+      # ":develop"). The packages API returns versions newest-first, but the newest
+      # tag can belong to an in-flight build whose manifests aren't all pushed yet
+      # (pull → "manifest unknown"). DOCKER_TAG_NAME drives EVERY per-sha image in
+      # the d2e compose (trex, logto, logto-post-init, pg-mgmt-init, storage,
+      # gateway, dataflow-gen-worker, …), and the publishes are not atomic — a tag
+      # can have d2e-trex pushed while d2e-logto is still building (that exact race
+      # broke this job: "alp-logto … manifest unknown"). So walk newest→older and
+      # pin the first tag where the COMPLETE image set resolves, deriving the set
+      # from the checked-out compose file so it never drifts from reality.
+      - name: Resolve latest fully-published d2e image tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PREFIX="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}"
+          # Every image name tagged with DOCKER_TAG_NAME. The base compose holds
+          # the image lines; the -ci file is an overlay — scan both.
+          IMAGES=$(grep -rhoE 'image:.*\$\{DOCKER_IMAGE_PREFIX[^}]*\}[a-z0-9-]+:\$\{DOCKER_TAG_NAME' \
+              d2e/docker-compose.yml d2e/docker-compose-ci.yml 2>/dev/null \
+            | sed -E 's/.*\}([a-z0-9-]+):.*/\1/' | sort -u)
+          if [ -z "$IMAGES" ]; then
+            echo "::error::could not derive DOCKER_TAG_NAME image set from the d2e compose files"; exit 1
+          fi
+          echo "images sharing DOCKER_TAG_NAME:" $IMAGES
           TAGS=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
             --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][]')
           if [ -z "$TAGS" ]; then
@@ -1110,15 +1248,19 @@ jobs:
           fi
           TAG=""
           for t in $TAGS; do
-            if docker manifest inspect "${PREFIX}d2e-trex:${t}" >/dev/null 2>&1; then
-              TAG="$t"; break
-            fi
-            echo "skip ${t}: manifest not published yet"
+            ok=1
+            for img in $IMAGES; do
+              if ! docker manifest inspect "${PREFIX}${img}:${t}" >/dev/null 2>&1; then
+                echo "skip ${t}: ${img} manifest not published yet"
+                ok=0; break
+              fi
+            done
+            if [ "$ok" = "1" ]; then TAG="$t"; break; fi
           done
           if [ -z "$TAG" ]; then
-            echo "::error::no pullable d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*'"; exit 1
+            echo "::error::no tag matching '${D2E_TREX_TAG_PREFIX}*' has the complete image set published"; exit 1
           fi
-          echo "Using d2e-trex image: ${PREFIX}d2e-trex:${TAG}"
+          echo "Using d2e image tag: ${TAG} (all $(echo "$IMAGES" | wc -w) images resolve)"
           echo "DOCKER_TAG_NAME=$TAG" >> "$GITHUB_ENV"
 
       - name: Rebundle this branch's core (main) into fresh eszips
@@ -1207,7 +1349,7 @@ jobs:
             docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
       - name: Wait for services to be healthy
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           # The compose project name is d2e or alp depending on d2e's cli/env, so
           # discover the trex container by its name suffix instead of hardcoding it.
@@ -1220,14 +1362,37 @@ jobs:
             sleep 5
           done
           echo "$TREX is healthy"
+
+          # A healthy trex only means the gateway answers. setupdemo also needs the
+          # in-container OHDSI WebAPI (Java, :8080) — its token exchange hits it
+          # directly — which comes up AFTER the gateway. Wait for WebAPI to actually
+          # answer so setupdemo doesn't race it (the "Connection refused / Adding
+          # demo dataset 500" flake). trex reaching WebAPI but WebAPI not being up
+          # shows as a 5xx from the gateway, so treat only 2xx-4xx as ready.
+          # Best-effort: on timeout we only warn and let setupdemo's retries run,
+          # so a probe mismatch can never make the job stricter than before.
+          PORT="${CADDY_PORT:-${PORT:-443}}"
+          echo "Waiting for WebAPI at https://localhost:${PORT}/WebAPI/info ..."
+          webapi_ready=0
+          for i in $(seq 1 90); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://localhost:${PORT}/WebAPI/info" || echo 000)
+            echo "  WebAPI HTTP ${code} (attempt ${i}/90)"
+            if [ "${code}" -ge 200 ] && [ "${code}" -lt 500 ]; then webapi_ready=1; break; fi
+            sleep 5
+          done
+          if [ "${webapi_ready}" != 1 ]; then
+            echo "::warning::WebAPI did not answer within the wait window; setupdemo will rely on its retries."
+          else
+            echo "WebAPI is ready"
+          fi
           docker ps --format "{{.Names}},{{.Status}}"
 
       - name: Run setupdemo
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
-          retry_wait_seconds: 100
-          max_attempts: 2
+          retry_wait_seconds: 120
+          max_attempts: 3
           command: |
             cd d2e
             ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml setupdemo

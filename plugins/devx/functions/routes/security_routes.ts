@@ -5,6 +5,7 @@ import { SECURITY_REVIEW_SYSTEM_PROMPT, parseSecurityFindings } from "../securit
 import { CODE_REVIEW_SYSTEM_PROMPT, parseCodeReviewFindings } from "../code_review_prompt.ts";
 import { QA_REVIEW_SYSTEM_PROMPT, parseQaFindings } from "../qa_review_prompt.ts";
 import { DESIGN_REVIEW_SYSTEM_PROMPT, parseDesignFindings } from "../design_review_prompt.ts";
+import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_update_prompt.ts";
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
 
@@ -23,12 +24,25 @@ const SECURITY_REVIEW_TOOLS = [
   "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
 ];
 const QA_REVIEW_TOOLS = [
+  // Screenshot lets a QA finding carry visual evidence; without it a bug report is
+  // prose only. BrowserEvaluate doubles as the console/pageerror capture channel.
   "BrowserNavigate", "BrowserClick", "BrowserFill", "BrowserGetText", "BrowserEvaluate",
+  "BrowserScreenshot",
   "Read", "Glob", "Grep", "GitDiff",
 ];
 const DESIGN_REVIEW_TOOLS = [
-  "BrowserNavigate", "BrowserClick", "BrowserScreenshot", "BrowserGetText",
+  // BrowserEvaluate is what makes the design review measurable rather than impressionistic:
+  // it can read computed styles (font stacks, contrast, touch-target sizes) and resize the
+  // viewport, without which the Responsive Design category cannot be honestly assessed.
+  "BrowserNavigate", "BrowserClick", "BrowserScreenshot", "BrowserGetText", "BrowserEvaluate",
   "Read", "Glob", "Grep", "GitDiff",
+];
+const DOCS_UPDATE_TOOLS = [
+  // The one agent in this file that WRITES: it adds/updates pages in the app's
+  // documentation website (d2e: docs/website), so it needs Write/Edit/SearchReplace
+  // on top of the explore set the code review uses.
+  "Read", "Glob", "Grep", "CodeSearch", "GitDiff", "GitLog", "GitStatus",
+  "Write", "Edit", "SearchReplace",
 ];
 
 export async function handleSecurityRoutes(path, method, req, userId, sql, corsHeaders) {
@@ -295,7 +309,19 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     if (files.length === 0) {
       return null;
     }
-    return `${prefix}\n\nThe project has ${files.length} code files. Use your tools (Read, Grep, GitDiff, Glob) to explore the codebase in depth. Here is a summary of the files for context:\n\n${files.map((f) => `- ${f.path} (${f.content.length} chars)`).join("\n")}`;
+    // Include the agreed plan when the workspace has one. Without it the reviewer cannot
+    // tell "built what was asked" from "built something that compiles", so scope creep and
+    // silently dropped requirements are invisible to it.
+    let planSection = "";
+    try {
+      const plan = await findPlanDoc(wsPath);
+      if (plan) {
+        planSection = `\n\n## Agreed plan (${plan.path})\n\nCheck the change against this before reviewing quality.\n\n${plan.content.slice(0, 12000)}`;
+      }
+    } catch {
+      // no plan available — review proceeds without the scope check
+    }
+    return `${prefix}${planSection}\n\nThe project has ${files.length} code files. Use your tools (Read, Grep, GitDiff, Glob) to explore the codebase in depth. Here is a summary of the files for context:\n\n${files.map((f) => `- ${f.path} (${f.content.length} chars)`).join("\n")}`;
   }
 
   // Helper: build QA/Design review message with git diff and app URL.
@@ -470,12 +496,75 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     return Response.json(await getLatestReview(appId, "design-review"), { headers: corsHeaders });
   }
 
+  // ── POST /apps/:id/docs/review ─────────────────────────────────────
+  // "review" in the path for uniformity with the other four kinds (claw's
+  // runReview builds /apps/:id/<kind>/review), but this agent WRITES docs;
+  // its findings are the pages it added/updated.
+
+  const docsReviewMatch = path.match(/\/apps\/([^/]+)\/docs\/review$/);
+  if (docsReviewMatch && method === "POST") {
+    const appId = docsReviewMatch[1];
+    if (!await checkApp(appId)) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    const userMessage = await buildCodeReviewMessage(
+      appId,
+      "Document the recently implemented feature in this project's documentation website (d2e apps: docs/website). Read the plan and git diff to understand what was built, then add or update the documentation pages.",
+    );
+    if (!userMessage) {
+      return Response.json({ error: "No code files found to document" }, { status: 400, headers: corsHeaders });
+    }
+    return runAgentReview({
+      appId,
+      systemPrompt: DOCS_UPDATE_SYSTEM_PROMPT,
+      userMessage,
+      parseFindings: parseDocsUpdateFindings,
+      table: "docs-update",
+      eventPrefix: "docs_review",
+      allowedTools: DOCS_UPDATE_TOOLS,
+      maxSteps: 30,
+    });
+  }
+
+  // ── GET /apps/:id/docs/reviews ─────────────────────────────────────
+
+  const docsReviewsMatch = path.match(/\/apps\/([^/]+)\/docs\/reviews$/);
+  if (docsReviewsMatch && method === "GET") {
+    const appId = docsReviewsMatch[1];
+    if (!await checkApp(appId)) {
+      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    }
+    return Response.json(await getLatestReview(appId, "docs-update"), { headers: corsHeaders });
+  }
+
   return null;
 }
 
 // ── Shared Helpers ────────────────────────────────────────────────
 
 const MAX_CONTEXT_SIZE = 200_000;
+
+// The agreed plan the coder worked from. `docs/plans/<feature>.md` is where the
+// facilitated flow writes it; take the most recently modified when a workspace has
+// several, since that is the one the current task used.
+async function findPlanDoc(wsPath: string): Promise<{ path: string; content: string } | null> {
+  const dir = `${wsPath}/docs/plans`;
+  let newest: { path: string; content: string; mtime: number } | null = null;
+  try {
+    for await (const entry of Deno.readDir(dir)) {
+      if (!entry.isFile || !entry.name.endsWith(".md")) continue;
+      const full = `${dir}/${entry.name}`;
+      const stat = await Deno.stat(full);
+      const mtime = stat.mtime?.getTime() ?? 0;
+      if (!newest || mtime > newest.mtime) {
+        newest = { path: `docs/plans/${entry.name}`, content: await Deno.readTextFile(full), mtime };
+      }
+    }
+  } catch {
+    return null; // no docs/plans dir — not every workspace is plan-driven
+  }
+  return newest ? { path: newest.path, content: newest.content } : null;
+}
 
 async function collectCodeFiles(wsPath: string): Promise<{ path: string; content: string }[]> {
   const files: { path: string; content: string }[] = [];

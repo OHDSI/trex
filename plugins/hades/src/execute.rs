@@ -133,7 +133,7 @@ pub fn execute_study(cfg: ExecuteConfig) -> Result<String, String> {
 
     if !std::path::Path::new(&lib_path).is_dir() {
         return Err(format!(
-            "R environment '{}' not found at {lib_path}. Run hades_setup_env first.",
+            "R environment '{}' not found at {lib_path}. Run trex_hades_setup_env first.",
             cfg.env_name
         ));
     }

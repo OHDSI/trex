@@ -6,7 +6,7 @@ sidebar_position: 6
 
 Agent plugins register long-running AI agents that run as isolated Deno
 EdgeRuntime workers on the core-shipped agents runtime. Each declared agent
-exposes an [eve](https://github.com/gestalt-labs/eve)-compatible HTTP surface —
+exposes an eve-compatible HTTP surface —
 session creation, turns, human-in-the-loop approvals, and an SSE event stream —
 plus a stateless `POST /chat` endpoint for the Vercel AI SDK UIMessage stream.
 Sessions, turns, and steps are persisted so runs can be replayed and audited
@@ -42,6 +42,7 @@ Declare agents under `trex.agents` in `package.json`:
 | `name` | string | Agent name (`[a-zA-Z0-9_-]`). Mounted at `${PLUGINS_BASE_PATH}/<scope>/<name>`. |
 | `dir` | string | Agent directory relative to the plugin, containing `instructions.md` and friends. Default `agent`. |
 | `env` | object | Per-agent env vars (with `${VAR}` substitution, same syntax as function plugins). Overrides passthrough vars; **cannot** override reserved keys. |
+| `memory` | array | Links to declared [memory plugin](./memory-plugins) brains: `[{ "name": "handbook", "mode": "read" \| "readwrite" }]`. Each link generates namespaced `<name>_search` / `<name>_recall` / `<name>_get_page` (and `<name>_capture` for `readwrite`) tools plus a usage skill at boot. |
 
 `trex.agents` may be a single object or an array of them.
 
@@ -69,6 +70,12 @@ agent/
 │   └── ...
 ├── skills/
 │   ├── greeting-style.md    # skills/<name>.md or skills/<name>/SKILL.md
+│   └── ...
+├── channels/
+│   ├── discord.ts           # one defineChannel per file; filename = channel id
+│   └── ...
+├── connections/
+│   ├── linear.ts            # one MCP/OpenAPI connection per file; filename = connection name
 │   └── ...
 └── subagents/
     └── shouter/             # each subagent is itself an agent directory
@@ -192,6 +199,91 @@ over the stream. The client resolves it via the `/approval` route. `always` /
 `never` decisions are sticky (persisted per user) and require an authenticated
 caller; `approve` / `deny` are one-shot.
 
+## Channels
+
+A channel is an inbound platform entry point — a Discord slash command, a
+Slack mention, a GitHub issue comment — that starts or resumes an agent
+session and delivers the reply back to the platform. Drop `channels/*.ts`
+files at the agent-dir root, each default-exporting a `defineChannel(...)`
+result (usually via a built-in adapter factory):
+
+```ts
+// channels/discord.ts
+import { discordChannel } from "eve/channels/discord";
+export default discordChannel();
+```
+
+Built-in adapters: `eve` (web), `discord`, `slack`, `telegram`, `twilio`
+(SMS), `github`, `linear`, `teams`, plus `custom`. Each mounts at
+`…/eve/v1/<channelId>` under the agent's base path and authenticates by
+**platform signature** (not the Trex JWT); credentials come from per-adapter
+env vars (`DISCORD_PUBLIC_KEY`, `SLACK_SIGNING_SECRET`, …). Optional
+`<PREFIX>_ALLOWED_USERS` / `<PREFIX>_ALLOWED_CHANNELS` env vars (e.g.
+`DISCORD_ALLOWED_USERS`) restrict who can trigger the agent; allow-listing a
+channel also covers threads spawned inside it.
+
+**Discord gateway mode**: setting `DISCORD_GATEWAY=1` in the agent's manifest
+`env` block (per-agent, deliberately no host-wide fallback) makes the server
+open an *outbound* WebSocket to Discord's gateway instead of receiving signed
+webhooks — no public URL needed, works behind NAT. Leave the app's
+Interactions Endpoint URL unset in the developer portal; `DISCORD_PUBLIC_KEY`
+is not used in this mode. `@trex/claw` documents both transports in detail.
+
+The per-adapter env var tables, route URLs to register on each platform, and
+current human-in-the-loop limitations are documented in
+`core/server/agents/README.md` in the source tree.
+
+## Connections
+
+A connection exposes an external service's tools to the model with
+credentials kept out of the prompt — a remote MCP server or an
+OpenAPI-described HTTP API. Drop `connections/*.ts` files at the agent-dir
+root; the file stem is the connection name and its tools are exposed as
+`<name>__<tool>`:
+
+```ts
+// connections/linear.ts
+import { defineMcpClientConnection } from "eve/connections";
+
+export default defineMcpClientConnection({
+  description: "Linear issue tracker (MCP).",
+  url: "https://mcp.linear.app/sse",
+  tools: { allow: ["create_issue", "search_issues"] },
+});
+```
+
+`defineOpenApiConnection({ spec, baseUrl, tools })` generates one tool per
+OpenAPI operation. `tools` takes exactly one of `allow` / `block`;
+`approval: once()` gates every tool of a connection behind the standard
+approval flow. When an agent has at least one connection, a built-in
+`connection_search` tool helps the model discover the right `<name>__<tool>`
+name. A broken or unreachable connection logs and continues — its tools are
+absent that turn, never a turn failure.
+
+Static auth uses env-var tokens or headers. For user-delegated OAuth, the
+`trexConnect("<connector>")` broker resolves tokens per user at tool-call
+time: registered connectors live in `agents.oauth_connectors`, tokens are
+stored AES-GCM-encrypted in `agents.oauth_tokens` (gated by `TREX_ROOT_KEY`),
+and a missing token emits a consent URL and parks the turn until the user
+authorizes. Full connector registration and broker details:
+`core/server/agents/README.md`.
+
+## Linked Memories
+
+The `memory` array on a `trex.agents[]` entry (see
+[Configuration](#configuration)) links the agent to declared
+[memory plugin](./memory-plugins) brains. The generated tools call the memory
+worker's MCP endpoint over the internal inter-service path; captures land in
+the agent's own `default` source and never overwrite imported knowledge.
+
+## Skill Packs
+
+Skills can also arrive from *other* plugins: a [skill plugin](./skill-plugins)
+declares packs that name their target agents and get staged into the agent's
+worker directory as `skills/<pack>--<skill>/` — even after the agent is
+already running. The agent's own `skills/` directory always wins on
+collision, and `GET /eve/v1/info` reports the injecting pack per skill.
+
 ## Persistence & Dashboard
 
 Sessions, turns, and steps are written to the **`agents`** schema in the
@@ -212,3 +304,8 @@ GitHub, and browser tools, subagents (`code-explorer`, `code-reviewer`), skills
 symlinked from the shared plugin skills, dynamic MCP tools, and the
 `resolveModel` / `buildInstructions` / `filterTools` hooks. See
 `plugins/devx/agent/` in the source tree.
+
+`@trex/claw` is a channel-first reference: a Discord facilitator agent that
+mediates between a team chat channel and the Code agent, using the `discord`
+channel adapter in either webhook or gateway mode, thread-per-task sessions,
+and approval buttons. See `plugins/claw/README.md`.

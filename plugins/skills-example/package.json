@@ -1,0 +1,10 @@
+{
+  "name": "@trex/skills-example",
+  "version": "0.1.0",
+  "description": "Example skills plugin: deploys a skill pack to the toy agent",
+  "trex": {
+    "skills": [
+      { "name": "examplepack", "dir": "pack", "agents": ["toy"] }
+    ]
+  }
+}

@@ -832,6 +832,73 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
   // sanitizers or an uncaught-error crash IS the assertion here.
 });
 
+Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (Task 19 robustness)", async () => {
+  const agent = await loadAgent(TOY);
+  // A channel whose `events` access throws — this fires inside startTurn's
+  // onTurnCreated (the delivery-registration callback: layer.ts's registerForTurn
+  // reads channel.events). Pre-fix that throw unwound the turn's IIFE BEFORE
+  // turn.started/runTurn, so the turn died with no turn.failed/session.failed and
+  // any /stream reader hung forever. The turn must now run to completion and emit
+  // its own lifecycle regardless of a delivery-registration failure.
+  // deno-lint-ignore no-explicit-any
+  (agent.channels as any).boomevt = {
+    __trexChannel: true,
+    get events() { throw new Error("registration boom"); },
+    routes: [{
+      method: "POST",
+      path: "/in",
+      // deno-lint-ignore no-explicit-any
+      handler: async (_req: Request, args: any) => {
+        const s = await args.send("hi", { auth: null, continuationToken: "u-1" });
+        return Response.json({ sessionId: s.id });
+      },
+    }],
+  };
+
+  const db = inMemoryDb();
+  const channelStore = {
+    resolveOrCreateSession: () => Promise.resolve({ sessionId: "chan-sess", created: true }),
+    setContinuationToken: () => Promise.resolve(),
+  };
+  const handler = createHandler({
+    agent,
+    store: createStore(db.query as never),
+    plugin: "toy-agent",
+    agentName: "toy",
+    basePath: "/plugins/trex/toy",
+    model: model("hello from toy"),
+    channelStore: channelStore as never,
+  });
+
+  // Deterministic sessionId from the fake channelStore -> subscribe before the POST.
+  const live: AgentEvent[] = [];
+  const unsub = subscribe("chan-sess", (e) => live.push(e));
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    const res = await handler(new Request(`${BASE}/eve/v1/boomevt/in`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    }));
+    assertEquals(res.status, 200); // send() already returned before the async throw
+    await until(() => settled(db)); // pre-fix this would hang (turn stuck "running")
+  } finally {
+    console.error = origError;
+    unsub();
+  }
+
+  // The turn ran to completion despite the registration throw...
+  assertEquals(db.turns[0].status, "completed");
+  // ...and published its full lifecycle on the wire (turn.started + a terminal).
+  assert(live.some((e) => e.type === "turn.started"), "turn.started was published");
+  assert(live.some((e) => e.type === "turn.completed"), "turn.completed was published");
+  assert(live.some((e) => e.type === "session.waiting"), "session parked (terminal reached)");
+  // The registration failure was logged, not silently swallowed.
+  assert(logged.some((l) => l.includes("delivery registration failed")), "logged the registration failure");
+});
+
 Deno.test("POST /chat returns a UIMessage stream", async () => {
   const { handler } = await makeHandler();
   const res = await handler(new Request(`${BASE}/chat`, {
@@ -1117,4 +1184,71 @@ Deno.test("GET /stream releases the subscriber when replay (listEvents) fails", 
   assert(errored, "stream body should error when replay fails");
   // No leaked subscriber: the registry is back to its pre-request count.
   assertEquals(subscriberCount(sid), before);
+});
+
+// ── OAuth broker routes (task-7) ─────────────────────────────────────────────
+import { signState } from "../connections/oauth/state.ts";
+import type { OAuthConnector, OAuthStore, OAuthToken } from "../connections/oauth/store.ts";
+
+const OAUTH_SECRET = "handler-oauth-secret";
+
+function oauthHandler() {
+  const puts: Array<{ pt: string; pid: string; c: string; token: OAuthToken }> = [];
+  const connectors: Record<string, OAuthConnector> = {
+    github: {
+      authorizationUrl: "https://prov.example/authorize",
+      tokenUrl: "https://prov.example/token",
+      clientId: "cid",
+      clientSecret: "csecret",
+      scopes: "repo",
+      principalScope: "user",
+    },
+  };
+  const store: OAuthStore = {
+    getToken: () => Promise.resolve(null),
+    putToken: (pt, pid, c, token) => {
+      puts.push({ pt, pid, c, token });
+      return Promise.resolve();
+    },
+    getConnector: (id) => Promise.resolve(connectors[id] ?? null),
+  } as OAuthStore;
+  return { store, puts, connectors };
+}
+
+Deno.test("oauth route: 404 when no broker is configured", async () => {
+  const { handler } = await makeHandler();
+  const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/start?state=x`));
+  assertEquals(res.status, 404);
+});
+
+Deno.test("oauth start route is mounted and 302s on a valid signed state", async () => {
+  const agent = await loadAgent(TOY);
+  const db = inMemoryDb();
+  const { store } = oauthHandler();
+  const handler = createHandler({
+    agent, store: createStore(db.query as never),
+    plugin: "toy-agent", agentName: "toy", basePath: "/plugins/trex/toy",
+    oauth: { store, secret: OAUTH_SECRET, startUrlBase: "/plugins/trex/toy/eve/v1/oauth", basePath: "/plugins/trex/toy" },
+  });
+  const state = await signState(
+    { session: "s", principalType: "user", principalId: "u", connector: "github", nonce: "n", exp: Date.now() + 600_000 },
+    OAUTH_SECRET,
+  );
+  const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/start?state=${encodeURIComponent(state)}`));
+  assertEquals(res.status, 302);
+  assert((res.headers.get("location") ?? "").startsWith("https://prov.example/authorize"));
+});
+
+Deno.test("oauth callback route rejects a tampered state with 400 (no token write)", async () => {
+  const agent = await loadAgent(TOY);
+  const db = inMemoryDb();
+  const { store, puts } = oauthHandler();
+  const handler = createHandler({
+    agent, store: createStore(db.query as never),
+    plugin: "toy-agent", agentName: "toy", basePath: "/plugins/trex/toy",
+    oauth: { store, secret: OAUTH_SECRET, startUrlBase: "/plugins/trex/toy/eve/v1/oauth", basePath: "/plugins/trex/toy" },
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/callback?code=X&state=forged.sig`));
+  assertEquals(res.status, 400);
+  assertEquals(puts.length, 0);
 });

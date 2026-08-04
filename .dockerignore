@@ -17,6 +17,9 @@ plugins/
 !plugins/studio/build/
 !plugins/pg-meta/
 !plugins/postgrest/
+!plugins/claw/
+!plugins/prometheus/
+!plugins/d2esupport/
 !plugins/devx-ext/build/release/devx_ext.trex
 # webapi native-lib build (Dockerfile.native-lib) needs these plugin trees +
 # the webapi-be submodule in context; build dirs are still trimmed by **/target/ etc.
@@ -38,6 +41,11 @@ plugins/
 !plugins/extension-ci-tools/
 plugins/devx-ext/build/
 plugins/devx-ext/target/
+# Local `make configure` residue (venv with host python paths, platform.txt):
+# if copied in, the in-image `make configure` reuses the broken venv and dies
+# with "No module named 'duckdb'". CI checkouts never have it; keep local
+# builds identical.
+plugins/devx-ext/configure/
 plugins/extension-ci-tools/build/
 plugins/extension-ci-tools/target/
 

@@ -69,6 +69,47 @@ the old key but does NOT require re-encrypting stored secrets.
    updated to the new values (visible via the admin API or in the
    `[auth] Anon key: ...` / `[auth] Service role key: ...` log lines).
 
+## Rotating individual API keys (no JWT-secret rotation needed)
+
+Unlike the JWT-signing-key rotation above, these mutations replace a single
+key in place without touching the signing key or forcing a stack restart.
+All are exposed as GraphQL mutations (admin-only):
+
+| Mutation               | Replaces                                              |
+|------------------------|-------------------------------------------------------|
+| `rotateAnonKey`        | The legacy `anon` JWT (`trexdb.setting.auth.anonKey`) |
+| `rotateServiceRoleKey` | The legacy `service_role` JWT (`auth.serviceRoleKey`) |
+| `rotatePublishableKey` | The `sb_publishable_…` key (`auth.publishableKey`)    |
+| `rotateSecretKey`      | The `sb_secret_…` key (`auth.secretKey`)              |
+
+Invalidation timing differs by key type. `rotatePublishableKey` /
+`rotateSecretKey` are validated by timing-safe equality against the stored
+value, so the prior key is invalidated the instant the new one is persisted.
+`rotateAnonKey` / `rotateServiceRoleKey` only re-issue the *published* legacy
+JWT — the old JWT remains valid (HMAC-verified against the shared JWT secret)
+until the JWT signing key itself is rotated via the procedure above.
+
+- `rotateAnonKey` / `rotateServiceRoleKey` also invalidate the in-process
+  memoized legacy-key cache (`invalidateAuthKeysCache`), so the PostgREST and
+  storage proxies — which read the anon/service_role JWTs to authenticate
+  their own upstream calls — never forward a stale JWT after rotation.
+- `rotatePublishableKey` / `rotateSecretKey` mint a fresh random key
+  (`sb_publishable_…` / `sb_secret_…`, not derived from the JWT signing key)
+  and overwrite the stored `{id, key, inserted_at}` row. They are resolved by
+  timing-safe equality against the stored value, so rotation takes effect for
+  the gateway, `authContext`, and realtime immediately.
+
+In both cases, **function workers do not see the new value until the server
+restarts** — worker env vars (`SUPABASE_ANON_KEY`/`SUPABASE_SERVICE_ROLE_KEY`
+and `SUPABASE_PUBLISHABLE_KEY`/`SUPABASE_SECRET_KEY`) are set once at boot.
+Restart the server after rotating any of these four keys if edge functions
+need to pick up the new value.
+
+trex currently manages a single default publishable/secret key pair (no
+named multi-key support); the Management API's `POST`/`PATCH`/`DELETE`
+`/v1/projects/:ref/api-keys` routes return `501` and point callers at these
+rotate mutations instead.
+
 ## Rotating the DEK (re-encrypts `trexdb.secret`)
 
 Out of scope for the v1 implementation. The schema supports multiple

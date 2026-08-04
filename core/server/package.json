@@ -2,7 +2,13 @@
   "name": "core-server",
   "private": true,
   "dependencies": {
+    "@ai-sdk/amazon-bedrock": "^4.0.115",
+    "@ai-sdk/anthropic": "^3",
+    "@ai-sdk/google": "^3",
+    "@ai-sdk/openai": "^3",
     "@modelcontextprotocol/sdk": "^1.12.0",
+    "ai": "^6",
+    "edn-data": "^1",
     "apache-arrow": "^21.1.0",
     "cors": "^2.8.5",
     "express": "^4.21.2",

@@ -129,3 +129,137 @@ function bedrockModel(modelId: string, env: EnvFn, bearerTokenOverride?: string)
   }
   return createAmazonBedrock(config)(modelId);
 }
+
+// Task 15: Bedrock prompt caching for the stable TOOLS+SYSTEM prefix.
+// `model.provider` ("amazon-bedrock" — verified against the installed
+// @ai-sdk/amazon-bedrock@4.0.133's bedrock-chat-language-model.ts: `readonly
+// provider = 'amazon-bedrock'`) is the only signal callers have for which
+// wire format streamText will use; there's no separate "is this bedrock"
+// flag threaded through resolveModelForTurn/resolveModel. Gate on it here so
+// model objects of other providers are left completely untouched by the
+// caller — see withSystemCachePoint (anthropic gets its own cacheControl
+// branch via isAnthropicModel below; openai/google stay plain strings).
+// deno-lint-ignore no-explicit-any
+export function isBedrockModel(model: any): boolean {
+  return model?.provider === "amazon-bedrock";
+}
+
+// Bedrock prompt caching is model-specific, not provider-wide: Anthropic Claude
+// on Bedrock supports it, but other Bedrock models (e.g. Z.AI `zai.glm-*`)
+// reject ANY request that carries a `cachePoint` with
+// `AccessDeniedException: "You invoked an unsupported model or your request did
+// not allow prompt caching."` — which, on a streaming turn, kills it silently
+// (typing indicator, no reply). So `isBedrockModel` alone is too broad a gate
+// for the cachePoint injection below: additionally require an Anthropic model
+// id. The tools -> system -> messages ordering this caching relies on (see
+// withSystemCachePoint) is Anthropic's Converse layout, which is exactly what
+// it was designed and verified against; non-Anthropic Bedrock models are
+// invoked plain (no cache point).
+// deno-lint-ignore no-explicit-any
+export function bedrockSupportsPromptCaching(model: any): boolean {
+  return isBedrockModel(model) && /(^|\.)anthropic\./i.test(model?.modelId ?? "");
+}
+
+// The direct Anthropic provider. Its language-model objects report
+// provider === "anthropic.messages" — NOT "anthropic" — verified against the
+// installed @ai-sdk/anthropic@4.0.15: createAnthropic's providerName defaults
+// to "anthropic.messages" and is passed through as the model's `provider`
+// (and confirmed at runtime via a stub-fetch streamText probe). The
+// providerOptions key it reads cacheControl from is still the plain
+// "anthropic" (get-cache-control.ts reads providerMetadata.anthropic), so
+// only this predicate — not the marker below — uses the dotted name.
+// deno-lint-ignore no-explicit-any
+export function isAnthropicModel(model: any): boolean {
+  return model?.provider === "anthropic.messages";
+}
+
+// deno-lint-ignore no-explicit-any
+export function isOpenAIModel(model: any): boolean {
+  // @ai-sdk/openai language models report provider "openai.responses" (default
+  // callable) or "openai.chat"; a custom baseURL (e.g. an openai-compatible
+  // gateway) keeps the same "openai.*" prefix.
+  return typeof model?.provider === "string" && model.provider.startsWith("openai");
+}
+
+// OpenAI/Responses does AUTOMATIC prompt caching for prompts over ~1024 tokens
+// (verified live: a repeated stable prefix reports ~all input tokens as
+// cachedInputTokens on the 2nd call) — there is no cachePoint to place, which
+// is why withSystemCachePoint no-ops for openai. A stable `promptCacheKey`
+// only affects cache-hit ROUTING: OpenAI routes requests sharing a key to the
+// same cache, so the stable TOOLS+SYSTEM prefix reuses its cache reliably
+// across a session's turns (and as the deployment scales to multiple backends).
+// Returns streamText-level providerOptions; empty ({}) for every non-openai
+// provider (their caching is handled by withSystemCachePoint's cache markers).
+// deno-lint-ignore no-explicit-any
+export function cacheProviderOptions(model: any, cacheKey: string): Record<string, any> {
+  if (cacheKey && isOpenAIModel(model)) {
+    return { openai: { promptCacheKey: cacheKey } };
+  }
+  return {};
+}
+
+// A SystemModelMessage carrying a provider cache marker (Bedrock cachePoint
+// or Anthropic cacheControl), or the plain-string no-op for every other
+// provider.
+export type SystemPrompt = string | {
+  role: "system";
+  content: string;
+  providerOptions:
+    | { bedrock: { cachePoint: { type: "default" } } }
+    | { anthropic: { cacheControl: { type: "ephemeral" } } };
+};
+
+// Wraps a plain system-prompt string in the AI SDK's SystemModelMessage
+// shape with a provider cache marker covering everything up to and including
+// the system block — a Bedrock cachePoint when the resolved model is a
+// caching-capable (Anthropic) bedrock model,
+// an Anthropic ephemeral cacheControl when it's the direct anthropic
+// provider; returns the original string unchanged for every other provider
+// (a true no-op: openai/google never see a providerOptions key).
+//
+// Why a cache point on `system` also covers the TOOLS prefix (the other half
+// of the brief's "cache the stable TOOLS+SYSTEM prefix" target): the
+// installed @ai-sdk/amazon-bedrock@^4.0.115 (resolves to 4.0.133 in the dx
+// image's npm set) has NO mechanism to attach a cache point to the tools
+// array — `BedrockCachePoint` is a valid member of
+// `BedrockToolConfiguration.tools` per bedrock-api-types.ts, but
+// bedrock-prepare-tools.ts's `prepareTools()` never constructs one; tool
+// definitions cannot be cache-pointed directly in this SDK version. Bedrock's
+// Converse API (for Anthropic models) builds the model context in the fixed
+// order tools -> system -> messages — the same ordering Anthropic's own
+// Messages API prompt-caching docs describe — so a cache point placed on the
+// system block caches the entire prefix up to and including it, tool
+// definitions included, as long as both are byte-identical across requests
+// (true here: buildSystemPrompt/resolveInstructions and the built tool set
+// are both deterministic per agent+metadata+turn). Confirmed against
+// convert-to-bedrock-chat-messages.ts: a system message's
+// `providerOptions.bedrock.cachePoint` becomes a second `{ cachePoint: {...} }`
+// entry appended to the wire `system` array — a field bedrockModel()'s
+// bearer-token custom fetch above never touches (it only rewrites
+// `parsed.messages`), so the marker survives that rewrite unmodified.
+// deno-lint-ignore no-explicit-any
+export function withSystemCachePoint(model: any, system: string): SystemPrompt {
+  if (bedrockSupportsPromptCaching(model)) {
+    return {
+      role: "system",
+      content: system,
+      providerOptions: { bedrock: { cachePoint: { type: "default" } } },
+    };
+  }
+  // Anthropic prompt caching: an ephemeral cache_control on the system block
+  // caches the stable TOOLS+SYSTEM prefix (Anthropic composes context in the
+  // same tools -> system -> messages order as Bedrock's Converse API), so a
+  // multi-turn session only pays to write that prefix once and reads it back
+  // cheaply thereafter. Verified against the installed @ai-sdk/anthropic@4:
+  // convert-to-anthropic-messages-api reads providerOptions.anthropic
+  // .cacheControl on a system message and emits `cache_control` on the wire
+  // system text block. openai/google fall through to the plain string below.
+  if (isAnthropicModel(model)) {
+    return {
+      role: "system",
+      content: system,
+      providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } },
+    };
+  }
+  return system;
+}

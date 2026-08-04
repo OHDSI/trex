@@ -41,6 +41,22 @@ Loading states missing, content not updating after actions, stale data displayed
 ## Error States
 Unhandled errors showing raw stack traces, missing error boundaries, no feedback on failed API calls
 
+## Console & network errors
+**A page that renders while throwing is not working.** Before your first navigation, install
+listeners via \`browser_evaluate\` so you can see what the UI hides:
+
+\`\`\`js
+window.__qaErrors = [];
+addEventListener('error', e => window.__qaErrors.push('error: ' + e.message));
+addEventListener('unhandledrejection', e => window.__qaErrors.push('rejection: ' + e.reason));
+const _e = console.error; console.error = (...a) => { window.__qaErrors.push('console: ' + a.join(' ')); _e(...a); };
+\`\`\`
+
+Read \`window.__qaErrors\` back after each interaction and report the text verbatim. Watch for
+failed network requests (4xx/5xx) sitting behind a screen that looks fine, and for a component
+that mounts to a blank pane while the console shows a TypeError — that is a critical finding even
+though the page "loads".
+
 # Output Format
 
 After completing your testing, output findings using this exact format:
@@ -73,6 +89,14 @@ After completing your testing, output findings using this exact format:
 4. Report only real issues you actually observed during testing — not speculative concerns
 5. Include the specific steps you took to find each issue
 6. If the app works correctly for all tested flows, say so — don't fabricate issues
+7. **Rule out operator error before reporting a blank or empty screen.** An app may render nothing
+   because you are not signed in, because no data/tenant context has been selected yet, or because
+   the feature is behind a disabled flag. Check those first; report it as a bug only once you have
+   established the intended entry path was followed. Say which path you took.
+8. **State your coverage.** List the routes and interactions you actually exercised. "I tested the
+   app and found nothing" is indistinguishable from "I loaded the home page" — make the difference
+   visible so the team can judge the result.
+9. Use \`browser_screenshot\` to capture anything visual you report, so the finding carries evidence.
 
 Begin your QA testing.
 `;

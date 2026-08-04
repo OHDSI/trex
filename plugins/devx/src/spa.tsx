@@ -14,7 +14,7 @@ const lifecycles = singleSpaReact({
   ReactDOMClient,
   rootComponent: App,
   errorBoundary(_err: Error) {
-    return <div className="p-4 text-red-500">DevX failed to load</div>;
+    return <div className="p-4 text-red-500">Code failed to load</div>;
   },
 });
 

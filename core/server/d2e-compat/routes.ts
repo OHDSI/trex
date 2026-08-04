@@ -40,40 +40,7 @@ import { pool } from "../db.ts";
 import { getPluginsJson } from "../plugin/ui.ts";
 import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
 import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
-import { encryptSecret } from "../auth/crypto.ts";
-import { decryptD2eCredentialPassword, isD2eEncryptedCredential } from "./credential-crypto.ts";
-
-// Upsert one credential row for a database. d2e clients (portal/demo) post the
-// source password RSA-encrypted (with a salt); recover it and store it under the
-// trex-native DEK scheme (password_encrypted) so boot-attach/dbm-sync see a uniform
-// credential. Keyed on (databaseId, username, userScope) — d2e registers an Admin
-// and a Read credential under the same username, and the native source-attach needs
-// the Admin one, so both must coexist (see the constraint migration in index.ts).
-async function upsertDatabaseCredential(client: any, code: string, cred: any): Promise<void> {
-  let password: string | null = cred.password ?? null;
-  let passwordEncrypted: string | null = null;
-  if (isD2eEncryptedCredential(cred)) {
-    try {
-      const plain = await decryptD2eCredentialPassword(cred.password, cred.salt, cred.serviceScope);
-      passwordEncrypted = await encryptSecret(plain);
-      password = null;
-    } catch (e) {
-      console.error(`[d2e-compat] credential decrypt failed for ${code}/${cred.userScope ?? ""}: ${e}`);
-      // best-effort: leave the raw value so the row still exists
-    }
-  }
-  await client.query(
-    `INSERT INTO trexdb.database_credential
-       ("databaseId", username, password, password_encrypted, "userScope", "serviceScope")
-     VALUES ($1, $2, $3, $4, $5, $6)
-     ON CONFLICT ("databaseId", username, "userScope") DO UPDATE SET
-       password = EXCLUDED.password,
-       password_encrypted = EXCLUDED.password_encrypted,
-       "serviceScope" = EXCLUDED."serviceScope",
-       "updatedAt" = NOW()`,
-    [code, cred.username, password, passwordEncrypted, cred.userScope ?? null, cred.serviceScope ?? null],
-  );
-}
+import { upsertDatabaseCredential } from "./db-credential.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -140,6 +107,36 @@ function certEscapeNewLine(str: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// /WebAPI proxy body handling
+// ---------------------------------------------------------------------------
+// Decide whether the proxy should re-serialize the middleware-parsed req.body
+// (JSON.stringify) instead of streaming the raw request through.
+//
+// Re-serialize only when the request itself is JSON and a parser produced an
+// object — including an empty {} or [] (e.g. the cohort-characterization
+// result POST sends an empty filter; keying on `Object.keys(parsed).length`
+// dropped those, and since the parser had already drained the raw stream the
+// fallback read yielded nothing and the POST reached WebAPI bodiless:
+// "Required request body is missing").
+//
+// Never re-serialize non-JSON requests: express.json() leaves req.body as {}
+// for content types it does not parse (multipart, form-encoded), and their
+// raw stream is still readable. Re-serializing that placeholder replaced a
+// multipart payload with the literal string "{}" while keeping the multipart
+// content-type — WebAPI's POST /source then failed with
+// MissingServletRequestPartException ("Required part 'source' is not
+// present"), which broke the d2e demo-dataset setup (E2E "Adding demo
+// dataset... 500").
+export function shouldReserializeParsedBody(
+  contentType: string | string[] | undefined,
+  parsed: unknown,
+): boolean {
+  if (parsed === undefined || parsed === null || typeof parsed !== "object") return false;
+  const ct = String(Array.isArray(contentType) ? contentType[0] : contentType ?? "").toLowerCase();
+  return ct.includes("application/json") || ct.includes("+json");
+}
+
+// ---------------------------------------------------------------------------
 // mountD2eRoutes — extends the Express app with all d2e thin-shell routes.
 // ---------------------------------------------------------------------------
 export function mountD2eRoutes(app: Express): void {
@@ -178,13 +175,7 @@ export function mountD2eRoutes(app: Express): void {
       // required"). Re-serialize req.body when present; fall back to the raw stream
       // for unparsed bodies.
       const parsed = (req as any).body;
-      // Re-serialize any parsed body — including an empty {} or [] (e.g. the
-      // cohort-characterization result POST sends an empty filter). Keying on
-      // `Object.keys(parsed).length > 0` dropped those: the body-parser had
-      // already drained the raw stream, so the fallback read below yielded
-      // nothing and the POST reached WebAPI bodiless ("Required request body is
-      // missing"). Only fall back to the raw stream for genuinely unparsed bodies.
-      if (parsed !== undefined && parsed !== null && typeof parsed === "object") {
+      if (shouldReserializeParsedBody((req as any).headers["content-type"], parsed)) {
         body = JSON.stringify(parsed);
         if (!headers.has("content-type")) headers.set("content-type", "application/json");
       } else {

@@ -14,7 +14,7 @@ services:
   trex-init:
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     image: ghcr.io/ohdsi/trexsql:dev
     entrypoint: /usr/local/bin/trex-init
     environment:
@@ -53,7 +53,7 @@ services:
   trex:
     build:
       context: .
-      dockerfile: Dockerfile.dev
+      dockerfile: Dockerfile
     image: ghcr.io/ohdsi/trexsql:dev
     ports:
       - 8000:8000
@@ -85,6 +85,9 @@ services:
     environment:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
       BASE_PATH: /trex
+      # Native email/password IDP (auth-router). Off by default in the
+      # engine; standalone/dev trex opts in so admin@trex.local can log in.
+      TREX_IDP_ENABLED: "true"
       BETTER_AUTH_URL: http://localhost:8001/trex
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2experience/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2experience/d2e/_packaging/d2e/npm/registry"

@@ -1,9 +1,10 @@
 import { STATUS_CODE } from "jsr:@std/http@^1.0/status";
 import { Buffer } from "node:buffer";
-import type { Express, Request, Response } from "express";
+import type { Express, NextFunction, Request, Response } from "express";
 import { authContext } from "../middleware/auth-context.ts";
 import { pluginAuthz, d2eAuthn } from "../middleware/plugin-authz.ts";
 import { scopeUrlPrefix, waitfor } from "./utils.ts";
+import { buildWorkerHeaders } from "./worker-headers.ts";
 import { PLUGINS_BASE_PATH } from "../config.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
 import { buildDatabaseCredentials, getRegistrationEpoch } from "../d2e-compat/dbm-sync.ts";
@@ -233,6 +234,19 @@ function isStreamingContentType(contentType: string): boolean {
   return contentType.includes("text/event-stream") || contentType.includes("application/x-ndjson");
 }
 
+// Serialize hot-reload worker (re)creation per servicePath. A forceCreate worker
+// recompiles the function into the shared /var/tmp/sb-compile-trex/<fn> dir, so
+// two parallel requests recreating the SAME function at once would race and
+// clobber each other's build. Chain them per path so each waits its turn; the
+// fetch runs once the worker exists. Bounded: one tail-promise per servicePath.
+const _hotReloadGate = new Map<string, Promise<unknown>>();
+function serializeHotReload<T>(key: string, task: () => Promise<T>): Promise<T> {
+  const prev = _hotReloadGate.get(key) ?? Promise.resolve();
+  const run = prev.then(task, task); // run after the previous holder settles (ok or error)
+  _hotReloadGate.set(key, run.then(() => {}, () => {}));
+  return run;
+}
+
 async function _callWorker(
   req: globalThis.Request,
   servicePath: string,
@@ -280,11 +294,25 @@ async function _callWorker(
     _workerEpoch.set(servicePath, epoch);
   }
 
+  // Dev hot-reload: with DEVX_HOT_RELOAD on, spin a fresh edge worker on every
+  // request for functions served from the devx workspace, so source edits are
+  // picked up live without a restart or rebuild. Scoped to the workspace dir so
+  // the baked platform functions (pooled, cached) are untouched. A fresh worker
+  // loads source from servicePath; an eszip bundle still overrides source, so
+  // hot-reload applies to unbundled (source) dev functions only.
+  const _wsDir = Deno.env.get("DEVX_WORKSPACE_DIR") || "/tmp/devx-workspaces";
+  const _hotReload = Deno.env.get("DEVX_HOT_RELOAD") === "true" &&
+    (servicePath.startsWith(_wsDir) || dir.startsWith(_wsDir));
+  if (_hotReload) forceCreate = true;
+
   const options: any = {
     servicePath,
     memoryLimitMb: fncfg.memoryLimitMb ?? 4096,
     workerTimeoutMs: 30 * 60 * 1000,
-    noModuleCache: false,
+    // Hot-reload needs BOTH a fresh worker (forceCreate) AND a source re-read:
+    // with the module cache on, a fresh worker still loads the cached module, so
+    // the file edit is invisible. Bypass the cache only for hot-reloaded workers.
+    noModuleCache: _hotReload,
     importMapPath: imports,
     envVars: _myenv,
     forceCreate,
@@ -309,8 +337,9 @@ async function _callWorker(
     },
   };
 
-  if (fncfg.eszip) {
+  if (fncfg.eszip && !_hotReload) {
     // Prebuilt eszip; fall back to source if absent (e.g. unbundled dev plugin).
+    // Skipped under hot-reload so edits to source are always what runs.
     try {
       options.maybeEszip = await readEszipCached(`${dir}${fncfg.eszip}`);
     } catch {
@@ -324,17 +353,20 @@ async function _callWorker(
   // behavior.
   const fetchSignal = signal ?? new AbortController().signal;
 
+  // deno-lint-ignore no-explicit-any
+  const spawn = () => (globalThis as any).EdgeRuntime.userWorkers.create(options);
+  // Under hot-reload every request forceCreates a fresh worker (recompile), so
+  // serialize creation per servicePath; otherwise reuse the pool as before.
+  const makeWorker = () => (_hotReload ? serializeHotReload(servicePath, spawn) : spawn());
   try {
-    // deno-lint-ignore no-explicit-any
-    const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
+    const worker = await makeWorker();
     return await worker.fetch(req, { signal: fetchSignal });
   } catch (e: any) {
     // Retry once on WorkerRequestCancelled, same as before — but only if
     // the caller's own signal isn't already aborted (client gone): retrying
     // a dead request just wastes a worker slot on a response nobody reads.
     if (e instanceof (Deno.errors as any).WorkerRequestCancelled && !fetchSignal.aborted) {
-      // deno-lint-ignore no-explicit-any
-      const worker = await (globalThis as any).EdgeRuntime.userWorkers.create(options);
+      const worker = await makeWorker();
       return await worker.fetch(req, { signal: fetchSignal });
     }
     console.error("Worker call error:", e);
@@ -427,6 +459,34 @@ async function _callInit(
   }
 }
 
+
+// Scopes whose plugins are first-party trusted: their function routes mount
+// scoped under PLUGINS_BASE_PATH/<scope>/ and are guarded by trex's own auth
+// (authContext + pluginAuthz) instead of the d2e/legacy Logto path, and their
+// agents plugins are allowed to mount (see agents.ts). @ohdsi is OHDSI's own
+// publishing scope — GitHub Packages only accepts owner-scoped names, so
+// first-party plugins built in OHDSI repos (e.g. the Pythia agent) publish as
+// @ohdsi/* and must be trusted like @trex/*. UI plugins are NOT affected:
+// ui.ts keeps non-@trex UI plugins root-mounted so @ohdsi/atlas3 stays at
+// /atlas.
+export const TRUSTED_PLUGIN_SCOPES = ["@trex/", "@ohdsi/"];
+export function isTrustedPluginScope(name: string): boolean {
+  return TRUSTED_PLUGIN_SCOPES.some((s) => name.startsWith(s));
+}
+
+// Live-config indirection (skills plugin type, re-stage-and-swap): an agents
+// mount passes fncfg.liveConfig, a MUTABLE ref whose fields are re-read on
+// every request. Swapping servicePath/importMapPath/xenv on the ref
+// atomically repoints the mount at a freshly staged dir — the worker pool
+// keys workers by servicePath, so the next request lazily creates a worker
+// from the new dir; no restart API needed. Absent liveConfig (every other
+// plugin type), behavior is unchanged.
+export interface LiveWorkerConfig {
+  servicePath: string;
+  importMapPath: string | null;
+  xenv: unknown;
+}
+
 export function _addFunction(
   app: Express,
   url: string,
@@ -439,6 +499,9 @@ export function _addFunction(
 ) {
   REGISTERED_FUNCTIONS.push({ name, source: url, function: fncfg.function });
 
+  const live = fncfg?.liveConfig as LiveWorkerConfig | undefined;
+  const cur = () => live ?? { servicePath: path, importMapPath: imports, xenv };
+
   // Worker-to-worker calls (Trex.tokioChannel) address functions by the
   // UNSCOPED plugin name + function path, e.g. `d2e-functions/portal` or
   // `fhir/fhir-gateway` — never the npm scope (`@data2evidence/...`). The plugin
@@ -449,31 +512,50 @@ export function _addFunction(
   const shortName = name.startsWith("@") && name.includes("/")
     ? name.slice(name.indexOf("/") + 1)
     : name;
-  const handler = (req: globalThis.Request) =>
-    _callWorker(req, path, imports, fncfg, dir, xenv);
+  const handler = (req: globalThis.Request) => {
+    const c = cur();
+    return _callWorker(req, c.servicePath, c.importMapPath, fncfg, dir, c.xenv);
+  };
   fnmap[`${name}${fncfg.function}`] = handler;
   fnmap[`${shortName}${fncfg.function}`] = handler;
 
   const scopePrefix = scopeUrlPrefix(name);
-  // @trex plugins mount scoped under PLUGINS_BASE_PATH/<scope>/; d2e/legacy
-  // plugins (@data2evidence, ...) mount their function routes at the bare source
-  // path (/analytics-svc, /system-portal, ...) as the d2e fork did, so the d2e
-  // UI's API calls keep resolving.
+  // Trusted-scope plugins mount scoped under PLUGINS_BASE_PATH/<scope>/;
+  // d2e/legacy plugins (@data2evidence, ...) mount their function routes at the
+  // bare source path (/analytics-svc, /system-portal, ...) as the d2e fork did,
+  // so the d2e UI's API calls keep resolving.
   // Match both the bare source (`/list`) and any sub-path (`/list/...`).
   // Express 4's `/list/*` pattern requires content after `/list/`, so we
   // register two routes to cover both shapes.
-  const isTrexPlugin = name.startsWith("@trex/");
-  const fullSource = isTrexPlugin
+  const isTrustedPlugin = isTrustedPluginScope(name);
+  const fullSource = isTrustedPlugin
     ? PLUGINS_BASE_PATH + scopePrefix + url
     : url;
-  // @trex plugins go through trex's auth (authContext + pluginAuthz, keyed on the
-  // trex HS256 session). d2e/legacy plugins carry a Logto RS256 JWT that authContext
-  // can't validate, so they use d2eAuthn: it verifies the Logto token against the
-  // Logto JWKS and enforces the role/URL scope check before forwarding to the worker
-  // (which only decodes the token). This restores the authn+authz the d2e fork did
-  // itself; without it a forged JWT would be trusted. Public paths are allowlisted
-  // inside d2eAuthn.
-  const authMw = isTrexPlugin ? [authContext, pluginAuthz] : [d2eAuthn];
+  // Trusted-scope plugins go through trex's auth (authContext + pluginAuthz, keyed
+  // on the trex HS256 session). d2e/legacy plugins carry a Logto RS256 JWT that
+  // authContext can't validate, so they use d2eAuthn: it verifies the Logto token
+  // against the Logto JWKS and enforces the role/URL scope check before forwarding
+  // to the worker (which only decodes the token). This restores the authn+authz the
+  // d2e fork did itself; without it a forged JWT would be trusted. Public paths are
+  // allowlisted inside d2eAuthn.
+  //
+  // authExemptPattern (agents channel routes, task-4): a trusted-scope plugin may
+  // mark a subset of its paths as auth-exempt at the proxy — for agents, the channel
+  // subpaths ({basePath}/eve/v1/<channelId>/*), which are authenticated by the
+  // adapter's own platform-signature verify() inside the worker, NOT by a trex
+  // JWT. Those paths skip authContext+pluginAuthz (which would otherwise 401 an
+  // unauthenticated platform webhook). Everything else — session/chat/health/
+  // info — keeps full proxy auth, unchanged. Non-agent plugins never set this,
+  // so their auth behavior is byte-for-byte identical to before.
+  const authExemptPattern = fncfg.authExemptPattern as RegExp | undefined;
+  const trexAuth = (req: Request, res: Response, next: NextFunction) => {
+    if (authExemptPattern && authExemptPattern.test(req.path)) return next();
+    authContext(req, res, (err?: unknown) => {
+      if (err) return next(err as Error);
+      pluginAuthz(req, res, next);
+    });
+  };
+  const authMw = isTrustedPlugin ? [trexAuth] : [d2eAuthn];
   app.all([fullSource, fullSource + "/*"], apiLimiter, ...authMw, async (req: Request, res: Response) => {
     // Propagate a client disconnect (browser tab closed, live tail dropped,
     // etc.) into the worker fetch so a long-lived stream (session tail,
@@ -489,29 +571,27 @@ export function _addFunction(
       const protocol = req.protocol || "http";
       const requestUrl = `${protocol}://${host}${req.originalUrl}`;
 
-      const headers = new Headers();
-      for (const [key, val] of Object.entries(req.headers)) {
-        if (val) {
-          // Strip encoding headers — the outer proxy handles compression;
-          // letting the worker compress causes double-encoding (ERR_CONTENT_DECODING_FAILED).
-          // Also strip content-length/transfer-encoding: the body below is rebuilt
-          // (re-serialized from req.body, or re-read), so the client's original
-          // content-length no longer matches and would truncate the worker's body
-          // stream ("user body write aborted: early end"). Let fetch recompute it.
-          const lower = key.toLowerCase();
-          if (lower === "accept-encoding" || lower === "content-length" || lower === "transfer-encoding") continue;
-          headers.set(key, Array.isArray(val) ? val.join(", ") : String(val));
-        }
-      }
-
-      // Inject auth context from middleware into headers for edge functions
+      // Build the worker header set. buildWorkerHeaders strips the transport
+      // headers the proxy recomputes (accept-encoding/content-length/
+      // transfer-encoding — the body below is rebuilt) AND the injected identity
+      // headers (x-user-id/x-user-role), then sets identity ONLY from verified
+      // auth context. A client-supplied x-user-id is therefore never forwarded
+      // to a worker that trusts it. See worker-headers.ts.
+      //
+      // Identity source by path: trusted-scope plugins (authContext) carry it in
+      // pgSettings["app.user_id"] (= the native token subject); d2e-scope plugins
+      // (d2eAuthn) carry the VERIFIED Logto subject on req.logtoSubject. Both are
+      // trex-verified — a value the client set itself is never used.
       const pgSettings = (req as any).pgSettings;
-      if (pgSettings?.["app.user_id"]) {
-        headers.set("x-user-id", pgSettings["app.user_id"]);
-      }
-      if (pgSettings?.["app.user_role"]) {
-        headers.set("x-user-role", pgSettings["app.user_role"]);
-      }
+      const verifiedUserId = pgSettings?.["app.user_id"] ??
+        (req as any).logtoSubject ?? undefined;
+      const headers = buildWorkerHeaders(
+        req.headers as Record<string, unknown>,
+        {
+          userId: verifiedUserId,
+          userRole: pgSettings?.["app.user_role"],
+        },
+      );
 
       let body: Blob | string | undefined;
       if (req.method !== "GET" && req.method !== "HEAD") {
@@ -541,7 +621,8 @@ export function _addFunction(
         signal: controller.signal,
       });
 
-      const workerResponse = await _callWorker(webReq, path, imports, fncfg, dir, xenv, controller.signal);
+      const c = cur();
+      const workerResponse = await _callWorker(webReq, c.servicePath, c.importMapPath, fncfg, dir, c.xenv, controller.signal);
 
       res.status(workerResponse.status);
       workerResponse.headers.forEach((value: string, key: string) => {

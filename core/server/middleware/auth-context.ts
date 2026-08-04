@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { Pool } from "pg";
 import { verifyAccessToken } from "../auth/jwt.ts";
+import { isSbKey, resolveSbKeyRole } from "../auth/sb-keys.ts";
 import { poolSsl } from "../lib/db-ssl.ts";
 import { pgRoleForUserRole } from "../lib/pg-role.ts";
 
@@ -81,9 +82,30 @@ export async function authContext(
       }
     }
 
-    // 2. Check apikey header (anon/service_role)
+    // 2. Check apikey header (anon/service_role — legacy JWT or new sb_ key)
     const apikey = req.headers.apikey as string | undefined;
     if (apikey) {
+      // New-format keys resolve by equality; same channel policy as legacy
+      // long-lived keys — only the apikey header grants these roles.
+      const sbRole = isSbKey(apikey) ? await resolveSbKeyRole(apikey) : null;
+      if (sbRole === "anon") {
+        (req as any).pgSettings = {
+          role: "anon",
+          "request.jwt.claims": JSON.stringify({ role: "anon" }),
+        };
+        (req as any).applicationRoles = [];
+        return next();
+      }
+      if (sbRole === "service_role") {
+        (req as any).pgSettings = {
+          role: "service_role",
+          "app.user_role": "admin",
+          "request.jwt.claims": JSON.stringify({ role: "service_role" }),
+        };
+        (req as any).applicationRoles = [];
+        return next();
+      }
+
       const claims = await verifyAccessToken(apikey);
       if (claims?.role === "anon") {
         (req as any).pgSettings = {

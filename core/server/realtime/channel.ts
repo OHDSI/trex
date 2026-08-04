@@ -40,7 +40,7 @@ export class Channel {
     this.broadcastCfg = { self: cfg.broadcast?.self === true, ack: cfg.broadcast?.ack === true };
     this.presenceKey = typeof cfg.presence?.key === "string" && cfg.presence.key !== ""
       ? cfg.presence.key
-      : (socket.claims?.sub ?? crypto.randomUUID());
+      : (("sub" in socket.claims ? socket.claims.sub : undefined) ?? crypto.randomUUID());
     for (const pc of cfg.postgres_changes ?? []) {
       const schema = pc.schema ?? "public";
       const table = pc.table ?? "*";

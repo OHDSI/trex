@@ -9,6 +9,11 @@ paths-ignore:
   # Vendored OHDSI pyqe library: imported wholesale into plugins/notebook.
   # Style fixes happen upstream; quality findings here are noise.
   - "plugins/notebook/src/kernels/pyodide/pyqe/**"
+  # Vendored third-party source under vendor/ (e.g. gbrain, imported wholesale
+  # for the memory plugin type). We carry only the minimal functional patches
+  # documented in vendor/*/PATCHES.md; upstream style/quality findings are noise
+  # and hand-fixing them would diverge the vendored copy from upstream.
+  - "vendor/**"
   # Build/coverage output.
   - "**/coverage/**"
   - "**/.next/**"

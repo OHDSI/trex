@@ -1,8 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import type { SecurityReview, CodeReview, QaTestReview, DesignReview } from "@/lib/types";
+import type { SecurityReview, CodeReview, QaTestReview, DesignReview, DocsReview } from "@/lib/types";
 import * as api from "@/lib/api";
 
-export type ReviewType = "security" | "code" | "qa" | "design";
+export type ReviewType = "security" | "code" | "qa" | "design" | "docs";
 
 export interface ReviewAgent {
   type: ReviewType;
@@ -20,21 +20,25 @@ export interface UseReviewAgentsReturn {
   codeReview: CodeReview | null;
   qaReview: QaTestReview | null;
   designReview: DesignReview | null;
+  docsReview: DocsReview | null;
   // Running state
   secReviewing: boolean;
   codeReviewing: boolean;
   qaReviewing: boolean;
   designReviewing: boolean;
+  docsReviewing: boolean;
   // Progress messages
   secProgress: string;
   codeProgress: string;
   qaProgress: string;
   designProgress: string;
+  docsProgress: string;
   // Run/stop actions
   runSecurityReview: () => void;
   runCodeReview: () => void;
   runQaReview: () => void;
   runDesignReview: () => void;
+  runDocsUpdate: () => void;
   stopAgent: (type: ReviewType) => void;
   // Agents list (for AgentsTab)
   agents: ReviewAgent[];
@@ -48,6 +52,7 @@ const LABELS: Record<ReviewType, string> = {
   code: "Code Review",
   qa: "QA Test",
   design: "Design Review",
+  docs: "Docs Update",
 };
 
 const MAX_STEPS: Record<ReviewType, number> = {
@@ -55,6 +60,7 @@ const MAX_STEPS: Record<ReviewType, number> = {
   code: 20,
   qa: 30,
   design: 25,
+  docs: 30,
 };
 
 export function useReviewAgents(appId: string): UseReviewAgentsReturn {
@@ -63,18 +69,21 @@ export function useReviewAgents(appId: string): UseReviewAgentsReturn {
   const [codeReview, setCodeReview] = useState<CodeReview | null>(null);
   const [qaReview, setQaReview] = useState<QaTestReview | null>(null);
   const [designReview, setDesignReview] = useState<DesignReview | null>(null);
+  const [docsReview, setDocsReview] = useState<DocsReview | null>(null);
 
   // Running state
   const [secReviewing, setSecReviewing] = useState(false);
   const [codeReviewing, setCodeReviewing] = useState(false);
   const [qaReviewing, setQaReviewing] = useState(false);
   const [designReviewing, setDesignReviewing] = useState(false);
+  const [docsReviewing, setDocsReviewing] = useState(false);
 
   // Progress
   const [secProgress, setSecProgress] = useState("");
   const [codeProgress, setCodeProgress] = useState("");
   const [qaProgress, setQaProgress] = useState("");
   const [designProgress, setDesignProgress] = useState("");
+  const [docsProgress, setDocsProgress] = useState("");
 
   // Steps
   const [secStep, setSecStep] = useState(0);
@@ -85,18 +94,22 @@ export function useReviewAgents(appId: string): UseReviewAgentsReturn {
   const [qaMaxSteps, setQaMaxSteps] = useState(MAX_STEPS.qa);
   const [designStep, setDesignStep] = useState(0);
   const [designMaxSteps, setDesignMaxSteps] = useState(MAX_STEPS.design);
+  const [docsStep, setDocsStep] = useState(0);
+  const [docsMaxSteps, setDocsMaxSteps] = useState(MAX_STEPS.docs);
 
   // Logs
   const [secLogs, setSecLogs] = useState<string[]>([]);
   const [codeLogs, setCodeLogs] = useState<string[]>([]);
   const [qaLogs, setQaLogs] = useState<string[]>([]);
   const [designLogs, setDesignLogs] = useState<string[]>([]);
+  const [docsLogs, setDocsLogs] = useState<string[]>([]);
 
   // Abort controllers
   const secController = useRef<AbortController | null>(null);
   const codeController = useRef<AbortController | null>(null);
   const qaController = useRef<AbortController | null>(null);
   const designController = useRef<AbortController | null>(null);
+  const docsController = useRef<AbortController | null>(null);
 
   // Load latest reviews on mount
   useEffect(() => {
@@ -105,6 +118,7 @@ export function useReviewAgents(appId: string): UseReviewAgentsReturn {
     api.getLatestCodeReview(appId).then((r) => { if (r) setCodeReview(r); }).catch(() => {});
     api.getLatestQaReview(appId).then((r) => { if (r) setQaReview(r); }).catch(() => {});
     api.getLatestDesignReview(appId).then((r) => { if (r) setDesignReview(r); }).catch(() => {});
+    api.getLatestDocsReview(appId).then((r) => { if (r) setDocsReview(r); }).catch(() => {});
   }, [appId]);
 
   // Helper to parse step info from progress message and append to logs
@@ -180,6 +194,19 @@ export function useReviewAgents(appId: string): UseReviewAgentsReturn {
     });
   }, [appId, designReviewing]);
 
+  const runDocsUpdate = useCallback(() => {
+    if (docsReviewing) return;
+    setDocsReviewing(true);
+    setDocsProgress("Starting docs update...");
+    setDocsStep(0);
+    setDocsLogs(["Starting docs update..."]);
+    docsController.current = api.streamDocsReview(appId, {
+      onProgress: makeProgressHandler(setDocsProgress, setDocsStep, setDocsMaxSteps, setDocsLogs),
+      onDone: (r) => { setDocsReview(r); setDocsReviewing(false); setDocsProgress(""); docsController.current = null; },
+      onError: (err) => { setDocsReviewing(false); setDocsProgress(`Error: ${err}`); setDocsLogs((p) => [...p, `Error: ${err}`]); docsController.current = null; },
+    });
+  }, [appId, docsReviewing]);
+
   const stopAgent = useCallback((type: ReviewType) => {
     switch (type) {
       case "security":
@@ -210,6 +237,13 @@ export function useReviewAgents(appId: string): UseReviewAgentsReturn {
         setDesignLogs((p) => [...p, "Stopped by user"]);
         designController.current = null;
         break;
+      case "docs":
+        docsController.current?.abort();
+        setDocsReviewing(false);
+        setDocsProgress("");
+        setDocsLogs((p) => [...p, "Stopped by user"]);
+        docsController.current = null;
+        break;
     }
   }, []);
 
@@ -219,15 +253,16 @@ export function useReviewAgents(appId: string): UseReviewAgentsReturn {
     { type: "code" as const, label: LABELS.code, running: codeReviewing, progress: codeProgress, step: codeStep, maxSteps: codeMaxSteps, logs: codeLogs },
     { type: "qa" as const, label: LABELS.qa, running: qaReviewing, progress: qaProgress, step: qaStep, maxSteps: qaMaxSteps, logs: qaLogs },
     { type: "design" as const, label: LABELS.design, running: designReviewing, progress: designProgress, step: designStep, maxSteps: designMaxSteps, logs: designLogs },
+    { type: "docs" as const, label: LABELS.docs, running: docsReviewing, progress: docsProgress, step: docsStep, maxSteps: docsMaxSteps, logs: docsLogs },
   ];
 
   const runningCount = agents.filter((a) => a.running).length;
 
   return {
-    secReview, codeReview, qaReview, designReview,
-    secReviewing, codeReviewing, qaReviewing, designReviewing,
-    secProgress, codeProgress, qaProgress, designProgress,
-    runSecurityReview, runCodeReview, runQaReview, runDesignReview,
+    secReview, codeReview, qaReview, designReview, docsReview,
+    secReviewing, codeReviewing, qaReviewing, designReviewing, docsReviewing,
+    secProgress, codeProgress, qaProgress, designProgress, docsProgress,
+    runSecurityReview, runCodeReview, runQaReview, runDesignReview, runDocsUpdate,
     stopAgent,
     agents,
     runningCount,

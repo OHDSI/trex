@@ -1,0 +1,25 @@
+{
+  "name": "@trex/d2esupport",
+  "version": "0.0.1",
+  "trex": {
+    "agents": [
+      {
+        "name": "d2esupport",
+        "dir": "agent",
+        "env": {
+          "D2ESUPPORT_MODEL_PROVIDER": "${D2ESUPPORT_MODEL_PROVIDER:-anthropic}",
+          "D2ESUPPORT_MODEL_ID": "${D2ESUPPORT_MODEL_ID:-claude-sonnet-5}",
+          "D2ESUPPORT_API_KEY": "${D2ESUPPORT_API_KEY}",
+          "D2ESUPPORT_MODEL_BASE_URL": "${D2ESUPPORT_MODEL_BASE_URL:-}",
+          "SLACK_BOT_TOKEN": "${SLACK_BOT_TOKEN}",
+          "SLACK_APP_TOKEN": "${SLACK_APP_TOKEN}",
+          "SLACK_SIGNING_SECRET": "${SLACK_SIGNING_SECRET:-}",
+          "SLACK_GATEWAY": "${SLACK_GATEWAY:-}",
+          "SLACK_ALLOWED_USERS": "${SLACK_ALLOWED_USERS:-}",
+          "D2ESUPPORT_USER_ID": "${D2ESUPPORT_USER_ID:-}"
+        }
+      }
+    ],
+    "migrations": { "schema": "d2esupport", "database": "_config" }
+  }
+}

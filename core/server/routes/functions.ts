@@ -459,7 +459,12 @@ router.get(`${BASE_PATH}/v1/projects/:ref`, apiLimiter, async (req, res) => {
   });
 });
 
-// GET /v1/projects/:ref/api-keys — anon & service_role keys
+async function sha256Hex(value: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(buf)).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// GET /v1/projects/:ref/api-keys — legacy anon/service_role + new publishable/secret keys
 router.get(`${BASE_PATH}/v1/projects/:ref/api-keys`, apiLimiter, async (req, res) => {
   const user = await requireAdmin(req);
   if (!user) {
@@ -468,6 +473,7 @@ router.get(`${BASE_PATH}/v1/projects/:ref/api-keys`, apiLimiter, async (req, res
   }
 
   const { pool } = await import("../db.ts");
+  const { getSbKeys } = await import("../auth/sb-keys.ts");
   try {
     const result = await pool.query(
       `SELECT key, value FROM trexdb.setting WHERE key IN ('auth.anonKey', 'auth.serviceRoleKey')`,
@@ -476,18 +482,45 @@ router.get(`${BASE_PATH}/v1/projects/:ref/api-keys`, apiLimiter, async (req, res
     for (const row of result.rows) {
       settings[row.key] = typeof row.value === "string" ? row.value : JSON.parse(row.value);
     }
+    const sb = await getSbKeys();
+    const secretHash = await sha256Hex(sb.secret.key);
 
     const reveal = req.query.reveal === "true";
     const keys = [
       {
+        id: "anon",
+        type: "legacy",
         name: "anon",
         api_key: reveal ? settings["auth.anonKey"] || null : null,
         prefix: settings["auth.anonKey"]?.slice(0, 20) || null,
+        secret_jwt_template: { role: "anon" },
       },
       {
+        id: "service_role",
+        type: "legacy",
         name: "service_role",
         api_key: reveal ? settings["auth.serviceRoleKey"] || null : null,
         prefix: settings["auth.serviceRoleKey"]?.slice(0, 20) || null,
+        secret_jwt_template: { role: "service_role" },
+      },
+      {
+        id: sb.publishable.id,
+        type: "publishable",
+        name: "default",
+        // Publishable keys are public — always return in full.
+        api_key: sb.publishable.key,
+        prefix: sb.publishable.key.slice(0, 20),
+        inserted_at: sb.publishable.inserted_at,
+      },
+      {
+        id: sb.secret.id,
+        type: "secret",
+        name: "default",
+        api_key: reveal ? sb.secret.key : `${sb.secret.key.slice(0, 14)}...`,
+        prefix: sb.secret.key.slice(0, 14),
+        hash: secretHash,
+        secret_jwt_template: { role: "service_role" },
+        inserted_at: sb.secret.inserted_at,
       },
     ];
 
@@ -497,6 +530,61 @@ router.get(`${BASE_PATH}/v1/projects/:ref/api-keys`, apiLimiter, async (req, res
     res.status(500).json({ message: "Internal server error" });
   }
 });
+
+// GET /v1/projects/:ref/api-keys/:id — per-key fetch with ?reveal (Studio's reveal button)
+router.get(`${BASE_PATH}/v1/projects/:ref/api-keys/:id`, apiLimiter, async (req, res) => {
+  const user = await requireAdmin(req);
+  if (!user) {
+    res.status(401).json({ message: "Unauthorized" });
+    return;
+  }
+  const { getSbKeys } = await import("../auth/sb-keys.ts");
+  try {
+    const sb = await getSbKeys();
+    const reveal = req.query.reveal === "true";
+    if (req.params.id === sb.publishable.id) {
+      res.json({
+        id: sb.publishable.id, type: "publishable", name: "default",
+        api_key: sb.publishable.key, prefix: sb.publishable.key.slice(0, 20),
+        inserted_at: sb.publishable.inserted_at,
+      });
+      return;
+    }
+    if (req.params.id === sb.secret.id) {
+      res.json({
+        id: sb.secret.id, type: "secret", name: "default",
+        api_key: reveal ? sb.secret.key : `${sb.secret.key.slice(0, 14)}...`,
+        prefix: sb.secret.key.slice(0, 14),
+        hash: await sha256Hex(sb.secret.key),
+        secret_jwt_template: { role: "service_role" },
+        inserted_at: sb.secret.inserted_at,
+      });
+      return;
+    }
+    res.status(404).json({ message: "API key not found" });
+  } catch (err) {
+    console.error("[mgmt] api-key error:", err);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// trex keeps one publishable + one secret key; create/update/delete are not supported.
+// Rotation is available via the GraphQL rotatePublishableKey/rotateSecretKey mutations.
+for (const method of ["post", "patch", "delete"] as const) {
+  const path = method === "post"
+    ? `${BASE_PATH}/v1/projects/:ref/api-keys`
+    : `${BASE_PATH}/v1/projects/:ref/api-keys/:id`;
+  router[method](path, apiLimiter, async (req, res) => {
+    const user = await requireAdmin(req);
+    if (!user) {
+      res.status(401).json({ message: "Unauthorized" });
+      return;
+    }
+    res.status(501).json({
+      message: "trex manages a single publishable/secret key pair; use the rotate mutations instead",
+    });
+  });
+}
 
 // GET /v1/projects/:ref/postgrest — PostgREST config
 // Returns the live effective values: trexdb.setting postgrest.* rows (written

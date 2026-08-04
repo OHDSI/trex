@@ -15,6 +15,8 @@ trexsql has a plugin system that extends the management application with custom 
 | **Flow** | Prefect workflow deployments | `trex.flow` |
 | **Transform** | Data transformation projects with model endpoints | `trex.transform` |
 | **Agent** | AI agents running on the eve-compatible agents runtime | `trex.agents` |
+| **Memory** | Knowledge brains (schema-isolated knowledge stores) imported from git or in-package content, searchable by linked agents | `trex.memory` |
+| **Skills** | Skill packs (markdown skills + supporting files, optional MCP connections) injected into targeted agents, deployable while the agent is running | `trex.skills` |
 
 A single plugin can combine multiple types.
 
@@ -28,6 +30,7 @@ flowchart TD
     ReadPkg --> RegUI["Register UI routes"]
     ReadPkg --> RegFlow["Register Prefect flows"]
     ReadPkg --> RegTx["Register transforms (recover endpoints from trexdb.transform_deployment)"]
+    ReadPkg --> RegSkills["Register skill packs (@trex scope only)"]
     ReadPkg --> RegAgent["Register agent workers (@trex scope only)"]
     RegFn --> EnsureRoles["ensureRolesExist — upsert into trexdb.role"]
     EnsureRoles --> CliLogin["Mount cliLoginRouter"]
@@ -36,6 +39,7 @@ flowchart TD
     RegUI --> Ready
     RegFlow --> Ready
     RegTx --> Ready
+    RegSkills --> Ready
     RegAgent --> Ready
 ```
 

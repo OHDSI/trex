@@ -1,6 +1,7 @@
-# Standalone compose stack that runs trex + the devx plugin from a single
-# pre-built image (ghcr.io/ohdsi/trexsql-dx) with the devx plugin and the
-# devx_ext DuckDB extension baked in — NO local builds, bind-mounts, or
+# Standalone compose stack that runs trex + the devx plugin from the standard
+# image (ghcr.io/ohdsi/trexsql). The devx plugin and the devx_ext DuckDB
+# extension are baked into every published image in gated folders and are
+# activated here via TREX_DX_ENABLED=true — NO local builds, bind-mounts, or
 # submodule checkouts required. Runs alongside the default docker-compose.yml
 # (ports offset by +1000 on HTTP / +20 on pg).
 #
@@ -11,10 +12,10 @@
 #   docker compose -f docker-compose.dx.yml up -d
 # UI: http://localhost:9001/plugins/trex/devx/
 #
-# Build the image locally instead of pulling (see Dockerfile.dx):
+# Build the image locally instead of pulling (see Dockerfile):
 #   git submodule update --init plugins/extension-ci-tools
-#   docker build -f Dockerfile.dx -t trexsql-dx:dev .
-#   TREX_IMAGE=trexsql-dx:dev docker compose -f docker-compose.dx.yml up -d
+#   docker build -t trexsql-local:full .
+#   TREX_IMAGE=trexsql-local:full docker compose -f docker-compose.dx.yml up -d
 #
 # Init containers (one-shots, not builds):
 #   - trex-init             — generates ./secrets/{root,derived}.env (the
@@ -24,7 +25,7 @@
 #                             uid 1000 (`node`) so devx-api routes can write.
 #
 # Notes:
-# - The dx image is multi-arch (arm64-native), so it runs natively rather than
+# - The image is multi-arch (arm64-native), so it runs natively rather than
 #   under amd64 emulation.
 # - Back up secrets/root.env — losing it invalidates every encrypted secret and
 #   issued JWT.
@@ -63,7 +64,7 @@ services:
   # Generates ./secrets/{root,derived}.env on first boot (TREX_ROOT_KEY and the
   # derived JWT/crypto keys). Short-circuits if the files already exist.
   trex-init:
-    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql-dx:latest}
+    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql:latest}
     entrypoint: /usr/local/bin/trex-init
     environment:
       TREX_SECRETS_DIR: /shared
@@ -114,9 +115,9 @@ services:
   # the devx plugin all live here. devx_ext command execution, the workspaces,
   # and the function runtime are co-located, so no remote sessions are involved.
   trex:
-    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql-dx:latest}
+    image: ${TREX_IMAGE:-ghcr.io/ohdsi/trexsql:latest}
     # Override with a local image for development:
-    #   TREX_IMAGE=trexsql-test:dev docker compose -f docker-compose.dx.yml up -d
+    #   TREX_IMAGE=trexsql-local:full docker compose -f docker-compose.dx.yml up -d
     # Ports offset by +1000 (HTTP) / +20 (pg) so this runs alongside the default
     # docker-compose.yml (which uses 8000/8001/5433). pgwire is on 5453 (not
     # 5443): 5443 is taken by an unrelated `sibyl-trex` container on this host.
@@ -139,12 +140,17 @@ services:
     volumes:
       - dx-claude-config:/home/node/.claude
       - dx-gh-config:/home/node/.config/gh
-      # The devx plugin and devx_ext extension are baked into the dx image, so
-      # nothing source-related is mounted here — only persistent data volumes.
+      # The devx plugin and devx_ext extension are baked into the image
+      # (activated by TREX_DX_ENABLED), so nothing source-related is mounted
+      # here — only persistent data volumes.
       - devx-workspaces:/tmp/devx-workspaces
     environment:
       <<: *swarm-config
       SWARM_NODE: trex
+      # Expose the baked-in devx plugin + devx_ext extension (gated folders in
+      # the image; see docker/entrypoint.sh). Everything else in this stack
+      # assumes devx is active.
+      TREX_DX_ENABLED: "true"
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-mypass}@postgres:5432/testdb
       # data_node runs the schema migrations (creates the `authenticator` role etc.)
       SCHEMA_DIR: /usr/src/core/schema
@@ -180,6 +186,20 @@ services:
       # encrypt/decrypt is disabled and GitHub connect / private-repo clone fail
       # (public clone still works — the token lookup is best-effort).
       DEVX_ENCRYPTION_KEY: ${DEVX_ENCRYPTION_KEY:-}
+      # Anthropic key for the devx agent (eve mount): agent workers receive it
+      # via core's PASSTHROUGH_ENV (core/server/plugin/agents.ts) and the
+      # default model resolution (anthropic/claude-sonnet-4) falls back to it
+      # when the calling user has no devx.settings/provider_configs row.
+      # Supplied via ./.env; required for agent turns and the eval suite
+      # (plugins/devx/agent/evals/README.md).
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Bedrock bearer-auth alternative to ANTHROPIC_API_KEY: model.ts's
+      # bedrockModel() falls back to this env var (dummy static creds, bearer
+      # token auth) when the resolved ModelSpec has no apiKey. Also supplied
+      # via ./.env; requires a devx.settings row with provider 'bedrock' to
+      # be selected (see plugins/devx/agent/evals/README.md).
+      AWS_BEARER_TOKEN_BEDROCK: ${AWS_BEARER_TOKEN_BEDROCK:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
       PLUGINS_INFORMATION_URL: "https://feeds.dev.azure.com/data2evidence/d2e/_apis/packaging/Feeds/d2e/packages?api-version=7.1&includeDescription=true"
       TPM_REGISTRY_URL: "https://pkgs.dev.azure.com/data2evidence/d2e/_packaging/d2e/npm/registry"
       PLUGINS_PATH: /usr/src/plugins
@@ -193,7 +213,7 @@ services:
       PGRST_DB_PRE_REQUEST: public.postgrest_pre_request
       PGRST_OPENAPI_SERVER_PROXY_URI: http://localhost:9001/trex/rest/v1
       # Register devx and prometheus in the web shell's top nav (consumed by plugins/web).
-      TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"DevX","plugin":"devx"},{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
+      TREX_WEB_NAV_EXTRA: '[{"path":"/devx","label":"Code","plugin":"devx"},{"path":"/prometheus","label":"Prometheus","plugin":"prometheus"}]'
     healthcheck:
       # /trex/api/ready returns 200 only after auth keys are written to the DB,
       # which is a stronger readiness signal than auth/v1/health.

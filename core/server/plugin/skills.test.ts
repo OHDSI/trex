@@ -1,0 +1,137 @@
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { addSkillsPlugin } from "./skills.ts";
+import {
+  _clearDeclaredSkillPacksForTest,
+  packsForAgent,
+  normalizeSkillsValue,
+  validateSkillPackDir,
+} from "./skill-packs.ts";
+import { _clearAgentMountsForTest, addAgentsPlugin, AGENT_MOUNTS } from "./agents.ts";
+
+const stubApp = { all: () => {} } as never;
+
+// Writes a pack source dir (skills/greeting) and returns the plugin dir; the
+// pack decl itself is passed to addSkillsPlugin separately by each test.
+async function writeSkillsPluginDir(): Promise<string> {
+  const dir = await Deno.makeTempDir();
+  await Deno.mkdir(`${dir}/pack/skills/greeting`, { recursive: true });
+  await Deno.writeTextFile(
+    `${dir}/pack/skills/greeting/SKILL.md`,
+    "---\ndescription: How to greet.\n---\n\n# Greeting\n",
+  );
+  return dir;
+}
+
+Deno.test("addSkillsPlugin skips untrusted scopes without registering packs", async () => {
+  _clearDeclaredSkillPacksForTest();
+  const dir = await writeSkillsPluginDir();
+  await addSkillsPlugin(stubApp, [{ name: "evilpack", dir: "pack", agents: ["*"] }], dir, "@evil/skills");
+  assertEquals(packsForAgent("toy"), []);
+});
+
+Deno.test("addSkillsPlugin registers a valid pack (no mounted agents → no rebuild)", async () => {
+  _clearDeclaredSkillPacksForTest();
+  _clearAgentMountsForTest();
+  const dir = await writeSkillsPluginDir();
+  await addSkillsPlugin(stubApp, [{ name: "goodpack", dir: "pack", agents: ["toy"] }], dir, "@trex/skills-test");
+  assertEquals(packsForAgent("toy").map((p) => p.name), ["goodpack"]);
+});
+
+Deno.test("addSkillsPlugin surfaces validation errors (pack registered only if valid)", async () => {
+  _clearDeclaredSkillPacksForTest();
+  const dir = await Deno.makeTempDir(); // no skills/ inside → invalid
+  await assertRejects(
+    () => addSkillsPlugin(stubApp, [{ name: "badpack", dir: "pack", agents: ["*"] }], dir, "@trex/skills-test"),
+    Error,
+    "badpack",
+  );
+  assertEquals(packsForAgent("toy"), []);
+});
+
+// The headline scenario: agent deployed FIRST, pack deployed AFTERWARDS —
+// the mounted agent is re-staged and its live config swapped, without any
+// restart API. (Worker-serving verification is a live-stack step; here we
+// prove the mount now points at a staged dir containing the pack.)
+Deno.test({
+  name: "addSkillsPlugin re-stages already-mounted target agents (deploy-after-agent)",
+  // rebuildAgentMount schedules a grace-period cleanup timer for the old
+  // staged dir (unref'd); opt out of the op sanitizer for this one test.
+  sanitizeOps: false,
+  sanitizeResources: false,
+  async fn() {
+    const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+    _clearDeclaredSkillPacksForTest();
+    _clearAgentMountsForTest();
+    try {
+      await addAgentsPlugin(stubApp, { name: "toy", dir: "agent" }, toyPlugin, "@trex/toy-agent");
+      const rec = AGENT_MOUNTS.get("@trex/toy-agent/toy")!;
+      const oldPath = rec.live.servicePath;
+      const dir = await writeSkillsPluginDir();
+      await addSkillsPlugin(stubApp, [{ name: "latepack", dir: "pack", agents: ["toy"] }], dir, "@trex/skills-test");
+      assert(rec.live.servicePath !== oldPath, "live servicePath must be swapped");
+      const md = await Deno.readTextFile(`${rec.live.servicePath}/agent/skills/latepack--greeting/SKILL.md`);
+      assert(md.includes("How to greet"));
+    } finally {
+      _clearDeclaredSkillPacksForTest();
+      _clearAgentMountsForTest();
+    }
+  },
+});
+
+Deno.test("addSkillsPlugin does NOT rebuild mounted agents the pack doesn't target", async () => {
+  const toyPlugin = new URL("../agents/testdata/toy-agent", import.meta.url).pathname;
+  _clearDeclaredSkillPacksForTest();
+  _clearAgentMountsForTest();
+  try {
+    await addAgentsPlugin(stubApp, { name: "toy", dir: "agent" }, toyPlugin, "@trex/toy-agent");
+    const rec = AGENT_MOUNTS.get("@trex/toy-agent/toy")!;
+    const oldPath = rec.live.servicePath;
+    const dir = await writeSkillsPluginDir();
+    await addSkillsPlugin(stubApp, [{ name: "otherpack", dir: "pack", agents: ["someone-else"] }], dir, "@trex/skills-test");
+    assertEquals(rec.live.servicePath, oldPath, "untargeted agent must not be re-staged");
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+    _clearAgentMountsForTest();
+  }
+});
+
+Deno.test("addSkillsPlugin validates every pack before registering any (no partial registration)", async () => {
+  _clearDeclaredSkillPacksForTest();
+  const dir = await Deno.makeTempDir();
+  // First pack is valid; second pack's dir doesn't exist on disk.
+  await Deno.mkdir(`${dir}/goodpack/skills/greeting`, { recursive: true });
+  await Deno.writeTextFile(
+    `${dir}/goodpack/skills/greeting/SKILL.md`,
+    "---\ndescription: How to greet.\n---\n\n# Greeting\n",
+  );
+  try {
+    await assertRejects(
+      () =>
+        addSkillsPlugin(
+          stubApp,
+          [
+            { name: "firstpack", dir: "goodpack", agents: ["toy"] },
+            { name: "secondpack", dir: "does-not-exist", agents: ["toy"] },
+          ],
+          dir,
+          "@trex/skills-test",
+        ),
+      Error,
+      "secondpack",
+    );
+    // The first pack must NOT be registered either: otherwise it's stuck
+    // registered-but-never-staged until the process restarts (registerSkillPack
+    // returns false on a later retry with the identical decl).
+    assertEquals(packsForAgent("toy"), []);
+  } finally {
+    _clearDeclaredSkillPacksForTest();
+  }
+});
+
+Deno.test("manifest: the real plugins/skills-example pack normalizes and validates", async () => {
+  const pluginDir = new URL("../../../plugins/skills-example", import.meta.url).pathname;
+  const pkg = JSON.parse(await Deno.readTextFile(`${pluginDir}/package.json`));
+  const decls = normalizeSkillsValue(pkg.trex.skills);
+  assertEquals(decls, [{ name: "examplepack", dir: "pack", agents: ["toy"] }]);
+  await validateSkillPackDir({ ...decls[0], srcDir: `${pluginDir}/pack`, pluginName: pkg.name });
+});

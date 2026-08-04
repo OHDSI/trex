@@ -31,7 +31,9 @@ Task tool (general-purpose):
     Once you're clear on requirements:
     1. Implement exactly what the task specifies
     2. Write tests (following TDD if task says to)
-    3. Verify implementation works
+    3. Verify implementation works. For d2e/edge functions, verification means
+       exercising them with the `testing-d2e-functions` skill against the real
+       edge runtime + Postgres — `deno run` alone is not a faithful test.
     4. Commit your work
     5. Self-review (see below)
     6. Report back
