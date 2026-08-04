@@ -127,8 +127,12 @@ export function decideMessageTrigger(input: {
   const isThread = channel.type !== undefined && THREAD_TYPES.has(channel.type);
   if (isThread) {
     if (channel.ownerId === applicationId) {
-      // Image-only / embed-only posts arrive with empty content — nothing to prompt with.
-      if (event.content.trim() === "") return { kind: "ignore" };
+      // Embed-only posts arrive with empty content — nothing to prompt with.
+      // But an attachment-only post (a screenshot dropped into the thread with
+      // no caption) IS a turn: the <attachments> block carries the payload.
+      if (event.content.trim() === "" && !(event.attachments && event.attachments.length > 0)) {
+        return { kind: "ignore" };
+      }
       return { kind: "thread-turn" };
     }
     if (mentionsBot(event, applicationId, botRoleId)) return { kind: "mention-in-thread" };
@@ -206,6 +210,11 @@ export interface HistoryMessage {
   author: string;
   bot: boolean;
   content: string;
+  // Files attached to the historical message. Kept so a mention-triggered turn
+  // can still relay a screenshot posted a few messages earlier — without this,
+  // "please reattach the file" loops were the only recovery. CDN urls are
+  // signed with ~24h validity, so recent-history relays still resolve.
+  attachments?: readonly DiscordMessageAttachment[];
 }
 
 /** Fetches up to `limit` messages (before `before` when given), returned OLDEST-first. */
@@ -229,10 +238,19 @@ export async function fetchMessagesBefore(
     .filter((m): m is Record<string, unknown> => isObject(m))
     .map((m) => {
       const author = isObject(m.author) ? m.author : {};
+      const attachments = (Array.isArray(m.attachments) ? m.attachments : [])
+        .filter((a): a is Record<string, unknown> => isObject(a))
+        .filter((a) => isNonEmptyString(a.url) && isNonEmptyString(a.filename))
+        .map((a) => ({
+          name: a.filename as string,
+          url: a.url as string,
+          ...(isNonEmptyString(a.content_type) ? { contentType: a.content_type } : {}),
+        }));
       return {
         author: isNonEmptyString(author.username) ? author.username : "unknown",
         bot: author.bot === true,
         content: typeof m.content === "string" ? m.content : "",
+        ...(attachments.length > 0 ? { attachments } : {}),
       };
     })
     .reverse();
@@ -249,7 +267,12 @@ export function formatMessagesBlock(
   const lines = messages.map((m) => {
     const label = m.bot ? `[bot:${m.author}]` : `[${m.author}]`;
     const content = m.content.length > HISTORY_CONTENT_MAX ? `${m.content.slice(0, HISTORY_CONTENT_MAX)}…` : m.content;
-    return `${label} ${content.replace(/\n/g, " ")}`;
+    // Attachment metadata (name/url) after the text, NOT truncated with it —
+    // the url must survive intact for the agent to relay it (askCodeAgent).
+    const att = (m.attachments ?? [])
+      .map((a) => ` [attachment: ${JSON.stringify({ name: a.name, url: a.url, ...(a.contentType ? { contentType: a.contentType } : {}) })}]`)
+      .join("");
+    return `${label} ${content.replace(/\n/g, " ")}${att}`;
   });
   return [`<${tag}>`, ...lines, `</${tag}>`].join("\n");
 }

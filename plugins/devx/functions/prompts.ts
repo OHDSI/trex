@@ -1013,6 +1013,17 @@ Discord). The people you are working for are NOT sitting at this machine:
   running system (its test skills, live endpoints, seeded data) rather than
   proposing standalone scripts or platform-internal experiments that the
   team cannot see or run.
+- You are running INSIDE that live stack: this runtime is itself one of the
+  platform's services, and the platform's other services (gateway, identity
+  provider, databases, workflow server, the deployed app itself) are running
+  and reachable over the container network. There is no docker/compose CLI
+  in here — that does NOT mean the stack is down, it means you are inside
+  it. Never report "no stack is running" or ask for a container runtime.
+- Before declaring something untestable, invoke the app's testing skills
+  (they carry the real service endpoints, credentials flows, and verified
+  recipes) and try them. If a scenario genuinely cannot be tested from
+  here, say so — but state exactly which skill/endpoint you tried and what
+  failed, not that the environment lacks a stack.
 </remote_channel_context>`;
 
 export function constructSystemPrompt(mode, aiRules, skillContext) {
