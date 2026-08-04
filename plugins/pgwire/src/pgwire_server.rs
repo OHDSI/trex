@@ -204,7 +204,7 @@ fn strip_leading_sql_noise(query: &str) -> &str {
     }
 }
 
-pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> String {
+pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials, session_id: u64) -> String {
     let escaped_query = query.replace("'", "''");
     let escaped_username = hana_creds.username.replace("'", "''");
     let escaped_password = hana_creds.password.replace("'", "''");
@@ -213,26 +213,31 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> 
 
     let leading = strip_leading_sql_noise(query).to_uppercase();
     if leading.starts_with("SELECT") || leading.starts_with("WITH") {
-        // Read path: trex_hana_scan(query, url) returns a result set.
+        // Read path: trex_hana_scan(query, url) returns a result set. The
+        // `session_id` NAMED arg reuses the client session's HANA connection
+        // (duckdb table functions can't overload by arity, hence a named arg).
         format!(
-            "SELECT * FROM trex_hana_scan('{}', 'hdbsql://{}:{}@{}:{}/{}')",
+            "SELECT * FROM trex_hana_scan('{}', 'hdbsql://{}:{}@{}:{}/{}', session_id => '{}')",
             escaped_query,
             escaped_username,
             escaped_password,
             escaped_host,
             hana_creds.port,
-            escaped_name
+            escaped_name,
+            session_id
         )
     } else {
-        // Write path: trex_hana_execute(connection_url, sql) -- URL first, runs DML/DDL.
+        // Write path: trex_hana_execute(connection_url, sql, session_id) -- URL
+        // first, runs DML/DDL. `session_id` is the optional positional 3rd arg.
         format!(
-            "SELECT trex_hana_execute('hdbsql://{}:{}@{}:{}/{}', '{}')",
+            "SELECT trex_hana_execute('hdbsql://{}:{}@{}:{}/{}', '{}', '{}')",
             escaped_username,
             escaped_password,
             escaped_host,
             hana_creds.port,
             escaped_name,
-            escaped_query
+            escaped_query,
+            session_id
         )
     }
 }
@@ -1224,7 +1229,7 @@ impl SimpleQueryHandler for TrexQueryHandler {
             log_debug(&format!("Submitting query: {}", sql));
             let (actual_sql, fallback_sql) = match &hana_credentials {
                 Some(creds) if !is_local_session_statement(&sql) => {
-                    (wrap_query_for_hana(&sql, creds), Some(sql.clone()))
+                    (wrap_query_for_hana(&sql, creds, self.session_id), Some(sql.clone()))
                 }
                 _ => (sql.clone(), None),
             };
@@ -1341,7 +1346,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             get_hana_credentials_if_available(&database, &self.server_host, self.server_port);
         let (actual_query, fallback_query) = match &hana_credentials {
             Some(creds) if !is_local_session_statement(&query) => {
-                (wrap_query_for_hana(&query, creds), Some(query.clone()))
+                (wrap_query_for_hana(&query, creds, self.session_id), Some(query.clone()))
             }
             _ => (query.clone(), None),
         };
@@ -1416,6 +1421,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         let param_types = stmt.parameter_types.clone();
         let server_host = self.server_host.clone();
         let server_port = self.server_port;
+        let session_id = self.session_id;
 
         tokio::task::spawn_blocking(move || -> PgWireResult<DescribeStatementResponse> {
             let guard = connection.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1435,7 +1441,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             let hana_credentials = get_hana_credentials_if_available(&database, &server_host, server_port);
 
             let (actual_statement, fallback_statement) = if let Some(hana_creds) = &hana_credentials {
-                (wrap_query_for_hana(&statement, hana_creds), Some(statement.clone()))
+                (wrap_query_for_hana(&statement, hana_creds, session_id), Some(statement.clone()))
             } else {
                 (statement.clone(), None)
             };
@@ -1483,6 +1489,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         let format = portal.result_column_format.clone();
         let server_host = self.server_host.clone();
         let server_port = self.server_port;
+        let session_id = self.session_id;
 
         tokio::task::spawn_blocking(move || -> PgWireResult<DescribePortalResponse> {
             let guard = connection.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1502,7 +1509,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             let hana_credentials = get_hana_credentials_if_available(&database, &server_host, server_port);
 
             let (actual_statement, fallback_statement) = if let Some(hana_creds) = &hana_credentials {
-                (wrap_query_for_hana(&statement, hana_creds), Some(statement.clone()))
+                (wrap_query_for_hana(&statement, hana_creds, session_id), Some(statement.clone()))
             } else {
                 (statement.clone(), None)
             };
@@ -1638,6 +1645,15 @@ pub fn start_pgwire_server_capi(
                                         log_debug("Processing socket...");
                                         let result = process_socket(socket, None, handlers).await;
                                         log_debug(&format!("Socket result: {:?}", result));
+                                        // Close this session's HANA connection (dropping its
+                                        // session-local #temp tables) on the still-live DuckDB
+                                        // session before returning it to the pool. Best-effort.
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            trex_pool_client::session_execute(
+                                                session_id,
+                                                &format!("SELECT trex_hana_evict_session('{}')", session_id),
+                                            )
+                                        }).await;
                                         let _ = trex_pool_client::destroy_session(session_id);
                                     });
                                 }

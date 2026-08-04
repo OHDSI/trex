@@ -303,6 +303,9 @@ pub struct HanaScanBindData {
     pub temporal_cols: Vec<bool>,
     pub batch_size: usize,
     pub max_retries: u32,
+    /// pgwire session id used to borrow a pooled HANA connection so bind's schema
+    /// probe and init's data pull share one HANA session (0 = fresh connection).
+    pub session_id: u64,
 }
 
 impl Clone for HanaScanBindData {
@@ -335,6 +338,7 @@ impl Clone for HanaScanBindData {
             temporal_cols: self.temporal_cols.clone(),
             batch_size: self.batch_size,
             max_retries: self.max_retries,
+            session_id: self.session_id,
         }
     }
 }
@@ -550,6 +554,13 @@ impl VTab for HanaScanVTab {
         // which would silently collapse the result to one varchar column.
         let query = query.trim_end().trim_end_matches(';').trim_end().to_string();
         let url = bind.get_parameter(1).to_string();
+        // Optional named parameter carrying the pgwire session id. DuckDB table
+        // functions cannot be overloaded by arity, so the session id is threaded
+        // as an optional named parameter rather than a third positional argument.
+        let session_id = bind
+            .get_named_parameter("session_id")
+            .map(|p| crate::hana_session_pool::parse_session_id(&p.to_string()))
+            .unwrap_or(0);
         validate_hana_connection(&url)?;
         let (user, password, host, port, database) = parse_hana_url(&url)?;
         let batch_size = std::env::var("HANA_BATCH_SIZE")
@@ -563,13 +574,18 @@ impl VTab for HanaScanVTab {
         if batch_size == 0 || batch_size > 10000 {
             return Err(HanaError::new("Batch size must be between 1 and 10000"));
         }
-        let (column_names, column_types, temporal_cols) = match safe_hana_connect(url.clone()) {
+        let (column_names, column_types, temporal_cols) = match crate::hana_session_pool::get_or_create(session_id, &url) {
             Ok(connection) => {
                 let schema_result = match connection.prepare(&query) {
                     Ok(_prepared) => {
                         match connection.query(&format!("SELECT * FROM ({}) AS subquery LIMIT 1", query)) {
                             Ok(result_set) => {
+                                // metadata() clones an Arc, so the probe ResultSet
+                                // can be dropped immediately. Releasing its cursor
+                                // here is required because init reuses this same
+                                // pooled connection for the real query.
                                 let metadata = result_set.metadata();
+                                drop(result_set);
                                 let mut names = Vec::new();
                                 let mut types = Vec::new();
                                 let mut temporal = Vec::new();
@@ -661,6 +677,7 @@ impl VTab for HanaScanVTab {
             temporal_cols,
             batch_size,
             max_retries,
+            session_id,
         })
     }
     fn init(init: &InitInfo) -> Result<Self::InitData, Box<dyn Error>> {
@@ -669,7 +686,7 @@ impl VTab for HanaScanVTab {
             let mut connection_result = None;
             let mut last_error = None;
             for attempt in 0..=bind_data_ref.max_retries {
-                match safe_hana_connect(bind_data_ref.url.clone()) {
+                match crate::hana_session_pool::get_or_create(bind_data_ref.session_id, &bind_data_ref.url) {
                     Ok(connection) => {
                         connection_result = Some(connection);
                         break;
@@ -892,6 +909,14 @@ impl VTab for HanaScanVTab {
             duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
         ])
     }
+    fn named_parameters() -> Option<Vec<(String, duckdb::core::LogicalTypeHandle)>> {
+        // Optional pgwire session id; when supplied, bind and init borrow the
+        // session's pooled HANA connection so session-local `#temp` tables survive.
+        Some(vec![(
+            "session_id".to_string(),
+            duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
+        )])
+    }
 }
 
 #[cfg(test)]
@@ -1081,6 +1106,7 @@ mod tests {
             temporal_cols: vec![false, false],
             batch_size: 1024,
             max_retries: 3,
+            session_id: 0,
         };
         let cloned = bind_data.clone();
         assert_eq!(bind_data.url, cloned.url);

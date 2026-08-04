@@ -422,3 +422,109 @@ fn test_hana_local_temp_table_lost_across_connections() {
     let res = count_rows(&c2, "SELECT id FROM #zz_it");
     assert!(res.is_err(), "temp table must NOT be visible from a separate connection, got {res:?}");
 }
+
+#[test]
+fn test_hana_temp_table_persists_within_session() {
+    // Session affinity: reusing the same session_id returns the same pooled HANA
+    // connection, so a LOCAL TEMPORARY TABLE created via one handle is visible
+    // through another handle for the same session.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    let session_id: u64 = 900_000 + std::process::id() as u64;
+
+    hana_scan::hana_session_pool::evict(session_id);
+    let c1 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn1");
+    let _ = run_write(&c1, "DROP TABLE #sess_probe"); // best-effort pre-clean
+    run_write(&c1, "CREATE LOCAL TEMPORARY TABLE #sess_probe (id INTEGER)").expect("create temp");
+    run_write(&c1, "INSERT INTO #sess_probe VALUES (7)").expect("insert temp");
+
+    let c2 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn2");
+    let n = count_rows(&c2, "SELECT id FROM #sess_probe")
+        .expect("#temp table must persist across get_or_create in same session");
+    assert_eq!(n, 1, "#temp table must persist across get_or_create in same session");
+
+    hana_scan::hana_session_pool::evict(session_id);
+}
+
+#[test]
+fn test_hana_temp_table_absent_without_session() {
+    // session_id 0 => a fresh connection (new HANA session) each call => the
+    // LOCAL TEMPORARY TABLE created on the first handle is not visible on the second.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+
+    let a = hana_scan::hana_session_pool::get_or_create(0, &url).expect("conn a");
+    run_write(&a, "CREATE LOCAL TEMPORARY TABLE #nosess (id INTEGER)").expect("create temp");
+
+    let b = hana_scan::hana_session_pool::get_or_create(0, &url).expect("conn b");
+    let res = count_rows(&b, "SELECT id FROM #nosess");
+    assert!(res.is_err(), "fresh (session 0) connection must not see the prior #temp, got {res:?}");
+}
+
+#[test]
+fn test_hana_scan_reads_session_temp_table() {
+    // trex_hana_scan runs its schema probe (bind) and its data pull (init) on the
+    // same pooled connection for a session. This exercises that pooled reuse: a
+    // #temp created on the session's connection is visible to a second pooled
+    // handle for the same session, mirroring what bind+init rely on.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    let session_id: u64 = 910_000 + std::process::id() as u64;
+    hana_scan::hana_session_pool::evict(session_id);
+
+    let c = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn");
+    let _ = run_write(&c, "DROP TABLE #scan_probe"); // best-effort pre-clean
+    run_write(&c, "CREATE LOCAL TEMPORARY TABLE #scan_probe (id INTEGER)").expect("create temp");
+    run_write(&c, "INSERT INTO #scan_probe VALUES (1)").expect("insert 1");
+    run_write(&c, "INSERT INTO #scan_probe VALUES (2)").expect("insert 2");
+
+    let c2 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn2");
+    let n = count_rows(&c2, "SELECT id FROM #scan_probe")
+        .expect("#temp must be visible to a second pooled handle for the same session");
+    assert_eq!(n, 2, "trex_hana_scan's bind+init must see the session's #temp rows");
+
+    hana_scan::hana_session_pool::evict(session_id);
+}
+
+#[test]
+fn test_evict_drops_session_temp_tables() {
+    // trex_hana_evict_session (via the pool's evict) closes the session's HANA
+    // connection. After eviction a fresh get_or_create opens a new HANA session,
+    // so the prior LOCAL TEMPORARY TABLE is gone.
+    common::setup();
+    let config = common::HanaTestConfig::new();
+    if config.should_skip {
+        println!("Skipping: {}", config.skip_reason);
+        return;
+    }
+    let url = config.connection_url.clone();
+    let session_id: u64 = 920_000 + std::process::id() as u64;
+    hana_scan::hana_session_pool::evict(session_id);
+
+    let c = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn");
+    let _ = run_write(&c, "DROP TABLE #evict_probe"); // best-effort pre-clean
+    run_write(&c, "CREATE LOCAL TEMPORARY TABLE #evict_probe (id INTEGER)").expect("create temp");
+    let removed = hana_scan::hana_session_pool::evict(session_id);
+    assert_eq!(removed, 1, "the session's pooled connection must be evicted");
+
+    let c2 = hana_scan::hana_session_pool::get_or_create(session_id, &url).expect("conn2");
+    let res = count_rows(&c2, "SELECT id FROM #evict_probe");
+    assert!(res.is_err(), "after eviction a new HANA session must not see the #temp, got {res:?}");
+
+    hana_scan::hana_session_pool::evict(session_id);
+}
