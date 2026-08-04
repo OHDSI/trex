@@ -6,9 +6,9 @@
  * runtime).
  *
  * A getConnection() alias is not always a credentialed database id. It can be:
- *   - a credentialed db_id      → dialect + publication come from the row;
- *   - `cdw_config_svc`          → the built-in duckdb file database;
- *   - a dataset cache_id        → attached as `ATTACH '<dir>/<id>.db' AS <id>`
+ *   - a credentialed db_id     -> dialect + publication come from the row;
+ *   - `cdw_config_svc`         -> the built-in duckdb file database;
+ *   - a dataset cache_id       -> attached as `ATTACH '<dir>/<id>.db' AS <id>`
  *                                 (core/server/d2e-compat/lib/attach.ts), so
  *                                 the alias IS the duckdb catalog name.
  * Only the first has a row in dbcredentials, so absence of a row is normal and
@@ -30,7 +30,7 @@ export function resolveDialect(credentials, dbId) {
 
 /**
  * Catalog name to query: `<db_id>_<publication>` for a credentialed database
- * that declares one, else `dbId` unchanged — which is what a cache_id needs.
+ * that declares one, else `dbId` unchanged, which is what a cache_id needs.
  */
 export function resolveFirstPublication(credentials, dbId) {
   const publication = findCredential(credentials, dbId)?.publications?.[0]?.publication;

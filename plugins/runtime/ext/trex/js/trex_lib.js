@@ -270,7 +270,7 @@ export class UserDatabaseManager {
 		const dbc = this.getDatabaseCredentials();
 		const worker_id = op_acquire_worker();
 		// db_id may be a dataset cache_id or the built-in duckdb file database,
-		// neither of which has a credential row — those resolve to duckdb.
+		// neither of which has a credential row; those resolve to duckdb.
 		const dialect = resolveDialect(dbc, db_id);
 		// Single TrexDB shared between read and write slots: same session,
 		// so a temp table CREATEd via the write path stays visible to a

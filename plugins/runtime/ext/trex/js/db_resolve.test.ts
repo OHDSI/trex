@@ -5,7 +5,7 @@ import {
   resolveFirstPublication,
 } from "./db_resolve.js";
 
-// A cache_id looks exactly like any other alias but has no credential row —
+// A cache_id looks exactly like any other alias but has no credential row:
 // dataset caches are attached as `ATTACH '<dir>/<cacheId>.db' AS <cacheId>`
 // (core/server/d2e-compat/lib/attach.ts), so the alias IS the duckdb catalog.
 const CACHE_ID = "bf972262_c919_434a_be89_5fb69a8e2cba";
