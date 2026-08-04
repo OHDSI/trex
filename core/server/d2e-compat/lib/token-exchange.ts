@@ -16,46 +16,32 @@ export function getTokenSubject(token: string): string | null {
 const WEBAPI_BASE_URL = "http://localhost:8080/WebAPI";
 
 /**
- * WebAPI's OIDC login is a two-step handshake: `openidDirect` validates the
- * Logto token and answers with a short-lived single-use code, which
- * `otc` then exchanges for the WebAPI session JWT.
+ * `openidDirect` validates the Logto token and answers in one hop with
+ * `LoginService.Result` — {login, jwt, roles, message} — carrying the WebAPI
+ * session JWT, mirrored in a `Bearer` response header (OidcAuthConfig
+ * .OpenidDirect). There is no one-time-code handshake to redeem.
  */
 async function exchangeToken(logtoToken: string): Promise<string | null> {
   try {
-    const codeResponse = await fetch(`${WEBAPI_BASE_URL}/user/login/openidDirect`, {
+    const response = await fetch(`${WEBAPI_BASE_URL}/user/login/openidDirect`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${logtoToken}`,
       },
     });
 
-    if (!codeResponse.ok) {
+    if (!response.ok) {
       console.error(
-        `[d2e-compat] Token exchange failed: ${codeResponse.status} ${await codeResponse.text()}`,
+        `[d2e-compat] Token exchange failed: ${response.status} ${await response.text()}`,
       );
       return null;
     }
 
-    const { code } = await codeResponse.json() as { code?: string };
-    if (!code) {
-      console.error("[d2e-compat] Token exchange: openidDirect returned no one-time code");
-      return null;
-    }
-
-    const jwtResponse = await fetch(
-      `${WEBAPI_BASE_URL}/user/login/otc?code=${encodeURIComponent(code)}`,
-    );
-
-    if (!jwtResponse.ok) {
-      console.error(
-        `[d2e-compat] Token exchange: one-time code rejected: ${jwtResponse.status} ${await jwtResponse.text()}`,
-      );
-      return null;
-    }
-
-    const { jwt } = await jwtResponse.json() as { jwt?: string };
+    const headerJwt = response.headers.get("Bearer");
+    const body = await response.json().catch(() => null) as { jwt?: string | null } | null;
+    const jwt = body?.jwt || headerJwt;
     if (!jwt) {
-      console.error("[d2e-compat] Token exchange: redeemed one-time code carried no JWT");
+      console.error("[d2e-compat] Token exchange: openidDirect returned no WebAPI JWT");
       return null;
     }
 
