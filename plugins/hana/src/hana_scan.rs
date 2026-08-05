@@ -304,6 +304,7 @@ pub struct HanaScanBindData {
     pub temporal_cols: Vec<bool>,
     pub batch_size: usize,
     pub max_retries: u32,
+    pub session_vars: BTreeMap<String, String>,
     /// pgwire session id used to borrow a pooled HANA connection so bind's schema
     /// probe and init's data pull share one HANA session (0 = fresh connection).
     pub session_id: u64,
