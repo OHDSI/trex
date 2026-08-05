@@ -342,7 +342,7 @@ export class HanaDB extends TrexDB {
 	#sessionVariables;
 	constructor(database, worker_id, sessionVariables = {}) {
 		super(database, worker_id);
-		this.#sessionVariables = sessionVariables;
+		this.#sessionVariables = sessionVariables ?? {};
 	}
 	#resolveConnectionUrl() {
 		const dbm = DatabaseManager.getDatabaseManager();
@@ -400,9 +400,10 @@ export class HanaDB extends TrexDB {
 				// Escape single quotes in SQL and connection URL to prevent SQL injection
 				const escapedSql = String(sql).replace(/'/g, "''");
 				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
+				const escapedSessionId = String(this.__session_id).replace(/'/g, "''");
 				const escapedSessionVariables = JSON.stringify(this.#sessionVariables).replace(/'/g, "''");
-				// Read path: trex_hana_scan(query, url, session_vars_json = json) returns a result set.
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from trex_hana_scan('${escapedSql}', '${escapedConnectionUrl}', session_vars_json = '${escapedSessionVariables}')`, nparams)));
+				// Read path: preserve HANA session affinity and apply Wizard attribution per query.
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from trex_hana_scan('${escapedSql}', '${escapedConnectionUrl}', session_id = '${escapedSessionId}', session_vars_json = '${escapedSessionVariables}')`, nparams)));
 			} catch(e) {
 				reject(e);
 			}
@@ -419,8 +420,10 @@ export class HanaDB extends TrexDB {
 				// Escape single quotes in SQL and connection URL to prevent SQL injection
 				const escapedSql = String(sql).replace(/'/g, "''");
 				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
-				// Write path: trex_hana_execute(connection_url, sql) -- URL first, runs DML/DDL.
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select trex_hana_execute('${escapedConnectionUrl}', '${escapedSql}')`, nparams)));
+				const escapedSessionId = String(this.__session_id).replace(/'/g, "''");
+				const escapedSessionVariables = JSON.stringify(this.#sessionVariables).replace(/'/g, "''");
+				// Write path: preserve HANA session affinity and apply Wizard attribution per query.
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select trex_hana_execute('${escapedConnectionUrl}', '${escapedSql}', '${escapedSessionId}', '${escapedSessionVariables}')`, nparams)));
 			} catch(e) {
 				reject(e);
 			}

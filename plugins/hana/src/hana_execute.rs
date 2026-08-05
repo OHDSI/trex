@@ -201,7 +201,25 @@ impl VScalar for HanaExecuteScalar {
             0
         };
 
-        let statements_executed = execute_hana_statement(&connection_string, &sql_statement, session_id)?;
+        let session_vars = if input.num_columns() > 3 {
+            let session_vars_vector = input.flat_vector(3);
+            let session_vars_slice = session_vars_vector
+                .as_slice_with_len::<libduckdb_sys::duckdb_string_t>(input.len());
+            let session_vars_json = {
+                let mut binding = session_vars_slice[0];
+                duckdb::types::DuckString::new(&mut binding).as_str().to_string()
+            };
+            crate::session_vars::parse_session_vars(&session_vars_json)?
+        } else {
+            Default::default()
+        };
+
+        let statements_executed = execute_hana_statement(
+            &connection_string,
+            &sql_statement,
+            session_id,
+            &session_vars,
+        )?;
         let result = format!("{} statement(s) executed", statements_executed);
 
         let flat_vector = output.flat_vector();
@@ -226,6 +244,15 @@ impl VScalar for HanaExecuteScalar {
                 ],
                 LogicalTypeId::Varchar.into()
             ),
+            ScalarFunctionSignature::exact(
+                vec![
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                    LogicalTypeId::Varchar.into(),
+                ],
+                LogicalTypeId::Varchar.into()
+            ),
         ]
     }
 }
@@ -240,7 +267,12 @@ fn is_benign_affected_rowcount_error(msg: &str) -> bool {
     msg.contains("affected-row-count") && msg.contains("expected a single Success")
 }
 
-fn execute_hana_statement(connection_string: &str, sql_statement: &str, session_id: u64) -> Result<usize, Box<dyn Error>> {
+fn execute_hana_statement(
+    connection_string: &str,
+    sql_statement: &str,
+    session_id: u64,
+    session_vars: &std::collections::BTreeMap<String, String>,
+) -> Result<usize, Box<dyn Error>> {
     let connection = match panic::catch_unwind(AssertUnwindSafe(|| {
         crate::hana_session_pool::get_or_create(session_id, connection_string)
     })) {
@@ -267,6 +299,8 @@ fn execute_hana_statement(connection_string: &str, sql_statement: &str, session_
             )));
         }
     };
+
+    crate::session_vars::apply_session_vars(&connection, session_vars)?;
 
     let statements = split_sql_statements(sql_statement);
 
