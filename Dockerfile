@@ -7,8 +7,27 @@ ARG DUCKDB_VERSION=1.4.4
 # standalone `sqlite` extension at extensions.duckdb.org (the URL 404s), so it is
 # intentionally NOT listed here — with fail-loud fetching it would abort the build.
 ARG DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite_scanner vss"
-ARG DUCKDB_COMMUNITY_EXTENSIONS="bigquery"
+# NOTE: `bigquery` used to be fetched from community-extensions.duckdb.org. It is
+# now built from source (stage `bigquery-ext-builder`) — see DUCKDB_BIGQUERY_* below.
+ARG DUCKDB_COMMUNITY_EXTENSIONS=""
 ARG DUCKDB_OPTIONAL_EXTENSIONS=""
+# DuckDB extensions compiled from source instead of downloaded. Recorded as ENV in
+# the final image so `docker inspect` still shows which extensions are present.
+ARG DUCKDB_SOURCE_EXTENSIONS="bigquery"
+
+# duckdb-bigquery is built from source because the published community build does
+# not carry the DuckDB 1.4 write-path backport. community-extensions resolves the
+# 1.4 line via the `andium` ref in extensions/bigquery/description.yml, and that
+# build path (build_andium.yml) is currently disabled upstream, so no published
+# 1.4.4 artifact contains it. Point these at a different repo/ref, or move
+# `bigquery` back into DUCKDB_COMMUNITY_EXTENSIONS, once that changes.
+ARG DUCKDB_BIGQUERY_REPO="https://github.com/p-hoffmann/duckdb-bigquery.git"
+ARG DUCKDB_BIGQUERY_REF="backport/v1.4-write-path"
+# Same vcpkg pin community-extensions uses for this extension, so the dependency
+# graph (gRPC/protobuf/Arrow/google-cloud-cpp) matches a known-good build.
+ARG DUCKDB_BIGQUERY_VCPKG_URL="https://github.com/microsoft/vcpkg.git"
+ARG DUCKDB_BIGQUERY_VCPKG_COMMIT="ef7dbf94b9198bc58f45951adcf1f041fcbc5ea0"
+ARG DUCKDB_BIGQUERY_CMAKE_VERSION="4.0.2"
 
 # Stage 1: Build the trex binary
 FROM debian:trixie-slim AS builder
@@ -56,6 +75,73 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && \
 
 COPY src/ /usr/src/trexsql/src/
 RUN cargo build --release
+
+# Stage 1b: Build the duckdb-bigquery extension from source.
+#
+# Mirrors duckdb/extension-ci-tools' own build image (docker/linux_amd64/Dockerfile):
+# same vcpkg pin, ninja, and a recent CMake — that combination is what actually
+# builds this extension's dependency graph today. `parser_tools` in the extension's
+# description.yml means bison+flex.
+#
+# This stage is expensive (vcpkg builds gRPC, protobuf, Arrow and google-cloud-cpp).
+# Under buildx it runs once per target platform, and the linux_arm64 pass is slow
+# when emulated. It is cached like any other layer, so it only re-runs when one of
+# the DUCKDB_BIGQUERY_* args changes.
+FROM debian:trixie-slim AS bigquery-ext-builder
+
+ARG TARGETARCH
+ARG DUCKDB_VERSION
+ARG DUCKDB_BIGQUERY_REPO
+ARG DUCKDB_BIGQUERY_REF
+ARG DUCKDB_BIGQUERY_VCPKG_URL
+ARG DUCKDB_BIGQUERY_VCPKG_COMMIT
+ARG DUCKDB_BIGQUERY_CMAKE_VERSION
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential git ca-certificates curl wget zip unzip tar \
+      ninja-build pkg-config autoconf automake libtool \
+      bison flex perl python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Debian's cmake is older than what the vcpkg ports at the pinned commit are built
+# against upstream; install the same CMake line extension-ci-tools uses.
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) cmake_arch=x86_64 ;; \
+      arm64) cmake_arch=aarch64 ;; \
+      *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    wget -q -O /tmp/cmake.sh \
+      "https://github.com/Kitware/CMake/releases/download/v${DUCKDB_BIGQUERY_CMAKE_VERSION}/cmake-${DUCKDB_BIGQUERY_CMAKE_VERSION}-linux-${cmake_arch}.sh"; \
+    sh /tmp/cmake.sh --skip-license --prefix=/usr/local; \
+    rm /tmp/cmake.sh; \
+    cmake --version
+
+ENV VCPKG_ROOT=/opt/vcpkg
+ENV VCPKG_TOOLCHAIN_PATH=/opt/vcpkg/scripts/buildsystems/vcpkg.cmake
+ENV GEN=ninja
+
+RUN mkdir -p /opt/vcpkg && cd /opt/vcpkg && \
+    git init && \
+    git remote add origin "${DUCKDB_BIGQUERY_VCPKG_URL}" && \
+    git fetch --depth 1 origin "${DUCKDB_BIGQUERY_VCPKG_COMMIT}" && \
+    git checkout FETCH_HEAD && \
+    ./bootstrap-vcpkg.sh -disableMetrics
+
+# The extension's `duckdb` submodule is pinned to the v1.4.4 tag, matching
+# DUCKDB_VERSION. DUCKDB_GIT_VERSION is passed through so the extension metadata
+# records that version — DuckDB refuses to LOAD an extension whose recorded
+# version/platform doesn't match the running engine.
+RUN git clone "${DUCKDB_BIGQUERY_REPO}" /usr/src/duckdb-bigquery && \
+    cd /usr/src/duckdb-bigquery && \
+    git checkout "${DUCKDB_BIGQUERY_REF}" && \
+    git submodule update --init --recursive
+
+RUN cd /usr/src/duckdb-bigquery && \
+    DUCKDB_GIT_VERSION="v${DUCKDB_VERSION}" GEN=ninja make release && \
+    mkdir -p /out && \
+    cp build/release/extension/bigquery/bigquery.duckdb_extension /out/ && \
+    ls -l /out/
 
 # Stage 2: Build web frontend
 FROM node:22-trixie-slim AS web-builder
@@ -207,6 +293,17 @@ RUN set -eu; \
     ln -sfn "$DEST" "${HOME_EXT_PARENT}/${DUCKDB_PLATFORM}"; \
     echo "DuckDB extensions present for ${DUCKDB_PLATFORM}:"; ls -1 "$DEST"
 
+# duckdb-bigquery, compiled in the bigquery-ext-builder stage rather than fetched
+# from community-extensions.duckdb.org. It lands in the same per-arch directory the
+# downloads above populate, so extension resolution (and the /home/node symlink
+# seeded just above, which points at the directory) picks it up unchanged.
+#
+# This binary is unsigned, unlike the community downloads. trex already opens every
+# DuckDB connection with allow_unsigned_extensions (src/main.rs, src/engine.rs,
+# plugins/pg_trex/src/worker.rs, plugins/runtime/ext/trex/lib.rs), so LOAD works.
+COPY --from=bigquery-ext-builder /out/bigquery.duckdb_extension \
+     /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/linux_${TARGETARCH}/
+
 # Override npm extensions with CI-built ones
 # Supports both flat layout (local builds) and arch-specific layout (CI multi-arch builds)
 COPY extensions/ /tmp/all-extensions/
@@ -333,6 +430,7 @@ ARG DUCKDB_VERSION
 ARG DUCKDB_CORE_EXTENSIONS
 ARG DUCKDB_COMMUNITY_EXTENSIONS
 ARG DUCKDB_OPTIONAL_EXTENSIONS
+ARG DUCKDB_SOURCE_EXTENSIONS
 
 # openssl: used by /usr/src/entrypoint.sh to generate the per-container TLS cert.
 # openssh-client: git's SSH commit signing (gpg.format=ssh) shells out to
@@ -379,6 +477,7 @@ ENV DUCKDB_VERSION="${DUCKDB_VERSION}"
 ENV DUCKDB_CORE_EXTENSIONS="${DUCKDB_CORE_EXTENSIONS}"
 ENV DUCKDB_COMMUNITY_EXTENSIONS="${DUCKDB_COMMUNITY_EXTENSIONS}"
 ENV DUCKDB_OPTIONAL_EXTENSIONS="${DUCKDB_OPTIONAL_EXTENSIONS}"
+ENV DUCKDB_SOURCE_EXTENSIONS="${DUCKDB_SOURCE_EXTENSIONS}"
 
 # Ensure config directories exist for OAuth token persistence
 RUN mkdir -p /home/node/.claude /home/node/.config/gh && \
