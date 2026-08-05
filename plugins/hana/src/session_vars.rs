@@ -25,13 +25,18 @@ pub(crate) fn parse_session_vars(json: &str) -> Result<BTreeMap<String, String>,
 }
 
 pub(crate) fn apply_session_vars(conn: &HanaConnection, vars: &BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
-    for (k, v) in vars {
-        match k.as_str() {
-            "APPLICATION" => { conn.set_application(v)?; }
-            "APPLICATIONUSER" => { conn.set_application_user(v)?; }
-            _ => { /* unknown client-info key: ignore */ }
-        }
-    }
+    // These values belong to the current query, not to the pooled connection.
+    // Clear omitted values so attribution from a previous query cannot leak.
+    conn.set_application(
+        vars.get("APPLICATION")
+            .map(String::as_str)
+            .unwrap_or(""),
+    )?;
+    conn.set_application_user(
+        vars.get("APPLICATIONUSER")
+            .map(String::as_str)
+            .unwrap_or(""),
+    )?;
     Ok(())
 }
 
