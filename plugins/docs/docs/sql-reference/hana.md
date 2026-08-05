@@ -73,17 +73,20 @@ SELECT trex_hana_detach('omop', 'CDM');
 
 ## Functions
 
-### `trex_hana_scan(query, url, session_vars_json = optional)`
+<a id="trex_hana_scanquery-url"></a>
+
+### `trex_hana_scan(query, url [, session_id, session_vars_json])`
 
 Run a SQL query against HANA and return the results as a Trex table.
-Connection is opened, query executed, results streamed back, connection
-closed — one-shot.
+Without `session_id`, connections are one-shot. Supplying one reuses that
+session's HANA connection so session-local objects such as `#temp` tables survive.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | query | VARCHAR | SAP HANA SQL. The remote side parses it, so use HANA syntax. |
 | url | VARCHAR | `hdbsqls://...` connection URL. |
-| session_vars_json | VARCHAR | Optional named parameter containing supported HANA client-information variables as JSON, such as `APPLICATION`. |
+| session_id | VARCHAR | Optional named parameter identifying a pooled HANA session. |
+| session_vars_json | VARCHAR | Optional named JSON object of HANA client-info variables. `APPLICATION` and `APPLICATIONUSER` are recognized case-insensitively; unknown keys are rejected. Omitted recognized keys are cleared on pooled connections. |
 
 **Returns:** TABLE (dynamic columns from the query schema).
 
@@ -91,6 +94,7 @@ closed — one-shot.
 SELECT * FROM trex_hana_scan(
   'SELECT TOP 10 * FROM PATIENTS',
   'hdbsqls://user:pass@hana:39015/HDB?insecure_omit_server_certificate_check',
+  session_id = '42',
   session_vars_json = '{"APPLICATION":"WIZARD_cross-sectional-demographics"}'
 );
 ```
@@ -151,16 +155,21 @@ List every HANA virtual table currently attached on this node.
 SELECT * FROM trex_hana_tables();
 ```
 
-### `trex_hana_execute(connection_string, sql_statement)`
+### `trex_hana_execute(connection_string, sql_statement [, session_id, session_vars_json])`
 
 Execute a HANA DDL/DML statement that doesn't return a result set —
 `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `CALL`. For `SELECT`, use
 `trex_hana_scan` instead.
 
+The optional `session_id` and `session_vars_json` arguments have the same
+pooling and client-info behavior as `trex_hana_scan`.
+
 ```sql
 SELECT trex_hana_execute(
   'hdbsqls://user:pass@hana:39015/HDB',
-  'CREATE TABLE TEST (id INTEGER, name NVARCHAR(100))'
+  'CREATE TABLE TEST (id INTEGER, name NVARCHAR(100))',
+  '42',
+  '{"APPLICATION":"WIZARD_cross-sectional-demographics"}'
 );
 ```
 
@@ -179,7 +188,7 @@ through Trex.
 | source_params_json | VARCHAR | JSON array of bind parameters for `source_sql`. Empty array runs it as a plain query. |
 | results_schema | VARCHAR | HANA schema containing the target `COHORT` table. Validated as a safe identifier. |
 | cohort_definition_id | BIGINT | Value written to `COHORT_DEFINITION_ID` on every inserted row. |
-| session_vars_json | VARCHAR | JSON object of HANA client-info session vars. `APPLICATION` and `APPLICATIONUSER` are recognized. |
+| session_vars_json | VARCHAR | JSON object of HANA client-info variables. `APPLICATION` and `APPLICATIONUSER` are recognized case-insensitively; unknown keys are rejected. |
 
 **Returns:** BIGINT — the number of rows inserted.
 
