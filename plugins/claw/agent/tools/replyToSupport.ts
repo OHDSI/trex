@@ -39,6 +39,10 @@ export default defineTool({
     if (!ctx?.sql) throw new Error("replyToSupport: ctx.sql unavailable");
     const userId = effectiveUserId(ctx?.userId, (k) => Deno.env.get(k));
     if (!userId) throw new Error("replyToSupport: no user id (set CLAW_CODE_USER_ID)");
-    return replyCore(ctx.sql, input as Input, userId);
+    // Deterministic channel id: the server-side delivery channel wins over the
+    // model-typed input (same override as the other support tools).
+    const channelId = ((ctx?.metadata as { channelId?: string } | undefined)?.channelId ??
+      (input as Input).channelId) as string;
+    return replyCore(ctx.sql, { ...(input as Input), channelId }, userId);
   },
 });

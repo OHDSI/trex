@@ -95,7 +95,7 @@ export default defineTool({
       attachments: {
         type: "array",
         description:
-          "Files the team attached in the channel, copied VERBATIM from the message's <attachments> block (name/url/contentType). They are materialized into the coder's workspace automatically — do not download, describe, or paste them anywhere yourself.",
+          "Files the team attached in the channel, copied VERBATIM from the message's <attachments> block (name/url/contentType) — or from an [attachment: {...}] entry in the thread/channel history block when the file was posted in an earlier message. They are materialized into the coder's workspace automatically — do not download, describe, or paste them anywhere yourself. Never claim a file is available to the coder before relaying it here.",
         items: {
           type: "object",
           properties: {

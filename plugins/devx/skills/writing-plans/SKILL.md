@@ -18,6 +18,12 @@ Assume they are a skilled developer, but know almost nothing about our toolset o
 **Save plans to:** `trex/plans/YYYY-MM-DD-<feature-name>.md`
 - (User preferences for plan location override this default)
 
+**Commit the plan:** the plan/spec is part of the change, not a scratch file.
+Commit it to the feature branch as soon as it's approved (its own commit, e.g.
+`plan: <feature name>`), so it ships with the PR and reviewers see the intent
+alongside the implementation. If the implementation later diverges, update the
+plan file in the same branch.
+
 ## Scope Check
 
 If the spec covers multiple independent subsystems, it should have been broken into sub-project specs during brainstorming. If it wasn't, suggest breaking this into separate plans — one per subsystem. Each plan should produce working, testable software on its own.

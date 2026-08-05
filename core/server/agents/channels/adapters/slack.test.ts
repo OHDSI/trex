@@ -48,10 +48,12 @@ interface ResumeCall {
 
 function mockArgs(
   resumeResult: { ok: boolean; error?: string } = { ok: true },
+  knownTokens: string[] = [],
 ): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[] } {
   const sends: SendCall[] = [];
   const resumes: ResumeCall[] = [];
   const args: ChannelRouteArgs = {
+    hasSession: (token) => Promise.resolve(knownTokens.includes(token)),
     send(message, opts) {
       sends.push({ message, opts });
       return Promise.resolve({ id: "session-1" });
@@ -155,6 +157,26 @@ Deno.test("message event → send() with the text + channel:thread_ts token + sl
   const state = call.opts.state as { channelId?: string; threadTs?: string };
   assertEquals(state.channelId, "C555");
   assertEquals(state.threadTs, "1700000000.000001");
+});
+
+Deno.test("DMs are off by default: a human DM is acked but never reaches send(); opt-in accepts it", async () => {
+  const humanDm = {
+    type: "event_callback",
+    team_id: "T1",
+    event: { type: "message", channel_type: "im", user: "U9", text: "help me", ts: "2.2", channel: "D1" },
+  };
+  // Default (directMessages unset) → dropped silently.
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET } });
+  const { args, sends } = mockArgs();
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(humanDm)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0, "a DM must not create a session by default");
+
+  // Explicit opt-in → handled.
+  const dmChannel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET }, directMessages: true });
+  const { args: args2, sends: sends2 } = mockArgs();
+  await dmChannel.routes[0].handler(await signedRequest(JSON.stringify(humanDm)), args2);
+  assertEquals(sends2.length, 1, "directMessages: true must accept the DM");
 });
 
 Deno.test("a DM message from the bot itself is ignored (no send)", async () => {
@@ -416,4 +438,47 @@ Deno.test("conversations allow-list: view_submission for a channel NOT on the li
   const res = await channel.routes[0].handler(await interactionRequest(freeformViewSubmissionPayload()), args);
   assertEquals(res.status, 200);
   assertEquals(resumes.length, 0);
+});
+
+// ---- thread-following (opts.threads) ---------------------------------------
+
+const THREAD_REPLY = {
+  type: "event_callback",
+  team_id: "T123",
+  event: {
+    type: "message",
+    channel_type: "channel",
+    user: "U777",
+    text: "any update on this?",
+    ts: "1700000000.000200",
+    thread_ts: "1700000000.000001", // reply inside the mention's thread
+    channel: "C555",
+  },
+};
+
+Deno.test("threads: a reply in a thread WITH an existing session becomes a turn (no re-mention)", async () => {
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET }, threads: true });
+  // Session already exists for this thread's token (created by the earlier mention).
+  const { args, sends } = mockArgs({ ok: true }, ["C555:1700000000.000001"]);
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(THREAD_REPLY)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 1);
+  assertEquals(sends[0].opts.continuationToken, "C555:1700000000.000001");
+  assertEquals(sends[0].message.includes("any update on this?"), true);
+});
+
+Deno.test("threads: a reply in a thread WITHOUT a session is ignored (join-only, never creates)", async () => {
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET }, threads: true });
+  const { args, sends } = mockArgs({ ok: true }, [] /* no known sessions */);
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(THREAD_REPLY)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0, "unknown thread must not start a session");
+});
+
+Deno.test("threads off (default): thread replies are ignored even with an existing session", async () => {
+  const channel = slackChannel({ credentials: { signingSecret: SIGNING_SECRET } });
+  const { args, sends } = mockArgs({ ok: true }, ["C555:1700000000.000001"]);
+  const res = await channel.routes[0].handler(await signedRequest(JSON.stringify(THREAD_REPLY)), args);
+  assertEquals(res.status, 200);
+  assertEquals(sends.length, 0);
 });

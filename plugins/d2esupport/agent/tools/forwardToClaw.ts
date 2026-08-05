@@ -15,11 +15,19 @@ interface Input {
 
 export async function forwardCore(
   sql: QueryFn,
-  ctx: { sessionId: string; userId: string },
+  ctx: { sessionId: string; userId: string; metadataChannelId?: string },
   input: Input,
   runTurn: (args: ClawTurnArgs) => Promise<{ clawSessionId: string; replyText: string; nextCursor: number }> = runClawTurn,
 ): Promise<{ reply: string }> {
   const prior = await readTask(sql, ctx.sessionId);
+  // Deterministic Slack identity: an existing task row wins outright (a
+  // follow-up must never migrate the task to a different thread), then the
+  // server-side delivery channel from turn metadata, and only for a brand-new
+  // task does the model-typed input seed the ids (metadata carries no
+  // thread_ts today, so the first threadTs necessarily comes from the
+  // [slack] context line).
+  const slackChannelId = prior?.slackChannelId ?? ctx.metadataChannelId ?? input.slackChannelId;
+  const slackThreadTs = prior?.slackThreadTs ?? input.slackThreadTs;
   const message = [
     "SUPPORT_TASK",
     `support_session: ${ctx.sessionId}`,
@@ -52,8 +60,8 @@ export async function forwardCore(
         sessionId: ctx.sessionId,
         clawSessionId: carried?.clawSessionId ?? prior?.clawSessionId ?? null,
         clawEventCursor: carried?.nextCursor ?? prior?.clawEventCursor ?? 0,
-        slackChannelId: input.slackChannelId,
-        slackThreadTs: input.slackThreadTs,
+        slackChannelId,
+        slackThreadTs,
         status: "forward_failed",
         brief: input.brief,
       });
@@ -66,8 +74,8 @@ export async function forwardCore(
     sessionId: ctx.sessionId,
     clawSessionId,
     clawEventCursor: nextCursor,
-    slackChannelId: input.slackChannelId,
-    slackThreadTs: input.slackThreadTs,
+    slackChannelId,
+    slackThreadTs,
     status: "forwarded" as const,
     brief: input.brief,
   };
@@ -111,6 +119,9 @@ export default defineTool({
     if (!ctx?.sql) throw new Error("forwardToClaw: ctx.sql unavailable");
     const userId = ctx.userId?.trim() || supportUserId();
     if (!userId) throw new Error("forwardToClaw: no user id (set D2ESUPPORT_USER_ID)");
-    return forwardCore(ctx.sql, { sessionId: ctx.sessionId, userId }, input as Input);
+    // Server-side delivery channel from the turn metadata (layer.ts) — beats
+    // the model-typed slackChannelId for everything but a brand-new task.
+    const metadataChannelId = (ctx?.metadata as { channelId?: string } | undefined)?.channelId;
+    return forwardCore(ctx.sql, { sessionId: ctx.sessionId, userId, metadataChannelId }, input as Input);
   },
 });

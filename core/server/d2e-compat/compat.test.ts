@@ -52,3 +52,104 @@ Deno.test("proxy streams genuinely unparsed bodies raw regardless of content typ
   assertEquals(shouldReserializeParsedBody("application/json", null), false);
   assertEquals(shouldReserializeParsedBody("application/json", "raw string"), false);
 });
+
+// ---------------------------------------------------------------------------
+// WebAPI OIDC token exchange (lib/token-exchange.ts)
+// ---------------------------------------------------------------------------
+import { getWebApiToken } from "./lib/token-exchange.ts";
+
+function unsignedJwt(payload: Record<string, unknown>): string {
+  const segment = (value: unknown) =>
+    btoa(JSON.stringify(value)).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+  return `${segment({ alg: "HS256", typ: "JWT" })}.${segment(payload)}.not-verified-here`;
+}
+
+const LOGTO_TOKEN = unsignedJwt({ sub: "q9j5vjrmba9x" });
+
+/** Runs `fn` with `globalThis.fetch` replaced by `handler`, recording request URLs. */
+async function withStubbedFetch<T>(
+  handler: (url: string, init?: RequestInit) => Response,
+  fn: () => Promise<T>,
+): Promise<{ result: T; urls: string[] }> {
+  const urls: string[] = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : input.toString();
+    urls.push(url);
+    return Promise.resolve(handler(url, init));
+  }) as typeof fetch;
+  try {
+    return { result: await fn(), urls };
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+
+// WebAPI answers openidDirect with LoginService.Result — {login, jwt, roles,
+// message} — and mirrors the same JWT in a `Bearer` response header. There is
+// no one-time code and no /user/login/otc route (OidcAuthConfig.OpenidDirect).
+Deno.test("token exchange reads the WebAPI session JWT from the openidDirect body", async () => {
+  const { result, urls } = await withStubbedFetch(
+    (url, init) => {
+      assertEquals(url, "http://localhost:8080/WebAPI/user/login/openidDirect");
+      assertEquals(
+        (init?.headers as Record<string, string>)?.Authorization,
+        `Bearer ${LOGTO_TOKEN}`,
+      );
+      return jsonResponse({
+        login: "q9j5vjrmba9x",
+        jwt: "webapi.session.jwt",
+        roles: null,
+        message: null,
+      });
+    },
+    () => getWebApiToken(LOGTO_TOKEN),
+  );
+
+  assertEquals(result, "webapi.session.jwt");
+  assertEquals(urls.length, 1);
+});
+
+Deno.test("token exchange falls back to the Bearer header when the body carries no jwt", async () => {
+  const { result } = await withStubbedFetch(
+    () =>
+      new Response("", {
+        status: 200,
+        headers: { Bearer: "webapi.session.jwt", "Content-Type": "text/plain" },
+      }),
+    () => getWebApiToken(LOGTO_TOKEN),
+  );
+  assertEquals(result, "webapi.session.jwt");
+});
+
+Deno.test("token exchange fails when openidDirect answers 200 without any JWT", async () => {
+  const { result } = await withStubbedFetch(
+    () => jsonResponse({ login: "q9j5vjrmba9x", jwt: null, roles: null, message: null }),
+    () => getWebApiToken(LOGTO_TOKEN),
+  );
+  assertEquals(result, null);
+});
+
+Deno.test("token exchange fails when openidDirect rejects the Logto token", async () => {
+  const { result, urls } = await withStubbedFetch(
+    () => jsonResponse({ login: null, jwt: null, roles: null, message: "Invalid token" }, 401),
+    () => getWebApiToken(LOGTO_TOKEN),
+  );
+  assertEquals(result, null);
+  assertEquals(urls.length, 1);
+});
+
+Deno.test("token exchange fails without calling WebAPI when the Logto token is unreadable", async () => {
+  const { result, urls } = await withStubbedFetch(
+    () => jsonResponse({}),
+    () => getWebApiToken("not-a-jwt"),
+  );
+  assertEquals(result, null);
+  assertEquals(urls.length, 0);
+});

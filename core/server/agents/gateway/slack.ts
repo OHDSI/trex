@@ -63,6 +63,10 @@ export interface SlackGatewayClientOptions {
   createSocket?: (url: string) => GatewaySocket;
   /** Reconnect backoff base in ms (default 1000; doubled per attempt, capped at 60s). */
   reconnectBaseMs?: number;
+  /** Loopback-forward attempts on network error/5xx (default 3). Parity with the Discord gateway. */
+  forwardAttempts?: number;
+  /** Base backoff between forward attempts in ms (default 500; doubled per attempt). */
+  forwardRetryBaseMs?: number;
 }
 
 const SEEN_MAX = 512;
@@ -220,10 +224,16 @@ export class SlackGatewayClient {
     // slash_commands: acked, intentionally dropped — the adapter has no slash handling.
   }
 
+  // Retries the loopback POST like the Discord gateway's #loopbackPost (#180):
+  // the channel route can be down transiently on worker (re)boot (connection
+  // refused / 5xx) and previously dropped the envelope outright. Only network
+  // errors and 5xx retry — a 4xx (bad signature, malformed) is deterministic.
+  // The signature is minted once: retries finish in ~1.5s, well inside the
+  // verifier's timestamp window.
   async #forward(body: string, contentType: string): Promise<void> {
     const timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await this.#opts.signer.sign(timestamp, body);
-    const res = await this.#fetch(this.#opts.forwardUrl, {
+    const init: RequestInit = {
       method: "POST",
       headers: {
         "content-type": contentType,
@@ -231,12 +241,28 @@ export class SlackGatewayClient {
         "x-slack-request-timestamp": timestamp,
       },
       body,
-    });
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      console.error(`${this.#label}: channel route rejected envelope (${res.status}): ${text.slice(0, 300)}`);
-      return;
+    };
+    const attempts = this.#opts.forwardAttempts ?? 3;
+    const base = this.#opts.forwardRetryBaseMs ?? 500;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await this.#fetch(this.#opts.forwardUrl, init);
+        if (res.status < 500) {
+          if (!res.ok) {
+            const text = await res.text().catch(() => "");
+            console.error(`${this.#label}: channel route rejected envelope (${res.status}): ${text.slice(0, 300)}`);
+            return;
+          }
+          await res.body?.cancel();
+          return;
+        }
+        const text = await res.text().catch(() => "");
+        console.warn(`${this.#label}: channel route returned ${res.status} (attempt ${i + 1}/${attempts}): ${text.slice(0, 200)}`);
+      } catch (e) {
+        console.warn(`${this.#label}: channel route network error (attempt ${i + 1}/${attempts}):`, e);
+      }
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, base * 2 ** i));
     }
-    await res.body?.cancel();
+    console.error(`${this.#label}: channel route unreachable after ${attempts} attempts — envelope dropped`);
   }
 }

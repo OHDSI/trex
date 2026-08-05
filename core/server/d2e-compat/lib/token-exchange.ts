@@ -13,38 +13,39 @@ export function getTokenSubject(token: string): string | null {
   }
 }
 
-async function exchangeToken(logtoToken: string): Promise<string | null> {
-  const webApiUrl = "http://localhost:8080/WebAPI/user/login/openidDirect";
+const WEBAPI_BASE_URL = "http://localhost:8080/WebAPI";
 
+/**
+ * `openidDirect` validates the Logto token and answers in one hop with
+ * `LoginService.Result` — {login, jwt, roles, message} — carrying the WebAPI
+ * session JWT, mirrored in a `Bearer` response header (OidcAuthConfig
+ * .OpenidDirect). There is no one-time-code handshake to redeem.
+ */
+async function exchangeToken(logtoToken: string): Promise<string | null> {
   try {
-    console.log(`[d2e-compat] Token exchange: calling ${webApiUrl}`);
-    const response = await fetch(webApiUrl, {
+    const response = await fetch(`${WEBAPI_BASE_URL}/user/login/openidDirect`, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${logtoToken}`,
       },
     });
 
-    console.log(`[d2e-compat] Token exchange response: status=${response.status}`);
-
     if (!response.ok) {
-      const body = await response.text();
-      console.error(`[d2e-compat] Token exchange failed: ${response.status} ${body}`);
-      return null;
-    }
-
-    const webApiToken = response.headers.get("Bearer");
-    if (!webApiToken) {
-      const headerNames: string[] = [];
-      response.headers.forEach((_v, k) => headerNames.push(k));
       console.error(
-        `[d2e-compat] Token exchange: no Bearer header in response. Response header names: ${headerNames.join(", ")}`,
+        `[d2e-compat] Token exchange failed: ${response.status} ${await response.text()}`,
       );
       return null;
     }
 
-    console.log("[d2e-compat] Token exchange: success");
-    return webApiToken;
+    const headerJwt = response.headers.get("Bearer");
+    const body = await response.json().catch(() => null) as { jwt?: string | null } | null;
+    const jwt = body?.jwt || headerJwt;
+    if (!jwt) {
+      console.error("[d2e-compat] Token exchange: openidDirect returned no WebAPI JWT");
+      return null;
+    }
+
+    return jwt;
   } catch (err) {
     console.error(`[d2e-compat] Token exchange error: ${err}`);
     return null;

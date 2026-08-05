@@ -504,6 +504,59 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     "other conversations. Grant me thread permissions here, or ask again in a channel " +
     "where I can create threads.";
 
+  // Discord's UPDATE_MESSAGE interaction callback (type 7) — edits the message
+  // the component sits on. Missing from the vendored response-type map.
+  const UPDATE_MESSAGE_RESPONSE_TYPE = 7;
+
+  /** Maps picked values/custom_id back to the human labels rendered on the
+   * message's own components (button label; select option labels). Falls back
+   * to the raw values so the outcome line never comes up empty. */
+  function labelsForSelection(
+    raw: Record<string, unknown>,
+    customId: string,
+    values: readonly string[],
+  ): string[] {
+    const message = raw.message as Record<string, unknown> | undefined;
+    const rows = Array.isArray(message?.components) ? message.components as Array<Record<string, unknown>> : [];
+    const controls = rows.flatMap((r) => Array.isArray(r.components) ? r.components as Array<Record<string, unknown>> : []);
+    const control = controls.find((c) => c.custom_id === customId);
+    if (!control) return [...values];
+    if (control.type === 2) { // button — the click IS the selection
+      return [typeof control.label === "string" && control.label ? control.label : customId];
+    }
+    const options = Array.isArray(control.options) ? control.options as Array<Record<string, unknown>> : [];
+    return values.map((v) => {
+      const opt = options.find((o) => o.value === v);
+      return typeof opt?.label === "string" && opt.label ? opt.label : v;
+    });
+  }
+
+  /** Interaction response that rewrites the component message in place: keeps
+   * the original text, appends the outcome line, and REMOVES the controls so
+   * the recorded state (who picked what, and whether it registered) is visible
+   * to everyone in the channel and the controls can't be re-clicked. */
+  function selectionOutcomeResponse(
+    interaction: { raw: Record<string, unknown>; user: { id?: string } },
+    outcome: string,
+  ): Response {
+    const original = readMessageContent(interaction.raw) ?? "";
+    const by = typeof interaction.user?.id === "string" && interaction.user.id ? ` — by <@${interaction.user.id}>` : "";
+    const content = `${original}${original ? "\n\n" : ""}${outcome}${by}`.slice(0, 2000);
+    return discordJsonBody({
+      type: UPDATE_MESSAGE_RESPONSE_TYPE,
+      data: { content, components: [] },
+    });
+  }
+
+  const RESUME_MISS_OUTCOME =
+    "⚠️ The selection was received but could NOT be applied — the request may have expired or was already answered. Ask again if the agent doesn't proceed.";
+
+  /** Short quoted preview of a typed answer for the outcome line. */
+  function answerPreview(text: string): string {
+    const flat = text.replace(/\s+/g, " ").trim();
+    return `“${flat.length > 300 ? `${flat.slice(0, 297)}...` : flat}”`;
+  }
+
   async function handleComponent(
     interaction: import("../vendor/discord/inbound.ts").DiscordComponentInteraction,
     args: ChannelRouteArgs,
@@ -518,22 +571,29 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       // Join for multi-select (max_values > 1); a single pick is just one value.
       const value = interaction.values.join(", ");
       if (value) {
-        await args.send(`The team selected: ${value}`, {
-          auth: toChannelAuth(interaction as unknown as DiscordCommandInteraction),
-          continuationToken: discordContinuationToken(
-            interaction.channelId,
-            opts.conversationId
-              ? opts.conversationId(interaction as unknown as DiscordCommandInteraction)
-              : interaction.channelId,
-          ),
-          state: {
-            channelId: interaction.channelId,
-            applicationId: interaction.applicationId,
-            guildId: interaction.guildId ?? null,
-            initialResponseSent: true,
-            ephemeral: false,
-          },
-        });
+        const labels = labelsForSelection(interaction.raw, interaction.customId, interaction.values);
+        try {
+          await args.send(`The team selected: ${value}`, {
+            auth: toChannelAuth(interaction as unknown as DiscordCommandInteraction),
+            continuationToken: discordContinuationToken(
+              interaction.channelId,
+              opts.conversationId
+                ? opts.conversationId(interaction as unknown as DiscordCommandInteraction)
+                : interaction.channelId,
+            ),
+            state: {
+              channelId: interaction.channelId,
+              applicationId: interaction.applicationId,
+              guildId: interaction.guildId ?? null,
+              initialResponseSent: true,
+              ephemeral: false,
+            },
+          });
+        } catch (e) {
+          console.error("discord: choice-pick send failed:", e);
+          return selectionOutcomeResponse(interaction, RESUME_MISS_OUTCOME);
+        }
+        return selectionOutcomeResponse(interaction, `✅ Selected: **${labels.join(", ")}**`);
       }
       return discordJsonBody({ type: DISCORD_INTERACTION_RESPONSE_TYPE.DEFERRED_UPDATE_MESSAGE });
     }
@@ -569,7 +629,7 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     }
     const inputResponses = deriveComponentInputResponses(interaction);
     if (inputResponses.length > 0) {
-      await runResume({
+      const applied = await runResume({
         req,
         args,
         channelId: interaction.channelId,
@@ -578,6 +638,16 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         inputResponses,
         interaction,
       });
+      // Buttons carry no `values`; fall back to the decoded option ids so the
+      // outcome line never renders empty.
+      const picked = interaction.values.length > 0
+        ? interaction.values
+        : inputResponses.map((r) => r.optionId).filter((v): v is string => typeof v === "string");
+      const labels = labelsForSelection(interaction.raw, interaction.customId, picked);
+      return selectionOutcomeResponse(
+        interaction,
+        applied ? `✅ **${labels.join(", ")}**` : RESUME_MISS_OUTCOME,
+      );
     }
     return discordJsonBody({ type: DISCORD_INTERACTION_RESPONSE_TYPE.DEFERRED_UPDATE_MESSAGE });
   }
@@ -609,13 +679,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
             ephemeral: false,
           },
         });
+        // The typed answer only drives the agent turn — without this edit it is
+        // invisible to everyone else in the channel (and the button stays live).
+        if (interaction.messageId !== undefined) {
+          return selectionOutcomeResponse(interaction, `💬 Answered: ${answerPreview(text)}`);
+        }
       }
       return discordJson({ content: "Answer received.", ephemeral: true });
     }
     const inputResponses = deriveModalInputResponses(interaction);
     if (inputResponses.length > 0) {
       const conversationId = interaction.messageId ?? interaction.id;
-      await runResume({
+      const applied = await runResume({
         req,
         args,
         channelId: interaction.channelId,
@@ -624,6 +699,13 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         inputResponses,
         interaction,
       });
+      if (interaction.messageId !== undefined) {
+        const text = inputResponses[0]?.text;
+        return selectionOutcomeResponse(
+          interaction,
+          applied ? `💬 Answered: ${answerPreview(text ?? "")}` : RESUME_MISS_OUTCOME,
+        );
+      }
     }
     return discordJson({ content: "Answer received.", ephemeral: true });
   }
@@ -717,7 +799,11 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
 
     if (trigger.kind === "thread-turn") {
       // Every prior human message already drove its own turn — no history block.
-      await sendToThread(event.channelId, [contextBlock, attachmentsBlock, text || event.content]);
+      // Attachment-only posts (screenshot with no caption) have empty content;
+      // give the turn an explicit stand-in so the agent knows what this is.
+      const turnText = text || event.content ||
+        (event.attachments?.length ? "(The user posted the file(s) in the <attachments> block above without any message text.)" : "");
+      await sendToThread(event.channelId, [contextBlock, attachmentsBlock, turnText]);
       return ignored();
     }
     if (trigger.kind === "mention-in-thread") {
@@ -774,12 +860,14 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     return ignored();
   }
 
-  async function runResume(ctx: DiscordResumeContext) {
+  /** Returns true when the decision was applied (so the caller can render the
+   * outcome on the message); false when the resume missed or threw. */
+  async function runResume(ctx: DiscordResumeContext): Promise<boolean> {
     try {
       if (opts.resume) {
         // An integrator override fully owns applying the decision.
         await opts.resume(ctx);
-        return;
+        return true;
       }
       // DEFAULT: apply the decoded decision via the channel layer's resume
       // primitive. The button/modal callback custom_id carries the requestId
@@ -792,9 +880,12 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       });
       if (!result.ok) {
         console.warn(`agents/discord: HITL resume did not apply the decision: ${result.error ?? "unknown error"}`);
+        return false;
       }
+      return true;
     } catch (e) {
       console.error("discord: HITL resume failed:", e);
+      return false;
     }
   }
 

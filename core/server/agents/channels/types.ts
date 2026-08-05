@@ -43,6 +43,11 @@ export interface ChannelRouteArgs {
     }
     | null;
   receive(channel: ChannelDef, input: unknown): Promise<{ id: string }>;
+  // Read-only: does a session ALREADY exist for this adapter-owned
+  // continuation token? Lets an adapter join ongoing conversations (e.g.
+  // Slack thread-following) without ever creating a session as a side
+  // effect — send() resolves-or-CREATES, this only resolves.
+  hasSession(continuationToken: string): Promise<boolean>;
   // Apply a HITL decision to a PARKED session (Task 17). Resolves the
   // (adapter-owned) `continuationToken` back to its session, then writes the
   // approve/deny/always/never decision the same way the native resolve routes

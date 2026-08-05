@@ -69,6 +69,32 @@ export function parseAppMentionEvent(envelope: SlackEventCallback): SlackMessage
  * the message carries a system `subtype` other than `file_share`, or the message
  * was posted by a bot (prevents the bot's own DM replies from re-triggering).
  */
+/**
+ * A human reply INSIDE an existing channel/group thread (message event with a
+ * thread_ts different from its own ts). Used by the adapter's thread-following
+ * mode; the adapter must gate dispatch on the session already existing, so
+ * plain channel chatter never starts sessions.
+ */
+export function parseThreadMessageEvent(envelope: SlackEventCallback): SlackMessage | null {
+  if (envelope.type !== "event_callback") return null;
+  const event = envelope.event;
+  if (!event || event.type !== "message") return null;
+  const msg = event as Record<string, unknown>;
+  const subtype = msg.subtype;
+  const botId = msg.bot_id;
+  const channelType = msg.channel_type;
+  const threadTs = msg.thread_ts;
+  if (
+    (channelType !== "channel" && channelType !== "group") ||
+    typeof threadTs !== "string" || threadTs.length === 0 || threadTs === msg.ts ||
+    (typeof subtype === "string" && subtype.length > 0 && subtype !== "file_share") ||
+    (typeof botId === "string" && botId.length > 0)
+  ) {
+    return null;
+  }
+  return buildSlackMessage(msg, envelope.team_id);
+}
+
 export function parseDirectMessageEvent(envelope: SlackEventCallback): SlackMessage | null {
   if (envelope.type !== "event_callback") return null;
   const event = envelope.event;

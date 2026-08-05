@@ -120,8 +120,18 @@ git branch -d <feature-branch>
 
 #### Option 2: Push and Create PR
 
+**Before pushing:** if a plan/spec was written for this work (e.g.
+`trex/plans/YYYY-MM-DD-<feature>.md`), make sure it is committed to the branch —
+the plan ships with the PR so reviewers see the intent next to the
+implementation. Commit it now if it's still untracked (update it first if the
+implementation diverged from it).
+
 ```bash
-# Push branch
+git add trex/plans/<plan-file>.md && git commit -m "plan: <feature name>"
+
+# Push branch DIRECTLY to the app repo's origin — never fork the repository or
+# push to a fork (no `gh repo fork`, no `gh pr create --fork`). If the push is
+# rejected, report the permission problem instead of falling back to a fork.
 git push -u origin <feature-branch>
 
 # Create PR

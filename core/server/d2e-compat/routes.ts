@@ -97,6 +97,15 @@ function isValidDbCode(code: unknown): boolean {
   return typeof code === "string" && DB_CODE_RE.test(code);
 }
 
+// Accept either spelling on write. GET /trex/db/ emits the trexdb column `extra`
+// under both names, so a client that round-trips the legacy `db_extra` alias must
+// not silently drop its extras (Snowflake key-pair, BigQuery dataset, ...).
+// deno-lint-ignore no-explicit-any
+function extraJson(body: any): string | null {
+  const extra = body.extra ?? body.db_extra;
+  return extra != null ? JSON.stringify(extra) : null;
+}
+
 // ---------------------------------------------------------------------------
 // /portal/env.js helpers
 // ---------------------------------------------------------------------------
@@ -447,6 +456,10 @@ export function mountD2eRoutes(app: Express): void {
           `SELECT d.id, d.id AS code, d.host, d.port,
                   d."databaseName" AS name, d.dialect,
                   d."vocabSchemas" AS vocab_schemas, d.extra,
+                  -- The legacy trex.db column was db_extra; trexdb.database
+                  -- renamed it to extra. The d2e UI still reads db_extra, so
+                  -- emit both (dbm-sync.ts does the same for its consumers).
+                  d.extra AS db_extra,
                   d.description, d.enabled,
                   d."createdAt", d."updatedAt",
                   COALESCE(
@@ -510,7 +523,7 @@ export function mountD2eRoutes(app: Express): void {
             body.name ?? body.databaseName ?? null,
             body.dialect ?? "postgresql",
             body.vocabSchemas != null ? JSON.stringify(body.vocabSchemas) : null,
-            body.extra != null ? JSON.stringify(body.extra) : null,
+            extraJson(body),
             body.description ?? null,
           ]
         );
@@ -564,7 +577,7 @@ export function mountD2eRoutes(app: Express): void {
             body.name ?? body.databaseName ?? null,
             body.dialect ?? null,
             body.vocabSchemas != null ? JSON.stringify(body.vocabSchemas) : null,
-            body.extra != null ? JSON.stringify(body.extra) : null,
+            extraJson(body),
             body.description ?? null,
           ]
         );

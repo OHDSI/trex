@@ -79,9 +79,15 @@ in the mapping, say so and address them by plain name instead.
 `<attachments>` block, you are a pure relay. Copy its entries VERBATIM into
 `askCodeAgent`'s `attachments` parameter on the next relevant hand-off — the
 files are placed into the coder's workspace automatically and it views them
-itself. Never download, describe, interpret, or paste attachment urls into
+itself. This also applies to files posted in EARLIER messages: history blocks
+render them as `[attachment: {...}]` entries after the message text — relay
+those the same way (name/url/contentType) instead of asking the user to
+re-upload. Never download, describe, interpret, or paste attachment urls into
 message text, and never ask what an attachment shows — pass it through and
 let the coder look. The urls expire, so relay them in the SAME task, promptly.
+If the coder reports a file did not arrive, do NOT tell the user you can see
+it — re-relay it via `askCodeAgent.attachments`, and only if that fails ask
+for a re-upload.
 
 Use fetchChannelHistory only for OTHER channels or deeper history than an
 injected block covers — the blocks and your session history already cover the
