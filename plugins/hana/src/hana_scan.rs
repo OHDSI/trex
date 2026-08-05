@@ -288,41 +288,6 @@ impl HanaError {
     }
 }
 
-fn parse_session_vars(json: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
-    let trimmed = json.trim();
-    if trimmed.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let value: serde_json::Value = serde_json::from_str(trimmed)
-        .map_err(|e| HanaError::new(&format!("Invalid session_vars_json: {}", e)))?;
-    let obj = value
-        .as_object()
-        .ok_or_else(|| HanaError::new("session_vars_json must be a JSON object"))?;
-    let mut vars = BTreeMap::new();
-    for (key, value) in obj {
-        if let Some(value) = value.as_str() {
-            vars.insert(key.clone(), value.to_string());
-        } else {
-            vars.insert(key.clone(), value.to_string());
-        }
-    }
-    Ok(vars)
-}
-
-fn apply_session_vars(
-    connection: &HanaConnection,
-    session_vars: &BTreeMap<String, String>,
-) -> Result<(), Box<dyn Error>> {
-    for (key, value) in session_vars {
-        match key.as_str() {
-            "APPLICATION" => connection.set_application(value)?,
-            "APPLICATIONUSER" => connection.set_application_user(value)?,
-            _ => { /* unknown client-info key: ignore */ }
-        }
-    }
-    Ok(())
-}
-
 #[derive(Debug)]
 pub struct HanaScanBindData {
     pub url: String,
@@ -595,7 +560,7 @@ impl VTab for HanaScanVTab {
             .get_named_parameter("session_vars_json")
             .map(|value| value.to_string())
             .unwrap_or_else(|| "{}".to_string());
-        let session_vars = parse_session_vars(&session_vars_json)?;
+        let session_vars = crate::session_vars::parse_session_vars(&session_vars_json)?;
         // Optional named parameter carrying the pgwire session id. DuckDB table
         // functions cannot be overloaded by arity, so the session id is threaded
         // as an optional named parameter rather than a third positional argument.
@@ -618,7 +583,7 @@ impl VTab for HanaScanVTab {
         }
         let (column_names, column_types, temporal_cols) = match crate::hana_session_pool::get_or_create(session_id, &url) {
             Ok(connection) => {
-                apply_session_vars(&connection, &session_vars)?;
+                crate::session_vars::apply_session_vars(&connection, &session_vars)?;
                 let schema_result = match connection.prepare(&query) {
                     Ok(_prepared) => {
                         match connection.query(&format!("SELECT * FROM ({}) AS subquery LIMIT 1", query)) {
@@ -732,7 +697,10 @@ impl VTab for HanaScanVTab {
             for attempt in 0..=bind_data_ref.max_retries {
                 match crate::hana_session_pool::get_or_create(bind_data_ref.session_id, &bind_data_ref.url) {
                     Ok(connection) => {
-                        apply_session_vars(&connection, &bind_data_ref.session_vars)?;
+                        crate::session_vars::apply_session_vars(
+                            &connection,
+                            &bind_data_ref.session_vars,
+                        )?;
                         connection_result = Some(connection);
                         break;
                     }

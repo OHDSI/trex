@@ -4,7 +4,6 @@ use duckdb::{
     vscalar::{VScalar, ScalarFunctionSignature},
 };
 use hdbconnect::{HdbValue, ResultSetMetadata, TypeId};
-use std::collections::BTreeMap;
 use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
 use crate::{HanaConnection, HanaError, redact_url_password};
@@ -100,38 +99,6 @@ fn fetch_size_from_env() -> u32 {
         .and_then(|v| v.parse::<u32>().ok())
         .filter(|n| *n > 0)
         .unwrap_or(100_000)
-}
-
-fn parse_session_vars(json: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
-    let trimmed = json.trim();
-    if trimmed.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let value: serde_json::Value = serde_json::from_str(trimmed)
-        .map_err(|e| HanaError::new(&format!("Invalid session_vars_json: {}", e)))?;
-    let obj = value
-        .as_object()
-        .ok_or_else(|| HanaError::new("session_vars_json must be a JSON object"))?;
-    let mut map = BTreeMap::new();
-    for (k, v) in obj {
-        if let Some(s) = v.as_str() {
-            map.insert(k.clone(), s.to_string());
-        } else {
-            map.insert(k.clone(), v.to_string());
-        }
-    }
-    Ok(map)
-}
-
-fn apply_session_vars(conn: &HanaConnection, vars: &BTreeMap<String, String>) -> Result<(), Box<dyn Error>> {
-    for (k, v) in vars {
-        match k.as_str() {
-            "APPLICATION" => { conn.set_application(v)?; }
-            "APPLICATIONUSER" => { conn.set_application_user(v)?; }
-            _ => { /* unknown client-info key: ignore */ }
-        }
-    }
-    Ok(())
 }
 
 /// Find the index of a column in result-set metadata by name (case-insensitive).
@@ -241,13 +208,13 @@ fn run_materialize(
 ) -> Result<i64, Box<dyn Error>> {
     let params = parse_source_params(source_params_json)?;
     let insert_sql = build_insert_sql(results_schema, cohort_definition_id)?;
-    let session_vars = parse_session_vars(session_vars_json)?;
+    let session_vars = crate::session_vars::parse_session_vars(session_vars_json)?;
     let batch_size = batch_size_from_env();
 
     let read_conn = connect(connection_string)?;
     let insert_conn = connect(connection_string)?;
-    apply_session_vars(&read_conn, &session_vars)?;
-    apply_session_vars(&insert_conn, &session_vars)?;
+    crate::session_vars::apply_session_vars(&read_conn, &session_vars)?;
+    crate::session_vars::apply_session_vars(&insert_conn, &session_vars)?;
     read_conn.set_fetch_size(fetch_size_from_env())?;
 
     // Read side: streaming ResultSet.
@@ -416,17 +383,6 @@ mod tests {
         std::env::set_var("HANA_MATERIALIZE_BATCH_SIZE", "0");
         assert_eq!(batch_size_from_env(), 30000); // 0/invalid falls back to default
         std::env::remove_var("HANA_MATERIALIZE_BATCH_SIZE");
-    }
-
-    #[test]
-    fn test_apply_session_vars_rejects_non_object() {
-        // A live connection isn't needed: parsing happens before any connection use.
-        assert!(parse_session_vars("[1,2,3]").is_err());
-        let m = parse_session_vars(r#"{"APPLICATION":"x","APPLICATIONUSER":"u"}"#).unwrap();
-        assert_eq!(m.get("APPLICATION").map(String::as_str), Some("x"));
-        assert_eq!(m.get("APPLICATIONUSER").map(String::as_str), Some("u"));
-        assert!(parse_session_vars("{}").unwrap().is_empty());
-        assert!(parse_session_vars("").unwrap().is_empty());
     }
 
     #[test]

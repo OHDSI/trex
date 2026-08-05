@@ -8,6 +8,7 @@ mod hana_materialize;
 mod hana_attach;
 mod hana_state;
 mod hana_replacement;
+mod session_vars;
 pub mod hana_session_pool;
 
 pub use hana_scan::{
