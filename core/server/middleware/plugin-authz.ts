@@ -1,5 +1,5 @@
 import type { Request, Response, NextFunction } from "express";
-import { ROLE_SCOPES, REQUIRED_URL_SCOPES } from "../plugin/function.ts";
+import { ROLE_SCOPES, REQUIRED_URL_SCOPES, SERVICE_CLIENT_ROLES } from "../plugin/function.ts";
 import { extractToken, verifyLogtoToken } from "../d2e-compat/auth.ts";
 import { fetchUserGroups } from "../d2e-compat/lib/usermgmt.ts";
 
@@ -86,13 +86,23 @@ const D2E_AUTHZ_PUBLIC_PATTERNS: RegExp[] = [
 //      mapped to the RBAC role names ROLE_SCOPES is keyed on.
 
 // Roles carried directly on the token. For M2M/service tokens the granted scopes
-// ARE the roles (old main's adUser), so the sub is included.
+// ARE the roles (old main's adUser), so the sub is included — plus the plugin role
+// registered for that client id, since manifests declare M2M grants under the env
+// var name holding the id, never the id itself (SERVICE_CLIENT_ROLES).
 function tokenRoles(payload: Record<string, unknown>): string[] {
   const roles: string[] = [];
   const rawRoles = payload["roles"];
   if (Array.isArray(rawRoles)) roles.push(...(rawRoles as string[]));
   const sub = payload["sub"] as string | undefined;
-  if (isServiceToken(payload) && sub && !roles.includes(sub)) roles.push(sub);
+  if (isServiceToken(payload)) {
+    const clientId = payload["client_id"] as string | undefined;
+    for (const id of [sub, clientId]) {
+      if (!id) continue;
+      if (!roles.includes(id)) roles.push(id);
+      const clientRole = SERVICE_CLIENT_ROLES[id];
+      if (clientRole && !roles.includes(clientRole)) roles.push(clientRole);
+    }
+  }
   return roles;
 }
 

@@ -40,6 +40,39 @@ function cachedDatabaseCredentialsJson(): string {
 export const ROLE_SCOPES: Record<string, string[]> = {};
 export const REQUIRED_URL_SCOPES: Array<{ path: string; scopes: string[]; httpMethods?: string[] }> = [];
 
+// Service-account client id -> the plugin role name granting its scopes. A
+// client-credentials token carries no role claim, so authz resolves its grants from
+// the token `sub` (== the Logto client id), while plugin manifests declare those
+// grants under the NAME of the env var holding that id (IDP_ALP_DATA_CLIENT_ID).
+export const SERVICE_CLIENT_ROLES: Record<string, string> = {};
+
+// A role name ending in _CLIENT_ID is an env reference, not a literal role. d2e
+// exports these ids with a doubled underscore after the prefix
+// (IDP_ALP_DATA_CLIENT_ID -> IDP__ALP_DATA_CLIENT_ID), so try that spelling too.
+function resolveServiceClientId(roleName: string): string | null {
+  if (roleName.includes("${")) return substituteEnvVars(roleName) || null;
+  if (!roleName.endsWith("_CLIENT_ID")) return null;
+  for (const name of [roleName, roleName.replace(/^([A-Z0-9]+)_/, "$1__")]) {
+    const value = Deno.env.get(name);
+    if (value) return value;
+  }
+  return null;
+}
+
+export function registerPluginRoles(roles: Record<string, string[]>) {
+  for (const [roleName, scopes] of Object.entries(roles)) {
+    if (ROLE_SCOPES[roleName]) {
+      ROLE_SCOPES[roleName] = ROLE_SCOPES[roleName]
+        .concat(scopes)
+        .filter((v: string, i: number, self: string[]) => self.indexOf(v) === i);
+    } else {
+      ROLE_SCOPES[roleName] = scopes;
+    }
+    const clientId = resolveServiceClientId(roleName);
+    if (clientId) SERVICE_CLIENT_ROLES[clientId] = roleName;
+  }
+}
+
 export const REGISTERED_FUNCTIONS: Array<{
   name: string;
   source: string;
@@ -706,15 +739,7 @@ export async function addPlugin(
   }
 
   if (value.roles) {
-    for (const [roleName, scopes] of Object.entries(value.roles)) {
-      if (ROLE_SCOPES[roleName]) {
-        ROLE_SCOPES[roleName] = ROLE_SCOPES[roleName]
-          .concat(scopes as string[])
-          .filter((v: string, i: number, self: string[]) => self.indexOf(v) === i);
-      } else {
-        ROLE_SCOPES[roleName] = scopes as string[];
-      }
-    }
+    registerPluginRoles(value.roles as Record<string, string[]>);
   }
 
   if (value.scopes) {
