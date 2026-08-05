@@ -955,14 +955,18 @@ impl VTab for HanaScanVTab {
         ])
     }
     fn named_parameters() -> Option<Vec<(String, duckdb::core::LogicalTypeHandle)>> {
-        Some(vec![(
-            "session_vars_json".to_string(),
         // Optional pgwire session id; when supplied, bind and init borrow the
         // session's pooled HANA connection so session-local `#temp` tables survive.
-        Some(vec![(
-            "session_id".to_string(),
-            duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
-        )])
+        Some(vec![
+            (
+                "session_id".to_string(),
+                duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
+            ),
+            (
+                "session_vars_json".to_string(),
+                duckdb::core::LogicalTypeHandle::from(LogicalTypeId::Varchar),
+            ),
+        ])
     }
 }
 
