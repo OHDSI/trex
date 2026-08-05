@@ -5,7 +5,7 @@ use crate::{HanaConnection, HanaError};
 
 pub(crate) fn parse_session_vars(json: &str) -> Result<BTreeMap<String, String>, Box<dyn Error>> {
     let trimmed = json.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
         return Ok(BTreeMap::new());
     }
     let value: serde_json::Value = serde_json::from_str(trimmed)
@@ -15,10 +15,17 @@ pub(crate) fn parse_session_vars(json: &str) -> Result<BTreeMap<String, String>,
         .ok_or_else(|| HanaError::new("session_vars_json must be a JSON object"))?;
     let mut map = BTreeMap::new();
     for (k, v) in obj {
+        let key = k.to_ascii_uppercase();
+        if key != "APPLICATION" && key != "APPLICATIONUSER" {
+            return Err(HanaError::new(&format!(
+                "Unrecognized HANA session variable: {}",
+                k
+            )));
+        }
         if let Some(s) = v.as_str() {
-            map.insert(k.clone(), s.to_string());
+            map.insert(key, s.to_string());
         } else {
-            map.insert(k.clone(), v.to_string());
+            map.insert(key, v.to_string());
         }
     }
     Ok(map)
@@ -53,5 +60,31 @@ mod tests {
         assert_eq!(m.get("APPLICATIONUSER").map(String::as_str), Some("u"));
         assert!(parse_session_vars("{}").unwrap().is_empty());
         assert!(parse_session_vars("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_session_vars_normalizes_supported_keys() {
+        let vars =
+            parse_session_vars(r#"{"application":"wizard","ApplicationUser":"alice"}"#)
+                .unwrap();
+        assert_eq!(vars.get("APPLICATION").map(String::as_str), Some("wizard"));
+        assert_eq!(
+            vars.get("APPLICATIONUSER").map(String::as_str),
+            Some("alice")
+        );
+    }
+
+    #[test]
+    fn test_parse_session_vars_rejects_unknown_keys() {
+        let error = parse_session_vars(r#"{"APLICATION":"wizard"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("APLICATION"));
+    }
+
+    #[test]
+    fn test_parse_session_vars_treats_null_as_absent() {
+        assert!(parse_session_vars("NULL").unwrap().is_empty());
+        assert!(parse_session_vars("null").unwrap().is_empty());
     }
 }
