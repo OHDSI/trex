@@ -33,6 +33,7 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
+  CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
   snowflakeExtrasFromRow,
@@ -154,7 +155,7 @@ export async function d2eBoot(): Promise<void> {
         // created by the create_cachedb_hana_plugin flow (pgwire ATTACH cannot
         // create it); createDbFileIfMissing only lets the re-attach proceed.
         await ensureCacheAttached(`${ds.id}_cache`, {
-          cacheDir: "/usr/src/data/cache",
+          cacheDir: CACHE_DIR,
           createDbFileIfMissing: true,
           exec: hanaExec,
         });
@@ -246,7 +247,7 @@ export async function d2eBoot(): Promise<void> {
     // catalog is gone and queries against it fail with "Catalog <cacheId> does
     // not exist" (e.g. the cohort builder's concept search). FHIR and
     // strategus_results are attached separately (above / below), so skip them.
-    const cacheDir = "/usr/src/data/cache";
+    const cacheDir = CACHE_DIR;
     const systemDbNames = new Set<string>([
       Deno.env.get("FHIR__DB_NAME") || "FHIR",
       Deno.env.get("TREX__STRATEGUS_RESULTS_DB_NAME") || "strategus_results",
@@ -280,7 +281,7 @@ export async function d2eBoot(): Promise<void> {
     }
     for (const cid of cacheIds) {
       try {
-        await ensureAttached({ cacheIds: [cid] }, { exec: attachExec, cacheDir, createDbFileIfMissing: true});
+        await ensureAttached({ cacheIds: [cid] }, { exec: attachExec, cacheDir });
       } catch (e) {
         log(`[attach-startup] cache ${cid} attach failed: ${(e as Error).message}`);
       }

@@ -1,8 +1,8 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
-  ensureAttached,
   ensureCacheAttached,
   ensureSourceAttached,
+  parseAttachBody,
   snowflakeExtrasFromRow,
   type SourceCredential,
 } from "./attach.ts";
@@ -79,22 +79,23 @@ Deno.test("cache attach without the flag skips a missing file", async () => {
   assertEquals(calls, []);
 });
 
-Deno.test("attach request creates and attaches a missing cache catalog", async () => {
-  const cacheId = `_${crypto.randomUUID().replace(/-/g, "_")}`;
-  const calls: string[] = [];
-  await ensureAttached(
-    { cacheIds: [cacheId] },
-    {
-      cacheDir: "/usr/src/data/cache",
-      createDbFileIfMissing: true,
-      exec: (sql) => {
-        calls.push(sql);
-      },
-    },
-  );
-  assertEquals(calls, [
-    `ATTACH IF NOT EXISTS '/usr/src/data/cache/${cacheId}.db' AS ${cacheId}`,
-  ]);
+Deno.test("parseAttachBody accepts cache and connection ids", () => {
+  assertEquals(parseAttachBody({ cacheIds: ["cache_a"], connectionIds: ["source_a"] }), {
+    cacheIds: ["cache_a"],
+    connectionIds: ["source_a"],
+  });
+});
+
+Deno.test("parseAttachBody rejects missing fields, wrong types, and malformed ids", () => {
+  for (const body of [{}, { cacheIds: "cache_a" }, { cacheIds: ["bad-id"] }, { connectionIds: [""] }]) {
+    let threw = false;
+    try {
+      parseAttachBody(body);
+    } catch {
+      threw = true;
+    }
+    assertEquals(threw, true);
+  }
 });
 
 Deno.test("postgres branch is unchanged", async () => {

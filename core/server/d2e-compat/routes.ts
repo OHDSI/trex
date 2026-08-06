@@ -42,7 +42,16 @@ import { getPluginsJson } from "../plugin/ui.ts";
 import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
 import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
 import { upsertDatabaseCredential } from "./db-credential.ts";
-import { ensureAttached, type ExecFn } from "./lib/attach.ts";
+import { decryptSecret } from "../auth/crypto.ts";
+import {
+  CACHE_DIR,
+  ensureCacheAttached,
+  ensureSourceAttached,
+  parseAttachBody,
+  snowflakeExtrasFromRow,
+  type ExecFn,
+  type SourceCredential,
+} from "./lib/attach.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -429,46 +438,83 @@ export function mountD2eRoutes(app: Express): void {
   // otherwise the subsequent Prefect flow fails with "Catalog ... does not
   // exist". ATTACH IF NOT EXISTS makes repeated requests idempotent.
   app.post("/trex/attach", requireAdmin, async (req: any, res: any) => {
-    const body: any = (req as any).body ?? {};
-    const cacheIds = body.cacheIds ?? [];
-    const connectionIds = body.connectionIds ?? [];
-
-    if (
-      !Array.isArray(cacheIds) ||
-      !Array.isArray(connectionIds) ||
-      cacheIds.some((id: unknown) => typeof id !== "string") ||
-      connectionIds.some((id: unknown) => typeof id !== "string")
-    ) {
-      (res as any).status(400).json({ error: "cacheIds and connectionIds must be string arrays" });
+    let input;
+    try {
+      input = parseAttachBody((req as any).body);
+    } catch (e) {
+      (res as any).status(400).json({ error: (e as Error).message });
       return;
     }
 
+    const results: Array<{
+      type: "cache" | "connection";
+      id: string;
+      status: "attached" | "failed";
+      error?: string;
+    }> = [];
+    let attachConn: any;
     try {
-      if (connectionIds.length > 0) {
-        // The native manager owns source attachment. Re-syncing the registry is
-        // idempotent and ensures newly registered sources are visible.
-        await syncTrexDatabaseManager();
-      }
-
       const Trex = (globalThis as any).Trex;
       if (!Trex?.TrexDB) {
         throw new Error("TrexDB is unavailable");
       }
-      const attachConn = new Trex.TrexDB("memory");
+      attachConn = new Trex.TrexDB("memory");
       const attachExec: ExecFn = (sql) => attachConn.execute(sql, []);
-      await ensureAttached(
-        { cacheIds },
-        {
-          exec: attachExec,
-          cacheDir: "/usr/src/data/cache",
-          createDbFileIfMissing: true,
-        },
-      );
 
-      (res as any).json({ cacheIds, connectionIds });
+      for (const id of input.connectionIds) {
+        try {
+          const db = await pool.query<{
+            id: string; dialect: string; host: string; port: number;
+            databaseName: string; extra: unknown; username: string | null;
+            password_encrypted: string | null;
+          }>(
+            `SELECT d.id, d.dialect, d.host, d.port, d."databaseName", d.extra,
+                    dc.username, dc.password_encrypted
+               FROM trexdb.database d
+               LEFT JOIN trexdb.database_credential dc
+                 ON dc."databaseId" = d.id AND dc."userScope" = 'Admin'
+              WHERE d.id = $1 AND d.enabled = true`,
+            [id],
+          );
+          const row = db.rows[0];
+          if (!row) throw new Error("enabled connection not found");
+          if (!row.username || !row.password_encrypted) throw new Error("Admin credential not found");
+          const connection: SourceCredential = {
+            id: row.id,
+            dialect: row.dialect,
+            host: row.host,
+            port: row.port,
+            name: row.databaseName,
+            adminUsername: row.username,
+            adminPassword: await decryptSecret(row.password_encrypted),
+            ...(row.dialect === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
+          };
+          await ensureSourceAttached(connection, { exec: attachExec });
+          results.push({ type: "connection", id, status: "attached" });
+        } catch (e) {
+          results.push({ type: "connection", id, status: "failed", error: (e as Error).message });
+        }
+      }
+      for (const id of input.cacheIds) {
+        try {
+          await ensureCacheAttached(id, {
+            exec: attachExec,
+            cacheDir: CACHE_DIR,
+            createDbFileIfMissing: true,
+          });
+          results.push({ type: "cache", id, status: "attached" });
+        } catch (e) {
+          results.push({ type: "cache", id, status: "failed", error: (e as Error).message });
+        }
+      }
+
+      const failed = results.some((result) => result.status === "failed");
+      (res as any).status(failed ? 207 : 200).json({ results });
     } catch (e) {
       console.error(`[d2e-compat] POST /trex/attach: ${e}`);
-      (res as any).status(500).json({ error: "Failed to attach databases" });
+      (res as any).status(500).json({ error: "Failed to attach databases", results });
+    } finally {
+      attachConn?.close?.();
     }
   });
 

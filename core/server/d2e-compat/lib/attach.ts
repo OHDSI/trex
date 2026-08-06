@@ -13,7 +13,7 @@ function sqlQuote(s: string): string {
   return s.replace(/'/g, "''");
 }
 
-const DEFAULT_CACHE_DIR = "./data/cache";
+export const CACHE_DIR = Deno.env.get("TREX__CACHE_DIR") ?? "/usr/src/data/cache";
 
 export type ExecFn = (sql: string) => Promise<unknown> | unknown;
 
@@ -39,7 +39,7 @@ export async function ensureCacheAttached(
   if (!isValidIdentifier(cacheId)) {
     throw new Error(`invalid identifier: ${cacheId}`);
   }
-  const dir = opts.cacheDir ?? DEFAULT_CACHE_DIR;
+  const dir = opts.cacheDir ?? CACHE_DIR;
   const createDbFileIfMissing = opts.createDbFileIfMissing ?? false;
   const filePath = `${dir}/${cacheId}.db`;
   if (!fileExists(filePath) && !createDbFileIfMissing) {
@@ -172,6 +172,40 @@ export async function ensureSourceAttached(
 export interface EnsureAttachedInput {
   connections?: SourceCredential[];
   cacheIds?: string[];
+}
+
+export interface AttachRequest {
+  cacheIds: string[];
+  connectionIds: string[];
+}
+
+export function parseAttachBody(body: unknown): AttachRequest {
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    throw new Error("request body must be an object");
+  }
+  const input = body as Record<string, unknown>;
+  if (!("cacheIds" in input) && !("connectionIds" in input)) {
+    throw new Error("request body must include cacheIds or connectionIds");
+  }
+  const cacheIds = input.cacheIds ?? [];
+  const connectionIds = input.connectionIds ?? [];
+  if (
+    !Array.isArray(cacheIds) ||
+    !Array.isArray(connectionIds) ||
+    cacheIds.some((id) => typeof id !== "string") ||
+    connectionIds.some((id) => typeof id !== "string")
+  ) {
+    throw new Error("cacheIds and connectionIds must be string arrays");
+  }
+  for (const id of cacheIds) {
+    if (!isValidIdentifier(id)) throw new Error(`invalid cache id: ${id}`);
+  }
+  for (const id of connectionIds) {
+    if (!isValidIdentifier(id) || id.length > MAX_SOURCE_ID_LEN) {
+      throw new Error(`invalid connection id: ${id}`);
+    }
+  }
+  return { cacheIds, connectionIds };
 }
 
 export async function ensureAttached(
