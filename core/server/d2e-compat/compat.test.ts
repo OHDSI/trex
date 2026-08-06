@@ -91,9 +91,11 @@ const jsonResponse = (body: unknown, status = 200) =>
     headers: { "Content-Type": "application/json" },
   });
 
-// WebAPI answers openidDirect with LoginService.Result — {login, jwt, roles,
-// message} — and mirrors the same JWT in a `Bearer` response header. There is
-// no one-time code and no /user/login/otc route (OidcAuthConfig.OpenidDirect).
+// openidDirect answers with one of two shapes depending on the pinned
+// webapi-be: LoginService.Result — {login, jwt, roles, message}, mirrored in a
+// `Bearer` response header — or an OneTimeCodeResponse — {code, expiresIn} —
+// redeemed at /user/login/otc. Both are exercised here; a shim that reads only
+// one 401s every /WebAPI call against the other.
 Deno.test("token exchange reads the WebAPI session JWT from the openidDirect body", async () => {
   const { result, urls } = await withStubbedFetch(
     (url, init) => {
@@ -128,12 +130,59 @@ Deno.test("token exchange falls back to the Bearer header when the body carries 
   assertEquals(result, "webapi.session.jwt");
 });
 
-Deno.test("token exchange fails when openidDirect answers 200 without any JWT", async () => {
+Deno.test("token exchange redeems the openidDirect one-time code for a WebAPI JWT", async () => {
+  const { result, urls } = await withStubbedFetch(
+    (url, init) => {
+      if (url.includes("/user/login/openidDirect")) {
+        assertEquals(
+          (init?.headers as Record<string, string>)?.Authorization,
+          `Bearer ${LOGTO_TOKEN}`,
+        );
+        return jsonResponse({ code: "28ff5efa-6efa-4b54-bacd-d7144c01d6b4", expiresIn: "PT10M" });
+      }
+      return jsonResponse({ login: "q9j5vjrmba9x", jwt: "webapi.session.jwt", roles: null });
+    },
+    () => getWebApiToken(LOGTO_TOKEN),
+  );
+
+  assertEquals(result, "webapi.session.jwt");
+  assertEquals(urls.length, 2);
+  assertEquals(
+    urls[1],
+    "http://localhost:8080/WebAPI/user/login/otc?code=28ff5efa-6efa-4b54-bacd-d7144c01d6b4",
+  );
+});
+
+Deno.test("token exchange fails when the one-time code cannot be redeemed", async () => {
+  const { result, urls } = await withStubbedFetch(
+    (url) =>
+      url.includes("/user/login/otc")
+        ? jsonResponse({ message: "Invalid or expired code" }, 401)
+        : jsonResponse({ code: "28ff5efa-6efa-4b54-bacd-d7144c01d6b4", expiresIn: "PT10M" }),
+    () => getWebApiToken(LOGTO_TOKEN),
+  );
+  assertEquals(result, null);
+  assertEquals(urls.length, 2);
+});
+
+Deno.test("token exchange fails when the redeemed one-time code carries no JWT", async () => {
   const { result } = await withStubbedFetch(
+    (url) =>
+      url.includes("/user/login/otc")
+        ? jsonResponse({ login: "q9j5vjrmba9x", jwt: null, roles: null })
+        : jsonResponse({ code: "28ff5efa-6efa-4b54-bacd-d7144c01d6b4", expiresIn: "PT10M" }),
+    () => getWebApiToken(LOGTO_TOKEN),
+  );
+  assertEquals(result, null);
+});
+
+Deno.test("token exchange fails when openidDirect answers 200 with neither JWT nor code", async () => {
+  const { result, urls } = await withStubbedFetch(
     () => jsonResponse({ login: "q9j5vjrmba9x", jwt: null, roles: null, message: null }),
     () => getWebApiToken(LOGTO_TOKEN),
   );
   assertEquals(result, null);
+  assertEquals(urls.length, 1);
 });
 
 Deno.test("token exchange fails when openidDirect rejects the Logto token", async () => {
