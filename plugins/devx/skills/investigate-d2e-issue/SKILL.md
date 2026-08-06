@@ -16,10 +16,28 @@ NOT change any code. Produce a JSON report.
 2. **Check the docs.** Read the repo's `docs/` folder (and any README next to
    the affected code) for intended behavior — a "bug" that matches documented
    behavior is a doc/UX finding, say so.
-3. **Find the owners.** `git log --format='%an %ae' -20 -- <affected paths>`
-   and `git blame` on the key files; collect the GitHub logins that appear
-   most (map noreply emails like `12345+login@users.noreply.github.com` to
-   `login`). 2–4 logins, most-relevant first.
+3. **Find the owners.** Identify the PRIMARY module first — the plugin/
+   component the issue names (where the broken behavior lives), as opposed to
+   supporting paths where the error merely surfaced. Then combine three
+   signals, in this order:
+   - **CODEOWNERS:** find the most specific pattern matching the primary
+     module in `.github/CODEOWNERS` (fall back to `CODEOWNERS` at the repo
+     root or in `docs/`). Its logins are the authoritative team assignment —
+     include the leading ones.
+   - **Line ownership of the primary module:** on its key files,
+     `git blame --line-porcelain <file> | grep '^author ' | sort | uniq -c | sort -rn`.
+     The module's top line-owners are primary owners even when they appear
+     nowhere else in the repo.
+   - **Recent commits:** `git log --format='%an %ae' -20 -- <path>`, run PER
+     affected path (primary module first, then supporting paths).
+   Do NOT pool counts across paths: a login that appears often repo-wide
+   (infra/maintenance committers who touch every directory) must not displace
+   the primary module's own CODEOWNERS entries or line-owners.
+   Map noreply emails like `12345+login@users.noreply.github.com` to `login`.
+   ALWAYS exclude bot/CI accounts — `ohdsi-trex`, `dependabot`,
+   `github-actions`, `Copilot`, and any author ending in `[bot]` — they are
+   never owners. 2–4 logins, most-relevant first (the primary module's
+   CODEOWNERS/line-owners before supporting-path committers).
 4. **Report.** Reply with ONLY this JSON (no prose around it):
 
 ```json
