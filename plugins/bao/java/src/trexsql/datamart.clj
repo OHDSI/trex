@@ -7,6 +7,7 @@
   (:require [trexsql.db :as db]
             [trexsql.util :as util]
             [trexsql.batch :as batch]
+            [trexsql.jobs :as jobs]
             [trexsql.errors :as errors]
             [clojure.string :as str]
             [clojure.tools.logging :as log]
@@ -516,14 +517,43 @@
    failure map is returned; on success the cache stays attached for the FTS step."
   [db config]
   (let [start (System/currentTimeMillis)
-        {:keys [database-code schema-name source-credentials cache-path]} config]
+        {:keys [database-code schema-name source-credentials cache-path]} config
+        ;; Open the job before any work so the build is visible in WebAPI's job
+        ;; overview while it runs, not just after it finishes. The JDBC path does
+        ;; this inline; this path had no job at all, which is why postgres caches
+        ;; never appeared in the overview and /cache/status reported ready
+        ;; immediately (a nil job status counts as "done").
+        exec-id (try (jobs/start-cache-job! db database-code schema-name)
+                     (catch Exception e
+                       (log/warn (format "Could not open cache job for %s: %s"
+                                         database-code (.getMessage e)))
+                       nil))]
     (db/attach-cache-file! db database-code (or cache-path "./data/cache"))
     (try
       (let [source-alias (attach-source! db database-code source-credentials)]
         (try
           (let [{:keys [tables-copied tables-failed]}
-                (copy-schema db source-alias database-code config)]
-            {:success? (empty? tables-failed)
+                (copy-schema db source-alias database-code config)
+                success? (empty? tables-failed)
+                ;; A copy that moved no tables is a failure, not an empty
+                ;; success: it means the source schema was missing or had
+                ;; nothing to read, and reporting it as COMPLETE is what let a
+                ;; 12KB cache pass as a healthy one.
+                copied-any? (seq tables-copied)
+                failure-msg (cond
+                              (not success?)
+                              (str "Failed to copy " (count tables-failed) " table(s): "
+                                   (str/join ", " (map :table-name tables-failed)))
+                              (not copied-any?)
+                              (str "No tables were copied from schema '" schema-name
+                                   "' — the schema is missing or contains no readable tables"))]
+            (jobs/update-local-progress! db database-code
+              {:completed-tables (count tables-copied)
+               :tables-copied tables-copied
+               :tables-failed tables-failed})
+            (jobs/finish-cache-job! db database-code exec-id
+                                    (and success? (boolean copied-any?)) failure-msg)
+            {:success? (and success? (boolean copied-any?))
              :database-code database-code
              :schema-name schema-name
              :tables-copied (mapv (fn [t] {:table-name (:table-name t)
@@ -532,7 +562,7 @@
                                            :error (:error t)
                                            :phase (:phase t)}) tables-failed)
              :duration-ms (- (System/currentTimeMillis) start)
-             :error nil})
+             :error failure-msg})
           (finally
             (try (db/detach-database! db source-alias)
                  (catch Exception e
@@ -541,6 +571,7 @@
       (catch Exception e
         ;; Detach the cache so a retry with the same database-code isn't blocked.
         (try (db/detach-database! db database-code) (catch Exception _ nil))
+        (jobs/finish-cache-job! db database-code exec-id false (.getMessage e))
         {:success? false
          :database-code database-code
          :schema-name schema-name

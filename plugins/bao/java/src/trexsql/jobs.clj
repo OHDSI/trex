@@ -132,6 +132,17 @@
                                  :where [:= :database_code database-code]})]
     (db/execute-with-params! trexsql-db update-sql (vec params))))
 
+(defn delete-job!
+  "Drop the cache_generation_info row for a database code. Called when its cache
+   file is deleted, so /cache/status stops reporting a build for a cache that is
+   no longer on disk."
+  [trexsql-db database-code]
+  (let [jobs-db (get-jobs-db trexsql-db)
+        [delete-sql & params] (sql/format
+                                {:delete-from (jobs-table jobs-db)
+                                 :where [:= :database_code database-code]})]
+    (db/execute-with-params! trexsql-db delete-sql (vec params))))
+
 (defn- parse-json-field [value]
   (when value
     (let [s (str value)]
@@ -400,3 +411,37 @@
   "Get WebAPI datasource from config. Returns nil if not configured."
   [trexsql-db]
   (get-in trexsql-db [:config :webapi-datasource]))
+
+(defn start-cache-job!
+  "Open a cache-generation job: a Spring Batch execution (so the build shows up
+   in WebAPI's job overview alongside every other job) plus the local
+   cache_generation_info row that drives /cache/status. Returns the Spring Batch
+   execution id, or nil when no WebAPI datasource is configured.
+
+   Both cache paths must call this. The JDBC path opens its job inline because
+   it also drives per-table progress and cancellation from the same loop; the
+   native-scanner path (postgres/mysql/bigquery) copies in one statement and has
+   no such loop, so without this it produced no job row at all — leaving builds
+   invisible in the overview and every status reading as instantly ready."
+  [trexsql-db database-code schema-name & [total-tables]]
+  (let [webapi-ds (get-webapi-datasource trexsql-db)
+        exec-id (write-spring-batch-job! webapi-ds "cacheGeneration"
+                  {:database-code database-code :schema-name schema-name})]
+    (create-local-job! trexsql-db database-code
+      {:job-execution-id exec-id
+       :source-key database-code
+       :status "RUNNING"
+       :total-tables (or total-tables 0)})
+    exec-id))
+
+(defn finish-cache-job!
+  "Close a job opened by start-cache-job!, mirroring the terminal status into
+   both the Spring Batch row and cache_generation_info. `error-msg` is recorded
+   so callers see why a build failed instead of a bare `undefined`."
+  [trexsql-db database-code exec-id success? & [error-msg]]
+  (let [webapi-ds (get-webapi-datasource trexsql-db)]
+    (when exec-id
+      (update-spring-batch-status! webapi-ds exec-id (if success? "COMPLETED" "FAILED")))
+    (update-local-status! trexsql-db database-code
+                          (if success? "COMPLETE" "ERROR")
+                          error-msg)))
