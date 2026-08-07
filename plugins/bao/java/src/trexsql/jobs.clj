@@ -349,50 +349,61 @@
 (defn- batch-table [prefix suffix]
   (str prefix suffix))
 
-(defn- execute-on-datasource!
-  "Execute parameterized SQL on external datasource. Returns row count."
-  [datasource sql params]
-  (with-open [conn (.getConnection datasource)
-              stmt (.prepareStatement conn sql)]
+(defn- exec-on-conn!
+  "Execute parameterized SQL on an open connection. Returns row count."
+  [^Connection conn sql params]
+  (with-open [stmt (.prepareStatement conn ^String sql)]
     (doseq [[idx param] (map-indexed vector params)]
       (.setObject stmt (inc idx) param))
     (.executeUpdate stmt)))
 
-(defn- query-on-datasource
-  "Execute parameterized query on external datasource. Returns first column of first row."
-  [datasource sql params]
-  (with-open [conn (.getConnection datasource)
-              stmt (.prepareStatement conn sql)]
+(defn- query-on-conn
+  "Execute parameterized query on an open connection. Returns first column of first row."
+  [^Connection conn sql params]
+  (with-open [stmt (.prepareStatement conn ^String sql)]
     (doseq [[idx param] (map-indexed vector params)]
       (.setObject stmt (inc idx) param))
     (with-open [rs (.executeQuery stmt)]
       (when (.next rs)
         (.getObject rs 1)))))
 
+;; WebAPI's DataSource is the JPA-managed Hikari pool, which hands out
+;; connections with autocommit off. Borrowing one per statement and closing it
+;; therefore discards the write: the JOB_INSTANCE insert never lands and the
+;; JOB_EXECUTION insert then fails job_inst_exec_fk. Do the whole write on one
+;; connection and commit it, which also makes instance+execution atomic.
+(defn- with-tx
+  [datasource f]
+  (with-open [conn (.getConnection datasource)]
+    (let [prev (.getAutoCommit conn)]
+      (.setAutoCommit conn false)
+      (try
+        (let [result (f conn)]
+          (.commit conn)
+          result)
+        (catch Throwable t
+          (try (.rollback conn) (catch Exception _ nil))
+          (throw t))
+        (finally
+          (try (.setAutoCommit conn prev) (catch Exception _ nil)))))))
+
 ;; The sequence name has to be inlined, not bound: PgJDBC binds a String as
 ;; varchar and PostgreSQL only has nextval(regclass), so a parameterized
 ;; NEXTVAL(?) throws and the job silently goes unrecorded.
-(defn- get-next-sequence-value [webapi-ds sequence-name]
-  (try
-    (query-on-datasource webapi-ds (str "SELECT nextval('" sequence-name "')") [])
-    (catch SQLException e
-      (log/warn (format "Failed to get sequence value for %s: %s" sequence-name (.getMessage e)))
-      nil)))
+(defn- next-sequence-value [^Connection conn sequence-name]
+  (query-on-conn conn (str "SELECT nextval('" sequence-name "')") []))
 
 ;; WebAPI renders these as the job's parameters, and its /job/execution query
 ;; left-joins them, so a job without them still lists -- just with no detail.
-(defn- write-batch-job-params! [webapi-ds prefix exec-id params]
+(defn- write-batch-job-params! [^Connection conn prefix exec-id params]
   (doseq [[k v] params
           :when (some? v)]
-    (try
-      (execute-on-datasource!
-        webapi-ds
-        (str "INSERT INTO " (batch-table prefix "JOB_EXECUTION_PARAMS")
-             " (job_execution_id, parameter_name, parameter_type, parameter_value, identifying)"
-             " VALUES (?, ?, ?, ?, ?)")
-        [exec-id (name k) "java.lang.String" (str v) "N"])
-      (catch SQLException e
-        (log/warn (format "Failed to write batch job param %s: %s" (name k) (.getMessage e)))))))
+    (exec-on-conn!
+      conn
+      (str "INSERT INTO " (batch-table prefix "JOB_EXECUTION_PARAMS")
+           " (job_execution_id, parameter_name, parameter_type, parameter_value, identifying)"
+           " VALUES (?, ?, ?, ?, ?)")
+      [exec-id (name k) "java.lang.String" (str v) "N"])))
 
 (declare get-webapi-datasource)
 
@@ -404,24 +415,26 @@
         prefix (batch-table-prefix trexsql-db)]
    (when webapi-ds
     (try
-      (let [instance-id (get-next-sequence-value webapi-ds (batch-table prefix "JOB_SEQ"))
-            exec-id (get-next-sequence-value webapi-ds (batch-table prefix "JOB_EXECUTION_SEQ"))
-            now (java.sql.Timestamp. (System/currentTimeMillis))]
-        (when (and instance-id exec-id)
-          (execute-on-datasource!
-            webapi-ds
-            (str "INSERT INTO " (batch-table prefix "JOB_INSTANCE")
-                 " (job_instance_id, job_name, job_key, version) VALUES (?, ?, ?, ?)")
-            [instance-id job-name (job-key-for job-params exec-id) 0])
-          (execute-on-datasource!
-            webapi-ds
-            (str "INSERT INTO " (batch-table prefix "JOB_EXECUTION")
-                 " (job_execution_id, job_instance_id, create_time, start_time,"
-                 "  status, version, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?)")
-            [exec-id instance-id now now "STARTED" 0 now])
-          (write-batch-job-params! webapi-ds prefix exec-id
-                                   (assoc job-params :jobName job-name))
-          exec-id))
+      (with-tx webapi-ds
+        (fn [conn]
+          (let [instance-id (next-sequence-value conn (batch-table prefix "JOB_SEQ"))
+                exec-id (next-sequence-value conn (batch-table prefix "JOB_EXECUTION_SEQ"))
+                now (java.sql.Timestamp. (System/currentTimeMillis))]
+            (when (and instance-id exec-id)
+              (exec-on-conn!
+                conn
+                (str "INSERT INTO " (batch-table prefix "JOB_INSTANCE")
+                     " (job_instance_id, job_name, job_key, version) VALUES (?, ?, ?, ?)")
+                [instance-id job-name (job-key-for job-params exec-id) 0])
+              (exec-on-conn!
+                conn
+                (str "INSERT INTO " (batch-table prefix "JOB_EXECUTION")
+                     " (job_execution_id, job_instance_id, create_time, start_time,"
+                     "  status, version, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                [exec-id instance-id now now "STARTED" 0 now])
+              (write-batch-job-params! conn prefix exec-id
+                                       (assoc job-params :jobName job-name))
+              exec-id))))
       (catch SQLException e
         (log/warn (format "Failed to write Spring Batch job: %s" (.getMessage e)))
         nil)))))
@@ -446,20 +459,22 @@
         (let [now (java.sql.Timestamp. (System/currentTimeMillis))
               terminal? (terminal-status? status)
               truncate (fn [^String s] (when s (subs s 0 (min 2500 (count s)))))]
-          (if terminal?
-            (execute-on-datasource!
-              webapi-ds
-              (str "UPDATE " (batch-table prefix "JOB_EXECUTION")
-                   " SET status = ?, end_time = ?, exit_code = ?, exit_message = ?,"
-                   "     last_updated = ?, version = COALESCE(version, 0) + 1"
-                   " WHERE job_execution_id = ?")
-              [status now status (truncate exit-message) now exec-id])
-            (execute-on-datasource!
-              webapi-ds
-              (str "UPDATE " (batch-table prefix "JOB_EXECUTION")
-                   " SET status = ?, last_updated = ?, version = COALESCE(version, 0) + 1"
-                   " WHERE job_execution_id = ?")
-              [status now exec-id])))
+          (with-tx webapi-ds
+            (fn [conn]
+              (if terminal?
+                (exec-on-conn!
+                  conn
+                  (str "UPDATE " (batch-table prefix "JOB_EXECUTION")
+                       " SET status = ?, end_time = ?, exit_code = ?, exit_message = ?,"
+                       "     last_updated = ?, version = COALESCE(version, 0) + 1"
+                       " WHERE job_execution_id = ?")
+                  [status now status (truncate exit-message) now exec-id])
+                (exec-on-conn!
+                  conn
+                  (str "UPDATE " (batch-table prefix "JOB_EXECUTION")
+                       " SET status = ?, last_updated = ?, version = COALESCE(version, 0) + 1"
+                       " WHERE job_execution_id = ?")
+                  [status now exec-id])))))
         (catch SQLException e
           (log/warn (format "Failed to update Spring Batch status: %s" (.getMessage e)))))))))
 

@@ -220,3 +220,63 @@
           (fn [] (jobs/update-spring-batch-status! {:config {}} 1 "COMPLETE"))))
       ;; refused before it ever looks at terminality or touches the datasource
       (is (zero? @calls)))))
+
+;; Transaction Tests
+
+;; WebAPI's DataSource hands out connections with autocommit off, so a write
+;; that only closes the connection is silently discarded. This is the shape of
+;; the bug where JOB_INSTANCE never landed and JOB_EXECUTION then tripped
+;; job_inst_exec_fk.
+
+(defn- recording-connection [calls auto-commit]
+  (let [state (atom auto-commit)]
+    (java.lang.reflect.Proxy/newProxyInstance
+      (.getClassLoader java.sql.Connection)
+      (into-array Class [java.sql.Connection])
+      (reify java.lang.reflect.InvocationHandler
+        (invoke [_ _ method args]
+          (let [n (.getName method)]
+            (swap! calls conj n)
+            (case n
+              "setAutoCommit" (do (reset! state (first args)) nil)
+              "getAutoCommit" @state
+              "isWrapperFor" false
+              "close" nil
+              nil)))))))
+
+(defn- recording-datasource [conn]
+  (java.lang.reflect.Proxy/newProxyInstance
+    (.getClassLoader javax.sql.DataSource)
+    (into-array Class [javax.sql.DataSource])
+    (reify java.lang.reflect.InvocationHandler
+      (invoke [_ _ method _]
+        (if (= "getConnection" (.getName method)) conn nil)))))
+
+(deftest test-with-tx-commits-when-autocommit-off
+  (testing "the write is committed rather than dropped on close"
+    (let [calls (atom [])
+          conn (recording-connection calls false)
+          ds (recording-datasource conn)]
+      (is (= :done (#'jobs/with-tx ds (fn [_] :done))))
+      (is (some #{"commit"} @calls))
+      (is (not (some #{"rollback"} @calls)))
+      ;; autocommit is turned off for the transaction and restored after
+      (is (= 2 (count (filter #{"setAutoCommit"} @calls)))))))
+
+(deftest test-with-tx-rolls-back-on-failure
+  (testing "a failed write is rolled back and the error propagates"
+    (let [calls (atom [])
+          conn (recording-connection calls false)
+          ds (recording-datasource conn)]
+      (is (thrown? RuntimeException
+                   (#'jobs/with-tx ds (fn [_] (throw (RuntimeException. "boom"))))))
+      (is (some #{"rollback"} @calls))
+      (is (not (some #{"commit"} @calls))))))
+
+(deftest test-with-tx-closes-the-connection
+  (testing "the connection is returned to the pool"
+    (let [calls (atom [])
+          conn (recording-connection calls false)
+          ds (recording-datasource conn)]
+      (#'jobs/with-tx ds (fn [_] nil))
+      (is (some #{"close"} @calls)))))
