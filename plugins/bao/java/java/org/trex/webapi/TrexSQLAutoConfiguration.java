@@ -36,6 +36,22 @@ public class TrexSQLAutoConfiguration {
             .getDeclaredConstructor(Environment.class).newInstance(env);
     }
 
+    /**
+     * The batch table prefix WebAPI's JobRepository is configured with. Falls back
+     * to the ohdsi schema, which is how application.yaml derives it by default.
+     */
+    static String resolveBatchTablePrefix(Environment env) {
+        String prefix = env.getProperty("spring.batch.repository.tableprefix");
+        if (prefix == null || prefix.isBlank()) {
+            prefix = env.getProperty("spring.batch.repository.table-prefix");
+        }
+        if (prefix == null || prefix.isBlank()) {
+            String schema = env.getProperty("datasource.ohdsi.schema", "webapi");
+            prefix = schema + ".BATCH_";
+        }
+        return prefix;
+    }
+
     @Bean
     public ServletRegistrationBean<HttpServlet> trexServlet(
             Environment env, ApplicationContext ctx) throws Exception {
@@ -48,6 +64,17 @@ public class TrexSQLAutoConfiguration {
             config.put("extensions-path", extensionsPath);
         }
         config.put("allow-unsigned-extensions", true);
+
+        // Cache builds run outside Spring Batch, so they only reach WebAPI's job
+        // overview if the plugin writes the batch rows itself. That needs the
+        // shared DataSource and the same table prefix the JobRepository uses --
+        // /job/execution reads <ohdsi-schema>.BATCH_* directly.
+        try {
+            config.put("webapi-datasource", ctx.getBean(javax.sql.DataSource.class));
+            config.put("batch-table-prefix", resolveBatchTablePrefix(env));
+        } catch (Exception e) {
+            log.warn("No WebAPI DataSource available; cache builds will not appear in the job overview", e);
+        }
 
         // Initialize TrexSQL engine via reflection (class from Clojure AOT)
         Class<?> trexClass = Class.forName("org.trex.Trexsql");

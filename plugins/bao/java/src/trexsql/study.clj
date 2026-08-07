@@ -63,7 +63,7 @@
 (defn- poll-study-progress
   "Background polling loop. Reads hades_status and syncs to local DB + Spring Batch.
    Runs until the hades job reaches a terminal status."
-  [trexsql-db study-id hades-job-id webapi-ds spring-batch-exec-id]
+  [trexsql-db study-id hades-job-id spring-batch-exec-id]
   (loop []
     (Thread/sleep poll-interval-ms)
     (let [hades (query-hades-status trexsql-db hades-job-id)]
@@ -85,7 +85,7 @@
           (when spring-batch-exec-id
             (try
               (jobs/update-spring-batch-status!
-                webapi-ds spring-batch-exec-id
+                trexsql-db spring-batch-exec-id
                 (map-hades-status-to-spring-batch (:status hades)))
               (catch Exception e
                 (log/warn (format "Failed to update Spring Batch for study %s: %s"
@@ -120,9 +120,8 @@
                             {:error (:error response)})))
         hades-job-id (:job_id response)
         study-id hades-job-id
-        webapi-ds (jobs/get-webapi-datasource trexsql-db)
         spring-batch-exec-id (jobs/write-spring-batch-job!
-                               webapi-ds "studyExecution"
+                               trexsql-db "studyExecution"
                                {:study-id study-id
                                 :database-name database-name
                                 :env-name env-name})
@@ -138,8 +137,7 @@
                       :env-base-dir env-base-dir}})]
     (future
       (try
-        (poll-study-progress trexsql-db study-id hades-job-id
-                             webapi-ds spring-batch-exec-id)
+        (poll-study-progress trexsql-db study-id hades-job-id spring-batch-exec-id)
         (catch Throwable t
           (log/error t (format "Study progress polling failed for %s" study-id))
           (try
@@ -162,8 +160,7 @@
       {:status "CANCELLED"})
     (when-let [study-status (jobs/get-study-status trexsql-db study-id)]
       (when-let [exec-id (:job-execution-id study-status)]
-        (when-let [webapi-ds (jobs/get-webapi-datasource trexsql-db)]
-          (jobs/update-spring-batch-status! webapi-ds exec-id "STOPPED"))))
+        (jobs/update-spring-batch-status! trexsql-db exec-id "STOPPED")))
     response))
 
 (defn setup-environment!
