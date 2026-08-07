@@ -3,7 +3,8 @@
   (:require [clojure.test :refer :all]
             [trexsql.webapi :as webapi]
             [trexsql.core :as core]
-            [clojure.data.json :as json]))
+            [reitit.core :as r]
+            [cheshire.core :as json]))
 
 ;; Helper Functions
 
@@ -50,7 +51,6 @@
   (testing "Valid database codes pass validation"
     (is (nil? (#'webapi/validate-database-code "mydb")))
     (is (nil? (#'webapi/validate-database-code "my_db")))
-    (is (nil? (#'webapi/validate-database-code "my-db")))
     (is (nil? (#'webapi/validate-database-code "MyDB123")))
     (is (nil? (#'webapi/validate-database-code "a")))))
 
@@ -60,6 +60,7 @@
     (is (some? (#'webapi/validate-database-code "")))
     (is (some? (#'webapi/validate-database-code "   ")))
     (is (some? (#'webapi/validate-database-code "my db")))
+    (is (some? (#'webapi/validate-database-code "my-db")))
     (is (some? (#'webapi/validate-database-code "my.db")))
     (is (some? (#'webapi/validate-database-code "my/db")))
     (is (some? (#'webapi/validate-database-code "my'db")))
@@ -93,6 +94,33 @@
         ;; Note: This depends on source-repository being empty
         (let [resp (webapi/handle-request db "GET" "unknown-source/cache" nil nil nil)]
           (is (= 404 (:status resp))))))))
+
+;; Router Tests
+
+;; The servlet dispatches through the Reitit router, not handle-request, so a
+;; handler wired only into handle-request answers 404 in production. These
+;; assert the route table itself resolves.
+
+(deftest test-router-resolves-cache-files
+  (testing "GET /cache/files resolves to the list handler"
+    (let [router (r/router webapi/routes {:conflicts nil})
+          match (r/match-by-path router "/cache/files")]
+      (is (some? match))
+      (is (some? (get-in match [:data :get :handler]))))))
+
+(deftest test-router-resolves-cache-file-delete
+  (testing "DELETE /cache/files/:database-code resolves and binds the path param"
+    (let [router (r/router webapi/routes {:conflicts nil})
+          match (r/match-by-path router "/cache/files/EUNOMIA")]
+      (is (some? match))
+      (is (some? (get-in match [:data :delete :handler])))
+      (is (= "EUNOMIA" (get-in match [:path-params :database-code]))))))
+
+(deftest test-router-cache-files-not-shadowed-by-source-key
+  (testing "/cache/files is not swallowed by the /:source-key subtree"
+    (let [router (r/router webapi/routes {:conflicts nil})
+          match (r/match-by-path router "/cache/files")]
+      (is (nil? (get-in match [:path-params :source-key]))))))
 
 ;; JSON Parsing Tests
 
@@ -184,7 +212,7 @@
     (is (= "{}" (#'webapi/normalize-proxy-body {})))
     (is (= "[]" (#'webapi/normalize-proxy-body [])))
     (let [encoded (#'webapi/normalize-proxy-body {:a 1})]
-      (is (= {"a" 1} (json/read-str encoded))))))
+      (is (= {"a" 1} (json/parse-string encoded))))))
 
 (deftest test-normalize-proxy-body-empty-input-stream
   (testing "an empty ServletInputStream (bodyless GET, e.g. /eve/v1/health) becomes nil"

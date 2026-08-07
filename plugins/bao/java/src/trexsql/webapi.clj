@@ -816,6 +816,14 @@
   [{:keys [db query-params]}]
   (handle-list-cache-jobs db query-params))
 
+(defn- list-cache-files-handler
+  [{:keys [db query-params]}]
+  (handle-list-cache-files db query-params))
+
+(defn- delete-cache-file-handler
+  [{:keys [db path-params query-params]}]
+  (handle-delete-cache-file db (:database-code path-params) query-params))
+
 (defn- create-cache-handler
   [{:keys [db path-params body-params query-params]}]
   (let [source-key (:source-key path-params)
@@ -1511,6 +1519,11 @@
   (vec
     (concat
       [["/cache/jobs" {:get {:handler list-cache-jobs-handler}}]
+       ;; Keyed by file rather than by source so orphaned caches, whose dataset
+       ;; is already gone, can still be listed and reclaimed. Must stay ahead of
+       ;; "/:source-key" so "cache" is not swallowed as a source key.
+       ["/cache/files" {:get {:handler list-cache-files-handler}}]
+       ["/cache/files/:database-code" {:delete {:handler delete-cache-file-handler}}]
        ["/study/jobs" {:get {:handler list-study-jobs-handler}}]
        ["/study/env" {:post {:handler setup-env-handler}}]
        ["/study/envs" {:get {:handler list-envs-handler}}]
