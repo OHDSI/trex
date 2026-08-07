@@ -471,7 +471,7 @@
   (with-open [source-conn (get-conn-fn)]
     (let [tables-to-copy (get-tables-to-copy source-conn trexsql-db database-code schema-name table-filter)
           total-tables (count tables-to-copy)
-          exec-id (jobs/write-spring-batch-job! webapi-ds "cacheGeneration"
+          exec-id (jobs/write-spring-batch-job! trexsql-db "cacheGeneration"
                     {:database-code database-code :schema-name schema-name})
           _ (jobs/create-local-job! trexsql-db database-code
               {:job-execution-id exec-id
@@ -492,7 +492,7 @@
           (if (empty? remaining)
             (let [duration-ms (- (System/currentTimeMillis) start-time)
                   success? (empty? tables-failed)]
-              (jobs/update-spring-batch-status! webapi-ds exec-id
+              (jobs/update-spring-batch-status! trexsql-db exec-id
                 (if success? "COMPLETED" "FAILED"))
               (jobs/update-local-status! trexsql-db database-code
                 (if success? "COMPLETE" "FAILED"))
@@ -514,7 +514,7 @@
 
             (if (check-cancellation trexsql-db database-code)
               (let [duration-ms (- (System/currentTimeMillis) start-time)]
-                (jobs/update-spring-batch-status! webapi-ds exec-id "STOPPED")
+                (jobs/update-spring-batch-status! trexsql-db exec-id "STOPPED")
                 (jobs/update-local-status! trexsql-db database-code "CANCELED")
                 {:success? false
                  :database-code database-code
@@ -567,7 +567,7 @@
         (catch Exception e
           (let [duration-ms (- (System/currentTimeMillis) start-time)
                 error-msg (.getMessage e)]
-            (jobs/update-spring-batch-status! webapi-ds exec-id "FAILED")
+            (jobs/update-spring-batch-status! trexsql-db exec-id "FAILED" error-msg)
             (jobs/update-local-status! trexsql-db database-code "ERROR" error-msg)
             (when progress-fn
               (progress-fn {:phase :job-failed :error error-msg}))

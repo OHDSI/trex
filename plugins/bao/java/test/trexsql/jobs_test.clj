@@ -173,3 +173,50 @@
     (with-test-db
       (fn [db]
         (is (nil? (jobs/get-webapi-datasource db)))))))
+
+;; Spring Batch Write Tests
+
+;; These cover the four ways the batch write silently produced no job row.
+
+(deftest test-batch-table-prefix-default
+  (testing "falls back to the WebAPI schema prefix when unconfigured"
+    (is (= "webapi.BATCH_" (#'jobs/batch-table-prefix {:config {}})))))
+
+(deftest test-batch-table-prefix-configured
+  (testing "uses the prefix WebAPI's JobRepository was configured with"
+    (is (= "other.BATCH_"
+           (#'jobs/batch-table-prefix {:config {:batch-table-prefix "other.BATCH_"}})))))
+
+(deftest test-batch-table-qualifies-names
+  (testing "table names are schema-qualified"
+    (is (= "webapi.BATCH_JOB_INSTANCE" (#'jobs/batch-table "webapi.BATCH_" "JOB_INSTANCE")))
+    (is (= "webapi.BATCH_JOB_SEQ" (#'jobs/batch-table "webapi.BATCH_" "JOB_SEQ")))))
+
+(deftest test-job-key-unique-per-execution
+  (testing "the same params on a second build produce a different JOB_KEY"
+    (let [params {:database-code "EUNOMIA" :schema-name "cdm"}]
+      (is (not= (#'jobs/job-key-for params 1)
+                (#'jobs/job-key-for params 2))))))
+
+(deftest test-job-key-fits-column
+  (testing "JOB_KEY stays within VARCHAR(32)"
+    (let [k (#'jobs/job-key-for {:database-code (apply str (repeat 200 "x"))} 123456789)]
+      (is (<= (count k) 32)))))
+
+(deftest test-batch-statuses-are-spring-batch-names
+  (testing "the local registry's vocabulary is not accepted as a BatchStatus"
+    ;; BatchStatus/valueOf runs inside WebAPI's ResultSetExtractor, so a bad
+    ;; value breaks /job/execution for every job, not just this row.
+    (doseq [bad ["COMPLETE" "ERROR" "CANCELED" "RUNNING"]]
+      (is (not (contains? @#'jobs/batch-statuses bad))))
+    (doseq [good ["COMPLETED" "FAILED" "STOPPED" "STARTED"]]
+      (is (contains? @#'jobs/batch-statuses good)))))
+
+(deftest test-update-status-rejects-non-batch-status
+  (testing "a non-BatchStatus value is refused rather than written"
+    (let [calls (atom 0)]
+      (with-redefs [jobs/get-webapi-datasource (fn [_] :fake-ds)]
+        (with-redefs-fn {#'jobs/terminal-status? (fn [_] (swap! calls inc) true)}
+          (fn [] (jobs/update-spring-batch-status! {:config {}} 1 "COMPLETE"))))
+      ;; refused before it ever looks at terminality or touches the datasource
+      (is (zero? @calls)))))
