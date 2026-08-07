@@ -246,6 +246,96 @@
     (when (seq clauses)
       (str " WHERE " (str/join " AND " clauses)))))
 
+;; Column each CDM table is range-partitioned on when copying in chunks. Mirrors
+;; the map d2e's create_cachedb_file flow uses, so both loaders chunk the same
+;; tables the same way. A table absent here is copied in one statement.
+(def ^:private chunk-column-map
+  {"person"                 "person_id"
+   "observation_period"     "person_id"
+   "visit_occurrence"       "person_id"
+   "visit_detail"           "person_id"
+   "condition_occurrence"   "person_id"
+   "drug_exposure"          "person_id"
+   "procedure_occurrence"   "person_id"
+   "device_exposure"        "person_id"
+   "measurement"            "person_id"
+   "observation"            "person_id"
+   "death"                  "person_id"
+   "note"                   "person_id"
+   "note_nlp"               "note_nlp_id"
+   "specimen"               "person_id"
+   "payer_plan_period"      "person_id"
+   "cost"                   "cost_id"
+   "drug_era"               "person_id"
+   "dose_era"               "person_id"
+   "condition_era"          "person_id"
+   "episode"                "person_id"
+   "concept"                "concept_id"
+   "concept_relationship"   "concept_id_1"
+   "concept_ancestor"       "ancestor_concept_id"
+   "concept_synonym"        "concept_id"})
+
+;; Rows per copy statement. Sized for BigQuery, which bills and rate-limits per
+;; scan and so wants as few statements as possible; the local engines handle a
+;; slice this size comfortably, so there is no reason to split them finer.
+;; d2e's flow uses the same value for BigQuery (chunk_utils/determine_chunk_size).
+(def ^:private default-chunk-size 5000000)
+
+(defn- chunk-size-for
+  "Rows per copy statement. An explicit :chunk-size in config always wins."
+  [configured]
+  (if (and configured (pos? (long configured)))
+    (long configured)
+    default-chunk-size))
+
+(defn- chunk-bounds
+  "MIN/MAX of the chunk column, or nil when the table is empty or the bounds
+   aren't usable (non-numeric key, all NULL). nil means copy in one statement."
+  [db source-table chunk-col]
+  (try
+    (let [sql-str (format "SELECT MIN(%s) AS lo, MAX(%s) AS hi FROM %s"
+                          (db/escape-identifier chunk-col "chunk-col")
+                          (db/escape-identifier chunk-col "chunk-col")
+                          source-table)
+          row (first (db/query db sql-str))
+          lo (some-> row (.get "lo"))
+          hi (some-> row (.get "hi"))]
+      (when (and (number? lo) (number? hi))
+        [(long lo) (long hi)]))
+    (catch Exception e
+      (log/debug (format "Chunk bounds unavailable for %s on %s: %s"
+                         source-table chunk-col (.getMessage e)))
+      nil)))
+
+(defn- copy-rows!
+  "Move rows into the (already created) target table.
+
+   Copying a whole CDM table in a single INSERT … SELECT makes the engine
+   materialize the entire scan at once, which is what makes large BigQuery
+   sources expensive and slow. When the table has a known integer key, walk it
+   in key ranges instead so each statement covers a bounded slice."
+  [db table-name select-clause source-table target-table where-clause config]
+  (let [chunk-col (get chunk-column-map (str/lower-case (str table-name)))
+        bounds (when chunk-col (chunk-bounds db source-table chunk-col))
+        base-where (or where-clause "")]
+    (if-not bounds
+      (db/execute! db (format "INSERT INTO %s SELECT %s FROM %s%s"
+                              target-table select-clause source-table base-where))
+      (let [[lo hi] bounds
+            size (chunk-size-for (:chunk-size config))
+            quoted-col (db/escape-identifier chunk-col "chunk-col")
+            joiner (if (str/blank? base-where) " WHERE " (str base-where " AND "))]
+        (log/info (format "Copying %s in ranges of %d on %s (%d..%d)"
+                          table-name size chunk-col lo hi))
+        (loop [start lo]
+          (when (<= start hi)
+            ;; Inclusive upper bound so the final slice picks up `hi` itself.
+            (let [end (min hi (+ start (dec size)))]
+              (db/execute! db (format "INSERT INTO %s SELECT %s FROM %s%s%s >= %d AND %s <= %d"
+                                      target-table select-clause source-table
+                                      joiner quoted-col start quoted-col end))
+              (recur (inc end)))))))))
+
 (defn copy-table
   "Copy one table from the attached source to the cache catalog.
    Returns TableResult on success, TableError on failure."
@@ -269,11 +359,9 @@
                                (db/escape-identifier target-schema "target-schema")
                                (db/escape-identifier table-name "table-name"))
           create-sql (format "CREATE OR REPLACE TABLE %s AS SELECT %s FROM %s WHERE false"
-                             target-table select-clause source-table)
-          insert-sql (format "INSERT INTO %s SELECT %s FROM %s%s"
-                             target-table select-clause source-table (or where-clause ""))]
+                             target-table select-clause source-table)]
       (db/execute! db create-sql)
-      (db/execute! db insert-sql)
+      (copy-rows! db table-name select-clause source-table target-table where-clause config)
       (let [count-sql (format "SELECT COUNT(*) as cnt FROM %s" target-table)
             count-result (db/query db count-sql)
             row-count (or (some-> count-result first (.get "cnt")) 0)]
