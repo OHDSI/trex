@@ -21,6 +21,14 @@ Discord channel yet). The message carries `support_session`, `kind`,
    any GitHub logins mentioned), continue the flow with those values, and use
    an empty `github_logins` list if none were identifiable.
 2. **Resolve owners.** `lookupDiscordIds` with the `github_logins`.
+   **Nobody may go unmentioned.** If `github_logins` came back empty (or
+   `lookupDiscordIds` resolved no ids), send ONE `askCodeAgent` follow-up:
+   "Return ONLY the GitHub logins from the most specific `.github/CODEOWNERS`
+   entry covering <the affected paths>; if none matches, the repo-root `*`
+   entry." and resolve THOSE. Only if that still yields no Discord ids may
+   you post without mentions — and then the summary MUST start with
+   "⚠ No owners resolved — team, please triage" so the gap is explicit, not
+   silent.
 3. **Notify.** `postDevSummary` with the support session id, kind, brief, the
    investigation's summary/next steps/proposed reply, pass the investigation's full
    `github_logins` list as `githubLogins`, the resolved Discord ids as `discordUserIds`,
@@ -44,6 +52,17 @@ Discord channel yet). The message carries `support_session`, `kind`,
      cause" at most.
    - No findings dump: the diagnosis lives in the dev thread; the user gets an
      acknowledgement, and later the reviewed answer (and PR link when fixed).
+   - **The `proposedReply` must add something beyond this acknowledgement.**
+     The user already gets "filed, team investigating, update follows" as the
+     ack — a draft that restates it is pointless and wastes a review cycle.
+     The draft must carry at least one of: the likely cause in user terms, a
+     workaround, a CONCRETE request for missing details (exact logs, steps,
+     environment — like "send the Logs tab output of the failed run"), or fix
+     status. When the investigation produced nothing user-facing yet, make the
+     draft the request for the specific missing information; if there is
+     genuinely nothing to say or ask beyond the ack, seed NO draft — note in
+     the thread that the user is acknowledged and a reply will be drafted once
+     there is progress to report.
    **If `postDevSummary` FAILED (tool error — e.g. `CLAW_DEV_CHANNEL_ID not
    set`, a Discord post failure), your reply MUST say so plainly:** state that
    the development team could NOT be notified and why (one line, e.g. "the dev
