@@ -26,9 +26,14 @@
   "Attach local jobs database. Creates if needed.
    Memoizes initialization per connection to avoid repeated DDL execution."
   [trexsql-db]
-  (let [cache-path (or (get-in trexsql-db [:config :cache-path]) "./data/cache")
+  ;; Type-hinted so the compiler emits a direct `new File(...)`. Unhinted, these
+  ;; go through clojure.lang.Reflector, which resolves constructors at runtime —
+  ;; and inside libwebapi-native.so (GraalVM native-image) that reflection is not
+  ;; registered, so it throws. It only surfaced on the native-scanner dialects,
+  ;; because those are the ones that reach this from the cache build.
+  (let [^String cache-path (or (get-in trexsql-db [:config :cache-path]) "./data/cache")
         cache-dir (File. cache-path)
-        jobs-file (File. cache-dir (str jobs-db-name ".db"))
+        jobs-file (File. cache-dir ^String (str jobs-db-name ".db"))
         file-path (.getAbsolutePath jobs-file)
         conn-hash (System/identityHashCode (:handle trexsql-db))]
     (when (not= conn-hash (get @jobs-db-initialized file-path))
