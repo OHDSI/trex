@@ -27,6 +27,7 @@ import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
 console.log("main function started");
@@ -1380,6 +1381,12 @@ if (initialKeyName) {
     console.error("[mcp] Failed to bootstrap initial API key:", err);
   }
 }
+
+// The embedded WebAPI is part of the base image, not of d2e compatibility, so
+// it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it
+// here rather than from an external init job means a bare `restart` of this
+// container brings WebAPI back with it.
+await startNativeWebApi();
 
 await runD2eBoot();
 
