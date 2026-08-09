@@ -199,7 +199,7 @@ jobs:
       # core/server/node_modules either way. Typechecking runs on dev machines
       # via the same command without --no-check.
       - name: core/server tests (agents, plugin loader, memory importer, d2e-compat)
-        run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts d2e-compat/
+        run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts d2e-compat/ webapi-native.test.ts
       # The gbrain worker suite runs under its OWN import map (gbrain/ alias +
       # npm: pins) — it is not a member of the core deno workspace, so it
       # cannot run under core/server/deno.json (see gbrain-worker/deno.json).
