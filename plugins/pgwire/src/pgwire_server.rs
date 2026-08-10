@@ -242,13 +242,37 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials, ses
     }
 }
 
+/// HANA sets session variables with a single-quoted name — `SET 'APPLICATION' =
+/// 'x'`. Postgres and DuckDB require an identifier there, so the quoted form
+/// unambiguously belongs to HANA and must be shipped through the passthrough
+/// wrap. `UNSET '<NAME>'` already passes through: it does not begin with `SET`.
+pub(crate) fn is_hana_session_variable_set(sql: &str) -> bool {
+    let rest = strip_leading_sql_noise(sql).trim_start();
+    let rest = match rest.get(..4) {
+        Some(head) if head.eq_ignore_ascii_case("SET ") => &rest[4..],
+        _ => return false,
+    };
+    let rest = rest.trim_start();
+    // `SET SESSION '<NAME>' = ...` is equivalent to `SET '<NAME>' = ...`.
+    let rest = match rest.get(..8) {
+        Some(head) if head.eq_ignore_ascii_case("SESSION ") => rest[8..].trim_start(),
+        _ => rest,
+    };
+    rest.starts_with('\'')
+}
+
 /// Transaction- and session-control statements manage the local DuckDB session
 /// (and the pgwire connection's transaction/settings state), so they must run on
 /// DuckDB directly and never be shipped to HANA through the passthrough wrap.
 /// Drivers emit these implicitly — e.g. the Postgres JDBC driver sends `BEGIN`
 /// on connect and Achilles issues `SET memory_limit = ...` — and HANA rejects
-/// them. Matched after stripping leading whitespace/comments.
+/// them. Matched after stripping leading whitespace/comments. HANA's own
+/// `SET '<NAME>' = '<value>'` form is excluded — see `is_hana_session_variable_set`.
 pub(crate) fn is_local_session_statement(sql: &str) -> bool {
+    // HANA session-variable assignments must reach HANA, not the local session.
+    if is_hana_session_variable_set(sql) {
+        return false;
+    }
     let upper = strip_leading_sql_noise(sql).trim_start().to_uppercase();
     const KEYWORDS: &[&str] = &[
         "BEGIN", "START TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT",
@@ -1762,6 +1786,56 @@ mod tests {
         assert!(!is_postgres_only_set("RESET extra_float_digits"));
         // SETOF is not a SET statement (would be inside e.g. CREATE FUNCTION).
         assert!(!is_postgres_only_set("SETOF integer"));
+    }
+
+    // -------- is_hana_session_variable_set / HANA SET passthrough --------
+
+    #[test]
+    fn detects_hana_quoted_session_variable_set() {
+        assert!(is_hana_session_variable_set("SET 'APPLICATION' = 'd2e-WIZARD_x'"));
+        assert!(is_hana_session_variable_set("set 'APPLICATIONUSER' = 'a@b.c'"));
+        assert!(is_hana_session_variable_set("  SET   'PA_CONFIG_ID' = '7'"));
+        assert!(is_hana_session_variable_set(
+            "SET SESSION 'TEMPORAL_SYSTEM_TIME_AS_OF' = '2026-01-01'"
+        ));
+        assert!(is_hana_session_variable_set(
+            "-- attribution\nSET 'APPLICATION' = 'x'"
+        ));
+    }
+
+    #[test]
+    fn does_not_detect_identifier_form_as_hana_session_variable() {
+        assert!(!is_hana_session_variable_set("SET memory_limit = '4GB'"));
+        assert!(!is_hana_session_variable_set("SET schema = 'demo_cdm'"));
+        assert!(!is_hana_session_variable_set("SET \"extra_float_digits\" = 3"));
+        assert!(!is_hana_session_variable_set("SET application_name = 'd2e'"));
+        assert!(!is_hana_session_variable_set("SELECT 1"));
+        assert!(!is_hana_session_variable_set("SET"));
+        assert!(!is_hana_session_variable_set(""));
+        assert!(!is_hana_session_variable_set("SETOF integer"));
+    }
+
+    #[test]
+    fn hana_session_variable_set_is_not_a_local_statement() {
+        // Must reach HANA through the passthrough wrap, not the local DuckDB session.
+        assert!(!is_local_session_statement("SET 'APPLICATION' = 'd2e-WIZARD_x'"));
+        assert!(!is_local_session_statement("SET SESSION 'APPLICATIONUSER' = 'a@b.c'"));
+    }
+
+    #[test]
+    fn identifier_sets_and_txn_control_stay_local() {
+        assert!(is_local_session_statement("SET memory_limit = '4GB'"));
+        assert!(is_local_session_statement("SET schema = 'demo_cdm'"));
+        assert!(is_local_session_statement("BEGIN"));
+        assert!(is_local_session_statement("COMMIT"));
+        assert!(is_local_session_statement("RESET ALL"));
+    }
+
+    #[test]
+    fn pg_compat_intercept_ignores_hana_quoted_set() {
+        // The pg-compat intercept runs first; it must not swallow the HANA form.
+        assert!(!is_postgres_only_set("SET 'APPLICATION' = 'd2e-WIZARD_x'"));
+        assert!(!is_postgres_only_set("SET SESSION 'APPLICATIONUSER' = 'a@b.c'"));
     }
 
     // -------- split_sql_statements --------
