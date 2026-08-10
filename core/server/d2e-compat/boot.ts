@@ -33,8 +33,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
+  CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
+  redactSecrets,
   snowflakeExtrasFromRow,
   type ExecFn,
   type SourceCredential,
@@ -50,33 +52,9 @@ export async function d2eBoot(): Promise<void> {
   const log = (m: string) => console.log(`[d2e-compat] ${m}`);
   const err = (m: string) => console.error(`[d2e-compat] ${m}`);
 
-  // ── Block 1: native WebAPI ────────────────────────────────────────────────
-  // webapi.trex (from the trexsql base) registers trex_webapi_start(), which starts
-  // WebAPI on :8080. Gated by WEBAPI_NATIVE_ENABLED so builds without the
-  // extension still start.
-  if ((Deno.env.get("WEBAPI_NATIVE_ENABLED") ?? "true") !== "false") {
-    try {
-      const webapiConn = new Trex.TrexDB("memory");
-      // trex_webapi_start is the primary name; webapi.trex builds from before
-      // the trex_ rename only register webapi_start. A NEW core routinely runs
-      // against an OLD extension (the e2e job rebundles this branch's core
-      // into a pulled image; rolling deploys skew the same way), and without
-      // the fallback WebAPI never starts and the whole cache pipeline strands
-      // on "Cache not ready". Try the primary, fall back on a catalog miss.
-      let startRows;
-      try {
-        startRows = await webapiConn.execute("SELECT trex_webapi_start() AS msg", []);
-      } catch (e) {
-        const msg = (e as Error).message ?? "";
-        if (!msg.includes("trex_webapi_start does not exist")) throw e;
-        log("trex_webapi_start not registered (pre-rename webapi.trex) — falling back to webapi_start()");
-        startRows = await webapiConn.execute("SELECT webapi_start() AS msg", []);
-      }
-      log(`native WebAPI — ${startRows[0]?.msg}`);
-    } catch (e) {
-      err(`webapi_start failed: ${(e as Error).message}`);
-    }
-  }
+  // Block 1 (native WebAPI) moved to ../webapi-native.ts: it is not d2e
+  // compatibility, and nesting it here made WEBAPI_NATIVE_ENABLED unreachable
+  // unless D2E_COMPAT was also set. index.ts starts it directly.
 
   // ── Block 2: ICU extension ───────────────────────────────────────────────
   // Load ICU extension for DuckDB functions like current_date.
@@ -168,7 +146,7 @@ export async function d2eBoot(): Promise<void> {
         // created by the create_cachedb_hana_plugin flow (pgwire ATTACH cannot
         // create it); createDbFileIfMissing only lets the re-attach proceed.
         await ensureCacheAttached(`${ds.id}_cache`, {
-          cacheDir: "/usr/src/data/cache",
+          cacheDir: CACHE_DIR,
           createDbFileIfMissing: true,
           exec: hanaExec,
         });
@@ -260,7 +238,7 @@ export async function d2eBoot(): Promise<void> {
     // catalog is gone and queries against it fail with "Catalog <cacheId> does
     // not exist" (e.g. the cohort builder's concept search). FHIR and
     // strategus_results are attached separately (above / below), so skip them.
-    const cacheDir = "/usr/src/data/cache";
+    const cacheDir = CACHE_DIR;
     const systemDbNames = new Set<string>([
       Deno.env.get("FHIR__DB_NAME") || "FHIR",
       Deno.env.get("TREX__STRATEGUS_RESULTS_DB_NAME") || "strategus_results",
@@ -289,7 +267,13 @@ export async function d2eBoot(): Promise<void> {
       try {
         await ensureAttached({ connections: [c] }, { exec: attachExec });
       } catch (e) {
-        log(`[attach-startup] connection ${c.id} attach failed: ${(e as Error).message}`);
+        // redactSecrets: the postgres ATTACH embeds the decrypted password and
+        // DuckDB echoes the whole DSN back in its connection errors.
+        log(
+          `[attach-startup] connection ${c.id} attach failed: ${
+            redactSecrets((e as Error).message)
+          }`,
+        );
       }
     }
     for (const cid of cacheIds) {

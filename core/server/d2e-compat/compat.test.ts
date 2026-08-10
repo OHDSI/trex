@@ -216,3 +216,49 @@ Deno.test("token exchange fails without calling WebAPI when the Logto token is u
   assertEquals(result, null);
   assertEquals(urls.length, 0);
 });
+
+// ---------------------------------------------------------------------------
+// POST /trex/attach status selection (routes.ts attachResponseStatus)
+// ---------------------------------------------------------------------------
+import { attachResponseStatus, type AttachResult } from "./routes.ts";
+
+const attachedResult = (id: string): AttachResult =>
+  ({ type: "cache", id, catalog: id, status: "attached" });
+const failedResult = (id: string): AttachResult =>
+  ({ type: "cache", id, status: "failed", error: "boom" });
+const skippedResult = (id: string): AttachResult =>
+  ({ type: "connection", id, status: "skipped", error: "no source attach for dialect hana" });
+
+Deno.test("attach returns 200 when nothing failed", () => {
+  assertEquals(attachResponseStatus([attachedResult("a")], false), 200);
+  assertEquals(attachResponseStatus([attachedResult("a"), attachedResult("b")], false), 200);
+});
+
+Deno.test("attach treats a skip as non-failure (HANA connections have no __srcdb)", () => {
+  // The HANA dataset-creation shape: cache attached, connection skipped.
+  assertEquals(
+    attachResponseStatus([attachedResult("hana_db_cache"), skippedResult("hana_db")], false),
+    200,
+  );
+  assertEquals(attachResponseStatus([skippedResult("hana_db")], false), 200);
+});
+
+Deno.test("attach returns 207 only for a genuinely partial failure", () => {
+  assertEquals(attachResponseStatus([attachedResult("a"), failedResult("b")], false), 207);
+  assertEquals(attachResponseStatus([skippedResult("a"), failedResult("b")], false), 207);
+});
+
+Deno.test("attach returns 500 when every item failed, never a 2xx", () => {
+  // 207 is inside fetch's res.ok, so an all-failed 207 would read as success to
+  // the d2e portal caller, which logs only on !res.ok.
+  assertEquals(attachResponseStatus([failedResult("a")], false), 500);
+  assertEquals(attachResponseStatus([failedResult("a"), failedResult("b")], false), 500);
+});
+
+Deno.test("attach returns 500 on a fatal error regardless of collected results", () => {
+  assertEquals(attachResponseStatus([], true), 500);
+  assertEquals(attachResponseStatus([attachedResult("a")], true), 500);
+  // No items and no fatal cannot happen (parseAttachBody rejects an empty
+  // request), but it must not report failure.
+  assertEquals(attachResponseStatus([], false), 200);
+});

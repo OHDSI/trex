@@ -26,9 +26,19 @@ if ! command -v native-image >/dev/null 2>&1; then
 fi
 native-image --version
 
-# --- 2. Build + install the bao trexsql jar to local .m2 (org.trex:trexsql:0.1.23) ---
+# --- 2. Build + install the bao trexsql jar to local .m2 (org.trex:trexsql) ---
+# Read the version back off project.clj rather than pinning it in the wrapper
+# pom: a plugin version bump would otherwise leave the pom pointing at a
+# coordinate `lein install` no longer publishes, and the build falls through to
+# clojars looking for a jar that was never released there.
 echo "[webapi-native] lein install trexsql"
 ( cd "$BAO_JAVA_DIR" && lein install )
+TREXSQL_VERSION="$(sed -n '1s/.*defproject[[:space:]]\+org\.trex\/trexsql[[:space:]]\+"\([^"]*\)".*/\1/p' "$BAO_JAVA_DIR/project.clj")"
+if [ -z "$TREXSQL_VERSION" ]; then
+  echo "[webapi-native] could not read trexsql version from project.clj" >&2
+  exit 1
+fi
+echo "[webapi-native] trexsql version: $TREXSQL_VERSION"
 
 # --- 3. Install the WebAPI jar to local .m2 (org.ohdsi:WebAPI:3.0.0-SNAPSHOT) ---
 # WebAPI binds surefire's skipTests to ${skipUnitTests} (and failsafe to
@@ -93,7 +103,7 @@ export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","datasource.url":"jdbc
 
 # --- 5. Native build (Spring AOT + native-image shared library) ---
 echo "[webapi-native] building native shared library"
-( cd "$WRAPPER_DIR" && mvn -B -DskipTests package )
+( cd "$WRAPPER_DIR" && mvn -B -DskipTests -Dtrexsql.version="$TREXSQL_VERSION" package )
 
 kill "$(cat /tmp/oidc_mock.pid 2>/dev/null)" 2>/dev/null || true
 service postgresql stop || true

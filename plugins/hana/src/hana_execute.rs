@@ -7,6 +7,20 @@ use std::error::Error;
 use std::panic::{self, AssertUnwindSafe};
 use crate::HanaError;
 
+/// Extract the meaningful detail from an hdbconnect error.
+///
+/// For a server-side failure, hdbconnect's `HdbError::DbError` Displays as the useless generic
+/// string "Database server responded with an error" — the actual SQL error (code, sqlstate,
+/// position, message text) lives in the contained `ServerError`, reachable via `server_error()`.
+/// Without this, every HANA rejection reaches the caller (DC/DQD flows) with no diagnosable
+/// cause. Surface the `ServerError` detail when present; otherwise fall back to the Display.
+fn hana_error_detail(e: &hdbconnect::HdbError) -> String {
+    match e.server_error() {
+        Some(se) => format!("{e}: {se}"),
+        None => e.to_string(),
+    }
+}
+
 /// Word-boundary keywords used to keep `BEGIN…END` blocks intact while splitting.
 fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
@@ -298,7 +312,7 @@ fn execute_hana_statement(connection_string: &str, sql_statement: &str, session_
                             total_affected += 1;
                         } else {
                             return Err(Box::new(HanaError::query(
-                                &format!("Failed to execute statement {} of {}: {}", idx + 1, statements.len(), e),
+                                &format!("Failed to execute statement {} of {}: {}", idx + 1, statements.len(), hana_error_detail(&e)),
                                 Some(stmt),
                                 None,
                                 "execute_hana_statement"
@@ -308,7 +322,7 @@ fn execute_hana_statement(connection_string: &str, sql_statement: &str, session_
                 }
             }
             Err(e) => return Err(Box::new(HanaError::query(
-                &format!("Failed to prepare statement {} of {}: {}", idx + 1, statements.len(), e),
+                &format!("Failed to prepare statement {} of {}: {}", idx + 1, statements.len(), hana_error_detail(&e)),
                 Some(stmt),
                 None,
                 "execute_hana_statement"
