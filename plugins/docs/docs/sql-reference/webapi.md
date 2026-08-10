@@ -17,9 +17,13 @@ connection or data copy.
 
 ## Functions
 
+The unprefixed `webapi_start` / `webapi_stop` / `webapi_status` names remain
+registered as deprecated aliases for existing scripts; new SQL should use the
+`trex_webapi_*` primaries.
+
 All three functions take no arguments and return a status message.
 
-### `webapi_start()`
+### `trex_webapi_start()`
 
 Start the embedded WebAPI. Hands the current engine's database handle to WebAPI
 so it shares the same catalog instance.
@@ -27,27 +31,27 @@ so it shares the same catalog instance.
 **Returns:** VARCHAR — status message. If the native library is missing, returns a clear error string rather than failing to load.
 
 ```sql
-SELECT webapi_start();
+SELECT trex_webapi_start();
 ```
 
-### `webapi_stop()`
+### `trex_webapi_stop()`
 
 Stop the embedded WebAPI.
 
 **Returns:** VARCHAR — status message.
 
 ```sql
-SELECT webapi_stop();
+SELECT trex_webapi_stop();
 ```
 
-### `webapi_status()`
+### `trex_webapi_status()`
 
 Report whether the embedded WebAPI is running.
 
 **Returns:** VARCHAR — status message.
 
 ```sql
-SELECT webapi_status();
+SELECT trex_webapi_status();
 ```
 
 ## Operational notes

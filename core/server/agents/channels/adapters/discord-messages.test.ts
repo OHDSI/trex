@@ -300,6 +300,27 @@ Deno.test("decideMessageTrigger: empty/whitespace content in an owned thread is 
   );
 });
 
+Deno.test("decideMessageTrigger: attachment-only post in an owned thread IS a turn", () => {
+  const att = [{ name: "screenshot.png", url: "https://cdn.example/s.png", contentType: "image/png" }];
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ content: "", attachments: att }),
+      applicationId: "app-1",
+      channel: CLAW_THREAD,
+    }).kind,
+    "thread-turn",
+  );
+  // Attachment-only in a FOREIGN thread still needs a mention.
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ content: "", attachments: att }),
+      applicationId: "app-1",
+      channel: FOREIGN_THREAD,
+    }).kind,
+    "ignore",
+  );
+});
+
 // ---- history block ---------------------------------------------------------
 
 Deno.test("formatMessagesBlock: oldest-first, bot label, 500-char cap, empty → empty string", () => {
@@ -315,6 +336,21 @@ Deno.test("formatMessagesBlock: oldest-first, bot label, 500-char cap, empty →
   // 500 content chars + "…" marker, no more
   assertEquals(lines[2].length, "[bot:trex] ".length + 501);
   assertEquals(formatMessagesBlock("channel_messages", []), "");
+});
+
+Deno.test("formatMessagesBlock: attachment metadata rides after the content, url intact", () => {
+  const block = formatMessagesBlock("thread_messages", [
+    {
+      author: "alice",
+      bot: false,
+      content: "here is the header mock",
+      attachments: [{ name: "navbar.png", url: "https://cdn.example/a/navbar.png?sig=x", contentType: "image/png" }],
+    },
+  ]);
+  const line = block.split("\n")[1];
+  assert(line.startsWith("[alice] here is the header mock [attachment: "));
+  assert(line.includes('"url":"https://cdn.example/a/navbar.png?sig=x"'));
+  assert(line.includes('"name":"navbar.png"'));
 });
 
 Deno.test("formatDiscordMessageContextBlock carries message identity, no interaction fields", () => {

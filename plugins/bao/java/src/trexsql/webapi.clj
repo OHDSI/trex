@@ -257,6 +257,36 @@
 (defn- get-cache-path [cache-base-path database-code]
   (str cache-base-path "/" database-code ".db"))
 
+;; Files in the cache directory that are not dataset caches and must never be
+;; offered for deletion: the job registry the status/jobs endpoints read, and
+;; the FHIR server's live database, which merely happens to live here.
+(def ^:private protected-cache-files #{"_cache_jobs.db" "FHIR.db"})
+
+(defn- wal-file ^File [^File cache-file]
+  (File. (str (.getAbsolutePath cache-file) ".wal")))
+
+(defn- cache-total-size
+  "Size of a cache on disk: the database plus its write-ahead log. DuckDB keeps
+   recently written data in the WAL until a checkpoint, so the .db alone can
+   read as 12KB while the cache actually holds data."
+  [^File cache-file]
+  (let [wal (wal-file cache-file)]
+    (+ (if (.exists cache-file) (.length cache-file) 0)
+       (if (.exists wal) (.length wal) 0))))
+
+(defn- delete-cache-files!
+  "Remove a cache's .db and its .wal. Leaving the WAL behind strands multi-MB
+   files with no database to attach them to. Returns true if the .db went away."
+  [^File cache-file]
+  (let [wal (wal-file cache-file)
+        deleted? (or (not (.exists cache-file)) (.delete cache-file))]
+    (when (.exists wal)
+      (try (.delete wal)
+           (catch Exception e
+             (log/warn (format "Failed to delete WAL %s: %s"
+                               (.getName wal) (.getMessage e))))))
+    deleted?))
+
 (defn- handle-create-cache [db source-key body params]
   (let [source (find-source-by-key source-key)]
     (if-not source
@@ -357,7 +387,10 @@
                  :cacheExists exists?
                  :cacheAttached attached?
                  :cacheFilePath (when exists? (.getAbsolutePath cache-file))
-                 :cacheSizeBytes (when exists? (.length cache-file))
+                 ;; Include the WAL: DuckDB leaves freshly written data there
+                 ;; until a checkpoint, so measuring the .db alone reports a
+                 ;; populated cache as an empty 12KB one.
+                 :cacheSizeBytes (when exists? (cache-total-size cache-file))
                  :lastModified (when exists? (.lastModified cache-file))
                  ;; activeJob = currently running. lastJob = most recent
                  ;; finished run (kept for history / error reporting).
@@ -383,6 +416,83 @@
            :count (count jobs)}))
     (catch Exception e
       (internal-error (.getMessage e)))))
+
+(defn- handle-list-cache-files
+  "Every cache file on disk, not just the ones a source still points at.
+
+   Deleting a dataset leaves its cache behind, and the per-source endpoints
+   can't see those files — find-source-by-key returns nothing, so they answer
+   404 and the bytes stay forever. Listing the directory is the only way to
+   surface them, so each entry reports whether a source still claims it."
+  [db params]
+  (try
+    (let [cache-path (or (:cachePath params) (get-cache-path-from-config))
+          dir (File. ^String cache-path)
+          files (or (.listFiles dir) (make-array File 0))
+          db-files (->> files
+                        (filter #(.isFile ^File %))
+                        (filter #(str/ends-with? (.getName ^File %) ".db"))
+                        (sort-by #(.getName ^File %)))]
+      (ok {:cachePath (.getAbsolutePath dir)
+           :files
+           (mapv (fn [^File f]
+                   (let [file-name (.getName f)
+                         database-code (subs file-name 0 (- (count file-name) 3))
+                         protected? (contains? protected-cache-files file-name)
+                         source (when-not protected?
+                                  (try (find-source-by-key database-code)
+                                       (catch Exception _ nil)))]
+                     {:fileName file-name
+                      :databaseCode database-code
+                      :sizeBytes (cache-total-size f)
+                      :lastModified (.lastModified f)
+                      :attached (try (datamart/is-attached? db database-code)
+                                     (catch Exception _ false))
+                      ;; No source means nothing references this cache any more.
+                      :orphaned (and (not protected?) (nil? source))
+                      ;; Protected files are listed so the total on disk adds
+                      ;; up, but they are not dataset caches and can't be removed.
+                      :protected protected?}))
+                 db-files)}))
+    (catch Exception e
+      (internal-error (.getMessage e)))))
+
+(defn- handle-delete-cache-file
+  "Delete a cache by its database code, whether or not a source still exists.
+   This is the orphan cleanup path; the per-source DELETE can only reach caches
+   whose dataset is still registered."
+  [db database-code params]
+  (if-let [validation-error (validate-database-code database-code)]
+    (bad-request validation-error)
+    (if (contains? protected-cache-files (str database-code ".db"))
+      (bad-request (str "Refusing to delete protected file: " database-code ".db"))
+      (let [cache-path (or (:cachePath params) (get-cache-path-from-config))
+            dir (File. ^String cache-path)
+            cache-file (File. ^String (get-cache-path cache-path database-code))]
+        ;; validate-database-code already rejects separators, but resolve and
+        ;; re-check the parent so nothing outside the cache directory can be
+        ;; reached even if that pattern is ever loosened.
+        (if-not (= (.getCanonicalPath dir)
+                   (.getCanonicalPath (.getParentFile (.getCanonicalFile cache-file))))
+          (bad-request "Resolved path escapes the cache directory")
+          (if-not (.exists cache-file)
+            (not-found (str "Cache file not found: " database-code ".db"))
+            (do
+              (when (try (datamart/is-attached? db database-code) (catch Exception _ false))
+                (try (datamart/detach-database! db database-code)
+                     (catch Exception e
+                       (log/warn (format "Detach before delete failed for %s: %s"
+                                         database-code (.getMessage e))))))
+              (if (delete-cache-files! cache-file)
+                (do
+                  ;; Drop the job row too, or /cache/status keeps reporting a
+                  ;; build for a cache that no longer exists.
+                  (try (jobs/delete-job! db database-code)
+                       (catch Exception e
+                         (log/warn (format "Could not clear job row for %s: %s"
+                                           database-code (.getMessage e)))))
+                  (no-content))
+                (internal-error "Failed to delete cache file")))))))))
 
 (defn- handle-cancel-cache-job [db source-key params]
   (let [source (find-source-by-key source-key)]
@@ -416,8 +526,10 @@
           (do
             (when (try (datamart/is-attached? db database-code) (catch Exception _ false))
               (try (datamart/detach-database! db database-code) (catch Exception _)))
-            (if (.delete cache-file)
-              (no-content)
+            (if (delete-cache-files! cache-file)
+              (do
+                (try (jobs/delete-job! db database-code) (catch Exception _ nil))
+                (no-content))
               (internal-error "Failed to delete cache file"))))))))
 
 ;; Study execution handlers
@@ -646,6 +758,14 @@
         "GET" (handle-list-cache-jobs db params)
         (not-found (str "Unknown cache jobs endpoint: " method " /cache/jobs")))
 
+      ;; /cache/files is keyed by file, not by source, so orphaned caches whose
+      ;; dataset is gone can still be listed and removed.
+      (and (= source-key "cache") (= resource "files"))
+      (case [method (some? action)]
+        ["GET" false] (handle-list-cache-files db params)
+        ["DELETE" true] (handle-delete-cache-file db action params)
+        (not-found (str "Unknown cache files endpoint: " method " /cache/files")))
+
       (= resource "cache")
       (case [method action]
         ["POST" nil] (handle-create-cache db source-key body params)
@@ -695,6 +815,14 @@
 (defn- list-cache-jobs-handler
   [{:keys [db query-params]}]
   (handle-list-cache-jobs db query-params))
+
+(defn- list-cache-files-handler
+  [{:keys [db query-params]}]
+  (handle-list-cache-files db query-params))
+
+(defn- delete-cache-file-handler
+  [{:keys [db path-params query-params]}]
+  (handle-delete-cache-file db (:database-code path-params) query-params))
 
 (defn- create-cache-handler
   [{:keys [db path-params body-params query-params]}]
@@ -1391,6 +1519,11 @@
   (vec
     (concat
       [["/cache/jobs" {:get {:handler list-cache-jobs-handler}}]
+       ;; Keyed by file rather than by source so orphaned caches, whose dataset
+       ;; is already gone, can still be listed and reclaimed. Must stay ahead of
+       ;; "/:source-key" so "cache" is not swallowed as a source key.
+       ["/cache/files" {:get {:handler list-cache-files-handler}}]
+       ["/cache/files/:database-code" {:delete {:handler delete-cache-file-handler}}]
        ["/study/jobs" {:get {:handler list-study-jobs-handler}}]
        ["/study/env" {:post {:handler setup-env-handler}}]
        ["/study/envs" {:get {:handler list-envs-handler}}]

@@ -1,5 +1,6 @@
 import { core } from "ext:core/mod.js";
 import { TrexConnection } from './dbconnection.js';
+import { resolveDialect, resolveFirstPublication } from './db_resolve.js';
 
 const ops = core.ops;
 
@@ -228,13 +229,7 @@ export class DatabaseManager {
 	}
 
 	getFirstPublication(db_id) {
-		try {
-			const tmp =  this.getCredentials().filter(c => c.id === db_id)[0].publications[0]
-			if(tmp)
-				return `${db_id}_${tmp.publication}`
-		} catch(e) {
-		}
-		return `${db_id}`
+		return resolveFirstPublication(this.getCredentials(), db_id);
 	}
 
 
@@ -274,14 +269,9 @@ export class UserDatabaseManager {
 	getConnection(db_id, schema, vocab_schema, result_schema, translationMap) {
 		const dbc = this.getDatabaseCredentials();
 		const worker_id = op_acquire_worker();
-		let dialect = "duckdb";
-		if (db_id != CDW_DUCKDB_FILE_DATABASE_CODE) {
-			try {
-				dialect = dbc.filter(c => c.id === db_id)[0].dialect;
-			} catch (e) {
-				console.error(`Error getting dialect for ${db_id}: ${e}`);
-			}
-		}
+		// db_id may be a dataset cache_id or the built-in duckdb file database,
+		// neither of which has a credential row; those resolve to duckdb.
+		const dialect = resolveDialect(dbc, db_id);
 		// Single TrexDB shared between read and write slots: same session,
 		// so a temp table CREATEd via the write path stays visible to a
 		// later JOIN via the read path.

@@ -91,6 +91,12 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_PROJECT_TOKEN }}
 
+      # Leiningen stamps project.clj's version into MANIFEST.MF, so without
+      # this the released jar reports whatever the checked-in version happens
+      # to be rather than the tag it was built from.
+      - name: Stamp release version into project.clj
+        run: lein change version set '"${{ steps.version.outputs.version }}"'
+
       - name: Build uberjar
         run: lein uberjar
 

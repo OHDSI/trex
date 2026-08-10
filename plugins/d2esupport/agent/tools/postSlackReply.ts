@@ -16,10 +16,23 @@ export async function postReplyCore(
   post: PostFn = (opts) => postSlackMessage(opts),
 ): Promise<{ posted: boolean }> {
   if (!input.text?.trim()) throw new Error("postSlackReply: text is required");
-  for (const chunk of splitSlackMessageText(input.text)) {
-    await post({ channelId: input.channelId, threadTs: input.threadTs, text: chunk });
-  }
+  // The task row is the AUTHORITATIVE destination — never the model-typed
+  // input: the APPROVED_REPLY turn arrives via the native session API with no
+  // channel metadata, so input.channelId/threadTs are reconstructed by the
+  // model from conversation text (attacker-adjacent in support tickets). Fall
+  // back to input only when no task row exists.
   const task = await readTask(sql, sessionId);
+  const channelId = task?.slackChannelId ?? input.channelId;
+  const threadTs = task?.slackThreadTs ?? input.threadTs;
+  if (task && (input.channelId !== channelId || input.threadTs !== threadTs)) {
+    console.warn(
+      `postSlackReply: model-supplied target ${input.channelId}:${input.threadTs} ` +
+        `differs from the task row ${channelId}:${threadTs} — using the task row`,
+    );
+  }
+  for (const chunk of splitSlackMessageText(input.text)) {
+    await post({ channelId, threadTs, text: chunk });
+  }
   if (task) await upsertTask(sql, { ...task, status: "answered" });
   return { posted: true };
 }

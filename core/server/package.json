@@ -6,7 +6,7 @@
     "@ai-sdk/anthropic": "^3",
     "@ai-sdk/google": "^3",
     "@ai-sdk/openai": "^3",
-    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "ai": "^6",
     "edn-data": "^1",
     "apache-arrow": "^21.1.0",
@@ -23,7 +23,7 @@
   },
   "overrides": {
     "hono": "^4.12.18",
-    "fast-uri": "^3.1.2",
+    "fast-uri": "^3.1.5",
     "ip-address": "^10.1.1"
   }
 }

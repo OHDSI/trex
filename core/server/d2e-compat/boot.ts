@@ -51,19 +51,9 @@ export async function d2eBoot(): Promise<void> {
   const log = (m: string) => console.log(`[d2e-compat] ${m}`);
   const err = (m: string) => console.error(`[d2e-compat] ${m}`);
 
-  // ── Block 1: native WebAPI ────────────────────────────────────────────────
-  // webapi.trex (from the trexsql base) registers webapi_start(), which starts
-  // WebAPI on :8080. Gated by WEBAPI_NATIVE_ENABLED so builds without the
-  // extension still start.
-  if ((Deno.env.get("WEBAPI_NATIVE_ENABLED") ?? "true") !== "false") {
-    try {
-      const webapiConn = new Trex.TrexDB("memory");
-      const startRows = await webapiConn.execute("SELECT webapi_start() AS msg", []);
-      log(`native WebAPI — ${startRows[0]?.msg}`);
-    } catch (e) {
-      err(`webapi_start failed: ${(e as Error).message}`);
-    }
-  }
+  // Block 1 (native WebAPI) moved to ../webapi-native.ts: it is not d2e
+  // compatibility, and nesting it here made WEBAPI_NATIVE_ENABLED unreachable
+  // unless D2E_COMPAT was also set. index.ts starts it directly.
 
   // ── Block 2: ICU extension ───────────────────────────────────────────────
   // Load ICU extension for DuckDB functions like current_date.

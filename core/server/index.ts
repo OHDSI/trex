@@ -23,9 +23,11 @@ import { Plugins } from "./plugin/plugin.ts";
 import { addPluginRoutes } from "./routes/plugin.ts";
 import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
+import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
 console.log("main function started");
@@ -148,8 +150,26 @@ app.get(`${BASE_PATH}/api/web-config`, apiLimiter, (_req, res) => {
   res.json({ navExtra });
 });
 
-// Mount GoTrue-compatible auth router
-app.use(`${BASE_PATH}/auth/v1`, authRouter);
+// Mount the GoTrue-compatible native auth router — but only when the native IDP
+// is explicitly enabled. Disabled by default so a deployment fronted by an
+// external IdP (d2e + Logto) ships no native login for ANY user and no usable
+// seeded admin@trex.local credential. When disabled, every native login endpoint
+// returns 403. Enable with TREX_IDP_ENABLED=true (see docker-compose.dev.yml /
+// docker-compose-local.yml for local/standalone use).
+if (nativeIdpEnabled()) {
+  app.use(`${BASE_PATH}/auth/v1`, authRouter);
+} else {
+  app.use(
+    `${BASE_PATH}/auth/v1`,
+    (_req: express.Request, res: express.Response) => {
+      res.status(403).json({
+        error: "idp_disabled",
+        error_description:
+          "Native login is disabled. Set TREX_IDP_ENABLED=true to enable it.",
+      });
+    },
+  );
+}
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
 if (typeof (globalThis as any).global === "undefined") {
@@ -671,6 +691,19 @@ app.all(`${BASE_PATH}/storage/v1/*`, express.raw({ type: "*/*", limit: "50mb" })
 
 // Supabase-compatible /pg/v1/* route — calls postgres-meta worker directly.
 app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res) => {
+  // Admin-only: pg-meta runs privileged schema introspection/DDL against the
+  // database and does NOT authenticate the caller itself (unlike PostgREST on
+  // /rest/v1 and the storage worker on /storage/v1, which verify the JWT). Gate
+  // it here the same way the Studio API is gated, so an authenticated non-admin
+  // (or anon) can't reach it. authContext has already populated pgSettings.
+  const role = (req as any).pgSettings?.["app.user_role"];
+  if (role !== "admin") {
+    res.status(role ? 403 : 401).json({
+      error: role ? "forbidden" : "not_authenticated",
+      error_description: "pg-meta (/pg/v1) is admin-only",
+    });
+    return;
+  }
   const handler = fnmap["@trex/pg-meta/postgres-meta/functions"];
   if (!handler) {
     res.status(503).json({ error: "pg-meta plugin not loaded" });
@@ -1348,6 +1381,12 @@ if (initialKeyName) {
     console.error("[mcp] Failed to bootstrap initial API key:", err);
   }
 }
+
+// The embedded WebAPI is part of the base image, not of d2e compatibility, so
+// it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it
+// here rather than from an external init job means a bare `restart` of this
+// container brings WebAPI back with it.
+await startNativeWebApi();
 
 await runD2eBoot();
 

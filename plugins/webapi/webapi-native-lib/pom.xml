@@ -18,6 +18,9 @@
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <spring.boot.version>3.5.6</spring.boot.version>
     <skipTests>true</skipTests>
+    <!-- Overridden by build-native-lib.sh with the version `lein install`
+         actually published, so bumping the plugin cannot orphan this. -->
+    <trexsql.version>0.3.1</trexsql.version>
   </properties>
 
   <!-- Replicate WebAPI's own dependency versions. dependencyManagement is NOT
@@ -70,7 +73,7 @@
     <dependency>
       <groupId>org.trex</groupId>
       <artifactId>trexsql</artifactId>
-      <version>0.1.23</version>
+      <version>${trexsql.version}</version>
     </dependency>
 
     <!-- @CEntryPoint compile visibility (provided; comes from WebAPI jar at runtime). -->

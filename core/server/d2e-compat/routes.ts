@@ -108,6 +108,15 @@ function isValidDbCode(code: unknown): boolean {
   return typeof code === "string" && DB_CODE_RE.test(code);
 }
 
+// Accept either spelling on write. GET /trex/db/ emits the trexdb column `extra`
+// under both names, so a client that round-trips the legacy `db_extra` alias must
+// not silently drop its extras (Snowflake key-pair, BigQuery dataset, ...).
+// deno-lint-ignore no-explicit-any
+function extraJson(body: any): string | null {
+  const extra = body.extra ?? body.db_extra;
+  return extra != null ? JSON.stringify(extra) : null;
+}
+
 // ---------------------------------------------------------------------------
 // /portal/env.js helpers
 // ---------------------------------------------------------------------------
@@ -138,11 +147,19 @@ function certEscapeNewLine(str: string): string {
 // MissingServletRequestPartException ("Required part 'source' is not
 // present"), which broke the d2e demo-dataset setup (E2E "Adding demo
 // dataset... 500").
+// Numbers and booleans count as parsed bodies too: the global json parser runs
+// non-strict (see routes/cli-login.ts) so WebAPI's tag endpoints, which take a
+// bare int, reach us with req.body === 2. That parser has already drained the
+// raw stream, so refusing to re-serialize would forward the POST bodiless.
+// Strings stay excluded — a raw, genuinely unparsed body also surfaces as a
+// string, and re-serializing that would double-encode it.
 export function shouldReserializeParsedBody(
   contentType: string | string[] | undefined,
   parsed: unknown,
 ): boolean {
-  if (parsed === undefined || parsed === null || typeof parsed !== "object") return false;
+  if (parsed === undefined || parsed === null) return false;
+  const kind = typeof parsed;
+  if (kind !== "object" && kind !== "number" && kind !== "boolean") return false;
   const ct = String(Array.isArray(contentType) ? contentType[0] : contentType ?? "").toLowerCase();
   return ct.includes("application/json") || ct.includes("+json");
 }
@@ -545,6 +562,10 @@ export function mountD2eRoutes(app: Express): void {
           `SELECT d.id, d.id AS code, d.host, d.port,
                   d."databaseName" AS name, d.dialect,
                   d."vocabSchemas" AS vocab_schemas, d.extra,
+                  -- The legacy trex.db column was db_extra; trexdb.database
+                  -- renamed it to extra. The d2e UI still reads db_extra, so
+                  -- emit both (dbm-sync.ts does the same for its consumers).
+                  d.extra AS db_extra,
                   d.description, d.enabled,
                   d."createdAt", d."updatedAt",
                   COALESCE(
@@ -608,7 +629,7 @@ export function mountD2eRoutes(app: Express): void {
             body.name ?? body.databaseName ?? null,
             body.dialect ?? "postgresql",
             body.vocabSchemas != null ? JSON.stringify(body.vocabSchemas) : null,
-            body.extra != null ? JSON.stringify(body.extra) : null,
+            extraJson(body),
             body.description ?? null,
           ]
         );
@@ -662,7 +683,7 @@ export function mountD2eRoutes(app: Express): void {
             body.name ?? body.databaseName ?? null,
             body.dialect ?? null,
             body.vocabSchemas != null ? JSON.stringify(body.vocabSchemas) : null,
-            body.extra != null ? JSON.stringify(body.extra) : null,
+            extraJson(body),
             body.description ?? null,
           ]
         );

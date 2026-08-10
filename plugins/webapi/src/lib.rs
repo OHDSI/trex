@@ -280,6 +280,18 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     // Capture the host engine's duckdb_database so webapi_start can pass it to the
     // embedded WebAPI, which then shares this instance instead of opening its own.
     WEBAPI_HOST_DB.store(con.raw_database() as usize as u64, Ordering::SeqCst);
+    // trex_-prefixed names are the primaries (repo SQL naming convention);
+    // the unprefixed originals stay registered as deprecated aliases for
+    // existing deployments/scripts. NOTE: webapi_start/stop/status are ALSO
+    // dlsym'd C symbol names of the embedded native lib — that namespace is
+    // separate and intentionally unchanged.
+    con.register_scalar_function::<WebApiStart>("trex_webapi_start")
+        .expect("register trex_webapi_start");
+    con.register_scalar_function::<WebApiStop>("trex_webapi_stop")
+        .expect("register trex_webapi_stop");
+    con.register_scalar_function::<WebApiStatus>("trex_webapi_status")
+        .expect("register trex_webapi_status");
+    // Deprecated aliases (pre-convention names).
     con.register_scalar_function::<WebApiStart>("webapi_start")
         .expect("register webapi_start");
     con.register_scalar_function::<WebApiStop>("webapi_stop")

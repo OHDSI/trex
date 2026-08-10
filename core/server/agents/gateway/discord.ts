@@ -94,6 +94,20 @@ export interface DiscordGatewayClientOptions {
   createSocket?: (url: string) => GatewaySocket;
   /** Reconnect backoff base in ms (default 1000; doubled per attempt, capped at 60s). */
   reconnectBaseMs?: number;
+  /**
+   * Loopback forward retries: attempts (default 3) and backoff base in ms
+   * (default 500; doubled per attempt). Only network errors and 5xx are
+   * retried — the loopback route runs in a worker isolate that recycles
+   * every ~15 min, so a POST landing mid-recycle used to drop the event.
+   */
+  forwardAttempts?: number;
+  forwardRetryBaseMs?: number;
+  /**
+   * Abort a connection that never reaches READY/RESUMED (default 30s). A
+   * half-open session that ACKs heartbeats but never completes the handshake
+   * would otherwise linger forever, silently receiving nothing.
+   */
+  readyTimeoutMs?: number;
 }
 
 export class DiscordGatewayClient {
@@ -106,6 +120,7 @@ export class DiscordGatewayClient {
   #socket: GatewaySocket | null = null;
   #heartbeatTimer: number | undefined;
   #reconnectTimer: number | undefined;
+  #readyTimer: number | undefined;
   #heartbeatAcked = true;
   #seq: number | null = null;
   #sessionId: string | null = null;
@@ -128,6 +143,7 @@ export class DiscordGatewayClient {
   stop(): void {
     this.#running = false;
     clearTimeout(this.#reconnectTimer);
+    clearTimeout(this.#readyTimer);
     clearInterval(this.#heartbeatTimer);
     try {
       this.#socket?.close(1000, "client stop");
@@ -176,6 +192,19 @@ export class DiscordGatewayClient {
     this.#socket = socket;
     this.#heartbeatAcked = true;
 
+    // Ready watchdog: if this connection never completes the handshake
+    // (READY on identify, RESUMED on resume) it is deaf — Discord dispatches
+    // nothing on a half-open session even when heartbeats keep ACKing. Force
+    // a fresh reconnect instead of lingering.
+    clearTimeout(this.#readyTimer);
+    this.#readyTimer = setTimeout(() => {
+      if (this.#socket !== socket) return;
+      console.warn(`${this.#label}: no READY/RESUMED within ${this.#opts.readyTimeoutMs ?? 30_000}ms — closing half-open connection`);
+      try {
+        socket.close(4903, "ready timeout");
+      } catch { /* already closed */ }
+    }, this.#opts.readyTimeoutMs ?? 30_000);
+
     socket.onmessage = (ev) => {
       try {
         this.#handleMessage(JSON.parse(String(ev.data)));
@@ -189,6 +218,7 @@ export class DiscordGatewayClient {
     socket.onclose = (ev) => {
       clearInterval(this.#heartbeatTimer);
       if (this.#socket !== socket) return; // superseded by a newer connection
+      clearTimeout(this.#readyTimer);
       this.#socket = null;
       if (!this.#running) return;
       if (FATAL_CLOSE_CODES.has(ev.code)) {
@@ -251,6 +281,10 @@ export class DiscordGatewayClient {
       case OP.INVALID_SESSION:
         // d=true → session is resumable; d=false → identify from scratch.
         if (msg.d !== true) {
+          // Re-identifying starts a fresh session: dispatches between the last
+          // seen seq and the new READY are gone (Discord replays only on
+          // RESUME). Log the gap so a missed mention is diagnosable.
+          console.warn(`${this.#label}: session invalidated (unresumable) — dispatches after seq ${this.#seq} are lost; re-identifying`);
           this.#sessionId = null;
           this.#resumeUrl = null;
         }
@@ -287,26 +321,64 @@ export class DiscordGatewayClient {
         this.#sessionId = ready?.session_id ?? null;
         this.#resumeUrl = ready?.resume_gateway_url ?? null;
         this.#attempts = 0;
+        clearTimeout(this.#readyTimer);
         console.log(`${this.#label}: gateway READY (session ${this.#sessionId})`);
         break;
       }
       case "RESUMED":
         this.#attempts = 0;
+        clearTimeout(this.#readyTimer);
         console.log(`${this.#label}: gateway session resumed`);
         break;
-      case "INTERACTION_CREATE":
+      case "INTERACTION_CREATE": {
+        // Receipt log: without it, "bot didn't react" incidents can't be
+        // attributed to Discord-side loss vs. forward-side loss.
+        const i = d as { id?: string; type?: number };
+        console.log(`${this.#label}: INTERACTION_CREATE ${i?.id} (type ${i?.type}) received`);
         void this.#forwardInteraction(d).catch((e) => {
           console.error(`${this.#label}: interaction forwarding failed:`, e);
         });
         break;
-      case "MESSAGE_CREATE":
+      }
+      case "MESSAGE_CREATE": {
+        const m = d as { id?: string; channel_id?: string; author?: { id?: string; username?: string; bot?: boolean } };
+        // Bot-authored messages (incl. our own replies) are dropped in
+        // #forwardMessage; don't log them either — one line per own reply
+        // would be pure noise.
+        if (m?.author?.bot !== true) {
+          console.log(`${this.#label}: MESSAGE_CREATE ${m?.id} from ${m?.author?.username ?? m?.author?.id} in ${m?.channel_id} received`);
+        }
         void this.#forwardMessage(d).catch((e) => {
           console.error(`${this.#label}: message forwarding failed:`, e);
         });
         break;
+      }
       default:
         break;
     }
+  }
+
+  // Loopback POST with bounded retry. The channel route runs in a worker
+  // isolate that recycles every ~15 min; a POST landing mid-recycle fails
+  // transiently (connection refused / 5xx) and used to drop the event
+  // outright. Retries only network errors and 5xx — a 4xx (unauthorized,
+  // malformed) is deterministic and returned to the caller as-is. Returns
+  // null when all attempts failed.
+  async #loopbackPost(url: string, init: RequestInit, what: string): Promise<Response | null> {
+    const attempts = this.#opts.forwardAttempts ?? 3;
+    const base = this.#opts.forwardRetryBaseMs ?? 500;
+    for (let i = 0; i < attempts; i++) {
+      try {
+        const res = await this.#fetch(url, init);
+        if (res.status < 500) return res;
+        const text = await res.text().catch(() => "");
+        console.warn(`${this.#label}: ${what} returned ${res.status} (attempt ${i + 1}/${attempts}): ${text.slice(0, 200)}`);
+      } catch (e) {
+        console.warn(`${this.#label}: ${what} network error (attempt ${i + 1}/${attempts}):`, e);
+      }
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, base * 2 ** i));
+    }
+    return null;
   }
 
   // The gateway INTERACTION_CREATE `d` payload is byte-for-byte the same
@@ -354,7 +426,7 @@ export class DiscordGatewayClient {
     const body = JSON.stringify(d);
     const timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await this.#opts.signer.sign(timestamp, body);
-    const res = await this.#fetch(this.#opts.forwardUrl, {
+    const res = await this.#loopbackPost(this.#opts.forwardUrl, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -362,7 +434,11 @@ export class DiscordGatewayClient {
         "x-signature-timestamp": timestamp,
       },
       body,
-    });
+    }, "channel route");
+    if (!res) {
+      console.error(`${this.#label}: channel route unreachable after retries — interaction ${interaction.id} dropped`);
+      return;
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       console.error(`${this.#label}: channel route rejected interaction (${res.status}): ${text.slice(0, 300)}`);
@@ -421,7 +497,7 @@ export class DiscordGatewayClient {
     const body = JSON.stringify(d);
     const timestamp = String(Math.floor(Date.now() / 1000));
     const signature = await this.#opts.signer.sign(timestamp, body);
-    const res = await this.#fetch(url, {
+    const res = await this.#loopbackPost(url, {
       method: "POST",
       headers: {
         "content-type": "application/json",
@@ -429,7 +505,11 @@ export class DiscordGatewayClient {
         "x-signature-timestamp": timestamp,
       },
       body,
-    });
+    }, "messages route");
+    if (!res) {
+      console.error(`${this.#label}: messages route unreachable after retries — message ${message.id} dropped`);
+      return;
+    }
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       console.error(`${this.#label}: messages route rejected message (${res.status}): ${text.slice(0, 300)}`);
