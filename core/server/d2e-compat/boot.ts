@@ -36,6 +36,7 @@ import {
   CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
+  redactSecrets,
   snowflakeExtrasFromRow,
   type ExecFn,
   type SourceCredential,
@@ -266,7 +267,13 @@ export async function d2eBoot(): Promise<void> {
       try {
         await ensureAttached({ connections: [c] }, { exec: attachExec });
       } catch (e) {
-        log(`[attach-startup] connection ${c.id} attach failed: ${(e as Error).message}`);
+        // redactSecrets: the postgres ATTACH embeds the decrypted password and
+        // DuckDB echoes the whole DSN back in its connection errors.
+        log(
+          `[attach-startup] connection ${c.id} attach failed: ${
+            redactSecrets((e as Error).message)
+          }`,
+        );
       }
     }
     for (const cid of cacheIds) {
