@@ -33,8 +33,10 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
+  CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
+  redactSecrets,
   snowflakeExtrasFromRow,
   type ExecFn,
   type SourceCredential,
@@ -144,7 +146,7 @@ export async function d2eBoot(): Promise<void> {
         // created by the create_cachedb_hana_plugin flow (pgwire ATTACH cannot
         // create it); createDbFileIfMissing only lets the re-attach proceed.
         await ensureCacheAttached(`${ds.id}_cache`, {
-          cacheDir: "/usr/src/data/cache",
+          cacheDir: CACHE_DIR,
           createDbFileIfMissing: true,
           exec: hanaExec,
         });
@@ -236,7 +238,7 @@ export async function d2eBoot(): Promise<void> {
     // catalog is gone and queries against it fail with "Catalog <cacheId> does
     // not exist" (e.g. the cohort builder's concept search). FHIR and
     // strategus_results are attached separately (above / below), so skip them.
-    const cacheDir = "/usr/src/data/cache";
+    const cacheDir = CACHE_DIR;
     const systemDbNames = new Set<string>([
       Deno.env.get("FHIR__DB_NAME") || "FHIR",
       Deno.env.get("TREX__STRATEGUS_RESULTS_DB_NAME") || "strategus_results",
@@ -265,7 +267,13 @@ export async function d2eBoot(): Promise<void> {
       try {
         await ensureAttached({ connections: [c] }, { exec: attachExec });
       } catch (e) {
-        log(`[attach-startup] connection ${c.id} attach failed: ${(e as Error).message}`);
+        // redactSecrets: the postgres ATTACH embeds the decrypted password and
+        // DuckDB echoes the whole DSN back in its connection errors.
+        log(
+          `[attach-startup] connection ${c.id} attach failed: ${
+            redactSecrets((e as Error).message)
+          }`,
+        );
       }
     }
     for (const cid of cacheIds) {
