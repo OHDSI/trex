@@ -50,7 +50,21 @@ Deno.test("proxy streams non-JSON bodies raw (multipart placeholder {} must not 
 Deno.test("proxy streams genuinely unparsed bodies raw regardless of content type", () => {
   assertEquals(shouldReserializeParsedBody("application/json", undefined), false);
   assertEquals(shouldReserializeParsedBody("application/json", null), false);
+  // A raw, unparsed body also arrives as a string; re-serializing would
+  // double-encode it, so strings keep streaming through untouched.
   assertEquals(shouldReserializeParsedBody("application/json", "raw string"), false);
+});
+
+Deno.test("proxy re-serializes primitive JSON bodies (WebAPI tag assign posts a bare int)", () => {
+  // POST /{conceptset|cohortdefinition}/{id}/tag/ sends `2` as the whole body.
+  // The global parser is non-strict, so it parses to a number and drains the
+  // stream — without re-serializing, the POST would reach WebAPI bodiless and
+  // the tag would never be assigned.
+  assertEquals(shouldReserializeParsedBody("application/json", 2), true);
+  assertEquals(shouldReserializeParsedBody("application/json; charset=utf-8", 0), true);
+  assertEquals(shouldReserializeParsedBody("application/json", false), true);
+  // Still gated on the request actually being JSON.
+  assertEquals(shouldReserializeParsedBody("multipart/form-data; boundary=x", 2), false);
 });
 
 // ---------------------------------------------------------------------------

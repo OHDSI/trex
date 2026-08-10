@@ -136,11 +136,19 @@ function certEscapeNewLine(str: string): string {
 // MissingServletRequestPartException ("Required part 'source' is not
 // present"), which broke the d2e demo-dataset setup (E2E "Adding demo
 // dataset... 500").
+// Numbers and booleans count as parsed bodies too: the global json parser runs
+// non-strict (see routes/cli-login.ts) so WebAPI's tag endpoints, which take a
+// bare int, reach us with req.body === 2. That parser has already drained the
+// raw stream, so refusing to re-serialize would forward the POST bodiless.
+// Strings stay excluded — a raw, genuinely unparsed body also surfaces as a
+// string, and re-serializing that would double-encode it.
 export function shouldReserializeParsedBody(
   contentType: string | string[] | undefined,
   parsed: unknown,
 ): boolean {
-  if (parsed === undefined || parsed === null || typeof parsed !== "object") return false;
+  if (parsed === undefined || parsed === null) return false;
+  const kind = typeof parsed;
+  if (kind !== "object" && kind !== "number" && kind !== "boolean") return false;
   const ct = String(Array.isArray(contentType) ? contentType[0] : contentType ?? "").toLowerCase();
   return ct.includes("application/json") || ct.includes("+json");
 }
