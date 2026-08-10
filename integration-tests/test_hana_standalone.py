@@ -53,6 +53,40 @@ def test_hana_scan_basic(node_factory):
     assert result[0][0] == 1
 
 
+def test_hana_session_variable_survives_across_calls(node_factory):
+    """A session variable set on a pinned session is visible to later statements."""
+    node = node_factory(load_hana=True, load_db=False)
+    session_id = "778899"
+    # Quotes are doubled once for the DuckDB literal carrying the HANA statement:
+    # HANA receives SET 'APPLICATION' = 'WIZARD_test'.
+    node.execute(
+        f"SELECT trex_hana_execute('{HANA_TEST_URL}', "
+        f"'SET ''APPLICATION'' = ''WIZARD_test''', '{session_id}')"
+    )
+    result = node.execute(
+        f"SELECT * FROM trex_hana_scan("
+        f"'SELECT SESSION_CONTEXT(''APPLICATION'') AS application FROM DUMMY', "
+        f"'{HANA_TEST_URL}', session_id = '{session_id}')"
+    )
+    node.execute(f"SELECT trex_hana_evict_session('{session_id}')")
+    assert result == [("WIZARD_test",)]
+
+
+def test_hana_session_variable_absent_without_session(node_factory):
+    """Without a session id each call is a fresh connection, so the SET is lost."""
+    node = node_factory(load_hana=True, load_db=False)
+    node.execute(
+        f"SELECT trex_hana_execute('{HANA_TEST_URL}', "
+        f"'SET ''APPLICATION'' = ''WIZARD_unpinned''')"
+    )
+    result = node.execute(
+        f"SELECT * FROM trex_hana_scan("
+        f"'SELECT SESSION_CONTEXT(''APPLICATION'') AS application FROM DUMMY', "
+        f"'{HANA_TEST_URL}')"
+    )
+    assert result != [("WIZARD_unpinned",)]
+
+
 def test_hana_query_alias(node_factory):
     """trex_hana_query() is an alias for trex_hana_scan() and returns the same result."""
     node = node_factory(load_hana=True, load_db=False)
