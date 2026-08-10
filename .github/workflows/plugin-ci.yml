@@ -1626,8 +1626,7 @@ jobs:
           file-report: true
 
       - name: Collect logs on failure
-        if: env.D2E_UNAVAILABLE != 'true'
-        if: failure()
+        if: env.D2E_UNAVAILABLE != 'true' && failure()
         working-directory: d2e
         run: |
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml logs
