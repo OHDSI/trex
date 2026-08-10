@@ -253,6 +253,23 @@ fn wrap_query_dml_uses_hana_execute() {
 }
 
 #[test]
+fn hana_session_variable_set_is_wrapped_as_execute_with_session_id() {
+    // `SET '<NAME>' = '<value>'` is HANA's session-variable assignment. It must be
+    // forwarded on the session's pinned connection, not run on local DuckDB, so a
+    // later statement on the same session can read it back with SESSION_CONTEXT.
+    let wrapped = wrap_query_for_hana("SET 'APPLICATION' = 'd2e-WIZARD_x'", &sample_creds(), 4242);
+    assert!(
+        wrapped.starts_with("SELECT trex_hana_execute("),
+        "session-variable SET must use the write wrap: {wrapped:?}"
+    );
+    assert!(
+        wrapped.contains("SET ''APPLICATION'' = ''d2e-WIZARD_x''"),
+        "the statement must be forwarded verbatim with quotes doubled: {wrapped:?}"
+    );
+    assert!(wrapped.ends_with(", '4242')"), "must carry the session id: {wrapped:?}");
+}
+
+#[test]
 fn wrap_query_dml_passes_url_before_sql() {
     // trex_hana_execute(connection_url, sql): the URL argument must come
     // first, the statement second. Regression guard for the arg-order bug.

@@ -205,11 +205,10 @@ jobs:
       # cannot run under core/server/deno.json (see gbrain-worker/deno.json).
       - name: gbrain memory worker tests (live DB)
         run: cd core/server && deno test --no-check --allow-all --import-map memory/gbrain-worker/deno.json --node-modules-dir=auto memory/gbrain-worker/
-      # Runtime alias resolution (db_resolve.js). Split out of trex_lib.js so it
-      # is importable without ext:core/mod.js, which only exists inside the
-      # runtime; the rest of that file stays untestable here.
-      - name: runtime getConnection alias resolution tests
-        run: deno test --no-check --allow-all plugins/runtime/ext/trex/js/db_resolve.test.ts
+      # Runtime JS split out of trex_lib.js so it is testable without
+      # ext:core/mod.js: db_resolve.js and hana_sql.js.
+      - name: runtime JS unit tests
+        run: deno test --no-check --allow-all plugins/runtime/ext/trex/js/
       # claw's importmap.json is authoring/test-only: at runtime the agents
       # loader stages the eve shim and generates the worker import map itself.
       - name: claw plugin tests

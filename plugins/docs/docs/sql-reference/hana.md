@@ -73,16 +73,18 @@ SELECT trex_hana_detach('omop', 'CDM');
 
 ## Functions
 
-### `trex_hana_scan(query, url)`
+### `trex_hana_scan(query, url [, session_id])`
 
 Run a SQL query against HANA and return the results as a Trex table.
-Connection is opened, query executed, results streamed back, connection
-closed — one-shot.
+Without `session_id`, connections are one-shot. Supplying one reuses that
+session's HANA connection, so session-local state survives between statements:
+`#temp` tables and session variables set with `SET '<VAR>' = '<value>'`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | query | VARCHAR | SAP HANA SQL. The remote side parses it, so use HANA syntax. |
 | url | VARCHAR | `hdbsqls://...` connection URL. |
+| session_id | VARCHAR | Optional named parameter identifying a pooled HANA session. |
 
 **Returns:** TABLE (dynamic columns from the query schema).
 
@@ -149,11 +151,12 @@ List every HANA virtual table currently attached on this node.
 SELECT * FROM trex_hana_tables();
 ```
 
-### `trex_hana_execute(connection_string, sql_statement)`
+### `trex_hana_execute(connection_string, sql_statement [, session_id])`
 
 Execute a HANA DDL/DML statement that doesn't return a result set —
 `CREATE`, `INSERT`, `UPDATE`, `DELETE`, `CALL`. For `SELECT`, use
-`trex_hana_scan` instead.
+`trex_hana_scan` instead. `session_id` is the optional positional third
+argument and has the same pooling behavior as in `trex_hana_scan`.
 
 ```sql
 SELECT trex_hana_execute(
@@ -161,6 +164,37 @@ SELECT trex_hana_execute(
   'CREATE TABLE TEST (id INTEGER, name NVARCHAR(100))'
 );
 ```
+
+### Session variables
+
+HANA session variables are set with HANA's own statement, so any variable works
+— there is no fixed list:
+
+```sql
+SELECT trex_hana_execute(
+  'hdbsqls://user:pass@hana:39015/HDB',
+  'SET ''APPLICATION'' = ''d2e-WIZARD_cross-sectional-demographics''',
+  '42'
+);
+```
+
+Read them back with `SESSION_CONTEXT`:
+
+```sql
+SELECT * FROM trex_hana_scan(
+  'SELECT SESSION_CONTEXT(''APPLICATION'') AS application FROM DUMMY',
+  'hdbsqls://user:pass@hana:39015/HDB',
+  session_id = '42'
+);
+```
+
+A variable lives as long as the session's pooled HANA connection, so both
+statements must pass the same `session_id`. Over pgwire the session id is
+supplied automatically and `SET '<VAR>' = '<value>'` is forwarded to HANA, so a
+client can issue it as an ordinary statement. Clear one with `UNSET '<VAR>'`.
+
+A pooled connection is closed when its session ends, and as a backstop once it
+has been idle longer than `HANA_SESSION_IDLE_TTL_SECS` (default 600).
 
 ### `trex_hana_materialize_cohort(connection_string, source_sql, source_params_json, results_schema, cohort_definition_id, session_vars_json)`
 
