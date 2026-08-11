@@ -10,6 +10,7 @@
  *  /oauth/token          — public      (Logto PKCE token exchange; d2e base.ts: no authn/authz middleware)
  *  /portal/plugin.json   — public      (d2e portal.ts: no authn/authz middleware)
  *  /portal/env.js        — public      (d2e portal.ts: no authn/authz middleware)
+ *  /trex/attach          — requireAdmin (ensure source and cache catalogs are attached)
  *  /trex/db/*            — requireAdmin (d2e: authn + authz → ALP_SYSTEM_ADMIN scope required)
  *  /trex/log             — requireAdmin (d2e: authn + authz → trex.log.write scope, assigned to ALP_SYSTEM_ADMIN)
  *
@@ -41,6 +42,18 @@ import { getPluginsJson } from "../plugin/ui.ts";
 import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
 import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
 import { upsertDatabaseCredential } from "./db-credential.ts";
+import { decryptSecret } from "../auth/crypto.ts";
+import {
+  CACHE_DIR,
+  ensureCacheAttached,
+  ensureSourceAttached,
+  normalizeDialect,
+  parseAttachBody,
+  redactSecrets,
+  snowflakeExtrasFromRow,
+  type ExecFn,
+  type SourceCredential,
+} from "./lib/attach.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -97,6 +110,15 @@ function isValidDbCode(code: unknown): boolean {
   return typeof code === "string" && DB_CODE_RE.test(code);
 }
 
+// Accept either spelling on write. GET /trex/db/ emits the trexdb column `extra`
+// under both names, so a client that round-trips the legacy `db_extra` alias must
+// not silently drop its extras (Snowflake key-pair, BigQuery dataset, ...).
+// deno-lint-ignore no-explicit-any
+function extraJson(body: any): string | null {
+  const extra = body.extra ?? body.db_extra;
+  return extra != null ? JSON.stringify(extra) : null;
+}
+
 // ---------------------------------------------------------------------------
 // /portal/env.js helpers
 // ---------------------------------------------------------------------------
@@ -127,13 +149,48 @@ function certEscapeNewLine(str: string): string {
 // MissingServletRequestPartException ("Required part 'source' is not
 // present"), which broke the d2e demo-dataset setup (E2E "Adding demo
 // dataset... 500").
+// Numbers and booleans count as parsed bodies too: the global json parser runs
+// non-strict (see routes/cli-login.ts) so WebAPI's tag endpoints, which take a
+// bare int, reach us with req.body === 2. That parser has already drained the
+// raw stream, so refusing to re-serialize would forward the POST bodiless.
+// Strings stay excluded — a raw, genuinely unparsed body also surfaces as a
+// string, and re-serializing that would double-encode it.
 export function shouldReserializeParsedBody(
   contentType: string | string[] | undefined,
   parsed: unknown,
 ): boolean {
-  if (parsed === undefined || parsed === null || typeof parsed !== "object") return false;
+  if (parsed === undefined || parsed === null) return false;
+  const kind = typeof parsed;
+  if (kind !== "object" && kind !== "number" && kind !== "boolean") return false;
   const ct = String(Array.isArray(contentType) ? contentType[0] : contentType ?? "").toLowerCase();
   return ct.includes("application/json") || ct.includes("+json");
+}
+
+// ---------------------------------------------------------------------------
+// POST /trex/attach — per-id result shape and HTTP status selection
+// ---------------------------------------------------------------------------
+export interface AttachResult {
+  type: "cache" | "connection";
+  id: string;
+  // The DuckDB catalog actually attached. Differs from `id` for a HANA cache,
+  // whose catalog is `<databaseCode>_cache`.
+  catalog?: string;
+  // "skipped" = the dialect has no source-attach mapping (HANA is queried
+  // directly). A skip is NOT an attach and must not be reported as one.
+  status: "attached" | "skipped" | "failed";
+  error?: string;
+}
+
+// 200 nothing failed · 207 partial · 500 fatal, or every item failed.
+// Never 207-when-everything-failed: 207 is inside fetch's `res.ok`, so the
+// caller (d2e portal TrexApiService.attach, which logs only on `!res.ok`)
+// would read a total failure as success and go on to run the Prefect flow
+// that then dies with "Catalog ... does not exist".
+export function attachResponseStatus(results: AttachResult[], fatal: boolean): number {
+  if (fatal) return 500;
+  const failed = results.filter((r) => r.status === "failed").length;
+  if (failed === 0) return 200;
+  return failed === results.length ? 500 : 207;
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +477,155 @@ export function mountD2eRoutes(app: Express): void {
     (res as any).send(`window.ENV_DATA = ${JSON.stringify(clientEnv)}`);
   });
 
+  // POST /trex/attach — ensure runtime source and cache catalogs exist.
+  // Status selection lives in attachResponseStatus() below (unit-tested).
+  //
+  // Dataset creation calls this immediately after assigning a cache_id. A new
+  // cache has no DuckDB file yet, so the attach must be allowed to create it
+  // (DuckDB's ATTACH creates the file); otherwise the subsequent Prefect flow
+  // fails with "Catalog ... does not exist". ATTACH IF NOT EXISTS makes
+  // repeated requests idempotent.
+  //
+  // Per-id `status`: "attached" (an ATTACH ran), "skipped" (the dialect has no
+  // source-attach mapping — HANA is queried directly) or "failed". A caller
+  // must not read "skipped" as "the catalog now exists". HTTP: 200 all fine,
+  // 207 partial, 500 everything failed (207 is inside `res.ok`, so an
+  // all-failed 207 would read as success to a plain fetch client).
+  app.post("/trex/attach", requireAdmin, async (req: any, res: any) => {
+    let input;
+    try {
+      input = parseAttachBody((req as any).body);
+    } catch (e) {
+      (res as any).status(400).json({ error: (e as Error).message });
+      return;
+    }
+
+    const results: AttachResult[] = [];
+    let attachConn: any;
+    let fatal = false;
+    try {
+      const Trex = (globalThis as any).Trex;
+      if (!Trex?.TrexDB) {
+        throw new Error("TrexDB is unavailable");
+      }
+      attachConn = new Trex.TrexDB("memory");
+      const attachExec: ExecFn = (sql) => attachConn.execute(sql, []);
+
+      for (const id of input.connectionIds) {
+        try {
+          // ORDER BY + LIMIT 1: the unique index is ("databaseId", username,
+          // "userScope"), so several Admin rows with different usernames are
+          // legal and an unordered rows[0] would pick one at random.
+          // `enabled IS NOT FALSE` matches readRegistryDecrypted (the column is
+          // nullable, and a NULL row is live everywhere else).
+          const db = await pool.query<{
+            id: string; dialect: string; host: string; port: number;
+            databaseName: string; extra: unknown; username: string | null;
+            password_encrypted: string | null;
+          }>(
+            `SELECT d.id, d.dialect, d.host, d.port, d."databaseName", d.extra,
+                    dc.username, dc.password_encrypted
+               FROM trexdb.database d
+               LEFT JOIN trexdb.database_credential dc
+                 ON dc."databaseId" = d.id AND dc."userScope" = 'Admin'
+              WHERE d.id = $1 AND d.enabled IS NOT FALSE
+              ORDER BY dc."updatedAt" DESC NULLS LAST
+              LIMIT 1`,
+            [id],
+          );
+          const row = db.rows[0];
+          if (!row) throw new Error("enabled connection not found");
+          if (!row.username || !row.password_encrypted) throw new Error("Admin credential not found");
+          const connection: SourceCredential = {
+            id: row.id,
+            dialect: row.dialect,
+            host: row.host,
+            port: row.port,
+            name: row.databaseName,
+            adminUsername: row.username,
+            adminPassword: await decryptSecret(row.password_encrypted),
+            ...(normalizeDialect(row.dialect) === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
+          };
+          const attached = await ensureSourceAttached(connection, { exec: attachExec });
+          results.push({
+            type: "connection",
+            id,
+            status: attached ? "attached" : "skipped",
+            ...(attached ? { catalog: `${id}__srcdb` } : { error: `no source attach for dialect ${row.dialect}` }),
+          });
+        } catch (e) {
+          // redactSecrets: the postgres ATTACH embeds the decrypted password and
+          // DuckDB echoes the whole DSN back in its connection errors.
+          results.push({
+            type: "connection",
+            id,
+            status: "failed",
+            error: redactSecrets((e as Error).message),
+          });
+        }
+      }
+
+      // HANA datasets set cache_id = databaseCode (they're queried directly), but
+      // the HANA *cache* catalog is `<code>_cache` — that's what boot.ts attaches
+      // and what create_cachedb_hana_plugin writes. Attaching the bare code would
+      // both miss the catalog the flow needs and create a stray <code>.db that
+      // boot then re-attaches on every restart.
+      const hanaIds = new Set<string>();
+      if (input.cacheIds.length > 0) {
+        const dialects = await pool.query<{ id: string; dialect: string }>(
+          `SELECT id, dialect FROM trexdb.database WHERE id = ANY($1::text[])`,
+          [input.cacheIds],
+        );
+        for (const row of dialects.rows) {
+          if (normalizeDialect(row.dialect) === "hana") hanaIds.add(row.id);
+        }
+      }
+
+      for (const id of input.cacheIds) {
+        const catalog = hanaIds.has(id) ? `${id}_cache` : id;
+        try {
+          await ensureCacheAttached(catalog, {
+            exec: attachExec,
+            cacheDir: CACHE_DIR,
+            createDbFileIfMissing: true,
+          });
+          results.push({ type: "cache", id, catalog, status: "attached" });
+        } catch (e) {
+          results.push({
+            type: "cache",
+            id,
+            catalog,
+            status: "failed",
+            error: redactSecrets((e as Error).message),
+          });
+        }
+      }
+    } catch (e) {
+      fatal = true;
+      console.error(`[d2e-compat] POST /trex/attach: ${redactSecrets(String(e))}`);
+    } finally {
+      attachConn?.close?.();
+    }
+
+    // Single response point: closing the pool session first, and never sending
+    // twice if the serializer throws.
+    const failed = results.filter((r) => r.status === "failed");
+    if (failed.length > 0) {
+      // The only caller treats !res.ok as the trigger to log, so a silent 207
+      // would lose this entirely — log it here regardless.
+      console.error(
+        `[d2e-compat] POST /trex/attach: ${failed.length}/${results.length} failed: ` +
+          failed.map((f) => `${f.type} ${f.id}: ${f.error}`).join("; "),
+      );
+    }
+    const status = attachResponseStatus(results, fatal);
+    if (status === 500) {
+      (res as any).status(500).json({ error: "Failed to attach databases", results });
+      return;
+    }
+    (res as any).status(status).json({ results });
+  });
+
   // ─────────────────────────────────────────────────────────────────────────
   // /trex/db/*  — credential CRUD  (ADMIN-ONLY: requireAdmin)
   //
@@ -447,6 +653,10 @@ export function mountD2eRoutes(app: Express): void {
           `SELECT d.id, d.id AS code, d.host, d.port,
                   d."databaseName" AS name, d.dialect,
                   d."vocabSchemas" AS vocab_schemas, d.extra,
+                  -- The legacy trex.db column was db_extra; trexdb.database
+                  -- renamed it to extra. The d2e UI still reads db_extra, so
+                  -- emit both (dbm-sync.ts does the same for its consumers).
+                  d.extra AS db_extra,
                   d.description, d.enabled,
                   d."createdAt", d."updatedAt",
                   COALESCE(
@@ -510,7 +720,7 @@ export function mountD2eRoutes(app: Express): void {
             body.name ?? body.databaseName ?? null,
             body.dialect ?? "postgresql",
             body.vocabSchemas != null ? JSON.stringify(body.vocabSchemas) : null,
-            body.extra != null ? JSON.stringify(body.extra) : null,
+            extraJson(body),
             body.description ?? null,
           ]
         );
@@ -564,7 +774,7 @@ export function mountD2eRoutes(app: Express): void {
             body.name ?? body.databaseName ?? null,
             body.dialect ?? null,
             body.vocabSchemas != null ? JSON.stringify(body.vocabSchemas) : null,
-            body.extra != null ? JSON.stringify(body.extra) : null,
+            extraJson(body),
             body.description ?? null,
           ]
         );

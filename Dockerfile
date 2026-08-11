@@ -7,8 +7,29 @@ ARG DUCKDB_VERSION=1.4.4
 # standalone `sqlite` extension at extensions.duckdb.org (the URL 404s), so it is
 # intentionally NOT listed here — with fail-loud fetching it would abort the build.
 ARG DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite_scanner vss"
-ARG DUCKDB_COMMUNITY_EXTENSIONS="bigquery"
+# NOTE: `bigquery` is not fetched from community-extensions.duckdb.org — see
+# DUCKDB_BIGQUERY_* below.
+ARG DUCKDB_COMMUNITY_EXTENSIONS=""
 ARG DUCKDB_OPTIONAL_EXTENSIONS=""
+# DuckDB extensions taken from a prebuilt release rather than extensions.duckdb.org.
+# Recorded as ENV in the final image so `docker inspect` still shows which
+# extensions are present.
+ARG DUCKDB_SOURCE_EXTENSIONS="bigquery"
+
+# duckdb-bigquery does not come from community-extensions.duckdb.org because the
+# published build does not carry the DuckDB 1.4 write-path backport:
+# community-extensions resolves the 1.4 line via the `andium` ref in
+# extensions/bigquery/description.yml, and that build path (build_andium.yml) is
+# disabled upstream, so no published 1.4.4 artifact contains it.
+#
+# The binary is built and released by the fork's own PrebuiltRelease workflow
+# (same DuckDB version and vcpkg pin community-extensions uses, so the
+# gRPC/protobuf/Arrow/google-cloud-cpp graph matches a known-good build) and
+# downloaded here. Building it in-image instead cost a full vcpkg run per target
+# platform — with the linux_arm64 pass emulated — on every cache miss. Move
+# `bigquery` back into DUCKDB_COMMUNITY_EXTENSIONS once upstream publishes 1.4.4.
+ARG DUCKDB_BIGQUERY_RELEASE_REPO="https://github.com/p-hoffmann/duckdb-bigquery"
+ARG DUCKDB_BIGQUERY_RELEASE_TAG="v1.4.4-write-path.1"
 
 # Stage 1: Build the trex binary
 FROM debian:trixie-slim AS builder
@@ -57,6 +78,26 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs && \
 COPY src/ /usr/src/trexsql/src/
 RUN cargo build --release
 
+# Stage 1b: Fetch the prebuilt duckdb-bigquery extension.
+#
+# The release asset is built by the fork's PrebuiltRelease workflow against the
+# same DuckDB version, so the version/platform the extension records match the
+# running engine — DuckDB refuses to LOAD one whose metadata disagrees.
+FROM debian:trixie-slim AS bigquery-ext-builder
+
+ARG TARGETARCH
+ARG DUCKDB_BIGQUERY_RELEASE_REPO
+ARG DUCKDB_BIGQUERY_RELEASE_TAG
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates wget && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /out && \
+    wget -q -O /out/bigquery.duckdb_extension \
+      "${DUCKDB_BIGQUERY_RELEASE_REPO}/releases/download/${DUCKDB_BIGQUERY_RELEASE_TAG}/bigquery-linux_${TARGETARCH}.duckdb_extension" && \
+    ls -l /out/
+
 # Stage 2: Build web frontend
 FROM node:22-trixie-slim AS web-builder
 WORKDIR /build
@@ -80,6 +121,15 @@ COPY plugins/docs/docs/ ./docs/
 COPY plugins/docs/src/ ./src/
 COPY plugins/docs/static/ ./static/
 RUN npm install && npm run build
+
+# Stage 4b: Build the prometheus frontend (FHIR analytics UI plugin). dist/ is
+# gitignored, so this stage is the only source of the bundle the image ships.
+# Mirrors the plugin's CI job (install with
+# --ignore-scripts, vendored atlas-ui is committed, no private registry deps).
+FROM node:22-trixie-slim AS prometheus-builder
+WORKDIR /build
+COPY plugins/prometheus/ ./
+RUN npm install --ignore-scripts --no-audit --no-fund && npm run build
 
 # Stage 5: Build postgres-meta (TypeScript -> dist/)
 FROM node:22-trixie-slim AS pg-meta-builder
@@ -198,6 +248,18 @@ RUN set -eu; \
     ln -sfn "$DEST" "${HOME_EXT_PARENT}/${DUCKDB_PLATFORM}"; \
     echo "DuckDB extensions present for ${DUCKDB_PLATFORM}:"; ls -1 "$DEST"
 
+# duckdb-bigquery, fetched in the bigquery-ext-builder stage from the fork's own
+# release rather than from community-extensions.duckdb.org. It lands in the same
+# per-arch directory the downloads above populate, so extension resolution (and the
+# /home/node symlink seeded just above, which points at the directory) picks it up
+# unchanged.
+#
+# This binary is unsigned, unlike the community downloads. trex already opens every
+# DuckDB connection with allow_unsigned_extensions (src/main.rs, src/engine.rs,
+# plugins/pg_trex/src/worker.rs, plugins/runtime/ext/trex/lib.rs), so LOAD works.
+COPY --from=bigquery-ext-builder /out/bigquery.duckdb_extension \
+     /usr/share/trexsql/extensions/v${DUCKDB_VERSION}/linux_${TARGETARCH}/
+
 # Override npm extensions with CI-built ones
 # Supports both flat layout (local builds) and arch-specific layout (CI multi-arch builds)
 COPY extensions/ /tmp/all-extensions/
@@ -298,6 +360,16 @@ COPY --from=pg-meta-builder /build/node_modules/ ./plugins-dev/pg-meta/postgres-
 # plugins-dev like storage/postgrest — not published to npm, no build step.
 # Dormant unless its DISCORD_*/CLAW_* env is configured at runtime.
 COPY plugins/claw/ ./plugins-dev/claw/
+# d2esupport agent plugin (Slack support triage forwarding to claw): same
+# pattern as claw — no build step, dormant unless its SLACK_*/D2ESUPPORT_*
+# env is configured at runtime.
+COPY plugins/d2esupport/ ./plugins-dev/d2esupport/
+# prometheus (FHIR analytics UI + its functions/functions-mri workers): whole
+# plugin dir + the freshly-built dist overlaid from the builder stage. The
+# plugin scanner picks up its trex.ui.routes/functions from package.json; the
+# /prometheus nav entry is added per-deployment via TREX_WEB_NAV_EXTRA.
+COPY plugins/prometheus/ ./plugins-dev/prometheus/
+COPY --from=prometheus-builder /build/dist/ ./plugins-dev/prometheus/dist/
 
 # Entrypoint + derivation CLI scripts live under /usr/src so the final stage
 # imports them with the same COPY as the rest of the tree.
@@ -314,10 +386,14 @@ ARG DUCKDB_VERSION
 ARG DUCKDB_CORE_EXTENSIONS
 ARG DUCKDB_COMMUNITY_EXTENSIONS
 ARG DUCKDB_OPTIONAL_EXTENSIONS
+ARG DUCKDB_SOURCE_EXTENSIONS
 
 # openssl: used by /usr/src/entrypoint.sh to generate the per-container TLS cert.
+# openssh-client: git's SSH commit signing (gpg.format=ssh) shells out to
+# ssh-keygen — without it, a user with a signing key configured fails EVERY
+# commit (devx Settings -> Integrations -> Git).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libssl3 libgomp1 ca-certificates libvulkan1 curl git unzip openssl && \
+      libssl3 libgomp1 ca-certificates libvulkan1 curl git unzip openssl openssh-client && \
     rm -rf /var/lib/apt/lists/*
 
 # Deno is required by docker/trex-init-entrypoint.sh (runs scripts/derive-secrets.ts)
@@ -357,6 +433,7 @@ ENV DUCKDB_VERSION="${DUCKDB_VERSION}"
 ENV DUCKDB_CORE_EXTENSIONS="${DUCKDB_CORE_EXTENSIONS}"
 ENV DUCKDB_COMMUNITY_EXTENSIONS="${DUCKDB_COMMUNITY_EXTENSIONS}"
 ENV DUCKDB_OPTIONAL_EXTENSIONS="${DUCKDB_OPTIONAL_EXTENSIONS}"
+ENV DUCKDB_SOURCE_EXTENSIONS="${DUCKDB_SOURCE_EXTENSIONS}"
 
 # Ensure config directories exist for OAuth token persistence
 RUN mkdir -p /home/node/.claude /home/node/.config/gh && \

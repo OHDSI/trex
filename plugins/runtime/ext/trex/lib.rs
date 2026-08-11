@@ -1337,7 +1337,9 @@ deno_core::extension!(
     esm = [
         dir "js",
         "trex_lib.js",
-        "dbconnection.js"
+        "dbconnection.js",
+        "db_resolve.js",
+        "hana_sql.js"
     ]
 );
 

@@ -16,18 +16,20 @@ export default defineTool({
     "while a long step runs. Your normal reply only lands when the turn ends (after a blocking " +
     "coder call), so call this FIRST to narrate the action you are about to take — e.g. " +
     "'On it, starting the implementation now.' or 'Exploring a couple of options.' Keep it to one " +
-    "short line. Not for plans/options (use postPlan) or decisions (use postChoice / awaitApproval).",
+    "short line. Not for plans/options (use postPlan) or decisions (use postChoice / awaitApproval). " +
+    "The server overrides channelId with the session's thread channel when available.",
   inputSchema: {
     type: "object",
     properties: {
-      channelId: { type: "string", description: "The current channel id." },
+      channelId: { type: "string", description: "The current channel id (the server overrides this with the session thread channel)." },
       text: { type: "string", description: "One short status line, e.g. 'Starting the implementation now.'" },
     },
     required: ["channelId", "text"],
   },
   execute: async (input, ctx) => {
     if (isEvalMode(ctx)) return evalStubs.postUpdate();
-    const { channelId, text } = input as Input;
+    const { text } = input as Input;
+    const channelId = (ctx?.metadata as any)?.channelId ?? (input as Input).channelId;
     const token = (globalThis as any).Deno?.env?.get?.("DISCORD_BOT_TOKEN");
     if (!token) throw new Error("postUpdate: DISCORD_BOT_TOKEN not set");
     if (!text?.trim()) throw new Error("postUpdate: text is required");

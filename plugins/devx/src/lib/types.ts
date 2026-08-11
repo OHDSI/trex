@@ -54,6 +54,18 @@ export interface DevxSettings {
   // legacy AI-SDK loop and the ported eve/agents runtime. Defaults to
   // 'legacy' server-side (DB column default) when unset/absent.
   loop?: "legacy" | "agents";
+  // V13: per-user git author identity (commit signing lives in
+  // devx.integrations, see GitSigningStatus).
+  git_author_name?: string;
+  git_author_email?: string;
+}
+
+export interface GitSigningStatus {
+  configured: boolean;
+  public_key?: string | null;
+  fingerprint?: string | null;
+  source?: "generated" | "imported" | null;
+  created_at?: string | null;
 }
 
 export interface ProviderConfigRecord {
@@ -252,6 +264,21 @@ export interface DesignFinding {
 export interface DesignReview {
   id: string;
   findings: DesignFinding[];
+  created_at: string;
+}
+
+// Docs update types — the docs agent WRITES documentation; its "findings" are
+// the pages it touched, so level is a change kind rather than a severity.
+
+export interface DocsUpdateEntry {
+  title: string;
+  level: "added" | "updated" | "skipped";
+  description: string;
+}
+
+export interface DocsReview {
+  id: string;
+  findings: DocsUpdateEntry[];
   created_at: string;
 }
 
@@ -516,6 +543,13 @@ export interface ProviderConfig {
   requiresBaseUrl: boolean;
 }
 
+export type ModelInfo = {
+  value: string;
+  displayName: string;
+  description: string;
+  supportsEffort?: boolean;
+};
+
 export const PROVIDERS: ProviderConfig[] = [
   {
     id: "anthropic",
@@ -574,12 +608,7 @@ export const PROVIDERS: ProviderConfig[] = [
   {
     id: "claude-code",
     name: "Claude Code (Subscription)",
-    models: [
-      "claude-sonnet-4-6",
-      "claude-opus-4-6",
-      "sonnet",
-      "opus",
-    ],
+    models: ["default", "sonnet", "haiku"], // fallback only; real list comes from GET /claude-code/models
     requiresApiKey: false,
     requiresBaseUrl: false,
   },
@@ -596,3 +625,18 @@ export const PROVIDERS: ProviderConfig[] = [
     requiresBaseUrl: false,
   },
 ];
+
+export interface UserMapEntry {
+  id: string;
+  github_login: string;
+  discord_user_id: string;
+  display_name?: string | null;
+  created_at?: string;
+}
+
+export interface SlackAllowlistEntry {
+  id: string;
+  slack_user_id: string;
+  note?: string | null;
+  created_at?: string;
+}

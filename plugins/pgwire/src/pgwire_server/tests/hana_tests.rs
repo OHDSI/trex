@@ -202,40 +202,71 @@ fn sample_creds() -> HanaCredentials {
 #[test]
 fn wrap_query_select_uses_hana_scan() {
     let q = "SELECT 1";
-    let out = wrap_query_for_hana(q, &sample_creds());
+    let out = wrap_query_for_hana(q, &sample_creds(), 0);
     assert!(out.starts_with("SELECT * FROM trex_hana_scan("), "got {out:?}");
     assert!(out.contains("'SELECT 1'"));
     assert!(out.contains("hdbsql://u:p@host:30015/DB"));
+    assert!(out.contains("session_id => '0'"), "got {out:?}");
+}
+
+#[test]
+fn wrap_query_embeds_session_id() {
+    // Read path: session_id is a NAMED arg (table functions can't overload by
+    // arity). Write path: session_id is the positional 3rd arg.
+    let read = wrap_query_for_hana("SELECT 1", &sample_creds(), 42);
+    assert!(read.starts_with("SELECT * FROM trex_hana_scan("), "got {read:?}");
+    assert!(read.contains("session_id => '42'"), "got {read:?}");
+
+    let write = wrap_query_for_hana("INSERT INTO t VALUES (1)", &sample_creds(), 42);
+    assert!(write.starts_with("SELECT trex_hana_execute("), "got {write:?}");
+    assert!(write.ends_with(", '42')"), "got {write:?}");
 }
 
 #[test]
 fn wrap_query_with_cte_uses_hana_scan() {
     let q = "WITH cte AS (SELECT 1) SELECT * FROM cte";
-    let out = wrap_query_for_hana(q, &sample_creds());
+    let out = wrap_query_for_hana(q, &sample_creds(), 0);
     assert!(out.starts_with("SELECT * FROM trex_hana_scan("), "got {out:?}");
 }
 
 #[test]
 fn wrap_query_lowercase_select_with_case_insensitive() {
     let q = "select 1";
-    let out = wrap_query_for_hana(q, &sample_creds());
+    let out = wrap_query_for_hana(q, &sample_creds(), 0);
     assert!(out.starts_with("SELECT * FROM trex_hana_scan("));
     let q2 = "with cte as (select 1) select * from cte";
-    let out2 = wrap_query_for_hana(q2, &sample_creds());
+    let out2 = wrap_query_for_hana(q2, &sample_creds(), 0);
     assert!(out2.starts_with("SELECT * FROM trex_hana_scan("));
 }
 
 #[test]
 fn wrap_query_dml_uses_hana_execute() {
     let q = "INSERT INTO t VALUES (1)";
-    let out = wrap_query_for_hana(q, &sample_creds());
+    let out = wrap_query_for_hana(q, &sample_creds(), 0);
     assert!(out.starts_with("SELECT trex_hana_execute("), "got {out:?}");
     let q2 = "UPDATE t SET a = 1";
-    let out2 = wrap_query_for_hana(q2, &sample_creds());
+    let out2 = wrap_query_for_hana(q2, &sample_creds(), 0);
     assert!(out2.starts_with("SELECT trex_hana_execute("));
     let q3 = "DELETE FROM t";
-    let out3 = wrap_query_for_hana(q3, &sample_creds());
+    let out3 = wrap_query_for_hana(q3, &sample_creds(), 0);
     assert!(out3.starts_with("SELECT trex_hana_execute("));
+}
+
+#[test]
+fn hana_session_variable_set_is_wrapped_as_execute_with_session_id() {
+    // `SET '<NAME>' = '<value>'` is HANA's session-variable assignment. It must be
+    // forwarded on the session's pinned connection, not run on local DuckDB, so a
+    // later statement on the same session can read it back with SESSION_CONTEXT.
+    let wrapped = wrap_query_for_hana("SET 'APPLICATION' = 'd2e-WIZARD_x'", &sample_creds(), 4242);
+    assert!(
+        wrapped.starts_with("SELECT trex_hana_execute("),
+        "session-variable SET must use the write wrap: {wrapped:?}"
+    );
+    assert!(
+        wrapped.contains("SET ''APPLICATION'' = ''d2e-WIZARD_x''"),
+        "the statement must be forwarded verbatim with quotes doubled: {wrapped:?}"
+    );
+    assert!(wrapped.ends_with(", '4242')"), "must carry the session id: {wrapped:?}");
 }
 
 #[test]
@@ -243,7 +274,7 @@ fn wrap_query_dml_passes_url_before_sql() {
     // trex_hana_execute(connection_url, sql): the URL argument must come
     // first, the statement second. Regression guard for the arg-order bug.
     let q = "INSERT INTO t VALUES (1)";
-    let out = wrap_query_for_hana(q, &sample_creds());
+    let out = wrap_query_for_hana(q, &sample_creds(), 0);
     let url_pos = out.find("hdbsql://").expect("url present");
     let sql_pos = out.find("INSERT INTO t").expect("sql present");
     assert!(url_pos < sql_pos, "url must precede sql, got {out:?}");
@@ -256,7 +287,7 @@ fn wrap_query_dml_passes_url_before_sql() {
 #[test]
 fn wrap_query_doubles_single_quotes_in_query() {
     let q = "SELECT 'it''s'";
-    let out = wrap_query_for_hana(q, &sample_creds());
+    let out = wrap_query_for_hana(q, &sample_creds(), 0);
     // Inside the wrapped SQL string literal, every ' is doubled. The
     // original `''` becomes `''''`, plus surrounding doubles for the
     // outer quotes (`'` → `''`).
@@ -272,7 +303,7 @@ fn wrap_query_doubles_quotes_in_credentials() {
         username: "us'er".to_string(),
         password: "pa'ss".to_string(),
     };
-    let out = wrap_query_for_hana("SELECT 1", &creds);
+    let out = wrap_query_for_hana("SELECT 1", &creds, 0);
     // Username, password, host, name all get single-quote doubling.
     assert!(out.contains("us''er"), "username quoting failed: {out}");
     assert!(out.contains("pa''ss"), "password quoting failed: {out}");
@@ -331,17 +362,17 @@ fn wrap_query_behind_leading_comment_still_uses_scan() {
     // (trex_hana_execute) and never runs on HANA as a scan.
     let block = "/*********\nMEASURE\n*********/\nSELECT 1";
     assert!(
-        wrap_query_for_hana(block, &sample_creds()).starts_with("SELECT * FROM trex_hana_scan("),
+        wrap_query_for_hana(block, &sample_creds(), 0).starts_with("SELECT * FROM trex_hana_scan("),
         "block-comment-prefixed read must wrap as scan"
     );
     let line = "-- header\nSELECT 1";
     assert!(
-        wrap_query_for_hana(line, &sample_creds()).starts_with("SELECT * FROM trex_hana_scan("),
+        wrap_query_for_hana(line, &sample_creds(), 0).starts_with("SELECT * FROM trex_hana_scan("),
         "line-comment-prefixed read must wrap as scan"
     );
     let ws = "   \n\t SELECT 1";
     assert!(
-        wrap_query_for_hana(ws, &sample_creds()).starts_with("SELECT * FROM trex_hana_scan(")
+        wrap_query_for_hana(ws, &sample_creds(), 0).starts_with("SELECT * FROM trex_hana_scan(")
     );
 }
 

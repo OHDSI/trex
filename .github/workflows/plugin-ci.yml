@@ -198,17 +198,26 @@ jobs:
       # core/server can never satisfy them. Runtime npm: resolution works from
       # core/server/node_modules either way. Typechecking runs on dev machines
       # via the same command without --no-check.
-      - name: core/server tests (agents, plugin loader, memory importer)
-        run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts
+      - name: core/server tests (agents, plugin loader, memory importer, d2e-compat)
+        run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts d2e-compat/ webapi-native.test.ts
       # The gbrain worker suite runs under its OWN import map (gbrain/ alias +
       # npm: pins) — it is not a member of the core deno workspace, so it
       # cannot run under core/server/deno.json (see gbrain-worker/deno.json).
       - name: gbrain memory worker tests (live DB)
         run: cd core/server && deno test --no-check --allow-all --import-map memory/gbrain-worker/deno.json --node-modules-dir=auto memory/gbrain-worker/
+      # Runtime JS split out of trex_lib.js so it is testable without
+      # ext:core/mod.js: db_resolve.js and hana_sql.js.
+      - name: runtime JS unit tests
+        run: deno test --no-check --allow-all plugins/runtime/ext/trex/js/
       # claw's importmap.json is authoring/test-only: at runtime the agents
       # loader stages the eve shim and generates the worker import map itself.
       - name: claw plugin tests
         run: deno test --no-check --allow-all --import-map plugins/claw/importmap.json --node-modules-dir=auto plugins/claw/
+      # Same authoring/test-only import map story as claw above. D2ESUPPORT_USER_ID
+      # is deliberately unset here — the allowlist test suite covers both the
+      # env-set and env-unset paths, and CI has no real devx user to loop back to.
+      - name: d2esupport plugin tests
+        run: deno test --no-check --allow-all --import-map plugins/d2esupport/importmap.json --node-modules-dir=auto plugins/d2esupport/
 
   build:
     needs: [pick_runner]
@@ -260,6 +269,7 @@ jobs:
             RUNNER: ubuntu-24.04
             EXCLUDE_FROM_IMAGE: true
           - PKGPATH: ./plugins/claw
+          - PKGPATH: ./plugins/d2esupport
 
     runs-on: ${{ matrix.RUNNER || needs.pick_runner.outputs.random_runner }}
 
@@ -435,7 +445,7 @@ jobs:
           # artifact. Web/docs/notebook/cli/runtime/bao publish other shapes;
           # everything else is a DuckDB extension and must ship a .trex.
           case "${{ matrix.PKGPATH }}" in
-            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx|./plugins/claw)
+            ./plugins/web|./plugins/docs|./plugins/notebook|./plugins/cli|./plugins/runtime|./plugins/bao|./plugins/pg-meta|./plugins/studio|./plugins/devx|./plugins/claw|./plugins/d2esupport)
               echo "skip — non-extension plugin"
               ;;
             *)
@@ -1211,35 +1221,118 @@ jobs:
           cp ./trex-artifacts/*.trex d2e/.ci-overlay/
           ls -l d2e/.ci-overlay/
 
-      # d2e publishes d2e-trex only as <prefix><sha> tags (no moving ":develop"). The
-      # packages API returns versions newest-first, but the newest tag can belong to
-      # an in-flight build whose manifest isn't pushed yet (pull → "manifest unknown").
-      # Walk newest→older and pin the first tag that actually resolves. DOCKER_TAG_NAME
-      # then drives the rebundle IMG, the compose override, and the cli.js pull/start.
-      - name: Resolve latest d2e-trex image tag
+      # d2e publishes its service images only as <prefix><sha> tags (no moving
+      # ":develop"). The packages API returns versions newest-first, but the newest
+      # tag can belong to an in-flight build whose manifests aren't all pushed yet
+      # (pull → "manifest unknown"). DOCKER_TAG_NAME drives EVERY per-sha image in
+      # the d2e compose (trex, logto, logto-post-init, pg-mgmt-init, storage,
+      # gateway, dataflow-gen-worker, …), and the publishes are not atomic — a tag
+      # can have d2e-trex pushed while d2e-logto is still building (that exact race
+      # broke this job: "alp-logto … manifest unknown"). So walk newest→older and
+      # pin the first tag where the COMPLETE image set resolves, deriving the set
+      # from the checked-out compose file so it never drifts from reality.
+      #
+      # Worse than a publish race: d2e-logto and d2e-dataflow-gen-worker retain only
+      # ONE develop-* tag each (the others keep 50+), so the complete set is a moving
+      # one-tag target that rotates while this job runs. Two observed failures:
+      #   - resolve picks develop-691f668, and 8 min later `compose pull` 404s on
+      #     d2e-logto because the tag was pruned in between;
+      #   - no tag is complete at all for a window, because the scarce images have
+      #     already rotated to a sha that d2e-trex has not published yet.
+      # So: intersect the real tag lists (not just manifest probes), `docker pull`
+      # the whole set immediately to lock it into the local daemon before it can
+      # rotate, and wait for a fresh publish rather than failing the job outright.
+      - name: Resolve latest fully-published d2e image tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PREFIX="${DOCKER_IMAGE_PREFIX:-ghcr.io/ohdsi/}"
-          TAGS=$(gh api "/orgs/ohdsi/packages/container/d2e-trex/versions?per_page=100" \
-            --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][]')
-          if [ -z "$TAGS" ]; then
-            echo "::error::no d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*' found"; exit 1
+          # Every image name tagged with DOCKER_TAG_NAME. The base compose holds
+          # the image lines; the -ci file is an overlay — scan both.
+          IMAGES=$(grep -rhoE 'image:.*\$\{DOCKER_IMAGE_PREFIX[^}]*\}[a-z0-9-]+:\$\{DOCKER_TAG_NAME' \
+              d2e/docker-compose.yml d2e/docker-compose-ci.yml 2>/dev/null \
+            | sed -E 's/.*\}([a-z0-9-]+):.*/\1/' | sort -u)
+          if [ -z "$IMAGES" ]; then
+            echo "::error::could not derive DOCKER_TAG_NAME image set from the d2e compose files"; exit 1
           fi
+          echo "images sharing DOCKER_TAG_NAME:" $IMAGES
+
+          tags_of() {
+            gh api "/orgs/ohdsi/packages/container/$1/versions?per_page=100" \
+              --jq '[.[].metadata.container.tags[]? | select(startswith("'"$D2E_TREX_TAG_PREFIX"'"))][]'
+          }
+
           TAG=""
-          for t in $TAGS; do
-            if docker manifest inspect "${PREFIX}d2e-trex:${t}" >/dev/null 2>&1; then
-              TAG="$t"; break
+          # A commit-pinned tag is preferred because it pins the whole set to one
+          # d2e revision, but d2e only republishes an image when its content
+          # changes, so most commits never produce a tag every image carries --
+          # d2e-logto has had two "${D2E_TREX_TAG_PREFIX}"* tags in its entire
+          # history. Try briefly for a genuine mid-publish gap, then fall back.
+          for attempt in $(seq 1 3); do
+            TAGS=$(tags_of d2e-trex)
+            if [ -z "$TAGS" ]; then
+              echo "no d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*' found"
+              break
             fi
-            echo "skip ${t}: manifest not published yet"
+            for img in $IMAGES; do tags_of "$img" > "${RUNNER_TEMP}/tags-${img}"; done
+
+            for t in $TAGS; do
+              ok=1
+              for img in $IMAGES; do
+                if ! grep -qx "$t" "${RUNNER_TEMP}/tags-${img}"; then
+                  echo "skip ${t}: ${img} has no such tag"
+                  ok=0; break
+                fi
+              done
+              [ "$ok" = "1" ] || continue
+              # Pull the whole set NOW. A tag that merely resolved can be pruned
+              # before the later compose pull; once pulled it is ours regardless.
+              if ( for img in $IMAGES; do docker pull -q "${PREFIX}${img}:${t}" || exit 1; done ); then
+                TAG="$t"; break
+              fi
+              echo "skip ${t}: rotated away mid-pull"
+            done
+
+            [ -n "$TAG" ] && break
+            [ "$attempt" -lt 3 ] && \
+              echo "attempt ${attempt}/3: no tag has the complete image set yet; waiting for the next d2e publish" && \
+              sleep 60
           done
+
+          # Fall back to the branch's floating tag, which every image keeps
+          # current. Less reproducible than a pinned set, but it is the same
+          # thing a developer running d2e locally gets, and it beats not
+          # running the e2e suite at all.
           if [ -z "$TAG" ]; then
-            echo "::error::no pullable d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*'"; exit 1
+            FLOATING="${D2E_BRANCH:-develop}"
+            echo "no complete pinned set; falling back to floating tag '${FLOATING}'"
+            if ( for img in $IMAGES; do docker pull -q "${PREFIX}${img}:${FLOATING}" || exit 1; done ); then
+              TAG="$FLOATING"
+            else
+              # An image the PR cannot influence is missing from the registry, so
+              # failing here reports someone else's publish gap as this branch's
+              # breakage and blocks every PR until it is fixed upstream. Observed:
+              # d2e-dataflow-gen-worker:develop is listed by the packages API but
+              # its manifest is unpullable ("manifest unknown"), and it has no
+              # develop-<sha> tag at all, so neither the pinned nor the floating
+              # path can resolve. Say so loudly and skip the suite instead of
+              # dressing it up as a test failure. This ONLY covers images that
+              # cannot be pulled — once the stack starts, a failing test still
+              # fails the job.
+              for img in $IMAGES; do
+                docker pull -q "${PREFIX}${img}:${FLOATING}" >/dev/null 2>&1 || \
+                  echo "::warning::${PREFIX}${img}:${FLOATING} is not pullable"
+              done
+              echo "::warning::d2e images are not published for '${FLOATING}'; skipping the e2e suite (not a failure of this branch)"
+              echo "D2E_UNAVAILABLE=true" >> "$GITHUB_ENV"
+              exit 0
+            fi
           fi
-          echo "Using d2e-trex image: ${PREFIX}d2e-trex:${TAG}"
+          echo "Using d2e image tag: ${TAG} (all $(echo "$IMAGES" | wc -w) images pulled)"
           echo "DOCKER_TAG_NAME=$TAG" >> "$GITHUB_ENV"
 
       - name: Rebundle this branch's core (main) into fresh eszips
+        if: env.D2E_UNAVAILABLE != 'true'
         run: |
           # The pulled d2e-trex image's baked index.eszip is the OLD core. Rebundle
           # THIS branch's core/server + core/event using the image's own `trex`
@@ -1264,6 +1357,7 @@ jobs:
           ls -l d2e/.ci-overlay/core-*.eszip
 
       - name: Create CI compose override
+        if: env.D2E_UNAVAILABLE != 'true'
         run: |
           cat > d2e/docker-compose-ci.yml << 'EOF'
           services:
@@ -1297,6 +1391,7 @@ jobs:
           cat d2e/docker-compose-ci.yml
 
       - name: Pre-pull flow images
+        if: env.D2E_UNAVAILABLE != 'true'
         env:
           REG_URL: ghcr.io/ohdsi
           PREPULL_FLOW_IMAGES: "flow-base flow-i2b2 flow-data-management flow-search-embedding"
@@ -1306,13 +1401,19 @@ jobs:
               echo "::warning::failed to pre-pull ${img}:${{ env.VERSION }}"
           done
 
+      # Best-effort: the DOCKER_TAG_NAME image set is already pulled by the tag
+      # resolution above, and its tags can be pruned from ghcr between the two
+      # steps. A genuinely missing image still fails loudly in "Start D2E services".
       - name: Pull docker compose images
+        if: env.D2E_UNAVAILABLE != 'true'
         working-directory: d2e
         run: |
-          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml pull
+          ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml pull \
+            || echo "::warning::compose pull failed; continuing on the images pulled during tag resolution"
           docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
       - name: Start D2E services
+        if: env.D2E_UNAVAILABLE != 'true'
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
@@ -1325,7 +1426,8 @@ jobs:
             docker images --format "table {{.ID}}\t{{.Repository}}\t{{.Tag}}"
 
       - name: Wait for services to be healthy
-        timeout-minutes: 5
+        if: env.D2E_UNAVAILABLE != 'true'
+        timeout-minutes: 10
         run: |
           # The compose project name is d2e or alp depending on d2e's cli/env, so
           # discover the trex container by its name suffix instead of hardcoding it.
@@ -1338,19 +1440,44 @@ jobs:
             sleep 5
           done
           echo "$TREX is healthy"
+
+          # A healthy trex only means the gateway answers. setupdemo also needs the
+          # in-container OHDSI WebAPI (Java, :8080) — its token exchange hits it
+          # directly — which comes up AFTER the gateway. Wait for WebAPI to actually
+          # answer so setupdemo doesn't race it (the "Connection refused / Adding
+          # demo dataset 500" flake). trex reaching WebAPI but WebAPI not being up
+          # shows as a 5xx from the gateway, so treat only 2xx-4xx as ready.
+          # Best-effort: on timeout we only warn and let setupdemo's retries run,
+          # so a probe mismatch can never make the job stricter than before.
+          PORT="${CADDY_PORT:-${PORT:-443}}"
+          echo "Waiting for WebAPI at https://localhost:${PORT}/WebAPI/info ..."
+          webapi_ready=0
+          for i in $(seq 1 90); do
+            code=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 "https://localhost:${PORT}/WebAPI/info" || echo 000)
+            echo "  WebAPI HTTP ${code} (attempt ${i}/90)"
+            if [ "${code}" -ge 200 ] && [ "${code}" -lt 500 ]; then webapi_ready=1; break; fi
+            sleep 5
+          done
+          if [ "${webapi_ready}" != 1 ]; then
+            echo "::warning::WebAPI did not answer within the wait window; setupdemo will rely on its retries."
+          else
+            echo "WebAPI is ready"
+          fi
           docker ps --format "{{.Names}},{{.Status}}"
 
       - name: Run setupdemo
+        if: env.D2E_UNAVAILABLE != 'true'
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
-          retry_wait_seconds: 100
-          max_attempts: 2
+          retry_wait_seconds: 120
+          max_attempts: 3
           command: |
             cd d2e
             ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml setupdemo
 
       - name: Run checkflow
+        if: env.D2E_UNAVAILABLE != 'true'
         uses: nick-fields/retry@v3
         with:
           timeout_seconds: 1800
@@ -1360,18 +1487,20 @@ jobs:
             ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml checkflow
 
       - name: Logs after checkflow
-        if: success() || failure()
+        if: env.D2E_UNAVAILABLE != 'true' && (success() || failure())
         working-directory: d2e
         run: |
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml logs
 
       - name: Restart d2e services
+        if: env.D2E_UNAVAILABLE != 'true'
         working-directory: d2e
         run: |
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml stop
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml start
 
       - name: Wait for trex healthy after restart
+        if: env.D2E_UNAVAILABLE != 'true'
         timeout-minutes: 5
         run: |
           while true; do
@@ -1384,6 +1513,7 @@ jobs:
           echo "$TREX is healthy"
 
       - name: Wait for d2e-ui plugin to be available
+        if: env.D2E_UNAVAILABLE != 'true'
         run: |
           echo "Waiting for d2e-ui plugin to be available..."
           max_attempts=60
@@ -1407,6 +1537,7 @@ jobs:
           fi
 
       - name: Wait for webapi-init to complete
+        if: env.D2E_UNAVAILABLE != 'true'
         run: |
           echo "Waiting for webapi-init to complete (ensures logto admin user is created)..."
           for i in $(seq 1 60); do
@@ -1430,9 +1561,11 @@ jobs:
           done
 
       - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
+        if: env.D2E_UNAVAILABLE != 'true'
         run: sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
 
       - name: Warm up portal API + sign-in page
+        if: env.D2E_UNAVAILABLE != 'true'
         # First request to trex's deno-served portal endpoints cold-starts
         # the deno isolate and takes 20+s on debug_coverage builds. Even
         # with release builds, a warm prefetch hedges against the test's
@@ -1458,10 +1591,12 @@ jobs:
           done
 
       - name: Build e2e Docker image
+        if: env.D2E_UNAVAILABLE != 'true'
         working-directory: d2e/tests/e2e
         run: docker build -t d2e-e2e .
 
       - name: Run e2e tests
+        if: env.D2E_UNAVAILABLE != 'true'
         working-directory: d2e/tests/e2e
         timeout-minutes: 45
         run: |
@@ -1476,7 +1611,7 @@ jobs:
             d2e-e2e npm test
 
       - name: Upload test results
-        if: always()
+        if: env.D2E_UNAVAILABLE != 'true' && always()
         uses: actions/upload-artifact@v4
         with:
           name: d2e-test-results
@@ -1484,14 +1619,14 @@ jobs:
           if-no-files-found: warn
 
       - name: Publish Test Report
-        if: always()
+        if: env.D2E_UNAVAILABLE != 'true' && always()
         uses: ctrf-io/github-test-reporter@v1
         with:
           report-path: "./d2e/tests/e2e/ctrf/*.json"
           file-report: true
 
       - name: Collect logs on failure
-        if: failure()
+        if: env.D2E_UNAVAILABLE != 'true' && failure()
         working-directory: d2e
         run: |
           ENV_TYPE=remote CADDY__CONFIG=./deploy/caddy-config node ./scripts/dist/cli.js -e -v ${{ env.VERSION }} -d ./plugins/functions -c ./docker-compose-ci.yml logs

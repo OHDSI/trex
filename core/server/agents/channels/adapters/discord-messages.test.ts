@@ -4,6 +4,7 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import {
   decideMessageTrigger,
   type DiscordMessageEvent,
+  formatAttachmentsBlock,
   formatDiscordMessageContextBlock,
   formatMessagesBlock,
   markdownTablesToCodeBlocks,
@@ -60,6 +61,39 @@ Deno.test("parseDiscordMessageEvent: missing id/author/channel → null", () => 
   assertEquals(parseDiscordMessageEvent({ ...RAW_MESSAGE, author: undefined }), null);
   assertEquals(parseDiscordMessageEvent({ ...RAW_MESSAGE, channel_id: "" }), null);
   assertEquals(parseDiscordMessageEvent(null), null);
+});
+
+Deno.test("parseDiscordMessageEvent: attachments parsed (metadata only), malformed entries dropped", () => {
+  const e = parseDiscordMessageEvent({
+    ...RAW_MESSAGE,
+    attachments: [
+      { id: "a1", filename: "screen.png", url: "https://cdn.example/a1/screen.png", content_type: "image/png", size: 1234 },
+      { id: "a2", filename: "notes.txt", url: "https://cdn.example/a2/notes.txt" }, // no content_type/size — fine
+      { id: "a3", url: "https://cdn.example/a3" }, // no filename — dropped
+      "garbage", // not an object — dropped
+    ],
+  });
+  assertEquals(e?.attachments, [
+    { name: "screen.png", url: "https://cdn.example/a1/screen.png", contentType: "image/png", size: 1234 },
+    { name: "notes.txt", url: "https://cdn.example/a2/notes.txt" },
+  ]);
+  // No attachments field at all → empty array, not undefined/null crash.
+  assertEquals(parseDiscordMessageEvent(RAW_MESSAGE)?.attachments, []);
+});
+
+Deno.test("formatAttachmentsBlock: metadata block for the agent; empty for none", () => {
+  const block = formatAttachmentsBlock([
+    { name: "screen.png", url: "https://cdn.example/s.png", contentType: "image/png", size: 9 },
+  ]);
+  assert(block.startsWith("<attachments>\n"));
+  assert(block.endsWith("\n</attachments>"));
+  // Carries name/url/contentType — and never size or file content.
+  assertEquals(
+    JSON.parse(block.slice("<attachments>\n".length, -"\n</attachments>".length)),
+    [{ name: "screen.png", url: "https://cdn.example/s.png", contentType: "image/png" }],
+  );
+  assertEquals(formatAttachmentsBlock([]), "");
+  assertEquals(formatAttachmentsBlock(undefined), "");
 });
 
 Deno.test("parseDiscordMessageEvent: empty content tolerated (no MESSAGE_CONTENT intent yields '')", () => {
@@ -266,6 +300,27 @@ Deno.test("decideMessageTrigger: empty/whitespace content in an owned thread is 
   );
 });
 
+Deno.test("decideMessageTrigger: attachment-only post in an owned thread IS a turn", () => {
+  const att = [{ name: "screenshot.png", url: "https://cdn.example/s.png", contentType: "image/png" }];
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ content: "", attachments: att }),
+      applicationId: "app-1",
+      channel: CLAW_THREAD,
+    }).kind,
+    "thread-turn",
+  );
+  // Attachment-only in a FOREIGN thread still needs a mention.
+  assertEquals(
+    decideMessageTrigger({
+      event: event({ content: "", attachments: att }),
+      applicationId: "app-1",
+      channel: FOREIGN_THREAD,
+    }).kind,
+    "ignore",
+  );
+});
+
 // ---- history block ---------------------------------------------------------
 
 Deno.test("formatMessagesBlock: oldest-first, bot label, 500-char cap, empty → empty string", () => {
@@ -281,6 +336,21 @@ Deno.test("formatMessagesBlock: oldest-first, bot label, 500-char cap, empty →
   // 500 content chars + "…" marker, no more
   assertEquals(lines[2].length, "[bot:trex] ".length + 501);
   assertEquals(formatMessagesBlock("channel_messages", []), "");
+});
+
+Deno.test("formatMessagesBlock: attachment metadata rides after the content, url intact", () => {
+  const block = formatMessagesBlock("thread_messages", [
+    {
+      author: "alice",
+      bot: false,
+      content: "here is the header mock",
+      attachments: [{ name: "navbar.png", url: "https://cdn.example/a/navbar.png?sig=x", contentType: "image/png" }],
+    },
+  ]);
+  const line = block.split("\n")[1];
+  assert(line.startsWith("[alice] here is the header mock [attachment: "));
+  assert(line.includes('"url":"https://cdn.example/a/navbar.png?sig=x"'));
+  assert(line.includes('"name":"navbar.png"'));
 });
 
 Deno.test("formatDiscordMessageContextBlock carries message identity, no interaction fields", () => {

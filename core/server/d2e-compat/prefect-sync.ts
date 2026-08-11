@@ -117,6 +117,13 @@ async function buildFlowCredentials(): Promise<any[]> {
         auth_provider_x509_cert_url: extra.auth_provider_x509_cert_url ?? "",
         client_x509_cert_url: extra.client_x509_cert_url ?? "",
         universe_domain: extra.universe_domain ?? "",
+        // Snowflake key-pair fields (null unless set in `extra`); the flow's
+        // Optional[...] credential model treats null as "unset".
+        warehouse: extra.warehouse ?? null,
+        snowflakeSchema: extra.schema ?? null,
+        role: extra.role ?? null,
+        privateKey: extra.privateKey ?? null,
+        privateKeyPassphrase: extra.privateKeyPassphrase ?? null,
       });
     }
     return out;

@@ -3,7 +3,7 @@
 Eve-convention eval suite (`core/server/agents/README.md` §Evals). One eval
 per `*.eval.ts` file; the file path is the eval id.
 
-## Eval catalog — 28 evals across 10 families
+## Eval catalog — 34 evals across 11 families
 
 | Family | Count | Eval ids | What it covers |
 |---|---|---|---|
@@ -15,10 +15,20 @@ per `*.eval.ts` file; the file path is the eval id.
 | `tools/web/` | 1 | `web-fetch` | `WebFetch` against a real external URL (`https://example.com`) — needs outbound network, see "Known-flaky". |
 | `modes/` | 4 | `default-allows`, `ask-blocks-mutation`, `plan-restricted`, `build-no-tools` | `agent.ts`'s `filterTools` mode gating (default/ask/plan/build), all needing the `metadata.mode` raw-HTTP workaround except `default-allows`. |
 | `subagents/` | 2 | `code-explorer`, `code-reviewer` | Genuine dispatch through the built-in `agent` tool to a named subagent, verified against real subagent output artifacts (not just a tool-call assertion). |
+| `skills/` | 6 | `load-testing-d2e-ui`, `load-testing-d2e-functions`, `load-testing-d2e-flows`, `load-d2e-ui-preview`, `load-screenshotting-mockups`, `load-documenting-d2e-features` | The built-in `load_skill` tool (`t.loadedSkill(...)`) loads the correct skill for a UI-verify/screenshot, function-test, flow-run, live-preview, mockup-capture, or document-the-feature task — covering #163's new d2e testing skills, the #163/#166 preview-vs-screenshot split, the mockup-screenshot flow, and the docs-update flow. Added after #147; see "skills/ family" below. |
 | `quality/` | 3 | `explanation-quality`, `plan-quality`, `code-change-quality` | LLM-as-judge (`t.judge.autoevals.closedQA(...).gate()`) rubric checks — the first evals in the suite with a real judge model wired in (see "Judge-based quality evals"). |
 | `errors/` | 2 | `read-missing-file`, `sql-error` | A tool call that genuinely errors (missing file / missing table) is surfaced honestly in the reply rather than hallucinated around; judged, plus asserts `calledTool(name, { status: "pending" })` (a real harness quirk — see below). |
 
-Total: 3 + 6 + 3 + 2 + 2 + 1 + 4 + 2 + 3 + 2 = 28.
+Total: 3 + 6 + 3 + 2 + 2 + 1 + 4 + 2 + 6 + 3 + 2 = 34.
+
+> The 28 → 34 additions are the `skills/` family. They were added after #147,
+> to cover the d2e testing skills #163 introduced (`testing-d2e-ui`,
+> `testing-d2e-functions`, `testing-d2e-flows`, `d2e-ui-preview`), which the
+> original suite never exercised — it tests the built-in `agent` tool
+> (`subagents/`) but never the built-in `skill`/`load_skill` tool. They have not
+> yet been run against a live stack from this worktree (`node_modules` not
+> installed here); the historical "28/28" run records below predate them. Run
+> `npm run eval -- skills` to confirm.
 
 ## Verified facts (live dx stack, plan Task 3, 2026-07-13)
 
@@ -55,12 +65,15 @@ Total: 3 + 6 + 3 + 2 + 2 + 1 + 4 + 2 + 3 + 2 = 28.
   key is present to double-confirm: ask the agent to `Write` a file named
   `WHEREAMI.txt`, then
   `docker compose -f docker-compose.dx.yml exec trex find /tmp/devx-workspaces -name WHEREAMI.txt`.
-- **Model resolution** (verified up to the provider call): with no
-  `devx.settings`/`devx.provider_configs` row the agent falls back to
-  anthropic/claude-sonnet-4-20250514 and the worker env's
-  `ANTHROPIC_API_KEY`. A raw turn walks the full chain (session insert,
-  agent load, settings lookup, model spec assembly) and fails with exactly
-  `AI_LoadAPIKeyError: Anthropic API key is missing` when no key is set.
+- **Model resolution** (verified up to the provider call, 2026-07-13; changed
+  since): at verification time, with no `devx.settings`/`devx.provider_configs`
+  row the agent fell back to a hardcoded anthropic/claude-sonnet-4-20250514
+  default and the worker env's `ANTHROPIC_API_KEY` (a raw turn failed with
+  exactly `AI_LoadAPIKeyError: Anthropic API key is missing` when no key was
+  set). That silent fallback has been REMOVED — `resolveModel` now throws
+  `"devx: no model provider configured"` when the user has neither row, so the
+  eval user's seeded `devx.settings` row (see "Model auth setup" below) is a
+  hard prerequisite for every turn, not just for choosing bedrock.
 
 ### Model auth setup — Bedrock bearer token (recommended, live-verified)
 
@@ -384,6 +397,45 @@ passes 3/3 again.
 No new sticky consent rows needed: `Read` is `defaultConsent: "always"`
 (read-only); `ExecuteSQL`'s row already exists from the `tools/sql` family
 (task 7).
+
+## skills/ family (added post-#147, for #163)
+
+Four evals asserting the agent loads the right d2e skill for a task. Each is a
+plain `t.send()` in default mode followed by `t.loadedSkill("<name>")` — eve
+0.19 sugar for `calledTool("load_skill", { input: { skill: "<name>" } })` (the
+built-in `load_skill` tool is present whenever `agent.skills.length > 0` and is
+offered in default/ask mode; it is dropped in plan/build mode, so these evals
+stay in default mode). Skills are discovered by core's loader via the
+`plugins/devx/agent/skills -> ../skills` symlink; the five d2e skills
+(`d2e`, `d2e-ui-preview`, `testing-d2e-ui`, `testing-d2e-functions`,
+`testing-d2e-flows`) live under `plugins/devx/skills/`.
+
+- `load-testing-d2e-ui` — a "verify/screenshot my d2e UI change" ask loads
+  `testing-d2e-ui` (build + overwrite served resources → drive `:41100`).
+- `load-d2e-ui-preview` — an "open the live hot-reload preview" ask loads
+  `d2e-ui-preview` instead. Together with the previous eval this pins the
+  #163/#166 split: screenshot/verify ≠ dev-server preview.
+- `load-testing-d2e-functions` / `load-testing-d2e-flows` — a "run/test my d2e
+  function/flow locally" ask loads the matching skill.
+- `load-screenshotting-mockups` — a "capture the prototypes/ mockups as PNGs"
+  ask loads `screenshotting-mockups` (the file://-based capture flow claw's
+  `present-mockups` skill drives), not `testing-d2e-ui`/`d2e-ui-preview`.
+- `load-documenting-d2e-features` — a "document the implemented feature" ask
+  loads `documenting-d2e-features` (the docs/website update flow behind the
+  UI's Docs Update check and claw's "Docs update" option).
+
+**No new live-stack infra**: skill loading is read-only (no `agents.tool_consents`
+row), needs no `chatId`/`mode` metadata workaround, and runs against the
+already-seeded workspace — the cheapest additive family in the suite.
+
+**Not yet live-verified from this worktree** (`node_modules` absent here). The
+one thing to confirm on the first live run: the model may satisfy some d2e tasks
+by absorbing the skill's guidance without a discrete `load_skill` call, in which
+case `loadedSkill(...)` (a gate) fails legitimately — if that happens, either the
+prompt needs to more explicitly ask "which skill applies here?", or the
+assertion should soften to a `t.judge.autoevals.closedQA(...)` rubric on the
+reply (the judge model is already wired in `evals.config.ts`). Verify with
+`npm run eval -- skills`.
 
 ## Bedrock prompt caching (task 15)
 

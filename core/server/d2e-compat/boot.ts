@@ -33,8 +33,11 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 import {
+  CACHE_DIR,
   ensureAttached,
   ensureCacheAttached,
+  redactSecrets,
+  snowflakeExtrasFromRow,
   type ExecFn,
   type SourceCredential,
 } from "./lib/attach.ts";
@@ -49,19 +52,9 @@ export async function d2eBoot(): Promise<void> {
   const log = (m: string) => console.log(`[d2e-compat] ${m}`);
   const err = (m: string) => console.error(`[d2e-compat] ${m}`);
 
-  // ── Block 1: native WebAPI ────────────────────────────────────────────────
-  // webapi.trex (from the trexsql base) registers webapi_start(), which starts
-  // WebAPI on :8080. Gated by WEBAPI_NATIVE_ENABLED so builds without the
-  // extension still start.
-  if ((Deno.env.get("WEBAPI_NATIVE_ENABLED") ?? "true") !== "false") {
-    try {
-      const webapiConn = new Trex.TrexDB("memory");
-      const startRows = await webapiConn.execute("SELECT webapi_start() AS msg", []);
-      log(`native WebAPI — ${startRows[0]?.msg}`);
-    } catch (e) {
-      err(`webapi_start failed: ${(e as Error).message}`);
-    }
-  }
+  // Block 1 (native WebAPI) moved to ../webapi-native.ts: it is not d2e
+  // compatibility, and nesting it here made WEBAPI_NATIVE_ENABLED unreachable
+  // unless D2E_COMPAT was also set. index.ts starts it directly.
 
   // ── Block 2: ICU extension ───────────────────────────────────────────────
   // Load ICU extension for DuckDB functions like current_date.
@@ -149,11 +142,15 @@ export async function d2eBoot(): Promise<void> {
     for (const ds of dbResult.rows) {
       if (ds.dialect !== "hana") continue;
       try {
-        await ensureCacheAttached(ds.id, {
-          cacheDir: "/usr/src/data/cache",
+        // PR #2835: attach the HANA cache as `${code}_cache.db`. The file is
+        // created by the create_cachedb_hana_plugin flow (pgwire ATTACH cannot
+        // create it); createDbFileIfMissing only lets the re-attach proceed.
+        await ensureCacheAttached(`${ds.id}_cache`, {
+          cacheDir: CACHE_DIR,
+          createDbFileIfMissing: true,
           exec: hanaExec,
         });
-        log(`Attached HANA cache for '${ds.id}'`);
+        log(`Attached HANA ${ds.id} as ${ds.id}_cache`);
       } catch (e) {
         err(`Failed to attach HANA cache for '${ds.id}': ${e}`);
       }
@@ -185,6 +182,7 @@ export async function d2eBoot(): Promise<void> {
       host: string;
       port: number;
       databaseName: string;
+      extra: unknown;
       cred_username: string | null;
       cred_password_encrypted: string | null;
     }>(
@@ -194,6 +192,7 @@ export async function d2eBoot(): Promise<void> {
          d.host,
          d.port,
          d."databaseName",
+         d.extra,
          dc.username AS cred_username,
          dc.password_encrypted AS cred_password_encrypted
        FROM trexdb.database d
@@ -227,6 +226,7 @@ export async function d2eBoot(): Promise<void> {
         name: row.databaseName,
         adminUsername: row.cred_username,
         adminPassword,
+        ...(row.dialect === "snowflake" ? snowflakeExtrasFromRow(row.extra) : {}),
       });
     }
 
@@ -238,7 +238,7 @@ export async function d2eBoot(): Promise<void> {
     // catalog is gone and queries against it fail with "Catalog <cacheId> does
     // not exist" (e.g. the cohort builder's concept search). FHIR and
     // strategus_results are attached separately (above / below), so skip them.
-    const cacheDir = "/usr/src/data/cache";
+    const cacheDir = CACHE_DIR;
     const systemDbNames = new Set<string>([
       Deno.env.get("FHIR__DB_NAME") || "FHIR",
       Deno.env.get("TREX__STRATEGUS_RESULTS_DB_NAME") || "strategus_results",
@@ -267,7 +267,13 @@ export async function d2eBoot(): Promise<void> {
       try {
         await ensureAttached({ connections: [c] }, { exec: attachExec });
       } catch (e) {
-        log(`[attach-startup] connection ${c.id} attach failed: ${(e as Error).message}`);
+        // redactSecrets: the postgres ATTACH embeds the decrypted password and
+        // DuckDB echoes the whole DSN back in its connection errors.
+        log(
+          `[attach-startup] connection ${c.id} attach failed: ${
+            redactSecrets((e as Error).message)
+          }`,
+        );
       }
     }
     for (const cid of cacheIds) {

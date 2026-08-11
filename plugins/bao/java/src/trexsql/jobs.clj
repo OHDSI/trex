@@ -26,9 +26,14 @@
   "Attach local jobs database. Creates if needed.
    Memoizes initialization per connection to avoid repeated DDL execution."
   [trexsql-db]
-  (let [cache-path (or (get-in trexsql-db [:config :cache-path]) "./data/cache")
+  ;; Type-hinted so the compiler emits a direct `new File(...)`. Unhinted, these
+  ;; go through clojure.lang.Reflector, which resolves constructors at runtime —
+  ;; and inside libwebapi-native.so (GraalVM native-image) that reflection is not
+  ;; registered, so it throws. It only surfaced on the native-scanner dialects,
+  ;; because those are the ones that reach this from the cache build.
+  (let [^String cache-path (or (get-in trexsql-db [:config :cache-path]) "./data/cache")
         cache-dir (File. cache-path)
-        jobs-file (File. cache-dir (str jobs-db-name ".db"))
+        jobs-file (File. cache-dir ^String (str jobs-db-name ".db"))
         file-path (.getAbsolutePath jobs-file)
         conn-hash (System/identityHashCode (:handle trexsql-db))]
     (when (not= conn-hash (get @jobs-db-initialized file-path))
@@ -131,6 +136,17 @@
                                  :set set-map
                                  :where [:= :database_code database-code]})]
     (db/execute-with-params! trexsql-db update-sql (vec params))))
+
+(defn delete-job!
+  "Drop the cache_generation_info row for a database code. Called when its cache
+   file is deleted, so /cache/status stops reporting a build for a cache that is
+   no longer on disk."
+  [trexsql-db database-code]
+  (let [jobs-db (get-jobs-db trexsql-db)
+        [delete-sql & params] (sql/format
+                                {:delete-from (jobs-table jobs-db)
+                                 :where [:= :database_code database-code]})]
+    (db/execute-with-params! trexsql-db delete-sql (vec params))))
 
 (defn- parse-json-field [value]
   (when value
@@ -322,81 +338,187 @@
 (defn terminal-status? [status]
   (contains? terminal-statuses status))
 
-(defn- hash-job-params [params]
-  (str (hash (pr-str params))))
+;; BATCH_JOB_INSTANCE has a unique constraint on (JOB_NAME, JOB_KEY) and JOB_KEY
+;; is VARCHAR(32), so a key derived from the params alone collides on the second
+;; build of the same cache. Mix in the execution id to keep each build distinct.
+(defn- job-key-for [params exec-id]
+  (let [raw (str (hash (pr-str params)) "-" exec-id)]
+    (subs raw 0 (min 32 (count raw)))))
 
-(defn- execute-on-datasource!
-  "Execute parameterized SQL on external datasource. Returns row count."
-  [datasource sql params]
-  (with-open [conn (.getConnection datasource)
-              stmt (.prepareStatement conn sql)]
+(def ^:private default-batch-table-prefix "webapi.BATCH_")
+
+(defn- batch-table-prefix [trexsql-db]
+  (or (get-in trexsql-db [:config :batch-table-prefix]) default-batch-table-prefix))
+
+;; Only ever built from the configured prefix, never from request data.
+(defn- batch-table [prefix suffix]
+  (str prefix suffix))
+
+(defn- exec-on-conn!
+  "Execute parameterized SQL on an open connection. Returns row count."
+  [^Connection conn sql params]
+  (with-open [stmt (.prepareStatement conn ^String sql)]
     (doseq [[idx param] (map-indexed vector params)]
       (.setObject stmt (inc idx) param))
     (.executeUpdate stmt)))
 
-(defn- query-on-datasource
-  "Execute parameterized query on external datasource. Returns first column of first row."
-  [datasource sql params]
-  (with-open [conn (.getConnection datasource)
-              stmt (.prepareStatement conn sql)]
+(defn- query-on-conn
+  "Execute parameterized query on an open connection. Returns first column of first row."
+  [^Connection conn sql params]
+  (with-open [stmt (.prepareStatement conn ^String sql)]
     (doseq [[idx param] (map-indexed vector params)]
       (.setObject stmt (inc idx) param))
     (with-open [rs (.executeQuery stmt)]
       (when (.next rs)
         (.getObject rs 1)))))
 
-(defn- get-next-sequence-value [webapi-ds sequence-name]
-  (try
-    (let [[query-sql & params] (sql/format {:select [[[:nextval sequence-name]]]})]
-      (query-on-datasource webapi-ds query-sql params))
-    (catch SQLException e
-      (log/warn (format "Failed to get sequence value for %s: %s" sequence-name (.getMessage e)))
-      nil)))
+;; WebAPI's DataSource is the JPA-managed Hikari pool, which hands out
+;; connections with autocommit off. Borrowing one per statement and closing it
+;; therefore discards the write: the JOB_INSTANCE insert never lands and the
+;; JOB_EXECUTION insert then fails job_inst_exec_fk. Do the whole write on one
+;; connection and commit it, which also makes instance+execution atomic.
+(defn- with-tx
+  [datasource f]
+  (with-open [conn (.getConnection datasource)]
+    (let [prev (.getAutoCommit conn)]
+      (.setAutoCommit conn false)
+      (try
+        (let [result (f conn)]
+          (.commit conn)
+          result)
+        (catch Throwable t
+          (try (.rollback conn) (catch Exception _ nil))
+          (throw t))
+        (finally
+          (try (.setAutoCommit conn prev) (catch Exception _ nil)))))))
+
+;; The sequence name has to be inlined, not bound: PgJDBC binds a String as
+;; varchar and PostgreSQL only has nextval(regclass), so a parameterized
+;; NEXTVAL(?) throws and the job silently goes unrecorded.
+(defn- next-sequence-value [^Connection conn sequence-name]
+  (query-on-conn conn (str "SELECT nextval('" sequence-name "')") []))
+
+;; WebAPI renders these as the job's parameters, and its /job/execution query
+;; left-joins them, so a job without them still lists -- just with no detail.
+(defn- write-batch-job-params! [^Connection conn prefix exec-id params]
+  (doseq [[k v] params
+          :when (some? v)]
+    (exec-on-conn!
+      conn
+      (str "INSERT INTO " (batch-table prefix "JOB_EXECUTION_PARAMS")
+           " (job_execution_id, parameter_name, parameter_type, parameter_value, identifying)"
+           " VALUES (?, ?, ?, ?, ?)")
+      [exec-id (name k) "java.lang.String" (str v) "N"])))
+
+(declare get-webapi-datasource)
 
 (defn write-spring-batch-job!
-  "Insert into Spring Batch tables. Returns job-execution-id or nil."
-  [webapi-ds job-name job-params]
-  (when webapi-ds
+  "Open a Spring Batch execution so the build shows up in WebAPI's job overview.
+   Returns job-execution-id, or nil when no WebAPI datasource is configured."
+  [trexsql-db job-name job-params]
+  (let [webapi-ds (get-webapi-datasource trexsql-db)
+        prefix (batch-table-prefix trexsql-db)]
+   (when webapi-ds
     (try
-      (let [instance-id (get-next-sequence-value webapi-ds "BATCH_JOB_SEQ")
-            exec-id (get-next-sequence-value webapi-ds "BATCH_JOB_EXECUTION_SEQ")
-            job-key (hash-job-params job-params)
-            now (java.sql.Timestamp. (System/currentTimeMillis))]
-        (when (and instance-id exec-id)
-          (let [[insert-sql & params] (sql/format
-                                        {:insert-into :BATCH_JOB_INSTANCE
-                                         :columns [:job_instance_id :job_name :job_key :version]
-                                         :values [[instance-id job-name job-key 0]]})]
-            (execute-on-datasource! webapi-ds insert-sql params))
-          (let [[insert-sql & params] (sql/format
-                                        {:insert-into :BATCH_JOB_EXECUTION
-                                         :columns [:job_execution_id :job_instance_id :start_time
-                                                   :status :version :create_time]
-                                         :values [[exec-id instance-id now "STARTED" 0 now]]})]
-            (execute-on-datasource! webapi-ds insert-sql params))
-          exec-id))
+      (with-tx webapi-ds
+        (fn [conn]
+          (let [instance-id (next-sequence-value conn (batch-table prefix "JOB_SEQ"))
+                exec-id (next-sequence-value conn (batch-table prefix "JOB_EXECUTION_SEQ"))
+                now (java.sql.Timestamp. (System/currentTimeMillis))]
+            (when (and instance-id exec-id)
+              (exec-on-conn!
+                conn
+                (str "INSERT INTO " (batch-table prefix "JOB_INSTANCE")
+                     " (job_instance_id, job_name, job_key, version) VALUES (?, ?, ?, ?)")
+                [instance-id job-name (job-key-for job-params exec-id) 0])
+              (exec-on-conn!
+                conn
+                (str "INSERT INTO " (batch-table prefix "JOB_EXECUTION")
+                     " (job_execution_id, job_instance_id, create_time, start_time,"
+                     "  status, version, last_updated) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                [exec-id instance-id now now "STARTED" 0 now])
+              (write-batch-job-params! conn prefix exec-id
+                                       (assoc job-params :jobName job-name))
+              exec-id))))
       (catch SQLException e
         (log/warn (format "Failed to write Spring Batch job: %s" (.getMessage e)))
-        nil))))
+        nil)))))
+
+;; WebAPI maps this column straight through BatchStatus/valueOf inside a
+;; ResultSetExtractor, so an unknown value 500s /job/execution for every job,
+;; not just this row. The local registry's vocabulary (COMPLETE/ERROR/CANCELED)
+;; must never reach here.
+(def ^:private batch-statuses
+  #{"COMPLETED" "STARTING" "STARTED" "STOPPING" "STOPPED" "FAILED" "ABANDONED" "UNKNOWN"})
 
 (defn update-spring-batch-status!
-  "Update Spring Batch job status."
-  [webapi-ds exec-id status]
-  (when (and webapi-ds exec-id)
-    (try
-      (let [now (java.sql.Timestamp. (System/currentTimeMillis))
-            terminal? (terminal-status? status)
-            set-map (cond-> {:status status}
-                      terminal? (assoc :end_time now))
-            [update-sql & params] (sql/format
-                                    {:update :BATCH_JOB_EXECUTION
-                                     :set set-map
-                                     :where [:= :job_execution_id exec-id]})]
-        (execute-on-datasource! webapi-ds update-sql params))
-      (catch SQLException e
-        (log/warn (format "Failed to update Spring Batch status: %s" (.getMessage e)))))))
+  "Close or update a Spring Batch execution."
+  [trexsql-db exec-id status & [exit-message]]
+  (let [webapi-ds (get-webapi-datasource trexsql-db)
+        prefix (batch-table-prefix trexsql-db)]
+   (when (and webapi-ds exec-id)
+    (if-not (contains? batch-statuses status)
+      (log/error (format "Refusing to write non-BatchStatus value %s to %s" status
+                         (batch-table prefix "JOB_EXECUTION")))
+      (try
+        (let [now (java.sql.Timestamp. (System/currentTimeMillis))
+              terminal? (terminal-status? status)
+              truncate (fn [^String s] (when s (subs s 0 (min 2500 (count s)))))]
+          (with-tx webapi-ds
+            (fn [conn]
+              (if terminal?
+                (exec-on-conn!
+                  conn
+                  (str "UPDATE " (batch-table prefix "JOB_EXECUTION")
+                       " SET status = ?, end_time = ?, exit_code = ?, exit_message = ?,"
+                       "     last_updated = ?, version = COALESCE(version, 0) + 1"
+                       " WHERE job_execution_id = ?")
+                  [status now status (truncate exit-message) now exec-id])
+                (exec-on-conn!
+                  conn
+                  (str "UPDATE " (batch-table prefix "JOB_EXECUTION")
+                       " SET status = ?, last_updated = ?, version = COALESCE(version, 0) + 1"
+                       " WHERE job_execution_id = ?")
+                  [status now exec-id])))))
+        (catch SQLException e
+          (log/warn (format "Failed to update Spring Batch status: %s" (.getMessage e)))))))))
 
 (defn get-webapi-datasource
   "Get WebAPI datasource from config. Returns nil if not configured."
   [trexsql-db]
   (get-in trexsql-db [:config :webapi-datasource]))
+
+(defn start-cache-job!
+  "Open a cache-generation job: a Spring Batch execution (so the build shows up
+   in WebAPI's job overview alongside every other job) plus the local
+   cache_generation_info row that drives /cache/status. Returns the Spring Batch
+   execution id, or nil when no WebAPI datasource is configured.
+
+   Both cache paths must call this. The JDBC path opens its job inline because
+   it also drives per-table progress and cancellation from the same loop; the
+   native-scanner path (postgres/mysql/bigquery) copies in one statement and has
+   no such loop, so without this it produced no job row at all — leaving builds
+   invisible in the overview and every status reading as instantly ready."
+  [trexsql-db database-code schema-name & [total-tables]]
+  (let [exec-id (write-spring-batch-job! trexsql-db "cacheGeneration"
+                  {:database-code database-code :schema-name schema-name
+                   :source_key database-code})]
+    (create-local-job! trexsql-db database-code
+      {:job-execution-id exec-id
+       :source-key database-code
+       :status "RUNNING"
+       :total-tables (or total-tables 0)})
+    exec-id))
+
+(defn finish-cache-job!
+  "Close a job opened by start-cache-job!, mirroring the terminal status into
+   both the Spring Batch row and cache_generation_info. `error-msg` is recorded
+   so callers see why a build failed instead of a bare `undefined`."
+  [trexsql-db database-code exec-id success? & [error-msg]]
+  (do
+    (when exec-id
+      (update-spring-batch-status! trexsql-db exec-id
+                                   (if success? "COMPLETED" "FAILED") error-msg))
+    (update-local-status! trexsql-db database-code
+                          (if success? "COMPLETE" "ERROR")
+                          error-msg)))

@@ -23,7 +23,7 @@
     "@trex/web": "latest",
     "playwright": "^1.59.1",
     "pptxgenjs": "^4.0.1",
-    "sharp": "^0.34.5"
+    "sharp": "^0.35.0"
   },
   "overrides": {
     "serialize-javascript": "^7.0.5",
@@ -32,9 +32,9 @@
     "@docusaurus/core": "^3.10.0",
     "@docusaurus/preset-classic": "^3.10.0",
     "@docusaurus/theme-mermaid": "^3.10.0",
-    "mermaid": "^11.15.0",
-    "fast-uri": "^3.1.2",
+    "mermaid": "^11.16.1",
+    "fast-uri": "^3.1.5",
     "@babel/plugin-transform-modules-systemjs": "^7.29.4",
-    "webpack-dev-server": "^5.2.4"
+    "webpack-dev-server": "^5.2.6"
   }
 }

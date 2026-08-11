@@ -5,8 +5,8 @@ sidebar_position: 7
 # Memory Plugins
 
 Memory plugins declare **knowledge brains**: named, schema-isolated
-[gbrain](https://github.com/p-hoffmann/gbrain) instances filled from git
-repositories or content shipped inside the plugin package. Each declared
+knowledge stores filled from git repositories or content shipped inside the
+plugin package. Each declared
 memory maps 1:1 to a Postgres schema (`memory_<name>`) in the same database
 as the rest of Trex, and is served by a single shared in-runtime Deno worker.
 Agents link to a memory by name and get generated search/recall/capture tools

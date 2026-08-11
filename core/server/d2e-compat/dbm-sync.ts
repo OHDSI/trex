@@ -112,6 +112,15 @@ export async function readRegistryDecrypted(): Promise<any[]> {
         vocabSchemas: row.vocab_schemas ?? [],
         publications: [],
         credentials,
+        // Forward the trexdb `extra` jsonb so it round-trips through the native
+        // DatabaseManager. Consumers disagree on the field name — the flow seeder
+        // reads `db_extra` (getDatabaseCredentials) while buildDatabaseCredentials
+        // reads `extra ?? db_extra` (getCredentials) — so emit both. Without this,
+        // dialect-specific extras (e.g. the Snowflake key-pair privateKey/
+        // warehouse/schema/role) never reach the flow's database-credentials seed
+        // or the function-worker DATABASE_CREDENTIALS.
+        extra: row.extra ?? {},
+        db_extra: row.extra ?? {},
       });
     }
     return out;

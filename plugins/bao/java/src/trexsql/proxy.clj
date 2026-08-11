@@ -1,7 +1,9 @@
 (ns trexsql.proxy
   (:require [trexsql.http-client :as client]
             [clojure.string :as str]
-            [clojure.tools.logging :as log]))
+            [clojure.tools.logging :as log]
+            [ring.core.protocols :as ring-protocols])
+  (:import [java.io InputStream IOException OutputStream]))
 
 (def ^:private hop-by-hop-headers
   ;; content-length is stripped so the HTTP client recomputes it from the body
@@ -23,6 +25,38 @@
     (if (str/blank? query-string)
       url
       (str url "?" query-string))))
+
+(defn- flushing-stream-body
+  "Wrap an upstream response stream so every chunk reaches the client as it
+   arrives.
+
+   Ring's default InputStream branch copies with clojure.java.io/copy and never
+   flushes, so bytes sit in the servlet's response buffer until it fills or the
+   response completes. That is invisible for ordinary responses and fatal for a
+   long-lived one: an agent session stream (SSE/NDJSON) does not complete while
+   the turn runs, so the client receives NOTHING — the request simply hangs
+   until it gives up, with no error on either side. Measured against the same
+   agent: 518 bytes of events over the direct mount, 0 bytes through this proxy.
+
+   A client that walks away mid-stream is normal here, so a broken pipe ends the
+   copy quietly instead of surfacing as a servlet-level error."
+  [^InputStream in]
+  (reify ring-protocols/StreamableResponseBody
+    (write-body-to-stream [_ _response out]
+      (let [^OutputStream out out]
+       (try
+        (with-open [in in]
+          (let [buf (byte-array 8192)]
+            (loop []
+              (let [n (.read in buf)]
+                (when (pos? n)
+                  (.write out buf 0 n)
+                  (.flush out)
+                  (recur))))))
+        (catch IOException e
+          (log/debug (str "Proxy stream closed by client: " (.getMessage e))))
+        (finally
+          (try (.close out) (catch IOException _ nil))))))))
 
 (defn- request-body->string [body]
   (cond
@@ -60,7 +94,10 @@
                               opts))]
         {:status (:status response)
          :headers (filter-headers (:headers response))
-         :body (:body response)})
+         :body (let [b (:body response)]
+                 (if (instance? InputStream b)
+                   (flushing-stream-body b)
+                   b))})
       (catch java.net.ConnectException e
         (log/error (str "Proxy connection failed: " target-url " - " (.getMessage e)))
         {:status 502

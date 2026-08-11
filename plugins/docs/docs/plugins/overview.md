@@ -15,7 +15,7 @@ trexsql has a plugin system that extends the management application with custom 
 | **Flow** | Prefect workflow deployments | `trex.flow` |
 | **Transform** | Data transformation projects with model endpoints | `trex.transform` |
 | **Agent** | AI agents running on the eve-compatible agents runtime | `trex.agents` |
-| **Memory** | Knowledge brains (schema-isolated gbrain instances) imported from git or in-package content, searchable by linked agents | `trex.memory` |
+| **Memory** | Knowledge brains (schema-isolated knowledge stores) imported from git or in-package content, searchable by linked agents | `trex.memory` |
 | **Skills** | Skill packs (markdown skills + supporting files, optional MCP connections) injected into targeted agents, deployable while the agent is running | `trex.skills` |
 
 A single plugin can combine multiple types.

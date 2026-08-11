@@ -1,5 +1,7 @@
 import { core } from "ext:core/mod.js";
 import { TrexConnection } from './dbconnection.js';
+import { resolveDialect, resolveFirstPublication } from './db_resolve.js';
+import { buildHanaEvictSessionSql, buildHanaExecuteSql, buildHanaScanSql } from './hana_sql.js';
 
 const ops = core.ops;
 
@@ -228,13 +230,7 @@ export class DatabaseManager {
 	}
 
 	getFirstPublication(db_id) {
-		try {
-			const tmp =  this.getCredentials().filter(c => c.id === db_id)[0].publications[0]
-			if(tmp)
-				return `${db_id}_${tmp.publication}`
-		} catch(e) {
-		}
-		return `${db_id}`
+		return resolveFirstPublication(this.getCredentials(), db_id);
 	}
 
 
@@ -274,14 +270,9 @@ export class UserDatabaseManager {
 	getConnection(db_id, schema, vocab_schema, result_schema, translationMap) {
 		const dbc = this.getDatabaseCredentials();
 		const worker_id = op_acquire_worker();
-		let dialect = "duckdb";
-		if (db_id != CDW_DUCKDB_FILE_DATABASE_CODE) {
-			try {
-				dialect = dbc.filter(c => c.id === db_id)[0].dialect;
-			} catch (e) {
-				console.error(`Error getting dialect for ${db_id}: ${e}`);
-			}
-		}
+		// db_id may be a dataset cache_id or the built-in duckdb file database,
+		// neither of which has a credential row; those resolve to duckdb.
+		const dialect = resolveDialect(dbc, db_id);
 		// Single TrexDB shared between read and write slots: same session,
 		// so a temp table CREATEd via the write path stays visible to a
 		// later JOIN via the read path.
@@ -352,6 +343,21 @@ export class HanaDB extends TrexDB {
 	constructor(database, worker_id) {
 		super(database, worker_id);
 	}
+
+	// Release the pinned HANA connection; nothing else evicts it on this path.
+	close() {
+		const sessionId = this.__session_id;
+		if (sessionId) {
+			try {
+				op_execute_query(super.getdatabase(), buildHanaEvictSessionSql(sessionId), []);
+			} catch (e) {
+				// Teardown must not fail if the session is already gone.
+				if (sqlLoggingEnabled()) console.log(`HANA session evict failed: ${e?.message ?? e}`);
+			}
+		}
+		super.close();
+	}
+
 	#resolveConnectionUrl() {
 		const dbm = DatabaseManager.getDatabaseManager();
 		const credentialsList = dbm.getCredentials() || [];
@@ -405,11 +411,10 @@ export class HanaDB extends TrexDB {
 				const nparams = map_params(params);
 				if (sqlLoggingEnabled()) console.log(`DB: ${super.getdatabase()} SQL: ${redactSecrets(sql)}`);
 				const connectionUrl = this.#resolveConnectionUrl();
-				// Escape single quotes in SQL and connection URL to prevent SQL injection
-				const escapedSql = String(sql).replace(/'/g, "''");
-				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
-				// Read path: trex_hana_scan(query, url) returns a result set.
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select * from trex_hana_scan('${escapedSql}', '${escapedConnectionUrl}')`, nparams)));
+				// Pin the session's HANA connection so `#temp` tables and session
+				// variables survive to the next statement.
+				const hanaSql = buildHanaScanSql(sql, connectionUrl, this.__session_id);
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), hanaSql, nparams)));
 			} catch(e) {
 				reject(e);
 			}
@@ -423,11 +428,9 @@ export class HanaDB extends TrexDB {
 				const nparams = map_params(params);
 				if (sqlLoggingEnabled()) console.log(`DB(write): ${super.getdatabase()} SQL: ${redactSecrets(sql)}`);
 				const connectionUrl = this.#resolveConnectionUrl();
-				// Escape single quotes in SQL and connection URL to prevent SQL injection
-				const escapedSql = String(sql).replace(/'/g, "''");
-				const escapedConnectionUrl = String(connectionUrl).replace(/'/g, "''");
-				// Write path: trex_hana_execute(connection_url, sql) -- URL first, runs DML/DDL.
-				resolve(JSON.parse(op_execute_query(super.getdatabase(), `select trex_hana_execute('${escapedConnectionUrl}', '${escapedSql}')`, nparams)));
+				// Write path: trex_hana_execute(url, sql, session_id) -- URL first.
+				const hanaSql = buildHanaExecuteSql(connectionUrl, sql, this.__session_id);
+				resolve(JSON.parse(op_execute_query(super.getdatabase(), hanaSql, nparams)));
 			} catch(e) {
 				reject(e);
 			}

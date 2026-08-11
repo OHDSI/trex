@@ -16,6 +16,7 @@ import { parseDesignFindings } from "./design_review_prompt.ts";
 import { TEMPLATES, scaffoldTemplate, injectComponentTagger } from "./templates.ts";
 import { relative } from "https://deno.land/std@0.224.0/path/mod.ts";
 import { gitOps } from "./git.ts";
+import { ensureGitConfig, refreshUserGitConfigs } from "./git_identity.ts";
 import { getGithubToken, injectToken } from "./routes/github_routes.ts";
 // Phase 6: Extracted route handlers
 import { handleGitRoutes } from "./routes/git_routes.ts";
@@ -27,6 +28,7 @@ import { handleProviderRoutes } from "./routes/provider_routes.ts";
 import { handlePromptRoutes } from "./routes/prompt_routes.ts";
 import { handleAttachmentRoutes } from "./routes/attachment_routes.ts";
 import { handleSecurityRoutes } from "./routes/security_routes.ts";
+import { handleSigningRoutes } from "./routes/signing_routes.ts";
 import { handleVisualEditingRoutes } from "./routes/visual_editing_routes.ts";
 import { handlePrototypeRoutes } from "./routes/prototype_routes.ts";
 import { handleD2ERoutes } from "./routes/d2e_routes.ts";
@@ -34,8 +36,10 @@ import { detectD2E } from "./d2e/detect.ts";
 import { handleSupabaseRoutes } from "./routes/supabase_routes.ts";
 import { handleSkillsRoutes } from "./routes/skills_routes.ts";
 import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
+import { handleClaudeCodeModelsRoutes } from "./routes/claude_code_models_routes.ts";
 import { handleCopilotRoutes } from "./routes/copilot_routes.ts";
 import { handleProviderConfigRoutes } from "./routes/provider_config_routes.ts";
+import { handleSupportRoutes } from "./routes/support_routes.ts";
 import { syncBuiltins } from "./skills/sync.ts";
 import {
   parseSlashInput,
@@ -203,7 +207,9 @@ Deno.serve(async (req: Request) => {
     const routeResult =
       await handleGitRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleGithubRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleSigningRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleClaudeCodeModelsRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleCopilotRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
@@ -217,7 +223,8 @@ Deno.serve(async (req: Request) => {
       await handleVisualEditingRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handlePrototypeRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleD2ERoutes(path, method, req, userId, sql, corsHeaders) ||
-      await handleSkillsRoutes(path, method, req, userId, sql, corsHeaders);
+      await handleSkillsRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleSupportRoutes(path, method, req, userId, sql, corsHeaders);
     if (routeResult) return routeResult;
 
     // --- Chat CRUD ---
@@ -379,6 +386,20 @@ Deno.serve(async (req: Request) => {
       // claw sets this so the coder works in a stable per-chat git worktree
       // (isolated feature branch) instead of the shared app working tree.
       const streamUseWorktree = body.useWorktree === true;
+      // claw also sets this: the request originates from a chat channel whose
+      // participants cannot execute anything on this machine. Appends the
+      // remote-channel sandbox context to the system prompt (all providers);
+      // the devx browser UI never sends it.
+      const streamRemoteChannel = body.remoteChannel === true;
+      // Channel attachments (metadata only: name/url/contentType), relayed by
+      // claw. Downloaded into the coder's workspace before the turn so the
+      // coder can Read them (images render multimodally); never inlined into
+      // any prompt. Capped defensively — the urls are remote input.
+      const streamAttachments = Array.isArray(body.attachments)
+        ? body.attachments
+          .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+          .slice(0, 10)
+        : [];
 
       // Verify chat belongs to user
       const chatCheck = await sql(
@@ -421,17 +442,16 @@ Deno.serve(async (req: Request) => {
           `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
           [userId],
         );
-        settings = legacyResult.rows[0] || {
-          provider: "anthropic",
-          model: "claude-sonnet-4-20250514",
-          api_key: null,
-          base_url: null,
-          ai_rules: null,
-          auto_approve: false,
-          max_steps: 100,
-          max_tool_steps: 10,
-          auto_fix_problems: false,
-        };
+        settings = legacyResult.rows[0];
+        // No silent model fallback (kept in sync with agent.ts's resolveModel):
+        // the former hardcoded anthropic/claude-sonnet default row always died
+        // on the api_key check below anyway — error explicitly instead.
+        if (!settings) {
+          return Response.json(
+            { error: "No provider configured. Please set up your provider in Settings." },
+            { status: 400, headers: corsHeaders },
+          );
+        }
       }
 
       // Subscription-based and Bedrock providers don't require an API key
@@ -696,6 +716,10 @@ Deno.serve(async (req: Request) => {
       if (hasComponentSelection) {
         systemPrompt += "\nThe user has selected specific components for editing. Component details and code snippets are in the user's message. Focus your modifications on those components.";
       }
+      if (streamRemoteChannel) {
+        const { REMOTE_CHANNEL_SYSTEM_PROMPT } = await import("./prompts.ts");
+        systemPrompt += `\n${REMOTE_CHANNEL_SYSTEM_PROMPT}`;
+      }
 
       // Get most recent messages for context (subquery to get newest, then order ascending)
       const historyResult = await sql(
@@ -767,6 +791,9 @@ Deno.serve(async (req: Request) => {
                 skillContext,
                 commandOverride,
                 hasComponentSelection,
+                useWorktree: streamUseWorktree,
+                remoteChannel: streamRemoteChannel,
+                attachments: streamAttachments,
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls.length > 0) savedToolCalls = agentResult.toolCalls;
@@ -785,6 +812,8 @@ Deno.serve(async (req: Request) => {
                 commandOverride,
                 hasComponentSelection,
                 useWorktree: streamUseWorktree,
+                remoteChannel: streamRemoteChannel,
+                attachments: streamAttachments,
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;
@@ -1215,7 +1244,7 @@ Deno.serve(async (req: Request) => {
       const result = await sql(
         `SELECT id, user_id, provider, model, api_key, base_url, ai_rules,
                 auto_approve, max_steps, max_tool_steps, auto_fix_problems,
-                loop, created_at, updated_at
+                loop, git_author_name, git_author_email, created_at, updated_at
          FROM devx.settings WHERE user_id = $1`,
         [userId],
       );
@@ -1254,9 +1283,20 @@ Deno.serve(async (req: Request) => {
         return Response.json({ error: "loop must be 'legacy' or 'agents'" }, { status: 400, headers: corsHeaders });
       }
       const hasLoopUpdate = body.loop !== undefined;
+      // Git author identity (V13): same "only touch it if sent" posture. Light
+      // validation only — git itself accepts nearly anything, but cap length
+      // and require an @ so an obvious paste error fails loud.
+      const hasGitNameUpdate = body.git_author_name !== undefined;
+      const hasGitEmailUpdate = body.git_author_email !== undefined;
+      if (hasGitNameUpdate && body.git_author_name && String(body.git_author_name).length > 200) {
+        return Response.json({ error: "git author name too long" }, { status: 400, headers: corsHeaders });
+      }
+      if (hasGitEmailUpdate && body.git_author_email && !/^[^\s@]+@[^\s@]+$/.test(String(body.git_author_email))) {
+        return Response.json({ error: "git author email must be a valid email address" }, { status: 400, headers: corsHeaders });
+      }
       const result = await sql(
-        `INSERT INTO devx.settings (user_id, provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'legacy'))
+        `INSERT INTO devx.settings (user_id, provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'legacy'), $12, $13)
          ON CONFLICT (user_id) DO UPDATE SET
            provider = EXCLUDED.provider,
            model = EXCLUDED.model,
@@ -1268,10 +1308,16 @@ Deno.serve(async (req: Request) => {
            max_tool_steps = EXCLUDED.max_tool_steps,
            auto_fix_problems = EXCLUDED.auto_fix_problems,
            loop = ${hasLoopUpdate ? "EXCLUDED.loop" : "devx.settings.loop"},
+           git_author_name = ${hasGitNameUpdate ? "EXCLUDED.git_author_name" : "devx.settings.git_author_name"},
+           git_author_email = ${hasGitEmailUpdate ? "EXCLUDED.git_author_email" : "devx.settings.git_author_email"},
            updated_at = NOW()
-         RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, created_at, updated_at`,
-        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? 25, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null],
+         RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email, created_at, updated_at`,
+        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? 25, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
       );
+      // Re-sync existing repos so a changed identity takes effect immediately.
+      if (hasGitNameUpdate || hasGitEmailUpdate) {
+        refreshUserGitConfigs(userId, sql).catch((e) => console.warn("[devx] git config refresh failed:", e?.message || e));
+      }
       return Response.json(result.rows[0], { headers: corsHeaders });
     }
 
@@ -1323,6 +1369,11 @@ Deno.serve(async (req: Request) => {
           // clean URL stays in git_remote_url; the token is only used here.
           const token = await getGithubToken(userId, sql);
           await gitOps.clone(injectToken(gitUrl, token), wsPath);
+
+          // Apply the user's git identity/signing config to the fresh clone.
+          try {
+            await ensureGitConfig(wsPath, userId, sql);
+          } catch (e) { console.warn("[devx] git identity setup failed:", e?.message || e); }
 
           // Fetch git submodules so workspace installs can resolve them — e.g.
           // d2e-ui declares libs/react-notebook as a submodule, and bun/yarn

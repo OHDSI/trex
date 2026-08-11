@@ -204,7 +204,7 @@ fn strip_leading_sql_noise(query: &str) -> &str {
     }
 }
 
-pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> String {
+pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials, session_id: u64) -> String {
     let escaped_query = query.replace("'", "''");
     let escaped_username = hana_creds.username.replace("'", "''");
     let escaped_password = hana_creds.password.replace("'", "''");
@@ -213,28 +213,52 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> 
 
     let leading = strip_leading_sql_noise(query).to_uppercase();
     if leading.starts_with("SELECT") || leading.starts_with("WITH") {
-        // Read path: trex_hana_scan(query, url) returns a result set.
+        // Read path: trex_hana_scan(query, url) returns a result set. The
+        // `session_id` NAMED arg reuses the client session's HANA connection
+        // (duckdb table functions can't overload by arity, hence a named arg).
         format!(
-            "SELECT * FROM trex_hana_scan('{}', 'hdbsql://{}:{}@{}:{}/{}')",
+            "SELECT * FROM trex_hana_scan('{}', 'hdbsql://{}:{}@{}:{}/{}', session_id => '{}')",
             escaped_query,
             escaped_username,
             escaped_password,
             escaped_host,
             hana_creds.port,
-            escaped_name
+            escaped_name,
+            session_id
         )
     } else {
-        // Write path: trex_hana_execute(connection_url, sql) -- URL first, runs DML/DDL.
+        // Write path: trex_hana_execute(connection_url, sql, session_id) -- URL
+        // first, runs DML/DDL. `session_id` is the optional positional 3rd arg.
         format!(
-            "SELECT trex_hana_execute('hdbsql://{}:{}@{}:{}/{}', '{}')",
+            "SELECT trex_hana_execute('hdbsql://{}:{}@{}:{}/{}', '{}', '{}')",
             escaped_username,
             escaped_password,
             escaped_host,
             hana_creds.port,
             escaped_name,
-            escaped_query
+            escaped_query,
+            session_id
         )
     }
+}
+
+/// HANA sets session variables with a single-quoted name — `SET 'APPLICATION' =
+/// 'x'`. Postgres and DuckDB require an identifier there, so the quoted form
+/// unambiguously belongs to HANA and must be shipped through the passthrough
+/// wrap. `UNSET '<NAME>'` already passes through: it does not begin with `SET`.
+pub(crate) fn is_hana_session_variable_set(sql: &str) -> bool {
+    let rest = strip_leading_sql_noise(sql).trim_start();
+    let rest = match rest.get(..4) {
+        Some(head) if head.eq_ignore_ascii_case("SET ") => &rest[4..],
+        _ => return false,
+    };
+    let rest = rest.trim_start();
+    // `SET SESSION '<NAME>' = ...` is equivalent to `SET '<NAME>' = ...`.
+    let rest = match rest.get(..8) {
+        Some(head) if head.eq_ignore_ascii_case("SESSION ") => rest[8..].trim_start(),
+        _ => rest,
+    };
+    rest.starts_with('\'')
 }
 
 /// Transaction- and session-control statements manage the local DuckDB session
@@ -242,8 +266,13 @@ pub(crate) fn wrap_query_for_hana(query: &str, hana_creds: &HanaCredentials) -> 
 /// DuckDB directly and never be shipped to HANA through the passthrough wrap.
 /// Drivers emit these implicitly — e.g. the Postgres JDBC driver sends `BEGIN`
 /// on connect and Achilles issues `SET memory_limit = ...` — and HANA rejects
-/// them. Matched after stripping leading whitespace/comments.
+/// them. Matched after stripping leading whitespace/comments. HANA's own
+/// `SET '<NAME>' = '<value>'` form is excluded — see `is_hana_session_variable_set`.
 pub(crate) fn is_local_session_statement(sql: &str) -> bool {
+    // HANA session-variable assignments must reach HANA, not the local session.
+    if is_hana_session_variable_set(sql) {
+        return false;
+    }
     let upper = strip_leading_sql_noise(sql).trim_start().to_uppercase();
     const KEYWORDS: &[&str] = &[
         "BEGIN", "START TRANSACTION", "COMMIT", "END", "ROLLBACK", "ABORT",
@@ -1224,7 +1253,7 @@ impl SimpleQueryHandler for TrexQueryHandler {
             log_debug(&format!("Submitting query: {}", sql));
             let (actual_sql, fallback_sql) = match &hana_credentials {
                 Some(creds) if !is_local_session_statement(&sql) => {
-                    (wrap_query_for_hana(&sql, creds), Some(sql.clone()))
+                    (wrap_query_for_hana(&sql, creds, self.session_id), Some(sql.clone()))
                 }
                 _ => (sql.clone(), None),
             };
@@ -1341,7 +1370,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             get_hana_credentials_if_available(&database, &self.server_host, self.server_port);
         let (actual_query, fallback_query) = match &hana_credentials {
             Some(creds) if !is_local_session_statement(&query) => {
-                (wrap_query_for_hana(&query, creds), Some(query.clone()))
+                (wrap_query_for_hana(&query, creds, self.session_id), Some(query.clone()))
             }
             _ => (query.clone(), None),
         };
@@ -1416,6 +1445,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         let param_types = stmt.parameter_types.clone();
         let server_host = self.server_host.clone();
         let server_port = self.server_port;
+        let session_id = self.session_id;
 
         tokio::task::spawn_blocking(move || -> PgWireResult<DescribeStatementResponse> {
             let guard = connection.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1435,7 +1465,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             let hana_credentials = get_hana_credentials_if_available(&database, &server_host, server_port);
 
             let (actual_statement, fallback_statement) = if let Some(hana_creds) = &hana_credentials {
-                (wrap_query_for_hana(&statement, hana_creds), Some(statement.clone()))
+                (wrap_query_for_hana(&statement, hana_creds, session_id), Some(statement.clone()))
             } else {
                 (statement.clone(), None)
             };
@@ -1483,6 +1513,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
         let format = portal.result_column_format.clone();
         let server_host = self.server_host.clone();
         let server_port = self.server_port;
+        let session_id = self.session_id;
 
         tokio::task::spawn_blocking(move || -> PgWireResult<DescribePortalResponse> {
             let guard = connection.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1502,7 +1533,7 @@ impl ExtendedQueryHandler for TrexQueryHandler {
             let hana_credentials = get_hana_credentials_if_available(&database, &server_host, server_port);
 
             let (actual_statement, fallback_statement) = if let Some(hana_creds) = &hana_credentials {
-                (wrap_query_for_hana(&statement, hana_creds), Some(statement.clone()))
+                (wrap_query_for_hana(&statement, hana_creds, session_id), Some(statement.clone()))
             } else {
                 (statement.clone(), None)
             };
@@ -1638,6 +1669,15 @@ pub fn start_pgwire_server_capi(
                                         log_debug("Processing socket...");
                                         let result = process_socket(socket, None, handlers).await;
                                         log_debug(&format!("Socket result: {:?}", result));
+                                        // Close this session's HANA connection (dropping its
+                                        // session-local #temp tables) on the still-live DuckDB
+                                        // session before returning it to the pool. Best-effort.
+                                        let _ = tokio::task::spawn_blocking(move || {
+                                            trex_pool_client::session_execute(
+                                                session_id,
+                                                &format!("SELECT trex_hana_evict_session('{}')", session_id),
+                                            )
+                                        }).await;
                                         let _ = trex_pool_client::destroy_session(session_id);
                                     });
                                 }
@@ -1746,6 +1786,56 @@ mod tests {
         assert!(!is_postgres_only_set("RESET extra_float_digits"));
         // SETOF is not a SET statement (would be inside e.g. CREATE FUNCTION).
         assert!(!is_postgres_only_set("SETOF integer"));
+    }
+
+    // -------- is_hana_session_variable_set / HANA SET passthrough --------
+
+    #[test]
+    fn detects_hana_quoted_session_variable_set() {
+        assert!(is_hana_session_variable_set("SET 'APPLICATION' = 'd2e-WIZARD_x'"));
+        assert!(is_hana_session_variable_set("set 'APPLICATIONUSER' = 'a@b.c'"));
+        assert!(is_hana_session_variable_set("  SET   'PA_CONFIG_ID' = '7'"));
+        assert!(is_hana_session_variable_set(
+            "SET SESSION 'TEMPORAL_SYSTEM_TIME_AS_OF' = '2026-01-01'"
+        ));
+        assert!(is_hana_session_variable_set(
+            "-- attribution\nSET 'APPLICATION' = 'x'"
+        ));
+    }
+
+    #[test]
+    fn does_not_detect_identifier_form_as_hana_session_variable() {
+        assert!(!is_hana_session_variable_set("SET memory_limit = '4GB'"));
+        assert!(!is_hana_session_variable_set("SET schema = 'demo_cdm'"));
+        assert!(!is_hana_session_variable_set("SET \"extra_float_digits\" = 3"));
+        assert!(!is_hana_session_variable_set("SET application_name = 'd2e'"));
+        assert!(!is_hana_session_variable_set("SELECT 1"));
+        assert!(!is_hana_session_variable_set("SET"));
+        assert!(!is_hana_session_variable_set(""));
+        assert!(!is_hana_session_variable_set("SETOF integer"));
+    }
+
+    #[test]
+    fn hana_session_variable_set_is_not_a_local_statement() {
+        // Must reach HANA through the passthrough wrap, not the local DuckDB session.
+        assert!(!is_local_session_statement("SET 'APPLICATION' = 'd2e-WIZARD_x'"));
+        assert!(!is_local_session_statement("SET SESSION 'APPLICATIONUSER' = 'a@b.c'"));
+    }
+
+    #[test]
+    fn identifier_sets_and_txn_control_stay_local() {
+        assert!(is_local_session_statement("SET memory_limit = '4GB'"));
+        assert!(is_local_session_statement("SET schema = 'demo_cdm'"));
+        assert!(is_local_session_statement("BEGIN"));
+        assert!(is_local_session_statement("COMMIT"));
+        assert!(is_local_session_statement("RESET ALL"));
+    }
+
+    #[test]
+    fn pg_compat_intercept_ignores_hana_quoted_set() {
+        // The pg-compat intercept runs first; it must not swallow the HANA form.
+        assert!(!is_postgres_only_set("SET 'APPLICATION' = 'd2e-WIZARD_x'"));
+        assert!(!is_postgres_only_set("SET SESSION 'APPLICATIONUSER' = 'a@b.c'"));
     }
 
     // -------- split_sql_statements --------

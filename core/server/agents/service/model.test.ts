@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { isAnthropicModel, isBedrockModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -66,9 +66,24 @@ Deno.test("isAnthropicModel is true only for provider === anthropic.messages", (
   assertEquals(isAnthropicModel({}), false);
 });
 
-Deno.test("withSystemCachePoint wraps system in a cache-pointed SystemModelMessage for bedrock", () => {
+Deno.test("bedrockSupportsPromptCaching is true only for Anthropic-on-Bedrock model ids", () => {
+  // Anthropic Claude on Bedrock (with and without a cross-region prefix) caches.
+  assertEquals(bedrockSupportsPromptCaching({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }), true);
+  assertEquals(bedrockSupportsPromptCaching({ provider: "amazon-bedrock", modelId: "anthropic.claude-3-5-sonnet-20241022-v2:0" }), true);
+  // Non-Anthropic Bedrock models (e.g. Z.AI GLM) do NOT support prompt caching —
+  // sending a cachePoint makes Bedrock reject the whole request with
+  // AccessDeniedException, so these must be excluded.
+  assertEquals(bedrockSupportsPromptCaching({ provider: "amazon-bedrock", modelId: "zai.glm-5" }), false);
+  assertEquals(bedrockSupportsPromptCaching({ provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" }), false);
+  // A bedrock model object with no modelId is treated as non-caching (safe default).
+  assertEquals(bedrockSupportsPromptCaching({ provider: "amazon-bedrock" }), false);
+  // Non-bedrock providers are never in scope here.
+  assertEquals(bedrockSupportsPromptCaching({ provider: "anthropic.messages", modelId: "claude-sonnet-5" }), false);
+});
+
+Deno.test("withSystemCachePoint wraps system in a cache-pointed SystemModelMessage for an Anthropic bedrock model", () => {
   const system = "You are a helpful agent.\nFollow the rules.";
-  const wrapped = withSystemCachePoint({ provider: "amazon-bedrock" }, system);
+  const wrapped = withSystemCachePoint({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, system);
   assertEquals(wrapped, {
     role: "system",
     content: system,
@@ -77,6 +92,14 @@ Deno.test("withSystemCachePoint wraps system in a cache-pointed SystemModelMessa
   // Text content must be byte-identical to the original — no truncation or
   // mutation, since the cache key depends on exact bytes.
   assertEquals((wrapped as { content: string }).content, system);
+});
+
+Deno.test("withSystemCachePoint is a no-op for a non-Anthropic bedrock model (e.g. GLM)", () => {
+  // Regression: a cachePoint on zai.glm-5 makes Bedrock reject the turn with
+  // AccessDeniedException ("unsupported model or your request did not allow
+  // prompt caching"), silently killing it. Such models must be invoked plain.
+  const system = "You are a helpful agent.";
+  assertEquals(withSystemCachePoint({ provider: "amazon-bedrock", modelId: "zai.glm-5" }, system), system);
 });
 
 Deno.test("withSystemCachePoint wraps system with an ephemeral cacheControl for anthropic", () => {
@@ -98,4 +121,27 @@ Deno.test("withSystemCachePoint is a no-op (identity) for providers without cach
   assertEquals(withSystemCachePoint({ provider: "google" }, system), system);
   assertEquals(withSystemCachePoint({ provider: undefined }, system), system);
   assertEquals(withSystemCachePoint(undefined, system), system);
+});
+
+Deno.test("isOpenAIModel matches openai.* provider ids (incl. openai-compatible gateways)", () => {
+  assertEquals(isOpenAIModel({ provider: "openai.responses" }), true);
+  assertEquals(isOpenAIModel({ provider: "openai.chat" }), true);
+  assertEquals(isOpenAIModel({ provider: "amazon-bedrock" }), false);
+  assertEquals(isOpenAIModel({ provider: "anthropic.messages" }), false);
+  assertEquals(isOpenAIModel({ provider: undefined }), false);
+  assertEquals(isOpenAIModel(undefined), false);
+});
+
+Deno.test("cacheProviderOptions returns a promptCacheKey only for openai models", () => {
+  // openai (incl. mantle/openai-compatible) → routing key under providerOptions.openai.
+  assertEquals(
+    cacheProviderOptions({ provider: "openai.responses" }, "trex-agents/claw"),
+    { openai: { promptCacheKey: "trex-agents/claw" } },
+  );
+  // Non-openai providers get no providerOptions (bedrock/anthropic cache via
+  // withSystemCachePoint's markers; a stray openai key would be meaningless).
+  assertEquals(cacheProviderOptions({ provider: "amazon-bedrock", modelId: "zai.glm-5" }, "k"), {});
+  assertEquals(cacheProviderOptions({ provider: "anthropic.messages" }, "k"), {});
+  // No key → nothing to route on, even for openai.
+  assertEquals(cacheProviderOptions({ provider: "openai.responses" }, ""), {});
 });

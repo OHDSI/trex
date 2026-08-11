@@ -11,8 +11,7 @@ page covers production guidance — for a hands-on walkthrough see
 
 :::info
 Distributed mode is opt-in and the planner / shuffle / partitioning subsystem
-is still maturing — the design lives in `specs/003-ballista-duckdb-distributed/`
-in the repo. Current production users typically run single-node Trex with
+is still maturing. Current production users typically run single-node Trex with
 federated queries; distributed mode is best validated on representative
 workloads before committing.
 :::
@@ -197,5 +196,3 @@ queries fan out — 4-8 GB is plenty for small clusters.
   function.
 - [Concepts → Query Pipeline](../concepts/query-pipeline) for how queries
   flow across nodes.
-- The `specs/003-ballista-duckdb-distributed/` directory in the repo for the
-  in-progress technical spec.

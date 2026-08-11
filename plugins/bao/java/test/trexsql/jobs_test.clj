@@ -173,3 +173,110 @@
     (with-test-db
       (fn [db]
         (is (nil? (jobs/get-webapi-datasource db)))))))
+
+;; Spring Batch Write Tests
+
+;; These cover the four ways the batch write silently produced no job row.
+
+(deftest test-batch-table-prefix-default
+  (testing "falls back to the WebAPI schema prefix when unconfigured"
+    (is (= "webapi.BATCH_" (#'jobs/batch-table-prefix {:config {}})))))
+
+(deftest test-batch-table-prefix-configured
+  (testing "uses the prefix WebAPI's JobRepository was configured with"
+    (is (= "other.BATCH_"
+           (#'jobs/batch-table-prefix {:config {:batch-table-prefix "other.BATCH_"}})))))
+
+(deftest test-batch-table-qualifies-names
+  (testing "table names are schema-qualified"
+    (is (= "webapi.BATCH_JOB_INSTANCE" (#'jobs/batch-table "webapi.BATCH_" "JOB_INSTANCE")))
+    (is (= "webapi.BATCH_JOB_SEQ" (#'jobs/batch-table "webapi.BATCH_" "JOB_SEQ")))))
+
+(deftest test-job-key-unique-per-execution
+  (testing "the same params on a second build produce a different JOB_KEY"
+    (let [params {:database-code "EUNOMIA" :schema-name "cdm"}]
+      (is (not= (#'jobs/job-key-for params 1)
+                (#'jobs/job-key-for params 2))))))
+
+(deftest test-job-key-fits-column
+  (testing "JOB_KEY stays within VARCHAR(32)"
+    (let [k (#'jobs/job-key-for {:database-code (apply str (repeat 200 "x"))} 123456789)]
+      (is (<= (count k) 32)))))
+
+(deftest test-batch-statuses-are-spring-batch-names
+  (testing "the local registry's vocabulary is not accepted as a BatchStatus"
+    ;; BatchStatus/valueOf runs inside WebAPI's ResultSetExtractor, so a bad
+    ;; value breaks /job/execution for every job, not just this row.
+    (doseq [bad ["COMPLETE" "ERROR" "CANCELED" "RUNNING"]]
+      (is (not (contains? @#'jobs/batch-statuses bad))))
+    (doseq [good ["COMPLETED" "FAILED" "STOPPED" "STARTED"]]
+      (is (contains? @#'jobs/batch-statuses good)))))
+
+(deftest test-update-status-rejects-non-batch-status
+  (testing "a non-BatchStatus value is refused rather than written"
+    (let [calls (atom 0)]
+      (with-redefs [jobs/get-webapi-datasource (fn [_] :fake-ds)]
+        (with-redefs-fn {#'jobs/terminal-status? (fn [_] (swap! calls inc) true)}
+          (fn [] (jobs/update-spring-batch-status! {:config {}} 1 "COMPLETE"))))
+      ;; refused before it ever looks at terminality or touches the datasource
+      (is (zero? @calls)))))
+
+;; Transaction Tests
+
+;; WebAPI's DataSource hands out connections with autocommit off, so a write
+;; that only closes the connection is silently discarded. This is the shape of
+;; the bug where JOB_INSTANCE never landed and JOB_EXECUTION then tripped
+;; job_inst_exec_fk.
+
+(defn- recording-connection [calls auto-commit]
+  (let [state (atom auto-commit)]
+    (java.lang.reflect.Proxy/newProxyInstance
+      (.getClassLoader java.sql.Connection)
+      (into-array Class [java.sql.Connection])
+      (reify java.lang.reflect.InvocationHandler
+        (invoke [_ _ method args]
+          (let [n (.getName method)]
+            (swap! calls conj n)
+            (case n
+              "setAutoCommit" (do (reset! state (first args)) nil)
+              "getAutoCommit" @state
+              "isWrapperFor" false
+              "close" nil
+              nil)))))))
+
+(defn- recording-datasource [conn]
+  (java.lang.reflect.Proxy/newProxyInstance
+    (.getClassLoader javax.sql.DataSource)
+    (into-array Class [javax.sql.DataSource])
+    (reify java.lang.reflect.InvocationHandler
+      (invoke [_ _ method _]
+        (if (= "getConnection" (.getName method)) conn nil)))))
+
+(deftest test-with-tx-commits-when-autocommit-off
+  (testing "the write is committed rather than dropped on close"
+    (let [calls (atom [])
+          conn (recording-connection calls false)
+          ds (recording-datasource conn)]
+      (is (= :done (#'jobs/with-tx ds (fn [_] :done))))
+      (is (some #{"commit"} @calls))
+      (is (not (some #{"rollback"} @calls)))
+      ;; autocommit is turned off for the transaction and restored after
+      (is (= 2 (count (filter #{"setAutoCommit"} @calls)))))))
+
+(deftest test-with-tx-rolls-back-on-failure
+  (testing "a failed write is rolled back and the error propagates"
+    (let [calls (atom [])
+          conn (recording-connection calls false)
+          ds (recording-datasource conn)]
+      (is (thrown? RuntimeException
+                   (#'jobs/with-tx ds (fn [_] (throw (RuntimeException. "boom"))))))
+      (is (some #{"rollback"} @calls))
+      (is (not (some #{"commit"} @calls))))))
+
+(deftest test-with-tx-closes-the-connection
+  (testing "the connection is returned to the pool"
+    (let [calls (atom [])
+          conn (recording-connection calls false)
+          ds (recording-datasource conn)]
+      (#'jobs/with-tx ds (fn [_] nil))
+      (is (some #{"close"} @calls)))))

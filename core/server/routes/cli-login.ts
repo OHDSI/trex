@@ -8,7 +8,13 @@ const router = Router();
 // Mounted globally (see core/server/index.ts), so this json parser gates the body
 // size of EVERY request including plugin-function POSTs (e.g. hades-api /jobs with
 // a full Strategus analysis spec). Default is ~100kb; raise it so large specs pass.
-router.use(express.json({ limit: "50mb" }));
+//
+// strict:false because this also parses proxied traffic: WebAPI's
+// POST /{conceptset|cohortdefinition}/{id}/tag/ takes a bare int as its JSON body,
+// and body-parser's strict mode rejects any top-level value that is not an object
+// or array — failing the request here with `Unexpected token '2', "2" is not valid
+// JSON` before it ever reaches WebAPI, so tag assignment never persisted.
+router.use(express.json({ limit: "50mb", strict: false }));
 
 // ── In-memory session store with 5-minute TTL ───────────────────────────────
 
