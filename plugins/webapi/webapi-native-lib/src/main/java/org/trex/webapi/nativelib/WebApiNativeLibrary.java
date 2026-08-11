@@ -1,8 +1,7 @@
 package org.trex.webapi.nativelib;
 
-import java.io.InputStream;
-import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.GeneralSecurityException;
 import java.security.cert.X509Certificate;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -85,8 +84,16 @@ public final class WebApiNativeLibrary {
      * these extra CA(s) are merged into one runtime truststore, so both public TLS
      * and internal self-signed TLS (Logto/Caddy OIDC discovery, JWKS, token,
      * userinfo) succeed. Built at runtime so it is independent of the native
-     * image's build-time truststore. Missing/empty/bad input is logged and skipped
-     * rather than aborting startup.
+     * image's build-time truststore.
+     *
+     * <p>A source the operator explicitly configured but that cannot yield trust —
+     * missing, unreadable, unparseable, or holding no certificates — <b>aborts
+     * startup</b>: {@code start} returns {@code error: …} instead of {@code started}.
+     * The alternative is a server that reports success and then fails at OIDC
+     * discovery with a handshake error hundreds of log lines later, phrased entirely
+     * differently. Content problems (an expired CA, a leaf rather than a CA) and a
+     * failure to persist the PKCS12 stay warn-and-continue. Unset or blank is a
+     * no-op, so deployments that do not use this are untouched.
      *
      * <p><b>This mutates process-global JVM TLS state</b> — the default
      * {@link SSLContext}, the default {@link HttpsURLConnection} socket factory,
@@ -103,7 +110,20 @@ public final class WebApiNativeLibrary {
      * and reintroduce the handshake failures this exists to fix.
      */
     private static void applyExtraTrustFromEnv() {
-        String caPath = System.getenv("WEBAPI_TRUST_CERTS");
+        applyExtraTrust(System.getenv("WEBAPI_TRUST_CERTS"));
+    }
+
+    /**
+     * {@link #applyExtraTrustFromEnv()} with the path passed in, so the failure
+     * paths are testable without an environment variable. Package-private for that
+     * reason only.
+     *
+     * @throws RuntimeTrustStore.InvalidTrustSource if {@code caPath} is set but the
+     *         trust it configures cannot be installed — this propagates out of
+     *         {@link #start} and the host receives {@code error: …} rather than
+     *         {@code started}
+     */
+    static void applyExtraTrust(String caPath) {
         if (caPath == null || caPath.isBlank()) {
             return;
         }
@@ -113,16 +133,8 @@ public final class WebApiNativeLibrary {
         }
         try {
             X509Certificate[] defaults = RuntimeTrustStore.defaultTrustAnchors();
-            RuntimeTrustStore.Merged merged;
-            try (InputStream in = Files.newInputStream(Path.of(caPath))) {
-                merged = RuntimeTrustStore.merge(defaults, in);
-            }
-            if (merged.extraCertCount() == 0) {
-                System.err.println("[webapi-native-lib] WEBAPI_TRUST_CERTS=" + caPath
-                        + " contained no certificates; skipping");
-                TRUST_APPLIED.set(false);
-                return;
-            }
+            RuntimeTrustStore.Merged merged = RuntimeTrustStore.require(defaults, Path.of(caPath));
+
             for (String warning : merged.warnings()) {
                 System.err.println("[webapi-native-lib] WEBAPI_TRUST_CERTS=" + caPath + ": " + warning);
             }
@@ -166,11 +178,18 @@ public final class WebApiNativeLibrary {
             System.out.println("[webapi-native-lib] installed runtime TLS trust ("
                     + merged.defaultAnchorCount() + " default anchors + "
                     + merged.extraCertCount() + " cert(s) from " + caPath + ")");
-        } catch (Throwable t) {
+        } catch (RuntimeTrustStore.InvalidTrustSource e) {
             TRUST_APPLIED.set(false);
-            System.err.println("[webapi-native-lib] failed to apply WEBAPI_TRUST_CERTS from "
-                    + caPath + ": " + t);
-            t.printStackTrace();
+            throw new RuntimeTrustStore.InvalidTrustSource("WEBAPI_TRUST_CERTS=" + caPath
+                    + " is set but unusable — " + e.getMessage()
+                    + "; refusing to start without the TLS trust it configures");
+        } catch (GeneralSecurityException | RuntimeException e) {
+            TRUST_APPLIED.set(false);
+            e.printStackTrace();
+            throw new RuntimeTrustStore.InvalidTrustSource("WEBAPI_TRUST_CERTS=" + caPath
+                    + " is set but the runtime TLS trust could not be installed ("
+                    + e.getClass().getSimpleName()
+                    + (e.getMessage() != null ? ": " + e.getMessage() : "") + ")");
         }
     }
 
