@@ -2,6 +2,7 @@ package org.trex.webapi.nativelib;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -185,5 +186,85 @@ class RuntimeTrustStoreTest {
         } finally {
             Files.deleteIfExists(stored.path());
         }
+    }
+
+    private static java.nio.file.Path fixturePath(String name) throws Exception {
+        return java.nio.file.Path.of(
+                RuntimeTrustStoreTest.class.getResource("/certs/" + name).toURI());
+    }
+
+    @Test
+    void requireRejectsAMissingFile() {
+        RuntimeTrustStore.InvalidTrustSource e = assertThrows(
+                RuntimeTrustStore.InvalidTrustSource.class,
+                () -> RuntimeTrustStore.require(RuntimeTrustStore.defaultTrustAnchors(),
+                        java.nio.file.Path.of("/no/such/ca.pem")));
+        assertTrue(e.getMessage().contains("/no/such/ca.pem"), e.getMessage());
+    }
+
+    @Test
+    void requireRejectsAnUnparseablePem() {
+        RuntimeTrustStore.InvalidTrustSource e = assertThrows(
+                RuntimeTrustStore.InvalidTrustSource.class,
+                () -> RuntimeTrustStore.require(RuntimeTrustStore.defaultTrustAnchors(),
+                        fixturePath("garbage.pem")));
+        assertTrue(e.getMessage().contains("parse"), e.getMessage());
+    }
+
+    /**
+     * merge() treats an empty PEM as a non-error on purpose -- it is policy-free.
+     * The "explicitly configured but useless" judgement belongs to the caller, so
+     * it lives here in require() and not there.
+     */
+    @Test
+    void requireRejectsAPemHoldingNoCertificates() {
+        RuntimeTrustStore.InvalidTrustSource e = assertThrows(
+                RuntimeTrustStore.InvalidTrustSource.class,
+                () -> RuntimeTrustStore.require(RuntimeTrustStore.defaultTrustAnchors(),
+                        fixturePath("empty.pem")));
+        assertTrue(e.getMessage().contains("no X.509 certificates"), e.getMessage());
+    }
+
+    @Test
+    void requireAcceptsAValidCa() throws Exception {
+        int defaults = RuntimeTrustStore.defaultTrustAnchors().length;
+        RuntimeTrustStore.Merged merged =
+                RuntimeTrustStore.require(RuntimeTrustStore.defaultTrustAnchors(), fixturePath("ca1.pem"));
+
+        assertEquals(1, merged.extraCertCount());
+        assertEquals(defaults + 1, merged.keyStore().size());
+    }
+
+    /**
+     * Content problems stay soft: the operator gets a loud warning and a running
+     * server, because a wrong-but-parseable CA is a different mistake from a
+     * mount that is not there.
+     */
+    @Test
+    void requireStillAcceptsSoftMisconfigurations() throws Exception {
+        RuntimeTrustStore.Merged leaf =
+                RuntimeTrustStore.require(RuntimeTrustStore.defaultTrustAnchors(), fixturePath("leaf.pem"));
+        assertTrue(leaf.warnings().stream().anyMatch(w -> w.contains("not a CA certificate")),
+                leaf.warnings().toString());
+
+        RuntimeTrustStore.Merged expired =
+                RuntimeTrustStore.require(RuntimeTrustStore.defaultTrustAnchors(), fixturePath("expired-ca.pem"));
+        assertTrue(expired.warnings().stream().anyMatch(w -> w.contains("expired on")),
+                expired.warnings().toString());
+    }
+
+    /**
+     * WebApiNativeLibrary.rootMessage() unwraps to the DEEPEST cause when building
+     * the string handed back to the host process. A cause here would replace our
+     * message with a bare NoSuchFileException and lose the WEBAPI_TRUST_CERTS
+     * context entirely -- which is the whole point of failing loudly.
+     */
+    @Test
+    void invalidTrustSourceCarriesNoCauseSoTheHostMessageSurvives() {
+        RuntimeTrustStore.InvalidTrustSource e = assertThrows(
+                RuntimeTrustStore.InvalidTrustSource.class,
+                () -> RuntimeTrustStore.require(RuntimeTrustStore.defaultTrustAnchors(),
+                        java.nio.file.Path.of("/no/such/ca.pem")));
+        assertNull(e.getCause(), "a cause would be unwrapped by rootMessage() and hide this message");
     }
 }

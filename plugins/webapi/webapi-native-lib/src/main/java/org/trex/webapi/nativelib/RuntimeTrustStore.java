@@ -55,6 +55,58 @@ final class RuntimeTrustStore {
     }
 
     /**
+     * Thrown when {@code WEBAPI_TRUST_CERTS} names something that cannot become
+     * trust: a missing or unreadable file, an unparseable PEM, or a file holding
+     * no X.509 certificates.
+     *
+     * <p>Deliberately carries <b>no cause</b>. {@code WebApiNativeLibrary.rootMessage()}
+     * unwraps to the deepest cause when building the string returned to the host
+     * process, so attaching one would replace this message with a bare
+     * {@code NoSuchFileException} and lose the {@code WEBAPI_TRUST_CERTS} context.
+     * The underlying throwable is printed at the throw site instead.
+     */
+    static final class InvalidTrustSource extends RuntimeException {
+        InvalidTrustSource(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * {@link #merge} for a source the operator explicitly configured: reads
+     * {@code pem} and fails if it cannot yield at least one trust anchor.
+     *
+     * <p>The split is deliberate. {@code merge()} stays policy-free and treats an
+     * empty PEM as a non-error; deciding that an explicitly configured file which
+     * yields nothing is a startup failure is a <i>caller's</i> judgement, so it
+     * lives here. Content warnings — an expired CA, a leaf rather than a CA — are
+     * <i>not</i> fatal and come back in {@link Merged#warnings()} as before: a
+     * wrong-but-parseable certificate is a different class of mistake from a
+     * volume that was never mounted.
+     *
+     * @throws InvalidTrustSource if {@code pem} is missing, unreadable,
+     *         unparseable, or contains no X.509 certificates
+     */
+    static Merged require(X509Certificate[] defaults, Path pem) {
+        try (InputStream in = Files.newInputStream(pem)) {
+            Merged merged = merge(defaults, in);
+            if (merged.extraCertCount() == 0) {
+                throw new InvalidTrustSource(pem + " contained no X.509 certificates");
+            }
+            return merged;
+        } catch (IOException e) {
+            throw new InvalidTrustSource("cannot read " + pem + " (" + detail(e) + ")");
+        } catch (GeneralSecurityException e) {
+            throw new InvalidTrustSource(
+                    "cannot parse " + pem + " as PEM X.509 certificates (" + detail(e) + ")");
+        }
+    }
+
+    private static String detail(Throwable t) {
+        String msg = t.getMessage();
+        return t.getClass().getSimpleName() + (msg != null ? ": " + msg : "");
+    }
+
+    /**
      * Trust anchors this JVM validates against by default.
      *
      * <p>Reads whatever the running image actually trusts: the build-time
