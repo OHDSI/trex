@@ -16,7 +16,7 @@ import {
 } from "./tools/workspace.ts";
 import { gitOps } from "./git.ts";
 import { ensureGitConfig } from "./git_identity.ts";
-import { chatWorktreeBranch, worktreeReuseError } from "./worktree_guard.ts";
+import { chatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 
@@ -47,14 +47,28 @@ async function ensureChatWorktree(userId: string, appId: string, chatId: string)
   } catch { /* create below */ }
   if (exists) {
     // Never trust bare directory existence: verify the worktree is registered
-    // and has THIS chat's branch checked out before reusing it.
+    // and has THIS chat's branch checked out before reusing it. A foreign
+    // branch with a CLEAN tree is the coder's own doing (it checks out e.g. an
+    // existing PR branch mid-turn and leaves it checked out) — restore the
+    // chat branch instead of failing the turn. A status failure counts as
+    // dirty: when we cannot PROVE the tree is clean, keep refusing.
     const entries = await gitOps.worktreeList(repoRoot);
-    const reason = worktreeReuseError(entries, worktree, branch);
-    if (reason) {
+    const dirtyCount = await gitOps.status(worktree)
+      .then((s) => s.files.length)
+      .catch(() => Number.MAX_SAFE_INTEGER);
+    const decision = worktreeReuseDecision(entries, worktree, branch, dirtyCount);
+    if ("error" in decision) {
       throw new Error(
-        `chat worktree ${worktree} is unusable: ${reason}. ` +
+        `chat worktree ${worktree} is unusable: ${decision.error}. ` +
           `Refusing to run the coder outside its isolated branch.`,
       );
+    }
+    if ("restore" in decision) {
+      console.warn(
+        `[claude_code_agent] chat worktree ${worktree} was left on '${decision.foreignBranch}' ` +
+          `(clean tree) — restoring ${branch}`,
+      );
+      await gitOps.branchSwitch(worktree, branch);
     }
     return worktree;
   }
