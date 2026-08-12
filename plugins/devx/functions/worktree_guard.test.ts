@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert";
-import { chatWorktreeBranch, worktreeReuseError } from "./worktree_guard.ts";
+import { chatWorktreeBranch, worktreeReuseDecision, worktreeReuseError } from "./worktree_guard.ts";
 
 Deno.test("chatWorktreeBranch: deterministic, sanitized, capped", () => {
   assertEquals(chatWorktreeBranch("abc-123"), "claw/abc-123");
@@ -31,5 +31,43 @@ Deno.test("worktreeReuseError: valid entry passes; missing/detached/wrong-branch
   assertEquals(
     worktreeReuseError([{ path: wt, branch: "claw/other-chat", detached: false }], wt, branch),
     `worktree has 'claw/other-chat' checked out (expected ${branch})`,
+  );
+});
+
+// worktreeReuseDecision: the guard's recoverable path. The coder legitimately
+// checks out an existing PR branch inside its own worktree and leaves it
+// there; with a CLEAN tree the next turn restores the chat branch instead of
+// failing (the PR-29 incident: every second turn of a work-on-existing-PR
+// task died with "unusable worktree").
+Deno.test("worktreeReuseDecision: own branch ok; clean foreign branch restores; dirty foreign branch errors", () => {
+  const wt = "/ws/u1/app1/.worktrees/chat-1";
+  const branch = "claw/chat-1";
+  const onOwn = [{ path: wt, branch, detached: false }];
+  const onPr = [{ path: wt, branch: "ohdsi-trex/some-pr-branch", detached: false }];
+
+  assertEquals(worktreeReuseDecision(onOwn, wt, branch, 0), { ok: true });
+  // Own branch + dirty tree is still fine — the dirt is this chat's own work.
+  assertEquals(worktreeReuseDecision(onOwn, wt, branch, 3), { ok: true });
+  // Foreign branch, clean tree → recoverable.
+  assertEquals(
+    worktreeReuseDecision(onPr, wt, branch, 0),
+    { restore: true, foreignBranch: "ohdsi-trex/some-pr-branch" },
+  );
+  // Foreign branch, dirty tree → hard error naming the risk.
+  assertEquals(
+    worktreeReuseDecision(onPr, wt, branch, 2),
+    {
+      error: `worktree has 'ohdsi-trex/some-pr-branch' checked out (expected ${branch}) ` +
+        `with 2 uncommitted change(s) — cannot restore the chat branch without risking them`,
+    },
+  );
+  // Unregistered and detached stay hard errors regardless of cleanliness.
+  assertEquals(
+    worktreeReuseDecision([], wt, branch, 0),
+    { error: `directory exists but git does not list it as a worktree` },
+  );
+  assertEquals(
+    worktreeReuseDecision([{ path: wt, branch: null, detached: true }], wt, branch, 0),
+    { error: `worktree is detached (expected branch ${branch})` },
   );
 });
