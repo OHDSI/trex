@@ -1,5 +1,6 @@
 package org.trex.webapi.nativelib;
 
+import java.io.IOException;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
 import java.security.cert.X509Certificate;
@@ -142,8 +143,14 @@ public final class WebApiNativeLibrary {
                 System.out.println("[webapi-native-lib] trusting extra CA: " + description);
             }
 
+            // KeyManagers are rebuilt from javax.net.ssl.keyStore* rather than passed as
+            // null: SSLContext.init does NOT fall back to those properties (SunJSSE
+            // substitutes a dummy key manager holding no keys), so replacing the default
+            // context with null here would silently drop the client certificate of a
+            // mutual-TLS deployment — and only when WEBAPI_TRUST_CERTS is set.
             SSLContext ctx = SSLContext.getInstance("TLS");
-            ctx.init(null, RuntimeTrustStore.trustManagers(merged.keyStore()), null);
+            ctx.init(RuntimeTrustStore.defaultKeyManagers(),
+                    RuntimeTrustStore.trustManagers(merged.keyStore()), null);
             SSLContext.setDefault(ctx);
             HttpsURLConnection.setDefaultSSLSocketFactory(ctx.getSocketFactory());
 
@@ -162,6 +169,24 @@ public final class WebApiNativeLibrary {
                     System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
                     System.setProperty("javax.net.ssl.trustStorePassword", store.password());
                     System.out.println("[webapi-native-lib] merged truststore at " + store.path());
+
+                    // Whether a native image honours a RUNTIME change to these properties
+                    // depends on the GraalVM build, which is why the toolchain is pinned.
+                    // Re-read the anchors the way HttpClient/OkHttp/JDBC would, so a
+                    // regression shows up as a log line instead of a TLS failure much
+                    // later. A warning, not fatal: the default SSLContext installed above
+                    // already carries the extra CA regardless.
+                    int expected = merged.defaultAnchorCount() + merged.extraCertCount();
+                    int visible = RuntimeTrustStore.visibleAnchorCount();
+                    if (visible >= expected) {
+                        System.out.println("[webapi-native-lib] runtime truststore verified: "
+                                + visible + " anchors visible to a fresh TrustManagerFactory");
+                    } else {
+                        System.err.println("[webapi-native-lib] WARNING: javax.net.ssl.trustStore"
+                                + " did not take effect (" + visible + " anchors visible, expected "
+                                + expected + "); libraries that build their own"
+                                + " TrustManagerFactory will NOT trust the extra CA(s)");
+                    }
                 } catch (Throwable t) {
                     System.err.println("[webapi-native-lib] could not persist the merged truststore: "
                             + t + "; the default SSLContext still trusts the extra CA(s), but"
@@ -183,7 +208,10 @@ public final class WebApiNativeLibrary {
             throw new RuntimeTrustStore.InvalidTrustSource("WEBAPI_TRUST_CERTS=" + caPath
                     + " is set but unusable — " + e.getMessage()
                     + "; refusing to start without the TLS trust it configures");
-        } catch (GeneralSecurityException | RuntimeException e) {
+        } catch (GeneralSecurityException | IOException | RuntimeException e) {
+            // IOException joins this clause because defaultKeyManagers() reads a keystore
+            // file: a configured-but-unreadable javax.net.ssl.keyStore must be fatal for
+            // the same reason a bad WEBAPI_TRUST_CERTS is, not silently degraded.
             TRUST_APPLIED.set(false);
             e.printStackTrace();
             throw new RuntimeTrustStore.InvalidTrustSource("WEBAPI_TRUST_CERTS=" + caPath

@@ -267,4 +267,60 @@ class RuntimeTrustStoreTest {
                         java.nio.file.Path.of("/no/such/ca.pem")));
         assertNull(e.getCause(), "a cause would be unwrapped by rootMessage() and hide this message");
     }
+
+    /**
+     * Zero default anchors means the JVM's own trust could not be read (e.g. an
+     * operator-set javax.net.ssl.trustStore pointing at an unreadable file). If
+     * require() built a store from that anyway, the resulting truststore would
+     * hold only the extra CA and installing it would REPLACE trust instead of
+     * widening it -- the central invariant of this feature.
+     */
+    @Test
+    void requireRejectsZeroDefaultAnchorsRatherThanReplacingTrust() throws Exception {
+        RuntimeTrustStore.InvalidTrustSource e = assertThrows(
+                RuntimeTrustStore.InvalidTrustSource.class,
+                () -> RuntimeTrustStore.require(new X509Certificate[0], fixturePath("ca1.pem")));
+        assertTrue(e.getMessage().contains("widen"), e.getMessage());
+        assertNull(e.getCause(), "a cause would be unwrapped by rootMessage() and hide this message");
+    }
+
+    /**
+     * The counterpart of the self-check that runs in the native image: a library
+     * building its own TrustManagerFactory from null must see the JVM's roots. In the
+     * image this same call is made AFTER javax.net.ssl.trustStore is repointed, which
+     * is what proves the runtime override reached those libraries.
+     */
+    @Test
+    void visibleAnchorCountSeesTheJvmDefaults() {
+        assertTrue(RuntimeTrustStore.visibleAnchorCount() > 0,
+                "a library building its own TrustManagerFactory must see the JVM's roots");
+    }
+
+    @Test
+    void defaultKeyManagersIsNullWhenNoKeyStoreConfigured() throws Exception {
+        String prior = System.getProperty("javax.net.ssl.keyStore");
+        System.clearProperty("javax.net.ssl.keyStore");
+        try {
+            assertNull(RuntimeTrustStore.defaultKeyManagers());
+        } finally {
+            if (prior != null) {
+                System.setProperty("javax.net.ssl.keyStore", prior);
+            }
+        }
+    }
+
+    @Test
+    void defaultKeyManagersThrowsWhenTheConfiguredKeyStoreCannotBeRead() throws Exception {
+        String prior = System.getProperty("javax.net.ssl.keyStore");
+        System.setProperty("javax.net.ssl.keyStore", "/no/such/keystore.p12");
+        try {
+            assertThrows(Exception.class, RuntimeTrustStore::defaultKeyManagers);
+        } finally {
+            if (prior == null) {
+                System.clearProperty("javax.net.ssl.keyStore");
+            } else {
+                System.setProperty("javax.net.ssl.keyStore", prior);
+            }
+        }
+    }
 }

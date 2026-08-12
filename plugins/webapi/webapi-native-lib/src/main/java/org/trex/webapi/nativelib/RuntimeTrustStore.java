@@ -18,6 +18,8 @@ import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
 
+import javax.net.ssl.KeyManager;
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
@@ -87,6 +89,17 @@ final class RuntimeTrustStore {
      *         unparseable, or contains no X.509 certificates
      */
     static Merged require(X509Certificate[] defaults, Path pem) {
+        // defaultTrustAnchors() returns an EMPTY array without throwing when the JVM's
+        // own trust cannot be read -- an unreadable baked cacerts, or an operator-set
+        // javax.net.ssl.trustStore pointing at a file that fails to load. Building on
+        // that would yield a store holding only the extra CA, and installing it would
+        // REPLACE trust rather than widen it. That is the one invariant this whole
+        // feature rests on, so refuse rather than silently narrow.
+        if (defaults.length == 0) {
+            throw new InvalidTrustSource("refusing to install a truststore built from 0 default"
+                    + " trust anchors: that would replace existing trust rather than widen it"
+                    + " (is javax.net.ssl.trustStore set to an unreadable file?)");
+        }
         try (InputStream in = Files.newInputStream(pem)) {
             Merged merged = merge(defaults, in);
             if (merged.extraCertCount() == 0) {
@@ -162,6 +175,65 @@ final class RuntimeTrustStore {
         }
 
         return new Merged(ks, defaultCount, extraCount, List.copyOf(warnings), List.copyOf(descriptions));
+    }
+
+    /**
+     * KeyManagers from the {@code javax.net.ssl.keyStore*} system properties, or
+     * {@code null} when none is configured.
+     *
+     * <p>Needed because {@code SSLContext.init(null, ...)} does <b>not</b> fall back to
+     * those properties — SunJSSE substitutes a dummy key manager holding no keys. The
+     * JDK's own default context builds them, so replacing that context without
+     * rebuilding the KeyManagers would silently drop the client certificate of any
+     * mutual-TLS deployment, and only when {@code WEBAPI_TRUST_CERTS} is set.
+     *
+     * <p>A configured-but-unreadable keystore propagates, matching the JDK's own
+     * behaviour of failing rather than starting without the identity it was given.
+     */
+    static KeyManager[] defaultKeyManagers() throws GeneralSecurityException, IOException {
+        String path = System.getProperty("javax.net.ssl.keyStore");
+        if (path == null || path.isBlank() || "NONE".equals(path)) {
+            return null;
+        }
+        String type = System.getProperty("javax.net.ssl.keyStoreType", KeyStore.getDefaultType());
+        String password = System.getProperty("javax.net.ssl.keyStorePassword");
+        char[] secret = password == null ? null : password.toCharArray();
+
+        KeyStore ks = KeyStore.getInstance(type);
+        try (InputStream in = Files.newInputStream(Path.of(path))) {
+            ks.load(in, secret);
+        }
+        KeyManagerFactory kmf =
+                KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        kmf.init(ks, secret);
+        return kmf.getKeyManagers();
+    }
+
+    /**
+     * Trust anchors a library that builds its own {@link TrustManagerFactory} from
+     * {@code null} would see right now — Apache HttpClient, OkHttp and most JDBC TLS
+     * stacks do exactly that, and read {@code javax.net.ssl.trustStore*} rather than
+     * the default {@link javax.net.ssl.SSLContext}.
+     *
+     * <p>Called after those properties are set, this reports whether the runtime
+     * override actually took effect. Inside a native image that is not a given: it
+     * depends on the GraalVM build, which is why the toolchain is pinned. Returns 0
+     * instead of throwing — this is a diagnostic and must never be why startup fails.
+     */
+    static int visibleAnchorCount() {
+        try {
+            TrustManagerFactory tmf =
+                    TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            tmf.init((KeyStore) null);
+            for (TrustManager tm : tmf.getTrustManagers()) {
+                if (tm instanceof X509TrustManager x509) {
+                    return x509.getAcceptedIssuers().length;
+                }
+            }
+        } catch (GeneralSecurityException e) {
+            System.err.println("[webapi-native-lib] could not re-read trust anchors: " + e);
+        }
+        return 0;
     }
 
     /** Trust managers over {@code ks} using the JDK's stock PKIX implementation. */
