@@ -17,6 +17,17 @@
 // endpoints alp-dataflow-gen-init/src/PrefectAPI.ts uses to seed the block at boot).
 // It never throws: a Prefect hiccup must not 500 the /trex/db write (mirrors how
 // syncTrexDatabaseManager degrades to a warning).
+//
+// Writes alone were not enough, though. Nothing re-seeded the block on a plain
+// RESTART: the d2e seeder reads Trex.DatabaseManager (empty until boot's registry
+// sync lands, and that sync sits behind the per-dataset cache attach loop), so on an
+// environment with many caches it seeded an EMPTY block and every flow run failed with
+//   ValueError: 'DATABASE_CREDENTIALS' secret is empty
+// until someone edited a database in setup to trigger the write path above. So boot
+// re-seeds too (reseedDatabaseCredentialsWithRetry, called from boot.ts): this module
+// reads the trexdb registry DIRECTLY, so unlike the d2e seeder it does not depend on
+// the in-memory manager being primed and is authoritative at any point during boot.
+// Prefect itself may still be starting, hence the bounded retry.
 
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
@@ -139,16 +150,34 @@ async function pfJson(res: Response, ctx: string): Promise<any> {
 
 const JSON_HEADERS = { "Content-Type": "application/json" };
 
+/** Outcome of one re-seed pass:
+ *  - "written": the block now matches the trexdb registry.
+ *  - "skipped": nothing to do (no PREFECT_API_URL, or an empty registry under
+ *    skipWhenEmpty) — a settled answer, so retrying cannot help.
+ *  - "failed":  transient (registry read or Prefect call failed) — worth a retry. */
+export type ReseedOutcome = "written" | "skipped" | "failed";
+
+export interface SyncPrefectDatabaseCredentialsOptions {
+  /** Leave the block untouched when the registry has no databases, instead of writing
+   *  `[]` over it. Used by the boot path: an empty write is never useful (no databases
+   *  means no flow can connect anyway) and would clobber the value Prefect carried over
+   *  from the previous run. The /trex/db write path leaves this off, where an empty
+   *  registry legitimately means "the last database was just deleted". */
+  skipWhenEmpty?: boolean;
+}
+
 /**
  * Re-seed (create-or-update) the Prefect `database-credentials` secret block from the
  * current trexdb registry. No-op (with a warning) when PREFECT_API_URL is unset or
  * Prefect is unreachable, so the /trex/db write still succeeds.
  */
-export async function syncPrefectDatabaseCredentials(): Promise<void> {
+export async function syncPrefectDatabaseCredentials(
+  options: SyncPrefectDatabaseCredentialsOptions = {},
+): Promise<ReseedOutcome> {
   const base = prefectBaseUrl();
   if (!base) {
     console.warn("[d2e-compat] PREFECT_API_URL unset — skipping Prefect 'database-credentials' re-seed");
-    return;
+    return "skipped";
   }
 
   let value: any[];
@@ -156,7 +185,15 @@ export async function syncPrefectDatabaseCredentials(): Promise<void> {
     value = await buildFlowCredentials();
   } catch (e) {
     console.error(`[d2e-compat] prefect sync: failed to read trexdb registry: ${e}`);
-    return;
+    return "failed";
+  }
+
+  if (options.skipWhenEmpty && value.length === 0) {
+    console.log(
+      "[d2e-compat] trexdb registry has no databases — leaving Prefect " +
+        "'database-credentials' untouched",
+    );
+    return "skipped";
   }
 
   try {
@@ -192,7 +229,7 @@ export async function syncPrefectDatabaseCredentials(): Promise<void> {
 
     if (createRes.ok) {
       console.log(`[d2e-compat] seeded Prefect '${BLOCK_NAME}' with ${value.length} database(s): [${codes}]`);
-      return;
+      return "written";
     }
     if (createRes.status !== 409) {
       throw new Error(`create block -> ${createRes.status} ${await createRes.text()}`);
@@ -214,7 +251,120 @@ export async function syncPrefectDatabaseCredentials(): Promise<void> {
       throw new Error(`update block -> ${patchRes.status} ${await patchRes.text()}`);
     }
     console.log(`[d2e-compat] updated Prefect '${BLOCK_NAME}' with ${value.length} database(s): [${codes}]`);
+    return "written";
   } catch (e) {
     console.error(`[d2e-compat] prefect 'database-credentials' re-seed failed: ${e}`);
+    return "failed";
   }
+}
+
+const DEFAULT_RESEED_ATTEMPTS = 30;
+const DEFAULT_RESEED_DELAY_MS = 10_000;
+
+const DEFAULT_VERIFY_DELAY_MS = 120_000;
+
+/** Parse a positive-integer env var, falling back on missing/garbage values. */
+function positiveIntEnv(name: string, fallback: number): number {
+  const parsed = Number(Deno.env.get(name));
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+/** Same, but 0 is a meaningful value (used to disable the verification pass). */
+function nonNegativeIntEnv(name: string, fallback: number): number {
+  const parsed = Number(Deno.env.get(name));
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+export interface ReseedRetryOptions {
+  /** Total number of passes, including the first. Default 30 (env
+   *  D2E_COMPAT_PREFECT_RESEED_ATTEMPTS). */
+  attempts?: number;
+  /** Delay between passes. Default 10s (env D2E_COMPAT_PREFECT_RESEED_DELAY_MS);
+   *  30 × 10s covers a Prefect server that boots well after trex. */
+  delayMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  log?: (message: string) => void;
+  /** Seam for tests; defaults to the real re-seed with skipWhenEmpty. */
+  attempt?: () => Promise<ReseedOutcome>;
+}
+
+/**
+ * Re-seed the `database-credentials` block, retrying only while the failure looks
+ * transient — Prefect is commonly still starting when trex boots. Returns the final
+ * outcome and never throws, so callers can fire it off without a guard.
+ */
+export async function reseedDatabaseCredentialsWithRetry(
+  options: ReseedRetryOptions = {},
+): Promise<ReseedOutcome> {
+  const attempts = options.attempts ??
+    positiveIntEnv("D2E_COMPAT_PREFECT_RESEED_ATTEMPTS", DEFAULT_RESEED_ATTEMPTS);
+  const delayMs = options.delayMs ??
+    positiveIntEnv("D2E_COMPAT_PREFECT_RESEED_DELAY_MS", DEFAULT_RESEED_DELAY_MS);
+  const sleep = options.sleep ?? defaultSleep;
+  const log = options.log ?? ((m: string) => console.log(`[d2e-compat] ${m}`));
+  const attempt = options.attempt ??
+    (() => syncPrefectDatabaseCredentials({ skipWhenEmpty: true }));
+
+  for (let pass = 1; pass <= attempts; pass++) {
+    let outcome: ReseedOutcome;
+    try {
+      outcome = await attempt();
+    } catch (e) {
+      outcome = "failed";
+      log(`prefect 'database-credentials' re-seed threw on pass ${pass}/${attempts}: ${e}`);
+    }
+    if (outcome !== "failed") return outcome;
+    if (pass === attempts) {
+      log(
+        `prefect 'database-credentials' re-seed did not succeed after ${attempts} attempt(s); ` +
+          `the block will be re-seeded on the next /trex/db write`,
+      );
+      return "failed";
+    }
+    await sleep(delayMs);
+  }
+  // Unreachable (attempts >= 1 always returns in the loop), but keeps the type total.
+  return "failed";
+}
+
+export interface BootReseedOptions extends ReseedRetryOptions {
+  /** Delay before the verification pass; 0 disables it. Default 120s (env
+   *  D2E_COMPAT_PREFECT_RESEED_VERIFY_DELAY_MS). */
+  verifyDelayMs?: number;
+}
+
+/**
+ * The boot entry point: re-seed the block, then re-seed once more a while later.
+ *
+ * The second pass exists because we are not the only writer. d2e's
+ * alp-dataflow-gen-init also seeds this block at startup, from
+ * Trex.DatabaseManager rather than from trexdb, and a bundle without the
+ * skip-when-empty guard will happily write `[]` over a good block — possibly
+ * seconds AFTER our first pass, since it is gated on the Prefect health check.
+ * One delayed re-seed (default 120s, comfortably past that seeder's own 3-minute
+ * worker budget) repairs such a clobber automatically instead of leaving the
+ * environment broken until someone edits a database in setup.
+ *
+ * Never throws. Not meant to be awaited by boot: it deliberately outlives it.
+ */
+export async function bootReseedDatabaseCredentials(
+  options: BootReseedOptions = {},
+): Promise<void> {
+  const sleep = options.sleep ?? defaultSleep;
+  const log = options.log ?? ((m: string) => console.log(`[d2e-compat] ${m}`));
+
+  const first = await reseedDatabaseCredentialsWithRetry(options);
+  // Nothing was written (no databases yet, or Prefect never came up) — a second
+  // pass would have nothing to repair; the /trex/db write path covers what follows.
+  if (first !== "written") return;
+
+  const verifyDelayMs = options.verifyDelayMs ??
+    nonNegativeIntEnv("D2E_COMPAT_PREFECT_RESEED_VERIFY_DELAY_MS", DEFAULT_VERIFY_DELAY_MS);
+  if (verifyDelayMs <= 0) return;
+
+  await sleep(verifyDelayMs);
+  log(`re-checking Prefect '${BLOCK_NAME}' after ${verifyDelayMs}ms`);
+  await reseedDatabaseCredentialsWithRetry(options);
 }
