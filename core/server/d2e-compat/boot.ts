@@ -44,6 +44,7 @@ import {
 import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
 import { migrateLegacyDatabaseRegistry } from "./dbm-migrate.ts";
+import { bootReseedDatabaseCredentials } from "./prefect-sync.ts";
 
 declare const Trex: any;
 declare const EdgeRuntime: any;
@@ -124,6 +125,29 @@ export async function d2eBoot(): Promise<void> {
   // Reconcile the legacy d2e `trex.db` connection registry into trexdb before
   // the attach blocks read it, so migrated connections are attached this boot.
   await migrateLegacyDatabaseRegistry();
+
+  // ── Block 5.6: native DatabaseManager sync ───────────────────────────────
+  // Push the trexdb registry into Trex.DatabaseManager (op_get_dbc store) so the
+  // d2e /trex/db façade and any worker reading Trex.DatabaseManager.getCredentials()
+  // see the live registry, and the native manager (re)attaches/publishes sources.
+  // This is the trex-native equivalent of d2e's DatabaseManager.get() priming
+  // trexdbm.setCredentials() at startup.
+  //
+  // Runs here — right after the registry is settled, BEFORE the attach blocks —
+  // rather than at the end of boot. Plugin init functions and function workers come up
+  // concurrently with this sequence and several read the registry ONCE at startup
+  // (alp-dataflow-gen-init seeds Prefect's database-credentials block from it;
+  // analytics-svc/cdw-svc bake DATABASE_CREDENTIALS into their worker env), so every
+  // second spent in blocks 6-7 was a second in which they could read an EMPTY registry.
+  // Those attach loops scale with the number of dataset cache files, so the window grew
+  // with the size of the environment. Nothing in blocks 6-7 reads the native manager —
+  // they query trexdb directly — so moving this earlier only narrows the window.
+  try {
+    const { syncTrexDatabaseManager } = await import("./dbm-sync.ts");
+    await syncTrexDatabaseManager();
+  } catch (e) {
+    err(`native DatabaseManager sync failed: ${(e as Error).message}`);
+  }
 
   // ── Block 6: HANA cache attach ───────────────────────────────────────────
   // For each credential with dialect="hana", attach its DuckDB cache file.
@@ -305,16 +329,19 @@ export async function d2eBoot(): Promise<void> {
     log(`[attach-startup] failed: ${(e as Error).message}`);
   }
 
-  // ── Block 8: native DatabaseManager sync ─────────────────────────────────
-  // Push the trexdb registry into Trex.DatabaseManager (op_get_dbc store) so the
-  // d2e /trex/db façade and any worker reading Trex.DatabaseManager.getCredentials()
-  // see the live registry, and the native manager (re)attaches/publishes sources.
-  // This is the trex-native equivalent of d2e's DatabaseManager.get() priming
-  // trexdbm.setCredentials() at startup.
-  try {
-    const { syncTrexDatabaseManager } = await import("./dbm-sync.ts");
-    await syncTrexDatabaseManager();
-  } catch (e) {
-    err(`native DatabaseManager sync failed: ${(e as Error).message}`);
-  }
+  // ── Block 8: Prefect database-credentials re-seed ────────────────────────
+  // Make a restart converge on its own. The block was previously only written by
+  // d2e's alp-dataflow-gen-init at startup and by this module on /trex/db writes;
+  // the init seeder reads Trex.DatabaseManager, which is empty until block 5.6 lands,
+  // so on a restart with no database edits it could seed an EMPTY block and break
+  // every flow run with ValueError("'DATABASE_CREDENTIALS' secret is empty"). Re-seeding
+  // from here fixes that for good: prefect-sync reads trexdb directly, so it is
+  // authoritative regardless of what the init function saw.
+  //
+  // NOT awaited: Prefect commonly starts after trex, and the retry budget (30 × 10s by
+  // default) plus the verification pass deliberately outlive boot — they must not hold
+  // up server.listen. Failures are logged, never thrown.
+  bootReseedDatabaseCredentials().catch((e) =>
+    err(`prefect 'database-credentials' boot re-seed failed: ${(e as Error).message}`)
+  );
 }
