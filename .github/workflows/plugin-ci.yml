@@ -745,6 +745,17 @@ jobs:
           if ! grep -q "SMOKE_TRUST=installed" smoke.out; then
             echo "::error::WEBAPI_TRUST_CERTS was not honoured in the native image"; exit 1
           fi
+          # A shared-library native image installs no signal handlers, so SIGPIPE keeps the
+          # host default of terminate and the close_notify write during TLS teardown kills
+          # the process silently mid-boot. SigPipeGuard fixes that; assert it actually ran.
+          # The harness deliberately leaves SIGPIPE at its lethal default, so "running"
+          # above already proves the library protects itself - do NOT harden harness.c or
+          # this coverage disappears. See docs/design/webapi-native-sigpipe.md.
+          if ! grep -q "SIGPIPE: ignored" smoke.out; then
+            echo "::error::SigPipeGuard did not ignore SIGPIPE; a peer-closed TLS socket can kill the host process"
+            grep -E "SIGPIPE:" smoke.out || true
+            exit 1
+          fi
           if grep -iqE "not registered for reflection|UnsupportedFeatureError|MissingReflectionRegistrationError|NoClassDefFoundError" smoke.out; then
             echo "::error::native-image reachability gap hit during boot smoke"; exit 1
           fi

@@ -34,6 +34,12 @@ public final class WebApiNativeLibrary {
             return cstr("already-running");
         }
         try {
+            // Before anything can open a socket: a shared-library native image installs no
+            // signal handlers, so SIGPIPE would keep the host default of terminate and the
+            // close_notify write during TLS teardown would kill the host process silently.
+            // Touches no TLS state, so it is safe above the trust install below.
+            System.out.println("[webapi-native-lib] SIGPIPE: " + SigPipeGuard.install());
+
             // Load-bearing ordering: configure JVM TLS trust BEFORE Spring (and
             // therefore SunJSSE / the OIDC client) initializes any SSLContext. This
             // native image bakes its default truststore at build time and ignores the
