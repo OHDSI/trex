@@ -47,6 +47,26 @@ fn json_scalar_to_hdb(item: &serde_json::Value) -> Result<HdbValue<'static>, Box
                 ))));
             }
         }
+        // d2e's query generator emits bound filter values as a wrapper object
+        // {"type": "...", "value": <scalar>} (e.g. {"type":"text","value":"MALE"}).
+        // Unwrap to the inner scalar; otherwise the whole object is stringified and
+        // bound as the literal JSON, so a predicate like `UPPER(concept_name)=UPPER(?)`
+        // matches nothing and the cohort materializes empty.
+        Value::Object(map) => {
+            let inner = map.get("value").ok_or_else(|| {
+                HanaError::new(&format!(
+                    "Unsupported object source parameter (missing 'value'): {}",
+                    item
+                ))
+            })?;
+            if inner.is_object() || inner.is_array() {
+                return Err(Box::new(HanaError::new(&format!(
+                    "Unsupported nested source parameter value: {}",
+                    inner
+                ))));
+            }
+            json_scalar_to_hdb(inner)?
+        }
         other => HdbValue::STRING(other.to_string()),
     })
 }
@@ -445,6 +465,22 @@ mod tests {
         assert!(matches!(v[2], HdbValue::DOUBLE(d) if (d - 3.5).abs() < 1e-9));
         assert!(matches!(v[3], HdbValue::BOOLEAN(true)));
         assert!(matches!(v[4], HdbValue::NULL));
+    }
+
+    #[test]
+    fn test_parse_params_typed_value_wrapper() {
+        // d2e sends filter values as {"type": "...", "value": <scalar>}; the inner
+        // scalar must be unwrapped, not stringified as the whole object.
+        let v = parse_source_params(r#"[{"type":"text","value":"MALE"},{"type":"num","value":42}]"#).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(matches!(v[0], HdbValue::STRING(ref s) if s == "MALE"));
+        assert!(matches!(v[1], HdbValue::BIGINT(42)));
+    }
+
+    #[test]
+    fn test_parse_params_object_without_value_errors() {
+        assert!(parse_source_params(r#"[{"type":"text"}]"#).is_err());
+        assert!(parse_source_params(r#"[{"type":"text","value":{"a":1}}]"#).is_err());
     }
 
     #[test]
