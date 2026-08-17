@@ -504,6 +504,20 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
   });
 });
 
+// Provision d2e's roles/schemas/grants before plugins load — plugin init
+// functions and plugin migrations both connect using the users created here.
+// Deliberately OUTSIDE the plugin-init try/catch below: that catch logs and
+// carries on to server.listen, which would leave trex reporting healthy on an
+// unprovisioned database. A bootstrap failure is fatal, same abort idiom as the
+// DEK init further down.
+try {
+  await runD2eBootstrap();
+} catch (err) {
+  console.error("[boot] FATAL: d2e bootstrap failed:", err);
+  if (typeof Deno.exit === "function") Deno.exit(1);
+  throw err;
+}
+
 try {
 // The studio SPA is served entirely by the Studio Node sidecar via the
 // @trex/studio function plugin (the studio catch-all route below). The sidecar's
@@ -596,9 +610,6 @@ app.all(
   // /portal static + SPA fallback, which would otherwise shadow the dynamic
   // /portal/env.js the portal needs (its absence crashes the portal app).
   await applyD2eCompat(app);
-  // Provision d2e's roles/schemas/grants before plugins load — plugin init
-  // functions and plugin migrations both connect using the users created here.
-  await runD2eBootstrap();
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
   console.log("Plugin system initialized");

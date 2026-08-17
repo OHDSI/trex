@@ -244,8 +244,35 @@ Deno.test("runBootstrapStatements propagates failures (bootstrap is fatal)", asy
   assertEquals(threw, true);
 });
 
-import { runD2eBootstrap } from "./index.ts";
+// ── Call site ───────────────────────────────────────────────────────────────
+// runD2eBootstrap is documented as FATAL on failure. It was originally called
+// inside index.ts's plugin-init try/catch, which logged and carried on to
+// server.listen — a bootstrap failure left trex healthy against an unprovisioned
+// database. Asserted structurally here because the alternative (booting the real
+// server) is not testable in-process.
+const INDEX_SRC = Deno.readTextFileSync(new URL("../index.ts", import.meta.url));
 
-Deno.test("runD2eBootstrap is a no-op when D2E_COMPAT is disabled", async () => {
-  await runD2eBootstrap();
+Deno.test("runD2eBootstrap is called exactly once, before plugin init", () => {
+  const calls = INDEX_SRC.match(/await runD2eBootstrap\(\)/g) ?? [];
+  assertEquals(calls.length, 1);
+  const call = INDEX_SRC.indexOf("await runD2eBootstrap()");
+  assertEquals(call < INDEX_SRC.indexOf("await Plugins.initPlugins(app)"), true);
+  assertEquals(call < INDEX_SRC.indexOf("server.listen(8000"), true);
+});
+
+Deno.test("the runD2eBootstrap call sits outside the plugin-init try/catch", () => {
+  const call = INDEX_SRC.indexOf("await runD2eBootstrap()");
+  // First statement inside the plugin-init try block.
+  const pluginTryBody = INDEX_SRC.indexOf("The studio SPA is served entirely");
+  const pluginCatch = INDEX_SRC.indexOf('console.error("Plugin system failed to initialize:"');
+  assertEquals(call < pluginTryBody, true, "bootstrap call is inside the plugin-init try block");
+  assertEquals(pluginTryBody < pluginCatch, true);
+});
+
+Deno.test("a bootstrap failure aborts boot instead of being logged and swallowed", () => {
+  const call = INDEX_SRC.indexOf("await runD2eBootstrap()");
+  const handler = INDEX_SRC.slice(call, call + 500);
+  assertStringIncludes(handler, "FATAL");
+  assertStringIncludes(handler, "Deno.exit(1)");
+  assertStringIncludes(handler, "throw err");
 });
