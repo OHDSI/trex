@@ -1,12 +1,14 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert";
+import { assertEquals, assertStringIncludes, assertThrows } from "jsr:@std/assert";
 import {
+  type BootstrapConfig,
   buildBootstrapStatements,
+  DOLLAR_TAG,
   parseBootstrapConfigFromEnv,
   quoteIdent,
   quoteLiteral,
 } from "./bootstrap.ts";
 
-const CFG = {
+const CFG: BootstrapConfig = {
   manageConfig: {
     databases: { "+alp": { schemas: { "+portal": {}, "+usermgmt": {} } } },
   },
@@ -41,8 +43,8 @@ Deno.test("every generated statement is idempotent", () => {
   for (const sql of buildBootstrapStatements(CFG)) {
     const idempotent = sql.includes("IF NOT EXISTS") ||
       sql.startsWith("GRANT ") ||
-      sql.startsWith("ALTER DEFAULT PRIVILEGES ") ||
-      sql.startsWith("DO $$");
+      sql.startsWith("ALTER DEFAULT PRIVILEGES") ||
+      sql.startsWith(`DO ${DOLLAR_TAG}`);
     assertEquals(idempotent, true, `not idempotent: ${sql}`);
   }
 });
@@ -88,6 +90,100 @@ Deno.test("grants per-schema privileges and default privileges to reader and wri
   assertEquals(stmts.includes('GRANT USAGE ON SCHEMA "portal" TO "alp_pg_read_user"'), true);
 });
 
+Deno.test("grants the manager manage privileges on every schema", () => {
+  const stmts = buildBootstrapStatements(CFG);
+  for (const schema of ["portal", "usermgmt"]) {
+    assertEquals(
+      stmts.includes(`GRANT CREATE, USAGE ON SCHEMA "${schema}" TO "alp_pg_admin_user"`),
+      true,
+      `missing manager schema grant for ${schema}`,
+    );
+    assertEquals(
+      stmts.includes(
+        `GRANT ALL ON ALL TABLES IN SCHEMA "${schema}" TO "alp_pg_admin_user" WITH GRANT OPTION`,
+      ),
+      true,
+    );
+    assertEquals(
+      stmts.includes(
+        `ALTER DEFAULT PRIVILEGES FOR ROLE "logto_postgres" IN SCHEMA "${schema}" GRANT ALL ON TABLES TO "alp_pg_admin_user" WITH GRANT OPTION`,
+      ),
+      true,
+    );
+  }
+});
+
+Deno.test("grants the logtoManager manage privileges with grant option", () => {
+  const stmts = buildBootstrapStatements(CFG);
+  // Without CREATE/USAGE here alp-logto cannot migrate its own schema.
+  assertEquals(
+    stmts.includes(
+      'GRANT CREATE, USAGE ON SCHEMA "portal" TO "logto_postgres" WITH GRANT OPTION',
+    ),
+    true,
+  );
+  assertEquals(
+    stmts.includes(
+      'GRANT ALL ON ALL SEQUENCES IN SCHEMA "portal" TO "logto_postgres" WITH GRANT OPTION',
+    ),
+    true,
+  );
+  assertEquals(
+    stmts.includes(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "alp_pg_admin_user" IN SCHEMA "portal" GRANT ALL ON FUNCTIONS TO "logto_postgres" WITH GRANT OPTION',
+    ),
+    true,
+  );
+});
+
+Deno.test("emits no logtoManager grants when it is not configured", () => {
+  const cfg = structuredClone(CFG);
+  delete cfg.manageUsers.alp.logtoManager;
+  delete cfg.manageUsers.alp.logtoManagerPassword;
+  const stmts = buildBootstrapStatements(cfg).join("\n");
+  assertEquals(stmts.includes("logto_postgres"), false);
+});
+
+Deno.test("grants the reader read privileges, not just schema usage", () => {
+  const stmts = buildBootstrapStatements(CFG);
+  assertEquals(stmts.includes('GRANT SELECT ON ALL TABLES IN SCHEMA "portal" TO "alp_pg_read_user"'), true);
+  assertEquals(
+    stmts.includes('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA "portal" TO "alp_pg_read_user"'),
+    true,
+  );
+  assertEquals(
+    stmts.includes('GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "portal" TO "alp_pg_read_user"'),
+    true,
+  );
+  assertEquals(
+    stmts.includes(
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "alp_pg_admin_user" IN SCHEMA "portal" GRANT SELECT ON TABLES TO "alp_pg_read_user"',
+    ),
+    true,
+  );
+});
+
+Deno.test("a password containing $$ stays inside the dollar-quoted body", () => {
+  const cfg = structuredClone(CFG);
+  cfg.manageUsers.alp.managerPassword = "pa$$w'ord$$";
+  const create = buildBootstrapStatements(cfg).find((s) =>
+    s.includes("alp_pg_admin_user") && s.includes("CREATE ROLE")
+  );
+  assertStringIncludes(create!, "ENCRYPTED PASSWORD 'pa$$w''ord$$'");
+  // Exactly the opening and closing tag — the password cannot terminate the body.
+  assertEquals(create!.split(DOLLAR_TAG).length - 1, 2);
+});
+
+Deno.test("a password containing the dollar-quote tag is rejected", () => {
+  const cfg = structuredClone(CFG);
+  cfg.manageUsers.alp.managerPassword = `x${DOLLAR_TAG}y`;
+  assertThrows(
+    () => buildBootstrapStatements(cfg),
+    Error,
+    DOLLAR_TAG,
+  );
+});
+
 Deno.test("parseBootstrapConfigFromEnv returns null when config is absent", () => {
   assertEquals(parseBootstrapConfigFromEnv({}), null);
 });
@@ -126,7 +222,6 @@ Deno.test("ALTER DEFAULT PRIVILEGES falls back to no-FOR-ROLE when manager is ab
 });
 
 import { runBootstrapStatements } from "./bootstrap.ts";
-import { runD2eBootstrap } from "./index.ts";
 
 Deno.test("runBootstrapStatements executes every statement in order", async () => {
   const seen: string[] = [];
@@ -148,6 +243,8 @@ Deno.test("runBootstrapStatements propagates failures (bootstrap is fatal)", asy
   }
   assertEquals(threw, true);
 });
+
+import { runD2eBootstrap } from "./index.ts";
 
 Deno.test("runD2eBootstrap is a no-op when D2E_COMPAT is disabled", async () => {
   await runD2eBootstrap();

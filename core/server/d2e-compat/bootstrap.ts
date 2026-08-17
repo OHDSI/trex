@@ -45,22 +45,100 @@ export function quoteLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+/** Tag for the dollar-quoted DO bodies. Dollar quoting is lexical — a bare `$$`
+ *  body ends at the FIRST `$$` in the text, single quotes notwithstanding, so a
+ *  password containing `$$` would escape the body. A distinctive tag closes
+ *  that hole; values containing the tag itself are rejected outright. */
+export const DOLLAR_TAG = "$trex_bootstrap$";
+
+function doBlock(body: string): string {
+  return `DO ${DOLLAR_TAG} ${body} ${DOLLAR_TAG}`;
+}
+
+/** Reject a value that would terminate the dollar-quoted DO body early. */
+function assertDollarSafe(what: string, value: string): void {
+  if (value.includes(DOLLAR_TAG)) {
+    throw new Error(`Invalid ${what}: must not contain ${DOLLAR_TAG}`);
+  }
+}
+
 /** `+name` / `-name` prefixes mark create/drop intent in d2e's config. */
 function stripMarker(name: string): string {
   return name.startsWith("+") || name.startsWith("-") ? name.slice(1) : name;
 }
 
 function createLoginRole(user: string, password: string, extra = ""): string {
+  assertDollarSafe(`password for role ${user}`, password);
   const attrs = `NOSUPERUSER ${extra}LOGIN ENCRYPTED PASSWORD ${quoteLiteral(password)}`;
-  return `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${
-    quoteLiteral(user)
-  }) THEN CREATE ROLE ${quoteIdent(user)} ${attrs}; END IF; END $$`;
+  return doBlock(
+    `BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${
+      quoteLiteral(user)
+    }) THEN CREATE ROLE ${quoteIdent(user)} ${attrs}; END IF; END`,
+  );
 }
 
 function createGroupRole(role: string, attrs: string): string {
-  return `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${
-    quoteLiteral(role)
-  }) THEN CREATE ROLE ${role} ${attrs}; END IF; END $$`;
+  return doBlock(
+    `BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${
+      quoteLiteral(role)
+    }) THEN CREATE ROLE ${role} ${attrs}; END IF; END`,
+  );
+}
+
+/** `FOR ROLE` clauses to emit for one ALTER DEFAULT PRIVILEGES grant.
+ *  Bootstrap runs as the superuser, so the bare form only covers objects the
+ *  superuser creates; the manage roles run the migrations that create the real
+ *  tables, hence one clause per other manage role. */
+function defaultPrivilegeOwners(creators: string[], self: string): string[] {
+  const clauses = [""];
+  for (const c of creators) {
+    if (c && c !== self) clauses.push(` FOR ROLE ${quoteIdent(c)}`);
+  }
+  return clauses;
+}
+
+/** Mirrors PGUserDAO.grantManagePrivilegesForSchema in the retired
+ *  alp-pg-management container: manage rights on the schema plus its current and
+ *  future objects. `withGrantOption` is the container's flag — there it gates the
+ *  schema-level grant only, the object-level grants always carry the option, and
+ *  that is reproduced here so effective privileges are unchanged. */
+function manageGrantsForSchema(
+  s: string,
+  user: string,
+  creators: string[],
+  withGrantOption: boolean,
+): string[] {
+  const u = quoteIdent(user);
+  const wgo = withGrantOption ? " WITH GRANT OPTION" : "";
+  const out = [
+    `GRANT CREATE, USAGE ON SCHEMA ${s} TO ${u}${wgo}`,
+    `GRANT ALL ON ALL TABLES IN SCHEMA ${s} TO ${u} WITH GRANT OPTION`,
+    `GRANT ALL ON ALL FUNCTIONS IN SCHEMA ${s} TO ${u} WITH GRANT OPTION`,
+    `GRANT ALL ON ALL SEQUENCES IN SCHEMA ${s} TO ${u} WITH GRANT OPTION`,
+  ];
+  for (const forRole of defaultPrivilegeOwners(creators, user)) {
+    out.push(
+      `ALTER DEFAULT PRIVILEGES${forRole} IN SCHEMA ${s} GRANT ALL ON TABLES TO ${u} WITH GRANT OPTION`,
+      `ALTER DEFAULT PRIVILEGES${forRole} IN SCHEMA ${s} GRANT ALL ON SEQUENCES TO ${u} WITH GRANT OPTION`,
+      `ALTER DEFAULT PRIVILEGES${forRole} IN SCHEMA ${s} GRANT ALL ON FUNCTIONS TO ${u} WITH GRANT OPTION`,
+    );
+  }
+  return out;
+}
+
+/** Mirrors PGUserDAO.grantReadPrivilegesForSchema: SELECT on tables, EXECUTE on
+ *  functions and sequence read access, for current and future objects. */
+function readGrantsForSchema(s: string, user: string, forRole: string): string[] {
+  const r = quoteIdent(user);
+  return [
+    `GRANT USAGE ON SCHEMA ${s} TO ${r}`,
+    `GRANT SELECT ON ALL TABLES IN SCHEMA ${s} TO ${r}`,
+    `GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${s} TO ${r}`,
+    `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA ${s} TO ${r}`,
+    `ALTER DEFAULT PRIVILEGES${forRole} IN SCHEMA ${s} GRANT SELECT ON TABLES TO ${r}`,
+    `ALTER DEFAULT PRIVILEGES${forRole} IN SCHEMA ${s} GRANT USAGE, SELECT ON SEQUENCES TO ${r}`,
+    `ALTER DEFAULT PRIVILEGES${forRole} IN SCHEMA ${s} GRANT EXECUTE ON FUNCTIONS TO ${r}`,
+  ];
 }
 
 export function parseBootstrapConfigFromEnv(
@@ -111,11 +189,25 @@ export function buildBootstrapStatements(cfg: BootstrapConfig): string[] {
 
     // ── Schemas + grants ─────────────────────────────────────────────────────
     const schemas = cfg.manageConfig.databases[dbKey].schemas || {};
+    // Roles that create objects in these schemas (they run the migrations).
+    const creators = [users.manager, users.logtoManager].filter(
+      (u): u is string => Boolean(u),
+    );
     for (const schemaKey of Object.keys(schemas)) {
       if (!schemaKey.startsWith("+")) continue;
       const schema = stripMarker(schemaKey).toLowerCase();
       const s = quoteIdent(schema);
       out.push(`CREATE SCHEMA IF NOT EXISTS ${s}`);
+
+      // The manage roles first: without CREATE/USAGE here, a service that owns
+      // its own migrations (alp-logto) cannot provision its schema on a fresh
+      // database — the schema is owned by the bootstrap superuser.
+      if (users.manager) {
+        out.push(...manageGrantsForSchema(s, users.manager, creators, false));
+      }
+      if (users.logtoManager && users.logtoManager !== users.manager) {
+        out.push(...manageGrantsForSchema(s, users.logtoManager, creators, true));
+      }
 
       if (users.writer) {
         const w = quoteIdent(users.writer);
@@ -135,10 +227,8 @@ export function buildBootstrapStatements(cfg: BootstrapConfig): string[] {
         }
       }
       if (users.reader && users.reader !== users.writer) {
-        out.push(`GRANT USAGE ON SCHEMA ${s} TO ${quoteIdent(users.reader)}`);
-      }
-      if (users.manager) {
-        out.push(`GRANT ALL ON SCHEMA ${s} TO ${quoteIdent(users.manager)}`);
+        const forRole = users.manager ? ` FOR ROLE ${quoteIdent(users.manager)}` : "";
+        out.push(...readGrantsForSchema(s, users.reader, forRole));
       }
     }
   }
