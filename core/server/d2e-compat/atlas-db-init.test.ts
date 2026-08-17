@@ -45,3 +45,50 @@ Deno.test("a probe error counts as not-ready rather than throwing", async () => 
   });
   assertEquals(ok, false);
 });
+
+import { applyAtlasDbInit } from "./atlas-db-init.ts";
+
+function deps(over: Record<string, unknown> = {}) {
+  const applied: string[] = [];
+  const logs: string[] = [];
+  return {
+    applied,
+    logs,
+    d: {
+      readDir: () => Promise.resolve(["200_admin.sql", "100_source.sql", "notes.md"]),
+      readFile: (p: string) => Promise.resolve(`-- ${p}`),
+      exec: (sql: string) => {
+        applied.push(sql);
+        return Promise.resolve(null);
+      },
+      tableExists: () => Promise.resolve(true),
+      dir: "/usr/src/atlas-db-init",
+      log: (m: string) => logs.push(m),
+      err: (m: string) => logs.push(`ERR ${m}`),
+      wait: { attempts: 2, sleep: () => Promise.resolve() },
+      ...over,
+    },
+  };
+}
+
+Deno.test("applies only .sql files, in filename order", async () => {
+  const { applied, d } = deps();
+  const count = await applyAtlasDbInit(d as never);
+  assertEquals(count, 2);
+  assertEquals(applied[0], "-- /usr/src/atlas-db-init/100_source.sql");
+  assertEquals(applied[1], "-- /usr/src/atlas-db-init/200_admin.sql");
+});
+
+Deno.test("applies nothing and logs when readiness times out", async () => {
+  const { applied, logs, d } = deps({ tableExists: () => Promise.resolve(false) });
+  const count = await applyAtlasDbInit(d as never);
+  assertEquals(count, 0);
+  assertEquals(logs.some((m) => m.startsWith("ERR")), true);
+});
+
+Deno.test("applies nothing when the directory is absent", async () => {
+  const { applied, d } = deps({ readDir: () => Promise.reject(new Error("ENOENT")) });
+  const count = await applyAtlasDbInit(d as never);
+  assertEquals(count, 0);
+  assertEquals(applied.length, 0);
+});

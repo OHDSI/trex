@@ -45,6 +45,7 @@ import { pool } from "../db.ts";
 import { decryptSecret } from "../auth/crypto.ts";
 import { migrateLegacyDatabaseRegistry } from "./dbm-migrate.ts";
 import { bootReseedDatabaseCredentials } from "./prefect-sync.ts";
+import type { TableRef } from "./atlas-db-init.ts";
 
 declare const Trex: any;
 declare const EdgeRuntime: any;
@@ -344,4 +345,35 @@ export async function d2eBoot(): Promise<void> {
   bootReseedDatabaseCredentials().catch((e) =>
     err(`prefect 'database-credentials' boot re-seed failed: ${(e as Error).message}`)
   );
+
+  // ── Block 9: atlas-db-init ────────────────────────────────────────────────
+  // Replaces d2e's webapi-init container. Runs here (rather than as a plugin
+  // init function or plugin migration) because both of those execute inside
+  // Plugins.initPlugins(), which index.ts calls BEFORE startNativeWebApi() —
+  // so webapi.sec_* does not exist yet at that point.
+  try {
+    const { applyAtlasDbInit } = await import("./atlas-db-init.ts");
+    const dir = Deno.env.get("D2E_ATLAS_DB_INIT_DIR") || "/usr/src/atlas-db-init";
+    await applyAtlasDbInit({
+      dir,
+      readDir: async (d: string) => {
+        const out: string[] = [];
+        for await (const e of Deno.readDir(d)) if (e.isFile) out.push(e.name);
+        return out;
+      },
+      readFile: (p: string) => Deno.readTextFile(p),
+      exec: (sql: string) => pool.query(sql),
+      tableExists: async (t: TableRef) => {
+        const r = await pool.query(
+          "SELECT 1 FROM information_schema.tables WHERE table_schema = $1 AND table_name = $2",
+          [t.schema, t.table],
+        );
+        return (r.rowCount ?? 0) > 0;
+      },
+      log,
+      err,
+    });
+  } catch (e) {
+    err(`atlas-db-init failed: ${(e as Error).message}`);
+  }
 }

@@ -46,3 +46,61 @@ export async function waitForTables(
   }
   return false;
 }
+
+/** Tables the seeding SQL reads from or writes to. `webapi.sec_role` is created
+ *  by WebAPI's Flyway (which runs after trex_webapi_start returns, hence the
+ *  wait); `logto.users` by Logto's own migrations. */
+export const REQUIRED_TABLES: TableRef[] = [
+  { schema: "webapi", table: "sec_role" },
+  { schema: "logto", table: "users" },
+];
+
+export interface AtlasDbInitDeps {
+  readDir: (dir: string) => Promise<string[]>;
+  readFile: (path: string) => Promise<string>;
+  exec: (sql: string) => Promise<unknown>;
+  tableExists: (t: TableRef) => Promise<boolean>;
+  dir: string;
+  log: (m: string) => void;
+  err: (m: string) => void;
+  wait?: WaitOptions;
+}
+
+/** Returns the number of SQL files applied. Never throws — the caller runs
+ *  inside d2eBoot(), where a failure must not take down boot. */
+export async function applyAtlasDbInit(deps: AtlasDbInitDeps): Promise<number> {
+  let names: string[];
+  try {
+    names = await deps.readDir(deps.dir);
+  } catch {
+    deps.log(`atlas-db-init skipped — ${deps.dir} not present`);
+    return 0;
+  }
+
+  const files = names.filter((n) => n.endsWith(".sql")).sort();
+  if (files.length === 0) {
+    deps.log(`atlas-db-init skipped — no .sql files in ${deps.dir}`);
+    return 0;
+  }
+
+  const ready = await waitForTables(deps.tableExists, REQUIRED_TABLES, deps.wait);
+  if (!ready) {
+    deps.err(
+      "atlas-db-init skipped — webapi.sec_role / logto.users not ready before timeout; will retry on next boot",
+    );
+    return 0;
+  }
+
+  let applied = 0;
+  for (const name of files) {
+    const path = `${deps.dir}/${name}`;
+    try {
+      await deps.exec(await deps.readFile(path));
+      applied++;
+    } catch (e) {
+      deps.err(`atlas-db-init ${name} failed: ${(e as Error).message}`);
+    }
+  }
+  deps.log(`atlas-db-init applied ${applied}/${files.length} file(s)`);
+  return applied;
+}
