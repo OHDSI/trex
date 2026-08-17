@@ -95,7 +95,7 @@ const server = http.createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
 
-    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId } = JSON.parse(body);
+    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId, figmaMcp } = JSON.parse(body);
     const sessionKey = chatId || "__default__";
 
     if (oauthToken) process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
@@ -169,7 +169,17 @@ const server = http.createServer(async (req, res) => {
         model: model || "sonnet",
         permissionMode: "bypassPermissions",
         cwd: cwd || undefined,
-        mcpServers: { kb: kbMcpServer, ask: askServer },
+        mcpServers: {
+          kb: kbMcpServer,
+          ask: askServer,
+          // Official Figma remote MCP server (design context behind Figma
+          // links). Only present when the deployment completed the OAuth
+          // connect in devx Settings; token refresh happens upstream
+          // (figma_mcp_routes.ts), each turn gets a fresh bearer.
+          ...(figmaMcp?.url && figmaMcp?.accessToken
+            ? { figma: { type: "http", url: figmaMcp.url, headers: { Authorization: `Bearer ${figmaMcp.accessToken}` } } }
+            : {}),
+        },
         // Discover the materialized devx skills from ~/.claude/skills so the
         // agent's Skill tool can autonomously invoke them (brainstorming, etc.).
         settingSources: ["user"],

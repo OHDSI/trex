@@ -19,6 +19,7 @@ import { ensureGitConfig } from "./git_identity.ts";
 import { chatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
+import { FIGMA_MCP_URL, getValidFigmaMcpToken } from "./routes/figma_mcp_routes.ts";
 
 // Pin a chat to a stable, isolated git worktree so a feature's work persists
 // across turns — each /stream turn otherwise resets the coder's cwd to the app
@@ -271,6 +272,10 @@ export async function streamClaudeCodeChat({
   // Refreshes the token in-place when expired (it lives ~1h) so long-lived
   // sessions don't start sending a stale token and 401-ing.
   const oauthToken = await getValidOAuthToken();
+  // Optional Figma MCP: when the deployment is connected (Settings -> Figma),
+  // hand the sidecar a fresh token so the coder can read designs behind
+  // pasted Figma links. Null when not connected -- feature is invisible.
+  const figmaToken = await getValidFigmaMcpToken();
 
   let fullContent = "";
   const collectedToolCalls = [];
@@ -287,6 +292,7 @@ export async function streamClaudeCodeChat({
         model: effectiveSettings.model,
         maxTurns: maxSteps,
         oauthToken,
+        figmaMcp: figmaToken ? { url: FIGMA_MCP_URL, accessToken: figmaToken } : undefined,
         cwd: workspacePath,
         // Resume each chat's OWN claude session — a single global session would
         // bleed context across chats and let one bad session break all of them.

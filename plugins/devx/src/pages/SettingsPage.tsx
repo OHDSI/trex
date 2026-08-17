@@ -22,6 +22,7 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { SupportSection } from "@/components/settings/SupportSection";
+import { FigmaSection } from "@/components/settings/FigmaSection";
 import { useSettings } from "@/hooks/useSettings";
 import { useGitHub } from "@/hooks/useGitHub";
 import { useGitSigning } from "@/hooks/useGitSigning";
@@ -727,6 +728,9 @@ export default function SettingsPage() {
                   Connect external services and MCP servers.
                 </p>
               </div>
+              <Separator />
+
+              <FigmaSection />
               <Separator />
 
               {/* GitHub */}
