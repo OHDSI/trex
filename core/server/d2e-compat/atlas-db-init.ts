@@ -55,6 +55,28 @@ export const REQUIRED_TABLES: TableRef[] = [
   { schema: "logto", table: "users" },
 ];
 
+/** psql meta-commands (`\gset`, `\if`, `\endif`, ...) are a psql client feature,
+ *  not SQL. The retired webapi-init container piped these files through psql;
+ *  this hook uses the wire protocol, whose simple-query parser rejects the whole
+ *  string — so a file containing one applies NOTHING. Detect and report instead
+ *  of failing silently; the SQL itself has to be fixed in the d2e repo. */
+export function findPsqlMetaCommands(sql: string): string[] {
+  const found: string[] = [];
+  const add = (name: string) => {
+    if (!found.includes(name)) found.push(name);
+  };
+  for (const raw of sql.split("\n")) {
+    const line = raw.trimEnd();
+    if (line.trimStart().startsWith("--")) continue;
+    const leading = /^[ \t]*\\(\w+)/.exec(line);
+    if (leading) add(`\\${leading[1]}`);
+    // psql also accepts a meta-command appended to a statement: `... AS x \gset`.
+    const trailing = /[ \t]\\(\w+)$/.exec(line);
+    if (trailing) add(`\\${trailing[1]}`);
+  }
+  return found;
+}
+
 export interface AtlasDbInitDeps {
   readDir: (dir: string) => Promise<string[]>;
   readFile: (path: string) => Promise<string>;
@@ -95,7 +117,17 @@ export async function applyAtlasDbInit(deps: AtlasDbInitDeps): Promise<number> {
   for (const name of files) {
     const path = `${deps.dir}/${name}`;
     try {
-      await deps.exec(await deps.readFile(path));
+      const sql = await deps.readFile(path);
+      const meta = findPsqlMetaCommands(sql);
+      if (meta.length > 0) {
+        deps.err(
+          `atlas-db-init ${name} skipped: contains psql meta-command(s) ${
+            meta.join(", ")
+          } — not executable over the wire protocol`,
+        );
+        continue;
+      }
+      await deps.exec(sql);
       applied++;
     } catch (e) {
       deps.err(`atlas-db-init ${name} failed: ${(e as Error).message}`);

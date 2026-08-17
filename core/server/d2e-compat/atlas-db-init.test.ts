@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert";
-import { waitForTables, type TableRef } from "./atlas-db-init.ts";
+import { findPsqlMetaCommands, waitForTables, type TableRef } from "./atlas-db-init.ts";
 
 const TABLES: TableRef[] = [
   { schema: "webapi", table: "sec_role" },
@@ -84,6 +84,32 @@ Deno.test("applies nothing and logs when readiness times out", async () => {
   const count = await applyAtlasDbInit(d as never);
   assertEquals(count, 0);
   assertEquals(logs.some((m) => m.startsWith("ERR")), true);
+});
+
+Deno.test("skips a file with psql meta-commands and says which ones", async () => {
+  const { applied, logs, d } = deps({
+    readDir: () => Promise.resolve(["220_external_role_map.sql", "100_source.sql"]),
+    readFile: (p: string) =>
+      Promise.resolve(
+        p.endsWith("220_external_role_map.sql")
+          ? "SELECT EXISTS (SELECT 1) AS have_role_map \\gset\n\n\\if :have_role_map\nSELECT 2;\n\\endif\n"
+          : "SELECT 1;",
+      ),
+  });
+  const count = await applyAtlasDbInit(d as never);
+  assertEquals(count, 1);
+  assertEquals(applied, ["SELECT 1;"]);
+  const skip = logs.find((m) => m.includes("220_external_role_map.sql"));
+  assertEquals(
+    skip,
+    "ERR atlas-db-init 220_external_role_map.sql skipped: contains psql meta-command(s) \\gset, \\if, \\endif — not executable over the wire protocol",
+  );
+});
+
+Deno.test("findPsqlMetaCommands ignores backslashes inside statements and comments", () => {
+  assertEquals(findPsqlMetaCommands("SELECT 'a\\gset b';\nSELECT 1;"), []);
+  assertEquals(findPsqlMetaCommands("-- run this with \\gset\nSELECT 1;"), []);
+  assertEquals(findPsqlMetaCommands("  \\gset\n"), ["\\gset"]);
 });
 
 Deno.test("applies nothing when the directory is absent", async () => {
