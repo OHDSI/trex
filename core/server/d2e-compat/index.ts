@@ -70,6 +70,31 @@ export async function applyD2eCompat(app: Express): Promise<void> {
 }
 
 /**
+ * Provision the d2e database objects (login users, supabase roles, schemas,
+ * grants) before any plugin runs. Replaces the alp-minerva-pg-mgmt-init
+ * container. No-op unless D2E_COMPAT.
+ *
+ * Unlike runD2eBoot, a failure here is FATAL: every downstream consumer assumes
+ * these roles and schemas exist, and continuing produces confusing errors much
+ * later in boot.
+ */
+export async function runD2eBootstrap(): Promise<void> {
+  if (!D2E_COMPAT) return;
+  const { parseBootstrapConfigFromEnv, runBootstrapStatements } = await import("./bootstrap.ts");
+  const cfg = parseBootstrapConfigFromEnv(Deno.env.toObject());
+  if (!cfg) {
+    console.log("[d2e-compat] bootstrap skipped — POSTGRES_MANAGE_CONFIG/USERS not set");
+    return;
+  }
+  const { pool } = await import("../db.ts");
+  const applied = await runBootstrapStatements(
+    (sql) => pool.query(sql),
+    cfg,
+  );
+  console.log(`[d2e-compat] bootstrap applied ${applied} statement(s)`);
+}
+
+/**
  * Mirror the active plugin registry into the legacy `trex.plugins` table that
  * d2e's job plugins read. No-op unless D2E_COMPAT. Call AFTER plugin init (and
  * any dynamic re-registration) so every active plugin is captured. A failure

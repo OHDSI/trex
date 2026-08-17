@@ -26,7 +26,7 @@ import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
-import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, runD2eBootstrap, syncD2ePlugins } from "./d2e-compat/index.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
@@ -596,6 +596,9 @@ app.all(
   // /portal static + SPA fallback, which would otherwise shadow the dynamic
   // /portal/env.js the portal needs (its absence crashes the portal app).
   await applyD2eCompat(app);
+  // Provision d2e's roles/schemas/grants before plugins load — plugin init
+  // functions and plugin migrations both connect using the users created here.
+  await runD2eBootstrap();
   await Plugins.initPlugins(app);
   addPluginRoutes(app);
   console.log("Plugin system initialized");

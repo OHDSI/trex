@@ -152,3 +152,16 @@ export function buildBootstrapStatements(cfg: BootstrapConfig): string[] {
 
   return out;
 }
+
+/** Execute the built statements in order. Rejects on the first failure — the
+ *  caller treats a bootstrap failure as fatal. */
+export async function runBootstrapStatements(
+  exec: (sql: string) => Promise<unknown>,
+  cfg: BootstrapConfig,
+): Promise<number> {
+  const statements = buildBootstrapStatements(cfg);
+  for (const sql of statements) {
+    await exec(sql);
+  }
+  return statements.length;
+}

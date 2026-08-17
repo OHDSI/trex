@@ -124,3 +124,31 @@ Deno.test("ALTER DEFAULT PRIVILEGES falls back to no-FOR-ROLE when manager is ab
     true,
   );
 });
+
+import { runBootstrapStatements } from "./bootstrap.ts";
+import { runD2eBootstrap } from "./index.ts";
+
+Deno.test("runBootstrapStatements executes every statement in order", async () => {
+  const seen: string[] = [];
+  const count = await runBootstrapStatements(async (sql) => {
+    seen.push(sql);
+    return await Promise.resolve(null);
+  }, CFG);
+  assertEquals(count, seen.length);
+  assertEquals(seen[0].includes("CREATE ROLE anon"), true);
+});
+
+Deno.test("runBootstrapStatements propagates failures (bootstrap is fatal)", async () => {
+  let threw = false;
+  try {
+    await runBootstrapStatements(() => Promise.reject(new Error("boom")), CFG);
+  } catch (e) {
+    threw = true;
+    assertEquals((e as Error).message.includes("boom"), true);
+  }
+  assertEquals(threw, true);
+});
+
+Deno.test("runD2eBootstrap is a no-op when D2E_COMPAT is disabled", async () => {
+  await runD2eBootstrap();
+});
