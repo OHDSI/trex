@@ -103,7 +103,12 @@ export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","datasource.url":"jdbc
 
 # --- 5. Native build (Spring AOT + native-image shared library) ---
 echo "[webapi-native] building native shared library"
-( cd "$WRAPPER_DIR" && mvn -B -DskipTests -Dtrexsql.version="$TREXSQL_VERSION" package )
+# -DskipTests=false overrides the pom's skipTests default so surefire runs
+# RuntimeTrustStoreTest here. The test phase precedes package, so a failure
+# aborts before the multi-hour native-image step rather than after it. This is
+# the only Maven invocation for this module in CI, so it is the only place the
+# unit tests can run automatically.
+( cd "$WRAPPER_DIR" && mvn -B -DskipTests=false -Dtrexsql.version="$TREXSQL_VERSION" package )
 
 kill "$(cat /tmp/oidc_mock.pid 2>/dev/null)" 2>/dev/null || true
 service postgresql stop || true

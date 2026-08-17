@@ -19,17 +19,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         maven postgresql postgresql-contrib unzip git python3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Oracle GraalVM for JDK 21 (includes native-image). TARGETARCH is provided by
-# BuildKit (amd64/arm64); map it to Oracle's tarball arch (x64/aarch64). Falls
-# back to the build host's dpkg arch when TARGETARCH is unset (legacy builder).
+# Oracle GraalVM for JDK 21, pinned. TARGETARCH is provided by BuildKit
+# (amd64/arm64); map it to Oracle's tarball arch (x64/aarch64). Falls back to the
+# build host's dpkg arch when TARGETARCH is unset (legacy builder).
+#
+# Pinned rather than "latest": whether a native image honours runtime
+# javax.net.ssl.trustStore* properties is a property of the toolchain build, so a
+# floating version can change TLS trust behaviour with no code change. 21.0.12 is
+# the build verified to honour them. Bump deliberately and re-verify.
 ARG TARGETARCH
+ARG GRAAL_FULL_VERSION=21.0.12
 RUN case "${TARGETARCH:-$(dpkg --print-architecture)}" in \
-      amd64) GRAAL_ARCH=x64 ;; \
-      arm64) GRAAL_ARCH=aarch64 ;; \
+      amd64) GRAAL_ARCH=x64; GRAAL_SHA256=b007ff64c425f85bbe0e686107044fba6ca5054a7e89271a473767f546aaddc1 ;; \
+      arm64) GRAAL_ARCH=aarch64; GRAAL_SHA256=e37877e3a67cd5c7be6172e8e26ecae7e5b4c76dd78f1d34f880cb7b985ebfd8 ;; \
       *) echo "unsupported architecture: ${TARGETARCH:-$(dpkg --print-architecture)}" >&2; exit 1 ;; \
     esac \
-    && curl -fsSL "https://download.oracle.com/graalvm/21/latest/graalvm-jdk-21_linux-${GRAAL_ARCH}_bin.tar.gz" \
-      | tar -xz -C /opt \
+    && curl -fsSL -o /tmp/graal.tar.gz \
+        "https://download.oracle.com/graalvm/21/archive/graalvm-jdk-${GRAAL_FULL_VERSION}_linux-${GRAAL_ARCH}_bin.tar.gz" \
+    && echo "${GRAAL_SHA256}  /tmp/graal.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/graal.tar.gz -C /opt \
+    && rm /tmp/graal.tar.gz \
     && mv /opt/graalvm-jdk-21* /opt/graalvm
 ENV JAVA_HOME=/opt/graalvm
 ENV GRAAL_HOME=/opt/graalvm
