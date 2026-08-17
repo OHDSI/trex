@@ -81,7 +81,7 @@ Deno.test("grants per-schema privileges and default privileges to reader and wri
   );
   assertEquals(
     stmts.includes(
-      'ALTER DEFAULT PRIVILEGES IN SCHEMA "portal" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO "alp_pg_write_user"',
+      'ALTER DEFAULT PRIVILEGES FOR ROLE "alp_pg_admin_user" IN SCHEMA "portal" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO "alp_pg_write_user"',
     ),
     true,
   );
@@ -99,4 +99,28 @@ Deno.test("parseBootstrapConfigFromEnv reads the three d2e env vars", () => {
     POSTGRES_MANAGE_ROLES_USERS: "{}",
   });
   assertEquals(cfg?.manageUsers.alp.manager, "alp_pg_admin_user");
+});
+
+Deno.test("ALTER DEFAULT PRIVILEGES falls back to no-FOR-ROLE when manager is absent", () => {
+  const cfgNoManager = {
+    manageConfig: {
+      databases: { "+alp": { schemas: { "+portal": {} } } },
+    },
+    manageUsers: {
+      alp: {
+        reader: "alp_pg_read_user",
+        readerPassword: "r-pass",
+        writer: "alp_pg_write_user",
+        writerPassword: "w-pass",
+      },
+    },
+    grantRolesUsers: {},
+  };
+  const stmts = buildBootstrapStatements(cfgNoManager);
+  assertEquals(
+    stmts.includes(
+      'ALTER DEFAULT PRIVILEGES IN SCHEMA "portal" GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO "alp_pg_write_user"',
+    ),
+    true,
+  );
 });

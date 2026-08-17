@@ -123,9 +123,16 @@ export function buildBootstrapStatements(cfg: BootstrapConfig): string[] {
         out.push(`GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON ALL TABLES IN SCHEMA ${s} TO ${w}`);
         out.push(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA ${s} TO ${w}`);
         out.push(`GRANT USAGE, UPDATE, SELECT ON ALL SEQUENCES IN SCHEMA ${s} TO ${w}`);
-        out.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${s} GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO ${w}`);
-        out.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${s} GRANT USAGE, UPDATE, SELECT ON SEQUENCES TO ${w}`);
-        out.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${s} GRANT EXECUTE ON FUNCTIONS TO ${w}`);
+        if (users.manager) {
+          const m = quoteIdent(users.manager);
+          out.push(`ALTER DEFAULT PRIVILEGES FOR ROLE ${m} IN SCHEMA ${s} GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO ${w}`);
+          out.push(`ALTER DEFAULT PRIVILEGES FOR ROLE ${m} IN SCHEMA ${s} GRANT USAGE, UPDATE, SELECT ON SEQUENCES TO ${w}`);
+          out.push(`ALTER DEFAULT PRIVILEGES FOR ROLE ${m} IN SCHEMA ${s} GRANT EXECUTE ON FUNCTIONS TO ${w}`);
+        } else {
+          out.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${s} GRANT SELECT, INSERT, UPDATE, DELETE, TRUNCATE ON TABLES TO ${w}`);
+          out.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${s} GRANT USAGE, UPDATE, SELECT ON SEQUENCES TO ${w}`);
+          out.push(`ALTER DEFAULT PRIVILEGES IN SCHEMA ${s} GRANT EXECUTE ON FUNCTIONS TO ${w}`);
+        }
       }
       if (users.reader && users.reader !== users.writer) {
         out.push(`GRANT USAGE ON SCHEMA ${s} TO ${quoteIdent(users.reader)}`);
