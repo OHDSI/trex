@@ -34,7 +34,7 @@
 
 // ── Boot-order contract (see docs: trex-d2e-db-bootstrap design) ─────────────
 // index.ts calls, in this order:
-//   1. runD2eBootstrap()      — roles/schemas/grants        (bootstrap.ts, FATAL on failure)
+//   1. runD2eBootstrap()      — roles/schemas/grants        (index.ts, FATAL on failure)
 //   2. Plugins.initPlugins()  — plugin init fns + migrations
 //   3. startNativeWebApi()    — WebAPI + its Flyway migrations
 //   4. runD2eBoot()           — this file, incl. Block 9 atlas-db-init (non-fatal)
