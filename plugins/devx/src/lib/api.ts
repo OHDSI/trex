@@ -556,6 +556,32 @@ export async function claudeCodeLogout(): Promise<{ ok: boolean; message: string
   return apiFetch("/claude-code/logout", { method: "POST" });
 }
 
+export async function getFigmaMcpStatus(): Promise<{
+  connected: boolean;
+  expiresAt: number | null;
+  clientRegistered: boolean;
+}> {
+  return apiFetch("/figma-mcp/status");
+}
+
+export async function startFigmaMcpLogin(redirectUri: string): Promise<{ authUrl: string }> {
+  return apiFetch("/figma-mcp/login", {
+    method: "POST",
+    body: JSON.stringify({ redirectUri }),
+  });
+}
+
+export async function exchangeFigmaMcpCode(code: string, state: string): Promise<{ connected: boolean }> {
+  return apiFetch("/figma-mcp/exchange", {
+    method: "POST",
+    body: JSON.stringify({ code, state }),
+  });
+}
+
+export async function figmaMcpLogout(): Promise<{ connected: boolean }> {
+  return apiFetch("/figma-mcp/logout", { method: "POST" });
+}
+
 export function getClaudeCodeModels(): Promise<{ models: ModelInfo[]; source: string }> {
   return apiFetch<{ models: ModelInfo[]; source: string }>("/claude-code/models");
 }

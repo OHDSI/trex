@@ -37,6 +37,7 @@ import { handleSupabaseRoutes } from "./routes/supabase_routes.ts";
 import { handleSkillsRoutes } from "./routes/skills_routes.ts";
 import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
 import { handleClaudeCodeModelsRoutes } from "./routes/claude_code_models_routes.ts";
+import { handleFigmaMcpRoutes } from "./routes/figma_mcp_routes.ts";
 import { handleCopilotRoutes } from "./routes/copilot_routes.ts";
 import { handleProviderConfigRoutes } from "./routes/provider_config_routes.ts";
 import { handleSupportRoutes } from "./routes/support_routes.ts";
@@ -210,6 +211,7 @@ Deno.serve(async (req: Request) => {
       await handleSigningRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeModelsRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleFigmaMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleCopilotRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
