@@ -219,6 +219,31 @@ fn main() {
         }
     }
 
+    // V1__initial_schema GRANTs to a role named `postgres` but never creates it —
+    // it assumes the conventional local superuser. Managed Postgres (RDS, Cloud
+    // SQL, Azure) names the master role whatever the operator chose, so that
+    // GRANT aborts the whole migration transaction and trexdb is never created;
+    // the visible symptoms are `relation "trexdb.event_log" does not exist` and a
+    // fatal `kek_wrapped_dek not present`. Ensure the role exists first. It is
+    // only ever a GRANT target here, so NOLOGIN suffices. This cannot be fixed in
+    // V1 itself: editing an applied migration trips the checksum guard in
+    // plugins/migration and would refuse to boot every existing install.
+    if is_data_node() {
+        match conn.execute(
+            "CALL postgres_execute('_config', 'CREATE ROLE postgres NOLOGIN')",
+            [],
+        ) {
+            Ok(_) => println!("Created the `postgres` grant-target role"),
+            Err(e) => {
+                let msg = e.to_string();
+                // Already present is the normal case on a conventional Postgres.
+                if !msg.contains("already exists") {
+                    println!("WARN: could not ensure the `postgres` role exists: {msg}");
+                }
+            }
+        }
+    }
+
     // Run core schema migrations via the migration extension
     if let Ok(schema_dir) = env::var("SCHEMA_DIR") {
         if is_data_node() {
