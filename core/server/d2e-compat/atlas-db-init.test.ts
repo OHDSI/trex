@@ -83,6 +83,8 @@ Deno.test("applies nothing and logs when readiness times out", async () => {
   const { applied, logs, d } = deps({ tableExists: () => Promise.resolve(false) });
   const count = await applyAtlasDbInit(d as never);
   assertEquals(count, 0);
+  // Nothing may reach the database when readiness times out — the next boot retries.
+  assertEquals(applied.length, 0);
   assertEquals(logs.some((m) => m.startsWith("ERR")), true);
 });
 
