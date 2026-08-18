@@ -365,9 +365,19 @@ export class Plugins {
     // own. A missed wait is logged but never aborts boot, matching the
     // attach-wait behavior above.
     const expectedCoreMigrations = await countCoreMigrationFiles();
+    // The grace short-circuit exists only for nodes that never run the core
+    // migration. src/main.rs's is_data_node() falls back to TRUE when
+    // SWARM_CONFIG (or SWARM_NODE) is unset, i.e. standalone — the shape d2e
+    // runs in. There the core migration is guaranteed, so never short-circuit:
+    // bailing out early would hand back exactly the deadlock this wait exists
+    // to prevent. Only a real swarm config keeps the heuristic.
+    const standalone = Deno.env.get("SWARM_CONFIG") === undefined;
+    const graceMs = standalone ? Number.POSITIVE_INFINITY : 5_000;
     for (const db of neededDatabases) {
       const start = Date.now();
-      const ready = await waitForCoreMigrations(conn, db, expectedCoreMigrations);
+      const ready = await waitForCoreMigrations(conn, db, expectedCoreMigrations, {
+        graceMs,
+      });
       const waitedMs = Date.now() - start;
       if (!ready) {
         console.error(
