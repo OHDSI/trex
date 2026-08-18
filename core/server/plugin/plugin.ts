@@ -15,7 +15,7 @@ import { addSkillsPlugin } from "./skills.ts";
 import { collectDeclaredSkillPacks } from "./skill-packs.ts";
 import { scanPluginDirectory, splitPathList } from "./utils.ts";
 import { escapeSql } from "../lib/sql.ts";
-import { waitForAttachedDatabase } from "../lib/db-wait.ts";
+import { waitForAttachedDatabase, waitForCoreMigrations } from "../lib/db-wait.ts";
 
 declare const Trex: any;
 
@@ -91,6 +91,28 @@ interface MigrationTarget {
   path: string;
   schema: string;
   database: string;
+}
+
+const CORE_MIGRATION_FILE_RE = /^V\d+__.+\.sql$/i;
+
+/**
+ * Count the core `trexdb` migration files (src/main.rs's SCHEMA_DIR) so
+ * applyMigrations knows how many rows refinery_schema_history should end up
+ * with once the core migration finishes. Falls back to 1 (the minimum any
+ * real core migration run would produce) if the directory can't be read —
+ * e.g. this node doesn't ship the core schema at all.
+ */
+async function countCoreMigrationFiles(): Promise<number> {
+  const schemaDir = Deno.env.get("SCHEMA_DIR") || "/usr/src/core/schema";
+  try {
+    let count = 0;
+    for await (const entry of Deno.readDir(schemaDir)) {
+      if (entry.isFile && CORE_MIGRATION_FILE_RE.test(entry.name)) count++;
+    }
+    return count;
+  } catch {
+    return 1;
+  }
 }
 
 export class Plugins {
@@ -332,6 +354,28 @@ export class Plugins {
       if (!ready) {
         console.error(
           `Plugin migrations: catalog "${db}" not attached after timeout; dependent migrations may fail`,
+        );
+      }
+    }
+    // Being attached is not enough: src/main.rs runs the core `trexdb` migration
+    // against the same attached catalog concurrently with the plugin migrations
+    // below, and Postgres can deadlock the two transactions against each other on
+    // pg_class. Wait for the core migration to actually finish (its migration
+    // count landed in refinery_schema_history) before racing it with DDL of our
+    // own. A missed wait is logged but never aborts boot, matching the
+    // attach-wait behavior above.
+    const expectedCoreMigrations = await countCoreMigrationFiles();
+    for (const db of neededDatabases) {
+      const start = Date.now();
+      const ready = await waitForCoreMigrations(conn, db, expectedCoreMigrations);
+      const waitedMs = Date.now() - start;
+      if (!ready) {
+        console.error(
+          `Plugin migrations: core migrations on catalog "${db}" did not finish after timeout; proceeding anyway (may race)`,
+        );
+      } else if (waitedMs > 100) {
+        console.log(
+          `Plugin migrations: waited ${waitedMs}ms for core migrations to finish on catalog "${db}"`,
         );
       }
     }
