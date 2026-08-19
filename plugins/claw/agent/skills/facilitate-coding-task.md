@@ -81,6 +81,11 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    - Ambiguous or not named, and the work plausibly belongs to an existing
      app → include the app choice in your clarifying question (step 3), listing
      the real app names as options.
+   - **The name is not an app** → do NOT refuse yet. Call `listApps` again with
+     `component: "<the name>"`. If an app contains it (`matchedPath`), that is the
+     app: say where you found it ("White Rabbit lives in Data2Evidence under
+     plugins/flows — working there") and continue. Refuse only when no registered
+     app contains it.
    - **The team names a repository/codebase that is NOT among the apps** →
      do not start and do not improvise a workaround (no cloning it inside
      another app, no app-less hacking on an unregistered repo). Tell the team
@@ -379,14 +384,21 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     not re-post the menu to collect a click for an answer you already have. Post
     the menu only when nobody has said anything about checks.
 
+    Otherwise, call `runReview` with `probe: true` first. Offer ONLY the checks it
+    reports available, and name the omitted ones with their reason in the same
+    message ("QA and design review need the app's dev server, which isn't
+    running — I've left them out"). Never offer a check that is known to be
+    unrunnable.
+
     Ask AFTER step 9 so the team decides with the screenshots in front of them —
     seeing the actual UI is what tells someone whether a design review is worth
-    running. Call `postChoice` with `multi: true` and ALWAYS the full list — the team
-    decides what fits, not you:
+    running. Call `postChoice` with `multi: true` and the full list of what the
+    probe reported available — the team decides what fits, not you:
     - `Code review` (value "code review"), `Security review` (value "security
-      review"), `QA / tests` (value "QA test"), `Design review` (value "design
-      review", UI only), `Docs update` (value "docs update", for user-visible
-      features), and `None — ship it` (value "none").
+      review"), `QA / tests` (value "QA test", only when the probe reports it
+      available), `Design review` (value "design review", UI only, only when the
+      probe reports it available), `Docs update` (value "docs update", for
+      user-visible features), and `None — ship it` (value "none").
     The team's picks resume you with "The team selected: <checks>". For "none",
     go to step 13.
 11. **Run each chosen check and post its report.** Work through the team's picks

@@ -39,6 +39,52 @@ export interface RunReviewResult {
   error?: string;
 }
 
+export interface ReviewAvailability {
+  available: string[];
+  unavailable: Array<{ kind: string; reason: string }>;
+}
+
+// qa/design drive a browser against the app's dev server. Offering them when it
+// is not running produced 19 failed review attempts and zero successes, so the
+// menu asks this first and omits what cannot run.
+export function availabilityFrom(state: { devServerRunning: boolean }): ReviewAvailability {
+  const available: string[] = ["code", "security"];
+  const unavailable: Array<{ kind: string; reason: string }> = [];
+  if (state.devServerRunning) {
+    available.push("qa", "design");
+  } else {
+    unavailable.push(
+      { kind: "qa", reason: "the app's dev server is not running" },
+      { kind: "design", reason: "the app's dev server is not running" },
+    );
+  }
+  return { available, unavailable };
+}
+
+// The exact status buildBrowserReviewMessage (devx's security_routes.ts) checks
+// before running qa/design: GET .../apps/:id/server/status, requiring
+// status === "running" AND a port. Probing here lets the checks menu skip what
+// would fail instead of learning that from a wasted review attempt.
+export async function probeDevServerState(
+  appId: string,
+  userId: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ devServerRunning: boolean }> {
+  try {
+    const token = await mintToken(userId);
+    const res = await fetchImpl(`${apiBase()}/apps/${appId}/server/status`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return { devServerRunning: false };
+    const body = await res.json();
+    return { devServerRunning: body?.status === "running" && !!body?.port };
+  } catch {
+    // Unreachable API, non-JSON body, etc. — treat as "not running" rather
+    // than throwing out of a probe whose whole point is to avoid a failure.
+    return { devServerRunning: false };
+  }
+}
+
 export async function runReviewCore(
   appId: string,
   kind: ReviewKind,
@@ -111,7 +157,10 @@ export default defineTool({
     "return an error saying so if it is not. 'docs' works on the SHARED app workspace — " +
     "during a facilitated task whose work lives on a feature worktree, have the coder run " +
     "its documenting-d2e-features skill instead so the docs land on the feature branch. " +
-    "Report the findings; do not fix anything without asking first.",
+    "Report the findings; do not fix anything without asking first. Call with " +
+    "`probe: true` (no `kind` needed) BEFORE offering checks: it returns which kinds " +
+    "are actually runnable right now, without running anything, so you never offer a " +
+    "check that is known to fail.",
   inputSchema: {
     type: "object",
     properties: {
@@ -122,16 +171,30 @@ export default defineTool({
       kind: {
         type: "string",
         enum: [...KINDS],
-        description: "Which review to run.",
+        description: "Which review to run. Not needed when `probe` is true.",
+      },
+      probe: {
+        type: "boolean",
+        description:
+          "Check availability instead of running anything. Returns " +
+          "{available, unavailable} — 'code' and 'security' are always available; " +
+          "'qa' and 'design' need the app's dev server and are reported unavailable " +
+          "with a reason when it is not running.",
       },
     },
-    required: ["app", "kind"],
+    required: ["app"],
   },
   execute: async (input, ctx) => {
+    if (input.probe) {
+      if (isEvalMode(ctx)) return availabilityFrom({ devServerRunning: true });
+      const userId = effectiveUserId(ctx?.userId, (k) => Deno.env.get(k));
+      if (!userId) throw new Error("runReview: no user id — set CLAW_CODE_USER_ID");
+      return availabilityFrom(await probeDevServerState(input.app, userId));
+    }
     if (isEvalMode(ctx)) return evalStubs.runReview(ctx, input.kind);
     const userId = effectiveUserId(ctx?.userId, (k) => Deno.env.get(k));
     if (!userId) throw new Error("runReview: no user id — set CLAW_CODE_USER_ID");
-    if (!KINDS.includes(input.kind)) {
+    if (!input.kind || !KINDS.includes(input.kind)) {
       throw new Error(`runReview: unknown kind '${input.kind}' (expected ${KINDS.join(", ")})`);
     }
     return await runReviewCore(input.app, input.kind, userId);
