@@ -151,7 +151,7 @@ const HEARTBEAT_MS = 300_000;
 
 // Final whole-branch review, Minor: with Task 4's per-session turn
 // serialization and Task 7's raised channel step floor (200), a hung
-// upstream (the devx-api function, or the Claude Code sidecar it drives)
+// upstream (the devx-api function, or the coder sidecar it drives)
 // could previously wedge the WHOLE session — not just this one turn — until
 // the 2h reaper eventually ran. A generous but bounded per-turn timeout
 // closes that off without needing every hang to wait for the reaper.
