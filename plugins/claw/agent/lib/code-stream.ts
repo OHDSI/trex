@@ -129,15 +129,42 @@ async function ensureChat(
   return chat.id as string;
 }
 
+// The last non-empty prose line of the accumulated assistant text, stripped of
+// tool markers and trimmed to 140 chars — a short "still alive" summary for the
+// heartbeat. Falls back to "still working" before any prose has arrived (a long
+// build/test run produces tool markers but no text for minutes).
+export function summarizeActivity(accumulated: string): string {
+  const line = accumulated
+    .split("\n")
+    .map((l) => l.replace(/<!--tool:[^>]*-->/g, "").trim())
+    .filter((l) => l.length > 0)
+    .pop();
+  if (!line) return "still working";
+  return line.length > 140 ? line.slice(0, 140) : line;
+}
+
+// A Discord thread wants a sign of life every few minutes, not every 90s: 37 of
+// 263 real turns ended with nothing posted to the channel because claw cannot
+// post anything while blocked inside this hand-off. Do not shorten this or make
+// it configurable — the interval was chosen deliberately.
+const HEARTBEAT_MS = 300_000;
+
 // Run one coder turn and return its reply text. The SSE carries the turn's whole
 // life (chunks, tool calls, subagents, questionnaires); we accumulate assistant
 // text and surface a questionnaire inline so claw can relay the coder's question
 // back to the channel. The turn is done when the server closes the stream.
-async function streamTurn(
+// onProgress, when supplied, is invoked once per HEARTBEAT_MS with a short note
+// derived from the latest accumulated text — driven by a timer started when the
+// stream opens, NOT from the chunk branch, so a long silent build or test run
+// (which produces no chunks for minutes) still reports in.
+// Exported for testing only (the timer/heartbeat wiring — see
+// code-stream.test.ts) — runCodeTurn is the only production caller.
+export async function streamTurn(
   token: string,
   chatId: string,
   message: string,
   attachments?: CodeTurnArgs["attachments"],
+  onProgress?: (note: string) => void,
 ): Promise<string> {
   const res = await fetch(`${apiBase()}/chats/${chatId}/stream`, {
     method: "POST",
@@ -161,6 +188,12 @@ async function streamTurn(
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
   let text = "";
+  // Timer-driven, not chunk-driven: a long build or test run produces no
+  // chunks for minutes, which is exactly the stretch the channel needs to
+  // hear about — see summarizeActivity's fallback for the "no prose yet" beat.
+  const beat = onProgress
+    ? setInterval(() => onProgress(summarizeActivity(text)), HEARTBEAT_MS)
+    : undefined;
   try {
     // deno-lint-ignore no-constant-condition
     while (true) {
@@ -197,6 +230,9 @@ async function streamTurn(
       }
     }
   } finally {
+    // Cleared on every exit path — including the ev.error throw above — so
+    // the timer never outlives the stream it was measuring.
+    if (beat !== undefined) clearInterval(beat);
     try { await reader.cancel(); } catch { /* already closed */ }
   }
   return text.trim();
@@ -210,6 +246,11 @@ export interface CodeTurnArgs {
   // Channel attachments relayed verbatim (metadata only); the devx stream
   // handler downloads them into the coder's workspace before the turn.
   attachments?: Array<{ name: string; url: string; contentType?: string }>;
+  // Invoked once per HEARTBEAT_MS while the turn is streaming, with a short
+  // note derived from the latest activity — see streamTurn. Callers with no
+  // channel to post to should pass nothing rather than a no-op (a no-op
+  // still burns a timer for no reason).
+  onProgress?: (note: string) => void;
 }
 
 // One hand-off to the Claude Code coder. Opens the chat on first use, forces the
@@ -223,6 +264,6 @@ export async function runCodeTurn(
   const token = await mintToken(args.userId);
   await ensureClaudeCodeProvider(token);
   const chatId = await ensureChat(token, args.appId, args.chatId);
-  const replyText = await streamTurn(token, chatId, args.message, args.attachments);
+  const replyText = await streamTurn(token, chatId, args.message, args.attachments, args.onProgress);
   return { chatId, replyText };
 }

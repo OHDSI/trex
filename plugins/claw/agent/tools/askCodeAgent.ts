@@ -14,6 +14,7 @@ import { defineTool } from "eve/tools";
 import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
 import { readOrchestration, upsertOrchestration, type QueryFn } from "../lib/state.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
+import { postChannelMessage } from "../lib/discord-rest.ts";
 
 interface Input {
   message: string;
@@ -37,7 +38,7 @@ export function effectiveUserId(ctxUserId: string | undefined, env: (k: string) 
 
 export async function askCore(
   sql: QueryFn,
-  ctx: { sessionId: string; userId: string },
+  ctx: { sessionId: string; userId: string; channelId?: string },
   input: Input,
   // Injected for testability (defaults to the real /stream turn); tests pass a
   // stub so askCore's orchestration can be exercised without a live coder.
@@ -50,12 +51,29 @@ export async function askCore(
   if (prior?.codeSessionId && input.app && input.app !== prior.appId) {
     console.warn(`claw: askCodeAgent ignored app change '${input.app}' — chat is fixed to '${prior.appId}'`);
   }
+  // Task 5 (claw-devx-reliability): while this hand-off is blocked, claw can
+  // post nothing else to the channel — the heartbeat is the only sign of life
+  // the thread gets for a long step. No channel, no timer: a channelId-less
+  // caller (no ctx.metadata.channelId) gets no onProgress at all, rather than
+  // a no-op that still burns an interval for nothing.
+  const onProgress = ctx.channelId
+    ? (note: string) => {
+        // Fire-and-forget: a failed heartbeat must never fail the turn — a
+        // Discord outage must not break a coding hand-off.
+        postChannelMessage(fetch, {
+          botToken: Deno.env.get("DISCORD_BOT_TOKEN")!,
+          channelId: ctx.channelId!,
+          content: `Still on it: ${note}`,
+        }).catch(() => {});
+      }
+    : undefined;
   const { chatId, replyText } = await runTurn({
     chatId: prior?.codeSessionId ?? null,
     message: input.message,
     userId: ctx.userId,
     appId,
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+    ...(onProgress ? { onProgress } : {}),
   });
   // eventCursor is unused on the /stream path (each turn streams to completion);
   // the column is retained for schema compatibility.
@@ -116,6 +134,7 @@ export default defineTool({
     // The coder chat is user-scoped (workspaces, app ownership, minted token
     // subject); without a resolvable user there is nothing to talk to.
     if (!userId) throw new Error("askCodeAgent: no user id (set CLAW_CODE_USER_ID)");
-    return askCore(ctx.sql, { sessionId: ctx.sessionId, userId }, input as Input);
+    const channelId = (ctx.metadata as { channelId?: string } | undefined)?.channelId;
+    return askCore(ctx.sql, { sessionId: ctx.sessionId, userId, channelId }, input as Input);
   },
 });

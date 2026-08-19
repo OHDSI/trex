@@ -111,6 +111,36 @@ Deno.test("runTurn does not emit message.completed for a clientOnly tool-call tu
   assert(!events.some((e) => e.type === "message.completed"));
 });
 
+// Task 5 (claw-devx-reliability), no-silent-turn guarantee: a turn whose
+// entire step list is server-executed tool calls (the step cap cuts it off
+// before the model ever produces closing text) must still deliver one line,
+// distinct from the clientOnly hand-off case above (which stays silent).
+Deno.test("runTurn delivers a fallback message.completed when a turn ends with only tool calls and no text", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.maxSteps = 2; // keep the tool-call loop short — the model never produces text
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "echo forever", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("echo", { text: "hi" })),
+  });
+  const completed = events.find((e) => e.type === "message.completed") as
+    | { data: { message: string; finishReason: string } }
+    | undefined;
+  assert(completed, "expected a fallback message.completed event");
+  assertEquals(
+    completed!.data.message,
+    'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.',
+  );
+  assertEquals(res.text, completed!.data.message);
+  // message.completed still precedes turn.completed for the fallback, same
+  // ordering guarantee as the normal-text path.
+  const completedIdx = events.indexOf(completed as AgentEvent);
+  const finishIdx = events.findIndex((e) => e.type === "turn.completed");
+  assert(completedIdx >= 0 && finishIdx >= 0 && completedIdx < finishIdx);
+});
+
 Deno.test("runTurn emits clientOnly tool call and does not execute it", async () => {
   const agent = await loadAgent(TOY);
   const { store } = memoryStoreCalls();

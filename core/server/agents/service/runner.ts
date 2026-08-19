@@ -118,6 +118,12 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   let text = "";
   let finishReason = "unknown";
   let textPersisted = false;
+  // Task 5 (claw-devx-reliability): a clientOnly tool call ends the turn with
+  // no text by DESIGN — the caller executes it and continues in a follow-up
+  // turn, it's a hand-off, not silence. The no-silent-turn fallback below
+  // must not fire for that case (see the "does not emit message.completed
+  // for a clientOnly tool-call turn" test).
+  let sawClientOnlyCall = false;
   // Persist the final assistant text exactly once. Called from the "finish"
   // case BEFORE the "finish" step so the stored seq order (text → finish)
   // matches the live emit order (message.completed → turn.completed) —
@@ -151,6 +157,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
         case "tool-call": {
           const p = part as any;
           const clientOnly = clientOnlyNames.has(p.toolName) || undefined;
+          if (clientOnly) sawClientOnlyCall = true;
           emit({
             type: "actions.requested",
             data: { turnId, actions: [{ kind: "tool-call", callId: p.toolCallId, toolName: p.toolName, input: p.input, clientOnly }] },
@@ -190,6 +197,15 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           // when this turn actually produced text (a pure tool-call step
           // that stops here with no trailing text has nothing to report).
           if (text) {
+            emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
+          } else if (!sawClientOnlyCall) {
+            // Task 5 (claw-devx-reliability), no-silent-turn guarantee: 37 of
+            // 263 real turns ended with nothing posted anywhere — the model
+            // ran only server-executed tool calls (or hit the step cap) and
+            // never produced closing text. Excluding sawClientOnlyCall keeps
+            // the legitimate client hand-off case (above) silent, as before.
+            text =
+              'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.';
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
           }
           emit({ type: "turn.completed", data: { turnId, usage, finishReason } });
