@@ -6,6 +6,7 @@
  */
 import { duckdb, escapeSql } from "./duckdb.ts";
 import { constructSystemPrompt } from "./prompts.ts";
+import { resolveCoderProfile } from "./coder_profile.ts";
 import {
   ensureWorkspace,
   ensureAppWorkspace,
@@ -191,7 +192,11 @@ export async function streamClaudeCodeChat({
   skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
 }) {
   const mode = chatMode || "agent";
-  const maxSteps = settings.max_steps || 100;
+  const profile = resolveCoderProfile({ remoteChannel });
+  // Channel turns run long, unattended, multi-step protocols (plan, implement,
+  // verify) — never let a lower per-user setting starve one below the floor
+  // the profile needs to actually finish a step.
+  const maxSteps = Math.max(settings.max_steps || 100, profile.maxStepsFloor);
   const effectiveSettings = commandOverride?.model
     ? { ...settings, model: commandOverride.model }
     : settings;
@@ -227,7 +232,7 @@ export async function streamClaudeCodeChat({
     if (rules !== undefined) aiRules = rules;
   }
 
-  let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext);
+  let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext, profile);
   const skillsPreamble = await loadSkillsPreamble();
   if (skillsPreamble) {
     const skillUsageRule = `<skill-usage>\nThe skills above are real and invocable via the Skill tool. When the user asks you to build a feature, component, app, or mockups, FIRST invoke the appropriate skill (e.g. the brainstorming skill to explore the idea and present design options) BEFORE writing app code. Do not jump straight to implementation, and do not write throwaway mockups into the user's app.\n</skill-usage>`;
@@ -242,12 +247,10 @@ export async function streamClaudeCodeChat({
   if (hasComponentSelection) {
     systemPrompt += "\nThe user has selected specific components for editing. Focus your modifications on those components.";
   }
-  if (remoteChannel) {
-    // Chat-channel-driven turn (claw): the requester cannot execute anything on
-    // this machine — tell the coder it must do/verify everything itself.
-    const { REMOTE_CHANNEL_SYSTEM_PROMPT } = await import("./prompts.ts");
-    systemPrompt += `\n${REMOTE_CHANNEL_SYSTEM_PROMPT}`;
-  }
+  // Remote-channel context is no longer appended here: for a channel turn,
+  // resolveCoderProfile() above already selected CHANNEL_CODER_SYSTEM_PROMPT
+  // as the BASE prompt (it folds in the same remote-channel guidance), so
+  // systemPrompt already reflects it — see prompts_channel.ts.
 
   const messages = history
     .filter((m) => m.content && (typeof m.content === "string" ? m.content.trim() !== "" : m.content.length > 0))

@@ -988,12 +988,11 @@ function wrapAiRules(aiRules, fallback) {
   return `<user_defined_ai_rules>\n${rules}\n</user_defined_ai_rules>`;
 }
 
-// Appended to the system prompt ONLY for remote-channel turns (claw driving the
-// coder on behalf of a chat channel, body.remoteChannel === true on /stream).
-// The devx browser UI never sets it: there the human sits at the workbench and
-// CAN run commands, restart services, and open localhost. On a remote channel
-// none of that is true, and suggestions like "run this in your terminal" or
-// "restart the container and tell me" are dead ends the team cannot execute.
+// DEPRECATED: kept exported for one release so any other importer keeps
+// working. The channel coder no longer appends this to the workbench prompt —
+// its content is folded into CHANNEL_CODER_SYSTEM_PROMPT in prompts_channel.ts,
+// which REPLACES the base prompt for a remote-channel turn instead of
+// decorating it. New code should use resolveCoderProfile()/prompts_channel.ts.
 export const REMOTE_CHANNEL_SYSTEM_PROMPT = `
 <remote_channel_context>
 You are running inside the project sandbox on behalf of a chat channel (e.g.
@@ -1026,10 +1025,14 @@ Discord). The people you are working for are NOT sitting at this machine:
   failed, not that the environment lacks a stack.
 </remote_channel_context>`;
 
-export function constructSystemPrompt(mode, aiRules, skillContext) {
+export function constructSystemPrompt(mode, aiRules, skillContext, profile) {
   let prompt;
 
-  if (mode === "plan") {
+  if (profile?.basePrompt) {
+    // Channel profile: the caller's contract replaces the workbench identity
+    // entirely (not appended — see coder_profile.ts/prompts_channel.ts).
+    prompt = profile.basePrompt.replace("[[AI_RULES]]", wrapAiRules(aiRules, DEFAULT_AI_RULES));
+  } else if (mode === "plan") {
     prompt = constructPlanModePrompt(aiRules);
   } else if (mode === "agent") {
     prompt = constructLocalAgentPrompt(aiRules);
