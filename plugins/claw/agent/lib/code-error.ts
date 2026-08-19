@@ -13,9 +13,33 @@ const SENTENCES: Record<string, string> = {
   invalid_key: "The coder's API key was rejected. It needs to be corrected in devx settings.",
 };
 
+// Final whole-branch review, Minor: the fallback below forwards an
+// UNCLASSIFIED raw error straight to Discord — unlike the SENTENCES above
+// (fixed, reviewed copy), this is whatever text the upstream provider/coder
+// happened to produce, which can be arbitrarily long and can contain a
+// credential the provider echoed back in its own error message (an API key
+// or bearer token quoted in a 401/403 body is common). Cap the length and
+// scrub the obvious secret shapes before it reaches the channel.
+const MAX_DETAIL_LEN = 300;
+
+function scrubSecrets(detail: string): string {
+  return detail
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}/g, "[redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\btoken=\S+/gi, "token=[redacted]")
+    .replace(/\bkey=\S+/gi, "key=[redacted]");
+}
+
 export function describeCoderError(code: string | undefined, raw: string | undefined): string {
-  if (code && SENTENCES[code]) return SENTENCES[code];
+  // Object.hasOwn (not a truthy index): `code: "constructor"` (or any other
+  // inherited Object.prototype key) must not resolve to a function via
+  // SENTENCES[code] — it falls through to the raw-message branch instead,
+  // same as any other unrecognized code.
+  if (code && Object.hasOwn(SENTENCES, code)) return SENTENCES[code];
   const detail = raw?.trim();
-  if (detail) return `The coding session failed: ${detail}`;
+  if (detail) {
+    const safe = scrubSecrets(detail).slice(0, MAX_DETAIL_LEN);
+    return `The coding session failed: ${safe}`;
+  }
   return "The coding session failed without reporting a reason. Nothing was changed.";
 }
