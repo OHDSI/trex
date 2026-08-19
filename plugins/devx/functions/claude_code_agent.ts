@@ -1,6 +1,6 @@
 // @ts-nocheck - Deno edge function
 /**
- * Claude Code agent — starts Node.js server via duckdb process manager,
+ * Coding-agent sidecar — starts Node.js server via duckdb process manager,
  * forwards chat to it with workspace cwd, streams SSE events back to browser.
  * SDK built-in tools (Read, Write, Edit, Bash, Glob, Grep) are enabled.
  */

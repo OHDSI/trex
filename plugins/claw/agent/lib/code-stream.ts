@@ -2,7 +2,7 @@
 // core's auth dir, copied next to the agent servicePath at worker creation), not
 // against the plugin source tree.
 //
-// claw drives the SAME coder the devx browser UI uses: the Claude Code sidecar,
+// claw drives the SAME coder the devx browser UI uses: the coder sidecar,
 // reached through the devx-api edge function's POST /chats/:id/stream. The eve
 // agents runtime cannot host that sidecar (its hook only yields a ModelSpec and
 // core owns the turn), so claw talks to the function mount directly instead.
@@ -265,7 +265,7 @@ export interface CodeTurnArgs {
   onProgress?: (note: string) => void;
 }
 
-// One hand-off to the Claude Code coder. Opens the chat on first use, forces the
+// One hand-off to the coder. Opens the chat on first use, forces the
 // claude-code provider, streams the turn, and returns { chatId, replyText } — the
 // chatId is persisted by the caller to continue the same chat across Discord turns.
 // The turn's intent (brainstorm / plan / implement) is carried by the message the
