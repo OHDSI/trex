@@ -7,6 +7,7 @@
     "npm:@ai-sdk/amazon-bedrock": "npm:@ai-sdk/amazon-bedrock@latest",
     "npm:@modelcontextprotocol/sdk/client/index.js": "npm:@modelcontextprotocol/sdk@1/client/index.js",
     "npm:@modelcontextprotocol/sdk/client/stdio.js": "npm:@modelcontextprotocol/sdk@1/client/stdio.js",
-    "npm:@modelcontextprotocol/sdk/client/sse.js": "npm:@modelcontextprotocol/sdk@1/client/sse.js"
+    "npm:@modelcontextprotocol/sdk/client/sse.js": "npm:@modelcontextprotocol/sdk@1/client/sse.js",
+    "npm:edn-data": "npm:edn-data@^1"
   }
 }

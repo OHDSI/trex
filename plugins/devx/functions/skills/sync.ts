@@ -6,6 +6,7 @@
  */
 
 import { parseFrontmatter } from "./frontmatter.ts";
+import { parseEDNString } from "npm:edn-data";
 
 type SqlFn = (query: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 
@@ -29,7 +30,7 @@ async function doSync(basePath: string, sqlFn: SqlFn): Promise<void> {
   await Promise.all([
     syncSkills(`${basePath}/skills`, sqlFn),
     syncCommands(`${basePath}/commands`, sqlFn),
-    syncAgents(`${basePath}/agents`, sqlFn),
+    syncAgents(`${basePath}/agent/subagents`, sqlFn),
   ]);
   console.log("[sync] Built-in skills, commands, and agents synced.");
 }
@@ -133,22 +134,34 @@ async function syncCommands(commandsDir: string, sqlFn: SqlFn): Promise<void> {
 
 // --- Agents ---
 
-async function syncAgents(agentsDir: string, sqlFn: SqlFn): Promise<void> {
-  const files = await listFiles(agentsDir, ".md");
+// Built-in agents live ONCE, as eve-layout subagent dirs under agent/subagents/
+// (agent.edn + instructions.md + tools/*.ts). The agents loop loads them via
+// loadAgent's subagents scan; this sync registers the SAME dirs as the legacy
+// loop's built-in devx.agents rows, so the two loops cannot drift apart.
+//
+// allowed_tools is derived from the tools/ filenames because the loader's
+// contract is "filename = tool name" — which is exactly the name buildToolSet
+// filters on (registry.ts's allowSet.has(tool.name)). The previous
+// agents/*.md frontmatter listed source filenames instead ("read_file",
+// "code_search"), which matched no registered tool, so every built-in
+// subagent spawned with an empty tool set.
+async function syncAgents(subagentsDir: string, sqlFn: SqlFn): Promise<void> {
+  const dirs = await listDirs(subagentsDir);
 
-  for (const file of files) {
-    const content = await readFileSafe(`${agentsDir}/${file}`);
-    if (!content) continue;
+  for (const dir of dirs) {
+    const agentPath = `${subagentsDir}/${dir}`;
+    const body = await readFileSafe(`${agentPath}/instructions.md`);
+    if (!body) continue;
 
-    const { metadata, body } = parseFrontmatter(content);
-    const name = String(metadata.name || file.replace(/\.md$/, ""));
-    const description = String(metadata.description || "");
-    const model = String(metadata.model || "inherit");
-    const maxSteps = Number(metadata["max-steps"]) || 15;
-    const allowedTools = parseStringArray(metadata["allowed-tools"]);
+    const config = await readAgentEdn(`${agentPath}/agent.edn`);
+    const name = dir;
+    const description = String(config?.description || "");
+    const model = String(config?.model || "inherit");
+    const maxSteps = Number(config?.["max-steps"]) || 15;
+    const allowedTools = await listToolNames(`${agentPath}/tools`);
 
     if (!description) {
-      console.warn(`[sync] Skipping agent "${name}": missing description`);
+      console.warn(`[sync] Skipping agent "${name}": agent.edn has no :description`);
       continue;
     }
 
@@ -173,6 +186,30 @@ async function syncAgents(agentsDir: string, sqlFn: SqlFn): Promise<void> {
       );
     }
   }
+}
+
+// Same options as the loader's readEdn (core/server/agents/loader.ts) so the
+// two read these files identically: {:max-steps 15} arrives as {"max-steps": 15}.
+async function readAgentEdn(path: string): Promise<Record<string, unknown> | null> {
+  const text = await readFileSafe(path);
+  if (!text) return null;
+  try {
+    const parsed = parseEDNString(text, { mapAs: "object", keywordAs: "string" });
+    return parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+  } catch (err) {
+    console.warn(`[sync] Ignoring unparseable ${path}:`, err);
+    return null;
+  }
+}
+
+// filename = tool name (loader contract); colocated *.test.ts are not tools.
+async function listToolNames(toolsDir: string): Promise<string[] | null> {
+  const names: string[] = [];
+  for (const f of await listFiles(toolsDir, ".ts")) {
+    if (/\.test\.ts$/.test(f)) continue;
+    names.push(f.replace(/\.ts$/, ""));
+  }
+  return names.length > 0 ? names.sort() : null;
 }
 
 // --- Helpers ---

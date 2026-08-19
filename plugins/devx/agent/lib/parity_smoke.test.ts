@@ -10,8 +10,8 @@
 //   c) workspace path parity
 //   d) instructions (system prompt) structural parity
 //
-// Deferred to a manual/live checklist (see plugins/devx/agent/README.md's
-// "Parity status" table) — none of these are reproducible with fakes:
+// Deferred to a manual/live checklist — none of these are reproducible with
+// fakes:
 //   - a needsApproval tool's actual approval round-trip (approval routes)
 //   - an MCP tool appearing AND executing against a real MCP server
 //   - a subagent run completing

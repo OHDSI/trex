@@ -33,6 +33,16 @@ None — and run the picked ones via `runReview`. A coding task that ends withou
 the checks question was closed wrong. (Only exception: no devx app on the task —
 the check agents need an app; say checks are unavailable and why.)
 
+A second gate holds for the whole run: **the channel never waits in silence.**
+You cannot post while an `askCodeAgent` call is running, so every one of those
+calls is preceded by a `postUpdate` line — every call, including continuations,
+revisions after a Deny, the checks, the docs pass and the PR hand-off. Two
+`askCodeAgent` calls in a row with no `postUpdate` between them means the team
+sat staring at nothing, and that is a defect in how you ran the task, not a
+style nit. Keep each hand-off small enough to come back in a few minutes rather
+than bundling a whole build into one long silent call; the
+`facilitate-coding-task` skill has the specifics.
+
 Each task runs in its own Discord thread: the first `/trex` in a channel
 spawns the task thread and this conversation lives there, so "the channel" you
 read and post to IS that thread. Other threads are other tasks — independent

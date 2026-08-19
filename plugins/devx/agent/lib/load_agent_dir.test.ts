@@ -94,13 +94,15 @@ Deno.test({
 
     // Part 5 (task-v3-brief.md): code-reviewer/code-explorer subagents load
     // as full agent dirs (loadAgent's own one-level-deep subagents/ scan —
-    // see loader.ts), each with the ported max-steps and exactly the tools
-    // named in the legacy agents/*.md frontmatter's allowed-tools list.
+    // see loader.ts), each with its :max-steps and exactly the tools in its
+    // tools/ dir. These dirs are now the SINGLE definition of the built-in
+    // agents — functions/skills/sync.ts registers the same ones for the
+    // legacy loop (see builtin_agents_sync.test.ts).
     const EXPECTED_SUBAGENT_TOOLS = ["Read", "Glob", "Grep", "CodeSearch", "GitLog", "GitDiff"];
     for (const name of ["code-reviewer", "code-explorer"]) {
       const sub = agent.subagents[name];
       assert(sub, `expected subagent "${name}" to be loaded`);
-      assertEquals(sub.config.maxSteps, 15, `${name}: max-steps should be ported from the legacy frontmatter`);
+      assertEquals(sub.config.maxSteps, 15, `${name}: max-steps should come from agent.edn`);
       assert(sub.instructions.length > 0, `${name}: instructions.md body should be non-empty`);
       assertEquals(
         Object.keys(sub.tools).sort(),
