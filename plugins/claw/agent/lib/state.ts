@@ -20,9 +20,9 @@ export interface Orchestration {
   codeSessionId: string | null; // the shared Code agent session, once opened
   eventCursor: number; // position in the Code session's event stream
   appId: string | null; // devx app the Code session is scoped to (fixed per task)
-  // Fix round 1 (claw-devx-reliability): optional, not required — upsertOrchestration
-  // never writes this column (see below), so callers building an Orchestration to
-  // upsert don't need to supply it. readOrchestration always populates it (with
+  // Optional, not required — upsertOrchestration never writes this column
+  // (see below), so callers building an Orchestration to upsert don't need
+  // to supply it. readOrchestration always populates it (with
   // [] when there are none) so claw's own instructions (agent.ts's
   // buildInstructions -> renderStateForPrompt) can see the ledger too, not just
   // the coder hand-off in askCore.
@@ -112,8 +112,8 @@ export function renderStateForPrompt(o: Orchestration | null): string {
   const session = !o || !o.codeSessionId
     ? "\n\n## Coding-agent session\nNo coding-agent session yet — you have not delegated anything for this conversation. Once the ask is clear, use askCodeAgent to open one."
     : "\n\n## Coding-agent session\nA coding-agent session is active for this conversation (askCodeAgent continues the SAME one). Keep facilitating: relay the team's clarified answers to it and post its replies back to the channel.";
-  // Fix round 1 (claw-devx-reliability): claw's OWN instructions need the
-  // ledger too, not just the coder hand-off in askCore — otherwise claw is
+  // claw's OWN instructions need the ledger too, not just the coder
+  // hand-off in askCore — otherwise claw is
   // told to "check the decisions already settled" (facilitate-coding-task.md)
   // with no way to actually see them. Reuses renderDecisionLedger rather than
   // a second renderer; unchanged (byte-identical) when there are no decisions.

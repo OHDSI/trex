@@ -15,7 +15,7 @@
 // on the same execute(). Appended to the decision ledger so the hand-off
 // after this one never re-asks it.
 //
-// Fix round 1: the ledger write must NEVER be able to turn an already-granted
+// The ledger write must NEVER be able to turn an already-granted
 // human approval into a failed gate. It's wrapped in its own try/catch — a
 // throwing appendDecision (DB blip, connection reset) is logged distinctly
 // and swallowed; the approval still returns normally. A missing sql or

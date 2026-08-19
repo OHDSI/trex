@@ -426,7 +426,7 @@ Deno.test("message.completed with tool-calls finishReason posts nothing", async 
   assertEquals(called, 0);
 });
 
-// ---- delivery: message.queued (Task 4, claw-devx-reliability fix round 1) --
+// ---- delivery: message.queued (Task 4, claw-devx-reliability) --
 
 Deno.test("message.queued posts a one-line channel acknowledgement (not a reply-edit, not a reaction)", async () => {
   const calls: Array<{ url: string; method: string; body: unknown }> = [];
@@ -457,10 +457,10 @@ Deno.test("message.queued posts a one-line channel acknowledgement (not a reply-
   assert(content.includes("queued"));
 });
 
-// Final whole-branch review, Critical 1: when the busy branch resolved a
-// pending gate as deny (handler.ts's startTurn, signalled via
-// `deniedPendingGate`), the ack must say so — the generic "queued" line
-// falsely implies the ball is still in the running turn's court.
+// When the busy branch resolves a pending gate as deny (handler.ts's
+// startTurn, signalled via `deniedPendingGate`), the ack must say so — the
+// generic "queued" line falsely implies the ball is still in the running
+// turn's court.
 Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
   const calls: Array<{ body: unknown }> = [];
   const fetchMock: typeof fetch = (_input, init) => {

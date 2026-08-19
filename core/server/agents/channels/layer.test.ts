@@ -628,11 +628,11 @@ Deno.test("channel resume MODE B: unknown token -> {ok:false} 'no session for to
   assertEquals(resolves, []);
 });
 
-// Final whole-branch review, Minor: Task 3 made discord.ts's tryResolveGate
-// call resume() on EVERY thread message, not just ones known to answer a
-// gate — so "no session for token" became the ROUTINE case for an ordinary
-// message in a thread with no registered session, not an error worth paging
-// on. Must log at a level below console.error.
+// Task 3 made discord.ts's tryResolveGate call resume() on EVERY thread
+// message, not just ones known to answer a gate — so "no session for token"
+// became the ROUTINE case for an ordinary message in a thread with no
+// registered session, not an error worth paging on. Must log at a level
+// below console.error.
 Deno.test("channel resume MODE B: an unknown token logs at warn, not error (routine on every thread message since Task 3)", async () => {
   const agent = await loadAgent(TOY);
   const { handler } = makeResumeLayer(agent, { tokenToSession: {} });

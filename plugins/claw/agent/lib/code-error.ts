@@ -13,9 +13,9 @@ const SENTENCES: Record<string, string> = {
   invalid_key: "The coder's API key was rejected. It needs to be corrected in devx settings.",
 };
 
-// Final whole-branch review, Minor: the fallback below forwards an
-// UNCLASSIFIED raw error straight to Discord — unlike the SENTENCES above
-// (fixed, reviewed copy), this is whatever text the upstream provider/coder
+// The fallback below forwards an UNCLASSIFIED raw error straight to Discord —
+// unlike the SENTENCES above (fixed, reviewed copy), this is whatever text
+// the upstream provider/coder
 // happened to produce, which can be arbitrarily long and can contain a
 // credential the provider echoed back in its own error message (an API key
 // or bearer token quoted in a 401/403 body is common). Cap the length and

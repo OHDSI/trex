@@ -30,8 +30,8 @@ Deno.test("awaitApprovalCore still approves when sql is unavailable (no crash wi
   assertEquals(out, { approved: true, what: "the plan" });
 });
 
-// Fix round 1 (Important #3): a throwing ledger write must never turn an
-// already-granted human approval into a failed gate.
+// A throwing ledger write must never turn an already-granted human approval
+// into a failed gate.
 Deno.test("awaitApprovalCore still approves when appendDecision throws, and logs the failure distinctly", async () => {
   const failing = () => Promise.reject(new Error("connection reset"));
   const originalError = console.error;

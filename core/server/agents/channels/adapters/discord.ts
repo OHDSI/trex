@@ -344,22 +344,21 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     async "session.failed"(_data, channelCtx) {
       stopTyping(stateOf(channelCtx).channelId);
     },
-    // Task 4 (claw-devx-reliability), fix round 1 (code review): acknowledge
-    // a message that arrived while a turn was already running and got
-    // queued instead of started as a second concurrent turn — otherwise it
-    // silently disappears until the next turn happens to fold it in. Posts a
-    // plain channel message rather than reusing `deliver()` (which would
-    // call stopTyping — wrong here, the original turn is still working) or a
-    // reaction (the original Discord message id isn't threaded through
-    // session/delivery state to react to). Best-effort: never affects the
-    // turn that's still running.
+    // Task 4 (claw-devx-reliability): acknowledge a message that arrived
+    // while a turn was already running and got queued instead of started as
+    // a second concurrent turn — otherwise it silently disappears until the
+    // next turn happens to fold it in. Posts a plain channel message rather
+    // than reusing `deliver()` (which would call stopTyping — wrong here,
+    // the original turn is still working) or a reaction (the original
+    // Discord message id isn't threaded through session/delivery state to
+    // react to). Best-effort: never affects the turn that's still running.
     //
-    // Final whole-branch review, Critical 1: `deniedPendingGate` (set by
-    // handler.ts's startTurn busy branch) says whether this queued reply also
-    // denied a pending approval gate — the generic "queued" line would
-    // otherwise tell the human the ball is still in the running turn's
-    // court, when it is actually back in theirs (the gate was just closed and
-    // their reply is about to drive the coder's revision).
+    // `deniedPendingGate` (set by handler.ts's startTurn busy branch) says
+    // whether this queued reply also denied a pending approval gate — the
+    // generic "queued" line would otherwise tell the human the ball is still
+    // in the running turn's court, when it is actually back in theirs (the
+    // gate was just closed and their reply is about to drive the coder's
+    // revision).
     async "message.queued"(data, channelCtx) {
       const state = stateOf(channelCtx);
       if (!state.channelId) return;

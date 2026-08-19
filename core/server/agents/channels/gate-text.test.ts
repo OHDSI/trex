@@ -24,8 +24,8 @@ Deno.test("a sentence that merely contains a keyword is NOT a decision", () => {
   assertEquals(matchGateText("yes but first explain why the chunk count is wrong"), null);
 });
 
-// looksLikeGateResponse (R1 residual, final review): a looser predicate than
-// matchGateText — it answers "is this message about the gate at all", not
+// looksLikeGateResponse: a looser predicate than matchGateText — it answers
+// "is this message about the gate at all", not
 // "does it cleanly resolve it". Used by service/handler.ts's busy branch to
 // gate the deny so ordinary chatter doesn't auto-deny a pending approval.
 Deno.test("looksLikeGateResponse: a qualified answer counts even though matchGateText rejects it", () => {
@@ -66,7 +66,7 @@ Deno.test("looksLikeGateResponse: strips a leading <discord_context> block and a
   assertEquals(looksLikeGateResponse(wrappedChatter), false);
 });
 
-// R1 residual, second pass: adapters/discord.ts's mention-in-thread trigger
+// adapters/discord.ts's mention-in-thread trigger
 // composes a THIRD block into the message — `<thread_messages>` (up to 50
 // lines of past conversation, discord-messages.ts's formatMessagesBlock) —
 // and reuses the same continuation token as thread-turn, so it can land on

@@ -6,9 +6,9 @@
 // here. The remote-channel section (formerly REMOTE_CHANNEL_SYSTEM_PROMPT) is
 // folded in below so there is one prompt, not a prompt plus a patch.
 //
-// Final whole-branch review, Important 4: the tool-use/KB guidance blocks are
-// IMPORTED from prompts.ts rather than hand-duplicated or (as before this fix)
-// silently dropped. Task 7's own decision text is explicit that "skills,
+// The tool-use/KB guidance blocks are IMPORTED from prompts.ts rather than
+// hand-duplicated or (as before this fix) silently dropped. Task 7's own
+// decision text is explicit that "skills,
 // tools, KB and d2e knowledge are identical and are the expensive part to
 // maintain; only the interaction contract differs" — composing from the SAME
 // exported consts the ui profile uses is what makes that true by construction
@@ -71,7 +71,7 @@ The people you are working for are NOT sitting at this machine:
   skill/endpoint you tried and what failed.
 </remote_channel_context>`;
 
-// R2 residual (final review): DEVELOPMENT_WORKFLOW_BLOCK is imported verbatim
+// DEVELOPMENT_WORKFLOW_BLOCK is imported verbatim
 // from prompts.ts above so the UI profile's byte-identity stays pinned
 // (prompts.test.ts) — it is not safe to edit that block itself. But its step
 // 2 tells the coder to call `AskUserQuestion` and step 4 tells it that "you
@@ -106,16 +106,16 @@ pass" is not enough: exercise it through the real edge runtime with your
 testing-d2e-functions skill, or state why you could not.
 </completion_gate>`;
 
-// `triggers` (Final whole-branch review, Important 6): step 5 of
-// facilitate-coding-task.md asks a FULL-track coder to NAME which of the four
-// labels apply ('new subsystem', 'schema change', 'multiple components',
-// 'design space') in its PROSE — but step 6's "gate the spec before the plan"
-// exception used to key off re-scanning that prose for the same literal
-// strings, so a coder that paraphrased ("this touches the schema" instead of
-// 'schema change') silently downgraded the two-gate path to one. `triggers`
-// carries the SAME labels as a machine-readable comma-list alongside `track`,
-// so step 6 can read a fact instead of inferring one — prose stays the
-// fallback for a reply that predates/omits the trailer, not the primary path.
+// `triggers`: step 5 of facilitate-coding-task.md asks a FULL-track coder to
+// NAME which of the four labels apply ('new subsystem', 'schema change',
+// 'multiple components', 'design space') in its PROSE — but step 6's "gate
+// the spec before the plan" exception used to key off re-scanning that prose
+// for the same literal strings, so a coder that paraphrased ("this touches
+// the schema" instead of 'schema change') silently downgraded the two-gate
+// path to one. `triggers` carries the SAME labels as a machine-readable
+// comma-list alongside `track`, so step 6 can read a fact instead of
+// inferring one — prose stays the fallback for a reply that predates/omits
+// the trailer, not the primary path.
 const REPLY_CONTRACT_BLOCK = `<reply_contract>
 End EVERY reply with exactly one machine-readable line, after your prose:
 

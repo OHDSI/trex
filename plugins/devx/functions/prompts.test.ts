@@ -49,7 +49,7 @@ Deno.test("channel profile replaces the base prompt instead of decorating it", (
   assertEquals(prompt.includes("STOP after the step"), true);
 });
 
-// Fix round 1: [[AI_RULES]] was silently dropped from the channel prompt
+// [[AI_RULES]] was silently dropped from the channel prompt
 // because CHANNEL_CODER_SYSTEM_PROMPT had no placeholder for
 // wrapAiRules(...) to land in — String.replace on an absent substring is a
 // silent no-op. This is the assertion that would have caught it: the app's
@@ -63,9 +63,9 @@ Deno.test("channel profile prompt carries the app's own ai_rules", () => {
   assertEquals(prompt.includes("[[AI_RULES]]"), false);
 });
 
-// Fix round 2: filling the [[AI_RULES]] gap with DEFAULT_AI_RULES (the
+// Filling the [[AI_RULES]] gap with DEFAULT_AI_RULES (the
 // React/Tailwind/shadcn workbench boilerplate) made things worse than the
-// round-1 bug — a channel coder on a non-React repo (this repo's own root
+// original bug — a channel coder on a non-React repo (this repo's own root
 // has neither ai_rules nor TREX.md/AI_RULES.md) would be told, inside its own
 // system prompt, that it's building a React app with shadcn/ui. With no
 // aiRules supplied, the channel prompt must say nothing about a tech stack,
@@ -78,8 +78,8 @@ Deno.test("channel profile with no ai_rules asserts no tech stack at all", () =>
   assertEquals(prompt.includes("[[AI_RULES]]"), false);
 });
 
-// Final whole-branch review, Important 4: the channel profile used to replace
-// LOCAL_AGENT_SYSTEM_PROMPT wholesale, dropping KNOWLEDGE_BASE_BLOCK and the
+// The channel profile used to replace LOCAL_AGENT_SYSTEM_PROMPT wholesale,
+// dropping KNOWLEDGE_BASE_BLOCK and the
 // tool-use guidance blocks even though Task 7's own decision text says "KB
 // stays identical, only the interaction contract differs" — the kb MCP server
 // is still registered, so the coder had the tools but was never told they're
@@ -117,8 +117,8 @@ Deno.test("channel profile prompt still omits the preview-panel/iframe framing a
   assertEquals(prompt.includes("GenerateImage"), false);
 });
 
-// R2 residual (final review): composing the channel prompt from the shared
-// blocks pulled in DEVELOPMENT_WORKFLOW_BLOCK's step 2 ("Use `AskUserQuestion`
+// Composing the channel prompt from the shared blocks pulled in
+// DEVELOPMENT_WORKFLOW_BLOCK's step 2 ("Use `AskUserQuestion`
 // to ask...") and step 4 ("you must ask the user to interact with the
 // application"), both of which contradict <remote_channel_context>'s "Never
 // hand back instructions for the user to execute" — and fn-claude-code's `ask`
@@ -147,9 +147,9 @@ Deno.test("ui profile prompt carries no channel-workflow override", () => {
   assertEquals(prompt.includes("<channel_workflow_override>"), false);
 });
 
-// Final whole-branch review, Important 6: the reply contract's `triggers`
-// attribute must name the SAME four labels, in the SAME wording, that step 5
-// of facilitate-coding-task.md asks the coder to choose among — a mismatch
+// The reply contract's `triggers` attribute must name the SAME four labels,
+// in the SAME wording, that step 5 of facilitate-coding-task.md asks the
+// coder to choose among — a mismatch
 // here is exactly how the trailer and the skill's prose silently drift apart.
 Deno.test("channel profile reply contract names the same four FULL-track trigger labels as the skill's step 5", () => {
   const channelProfile = resolveCoderProfile({ remoteChannel: true });

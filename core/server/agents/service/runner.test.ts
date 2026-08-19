@@ -112,7 +112,7 @@ Deno.test("runTurn does not emit message.completed for a clientOnly tool-call tu
 });
 
 // Task 5 (claw-devx-reliability), no-silent-turn guarantee — four branches at
-// the "finish" case, per fix round 1's ruling:
+// the "finish" case:
 //   1. text present -> emit as always (covered by the first test in this file).
 //   2. clientOnly call, no text -> stay silent (covered just above).
 //   3. no tool calls at all, no text -> "Nothing was changed" (true: nothing ran).
@@ -174,7 +174,7 @@ Deno.test("runTurn delivers a no-claim fallback when tools ran but none posted a
   assert(completedIdx >= 0 && finishIdx >= 0 && completedIdx < finishIdx);
 });
 
-// The regression fix round 1 exists for: a turn that calls a postsToChannel
+// The regression this exists for: a turn that calls a postsToChannel
 // tool (e.g. claw's postUpdate) and then ends with no text must NOT get the
 // fallback — the channel already heard from the agent, and appending
 // "Nothing was changed" could be an outright false claim if a later step in
@@ -200,8 +200,8 @@ Deno.test("runTurn emits NO fallback when a postsToChannel tool ran and the turn
   assertEquals(res.text, "");
 });
 
-// Final whole-branch review, Important 3: sawChannelPost was STICKY (true
-// forever once ANY postsToChannel tool ran this turn), but claw's skill
+// sawChannelPost was STICKY (true forever once ANY postsToChannel tool ran
+// this turn), but claw's skill
 // makes postUpdate immediately before every askCodeAgent an invariant
 // (facilitate-coding-task.md:125) — so claw's canonical turn is
 // postUpdate("starting X") -> askCodeAgent (long) -> step cap, no closing

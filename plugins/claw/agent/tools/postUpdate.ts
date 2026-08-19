@@ -11,7 +11,7 @@ import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 interface Input { channelId: string; text: string }
 
 export default defineTool({
-  // Task 5 (claw-devx-reliability), fix round 1: this tool's own execute()
+  // Task 5 (claw-devx-reliability): this tool's own execute()
   // posts to Discord directly (see below) — tells runner.ts's no-silent-turn
   // fallback that the channel already heard from the agent this turn.
   postsToChannel: true,

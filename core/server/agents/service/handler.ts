@@ -187,21 +187,20 @@ function startTurn(
     // purpose (see the report).
     let running = await deps.store.getRunningTurn(sessionId);
     if (running) {
-      // Fix round 1 (code review directive, supersedes the brief's "do not
-      // invent a scheduler" — this repo has none to invent into): lazy
-      // reaping. Serialization means a turn stuck `running` forever (a
-      // worker crash/redeploy mid-turn — the same 21-turn defect
-      // reapStaleTurns exists for) now wedges every LATER message on that
-      // session too, not just races one. Rather than adding a scheduler,
-      // reap on the way in: if the running turn is actually stale, this
-      // marks it failed and clears it, so the message below proceeds as a
-      // normal turn instead of being queued behind a zombie forever. A
-      // genuinely live turn is untouched (the cutoff only matches turns
-      // older than it) and falls through to the queue exactly as before.
+      // Lazy reaping, not a scheduler — this repo has none to invent into.
+      // Serialization means a turn stuck `running` forever (a worker
+      // crash/redeploy mid-turn — the same 21-turn defect reapStaleTurns
+      // exists for) now wedges every LATER message on that session too, not
+      // just races one. Rather than adding a scheduler, reap on the way in:
+      // if the running turn is actually stale, this marks it failed and
+      // clears it, so the message below proceeds as a normal turn instead of
+      // being queued behind a zombie forever. A genuinely live turn is
+      // untouched (the cutoff only matches turns older than it) and falls
+      // through to the queue exactly as before.
       //
-      // Fix round 2 (code review): this runs on EVERY message that lands on
-      // a busy session, so a transient reap/re-read failure here is a real
-      // failure mode, not hypothetical. It must not escape to the outer
+      // This runs on EVERY message that lands on a busy session, so a
+      // transient reap/re-read failure here is a real failure mode, not
+      // hypothetical. It must not escape to the outer
       // "turn crashed" catch below (no turn was ever created on this path —
       // same reasoning as the queueFollowUp catch a few lines down) and it
       // must not silently drop the incoming message either. Degrade to the
@@ -217,8 +216,8 @@ function startTurn(
       }
     }
     if (running) {
-      // Final whole-branch review, Critical 1: a pending approval gate keeps
-      // its turn `status='running'` for the whole approval poll (up to 30
+      // A pending approval gate keeps its turn `status='running'` for the
+      // whole approval poll (up to 30
       // minutes as of Task 3). A QUALIFIED reply to that gate — the plan's
       // own example, "yes but first explain why the chunk count is wrong" —
       // is not a bare yes/no, so matchGateText correctly returns null (see
@@ -241,8 +240,8 @@ function startTurn(
       // for the existing queue/fold path exactly as before; this fix does
       // not add gate resolution for callers that opted out of it.
       //
-      // Residual fix (R1, final review): asText(message) here is the message
-      // the channel adapter actually composed — for Discord (the only
+      // asText(message) here is the message the channel adapter actually
+      // composed — for Discord (the only
       // adapter that reaches this path) that's always a `<discord_context>`
       // block plus the human's words (adapters/discord.ts's sendToThread),
       // so matchGateText(asText(message), ...) is essentially ALWAYS null —
@@ -277,9 +276,9 @@ function startTurn(
       }
       try {
         await deps.store.queueFollowUp(sessionId, asText(message));
-        // Fix round 1 (code review): queued messages previously vanished
-        // with no acknowledgement until the next turn happened to fold them
-        // in. message.queued is a turn-agnostic trex extension to the event
+        // Queued messages previously vanished with no acknowledgement until
+        // the next turn happened to fold them in. message.queued is a
+        // turn-agnostic trex extension to the event
         // vocabulary (same pattern as session.waiting/session.failed in
         // events.ts — live-only, not persisted/replayed) so it reaches
         // whichever channel delivery subscription is already live for this
@@ -305,8 +304,8 @@ function startTurn(
     // of racing it as a separate turn. Ordinary case (nothing queued) is a
     // no-op DB round trip that leaves `message` untouched.
     //
-    // Final whole-branch review, Important 5: `queued` items arrived and
-    // were queued BEFORE this call's `message` (they were queued behind a
+    // `queued` items arrived and were queued BEFORE this call's `message`
+    // (they were queued behind a
     // turn that has since finished or failed; `message` is what just
     // triggered THIS startTurn call, chronologically after all of them) —
     // store.ts's takeFollowUps docstring promises "in the order they

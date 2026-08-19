@@ -24,9 +24,9 @@ Deno.test("a blocked trailer keeps the reason", () => {
   assertEquals(trailer?.blocked, "docker unavailable in sandbox");
 });
 
-// Review fix (round 1): [^>]* used to let a `>` embedded in an attribute
-// value terminate the match early, dropping the whole trailer AND leaving
-// the raw <handoff .../> markup in the channel-facing body — exactly the
+// [^>]* used to let a `>` embedded in an attribute value terminate the match
+// early, dropping the whole trailer AND leaving the raw <handoff .../>
+// markup in the channel-facing body — exactly the
 // leak this feature exists to prevent. blocked/needs are free-prose fields
 // ("one-line blocker", "the one thing you need") where "A > B" or
 // "coverage > 80%" is a natural thing for the coder to write.
@@ -48,9 +48,9 @@ Deno.test("mid-prose <handoff> markup with trailing prose is still not treated a
   assertEquals(body, reply);
 });
 
-// Review fix (round 1), minor #2: the attribute regex is [^"]*, so a literal
-// (unescaped) `"` inside a value truncates that value at the first embedded
-// quote. This is not a crash and the body is still stripped correctly — the
+// The attribute regex is [^"]*, so a literal (unescaped) `"` inside a value
+// truncates that value at the first embedded quote. This is not a crash and
+// the body is still stripped correctly — the
 // contract asks the coder to keep values free of `"` (see prompts_channel.ts)
 // rather than build quote-escaping. Pinned here so the truncation is
 // documented behavior, not a surprise.
@@ -61,8 +61,8 @@ Deno.test("an embedded quote in a value truncates it silently, but the body is s
   assertEquals(body, "Done.");
 });
 
-// Review fix (round 1), minor #4: attr()/list() used to search for
-// `name="..."` anywhere in the raw attribute span, so a name that is a suffix
+// attr()/list() used to search for `name="..."` anywhere in the raw
+// attribute span, so a name that is a suffix
 // of another attribute's name (separated by a non-word character, e.g. a
 // hypothetical "sub-remaining") could bleed its value into the shorter name.
 // Anchoring on a preceding boundary (start-of-string or whitespace) fixes it.
@@ -72,8 +72,8 @@ Deno.test("an attribute name that is a suffix of another (with a separator) does
   assertEquals(trailer?.remaining, ["a", "b"]);
 });
 
-// Review fix (round 2): round 1's fix ([\s\S]*? on a whole-string regex) let
-// the match start at the FIRST "<handoff"-shaped substring — e.g. a decoy the
+// An earlier fix ([\s\S]*? on a whole-string regex) let the match start at
+// the FIRST "<handoff"-shaped substring — e.g. a decoy the
 // coder quotes while explaining the trailer format, or pastes from a prior
 // reply inside a fenced code block — and stretch non-greedily to whatever
 // closing ">" it could reach from there. That silently took facts from the
@@ -99,8 +99,8 @@ Deno.test("a decoy <handoff> with no real trailer after it parses as null and th
   assertEquals(body, reply);
 });
 
-// Final whole-branch review, Important 6: `triggers` is a comma-list, parsed
-// with the SAME `list()` helper as `done`/`remaining` — so it carries the
+// `triggers` is a comma-list, parsed with the SAME `list()` helper as
+// `done`/`remaining` — so it carries the
 // same absent-vs-empty asymmetry (no attribute at all -> undefined, an
 // attribute present but empty -> []). Step 6 of facilitate-coding-task.md
 // depends on this distinction: "the attribute is absent" (older/non-

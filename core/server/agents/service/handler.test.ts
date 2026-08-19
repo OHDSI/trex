@@ -24,7 +24,7 @@ function composeDiscordMessage(humanText: string): string {
   return [contextBlock, humanText].join("\n\n");
 }
 
-// R1 residual, second pass: adapters/discord.ts:866-869's mention-in-thread
+// adapters/discord.ts:866-869's mention-in-thread
 // trigger composes a THIRD block into the same message —
 // `formatMessagesBlock("thread_messages", history)`, up to 50 lines of past
 // conversation — and reuses the same continuation token as thread-turn
@@ -95,10 +95,9 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
     }
     if (sql.includes("UPDATE agents.turns") && sql.includes("RETURNING id")) {
-      // Fix round 1 (code review): reapStaleTurns — cutoff is a JS-computed
-      // Date passed as a param (see store.ts), matched against each turn's
-      // real startedAt the same way the real `started_at < $n` predicate
-      // would. Final whole-branch review, Important 2: also session-scoped —
+      // reapStaleTurns — cutoff is a JS-computed Date passed as a param (see
+      // store.ts), matched against each turn's real startedAt the same way
+      // the real `started_at < $n` predicate would. Also session-scoped —
       // params are [sessionId, cutoff, errorText], matching the real
       // `session_id = $1 AND started_at < $2` predicate.
       const sid = params[0] as string;
@@ -156,8 +155,8 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [{ request_id: params[0] }] });
     }
     if (sql.includes("SELECT request_id, tool, input FROM agents.approvals")) {
-      // Task 4 / Critical 1 (final whole-branch review): getSinglePendingApproval —
-      // the session's sole still-undecided approval, mirroring store.ts's
+      // Task 4: getSinglePendingApproval — the session's sole still-undecided
+      // approval, mirroring store.ts's
       // `WHERE session_id = $1 AND decision IS NULL`.
       const sid = params[0] as string;
       const pending = [...approvals.entries()].filter(([, a]) => a.sessionId === sid && a.decision === null);
@@ -953,8 +952,8 @@ Deno.test("a message arriving while a turn is running is queued, not started as 
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => db.turns.length === 1 && db.turns[0].status === "running");
 
-  // Fix round 1 (code review): a queued message must not silently vanish —
-  // it gets a live, turn-agnostic acknowledgement event a channel adapter
+  // A queued message must not silently vanish — it gets a live,
+  // turn-agnostic acknowledgement event a channel adapter
   // can turn into a reply/reaction (see discord.ts's "message.queued"
   // handler for the Discord-side consumption of this).
   const live: AgentEvent[] = [];
@@ -1041,22 +1040,20 @@ Deno.test("a follow-up queued during a turn that fails is folded into the next e
   }));
   await until(() => db.turns.length === 2 && settled(db));
   assertEquals(db.turns[1].status, "completed");
-  // Final whole-branch review, Important 5: "queued while busy" arrived
-  // BEFORE "try again" (it was queued while the first turn was still
-  // running; "try again" is what finally re-triggered this turn afterward)
-  // — store.ts's takeFollowUps docstring promises "in the order they
-  // arrived", so the queued item must lead, not trail.
+  // "queued while busy" arrived BEFORE "try again" (it was queued while the
+  // first turn was still running; "try again" is what finally re-triggered
+  // this turn afterward) — store.ts's takeFollowUps docstring promises "in
+  // the order they arrived", so the queued item must lead, not trail.
   assertEquals(db.turns[1].message, "queued while busy\n\ntry again");
   assertEquals(db.followUps.length, 0);
 });
 
-// Fix round 1 (code review directive — supersedes the brief's "do not
-// invent a scheduler"): lazy reaping. Serialization means a turn stuck
-// `running` forever (the same defect reapStaleTurns exists for — 21 turns
-// observed) now wedges every LATER message on that session too, since
-// nothing else ever un-blocks getRunningTurn. There is no periodic hook in
-// this runtime to run reapStaleTurns on a timer (see the report), so
-// startTurn reaps on the way in instead: finding a running turn, it calls
+// Lazy reaping, not a scheduler. Serialization means a turn stuck `running`
+// forever (the same defect reapStaleTurns exists for — 21 turns observed) now
+// wedges every LATER message on that session too, since nothing else ever
+// un-blocks getRunningTurn. There is no periodic hook in this runtime to run
+// reapStaleTurns on a timer, so startTurn reaps on the way in instead:
+// finding a running turn, it calls
 // reapStaleTurns, then re-reads getRunningTurn — a genuinely stale turn is
 // now failed and the new message proceeds normally; a live one still folds
 // into the queue exactly as before (covered by the sibling tests above).
@@ -1110,14 +1107,13 @@ Deno.test("a stale (abandoned) running turn is reaped when a new message arrives
   await until(() => true); // yield a tick for the release to be observed
 });
 
-// Fix round 2 (code review): round 1's lazy-reap call sat OUTSIDE the queue
-// branch's try/catch — a transient reap failure (a real failure mode, since
-// this runs on every message that lands on a busy session, not a
-// hypothetical) would have escaped to the outer "turn crashed" catch and
-// silently dropped the incoming message (queueFollowUp never reached, no
-// queue row, no ack). It must instead degrade to the safe assumption: treat
-// the session as still busy and queue the message exactly as if reaping had
-// found nothing stale.
+// The lazy-reap call must sit INSIDE the queue branch's try/catch — a
+// transient reap failure (a real failure mode, since this runs on every
+// message that lands on a busy session, not a hypothetical) would otherwise
+// escape to the outer "turn crashed" catch and silently drop the incoming
+// message (queueFollowUp never reached, no queue row, no ack). It must
+// instead degrade to the safe assumption: treat the session as still busy
+// and queue the message exactly as if reaping had found nothing stale.
 Deno.test("a reap failure during the busy-check still queues and acknowledges the message (not dropped, not logged as a turn crash)", async () => {
   let releaseGate: () => void = () => {};
   const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -1176,9 +1172,8 @@ Deno.test("a reap failure during the busy-check still queues and acknowledges th
   assert(!logged.some((l) => l.includes("turn crashed")), `"turn crashed" must not fire for a reap failure: ${JSON.stringify(logged)}`);
 });
 
-// Fix round 1 (code review): the queue-write path (busy session) must not
-// be misreported through the generic "turn crashed" log — no turn was ever
-// created on that path.
+// The queue-write path (busy session) must not be misreported through the
+// generic "turn crashed" log — no turn was ever created on that path.
 Deno.test("a follow-up queue write failure is logged distinctly from a turn crash", async () => {
   let releaseGate: () => void = () => {};
   const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -1225,8 +1220,8 @@ Deno.test("a follow-up queue write failure is logged distinctly from a turn cras
   assert(!logged.some((l) => l.includes("turn crashed")));
 });
 
-// Final whole-branch review, Critical 1: a QUALIFIED reply to a pending
-// approval gate ("yes but first explain why the chunk count is wrong") is not
+// A QUALIFIED reply to a pending approval gate ("yes but first explain why
+// the chunk count is wrong") is not
 // a bare yes/no — matchGateText returns null for it (gate-text.ts) — so a
 // pre-checking caller (discord.ts's tryResolveGate) falls through to send()/
 // startTurn with the gate STILL pending. Before this fix that reply was
@@ -1322,7 +1317,7 @@ Deno.test("a reply arriving on a busy session with NO pending gate still queues 
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
 });
 
-// R1 residual (final review): a reply that matches matchGateText's
+// A reply that matches matchGateText's
 // vocabulary CLEANLY (raw, unwrapped text — the shape a hypothetical
 // non-Discord caller that skips tryResolveGate would send directly) must
 // still be left alone here: matchGateText("approve") is non-null, so the
@@ -1368,7 +1363,7 @@ Deno.test("a busy-session reply with RAW text that matches the pending gate's vo
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
 });
 
-// R1 residual (final review), the actual regression: adapters/discord.ts
+// The actual regression: adapters/discord.ts
 // composes the inbound message as `[contextBlock, attachmentsBlock,
 // text].join("\n\n")` BEFORE it ever reaches startTurn — so asText(message)
 // here is always wrapped in a `<discord_context>` block. Pre-fix,
@@ -1500,7 +1495,7 @@ Deno.test("a composed Discord message on a busy session with NO pending gate sti
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
 });
 
-// R1 residual, second pass (re-review finding): adapters/discord.ts's
+// adapters/discord.ts's
 // mention-in-thread trigger composes a THIRD block — `<thread_messages>`,
 // up to 50 lines of past conversation — into the same message, reusing the
 // same continuation token as thread-turn, so it can land on the same
@@ -1604,8 +1599,8 @@ Deno.test("a composed mention-in-thread message whose CURRENT reply qualifiedly 
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
 });
 
-// Final whole-branch review, Important 2: reapStaleTurns must not reach
-// across sessions. Before the fix a message on ANY busy session marked
+// reapStaleTurns must not reach across sessions. Before the fix a message on
+// ANY busy session marked
 // EVERY stale `running` turn deployment-wide, so another session's
 // genuinely long-running turn (plausible: Task 7 raised the channel step
 // floor to 200 and streamTurn has no timeout) could be failed out from under

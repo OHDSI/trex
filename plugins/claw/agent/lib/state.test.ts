@@ -33,8 +33,8 @@ Deno.test("readOrchestration maps a row", async () => {
   assertEquals(got, { sessionId: "s1", codeSessionId: "c1", eventCursor: 7, appId: null, decisions: [] });
 });
 
-// Fix round 1 (claw-devx-reliability): readOrchestration now carries the
-// ledger too, so claw's own instructions (renderStateForPrompt) can see it.
+// readOrchestration carries the ledger too, so claw's own instructions
+// (renderStateForPrompt) can see it.
 Deno.test("readOrchestration maps decisions when present", async () => {
   const f = fakeSql();
   f.setRows([{
@@ -71,10 +71,9 @@ Deno.test("renderStateForPrompt distinguishes no-session from active-session", (
   assertEquals(active.includes("active"), true);
 });
 
-// Fix round 1 (claw-devx-reliability): the big finding — claw's OWN
-// instructions must carry the ledger too, not just the coder hand-off in
-// askCore, or the "check what's already settled" skill instruction has
-// nothing to read.
+// claw's OWN instructions must carry the ledger too, not just the coder
+// hand-off in askCore, or the "check what's already settled" skill
+// instruction has nothing to read.
 Deno.test("renderStateForPrompt includes the decision ledger when the orchestration carries decisions", () => {
   const out = renderStateForPrompt({
     sessionId: "s1",
@@ -146,15 +145,15 @@ Deno.test("renderDecisionLedger lists decisions newest last", () => {
   assertEquals(out.indexOf("dialect") < out.indexOf("window"), true);
 });
 
-// Minor (fix round 1): the header must say outright that the latest entry
-// wins, not just imply it via "appears again lower down".
+// The header must say outright that the latest entry wins, not just imply it
+// via "appears again lower down".
 Deno.test("renderDecisionLedger's header states outright that the latest entry wins", () => {
   const out = renderDecisionLedger([{ at: "2026-08-06T12:00:00Z", question: "q", decision: "d" }]);
   assertStringIncludes(out, "LATEST entry");
 });
 
-// Minor (fix round 1): a decision/question containing a newline must not
-// break the one-bullet-per-line rendering.
+// A decision/question containing a newline must not break the
+// one-bullet-per-line rendering.
 Deno.test("renderDecisionLedger collapses whitespace in question and decision", () => {
   const out = renderDecisionLedger([
     { at: "2026-08-06T12:00:00Z", question: "follow-up\nwindow", decision: "configurable,\n  default 365 days" },

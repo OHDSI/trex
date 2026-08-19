@@ -14,7 +14,7 @@
 // happens, so postChoice itself cannot append to the decision ledger.
 // Deliberately not hooked from that adapter either — claw.orchestrations is
 // claw-owned and the adapter is shared channel infrastructure, so the
-// layering must not invert. Fix round 1: claw records the pick itself, one
+// layering must not invert. Instead, claw records the pick itself, one
 // step later, by calling recordDecision.ts once the resumed "The team
 // selected: ..." message reaches it (see facilitate-coding-task.md).
 import { defineTool } from "eve/tools";
@@ -29,7 +29,7 @@ interface OptionIn { label: string; value: string; description?: string }
 interface Input { channelId: string; title: string; intro?: string; options: OptionIn[]; multi?: boolean }
 
 export default defineTool({
-  // Task 5 (claw-devx-reliability), fix round 1 — see postUpdate.ts.
+  // Task 5 (claw-devx-reliability) — see postUpdate.ts.
   postsToChannel: true,
   description:
     "Present design options to the channel as a dropdown (select menu) the team picks from with " +

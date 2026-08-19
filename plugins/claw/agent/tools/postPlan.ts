@@ -18,7 +18,7 @@ const BLURPLE = 0x5865F2;
 interface Input { channelId: string; title: string; text: string; attachPath?: string }
 
 export default defineTool({
-  // Task 5 (claw-devx-reliability), fix round 1 — see postUpdate.ts.
+  // Task 5 (claw-devx-reliability) — see postUpdate.ts.
   postsToChannel: true,
   description:
     "Display a plan, brainstorm, or set of options in the Discord channel as a rich embed " +

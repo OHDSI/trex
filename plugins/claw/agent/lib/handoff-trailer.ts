@@ -9,9 +9,9 @@ export interface HandoffTrailer {
   needs?: string;
   done?: string[];
   remaining?: string[];
-  // Final whole-branch review, Important 6: the FULL-track triggers the
-  // coder named in step 5 (a subset of 'new subsystem' | 'schema change' |
-  // 'multiple components' | 'design space' — see prompts_channel.ts's
+  // The FULL-track triggers the coder named in step 5 (a subset of
+  // 'new subsystem' | 'schema change' | 'multiple components' |
+  // 'design space' — see prompts_channel.ts's
   // <reply_contract>), so step 6's "gate the spec before the plan" exception
   // can key off a machine-readable fact instead of re-reading the coder's
   // prose for the literal label strings.
@@ -19,14 +19,14 @@ export interface HandoffTrailer {
 }
 
 // Anchored on the LAST "<handoff" in the reply, then matched forward from
-// there to the end of the string. Two review rounds shaped this:
+// there to the end of the string. Two bugs shaped this design:
 //
-// Round 1: a bounded [^>]* class let a `>` embedded inside an attribute value
-// (e.g. blocked="needs decision: A > B") terminate the match early, dropping
-// the whole trailer and leaking the raw markup into the channel-facing body.
+// A bounded [^>]* class let a `>` embedded inside an attribute value (e.g.
+// blocked="needs decision: A > B") terminate the match early, dropping the
+// whole trailer and leaking the raw markup into the channel-facing body.
 // Fixed by widening the capture to [\s\S]*?.
 //
-// Round 2: with a whole-string regex, that widened [\s\S]*? was free to start
+// With a whole-string regex, that widened [\s\S]*? was free to start
 // matching at the FIRST "<handoff"-shaped substring (e.g. a decoy the coder
 // quotes while explaining the trailer format, or pastes from a prior reply
 // inside a fenced code block) and stretch non-greedily to whatever "/?>\s*$"

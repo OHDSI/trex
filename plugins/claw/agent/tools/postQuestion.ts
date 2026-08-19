@@ -17,7 +17,7 @@ const QUESTION_CUSTOM_ID = "eve_question";
 interface Input { channelId: string; question: string }
 
 export default defineTool({
-  // Task 5 (claw-devx-reliability), fix round 1 — see postUpdate.ts.
+  // Task 5 (claw-devx-reliability) — see postUpdate.ts.
   postsToChannel: true,
   description:
     "Ask the channel an open (free-text) clarifying question with a native answer UI: the " +

@@ -65,7 +65,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   const clientOnlyNames = new Set(
     Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).clientOnly).map(([n]) => n),
   );
-  // Task 5 (claw-devx-reliability), fix round 1: agent-agnostic — runner.ts
+  // Task 5 (claw-devx-reliability): agent-agnostic — runner.ts
   // does not know any tool by name, so a tool declares whether ITS OWN
   // execute() already speaks to the channel directly (outside this turn's
   // emit/message.completed path), the same way it declares clientOnly. See
@@ -132,9 +132,9 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // must not fire for that case (see the "does not emit message.completed
   // for a clientOnly tool-call turn" test).
   let sawClientOnlyCall = false;
-  // Final whole-branch review, Important 3: whether the MOST RECENT tool call
-  // posted to the channel — not whether one EVER did. Fix round 1 originally
-  // made this sticky (true forever once any postsToChannel tool ran), but
+  // Whether the MOST RECENT tool call posted to the channel — not whether one
+  // EVER did. An earlier version made this sticky (true forever once any
+  // postsToChannel tool ran), but
   // claw's skill makes postUpdate immediately before EVERY askCodeAgent call
   // an invariant (facilitate-coding-task.md) — so claw's canonical turn shape
   // is postUpdate("starting X") -> askCodeAgent (long) -> step cap, no
@@ -146,7 +146,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // longer silences a fallback for whatever happened AFTER it; a channel post
   // that genuinely is the last thing the turn did still suppresses it.
   let lastToolWasChannelPost = false;
-  // Fix round 1: distinguishes "the turn genuinely did nothing" (safe to say
+  // Distinguishes "the turn genuinely did nothing" (safe to say
   // "Nothing was changed") from "tools ran but nothing reached the channel
   // and there's no closing text" (the actually-silent-after-doing-work case
   // this task exists to fix — must NOT claim nothing changed, since it might
@@ -237,8 +237,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
             // turn) — see the "does not emit message.completed for a
             // clientOnly tool-call turn" test.
           } else if (lastToolWasChannelPost) {
-            // Fix round 1 (claw-devx-reliability), narrowed by the final
-            // whole-branch review (Important 3): the LAST tool call this turn
+            // Task 5 (claw-devx-reliability): the LAST tool call this turn
             // made was a postsToChannel tool (postUpdate/postChoice/postPlan/
             // postQuestion/postScreenshots/postDevSummary) — the channel just
             // heard from the agent as the turn's closing act, so emitting the
@@ -256,7 +255,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
               'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.';
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
           } else {
-            // Fix round 1: tools ran (so work may have happened) but none of
+            // Tools ran (so work may have happened) but none of
             // them posted to the channel and the model never produced closing
             // text — e.g. it hit the step cap mid tool-call loop. This is the
             // genuinely-silent-after-doing-work case the task exists to fix.

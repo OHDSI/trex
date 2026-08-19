@@ -24,18 +24,18 @@ Deno.test("no code and no raw degrades honestly", () => {
   );
 });
 
-// Final whole-branch review, Minor: `code: "constructor"` must not resolve to
-// Function.prototype.constructor via an unguarded SENTENCES[code] index —
-// it must fall through to the raw-message branch like any other unknown code.
+// `code: "constructor"` must not resolve to Function.prototype.constructor
+// via an unguarded SENTENCES[code] index — it must fall through to the
+// raw-message branch like any other unknown code.
 Deno.test("a prototype-polluting code falls through to the raw message instead of resolving a function", () => {
   const got = describeCoderError("constructor", "some raw detail");
   assertStringIncludes(got, "some raw detail");
 });
 
-// Final whole-branch review, Minor: an unclassified raw error is whatever the
-// upstream provider produced — it can quote back a credential (a common shape
-// in 401/403 bodies) or run arbitrarily long. Both must be cleaned up before
-// the message reaches Discord.
+// An unclassified raw error is whatever the upstream provider produced — it
+// can quote back a credential (a common shape in 401/403 bodies) or run
+// arbitrarily long. Both must be cleaned up before the message reaches
+// Discord.
 Deno.test("obvious secret shapes are scrubbed from an unclassified raw error", () => {
   const got = describeCoderError(undefined, "401 unauthorized: Bearer sk-abcdefgh12345678 rejected, token=xyz789 key=abc123");
   assertEquals(got.includes("sk-abcdefgh12345678"), false);

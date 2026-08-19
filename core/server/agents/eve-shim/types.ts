@@ -105,7 +105,7 @@ export interface ToolDef {
   needsApproval?: boolean;
   clientOnly?: boolean;
   idempotent?: boolean;
-  // Task 5 (claw-devx-reliability), fix round 1: this tool speaks to the
+  // Task 5 (claw-devx-reliability): this tool speaks to the
   // channel directly (its own REST call, outside the emit/message.completed
   // event path) — set on claw's postUpdate/postChoice/postPlan/postQuestion/
   // postScreenshots/postDevSummary. runner.ts's no-silent-turn fallback reads

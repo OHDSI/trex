@@ -174,32 +174,29 @@ export function createStore(query: QueryFn) {
     // message the plan specifies, with the cutoff restated in minutes for a
     // human reading the row.
     //
-    // Final whole-branch review, Important 2: session-scoped on purpose.
-    // handler.ts's startTurn calls this lazily whenever a message lands on a
-    // BUSY session, to unwedge a zombie turn on THAT session — it never
-    // needed to touch any other session. An unscoped reap marked every
-    // running turn deployment-wide, so one session's message could fail
-    // another session's genuinely live turn (long turns are plausible: Task 7
-    // raised the channel step floor to 200 and streamTurn has no timeout);
-    // getRunningTurn on the victim session then returned null, so ITS next
-    // message started a second concurrent turn — the exact defect Task 4
-    // exists to remove — and when the real turn finished later,
-    // finishTurn(id, "completed") flipped the row back, erasing the evidence
-    // the reap ever ran.
+    // Session-scoped on purpose. handler.ts's startTurn calls this lazily
+    // whenever a message lands on a BUSY session, to unwedge a zombie turn on
+    // THAT session — it never needed to touch any other session. An unscoped
+    // reap marked every running turn deployment-wide, so one session's
+    // message could fail another session's genuinely live turn (long turns
+    // are plausible: Task 7 raised the channel step floor to 200 and
+    // streamTurn has no timeout); getRunningTurn on the victim session then
+    // returned null, so ITS next message started a second concurrent turn —
+    // the exact defect Task 4 exists to remove — and when the real turn
+    // finished later, finishTurn(id, "completed") flipped the row back,
+    // erasing the evidence the reap ever ran.
     //
-    // Fix round 1 (code review): the cutoff is computed HERE in JS
-    // (`new Date(Date.now() - olderThanMs)`) and passed as a plain parameter
-    // — the SQL then does a trivial `started_at < $1` comparison instead of
-    // `NOW() - (... )::interval` arithmetic inline in the query string. This
-    // isn't just style: with the arithmetic in SQL, a get-the-sign-wrong bug
-    // (`NOW() - ...` vs `NOW() + ...`) is invisible to any test that only
-    // asserts the SQL *text* — which is exactly what the original version of
-    // this method shipped with, and review correctly flagged it as unproven.
-    // With the cutoff computed in JS, store.test.ts can assert the exact
-    // Date value passed for a given olderThanMs (proving the JS-side sign is
-    // right) and a fake that evaluates `started_at < cutoff` against seeded
-    // rows can prove the query's comparison direction against that same
-    // real value — both directions, without a live Postgres.
+    // The cutoff is computed HERE in JS (`new Date(Date.now() -
+    // olderThanMs)`) and passed as a plain parameter — the SQL then does a
+    // trivial `started_at < $1` comparison instead of `NOW() - (...
+    // )::interval` arithmetic inline in the query string. This isn't just
+    // style: with the arithmetic in SQL, a get-the-sign-wrong bug (`NOW() -
+    // ...` vs `NOW() + ...`) is invisible to any test that only asserts the
+    // SQL *text*. With the cutoff computed in JS, store.test.ts can assert
+    // the exact Date value passed for a given olderThanMs (proving the
+    // JS-side sign is right) and a fake that evaluates `started_at < cutoff`
+    // against seeded rows can prove the query's comparison direction against
+    // that same real value — both directions, without a live Postgres.
     async reapStaleTurns(sessionId: string, olderThanMs: number): Promise<number> {
       const cutoff = new Date(Date.now() - olderThanMs);
       const minutes = Math.round(olderThanMs / 60000);

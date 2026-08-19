@@ -22,8 +22,8 @@ export interface AppFileNode {
   children?: AppFileNode[];
 }
 
-// Final whole-branch review, Minor: a team names a product with spaces
-// ("White Rabbit") but a checked-out directory name never has any — so a
+// A team names a product with spaces ("White Rabbit") but a checked-out
+// directory name never has any — so a
 // bare `.includes(needle)` on the raw (lowercased-only) name matched nothing
 // for the plan's own motivating example. Stripping/collapsing spaces,
 // hyphens, and underscores from BOTH sides before comparing makes "White

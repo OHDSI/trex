@@ -2,7 +2,7 @@ import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { buildAskQuestionRule } from "./claude_code_agent.ts";
 import { resolveCoderProfile } from "./coder_profile.ts";
 
-// Fix round 1: the ui profile's askQuestionRule told the coder to ALWAYS use
+// The ui profile's askQuestionRule told the coder to ALWAYS use
 // the blocking mcp__ask__ask_question tool, injected unconditionally
 // regardless of profile. On a channel turn that tool polls devx.pending_responses
 // for up to 5 minutes for an answer nobody is watching the chat to give — while
@@ -24,7 +24,7 @@ Deno.test("channel profile gets no ask_question rule at all", () => {
   assertEquals(rule, "");
 });
 
-// Fix round 2 (Minor): pin the ui profile's exact output against the literal
+// Pin the ui profile's exact output against the literal
 // template that lived inline in streamClaudeCodeChat before the
 // buildAskQuestionRule extraction, so the refactor's byte-identity is an
 // assertion, not a claim resting on two substring checks.

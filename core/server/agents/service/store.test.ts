@@ -202,27 +202,25 @@ Deno.test("getRunningTurn returns the sole running turn (or null)", async () => 
 // Task 4: 21 turns were observed stuck in `running` forever because nothing
 // ever ends an abandoned turn.
 //
-// Fix round 1 (code review): the original version of these tests only
-// string-matched the SQL text ("started_at <") and never proved the
+// String-matching the SQL text alone ("started_at <") never proves the
 // direction of the comparison — a reversed operator or a `NOW() + interval`
-// sign bug would have sailed through. reapStaleTurns now computes the
-// cutoff in JS and passes it as a plain `Date` parameter, so the SQL is a
-// single trivial `started_at < $1` with no arithmetic left to hide a sign
-// bug. Two tests below cover both realistic ways this could still be
-// reversed without a live Postgres: (1) the cutoff VALUE the store computes
-// is actually in the past relative to call time, for a given olderThanMs
-// (catches a `Date.now() + olderThanMs` sign bug), and (2) the literal SQL
-// text says `started_at < $1`, not `>` (catches an operator flip — a
-// meaningful check now that it's one trivial operator, not arithmetic to
-// parse). Both mutations were verified live against this suite (see the
-// report).
+// sign bug would sail through. reapStaleTurns computes the cutoff in JS and
+// passes it as a plain `Date` parameter, so the SQL is a single trivial
+// `started_at < $1` with no arithmetic left to hide a sign bug. Two tests
+// below cover both realistic ways this could still be reversed without a
+// live Postgres: (1) the cutoff VALUE the store computes is actually in the
+// past relative to call time, for a given olderThanMs (catches a
+// `Date.now() + olderThanMs` sign bug), and (2) the literal SQL text says
+// `started_at < $1`, not `>` (catches an operator flip — a meaningful check
+// now that it's one trivial operator, not arithmetic to parse). Both
+// mutations were verified live against this suite (see the report).
 //
-// Fix round 2 (code review): a third test here previously claimed to prove
-// the predicate direction via a fake that evaluated `started_at < cutoff`
-// against seeded rows — but the fake hardcoded that same `<` and derived its
-// rows from whatever cutoff the store handed it, so it could never fail
-// under either mutation above (confirmed: it stayed green through both).
-// Deleted rather than left in place claiming coverage it didn't provide.
+// A third test here previously claimed to prove the predicate direction via
+// a fake that evaluated `started_at < cutoff` against seeded rows — but the
+// fake hardcoded that same `<` and derived its rows from whatever cutoff the
+// store handed it, so it could never fail under either mutation above
+// (confirmed: it stayed green through both). Deleted rather than left in
+// place claiming coverage it didn't provide.
 
 Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error string, scoped to the given session", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1" }, { id: "t-2" }] }]);
@@ -231,10 +229,9 @@ Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error st
   assertEquals(n, 2);
   assert(calls[0].sql.includes("UPDATE agents.turns"));
   assert(calls[0].sql.includes("status = 'running'"));
-  // Final whole-branch review, Important 2: session_id = $1 scopes the reap
-  // to the calling session — an unscoped reap marked every stale running
-  // turn deployment-wide, so one session's message could fail another
-  // session's genuinely live turn.
+  // session_id = $1 scopes the reap to the calling session — an unscoped
+  // reap marked every stale running turn deployment-wide, so one session's
+  // message could fail another session's genuinely live turn.
   assert(calls[0].sql.includes("session_id = $1"));
   assert(calls[0].sql.includes("started_at < $2")); // trivial parameter comparison, no in-SQL date arithmetic
   assert(calls[0].sql.includes("RETURNING id"));
