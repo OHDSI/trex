@@ -142,9 +142,9 @@ Deno.test("getApprovalSession returns the session for a requestId (null when unk
 });
 
 // Channel HITL resume — MODE B lookup: exactly-one-pending semantics.
-// Task 4 (claw-devx-reliability): the return shape grew from a bare requestId
-// to {requestId, tool, options?} — Task 3's gate-text matcher needs the tool
-// and (for postChoice-style gates) the option id/label pairs to resolve a
+// The return shape grew from a bare requestId to {requestId, tool,
+// options?} — the gate-text matcher needs the tool and (for
+// postChoice-style gates) the option id/label pairs to resolve a
 // plain-text reply against the pending gate unambiguously.
 Deno.test("getSinglePendingApproval returns requestId+tool only when exactly one is pending", async () => {
   const { fn, calls } = fakeQuery([
@@ -184,8 +184,8 @@ Deno.test("getSinglePendingApproval omits options when input carries none", asyn
   assertEquals(await store.getSinglePendingApproval("s-9"), { requestId: "r-7", tool: "dangerous_tool" });
 });
 
-// Task 4 (claw-devx-reliability): the "one turn at a time" seam. A busy
-// session's running turn (or lack thereof) — see discord-messages.ts's
+// The "one turn at a time" seam. A busy session's running turn (or lack
+// thereof) — see discord-messages.ts's
 // folding logic and service/handler.ts's startTurn, which both key off this.
 Deno.test("getRunningTurn returns the sole running turn (or null)", async () => {
   const { fn, calls } = fakeQuery([
@@ -199,7 +199,7 @@ Deno.test("getRunningTurn returns the sole running turn (or null)", async () => 
   assertEquals(await store.getRunningTurn("s-1"), null);
 });
 
-// Task 4: 21 turns were observed stuck in `running` forever because nothing
+// 21 turns were observed stuck in `running` forever because nothing
 // ever ends an abandoned turn.
 //
 // String-matching the SQL text alone ("started_at <") never proves the
@@ -259,7 +259,7 @@ Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reve
   );
 });
 
-// Task 4: the follow-up queue a busy session folds a new message into
+// The follow-up queue a busy session folds a new message into
 // (instead of racing it against the turn already running) — see
 // service/handler.ts's startTurn.
 Deno.test("queueFollowUp inserts and takeFollowUps drains oldest-first, removing what it returns", async () => {

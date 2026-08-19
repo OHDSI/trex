@@ -19,7 +19,7 @@ import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
-// OAuth broker wiring (Task 7). index.ts builds this (a DEK-backed OAuthStore +
+// OAuth broker wiring. index.ts builds this (a DEK-backed OAuthStore +
 // the HMAC state secret) only when the worker has a root key; absent → oauth
 // connections are skipped and the /oauth routes 404. Combines OAuthProviderDeps
 // (threaded to the connection provider) with the routes' basePath.
@@ -34,21 +34,21 @@ interface Deps {
   agentName: string;
   basePath: string;
   model?: any;
-  // The worker's pg pool query fn, threaded through to hookCtx.sql (H1) —
+  // The worker's pg pool query fn, threaded through to hookCtx.sql —
   // index.ts passes the real pool query; tests inject a fake. Optional so
   // existing createHandler callers/tests that never configure a hook keep
   // working; a hook that actually calls ctx.sql without one configured
   // fails loudly at call time instead of silently no-oping.
   sql?: QueryFn;
   env?: EnvFn;
-  // Channel layer (task-4). Optional so existing createHandler callers/tests
+  // Channel layer. Optional so existing createHandler callers/tests
   // that never exercise channels keep working; when set, {basePath}/eve/v1/
   // <channelId>/* is dispatched to the channel layer (see the channel branch
   // below). channel routes are auth-exempt at the proxy — see plugin/agents.ts.
   channelStore?: ChannelStore;
-  // Task 6 delivery-registration hook, threaded straight through to the layer.
+  // Delivery-registration hook, threaded straight through to the layer.
   onSessionStarted?: (info: ChannelSessionStarted) => void;
-  // Task 7 OAuth broker. When set: the /eve/v1/oauth/<connector>/{start,callback}
+  // OAuth broker. When set: the /eve/v1/oauth/<connector>/{start,callback}
   // consent routes are mounted (auth-exempt at the proxy, gated by signed state)
   // AND the connection provider gets the broker so kind:"oauth" connections
   // resolve/park tokens. Unset → those routes 404 and oauth connections skip.
@@ -103,7 +103,7 @@ export function stepToEvent(row: { turn_id: string; kind: string; name: string |
     case "text":
       return { type: "message.completed", data: { turnId, message: p.text, finishReason: p.finishReason ?? "stop" } };
     case "custom":
-      // H3: ToolContext.emit's persisted step (runner.ts's toolEmit) — the
+      // ToolContext.emit's persisted step (runner.ts's toolEmit) — the
       // payload IS the data a tool passed to emit(name, data), not
       // necessarily an object, so read `row.payload` raw rather than the
       // `p` fallback above (which coerces null to `{}`, wrong for a tool
@@ -117,14 +117,14 @@ export function stepToEvent(row: { turn_id: string; kind: string; name: string |
   }
 }
 
-// Per-request context for the agent's resolveModel/buildInstructions hooks
-// (H1) — built fresh on every call, never cached. `userId` must come from
+// Per-request context for the agent's resolveModel/buildInstructions hooks —
+// built fresh on every call, never cached. `userId` must come from
 // the caller's x-user-id-derived value only (never metadata, which is
 // client-supplied request payload) — see createHandler's createdBy.
 function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerToken: string | undefined, userId: string | undefined): HookCtx {
   return {
     sessionId, bearerToken, userId, metadata,
-    // OAuth broker principal (Task 7): a native session's end-user principal IS
+    // OAuth broker principal: a native session's end-user principal IS
     // its x-user-id. A channel session (no x-user-id) leaves this undefined, so
     // a user-scoped oauth connection fails closed (principal_required) until the
     // channel principal is threaded here — see the report's follow-up note.
@@ -134,14 +134,14 @@ function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerTo
   };
 }
 
-// The connection-provider opts (Task 5/7) for a turn: the OAuth broker deps
+// The connection-provider opts for a turn: the OAuth broker deps
 // when configured, so kind:"oauth" connections resolve/park tokens. Built fresh
 // per call; undefined when no broker is wired (oauth connections then skip).
 function connectionOptsFor(deps: Deps) {
   return deps.oauth ? { oauth: deps.oauth } : undefined;
 }
 
-// Task 4: matches the brief's original reapStaleTurns(2 * 60 * 60 * 1000) —
+// Matches the brief's original reapStaleTurns(2 * 60 * 60 * 1000) —
 // re-used here as the lazy-reap cutoff (see startTurn) since no periodic
 // scheduler exists to call it on a timer (checked service/index.ts: no
 // setInterval/cron/periodic hook of any kind — see the report).
@@ -165,7 +165,7 @@ function startTurn(
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
-    // Task 4 (claw-devx-reliability): "one turn at a time per session". 43 of
+    // "One turn at a time per session". 43 of
     // 263 real turns (16%) started while the previous turn on the same
     // session was still running — in one case two turns drove the same
     // coding-agent chat 22s apart with contradictory instructions, and the
@@ -218,8 +218,8 @@ function startTurn(
     if (running) {
       // A pending approval gate keeps its turn `status='running'` for the
       // whole approval poll (up to 30
-      // minutes as of Task 3). A QUALIFIED reply to that gate — the plan's
-      // own example, "yes but first explain why the chunk count is wrong" —
+      // minutes). A QUALIFIED reply to that gate — e.g.
+      // "yes but first explain why the chunk count is wrong" —
       // is not a bare yes/no, so matchGateText correctly returns null (see
       // gate-text.ts) and a pre-checking caller (discord.ts's tryResolveGate)
       // falls through to here with the gate STILL pending. Queueing that
@@ -338,7 +338,7 @@ function startTurn(
         connectionOpts: connectionOptsFor(deps),
       });
       await deps.store.finishTurn(turn.id, "completed");
-      // Task 4: a follow-up may have been queued WHILE this turn ran (the
+      // A follow-up may have been queued WHILE this turn ran (the
       // getRunningTurn check above only sees turns that existed before THIS
       // one started). Drain and run it immediately as the next turn — rather
       // than publishing session.waiting and waiting for some future message
@@ -521,8 +521,8 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!session) return json({ error: "session not found" }, 404);
       const body = await req.json().catch(() => ({}));
       if (Array.isArray(body.inputResponses)) {
-        // Session-ownership check (ride-along, task-h5-brief.md): a session
-        // with a known owner (created_by set from x-user-id at creation)
+        // Session-ownership check: a session with a known owner (created_by
+        // set from x-user-id at creation)
         // only lets that same owner resolve its pending approvals — without
         // this, any authenticated caller who learns (sessionId, requestId)
         // could resolve someone else's approval and, with sticky
@@ -655,7 +655,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!Array.isArray(body.messages) || body.messages.length === 0) return json({ error: "messages[] required" }, 400);
       const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
       const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
-      // Same hooks as the session path (H1): built fresh per request, never
+      // Same hooks as the session path: built fresh per request, never
       // cached — resolveModelForTurn/resolveInstructions apply
       // config.resolveModel/buildInstructions when configured.
       const hookCtx = buildHookCtx(deps, sessionId, body.metadata, bearerToken, createdBy);
@@ -666,7 +666,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // passing the bare Promise as streamText's `messages`; awaiting it is
       // the only change, no effect on the endpoint contract.
       const modelMessages = await convertToModelMessages(body.messages);
-      // H3: /chat's emit channel — writes a `data-${name}` UIMessage part
+      // /chat's emit channel — writes a `data-${name}` UIMessage part
       // interleaved into the SAME stream useChat consumes, AI SDK v6's
       // documented convention for custom data parts. Unlike the session
       // path (runner.ts's toolEmit), this is stream-only: no agents.steps
@@ -679,7 +679,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // Late-bound writer indirection: tools are built HERE, in the setup
       // phase, so a setup-time throw (a throwing filterTools hook, a broken
       // tool build) still rejects this route with an HTTP error exactly as
-      // it did pre-H3 — moving buildSdkTools inside the stream's execute()
+      // it did before this change — moving buildSdkTools inside the stream's execute()
       // would demote those to a 200 + in-stream SSE error frame. But the
       // writer that toolEmit needs to write to only exists inside execute()
       // — so toolEmit targets this rebindable slot instead, and execute()
@@ -694,7 +694,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // Shared tool builder (same as the session runner). No emit/turnId
       // here for the approval AgentEvent channel, so needsApproval tools
       // answer with an "use the session API" error instead of hanging a
-      // stateless request. H2: async (dynamic-tools.ts provider); hookCtx
+      // stateless request. Async (dynamic-tools.ts provider); hookCtx
       // is the same one just used for
       // resolveModelForTurn/resolveInstructions above.
       const tools = await buildSdkTools({
@@ -702,22 +702,22 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
       });
-      // H3: switched from the bare `result.toUIMessageStreamResponse()` to
+      // Switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has
       // somewhere to write on this path — a plain streamText UIMessage
       // stream has no way to interleave extra parts into itself; wrapping it
       // in a writer-driven stream does (confirmed against the installed
       // ai@6.0.219 package: `createUIMessageStream`/`createUIMessageStreamResponse`
-      // and `UIMessageStreamWriter.write`/`.merge` — see task-h3-report.md).
+      // and `UIMessageStreamWriter.write`/`.merge`).
       // streamText stays inside execute() (it IS the streaming phase); only
       // the setup calls above run before the stream so their failures keep
-      // pre-H3 HTTP-error semantics.
+      // the same HTTP-error semantics as before.
       const uiStream = createUIMessageStream({
         execute: ({ writer }) => {
           writeData = (p) => writer.write(p);
           const result = streamText({
             model,
-            // Task 15 3rd site: same system cache-point wrap as
+            // Same system cache-point wrap as
             // runner.ts/toolset.ts (see withSystemCachePoint in model.ts) —
             // bedrock cachePoint / anthropic cacheControl, no-op elsewhere.
             system: withSystemCachePoint(model, system),
@@ -749,7 +749,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       return createUIMessageStreamResponse({ stream: uiStream });
     }
 
-    // OAuth consent routes (task-7): {basePath}/eve/v1/oauth/<connector>/{start,
+    // OAuth consent routes: {basePath}/eve/v1/oauth/<connector>/{start,
     // callback}. EXEMPT from proxy auth (channelAuthExemptPattern excludes only
     // session|health|info|eve, so `oauth` falls through to the exemption) — a
     // provider's browser redirect carries no trex JWT; the signed `state` is the
@@ -771,7 +771,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       return kind === "start" ? handleOAuthStart(req, routeDeps) : handleOAuthCallback(req, routeDeps);
     }
 
-    // Channel branch (task-4): {basePath}/eve/v1/{channelId}{routePath}, where
+    // Channel branch: {basePath}/eve/v1/{channelId}{routePath}, where
     // channelId is one of the agent's loaded channels (never `session`/`health`/
     // `info`, which the explicit routes above already handled). Served WITHOUT
     // the x-user-id/JWT the session/chat routes rely on: the proxy exempts these

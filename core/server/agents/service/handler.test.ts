@@ -55,11 +55,11 @@ function inMemoryDb() {
   > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
   const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string }>();
-  // Task 4 (claw-devx-reliability): the follow-up queue a busy session's new
-  // message folds into (store.ts's queueFollowUp/takeFollowUps), keyed the
+  // The follow-up queue a busy session's new message folds into
+  // (store.ts's queueFollowUp/takeFollowUps), keyed the
   // same order-preserving way agents.turn_followups is (insertion order).
   const followUps: Array<{ session_id: string; message: string }> = [];
-  // H4: (userId, plugin, agent, tool) -> consent, keyed the same way as the
+  // (userId, plugin, agent, tool) -> consent, keyed the same way as the
   // real table's primary key.
   const toolConsents = new Map<string, "always" | "never">();
   // Every call the store issues, in order — lets tests assert on the exact
@@ -79,7 +79,7 @@ function inMemoryDb() {
       return Promise.resolve({ rows: s ? [{ id: params[0], status: s.status, created_by: s.created_by }] : [] });
     }
     if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
-      // Task 4: getRunningTurn — the most-recently-started running turn.
+      // getRunningTurn — the most-recently-started running turn.
       const running = turns.filter((t) => t.session_id === params[0] && t.status === "running")
         .sort((a, b) => b.seq - a.seq);
       const t = running[0];
@@ -121,12 +121,12 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("INSERT INTO agents.turn_followups")) {
-      // Task 4: queueFollowUp.
+      // queueFollowUp.
       followUps.push({ session_id: params[0] as string, message: params[1] as string });
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("DELETE FROM agents.turn_followups")) {
-      // Task 4: takeFollowUps — drains (removes) every queued follow-up for
+      // takeFollowUps — drains (removes) every queued follow-up for
       // the session, oldest-first (insertion order, same as the CTE's
       // ORDER BY created_at against the real table).
       const sid = params[0] as string;
@@ -155,7 +155,7 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [{ request_id: params[0] }] });
     }
     if (sql.includes("SELECT request_id, tool, input FROM agents.approvals")) {
-      // Task 4: getSinglePendingApproval — the session's sole still-undecided
+      // getSinglePendingApproval — the session's sole still-undecided
       // approval, mirroring store.ts's
       // `WHERE session_id = $1 AND decision IS NULL`.
       const sid = params[0] as string;
@@ -340,7 +340,7 @@ Deno.test("replay preserves live event order: message.completed before turn.comp
   assert(completedIdx < finishIdx, `replay order inverted: [${types.join(", ")}]`);
 });
 
-// H3: replay maps a persisted `custom` step (from ToolContext.emit on the
+// Replay maps a persisted `custom` step (from ToolContext.emit on the
 // session path — runner.test.ts covers the live side) back to the same
 // `tool.event` a live subscriber would have seen, same as every other step
 // kind (see handler.ts's stepToEvent).
@@ -375,7 +375,7 @@ Deno.test("GET /stream replays a persisted custom step as tool.event", async () 
   assertEquals(toolEvent.data.payload, { step: 1 });
 });
 
-// H3 regression guard for replay ordering: a custom step (persisted through
+// Regression guard for replay ordering: a custom step (persisted through
 // the shared stepSeq counter during the tool phase) must replay BEFORE the
 // text step's message.completed, which in turn must replay BEFORE finish's
 // turn.completed — the eve-client ordering fix (persistText before the
@@ -572,7 +572,7 @@ Deno.test("POST /approval 404s a requestId that belongs to a different session",
   assertEquals(db.turns[0].status, "completed");
 });
 
-// H4 (sticky tool-consent decisions — task-h4-brief.md): POST /approval's
+// Sticky tool-consent decisions: POST /approval's
 // "always"/"never" decisions resolve the pending request (as approve/deny)
 // AND upsert agents.tool_consents for the authenticated user.
 Deno.test("POST /approval with decision 'always' resolves as approve and upserts a sticky consent", async () => {
@@ -635,7 +635,7 @@ Deno.test("POST /approval with decision 'never' resolves as deny and upserts a s
   assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "never");
 
   // Drain the fire-and-forget turn (denied tool call still lets the turn
-  // finish, per the pre-H4 deny path) — see the `until` helper's own comment
+  // finish, per the existing deny path) — see the `until` helper's own comment
   // on why leaving this pending leaks a timer into the next test.
   await until(() => settled(db), 10_000);
 });
@@ -734,7 +734,7 @@ Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' with
   }));
   assertEquals(rejected.status, 400);
   assertEquals(db.approvals.get(requestId)!.decision, null);
-  // H4 review Minor: the 400 must not have produced a sticky consent row.
+  // The 400 must not have produced a sticky consent row.
   assertEquals(db.toolConsents.size, 0);
 
   // Drain the fire-and-forget turn (see the sibling /approval test's comment).
@@ -745,10 +745,10 @@ Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' with
   await until(() => settled(db), 10_000);
 });
 
-// Ride-along security fix (task-h5-brief.md, from the H4 review): approval
-// resolution must verify the caller is the session's owner, not just
+// Ride-along security fix: approval resolution must verify the caller is
+// the session's owner, not just
 // (requestId, sessionId) — otherwise any authenticated user who learns
-// those ids could resolve someone else's pending approval and, with H4's
+// those ids could resolve someone else's pending approval and, with the
 // sticky verbs, accrue a durable consent on their behalf.
 Deno.test("POST /approval: the session owner (matching x-user-id) can resolve their own approval", async () => {
   const { handler, db } = await makeHandler({
@@ -925,7 +925,7 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
   // sanitizers or an uncaught-error crash IS the assertion here.
 });
 
-// Task 4 (claw-devx-reliability): "one turn at a time per session". Measured
+// "One turn at a time per session". Measured
 // over two weeks of real transcripts: 43 of 263 turns (16%) started while the
 // previous turn on the same session was still running — one case had two
 // turns drive the same coding-agent chat 22s apart with contradictory
@@ -1602,10 +1602,10 @@ Deno.test("a composed mention-in-thread message whose CURRENT reply qualifiedly 
 // reapStaleTurns must not reach across sessions. Before the fix a message on
 // ANY busy session marked
 // EVERY stale `running` turn deployment-wide, so another session's
-// genuinely long-running turn (plausible: Task 7 raised the channel step
-// floor to 200 and streamTurn has no timeout) could be failed out from under
+// genuinely long-running turn (plausible: the channel step floor was raised
+// to 200 and streamTurn has no timeout) could be failed out from under
 // it by an unrelated session's traffic, re-opening the two-concurrent-turns
-// hole Task 4 exists to close.
+// hole this reap-scoping fix exists to close.
 Deno.test("a stale turn on ANOTHER session is left alone while the calling session's stale turn is reaped", async () => {
   let releaseA: () => void = () => {};
   const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
@@ -1678,7 +1678,7 @@ Deno.test("a stale turn on ANOTHER session is left alone while the calling sessi
   await until(() => true);
 });
 
-Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (Task 19 robustness)", async () => {
+Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (robustness)", async () => {
   const agent = await loadAgent(TOY);
   // A channel whose `events` access throws — this fires inside startTurn's
   // onTurnCreated (the delivery-registration callback: layer.ts's registerForTurn
@@ -1774,9 +1774,9 @@ Deno.test("POST /chat: finish part carries usage in messageMetadata", async () =
   assert(text.includes('"outputTokens"'), `messageMetadata missing usage.outputTokens: ${text}`);
 });
 
-// H3: ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part
+// ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part
 // into the SAME stream useChat consumes (createUIMessageStream +
-// writer.merge — see handler.ts and task-h3-report.md for the v6 API
+// writer.merge — see handler.ts for the v6 API
 // verification). No agents.steps write on this path (unlike the session
 // path) — /chat never persisted tool-call/tool-result steps either.
 Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", async () => {
@@ -1803,12 +1803,12 @@ Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", 
   assert(text.includes('"step":1'), `emitted payload missing from stream: ${text}`);
 });
 
-// H3 review fix: /chat setup-phase failures must keep pre-H3 HTTP-error
-// semantics. buildSdkTools (and its filterTools hook) runs BEFORE
+// /chat setup-phase failures must keep the same HTTP-error
+// semantics as before. buildSdkTools (and its filterTools hook) runs BEFORE
 // createUIMessageStream, so a throwing hook rejects the route — it must
 // NOT be demoted to a 200 response carrying an in-stream SSE error frame
 // (which is what moving tool building inside the stream's execute() would
-// have done). Matches hooks.test.ts's pre-H3 assertRejects posture for a
+// have done). Matches hooks.test.ts's assertRejects posture for a
 // throwing resolveModel on /chat.
 Deno.test("POST /chat: a throwing filterTools hook rejects the request (setup phase, no 200+SSE-error demotion)", async () => {
   const { handler } = await makeHandler({
@@ -2032,7 +2032,7 @@ Deno.test("GET /stream releases the subscriber when replay (listEvents) fails", 
   assertEquals(subscriberCount(sid), before);
 });
 
-// ── OAuth broker routes (task-7) ─────────────────────────────────────────────
+// ── OAuth broker routes ─────────────────────────────────────────────
 import { signState } from "../connections/oauth/state.ts";
 import type { OAuthConnector, OAuthStore, OAuthToken } from "../connections/oauth/store.ts";
 

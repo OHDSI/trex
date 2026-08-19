@@ -1,5 +1,5 @@
--- Task 4 (claw-devx-reliability): "one turn at a time per session". A
--- message that arrives while a session's turn is still running is no longer
+-- "One turn at a time per session". A message that arrives while a
+-- session's turn is still running is no longer
 -- started as a second, concurrent turn (measured: 43 of 263 turns / 16%
 -- started while the previous turn on the same session was still running,
 -- including one case where two turns drove the same coding-agent chat 22s

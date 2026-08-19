@@ -10,7 +10,7 @@ function fakeSql() {
   return { fn, calls };
 }
 
-// Task 6 (claw-devx-reliability): execute() only runs on Approve, so it is
+// execute() only runs on Approve, so it is
 // the one unconditional gate-resolution capture point (button click AND a
 // typed "approve" in the thread both resume through this same execute()).
 Deno.test("awaitApprovalCore records the approval as a settled decision", async () => {

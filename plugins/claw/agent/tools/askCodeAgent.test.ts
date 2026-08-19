@@ -80,7 +80,7 @@ Deno.test("askCore continues the SAME coder chat", async () => {
   assertEquals(turn.seen[0].chatId, "chat-1"); // continues the stored chat
 });
 
-// Task 5 (claw-devx-reliability): the heartbeat is wired through askCodeAgent
+// The heartbeat is wired through askCodeAgent
 // so claw can still show a sign of life while blocked inside this hand-off.
 Deno.test("askCore passes onProgress to the coder turn when a channelId is available", async () => {
   const sql = fakeSql();
@@ -127,7 +127,7 @@ Deno.test("askCore's onProgress posts 'Still on it: <note>' to the channel and s
   }
 });
 
-// Task 6 (claw-devx-reliability): settled decisions ride every hand-off.
+// Settled decisions ride every hand-off.
 Deno.test("askCore prepends the decision ledger to the forwarded message when decisions exist", async () => {
   const sql = fakeSql();
   sql.store.set("s1", {
@@ -151,8 +151,8 @@ Deno.test("askCore leaves the message untouched when there are no decisions yet"
   assertEquals(turn.seen[0].message, "Build X");
 });
 
-// Task 8 (claw-devx-reliability): the coder's reply ends with a machine
-// trailer; the channel must never see it, and claw gets the parsed facts back.
+// The coder's reply ends with a machine trailer; the channel must never see
+// it, and claw gets the parsed facts back.
 Deno.test("askCore strips the handoff trailer from the reply and returns it parsed", async () => {
   const sql = fakeSql();
   const reply = 'Implemented and tested.\n\n<handoff track="light" saved="trex/specs/x.md" tests="4/4 pass"/>';

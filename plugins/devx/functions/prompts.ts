@@ -480,7 +480,7 @@ const COMMON_GUIDELINES = `- All text you output outside of tool use is displaye
 
 // Exported (not module-private) so prompts_channel.ts can compose
 // CHANNEL_CODER_SYSTEM_PROMPT from these SAME blocks rather than
-// hand-duplicating or silently dropping them — Task 7's own decision text
+// hand-duplicating or silently dropping them — the design intent
 // says "skills, tools, KB and d2e knowledge are identical and are the
 // expensive part to maintain; only the interaction contract differs." One
 // source of truth so the ui/channel profiles cannot drift.

@@ -79,9 +79,9 @@ Deno.test("channel profile with no ai_rules asserts no tech stack at all", () =>
 });
 
 // The channel profile used to replace LOCAL_AGENT_SYSTEM_PROMPT wholesale,
-// dropping KNOWLEDGE_BASE_BLOCK and the
-// tool-use guidance blocks even though Task 7's own decision text says "KB
-// stays identical, only the interaction contract differs" — the kb MCP server
+// dropping KNOWLEDGE_BASE_BLOCK and the tool-use guidance blocks even
+// though the design intent says "KB stays identical, only the interaction
+// contract differs" — the kb MCP server
 // is still registered, so the coder had the tools but was never told they're
 // authoritative. Composing from the SAME exported blocks the ui profile uses
 // (prompts_channel.ts) fixes this by construction.

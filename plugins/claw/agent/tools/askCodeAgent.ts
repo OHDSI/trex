@@ -55,8 +55,8 @@ export async function askCore(
   if (prior?.codeSessionId && input.app && input.app !== prior.appId) {
     console.warn(`claw: askCodeAgent ignored app change '${input.app}' — chat is fixed to '${prior.appId}'`);
   }
-  // Task 5 (claw-devx-reliability): while this hand-off is blocked, claw can
-  // post nothing else to the channel — the heartbeat is the only sign of life
+  // While this hand-off is blocked, claw can post nothing else to the
+  // channel — the heartbeat is the only sign of life
   // the thread gets for a long step. No channel, no timer: a channelId-less
   // caller (no ctx.metadata.channelId) gets no onProgress at all, rather than
   // a no-op that still burns an interval for nothing.
@@ -71,7 +71,7 @@ export async function askCore(
         }).catch(() => {});
       }
     : undefined;
-  // Task 6 (claw-devx-reliability): prepend what the team already settled, so
+  // Prepend what the team already settled, so
   // the coder (and claw, reading its own reply back) is never re-asked
   // something a hand-off ago already answered.
   const ledger = renderDecisionLedger(await readDecisions(sql, ctx.sessionId));
@@ -92,7 +92,7 @@ export async function askCore(
     eventCursor: 0,
     appId,
   });
-  // Task 8 (claw-devx-reliability): the coder ends its reply with a machine
+  // The coder ends its reply with a machine
   // trailer (see prompts_channel.ts's <reply_contract>); strip it from what
   // the channel sees and hand the parsed facts back alongside.
   const { trailer, body } = parseTrailer(replyText);

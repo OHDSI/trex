@@ -1,4 +1,4 @@
-// The channel layer (spec §6 / task-4): dispatches an inbound HTTP request to
+// The channel layer (spec §6): dispatches an inbound HTTP request to
 // the matching channel's route on an agent, builds the per-request
 // ChannelRouteArgs the route handler uses, and turns a route's send() into a
 // resolved session + a started turn.
@@ -25,11 +25,10 @@ import type { AgentEvent } from "../service/events.ts";
 import type { ChannelDef } from "./types.ts";
 import { registerDelivery as defaultRegisterDelivery } from "./delivery.ts";
 
-// Background-delivery executor (Task 5). The Task-0 spike verified
-// EdgeRuntime.waitUntil keeps a background fetch alive past the HTTP response
-// (specs/008-agents-channels/spike-channels.md); when the global is absent
-// (unit tests, non-edge hosts) fall back to a detached promise so delivery
-// still runs — it just isn't guaranteed against isolate reclamation.
+// Background-delivery executor. A spike verified EdgeRuntime.waitUntil
+// keeps a background fetch alive past the HTTP response; when the global is
+// absent (unit tests, non-edge hosts) fall back to a detached promise so
+// delivery still runs — it just isn't guaranteed against isolate reclamation.
 function edgeWaitUntil(p: Promise<unknown>): void {
   // deno-lint-ignore no-explicit-any
   const er = (globalThis as any).EdgeRuntime;
@@ -37,8 +36,8 @@ function edgeWaitUntil(p: Promise<unknown>): void {
   else void Promise.resolve(p).catch((e) => console.error("agents: channel delivery task failed:", e));
 }
 
-// Fired right after a send() starts a turn so the delivery layer (Task 6) can
-// register where the agent's reply should be routed. A no-op for Task 4 — the
+// Fired right after a send() starts a turn so the delivery layer can
+// register where the agent's reply should be routed. Currently a no-op — the
 // interface is kept stable so delivery can plug in without touching send().
 export interface ChannelSessionStarted {
   channelId: string;
@@ -70,7 +69,7 @@ export interface ChannelLayerDeps {
   subscribe: (sessionId: string, fn: (e: AgentEvent) => void) => () => void;
   env?: (k: string) => string | undefined;
   onSessionStarted?: (info: ChannelSessionStarted) => void;
-  // Task 5 — server-initiated outbound delivery. All three are injectable so a
+  // Server-initiated outbound delivery. All three are injectable so a
   // test can drive delivery without EdgeRuntime; production leaves them unset
   // and the defaults below (delivery.ts's registerDelivery + EdgeRuntime.waitUntil)
   // apply. When a started channel turn's channel declares `events` handlers,
@@ -206,8 +205,8 @@ function buildArgs(
       title: opts.title,
     };
 
-    // Server-initiated delivery (Task 5, turn-scoped in Task 19): if this
-    // channel declares `events` handlers, subscribe them to the session's live
+    // Server-initiated delivery, turn-scoped: if this channel declares
+    // `events` handlers, subscribe them to the session's live
     // stream so the adapter posts the agent's reply back to the platform AFTER
     // this response returns. Registration is deferred to onTurnCreated so the
     // subscription is scoped to THIS turn's id — two overlapping turns on one
@@ -351,7 +350,7 @@ function buildArgs(
       });
     },
 
-    // Channel HITL resume (Task 17/18): apply an approval decision to a parked
+    // Channel HITL resume: apply an approval decision to a parked
     // session WITHOUT driving a turn (the session's still-alive poll loop
     // consumes it). Two addressing modes, chosen by the input, both scoped to
     // THIS channel so a callback can never resolve another channel's approval.
@@ -403,9 +402,9 @@ function buildArgs(
       const token = namespacedToken(channelId, continuationToken);
       const sessionId = await deps.channelStore.getSessionByToken(channelId, token);
       if (!sessionId) {
-        // Task 3 made discord.ts's tryResolveGate call resume() on EVERY
+        // discord.ts's tryResolveGate calls resume() on EVERY
         // thread message (not just ones known to be answering a gate), so
-        // "no session for token" is now the routine case for an ordinary
+        // "no session for token" is the routine case for an ordinary
         // thread with no gate pending — not an error worth paging on.
         // Demoted from console.error to console.warn.
         console.warn(`agents: channel resume found no session for token '${token}'`);
@@ -415,8 +414,8 @@ function buildArgs(
       if (!pending) {
         return { ok: false, error: "no single pending approval" };
       }
-      // Task 3 (claw-devx-reliability): a text-platform reply carries no
-      // explicit decision — just the human's words. Only consulted when the
+      // A text-platform reply carries no explicit decision — just the
+      // human's words. Only consulted when the
       // caller didn't already supply an explicit decision/requestId (the
       // MODE A / structured-decision callers above are untouched). A miss
       // (the text isn't a decision for THIS gate's vocabulary) resolves to

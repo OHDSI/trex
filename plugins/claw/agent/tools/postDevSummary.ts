@@ -80,7 +80,7 @@ export async function postDevSummaryCore(sql: QueryFn, input: Input, deps: Deps)
 }
 
 export default defineTool({
-  // Task 5 (claw-devx-reliability) — see postUpdate.ts.
+  // This tool's own execute() posts to the channel directly — see postUpdate.ts.
   postsToChannel: true,
   description:
     "Notify the dev channel about a support task: posts the summary mentioning the resolved " +

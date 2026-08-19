@@ -14,7 +14,7 @@ export interface ChannelAuth {
 }
 
 // The per-request toolkit handed to a channel route handler by the runtime
-// (Task 5+ supplies the concrete implementation). A handler uses these to push
+// (the concrete implementation lives elsewhere). A handler uses these to push
 // a message into an agent session (`send`), stream an existing session's events
 // (`getSession`), forward inbound platform input (`receive`), read matched path
 // params, defer background work past the response (`waitUntil`), and inspect the
@@ -48,23 +48,24 @@ export interface ChannelRouteArgs {
   // Slack thread-following) without ever creating a session as a side
   // effect — send() resolves-or-CREATES, this only resolves.
   hasSession(continuationToken: string): Promise<boolean>;
-  // Apply a HITL decision to a PARKED session (Task 17). Resolves the
+  // Apply a HITL decision to a PARKED session. Resolves the
   // (adapter-owned) `continuationToken` back to its session, then writes the
   // approve/deny/always/never decision the same way the native resolve routes
   // do — the session's `waitUntil`-alive poll loop consumes it and the SAME turn
   // continues. This does NOT drive a turn (no `send`). Sticky "always"/"never"
   // needs an authenticated trex user; a platform-webhook caller (no trex user)
   // can only approve/deny. An unknown token resolves to `{ ok: false, error }`
-  // (logged, never thrown). Wiring an adapter's default resume to this is Task 18.
+  // (logged, never thrown). Wiring an adapter's default resume to this is left
+  // to the adapter.
   //
-  // `text` (Task 3, claw-devx-reliability): a plain thread reply carries no
-  // explicit decision/requestId, just the human's words ("approve", "no
-  // checks open pr", …). When `decision`/`inputResponses` are absent and
-  // `text` is given, MODE B matches it against the session's single pending
-  // gate's vocabulary (channels/gate-text.ts's matchGateText) before
-  // resolving — a miss (no pending gate, or text isn't a decision for it)
-  // still resolves to `{ ok: false, error }`, never throws, so a caller can
-  // always fall back to starting an ordinary turn.
+  // `text`: a plain thread reply carries no explicit decision/requestId,
+  // just the human's words ("approve", "no checks open pr", …). When
+  // `decision`/`inputResponses` are absent and `text` is given, MODE B
+  // matches it against the session's single pending gate's vocabulary
+  // (channels/gate-text.ts's matchGateText) before resolving — a miss (no
+  // pending gate, or text isn't a decision for it) still resolves to
+  // `{ ok: false, error }`, never throws, so a caller can always fall back
+  // to starting an ordinary turn.
   resume(
     continuationToken: string,
     input: {
@@ -117,7 +118,7 @@ export interface ChannelReceiveResult {
 }
 
 // The branded channel definition produced by defineChannel and consumed by the
-// loader/runtime (Tasks 2/5/8+). `__trexChannel` is the brand the loader checks
+// loader/runtime. `__trexChannel` is the brand the loader checks
 // before trusting a channel file's default export, exactly as `__trexTool` /
 // `__trexToolProvider` gate the tool surface.
 export interface ChannelDef {

@@ -111,7 +111,7 @@ Deno.test("runTurn does not emit message.completed for a clientOnly tool-call tu
   assert(!events.some((e) => e.type === "message.completed"));
 });
 
-// Task 5 (claw-devx-reliability), no-silent-turn guarantee — four branches at
+// No-silent-turn guarantee — four branches at
 // the "finish" case:
 //   1. text present -> emit as always (covered by the first test in this file).
 //   2. clientOnly call, no text -> stay silent (covered just above).
@@ -367,7 +367,7 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   assert("skill" in top);
 });
 
-// H3: ToolContext.emit — see task-h3-brief.md. The session path publishes a
+// ToolContext.emit: the session path publishes a
 // live tool.event and persists a `custom` step through the SAME stepSeq
 // counter as every other step (asserted via the raw insert params here), so
 // every persisted step this turn — including this one — has a unique,
@@ -437,7 +437,7 @@ Deno.test("a tool that never calls ctx.emit produces no tool.event", async () =>
   assert(!events.some((e) => e.type === "tool.event"));
 });
 
-// H4 (sticky tool-consent decisions — task-h4-brief.md): authoredTool's
+// Sticky tool-consent decisions: authoredTool's
 // needsApproval branch checks store.getToolConsent(userId, plugin, agent,
 // tool) BEFORE creating a one-shot approval request.
 Deno.test("needsApproval tool with an 'always' consent on file executes immediately, no approval request", async () => {

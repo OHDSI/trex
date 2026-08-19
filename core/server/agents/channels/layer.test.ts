@@ -1,4 +1,4 @@
-// Channel layer (Task 4): route dispatch + ChannelRouteArgs + send().
+// Channel layer: route dispatch + ChannelRouteArgs + send().
 // deno-lint-ignore-file no-explicit-any
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { createChannelHandler } from "./layer.ts";
@@ -80,9 +80,9 @@ Deno.test("channel layer: POST to a channel route runs the handler, send() creat
   // Webhook channel (no trex auth) => created_by stays null (FIX 1).
   assertEquals(channelStore.calls[0].createdBy, null);
 
-  // The turn was started against the resolved session, and the Task 6 hook fired.
-  // The toy webhook passes no delivery state, so metadata.channelId falls back to
-  // the registration id "webhook".
+  // The turn was started against the resolved session, and the onSessionStarted
+  // hook fired. The toy webhook passes no delivery state, so metadata.channelId
+  // falls back to the registration id "webhook".
   assertEquals(startTurns, [{ sessionId: "sess-1", message: "hi there", metadata: { channelId: "webhook" } }]);
   assertEquals(started, [{ channelId: "webhook", sessionId: "sess-1", created: true }]);
 });
@@ -238,7 +238,7 @@ Deno.test("channel layer: requestIp is derived from x-forwarded-for (else null)"
   assertEquals(await noXff.json(), { ip: null });
 });
 
-Deno.test("channel layer: a channel with events registers background delivery on send() (Task 5, injectable)", async () => {
+Deno.test("channel layer: a channel with events registers background delivery on send() (injectable)", async () => {
   const agent = await loadAgent(TOY);
   // A channel whose route calls send() and which declares an events handler —
   // send() must register delivery for it (the toy webhook has no events, so it
@@ -266,7 +266,7 @@ Deno.test("channel layer: a channel with events registers background delivery on
     plugin: "toy-agent",
     agentName: "toy",
     basePath: BASE,
-    // Task 19: startTurn surfaces the created turn id via onTurnCreated; send()
+    // startTurn surfaces the created turn id via onTurnCreated; send()
     // uses it to scope this turn's delivery.
     startTurn: (_s, _m, _md, onTurnCreated) => onTurnCreated?.("turn-1"),
     subscribe: () => () => {},
@@ -472,7 +472,7 @@ Deno.test("channel layer: a path outside {basePath}/eve/v1 -> 404", async () => 
   assertEquals(res.status, 404);
 });
 
-// Task 17/18: channel HITL resume primitive with two addressing modes.
+// Channel HITL resume primitive with two addressing modes.
 //   MODE A — by request id: getApprovalSession(requestId) → sessionInChannel
 //            guard → resolve. (widgets: the callback carries the requestId.)
 //   MODE B — by token, single pending: getSessionByToken → getSinglePendingApproval
@@ -485,7 +485,7 @@ function makeResumeLayer(
     approvalToSession?: Record<string, string>; // requestId -> sessionId (MODE A)
     sessionsInChannel?: Record<string, string[]>; // channel -> sessionIds (MODE A guard)
     singlePending?: Record<string, string | null>; // sessionId -> requestId | null (MODE B)
-    // Task 3: options carried on the pending approval's input, for MODE B's
+    // Options carried on the pending approval's input, for MODE B's
     // text-matching (matchGateText) — sessionId -> {id,label}[].
     singlePendingOptions?: Record<string, Array<{ id: string; label: string }>>;
   },
@@ -519,7 +519,7 @@ function makeResumeLayer(
     getSinglePendingApproval(sessionId: string) {
       pendingLookups.push(sessionId);
       const requestId = opts.singlePending?.[sessionId] ?? null;
-      // Task 4: the store's real return shape is {requestId, tool, options?} —
+      // The store's real return shape is {requestId, tool, options?} —
       // the fixture only cares about requestId, so `tool` is a fixed stand-in.
       const options = opts.singlePendingOptions?.[sessionId];
       return Promise.resolve(requestId ? { requestId, tool: "tool", ...(options ? { options } : {}) } : null);
@@ -628,12 +628,12 @@ Deno.test("channel resume MODE B: unknown token -> {ok:false} 'no session for to
   assertEquals(resolves, []);
 });
 
-// Task 3 made discord.ts's tryResolveGate call resume() on EVERY thread
+// discord.ts's tryResolveGate calls resume() on EVERY thread
 // message, not just ones known to answer a gate — so "no session for token"
-// became the ROUTINE case for an ordinary message in a thread with no
+// is the ROUTINE case for an ordinary message in a thread with no
 // registered session, not an error worth paging on. Must log at a level
 // below console.error.
-Deno.test("channel resume MODE B: an unknown token logs at warn, not error (routine on every thread message since Task 3)", async () => {
+Deno.test("channel resume MODE B: an unknown token logs at warn, not error (routine on every thread message)", async () => {
   const agent = await loadAgent(TOY);
   const { handler } = makeResumeLayer(agent, { tokenToSession: {} });
 
@@ -668,7 +668,7 @@ Deno.test("channel resume MODE B: zero/ambiguous pending -> {ok:false} 'no singl
   assertEquals(resolves, []);
 });
 
-// ---- MODE B, text (Task 3, claw-devx-reliability) --------------------------
+// ---- MODE B, text --------------------------
 // A text-platform reply carries no explicit decision — resume() matches the
 // raw text against the pending gate's vocabulary (gate-text.ts's matchGateText)
 // itself, using the SAME getSinglePendingApproval it already fetched.

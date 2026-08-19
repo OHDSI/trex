@@ -51,12 +51,12 @@ interface ResumeCall {
 }
 
 function mockArgs(
-  // Realistic default: no pending approval most of the time (Task 3's
-  // gate-text resume is tried on every thread reply — see discord.ts's
+  // Realistic default: no pending approval most of the time (gate-text
+  // resume is tried on every thread reply — see discord.ts's
   // tryResolveGate — so a test that doesn't care about it must see the same
-  // "nothing pending" miss production gets, and fall through to send() same
-  // as before Task 3). Tests that specifically exercise a HITL resume
-  // succeeding pass an explicit { ok: true } override.
+  // "nothing pending" miss production gets, and fall through to send() as
+  // before). Tests that specifically exercise a HITL resume succeeding pass
+  // an explicit { ok: true } override.
   resumeResult: { ok: boolean; error?: string } = { ok: false, error: "no single pending approval" },
 ): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[] } {
   const sends: SendCall[] = [];
@@ -426,7 +426,7 @@ Deno.test("message.completed with tool-calls finishReason posts nothing", async 
   assertEquals(called, 0);
 });
 
-// ---- delivery: message.queued (Task 4, claw-devx-reliability) --
+// ---- delivery: message.queued --
 
 Deno.test("message.queued posts a one-line channel acknowledgement (not a reply-edit, not a reaction)", async () => {
   const calls: Array<{ url: string; method: string; body: unknown }> = [];
@@ -916,7 +916,7 @@ Deno.test("messages route: human message in bot-owned thread → send keyed to t
   assertEquals(sends[0].opts.auth?.principalId, "user-1");
 });
 
-// ---- gate-text resolution (Task 3, claw-devx-reliability) -----------------
+// ---- gate-text resolution -----------------
 // 27 of 43 real approval gates (63%) were never clicked — the human answered
 // by typing "approve" in the thread instead, and only a button click resumed
 // the parked session. These prove the wiring: a thread reply is tried against
@@ -954,7 +954,7 @@ Deno.test("messages route: a plain-text 'approve' reply resolves the pending gat
   assertEquals(res.status, 200);
   assertEquals(resumes, [{ continuationToken: "thread-1:thread-1", input: { text: "approve" } }]);
   // The parked turn continues itself (layer.ts resume()) — a SECOND turn for
-  // the same reply must never start (the concurrent-turn bug Task 4 fixed).
+  // the same reply must never start (this was a real concurrent-turn bug).
   assertEquals(sends.length, 0, "resolving the gate must not also start a new turn");
 });
 

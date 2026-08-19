@@ -149,7 +149,7 @@ export function summarizeActivity(accumulated: string): string {
 // it configurable — the interval was chosen deliberately.
 const HEARTBEAT_MS = 300_000;
 
-// With Task 4's per-session turn serialization and Task 7's raised channel
+// With per-session turn serialization and a raised channel
 // step floor (200), a hung
 // upstream (the devx-api function, or the coder sidecar it drives)
 // could previously wedge the WHOLE session — not just this one turn — until

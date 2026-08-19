@@ -7,9 +7,9 @@
 // folded in below so there is one prompt, not a prompt plus a patch.
 //
 // The tool-use/KB guidance blocks are IMPORTED from prompts.ts rather than
-// hand-duplicated or (as before this fix) silently dropped. Task 7's own
-// decision text is explicit that "skills,
-// tools, KB and d2e knowledge are identical and are the expensive part to
+// hand-duplicated or (as before this fix) silently dropped. The design
+// intent is explicit that "skills, tools, KB and d2e knowledge are
+// identical and are the expensive part to
 // maintain; only the interaction contract differs" — composing from the SAME
 // exported consts the ui profile uses is what makes that true by construction
 // instead of by discipline. Only APP_COMMANDS_BLOCK (the preview-panel

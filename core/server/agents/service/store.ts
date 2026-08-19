@@ -124,8 +124,8 @@ export function createStore(query: QueryFn) {
     // text reply carries a decision but no requestId, so it can only be applied
     // unambiguously when exactly one approval is pending; >1 is ambiguous (never
     // guess which the reply answers) and 0 means the reply is an ordinary
-    // message. Task 4 (claw-devx-reliability): widened from a bare requestId to
-    // {requestId, tool, options?} — Task 3's plain-text gate matcher needs the
+    // message. Widened from a bare requestId to {requestId, tool, options?}
+    // — the plain-text gate matcher needs the
     // tool name and, for postChoice-style gates, the option id/label pairs
     // (read from `input.options`, tolerating id|value|label key variants) to
     // resolve a reply against the pending gate.
@@ -148,7 +148,7 @@ export function createStore(query: QueryFn) {
       return { requestId: row.request_id, tool: row.tool, ...(options && options.length ? { options } : {}) };
     },
 
-    // Task 4 (claw-devx-reliability): "one turn at a time per session". The
+    // "One turn at a time per session". The
     // session's in-flight turn (there should be at most one — see
     // service/handler.ts's startTurn, which checks this before creating a new
     // turn), or null when idle. seq DESC LIMIT 1 is defensive: normally there's
@@ -165,7 +165,7 @@ export function createStore(query: QueryFn) {
       return row ? { id: row.id, seq: Number(row.seq), startedAt: row.started_at } : null;
     },
 
-    // Task 4: 21 of 263 turns were observed stuck `running` forever because
+    // 21 of 263 turns were observed stuck `running` forever because
     // nothing ever ended an abandoned turn (a worker crash/redeploy mid-turn
     // leaves no other signal). Marks every `running` turn older than the
     // cutoff, ON THE GIVEN SESSION, `failed`, so a hung turn stops blocking
@@ -179,12 +179,12 @@ export function createStore(query: QueryFn) {
     // THAT session — it never needed to touch any other session. An unscoped
     // reap marked every running turn deployment-wide, so one session's
     // message could fail another session's genuinely live turn (long turns
-    // are plausible: Task 7 raised the channel step floor to 200 and
+    // are plausible: the channel step floor was raised to 200 and
     // streamTurn has no timeout); getRunningTurn on the victim session then
     // returned null, so ITS next message started a second concurrent turn —
-    // the exact defect Task 4 exists to remove — and when the real turn
-    // finished later, finishTurn(id, "completed") flipped the row back,
-    // erasing the evidence the reap ever ran.
+    // the exact defect this reap-scoping fix exists to remove — and when
+    // the real turn finished later, finishTurn(id, "completed") flipped the
+    // row back, erasing the evidence the reap ever ran.
     //
     // The cutoff is computed HERE in JS (`new Date(Date.now() -
     // olderThanMs)`) and passed as a plain parameter — the SQL then does a
@@ -212,7 +212,7 @@ export function createStore(query: QueryFn) {
       return r.rows.length;
     },
 
-    // Task 4: the follow-up queue a busy session's new message folds into
+    // The follow-up queue a busy session's new message folds into
     // instead of racing the turn already running (service/handler.ts's
     // startTurn checks getRunningTurn, and queues here rather than starting a
     // second concurrent turn). No existing session-scoped scratch mechanism
@@ -242,7 +242,7 @@ export function createStore(query: QueryFn) {
       return r.rows.map((row: { message: string }) => row.message);
     },
 
-    // H4: looks up the tool an approval request was raised for, so a sticky
+    // Looks up the tool an approval request was raised for, so a sticky
     // (always/never) decision on that request can be recorded against the
     // right (user, plugin, agent, tool) key — see handler.ts's approval
     // routes, which call this only after resolveApproval succeeds.
@@ -251,7 +251,7 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.tool ?? null;
     },
 
-    // H4: sticky tool-consent decisions (task-h4-brief.md). Checked by
+    // Sticky tool-consent decisions. Checked by
     // toolset.ts's authoredTool BEFORE creating a one-shot approval request
     // — "always" executes immediately, "never" denies immediately, and a
     // miss (null) falls through to the existing per-call approval flow.

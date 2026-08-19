@@ -4,7 +4,7 @@
 // message (see channels/adapters/discord.ts). Use at Gate 1 when there are
 // multiple real options; for a plain go/no-go, use awaitApproval instead.
 //
-// Task 6 (claw-devx-reliability): unlike awaitApproval, the pick is NOT
+// Unlike awaitApproval, the pick is NOT
 // observable here. This tool's execute() only fires once, to POST the
 // dropdown — the resume on selection is driven entirely by
 // core/server/agents/channels/adapters/discord.ts's handleComponent
@@ -29,7 +29,7 @@ interface OptionIn { label: string; value: string; description?: string }
 interface Input { channelId: string; title: string; intro?: string; options: OptionIn[]; multi?: boolean }
 
 export default defineTool({
-  // Task 5 (claw-devx-reliability) — see postUpdate.ts.
+  // This tool's own execute() posts to the channel directly — see postUpdate.ts.
   postsToChannel: true,
   description:
     "Present design options to the channel as a dropdown (select menu) the team picks from with " +

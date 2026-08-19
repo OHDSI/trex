@@ -40,7 +40,7 @@ Deno.test("effectiveUserId prefers ctx user, then CLAW_CODE_USER_ID env", () => 
   assertEquals(effectiveUserId(undefined, () => ""), undefined);
 });
 
-// --- component search (Task 10: find components inside registered apps) ---
+// --- component search (find components inside registered apps) ---
 
 function tree(): AppFileNode[] {
   return [

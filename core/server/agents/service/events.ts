@@ -76,7 +76,7 @@ export type AgentEvent =
   | { type: "turn.failed"; data: { turnId: string; message: string } }
   | { type: "session.waiting"; data: { wait: "next-user-message" } }
   | { type: "session.failed"; data: { sessionId: string; message: string } }
-  // H3, trex extension (not part of eve's documented vocabulary — see
+  // Trex extension (not part of eve's documented vocabulary — see
   // COMPAT.md): an authored tool's ToolContext.emit(name, data) call,
   // published verbatim as `{name, payload: data}`. Persisted as an
   // `agents.steps` row with `kind: 'custom'` (runner.ts's toolEmit; the
@@ -86,8 +86,8 @@ export type AgentEvent =
   // replayable (handler.ts's stepToEvent maps a `custom` step straight back
   // to `tool.event`).
   | { type: "tool.event"; data: { name: string; payload: unknown } }
-  // Task 4 (claw-devx-reliability), trex extension (not part of eve's
-  // documented vocabulary): fired when startTurn folds a message into the
+  // Trex extension (not part of eve's documented vocabulary): fired when
+  // startTurn folds a message into the
   // follow-up queue instead of starting it as a second concurrent turn on a
   // busy session, so a channel adapter with a live delivery subscription can
   // acknowledge receipt instead of the message silently vanishing until the

@@ -51,7 +51,7 @@ export interface AgentConfig {
   // resolveModelForTurn and toolset.ts's resolveInstructions.
   resolveModel?: (ctx: HookCtx) => Promise<string | ModelSpec>;
   buildInstructions?: (base: string, ctx: HookCtx) => Promise<string>;
-  // H2: applied to the MERGED tool set (authored + dynamic-tools.ts provider
+  // Applied to the MERGED tool set (authored + dynamic-tools.ts provider
   // output + built-in `skill`/`agent`) by toolset.ts's buildSdkTools —
   // returning false drops the tool. Synchronous by design (a per-tool
   // yes/no decision, not an I/O call); a thrown filter propagates uncaught,
@@ -83,7 +83,7 @@ export interface ToolContext {
   // `ctx?.sql?.(...)` there is simply unavailable, not a crash, as long as
   // a tool guards the same way it guards `emit`/`userId`.
   sql?: QueryFn;
-  // H3: fire-and-forget custom tool events. A tool's execute() calls this to
+  // Fire-and-forget custom tool events. A tool's execute() calls this to
   // surface arbitrary progress/telemetry to whichever client is watching —
   // the session API's live stream (as a `tool.event` AgentEvent, also
   // persisted as an `agents.steps` row with `kind: 'custom'`, see
@@ -105,9 +105,9 @@ export interface ToolDef {
   needsApproval?: boolean;
   clientOnly?: boolean;
   idempotent?: boolean;
-  // Task 5 (claw-devx-reliability): this tool speaks to the
-  // channel directly (its own REST call, outside the emit/message.completed
-  // event path) — set on claw's postUpdate/postChoice/postPlan/postQuestion/
+  // This tool speaks to the channel directly (its own REST call, outside
+  // the emit/message.completed event path) — set on claw's
+  // postUpdate/postChoice/postPlan/postQuestion/
   // postScreenshots/postDevSummary. runner.ts's no-silent-turn fallback reads
   // this (agent-agnostic — it does not know any tool by name) to avoid
   // claiming "nothing happened" after a turn that already told the channel

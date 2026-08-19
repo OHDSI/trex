@@ -8,10 +8,10 @@
 // button label is currently the generic runtime approve/deny; `what` is recorded
 // on the request and echoed back so the facilitator knows which gate resolved.
 //
-// Task 6 (claw-devx-reliability): execute() runs ONLY on approve (a Deny never
-// reaches here), so this is the one place that unconditionally captures a
+// execute() runs ONLY on approve (a Deny never reaches here), so this is
+// the one place that unconditionally captures a
 // gate resolution — both a button click and a typed "approve" in the thread
-// (Task 3's text-resume path still ends up here; see channels/layer.ts) land
+// (the text-resume path still ends up here; see channels/layer.ts) land
 // on the same execute(). Appended to the decision ledger so the hand-off
 // after this one never re-asks it.
 //
