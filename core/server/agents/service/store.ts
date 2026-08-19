@@ -168,10 +168,24 @@ export function createStore(query: QueryFn) {
     // Task 4: 21 of 263 turns were observed stuck `running` forever because
     // nothing ever ended an abandoned turn (a worker crash/redeploy mid-turn
     // leaves no other signal). Marks every `running` turn older than the
-    // cutoff `failed`, so a hung turn stops blocking getRunningTurn/folding
-    // forever, and returns how many it reaped (for logging/metrics by the
-    // caller). `error` carries the fixed message the plan specifies, with the
-    // cutoff restated in minutes for a human reading the row.
+    // cutoff, ON THE GIVEN SESSION, `failed`, so a hung turn stops blocking
+    // that session's getRunningTurn/folding forever, and returns how many it
+    // reaped (for logging/metrics by the caller). `error` carries the fixed
+    // message the plan specifies, with the cutoff restated in minutes for a
+    // human reading the row.
+    //
+    // Final whole-branch review, Important 2: session-scoped on purpose.
+    // handler.ts's startTurn calls this lazily whenever a message lands on a
+    // BUSY session, to unwedge a zombie turn on THAT session — it never
+    // needed to touch any other session. An unscoped reap marked every
+    // running turn deployment-wide, so one session's message could fail
+    // another session's genuinely live turn (long turns are plausible: Task 7
+    // raised the channel step floor to 200 and streamTurn has no timeout);
+    // getRunningTurn on the victim session then returned null, so ITS next
+    // message started a second concurrent turn — the exact defect Task 4
+    // exists to remove — and when the real turn finished later,
+    // finishTurn(id, "completed") flipped the row back, erasing the evidence
+    // the reap ever ran.
     //
     // Fix round 1 (code review): the cutoff is computed HERE in JS
     // (`new Date(Date.now() - olderThanMs)`) and passed as a plain parameter
@@ -186,17 +200,17 @@ export function createStore(query: QueryFn) {
     // right) and a fake that evaluates `started_at < cutoff` against seeded
     // rows can prove the query's comparison direction against that same
     // real value — both directions, without a live Postgres.
-    async reapStaleTurns(olderThanMs: number): Promise<number> {
+    async reapStaleTurns(sessionId: string, olderThanMs: number): Promise<number> {
       const cutoff = new Date(Date.now() - olderThanMs);
       const minutes = Math.round(olderThanMs / 60000);
       const r = await query(
         `UPDATE agents.turns
             SET status = 'failed',
-                error = $2,
+                error = $3,
                 finished_at = NOW()
-          WHERE status = 'running' AND started_at < $1
+          WHERE status = 'running' AND session_id = $1 AND started_at < $2
           RETURNING id`,
-        [cutoff, `turn abandoned (no completion within ${minutes} minutes)`],
+        [sessionId, cutoff, `turn abandoned (no completion within ${minutes} minutes)`],
       );
       return r.rows.length;
     },

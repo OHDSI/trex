@@ -353,14 +353,25 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     // reaction (the original Discord message id isn't threaded through
     // session/delivery state to react to). Best-effort: never affects the
     // turn that's still running.
-    async "message.queued"(_data, channelCtx) {
+    //
+    // Final whole-branch review, Critical 1: `deniedPendingGate` (set by
+    // handler.ts's startTurn busy branch) says whether this queued reply also
+    // denied a pending approval gate — the generic "queued" line would
+    // otherwise tell the human the ball is still in the running turn's
+    // court, when it is actually back in theirs (the gate was just closed and
+    // their reply is about to drive the coder's revision).
+    async "message.queued"(data, channelCtx) {
       const state = stateOf(channelCtx);
       if (!state.channelId) return;
+      const deniedPendingGate = (data as { deniedPendingGate?: boolean } | undefined)?.deniedPendingGate === true;
+      const content = deniedPendingGate
+        ? "👀 Got it — that's more than a plain yes/no, so I'm treating it as feedback: I closed the pending approval and I'll send this to the coder as the revision."
+        : "👀 Got it — queued. I'll get to it right after the current step finishes.";
       try {
         await sendDiscordChannelMessage({
           ...apiOpts(),
           channelId: state.channelId,
-          body: { content: "👀 Got it — queued. I'll get to it right after the current step finishes." },
+          body: { content },
         });
       } catch (e) {
         console.warn("discord: message.queued acknowledgement failed — swallowed:", e);

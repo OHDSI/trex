@@ -457,6 +457,32 @@ Deno.test("message.queued posts a one-line channel acknowledgement (not a reply-
   assert(content.includes("queued"));
 });
 
+// Final whole-branch review, Critical 1: when the busy branch resolved a
+// pending gate as deny (handler.ts's startTurn, signalled via
+// `deniedPendingGate`), the ack must say so — the generic "queued" line
+// falsely implies the ball is still in the running turn's court.
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  const calls: Array<{ body: unknown }> = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    calls.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  const channelCtx = { state: { channelId: "chan-1" } };
+
+  await channel.events!["message.queued"](
+    { text: "yes but first explain why the chunk count is wrong", deniedPendingGate: true },
+    channelCtx,
+  );
+
+  assertEquals(calls.length, 1);
+  const content = (calls[0].body as { content: string }).content;
+  assert(/closed the pending approval|feedback/i.test(content), `expected the deny-ack wording, got: ${content}`);
+});
+
 Deno.test("message.queued is a no-op without a channelId, and swallows a delivery failure", async () => {
   let called = 0;
   const fetchMock: typeof fetch = () => {

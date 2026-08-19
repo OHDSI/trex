@@ -61,11 +61,17 @@ function inMemoryDb() {
     }
     if (sql.includes("UPDATE agents.turns") && sql.includes("RETURNING id")) {
       // Fix round 1 (code review): reapStaleTurns — cutoff is a JS-computed
-      // Date passed as $1 (see store.ts), matched against each turn's real
-      // startedAt the same way the real `started_at < $1` predicate would.
-      const cutoff = params[0] as Date;
-      const errorText = params[1] as string;
-      const stale = turns.filter((t) => t.status === "running" && t.startedAt.getTime() < cutoff.getTime());
+      // Date passed as a param (see store.ts), matched against each turn's
+      // real startedAt the same way the real `started_at < $n` predicate
+      // would. Final whole-branch review, Important 2: also session-scoped —
+      // params are [sessionId, cutoff, errorText], matching the real
+      // `session_id = $1 AND started_at < $2` predicate.
+      const sid = params[0] as string;
+      const cutoff = params[1] as Date;
+      const errorText = params[2] as string;
+      const stale = turns.filter((t) =>
+        t.session_id === sid && t.status === "running" && t.startedAt.getTime() < cutoff.getTime()
+      );
       for (const t of stale) {
         t.status = "failed";
         t.error = errorText;
@@ -113,6 +119,16 @@ function inMemoryDb() {
       if (!a || a.decision !== null || a.sessionId !== params[2]) return Promise.resolve({ rows: [] });
       a.decision = params[1] as string;
       return Promise.resolve({ rows: [{ request_id: params[0] }] });
+    }
+    if (sql.includes("SELECT request_id, tool, input FROM agents.approvals")) {
+      // Task 4 / Critical 1 (final whole-branch review): getSinglePendingApproval —
+      // the session's sole still-undecided approval, mirroring store.ts's
+      // `WHERE session_id = $1 AND decision IS NULL`.
+      const sid = params[0] as string;
+      const pending = [...approvals.entries()].filter(([, a]) => a.sessionId === sid && a.decision === null);
+      return Promise.resolve({
+        rows: pending.map(([id, a]) => ({ request_id: id, tool: a.tool, input: null })),
+      });
     }
     if (sql.includes("SELECT decision")) {
       const a = approvals.get(params[0] as string);
@@ -1167,6 +1183,226 @@ Deno.test("a follow-up queue write failure is logged distinctly from a turn cras
   }
   assert(logged.some((l) => l.includes("follow-up queue write failed") && !l.includes("turn crashed")));
   assert(!logged.some((l) => l.includes("turn crashed")));
+});
+
+// Final whole-branch review, Critical 1: a QUALIFIED reply to a pending
+// approval gate ("yes but first explain why the chunk count is wrong") is not
+// a bare yes/no — matchGateText returns null for it (gate-text.ts) — so a
+// pre-checking caller (discord.ts's tryResolveGate) falls through to send()/
+// startTurn with the gate STILL pending. Before this fix that reply was
+// queued behind the very gate it answered, for up to the whole 30-minute
+// approval poll, with neither side able to move. The busy branch now denies
+// the pending gate itself (letting the parked awaitApproval return and the
+// coder revise) and still queues the reply to ride the next turn as the
+// revision's driving instruction.
+Deno.test("a qualified reply arriving while a gate is pending resolves the gate as deny and does not strand the message", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate; // stands in for the turn parked inside a poll on the pending gate
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  // A pending gate on this session — direct fake-state mutation, same
+  // convention as the stale-turn test above backdating db.turns[0].startedAt.
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const reply = "yes but first explain why the chunk count is wrong";
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: reply }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  // The gate was resolved as deny — the parked awaitApproval poll returns
+  // instead of sitting there for the rest of the 30-minute window.
+  assertEquals(db.approvals.get("r-1")?.decision, "deny");
+  // The reply itself is NOT stranded — it is queued to drive the revision.
+  assertEquals(db.followUps, [{ session_id: sid, message: reply }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
+  assertEquals((ack.data as { text: string; deniedPendingGate: boolean }).text, reply);
+  // The ack carries what actually happened, so the channel adapter can say
+  // something other than the generic "the ball is not in your court" line.
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
+});
+
+Deno.test("a reply arriving on a busy session with NO pending gate still queues exactly as it does today", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  // No pending approval on this session.
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "also rename the tests to .test.ts" }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.followUps, [{ session_id: sid, message: "also rename the tests to .test.ts" }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// Self-review guard (sibling-defect check): a reply that DOES match the
+// pending gate's vocabulary (e.g. a bare "approve") must never reach this
+// deny path — that would be an auto-approve/auto-deny landmine. In practice
+// this only reaches startTurn's busy branch for a caller that never
+// pre-checked the gate (only discord.ts does today; see gate-text.ts) — the
+// message is left exactly where it always was: queued, gate still pending.
+Deno.test("a busy-session reply that matches the pending gate's vocabulary is left alone (not auto-resolved) by the busy branch", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "approve" }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, null); // untouched — not auto-resolved
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// Final whole-branch review, Important 2: reapStaleTurns must not reach
+// across sessions. Before the fix a message on ANY busy session marked
+// EVERY stale `running` turn deployment-wide, so another session's
+// genuinely long-running turn (plausible: Task 7 raised the channel step
+// floor to 200 and streamTurn has no timeout) could be failed out from under
+// it by an unrelated session's traffic, re-opening the two-concurrent-turns
+// hole Task 4 exists to close.
+Deno.test("a stale turn on ANOTHER session is left alone while the calling session's stale turn is reaped", async () => {
+  let releaseA: () => void = () => {};
+  const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const modelA = new MockLanguageModelV3({
+    doStream: async () => {
+      await gateA;
+      return { stream: simulateReadableStream({ chunks: textChunks("a done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: modelA });
+
+  // Session A: its own stale (abandoned) running turn, well past the 2h cutoff.
+  const createA = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "a-first" }),
+  }));
+  const sidA = createA.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.some((t) => t.session_id === sidA && t.status === "running"));
+  const turnA = db.turns.find((t) => t.session_id === sidA)!;
+  turnA.startedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+
+  // Session B: a DIFFERENT, unrelated session with its own live-but-old
+  // running turn — stands in for a genuinely long-running turn elsewhere in
+  // the deployment (not the caller's own zombie).
+  let releaseB: () => void = () => {};
+  const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const modelB = new MockLanguageModelV3({
+    doStream: async () => {
+      await gateB;
+      return { stream: simulateReadableStream({ chunks: textChunks("b done") }) };
+    },
+  });
+  const agent = await loadAgent(TOY);
+  const handlerB = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: modelB,
+  });
+  const createB = await handlerB(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "b-first" }),
+  }));
+  const sidB = createB.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.some((t) => t.session_id === sidB && t.status === "running"));
+  const turnB = db.turns.find((t) => t.session_id === sidB)!;
+  turnB.startedAt = new Date(Date.now() - 3 * 60 * 60 * 1000); // also past the cutoff
+
+  // A new message lands on session A ONLY — this is what triggers the lazy
+  // reap, and it must only touch session A's own stale turn.
+  const recoveredHandler = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: model("a recovered"),
+  });
+  await recoveredHandler(new Request(`${BASE}/eve/v1/session/${sidA}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "are you there?" }),
+  }));
+  await until(() => turnA.status === "failed");
+
+  assertEquals(turnA.status, "failed"); // reaped — the caller's own session
+  assert(turnA.error?.includes("turn abandoned"));
+  // Session B's stale turn is UNTOUCHED — still running, not reaped out from
+  // under it by session A's traffic.
+  assertEquals(turnB.status, "running");
+  assertEquals(turnB.error, null);
+
+  releaseA();
+  releaseB();
+  await until(() => true);
 });
 
 Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (Task 19 robustness)", async () => {

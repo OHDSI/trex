@@ -224,15 +224,21 @@ Deno.test("getRunningTurn returns the sole running turn (or null)", async () => 
 // under either mutation above (confirmed: it stayed green through both).
 // Deleted rather than left in place claiming coverage it didn't provide.
 
-Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error string", async () => {
+Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error string, scoped to the given session", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1" }, { id: "t-2" }] }]);
   const store = createStore(fn as never);
-  const n = await store.reapStaleTurns(2 * 60 * 60 * 1000);
+  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
   assertEquals(n, 2);
   assert(calls[0].sql.includes("UPDATE agents.turns"));
   assert(calls[0].sql.includes("status = 'running'"));
-  assert(calls[0].sql.includes("started_at < $1")); // trivial parameter comparison, no in-SQL date arithmetic
+  // Final whole-branch review, Important 2: session_id = $1 scopes the reap
+  // to the calling session — an unscoped reap marked every stale running
+  // turn deployment-wide, so one session's message could fail another
+  // session's genuinely live turn.
+  assert(calls[0].sql.includes("session_id = $1"));
+  assert(calls[0].sql.includes("started_at < $2")); // trivial parameter comparison, no in-SQL date arithmetic
   assert(calls[0].sql.includes("RETURNING id"));
+  assertEquals(calls[0].params[0], "s-1");
   assert(
     calls[0].params.includes("turn abandoned (no completion within 120 minutes)"),
     `expected the exact abandoned-turn error string in params, got: ${JSON.stringify(calls[0].params)}`,
@@ -243,9 +249,9 @@ Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reve
   const { fn, calls } = fakeQuery([{ rows: [] }]);
   const store = createStore(fn as never);
   const before = Date.now();
-  await store.reapStaleTurns(2 * 60 * 60 * 1000); // 2h
+  await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000); // 2h
   const after = Date.now();
-  const cutoff = calls[0].params[0] as Date;
+  const cutoff = calls[0].params[1] as Date;
   assert(cutoff instanceof Date, `expected a Date parameter, got: ${JSON.stringify(calls[0].params)}`);
   // cutoff must land within [before - 2h, after - 2h] — i.e. "2h ago", not
   // "2h from now" (which a Date.now() + olderThanMs bug would produce, and

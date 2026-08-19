@@ -15,6 +15,7 @@ import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
+import { matchGateText } from "../channels/gate-text.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -209,13 +210,55 @@ function startTurn(
       // through to the queue branch so the message still gets queued and
       // still gets acknowledged.
       try {
-        await deps.store.reapStaleTurns(STALE_TURN_MS);
+        await deps.store.reapStaleTurns(sessionId, STALE_TURN_MS);
         running = await deps.store.getRunningTurn(sessionId);
       } catch (e) {
         console.error(`agents: stale-turn reap failed for session ${sessionId} (treating session as busy):`, e);
       }
     }
     if (running) {
+      // Final whole-branch review, Critical 1: a pending approval gate keeps
+      // its turn `status='running'` for the whole approval poll (up to 30
+      // minutes as of Task 3). A QUALIFIED reply to that gate — the plan's
+      // own example, "yes but first explain why the chunk count is wrong" —
+      // is not a bare yes/no, so matchGateText correctly returns null (see
+      // gate-text.ts) and a pre-checking caller (discord.ts's tryResolveGate)
+      // falls through to here with the gate STILL pending. Queueing that
+      // reply behind the very gate it answers stalls the thread for the rest
+      // of the poll, with neither side able to move — the human is waiting
+      // on the queued reply to be seen, and the running turn is waiting on a
+      // click that will never come because the human already replied in
+      // words. Deny the pending gate so the parked awaitApproval returns
+      // immediately and the coder revises; the reply queued just below rides
+      // the very next turn as that revision's driving instruction, matching
+      // the skill's existing "Deny -> relay the team's changes, have the
+      // coder revise, gate again" semantics (facilitate-coding-task.md).
+      //
+      // Deliberately narrow: only a gate the incoming text does NOT already
+      // match is denied here. A caller that never pre-checks the gate (only
+      // discord.ts does today) can still land here with matching text (e.g.
+      // a bare "approve" on a channel with no pre-check) — that text is left
+      // for the existing queue/fold path exactly as before; this fix does
+      // not add gate resolution for callers that opted out of it.
+      let deniedPendingGate = false;
+      try {
+        const pending = await deps.store.getSinglePendingApproval(sessionId);
+        if (pending && matchGateText(asText(message), pending.options) === null) {
+          const resolved = await resolveApprovalDecision(
+            deps.store,
+            sessionId,
+            { requestId: pending.requestId, decision: "deny" },
+            { plugin: deps.plugin, agentName: deps.agentName, userId },
+          );
+          deniedPendingGate = resolved.ok;
+        }
+      } catch (e) {
+        // Never let a pending-gate check failure escape to the outer "turn
+        // crashed" catch (no turn was created/touched on this path) or block
+        // the queue write below — degrade to "queue without resolving",
+        // same posture as the reap-failure branch above.
+        console.error(`agents: pending-gate check failed for session ${sessionId} (queueing without resolving):`, e);
+      }
       try {
         await deps.store.queueFollowUp(sessionId, asText(message));
         // Fix round 1 (code review): queued messages previously vanished
@@ -228,8 +271,10 @@ function startTurn(
         // no turnId to every active subscriber). The Discord adapter turns
         // it into a one-line reply (see discord.ts's builtinEvents) rather
         // than a message reaction, since the original Discord message id
-        // isn't threaded through session state to react to.
-        publish(sessionId, { type: "message.queued", data: { text: asText(message) } });
+        // isn't threaded through session state to react to. `deniedPendingGate`
+        // lets that ack say what actually happened instead of always
+        // implying the ball is still in the running turn's court.
+        publish(sessionId, { type: "message.queued", data: { text: asText(message), deniedPendingGate } });
       } catch (e) {
         // Distinct from the "turn crashed" catch below: no turn was ever
         // created on this path, so that wording would misdescribe a queue
