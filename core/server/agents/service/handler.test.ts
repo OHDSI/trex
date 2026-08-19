@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { createHandler } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
@@ -58,6 +58,19 @@ function inMemoryDb() {
       };
       turns.push(t);
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
+    }
+    if (sql.includes("UPDATE agents.turns") && sql.includes("RETURNING id")) {
+      // Fix round 1 (code review): reapStaleTurns — cutoff is a JS-computed
+      // Date passed as $1 (see store.ts), matched against each turn's real
+      // startedAt the same way the real `started_at < $1` predicate would.
+      const cutoff = params[0] as Date;
+      const errorText = params[1] as string;
+      const stale = turns.filter((t) => t.status === "running" && t.startedAt.getTime() < cutoff.getTime());
+      for (const t of stale) {
+        t.status = "failed";
+        t.error = errorText;
+      }
+      return Promise.resolve({ rows: stale.map((t) => ({ id: t.id })) });
     }
     if (sql.includes("UPDATE agents.turns")) {
       const t = turns.find((t) => t.id === params[0]);
@@ -889,17 +902,28 @@ Deno.test("a message arriving while a turn is running is queued, not started as 
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => db.turns.length === 1 && db.turns[0].status === "running");
 
+  // Fix round 1 (code review): a queued message must not silently vanish —
+  // it gets a live, turn-agnostic acknowledgement event a channel adapter
+  // can turn into a reply/reaction (see discord.ts's "message.queued"
+  // handler for the Discord-side consumption of this).
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
   const second = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ message: "second, urgent" }),
   }));
   assertEquals(second.status, 202);
   await until(() => db.followUps.some((f) => f.session_id === sid)); // drain the fire-and-forget queue write
+  unsub();
 
   // No second, concurrent turn — the message was folded into the queue instead.
   assertEquals(db.turns.length, 1);
   assertEquals(db.turns[0].status, "running");
   assertEquals(db.followUps, [{ session_id: sid, message: "second, urgent" }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
+  assertEquals((ack.data as { text: string }).text, "second, urgent");
 
   releaseGate();
   // The queued follow-up is run automatically as soon as the first turn
@@ -968,6 +992,115 @@ Deno.test("a follow-up queued during a turn that fails is folded into the next e
   assertEquals(db.turns[1].status, "completed");
   assertEquals(db.turns[1].message, "try again\n\nqueued while busy");
   assertEquals(db.followUps.length, 0);
+});
+
+// Fix round 1 (code review directive — supersedes the brief's "do not
+// invent a scheduler"): lazy reaping. Serialization means a turn stuck
+// `running` forever (the same defect reapStaleTurns exists for — 21 turns
+// observed) now wedges every LATER message on that session too, since
+// nothing else ever un-blocks getRunningTurn. There is no periodic hook in
+// this runtime to run reapStaleTurns on a timer (see the report), so
+// startTurn reaps on the way in instead: finding a running turn, it calls
+// reapStaleTurns, then re-reads getRunningTurn — a genuinely stale turn is
+// now failed and the new message proceeds normally; a live one still folds
+// into the queue exactly as before (covered by the sibling tests above).
+Deno.test("a stale (abandoned) running turn is reaped when a new message arrives, and that message runs immediately instead of queuing behind it forever", async () => {
+  let releaseStuckGate: () => void = () => {};
+  const stuckGate = new Promise<void>((resolve) => { releaseStuckGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const stuckModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await stuckGate;
+      return { stream: simulateReadableStream({ chunks: textChunks("stuck turn finally answers") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: stuckModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  // Simulate an abandoned turn (e.g. a worker crash/redeploy mid-turn): well
+  // past the 2h reap cutoff. No DB-backed backdateTurn helper exists in this
+  // file's fake-store convention (see store.test.ts's own tests, which drive
+  // the store's SQL/params directly instead) — this file's equivalent is
+  // direct fake-state mutation, same as every other test here that reads/
+  // asserts on `db.turns` directly.
+  db.turns[0].startedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+
+  // A second handler instance shares the same underlying fake store/db —
+  // standing in for "a different request hits the worker" (the stuck turn's
+  // own model call above never resolves on its own).
+  const agent = await loadAgent(TOY);
+  const recoveredHandler = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: model("recovered"),
+  });
+  await recoveredHandler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "are you there?" }),
+  }));
+  await until(() => db.turns.length === 2 && db.turns[1].status === "completed");
+
+  assertEquals(db.turns[0].status, "failed"); // reaped, not left running forever
+  assert(db.turns[0].error?.includes("turn abandoned"));
+  // Ran immediately as its own turn — NOT folded/queued behind the zombie.
+  assertEquals(db.turns[1].message, "are you there?");
+  assertEquals(db.followUps.length, 0);
+
+  releaseStuckGate(); // let the original stuck call settle so it doesn't leak past the test
+  await until(() => true); // yield a tick for the release to be observed
+});
+
+// Fix round 1 (code review): the queue-write path (busy session) must not
+// be misreported through the generic "turn crashed" log — no turn was ever
+// created on that path.
+Deno.test("a follow-up queue write failure is logged distinctly from a turn crash", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const db = inMemoryDb();
+  const baseStore = createStore(db.query as never);
+  const brokenStore = {
+    ...baseStore,
+    queueFollowUp: () => Promise.reject(new Error("db unavailable")),
+  };
+  const agent = await loadAgent(TOY);
+  const handler = createHandler({
+    agent, store: brokenStore as never, plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: gatedModel,
+  });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "second" }),
+    }));
+    await until(() => logged.some((l) => l.includes("db unavailable")));
+  } finally {
+    console.error = origError;
+    releaseGate();
+  }
+  assert(logged.some((l) => l.includes("follow-up queue write failed") && !l.includes("turn crashed")));
+  assert(!logged.some((l) => l.includes("turn crashed")));
 });
 
 Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (Task 19 robustness)", async () => {

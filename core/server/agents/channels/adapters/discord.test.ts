@@ -420,6 +420,62 @@ Deno.test("message.completed with tool-calls finishReason posts nothing", async 
   assertEquals(called, 0);
 });
 
+// ---- delivery: message.queued (Task 4, claw-devx-reliability fix round 1) --
+
+Deno.test("message.queued posts a one-line channel acknowledgement (not a reply-edit, not a reaction)", async () => {
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    calls.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  // Deliberately carries an interactionToken too — message.queued must still
+  // go to the plain channel-message endpoint (not the interaction edit/
+  // followup endpoints message.completed uses), since this is a background
+  // ack for a turn that is NOT the one owning the interaction response.
+  const channelCtx = { state: { channelId: "chan-1", interactionToken: "tok-1", initialResponseSent: false } };
+
+  await channel.events!["message.queued"]({ text: "also rename the tests" }, channelCtx);
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].method, "POST");
+  assertEquals(calls[0].url.endsWith("/channels/chan-1/messages"), true);
+  const content = (calls[0].body as { content: string }).content;
+  assert(content.includes("queued"));
+});
+
+Deno.test("message.queued is a no-op without a channelId, and swallows a delivery failure", async () => {
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response("boom", { status: 500 }));
+  };
+  const channel = discordChannel({ credentials: { applicationId: "app-1" }, api: { fetch: fetchMock } });
+
+  // No channelId in state → nothing to post to.
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(called, 0);
+
+  // A channelId that leads to a failed delivery must not throw (best-effort).
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"]({ text: "hi" }, { state: { channelId: "chan-1" } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assert(logged.some((l) => l.includes("message.queued")));
+});
+
 // ---- delivery: input.requested → HITL components --------------------------
 
 Deno.test("input.requested renders approve/deny button components", async () => {

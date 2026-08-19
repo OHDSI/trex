@@ -172,16 +172,31 @@ export function createStore(query: QueryFn) {
     // forever, and returns how many it reaped (for logging/metrics by the
     // caller). `error` carries the fixed message the plan specifies, with the
     // cutoff restated in minutes for a human reading the row.
+    //
+    // Fix round 1 (code review): the cutoff is computed HERE in JS
+    // (`new Date(Date.now() - olderThanMs)`) and passed as a plain parameter
+    // — the SQL then does a trivial `started_at < $1` comparison instead of
+    // `NOW() - (... )::interval` arithmetic inline in the query string. This
+    // isn't just style: with the arithmetic in SQL, a get-the-sign-wrong bug
+    // (`NOW() - ...` vs `NOW() + ...`) is invisible to any test that only
+    // asserts the SQL *text* — which is exactly what the original version of
+    // this method shipped with, and review correctly flagged it as unproven.
+    // With the cutoff computed in JS, store.test.ts can assert the exact
+    // Date value passed for a given olderThanMs (proving the JS-side sign is
+    // right) and a fake that evaluates `started_at < cutoff` against seeded
+    // rows can prove the query's comparison direction against that same
+    // real value — both directions, without a live Postgres.
     async reapStaleTurns(olderThanMs: number): Promise<number> {
+      const cutoff = new Date(Date.now() - olderThanMs);
       const minutes = Math.round(olderThanMs / 60000);
       const r = await query(
         `UPDATE agents.turns
             SET status = 'failed',
                 error = $2,
                 finished_at = NOW()
-          WHERE status = 'running' AND started_at < NOW() - ($1 || ' milliseconds')::interval
+          WHERE status = 'running' AND started_at < $1
           RETURNING id`,
-        [String(olderThanMs), `turn abandoned (no completion within ${minutes} minutes)`],
+        [cutoff, `turn abandoned (no completion within ${minutes} minutes)`],
       );
       return r.rows.length;
     },

@@ -85,4 +85,13 @@ export type AgentEvent =
   // input.requested/session.waiting/session.failed above — this one IS
   // replayable (handler.ts's stepToEvent maps a `custom` step straight back
   // to `tool.event`).
-  | { type: "tool.event"; data: { name: string; payload: unknown } };
+  | { type: "tool.event"; data: { name: string; payload: unknown } }
+  // Task 4 (claw-devx-reliability), trex extension (not part of eve's
+  // documented vocabulary): fired when startTurn folds a message into the
+  // follow-up queue instead of starting it as a second concurrent turn on a
+  // busy session, so a channel adapter with a live delivery subscription can
+  // acknowledge receipt instead of the message silently vanishing until the
+  // next turn happens to fold it in. Turn-agnostic (no turnId) and live-only
+  // — not persisted/replayed — same posture as session.waiting/
+  // session.failed above.
+  | { type: "message.queued"; data: { text: string } };

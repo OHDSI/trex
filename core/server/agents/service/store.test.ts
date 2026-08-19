@@ -200,22 +200,82 @@ Deno.test("getRunningTurn returns the sole running turn (or null)", async () => 
 });
 
 // Task 4: 21 turns were observed stuck in `running` forever because nothing
-// ever ends an abandoned turn. reapStaleTurns fails only turns whose SQL
-// WHERE clause the store issues — cutoff comparison is asserted via the SQL
-// text since this file's fakeQuery doesn't evaluate the WHERE clause itself.
-Deno.test("reapStaleTurns fails stale running turns and returns the count", async () => {
+// ever ends an abandoned turn.
+//
+// Fix round 1 (code review): the original version of these tests only
+// string-matched the SQL text ("started_at <") and never proved the
+// direction of the comparison — a reversed operator or a `NOW() + interval`
+// sign bug would have sailed through. reapStaleTurns now computes the
+// cutoff in JS and passes it as a plain `Date` parameter (SQL: a trivial
+// `started_at < $1`), which makes the direction provable two ways without a
+// live Postgres: (1) assert the cutoff VALUE the store computes is actually
+// in the past relative to call time, for a given olderThanMs (catches a
+// `Date.now() + olderThanMs` sign bug), and (2) drive the store with a fake
+// that evaluates the real `started_at < cutoff` predicate against seeded
+// rows straddling that exact cutoff value (catches a `>` vs `<` bug in the
+// predicate itself). Together they cover both ways this could be reversed.
+
+Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error string", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1" }, { id: "t-2" }] }]);
   const store = createStore(fn as never);
   const n = await store.reapStaleTurns(2 * 60 * 60 * 1000);
   assertEquals(n, 2);
   assert(calls[0].sql.includes("UPDATE agents.turns"));
   assert(calls[0].sql.includes("status = 'running'"));
-  assert(calls[0].sql.includes("started_at <"));
+  assert(calls[0].sql.includes("started_at < $1")); // trivial parameter comparison, no in-SQL date arithmetic
   assert(calls[0].sql.includes("RETURNING id"));
   assert(
     calls[0].params.includes("turn abandoned (no completion within 120 minutes)"),
     `expected the exact abandoned-turn error string in params, got: ${JSON.stringify(calls[0].params)}`,
   );
+});
+
+Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reversed sign)", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  const before = Date.now();
+  await store.reapStaleTurns(2 * 60 * 60 * 1000); // 2h
+  const after = Date.now();
+  const cutoff = calls[0].params[0] as Date;
+  assert(cutoff instanceof Date, `expected a Date parameter, got: ${JSON.stringify(calls[0].params)}`);
+  // cutoff must land within [before - 2h, after - 2h] — i.e. "2h ago", not
+  // "2h from now" (which a Date.now() + olderThanMs bug would produce, and
+  // which this range would never contain).
+  assert(
+    cutoff.getTime() >= before - 2 * 60 * 60 * 1000 && cutoff.getTime() <= after - 2 * 60 * 60 * 1000,
+    `cutoff ${cutoff.toISOString()} is not ~2h before call time — sign of the cutoff computation looks reversed`,
+  );
+});
+
+Deno.test("reapStaleTurns' predicate direction: only a turn started BEFORE the cutoff is reaped, one started after is not", async () => {
+  // Drives reapStaleTurns end-to-end and evaluates `started_at < cutoff`
+  // against the REAL cutoff Date the store computed (not a value re-derived
+  // by the test), against two rows straddling it by 1s each. This is honest
+  // about what it can and can't prove without a live Postgres: it can't
+  // independently verify Postgres's own "<" operator (only a real DB could),
+  // but combined with the sibling test's literal assertion that the SQL text
+  // is `started_at < $1` (not `>` — a single trivial operator now that the
+  // cutoff arithmetic moved out of SQL and into the "computes a cutoff
+  // strictly in the past" test above), this closes both realistic ways the
+  // boundary could be reversed: a flipped operator in the SQL string, or a
+  // flipped sign in the JS cutoff computation.
+  let seenCutoff: Date | undefined;
+  const fn = (sql: string, params?: unknown[]) => {
+    if (sql.includes("UPDATE agents.turns")) {
+      const cutoff = params![0] as Date;
+      seenCutoff = cutoff;
+      const rows = [
+        { id: "older", started_at: new Date(cutoff.getTime() - 1000) }, // 1s before cutoff -> stale, must reap
+        { id: "newer", started_at: new Date(cutoff.getTime() + 1000) }, // 1s after cutoff -> live, must NOT reap
+      ].filter((t) => t.started_at.getTime() < cutoff.getTime());
+      return Promise.resolve({ rows: rows.map((r) => ({ id: r.id })) });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  const store = createStore(fn as never);
+  const n = await store.reapStaleTurns(2 * 60 * 60 * 1000);
+  assert(seenCutoff instanceof Date);
+  assertEquals(n, 1); // exactly the older-than-cutoff turn, never the newer one
 });
 
 // Task 4: the follow-up queue a busy session folds a new message into

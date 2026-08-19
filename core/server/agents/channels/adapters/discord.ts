@@ -344,6 +344,28 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     async "session.failed"(_data, channelCtx) {
       stopTyping(stateOf(channelCtx).channelId);
     },
+    // Task 4 (claw-devx-reliability), fix round 1 (code review): acknowledge
+    // a message that arrived while a turn was already running and got
+    // queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Posts a
+    // plain channel message rather than reusing `deliver()` (which would
+    // call stopTyping — wrong here, the original turn is still working) or a
+    // reaction (the original Discord message id isn't threaded through
+    // session/delivery state to react to). Best-effort: never affects the
+    // turn that's still running.
+    async "message.queued"(_data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.channelId) return;
+      try {
+        await sendDiscordChannelMessage({
+          ...apiOpts(),
+          channelId: state.channelId,
+          body: { content: "👀 Got it — queued. I'll get to it right after the current step finishes." },
+        });
+      } catch (e) {
+        console.warn("discord: message.queued acknowledgement failed — swallowed:", e);
+      }
+    },
   };
 
   const events: ChannelEventHandlers = { ...builtinEvents, ...opts.events };

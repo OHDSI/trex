@@ -140,6 +140,18 @@ function connectionOptsFor(deps: Deps) {
   return deps.oauth ? { oauth: deps.oauth } : undefined;
 }
 
+// Task 4: matches the brief's original reapStaleTurns(2 * 60 * 60 * 1000) —
+// re-used here as the lazy-reap cutoff (see startTurn) since no periodic
+// scheduler exists to call it on a timer (checked service/index.ts: no
+// setInterval/cron/periodic hook of any kind — see the report).
+const STALE_TURN_MS = 2 * 60 * 60 * 1000;
+
+// A turn's `message` column (and the follow-up queue) both want a plain
+// string; non-string messages (only possible on the native /eve/v1/session
+// routes, which accept arbitrary JSON) are stringified the same way
+// runner.ts's own userContent conversion does.
+const asText = (m: unknown): string => typeof m === "string" ? m : JSON.stringify(m);
+
 function startTurn(
   deps: Deps,
   sessionId: string,
@@ -160,14 +172,55 @@ function startTurn(
     // still running is queued instead of started as a second, concurrent
     // turn; startTurn is the single choke point every caller (channel
     // adapters via layer.ts's send(), and native /eve/v1/session[/:id]) goes
-    // through, so this check covers all of them. Not airtight under a
-    // millisecond-scale race between two concurrent startTurn calls (no DB
-    // lock — see the report), but it closes the real-world window (seconds,
-    // not milliseconds) that produced the measured 16%.
-    const running = await deps.store.getRunningTurn(sessionId);
+    // through, so this check covers all of them.
+    //
+    // Not airtight: the window between this getRunningTurn read and the
+    // addTurn write below is check-then-act, not a DB-level lock, and it is
+    // NOT millisecond-scale — takeFollowUps and historyForModel are each an
+    // additional awaited round trip in between, so the window spans multiple
+    // network round trips, not one. A webhook redelivery or a genuine
+    // double-submit landing in that window can still both pass the check. A
+    // DB-level uniqueness guard (e.g. a partial unique index on
+    // agents.turns(session_id) WHERE status = 'running') would close this
+    // fully but is out of scope for this round — kept as check-then-act on
+    // purpose (see the report).
+    let running = await deps.store.getRunningTurn(sessionId);
     if (running) {
-      const text = typeof message === "string" ? message : JSON.stringify(message);
-      await deps.store.queueFollowUp(sessionId, text);
+      // Fix round 1 (code review directive, supersedes the brief's "do not
+      // invent a scheduler" — this repo has none to invent into): lazy
+      // reaping. Serialization means a turn stuck `running` forever (a
+      // worker crash/redeploy mid-turn — the same 21-turn defect
+      // reapStaleTurns exists for) now wedges every LATER message on that
+      // session too, not just races one. Rather than adding a scheduler,
+      // reap on the way in: if the running turn is actually stale, this
+      // marks it failed and clears it, so the message below proceeds as a
+      // normal turn instead of being queued behind a zombie forever. A
+      // genuinely live turn is untouched (the cutoff only matches turns
+      // older than it) and falls through to the queue exactly as before.
+      await deps.store.reapStaleTurns(STALE_TURN_MS);
+      running = await deps.store.getRunningTurn(sessionId);
+    }
+    if (running) {
+      try {
+        await deps.store.queueFollowUp(sessionId, asText(message));
+        // Fix round 1 (code review): queued messages previously vanished
+        // with no acknowledgement until the next turn happened to fold them
+        // in. message.queued is a turn-agnostic trex extension to the event
+        // vocabulary (same pattern as session.waiting/session.failed in
+        // events.ts — live-only, not persisted/replayed) so it reaches
+        // whichever channel delivery subscription is already live for this
+        // session's running turn (delivery.ts passes through any event with
+        // no turnId to every active subscriber). The Discord adapter turns
+        // it into a one-line reply (see discord.ts's builtinEvents) rather
+        // than a message reaction, since the original Discord message id
+        // isn't threaded through session state to react to.
+        publish(sessionId, { type: "message.queued", data: { text: asText(message) } });
+      } catch (e) {
+        // Distinct from the "turn crashed" catch below: no turn was ever
+        // created on this path, so that wording would misdescribe a queue
+        // write failure as a turn failure.
+        console.error(`agents: follow-up queue write failed for session ${sessionId} (message dropped):`, e);
+      }
       return;
     }
 
@@ -176,9 +229,7 @@ function startTurn(
     // of racing it as a separate turn. Ordinary case (nothing queued) is a
     // no-op DB round trip that leaves `message` untouched.
     const queued = await deps.store.takeFollowUps(sessionId);
-    const turnMessage = queued.length > 0
-      ? [typeof message === "string" ? message : JSON.stringify(message), ...queued].join("\n\n")
-      : message;
+    const turnMessage = queued.length > 0 ? [asText(message), ...queued].join("\n\n") : message;
 
     const history = await historyForModel(deps.store, sessionId);
     const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
