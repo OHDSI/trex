@@ -174,7 +174,7 @@ async function streamTurn(
         if (!line.startsWith("data:")) continue;
         const json = line.slice(5).trim();
         if (!json) continue;
-        let ev: { type?: string; content?: string; questions?: unknown };
+        let ev: { type?: string; content?: string; error?: string; code?: string; raw?: string; questions?: unknown };
         try { ev = JSON.parse(json); } catch { continue; }
         if (ev.type === "chunk") {
           text += ev.content ?? "";
@@ -184,7 +184,10 @@ async function streamTurn(
           // reply, without double-counting the chunks we already accumulated.
           if (!text && typeof ev.content === "string") text = ev.content;
         } else if (ev.type === "error") {
-          throw new Error(`code turn error: ${ev.content ?? "unknown"}`);
+          // devx sends the message on `error` (never on `content`, which carries chunk
+          // text) plus a stable `code` and, for remoteChannel callers, the raw message.
+          const { describeCoderError } = await import("./code-error.ts");
+          throw new Error(describeCoderError(ev.code, ev.raw ?? ev.error));
         } else if (ev.type === "questionnaire" && Array.isArray(ev.questions)) {
           const qs = ev.questions
             .map((q: any, i: number) => `${i + 1}. ${q?.text ?? q?.question ?? q}`)
