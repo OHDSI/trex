@@ -22,15 +22,27 @@ export interface AppFileNode {
   children?: AppFileNode[];
 }
 
+// Final whole-branch review, Minor: a team names a product with spaces
+// ("White Rabbit") but a checked-out directory name never has any — so a
+// bare `.includes(needle)` on the raw (lowercased-only) name matched nothing
+// for the plan's own motivating example. Stripping/collapsing spaces,
+// hyphens, and underscores from BOTH sides before comparing makes "White
+// Rabbit", "white-rabbit", and "white_rabbit" all match a `whiterabbit`
+// directory the same way a human would read them as the same name.
+function normalizeComponentName(s: string): string {
+  return s.toLowerCase().replace(/[\s_-]+/g, "");
+}
+
 // Bounded, first-hit-wins walk of one app's file tree (breadth-first, so a
 // shallow match is preferred over a deep one). Pure and synchronous — no
 // network, no recursion depth of its own — so it cannot blow up regardless of
 // how the tree was fetched.
 export function firstComponentMatch(nodes: AppFileNode[], needle: string): string | undefined {
+  const target = normalizeComponentName(needle);
   const queue = [...nodes];
   while (queue.length) {
     const node = queue.shift()!;
-    if (node.name.toLowerCase().includes(needle)) return node.path;
+    if (normalizeComponentName(node.name).includes(target)) return node.path;
     if (node.type === "directory" && node.children?.length) queue.push(...node.children);
   }
   return undefined;
@@ -57,7 +69,9 @@ export async function findComponentInApp(
     });
     if (!res.ok) return undefined;
     const tree = await res.json();
-    return Array.isArray(tree) ? firstComponentMatch(tree, component.toLowerCase()) : undefined;
+    // normalizeComponentName inside firstComponentMatch already lowercases
+    // and strips separators — pass the raw component name through.
+    return Array.isArray(tree) ? firstComponentMatch(tree, component) : undefined;
   } catch {
     // Unreachable API, non-JSON body, missing workspace, etc. — one app
     // failing to answer must not fail the whole listApps call.

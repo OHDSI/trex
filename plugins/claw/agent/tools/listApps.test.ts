@@ -65,6 +65,18 @@ Deno.test("firstComponentMatch returns undefined when nothing matches", () => {
   assertEquals(firstComponentMatch(tree(), "nonexistent"), undefined);
 });
 
+// Final whole-branch review, Minor: the plan's own motivating example — a
+// team names a product "White Rabbit" (with a space), but the checked-out
+// directory name (`whiterabbit`) never has one, so a bare `.includes` match
+// found nothing. Spaces, hyphens, and underscores are stripped from both
+// sides before comparing, so any of these phrasings resolves to the same
+// directory.
+Deno.test("firstComponentMatch matches across spaces/hyphens/underscores on either side", () => {
+  assertEquals(firstComponentMatch(tree(), "White Rabbit"), "plugins/flows/whiterabbit");
+  assertEquals(firstComponentMatch(tree(), "white-rabbit"), "plugins/flows/whiterabbit");
+  assertEquals(firstComponentMatch(tree(), "white_rabbit"), "plugins/flows/whiterabbit");
+});
+
 Deno.test("firstComponentMatch does not blow up on nodes without children", () => {
   const nodes: AppFileNode[] = [{ name: "empty-dir", path: "empty-dir", type: "directory" }];
   assertEquals(firstComponentMatch(nodes, "anything"), undefined);
