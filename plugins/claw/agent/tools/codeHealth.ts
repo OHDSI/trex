@@ -12,7 +12,7 @@ export function healthFromResponse(r: ProbeResult): { ok: boolean; detail: strin
   if (r.status === 401 || r.status === 403) {
     return {
       ok: false,
-      detail: "The workspace rejected my credentials (401). Someone needs to re-authenticate the devx workspace.",
+      detail: `The workspace rejected my credentials (${r.status}). Someone needs to re-authenticate the devx workspace.`,
     };
   }
   if (r.status) return { ok: false, detail: `The workspace answered ${r.status}, so it is not usable right now.` };

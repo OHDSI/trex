@@ -22,3 +22,9 @@ Deno.test("a transport failure is reported as unreachable with the cause", () =>
   assertEquals(got.ok, false);
   assertEquals(got.detail, "The workspace is not reachable: connection refused.");
 });
+
+Deno.test("a non-auth error status is reported with the status code", () => {
+  const got = healthFromResponse({ ok: false, status: 500 });
+  assertEquals(got.ok, false);
+  assertEquals(got.detail, "The workspace answered 500, so it is not usable right now.");
+});
