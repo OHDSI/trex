@@ -71,3 +71,30 @@ Deno.test("an attribute name that is a suffix of another (with a separator) does
   const { trailer } = parseTrailer(reply);
   assertEquals(trailer?.remaining, ["a", "b"]);
 });
+
+// Review fix (round 2): round 1's fix ([\s\S]*? on a whole-string regex) let
+// the match start at the FIRST "<handoff"-shaped substring — e.g. a decoy the
+// coder quotes while explaining the trailer format, or pastes from a prior
+// reply inside a fenced code block — and stretch non-greedily to whatever
+// closing ">" it could reach from there. That silently took facts from the
+// decoy instead of the real trailer at the end, and truncated the body back
+// to before the decoy, dropping the closing fence and anything after it. The
+// fix anchors on the LAST "<handoff" via lastIndexOf, so an earlier
+// occurrence is never even a candidate.
+Deno.test("a decoy <handoff> earlier in the reply is ignored when a real trailer follows — the real trailer wins and the decoy stays in the body", () => {
+  const reply =
+    '```\nUse this: <handoff track="light" saved="x"/>\n```\n\n' +
+    '<handoff track="full" saved="x.md" tests="1/1 pass"/>';
+  const { trailer, body } = parseTrailer(reply);
+  assertEquals(trailer?.track, "full");
+  assertEquals(trailer?.saved, "x.md");
+  assertEquals(trailer?.tests, "1/1 pass");
+  assertEquals(body, '```\nUse this: <handoff track="light" saved="x"/>\n```');
+});
+
+Deno.test("a decoy <handoff> with no real trailer after it parses as null and the body is byte-identical", () => {
+  const reply = '```\nUse this: <handoff track="light" saved="x"/>\n```';
+  const { trailer, body } = parseTrailer(reply);
+  assertEquals(trailer, null);
+  assertEquals(body, reply);
+});

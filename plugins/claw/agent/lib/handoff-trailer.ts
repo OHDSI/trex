@@ -11,14 +11,33 @@ export interface HandoffTrailer {
   remaining?: string[];
 }
 
-// Non-greedy but end-anchored: [^>]* would let a `>` embedded inside an
-// attribute value (e.g. blocked="needs decision: A > B") terminate the match
-// early, dropping the whole trailer and leaving the raw markup in the
-// channel-facing body — the exact failure this feature exists to prevent.
-// [\s\S]*? still can't cross the true closing `/>` because \s*$ after it only
-// succeeds once the rest of the string is whitespace, which the interior `>`
-// case never satisfies (there's always more attribute text after it).
-const TRAILER_RE = /\n?\s*<handoff\b([\s\S]*?)\/?>\s*$/;
+// Anchored on the LAST "<handoff" in the reply, then matched forward from
+// there to the end of the string. Two review rounds shaped this:
+//
+// Round 1: a bounded [^>]* class let a `>` embedded inside an attribute value
+// (e.g. blocked="needs decision: A > B") terminate the match early, dropping
+// the whole trailer and leaking the raw markup into the channel-facing body.
+// Fixed by widening the capture to [\s\S]*?.
+//
+// Round 2: with a whole-string regex, that widened [\s\S]*? was free to start
+// matching at the FIRST "<handoff"-shaped substring (e.g. a decoy the coder
+// quotes while explaining the trailer format, or pastes from a prior reply
+// inside a fenced code block) and stretch non-greedily to whatever "/?>\s*$"
+// it could reach — silently taking facts from the decoy instead of the real
+// trailer at the end, and truncating the body back to before the decoy.
+// lastIndexOf + a regex anchored with ^ (not a bare scan) fixes this by
+// construction: there is only one "<handoff" candidate to test — the last
+// one — and it only counts as a trailer if the rest of the string, from that
+// exact point, is the tag itself plus trailing whitespace. Earlier
+// occurrences are never candidates at all, so they can't win and can't be
+// truncated away.
+function matchTrailer(reply: string): { raw: string; index: number } | null {
+  const idx = reply.lastIndexOf("<handoff");
+  if (idx === -1) return null;
+  const m = /^<handoff\b([\s\S]*?)\/?>\s*$/.exec(reply.slice(idx));
+  if (!m) return null; // real text (or another decoy) after it -> not a trailer
+  return { raw: m[1], index: idx };
+}
 
 // Anchored on a preceding boundary (start-of-string or whitespace) so a name
 // that happens to be a suffix of another attribute's name (e.g. a future
@@ -36,9 +55,9 @@ function list(raw: string, name: string): string[] | undefined {
 }
 
 export function parseTrailer(reply: string): { trailer: HandoffTrailer | null; body: string } {
-  const m = TRAILER_RE.exec(reply);
-  if (!m) return { trailer: null, body: reply };
-  const raw = m[1];
+  const found = matchTrailer(reply);
+  if (!found) return { trailer: null, body: reply };
+  const { raw, index } = found;
   const track = attr(raw, "track");
   return {
     trailer: {
@@ -50,6 +69,6 @@ export function parseTrailer(reply: string): { trailer: HandoffTrailer | null; b
       ...(list(raw, "done") ? { done: list(raw, "done") } : {}),
       ...(list(raw, "remaining") ? { remaining: list(raw, "remaining") } : {}),
     },
-    body: reply.slice(0, m.index).trimEnd(),
+    body: reply.slice(0, index).trimEnd(),
   };
 }
