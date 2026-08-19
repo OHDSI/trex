@@ -14,7 +14,7 @@
 // happens, so postChoice cannot append to the decision ledger — recording it
 // would require either a hook in that adapter (outside this plugin) or claw
 // itself calling a record-decision tool after relaying the pick. Left
-// unrecorded here rather than invented; see task-6-report.md.
+// unrecorded here rather than invented.
 import { defineTool } from "eve/tools";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
