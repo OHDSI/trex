@@ -197,8 +197,23 @@ function startTurn(
       // normal turn instead of being queued behind a zombie forever. A
       // genuinely live turn is untouched (the cutoff only matches turns
       // older than it) and falls through to the queue exactly as before.
-      await deps.store.reapStaleTurns(STALE_TURN_MS);
-      running = await deps.store.getRunningTurn(sessionId);
+      //
+      // Fix round 2 (code review): this runs on EVERY message that lands on
+      // a busy session, so a transient reap/re-read failure here is a real
+      // failure mode, not hypothetical. It must not escape to the outer
+      // "turn crashed" catch below (no turn was ever created on this path —
+      // same reasoning as the queueFollowUp catch a few lines down) and it
+      // must not silently drop the incoming message either. Degrade to the
+      // safe assumption instead: keep treating the session as busy (the
+      // `running` value already read above), log distinctly, and fall
+      // through to the queue branch so the message still gets queued and
+      // still gets acknowledged.
+      try {
+        await deps.store.reapStaleTurns(STALE_TURN_MS);
+        running = await deps.store.getRunningTurn(sessionId);
+      } catch (e) {
+        console.error(`agents: stale-turn reap failed for session ${sessionId} (treating session as busy):`, e);
+      }
     }
     if (running) {
       try {

@@ -206,14 +206,23 @@ Deno.test("getRunningTurn returns the sole running turn (or null)", async () => 
 // string-matched the SQL text ("started_at <") and never proved the
 // direction of the comparison — a reversed operator or a `NOW() + interval`
 // sign bug would have sailed through. reapStaleTurns now computes the
-// cutoff in JS and passes it as a plain `Date` parameter (SQL: a trivial
-// `started_at < $1`), which makes the direction provable two ways without a
-// live Postgres: (1) assert the cutoff VALUE the store computes is actually
-// in the past relative to call time, for a given olderThanMs (catches a
-// `Date.now() + olderThanMs` sign bug), and (2) drive the store with a fake
-// that evaluates the real `started_at < cutoff` predicate against seeded
-// rows straddling that exact cutoff value (catches a `>` vs `<` bug in the
-// predicate itself). Together they cover both ways this could be reversed.
+// cutoff in JS and passes it as a plain `Date` parameter, so the SQL is a
+// single trivial `started_at < $1` with no arithmetic left to hide a sign
+// bug. Two tests below cover both realistic ways this could still be
+// reversed without a live Postgres: (1) the cutoff VALUE the store computes
+// is actually in the past relative to call time, for a given olderThanMs
+// (catches a `Date.now() + olderThanMs` sign bug), and (2) the literal SQL
+// text says `started_at < $1`, not `>` (catches an operator flip — a
+// meaningful check now that it's one trivial operator, not arithmetic to
+// parse). Both mutations were verified live against this suite (see the
+// report).
+//
+// Fix round 2 (code review): a third test here previously claimed to prove
+// the predicate direction via a fake that evaluated `started_at < cutoff`
+// against seeded rows — but the fake hardcoded that same `<` and derived its
+// rows from whatever cutoff the store handed it, so it could never fail
+// under either mutation above (confirmed: it stayed green through both).
+// Deleted rather than left in place claiming coverage it didn't provide.
 
 Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error string", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1" }, { id: "t-2" }] }]);
@@ -245,37 +254,6 @@ Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reve
     cutoff.getTime() >= before - 2 * 60 * 60 * 1000 && cutoff.getTime() <= after - 2 * 60 * 60 * 1000,
     `cutoff ${cutoff.toISOString()} is not ~2h before call time — sign of the cutoff computation looks reversed`,
   );
-});
-
-Deno.test("reapStaleTurns' predicate direction: only a turn started BEFORE the cutoff is reaped, one started after is not", async () => {
-  // Drives reapStaleTurns end-to-end and evaluates `started_at < cutoff`
-  // against the REAL cutoff Date the store computed (not a value re-derived
-  // by the test), against two rows straddling it by 1s each. This is honest
-  // about what it can and can't prove without a live Postgres: it can't
-  // independently verify Postgres's own "<" operator (only a real DB could),
-  // but combined with the sibling test's literal assertion that the SQL text
-  // is `started_at < $1` (not `>` — a single trivial operator now that the
-  // cutoff arithmetic moved out of SQL and into the "computes a cutoff
-  // strictly in the past" test above), this closes both realistic ways the
-  // boundary could be reversed: a flipped operator in the SQL string, or a
-  // flipped sign in the JS cutoff computation.
-  let seenCutoff: Date | undefined;
-  const fn = (sql: string, params?: unknown[]) => {
-    if (sql.includes("UPDATE agents.turns")) {
-      const cutoff = params![0] as Date;
-      seenCutoff = cutoff;
-      const rows = [
-        { id: "older", started_at: new Date(cutoff.getTime() - 1000) }, // 1s before cutoff -> stale, must reap
-        { id: "newer", started_at: new Date(cutoff.getTime() + 1000) }, // 1s after cutoff -> live, must NOT reap
-      ].filter((t) => t.started_at.getTime() < cutoff.getTime());
-      return Promise.resolve({ rows: rows.map((r) => ({ id: r.id })) });
-    }
-    return Promise.resolve({ rows: [] });
-  };
-  const store = createStore(fn as never);
-  const n = await store.reapStaleTurns(2 * 60 * 60 * 1000);
-  assert(seenCutoff instanceof Date);
-  assertEquals(n, 1); // exactly the older-than-cutoff turn, never the newer one
 });
 
 // Task 4: the follow-up queue a busy session folds a new message into

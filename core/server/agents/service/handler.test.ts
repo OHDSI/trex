@@ -1054,6 +1054,72 @@ Deno.test("a stale (abandoned) running turn is reaped when a new message arrives
   await until(() => true); // yield a tick for the release to be observed
 });
 
+// Fix round 2 (code review): round 1's lazy-reap call sat OUTSIDE the queue
+// branch's try/catch — a transient reap failure (a real failure mode, since
+// this runs on every message that lands on a busy session, not a
+// hypothetical) would have escaped to the outer "turn crashed" catch and
+// silently dropped the incoming message (queueFollowUp never reached, no
+// queue row, no ack). It must instead degrade to the safe assumption: treat
+// the session as still busy and queue the message exactly as if reaping had
+// found nothing stale.
+Deno.test("a reap failure during the busy-check still queues and acknowledges the message (not dropped, not logged as a turn crash)", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const db = inMemoryDb();
+  const baseStore = createStore(db.query as never);
+  const brokenReapStore = {
+    ...baseStore,
+    reapStaleTurns: () => Promise.reject(new Error("reap query timed out")),
+  };
+  const agent = await loadAgent(TOY);
+  const handler = createHandler({
+    agent, store: brokenReapStore as never, plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: gatedModel,
+  });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "second" }),
+    }));
+    await until(() => db.followUps.some((f) => f.session_id === sid));
+  } finally {
+    console.error = origError;
+    unsub();
+    releaseGate();
+  }
+
+  assertEquals(db.turns.length, 1); // no second, concurrent turn
+  assertEquals(db.followUps, [{ session_id: sid, message: "second" }]); // still queued despite the reap failure
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
+  assertEquals((ack.data as { text: string }).text, "second");
+  assert(
+    logged.some((l) => l.includes("stale-turn reap failed") && l.includes("treating session as busy")),
+    `expected the distinct reap-failure log, got: ${JSON.stringify(logged)}`,
+  );
+  assert(!logged.some((l) => l.includes("turn crashed")), `"turn crashed" must not fire for a reap failure: ${JSON.stringify(logged)}`);
+});
+
 // Fix round 1 (code review): the queue-write path (busy session) must not
 // be misreported through the generic "turn crashed" log — no turn was ever
 // created on that path.
