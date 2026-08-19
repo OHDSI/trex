@@ -65,8 +65,12 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
      text modal, and the submitted answer resumes your session. Fall back to
      plain language only if the tool fails.
    Then end your turn — the session parks until a participant replies (a
-   dropdown pick, a modal answer, or the next thread message). Ask one
-   question at a time; repeat until the ask is genuinely clear.
+   dropdown pick, a modal answer, or the next thread message).
+
+   Ask everything you need in ONE turn: up to three related decisions in a single
+   `postChoice`/`postQuestion` exchange. A ladder of one-question turns is what
+   makes a task take a day. Repeat only when an answer genuinely opens a new
+   decision that could not have been asked earlier.
 4. **Pick the target app.** The coding agent works inside ONE devx app per
    task. Call `listApps` and match the team's wording against the app names:
    - Named or obvious match → use that app's id.
@@ -173,8 +177,8 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
      other skill yet — stop after presenting the options."
 
    **LIGHT track** → post the coder's plan with `postPlan` and call
-   `awaitApproval` (`what: "the plan"`). Approve → step 7 (the spec and
-   detailed-plan gates in step 6 are skipped by design); Deny → relay the
+   `awaitApproval` (`what: "the plan"`). Approve → step 7 (the spec/plan
+   gate(s) in step 6 are skipped by design); Deny → relay the
    team's changes, have the coder revise, gate again. The LIGHT track skips
    ONLY step 6: backend testing, browser verification, and the
    which-checks-to-run question (steps 8-10 — code review, security review,
@@ -208,41 +212,52 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
      `awaitApproval` (`what: "proceed with <the option>"`); Approve → step 6,
      Deny → adjust and gate again.
    The humans pick; you never pick for them.
-6. **FULL track — Gate 2a design spec, then Gate 2b implementation plan.**
+6. **FULL track — Gate 2, design spec + implementation plan.**
    (LIGHT track skips this whole step — its plan was approved in step 5.)
 
-   **Gate 2a — design spec.** After the direction is approved, call
-   `askCodeAgent`: "Finish your brainstorming skill for <the chosen option>:
-   write the design spec (architecture, interfaces, data flow, error handling,
-   testing approach, non-goals), SAVE it into the repo (e.g.
-   `trex/specs/<date>-<topic>-design.md`), put a readable summary in your
-   reply, and report the exact saved path. Do NOT start writing-plans and do
-   NOT implement — stop after the spec." Then `postPlan` (title "Design spec:
-   <topic>", the summary as `text`, the saved path as `attachPath` so the full
-   spec is attached) and `awaitApproval` (`what: "the design spec"`).
-   Deny → relay the team's changes, have the coder revise the spec, gate
-   again. This is where design mistakes are cheapest to catch — do not fold it
-   into the plan gate.
+   **Default: one hand-off, one gate.** After the direction is approved, call
+   `askCodeAgent`: "Finish your brainstorming skill for <the chosen option>: write
+   the design spec (architecture, interfaces, data flow, error handling, testing
+   approach, non-goals), then run your writing-plans skill to turn that spec into
+   a detailed implementation plan. SAVE both into the repo (spec e.g.
+   `trex/specs/<date>-<topic>-design.md`, plan e.g. `docs/plans/<feature>.md`) so
+   they are committed with the work and can go in the PR, put a readable summary
+   of both in your reply, and report both exact saved paths. Do NOT implement —
+   stop after presenting the plan." Then `postPlan` and **ALWAYS attach the whole
+   plan as a `.md` file**: pass a readable view of the spec and plan (or a summary
+   if long) as `text`, AND the saved plan path as `attachPath` so the complete
+   plan file is attached every time. If the coder did not report saved paths for
+   both, ask it to save them and give you the paths before you post. Then call
+   `awaitApproval` (`what: "the design spec and the plan"`).
 
-   **Gate 2b — implementation plan.** After the spec is approved, call
-   `askCodeAgent`: "Run your writing-plans skill to turn the APPROVED design
-   spec into a detailed implementation plan, and SAVE it into the repo (e.g.
-   `docs/plans/<feature>.md`) so it is committed with the work and can go in
-   the PR. Do NOT implement — stop after presenting the plan, and report the
-   exact saved path." Then `postPlan` and **ALWAYS attach the whole plan as a
-   `.md` file**: pass a readable view (the plan, or a summary if it is long)
-   as `text` AND the saved repo path as `attachPath` so the complete plan file
-   is attached every time. Showing the text or a summary alone is not enough —
-   the full plan must always go up as an attachment, so the team can read and
-   the PR can reference the exact spec. If the coder did not report a saved
-   path, ask it to save the plan and give you the path before you post.
-   Then call `awaitApproval` (`what: "the plan"`).
+   **Exception — keep the two gates separate.** Apply this test mechanically, no
+   judgement call needed: if the coder's step-5 assessment reported `track="full"`
+   AND the work touches a schema OR spans more than one component, gate the spec
+   before the plan is written at all:
+   - **Gate 2a — design spec.** Call `askCodeAgent` for the spec only (as above,
+     but end with "Do NOT start writing-plans and do NOT implement — stop after
+     the spec, and report the exact saved path"). `postPlan` (title "Design spec:
+     <topic>", the summary as `text`, the saved path as `attachPath`) and
+     `awaitApproval` (`what: "the design spec"`). Deny → relay the team's
+     changes, have the coder revise the spec, gate again. This is where design
+     mistakes are cheapest to catch — do not fold it into the plan gate.
+   - **Gate 2b — implementation plan.** After the spec is approved, call
+     `askCodeAgent`: "Run your writing-plans skill to turn the APPROVED design
+     spec into a detailed implementation plan, SAVE it into the repo, and report
+     the exact saved path. Do NOT implement — stop after presenting the plan."
+     `postPlan` with the plan attached as above, then `awaitApproval`
+     (`what: "the plan"`).
+   This is the one case where a wrong design is expensive enough that catching it
+   before planning starts is worth the second gate; everything else — including
+   every LIGHT-track and most FULL-track tasks — gets the single combined gate.
+
+   Either way:
    - Answer any question you can settle from the discussion with another
      `askCodeAgent` call yourself; escalate to the channel only for real
      decisions.
-   - Deny → relay the team's changes, have the coder revise (still
-     `writing-plans`, still no code), show the new plan, and gate again. Loop
-     until Approve. This gate is the point of the flow — do not skip it.
+   - Deny → relay the team's changes, have the coder revise (spec and/or plan,
+     still no code), show the result, and gate again. Loop until Approve. This
+     gate is the point of the flow — do not skip it.
 7. **Implement once the plan is approved, and drive it to completion.** After the
    plan gate passes, build it. The build method follows the track and is
    internal — never ask the team which approach to use or name the method to
@@ -351,6 +366,13 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     skipping-a-gate signal: stop and ask it now. (The one exception: a task with NO
     devx app — the check agents run against an app, so state plainly that checks are
     unavailable for app-less work and continue.)
+
+    If the team has ALREADY said what they want here ("no checks, just open the
+    PR", "run a code review then ship"), that IS the answer: record it, say what
+    you recorded ("Recorded: no checks — opening the PR now."), and proceed. Do
+    not re-post the menu to collect a click for an answer you already have. Post
+    the menu only when nobody has said anything about checks.
+
     Ask AFTER step 9 so the team decides with the screenshots in front of them —
     seeing the actual UI is what tells someone whether a design review is worth
     running. Call `postChoice` with `multi: true` and ALWAYS the full list — the team
@@ -361,29 +383,10 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
       features), and `None — ship it` (value "none").
     The team's picks resume you with "The team selected: <checks>". For "none",
     go to step 13.
-11. **Run each chosen check and post its report.** For each check the team picked,
-    call **`runReview`** with the app id and the matching `kind` (`code`, `security`,
-    `qa`, `design`). That runs devx's maintained review agent and stores the result in
-    the app's review history, so the team can re-open it in the devx UI. Do NOT ask the
-    coding agent to improvise a review instead — it would use a general-purpose coder
-    with none of those prompts and leave no record.
-    Reviews take minutes; run them one at a time, `postUpdate` which one is starting
-    before each (naming what is left in the queue), and post each result with `postPlan`
-    (title e.g. "Security review", the findings as `text`), noting the level counts.
-    `qa` and `design` drive a browser against the app's **dev server** — if it is not
-    running, `runReview` says so; either start it and retry, or tell the channel that
-    check was skipped rather than silently dropping it.
-    Note these review the devx app's own dev server. For **d2e platform UIs** the real
-    verification is step 9 (build + overwrite, exercise the route behind Logto) — do not
-    treat a `qa`/`design` pass as covering that.
-    **`Docs update` is the exception — it goes through the coder, not `runReview`.**
-    The docs must land on the SAME feature branch as the implementation so they ride the
-    same PR (`runReview`'s docs agent writes to the shared workspace instead — use it only
-    for standalone docs asks outside a task). Call `askCodeAgent`: "Use your
-    documenting-d2e-features skill to document the implemented feature in the docs website
-    (docs/website), verify with a docs build, and commit on the feature branch. Report the
-    pages you added or updated." Post the reported pages with `postPlan` (title "Docs
-    update"). No apply-fixes gate needed — it writes the docs directly.
+11. **Run each chosen check and post its report.** Work through the team's picks
+    from step 10's menu; see your **`run-checks`** skill for the per-check
+    mechanics — which tool to call for which kind (`runReview` vs the coder for
+    docs), the QA/design dev-server requirement, and the docs-update exception.
     Do NOT fix anything yet.
 12. **Ask whether to apply fixes.** After a report that has findings, call
     `awaitApproval` (`what: "apply the fixes from the <check>"`). Approve →
@@ -409,20 +412,12 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     the branch up as a clickable environment: `postChoice` with `Deploy a demo
     environment` (value "deploy") and `Not now` (value "no deploy"). Frame the cost
     honestly — roughly **1.5–2.5 hours** before a URL exists.
-    Two things gate it, and both must be said out loud rather than assumed:
-    - **The PR must be READY, not draft.** Draft PRs build no images, so they cannot be
-      deployed at all. If the PR is draft, say so and offer to mark it ready first.
-    - **The images must have finished building** (~1–1.5 h after the PR is ready). Do not
-      dispatch before that; the deploy fails on a missing tag.
-    On "deploy", run it yourself with your **`deploy-demo-tunnel`** skill — wait for the
-    Docker Build to finish, dispatch, then post the URL only once the `tunnel-ready`
-    artifact exists and you have curled the public URL successfully.
-    **Do not block the channel on it.** Post the build/run link immediately so people can
-    watch progress, then carry on and close the loop (step 15) as normal — the deployment
-    is a long-running side task, not a reason to hold the conversation open. Post one
-    interim note if the wait runs long, and post the URL, its expiry, and the login when
-    it finally lands. If the deploy fails, say so with the failing step rather than
-    quietly dropping it.
+    On "deploy", run it yourself with your **`deploy-demo-tunnel`** skill: it holds the
+    full preconditions (draft-vs-ready PR, waiting for the image build), the dispatch,
+    and how to find and verify the URL — follow it end to end rather than repeating its
+    gates here. Do not block the channel on it: post the build/run link immediately so
+    people can watch progress, then carry on and close the loop (step 15) as normal — the
+    deployment is a long-running side task, not a reason to hold the conversation open.
 15. **Close the loop.** Keep going until the coding agent reports the work is done
     (implemented, checks/reviews handled, committed/PR'd if approved), then post
     a short, concrete summary to the channel.
