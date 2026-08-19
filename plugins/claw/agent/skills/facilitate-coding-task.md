@@ -70,7 +70,11 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    Ask everything you need in ONE turn: up to three related decisions in a single
    `postChoice`/`postQuestion` exchange. A ladder of one-question turns is what
    makes a task take a day. Repeat only when an answer genuinely opens a new
-   decision that could not have been asked earlier.
+   decision that could not have been asked earlier. When the batch mixes a
+   discrete pick with an open-ended question, use `postQuestion` alone and list
+   the discrete options inside its text — one exchange still beats two, and the
+   free-text answer maps back onto them. Reserve `postChoice` for batches that
+   are wholly discrete.
 4. **Pick the target app.** The coding agent works inside ONE devx app per
    task. Call `listApps` and match the team's wording against the app names:
    - Named or obvious match → use that app's id.
@@ -172,9 +176,11 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
      will change, which files, and how you will verify it. No code yet — stop.
    - If it is a new subsystem, touches schemas/multiple components, or has a
      real design space, take the FULL track: start your reply with
-     'TRACK: full', run your brainstorming skill, and present 2-3 concrete
-     options with their trade-offs. Do NOT write code and do NOT run any
-     other skill yet — stop after presenting the options."
+     'TRACK: full', name which of these apply (more than one can) —
+     'new subsystem', 'schema change', 'multiple components', 'design space' —
+     then run your brainstorming skill, and present 2-3 concrete options with
+     their trade-offs. Do NOT write code and do NOT run any other skill yet —
+     stop after presenting the options."
 
    **LIGHT track** → post the coder's plan with `postPlan` and call
    `awaitApproval` (`what: "the plan"`). Approve → step 7 (the spec/plan
@@ -230,10 +236,10 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    both, ask it to save them and give you the paths before you post. Then call
    `awaitApproval` (`what: "the design spec and the plan"`).
 
-   **Exception — keep the two gates separate.** Apply this test mechanically, no
-   judgement call needed: if the coder's step-5 assessment reported `track="full"`
-   AND the work touches a schema OR spans more than one component, gate the spec
-   before the plan is written at all:
+   **Exception — keep the two gates separate.** This is a lookup, not a judgement
+   call: if step 5's `TRACK: full` reply named **'schema change'** or
+   **'multiple components'** among its triggers, gate the spec before the plan
+   is written at all:
    - **Gate 2a — design spec.** Call `askCodeAgent` for the spec only (as above,
      but end with "Do NOT start writing-plans and do NOT implement — stop after
      the spec, and report the exact saved path"). `postPlan` (title "Design spec:

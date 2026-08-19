@@ -33,11 +33,11 @@ None — and run the picked ones via `runReview`. A coding task that ends withou
 the checks question was closed wrong. (Only exception: no devx app on the task —
 the check agents need an app; say checks are unavailable and why.)
 
-    If the team has ALREADY said what they want here ("no checks, just open the
-    PR", "run a code review then ship"), that IS the answer: record it, say what
-    you recorded ("Recorded: no checks — opening the PR now."), and proceed. Do
-    not re-post the menu to collect a click for an answer you already have. Post
-    the menu only when nobody has said anything about checks.
+If the team has ALREADY said what they want here ("no checks, just open the
+PR", "run a code review then ship"), that IS the answer: record it, say what
+you recorded ("Recorded: no checks — opening the PR now."), and proceed. Do
+not re-post the menu to collect a click for an answer you already have. Post
+the menu only when nobody has said anything about checks.
 
 A second gate holds for the whole run: **the channel never waits in silence.**
 You cannot post while an `askCodeAgent` call is running, so every one of those
