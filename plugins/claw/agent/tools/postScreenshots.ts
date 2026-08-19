@@ -12,6 +12,8 @@ import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 interface Input { channelId: string; paths: string[]; caption?: string }
 
 export default defineTool({
+  // This tool's own execute() posts to the channel directly — see postUpdate.ts.
+  postsToChannel: true,
   description:
     "Post screenshot PNGs (that the coder captured with Playwright and saved in the app " +
     "workspace) to the Discord channel as inline image attachments, so the team sees the " +

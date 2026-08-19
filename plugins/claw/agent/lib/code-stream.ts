@@ -2,7 +2,7 @@
 // core's auth dir, copied next to the agent servicePath at worker creation), not
 // against the plugin source tree.
 //
-// claw drives the SAME coder the devx browser UI uses: the Claude Code sidecar,
+// claw drives the SAME coder the devx browser UI uses: the coder sidecar,
 // reached through the devx-api edge function's POST /chats/:id/stream. The eve
 // agents runtime cannot host that sidecar (its hook only yields a ModelSpec and
 // core owns the turn), so claw talks to the function mount directly instead.
@@ -64,7 +64,7 @@ export async function mintToken(userId: string): Promise<string> {
 }
 
 // Pin the coder user to the claude-code provider so the turn lands on
-// streamClaudeCodeChat (the Claude Code sidecar) rather than the API-key ai-sdk
+// streamClaudeCodeChat (the coder sidecar) rather than the API-key ai-sdk
 // loop. claude-code needs no api_key (noKeyProviders in index.ts). Done through
 // the settings API (with the minted token) rather than direct SQL so it stays
 // user-scoped and avoids assuming claw's sql role can write the devx schema.
@@ -129,15 +129,49 @@ async function ensureChat(
   return chat.id as string;
 }
 
+// The last non-empty prose line of the accumulated assistant text, stripped of
+// tool markers and trimmed to 140 chars — a short "still alive" summary for the
+// heartbeat. Falls back to "still working" before any prose has arrived (a long
+// build/test run produces tool markers but no text for minutes).
+export function summarizeActivity(accumulated: string): string {
+  const line = accumulated
+    .split("\n")
+    .map((l) => l.replace(/<!--tool:[^>]*-->/g, "").trim())
+    .filter((l) => l.length > 0)
+    .pop();
+  if (!line) return "still working";
+  return line.length > 140 ? line.slice(0, 140) : line;
+}
+
+// A Discord thread wants a sign of life every few minutes, not every 90s: 37 of
+// 263 real turns ended with nothing posted to the channel because claw cannot
+// post anything while blocked inside this hand-off. Do not shorten this or make
+// it configurable — the interval was chosen deliberately.
+const HEARTBEAT_MS = 300_000;
+
+// With per-session turn serialization and a raised channel step floor (200), a
+// hung upstream (the devx-api function, or the coder sidecar it drives) could
+// previously wedge the WHOLE session — not just this one turn — until the 2h
+// reaper eventually ran. A generous but bounded per-turn timeout closes that
+// off without needing every hang to wait for the reaper.
+const TURN_TIMEOUT_MS = 90 * 60_000;
+
 // Run one coder turn and return its reply text. The SSE carries the turn's whole
 // life (chunks, tool calls, subagents, questionnaires); we accumulate assistant
 // text and surface a questionnaire inline so claw can relay the coder's question
 // back to the channel. The turn is done when the server closes the stream.
-async function streamTurn(
+// onProgress, when supplied, is invoked once per HEARTBEAT_MS with a short note
+// derived from the latest accumulated text — driven by a timer started when the
+// stream opens, NOT from the chunk branch, so a long silent build or test run
+// (which produces no chunks for minutes) still reports in.
+// Exported for testing only (the timer/heartbeat wiring — see
+// code-stream.test.ts) — runCodeTurn is the only production caller.
+export async function streamTurn(
   token: string,
   chatId: string,
   message: string,
   attachments?: CodeTurnArgs["attachments"],
+  onProgress?: (note: string) => void,
 ): Promise<string> {
   const res = await fetch(`${apiBase()}/chats/${chatId}/stream`, {
     method: "POST",
@@ -155,12 +189,22 @@ async function streamTurn(
       remoteChannel: true,
       ...(attachments?.length ? { attachments } : {}),
     }),
+    // Bounded so a hung upstream cannot wedge this session forever — see
+    // TURN_TIMEOUT_MS above. Aborts the fetch/stream; the caller (askCore)
+    // sees this as an ordinary turn failure, same as any other stream error.
+    signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
   });
   if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status} ${res.ok ? "(no body)" : await res.text()}`);
 
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buf = "";
   let text = "";
+  // Timer-driven, not chunk-driven: a long build or test run produces no
+  // chunks for minutes, which is exactly the stretch the channel needs to
+  // hear about — see summarizeActivity's fallback for the "no prose yet" beat.
+  const beat = onProgress
+    ? setInterval(() => onProgress(summarizeActivity(text)), HEARTBEAT_MS)
+    : undefined;
   try {
     // deno-lint-ignore no-constant-condition
     while (true) {
@@ -174,7 +218,7 @@ async function streamTurn(
         if (!line.startsWith("data:")) continue;
         const json = line.slice(5).trim();
         if (!json) continue;
-        let ev: { type?: string; content?: string; questions?: unknown };
+        let ev: { type?: string; content?: string; error?: string; code?: string; raw?: string; questions?: unknown };
         try { ev = JSON.parse(json); } catch { continue; }
         if (ev.type === "chunk") {
           text += ev.content ?? "";
@@ -184,7 +228,10 @@ async function streamTurn(
           // reply, without double-counting the chunks we already accumulated.
           if (!text && typeof ev.content === "string") text = ev.content;
         } else if (ev.type === "error") {
-          throw new Error(`code turn error: ${ev.content ?? "unknown"}`);
+          // devx sends the message on `error` (never on `content`, which carries chunk
+          // text) plus a stable `code` and, for remoteChannel callers, the raw message.
+          const { describeCoderError } = await import("./code-error.ts");
+          throw new Error(describeCoderError(ev.code, ev.raw ?? ev.error));
         } else if (ev.type === "questionnaire" && Array.isArray(ev.questions)) {
           const qs = ev.questions
             .map((q: any, i: number) => `${i + 1}. ${q?.text ?? q?.question ?? q}`)
@@ -194,6 +241,9 @@ async function streamTurn(
       }
     }
   } finally {
+    // Cleared on every exit path — including the ev.error throw above — so
+    // the timer never outlives the stream it was measuring.
+    if (beat !== undefined) clearInterval(beat);
     try { await reader.cancel(); } catch { /* already closed */ }
   }
   return text.trim();
@@ -207,9 +257,14 @@ export interface CodeTurnArgs {
   // Channel attachments relayed verbatim (metadata only); the devx stream
   // handler downloads them into the coder's workspace before the turn.
   attachments?: Array<{ name: string; url: string; contentType?: string }>;
+  // Invoked once per HEARTBEAT_MS while the turn is streaming, with a short
+  // note derived from the latest activity — see streamTurn. Callers with no
+  // channel to post to should pass nothing rather than a no-op (a no-op
+  // still burns a timer for no reason).
+  onProgress?: (note: string) => void;
 }
 
-// One hand-off to the Claude Code coder. Opens the chat on first use, forces the
+// One hand-off to the coder. Opens the chat on first use, forces the
 // claude-code provider, streams the turn, and returns { chatId, replyText } — the
 // chatId is persisted by the caller to continue the same chat across Discord turns.
 // The turn's intent (brainstorm / plan / implement) is carried by the message the
@@ -220,6 +275,6 @@ export async function runCodeTurn(
   const token = await mintToken(args.userId);
   await ensureClaudeCodeProvider(token);
   const chatId = await ensureChat(token, args.appId, args.chatId);
-  const replyText = await streamTurn(token, chatId, args.message, args.attachments);
+  const replyText = await streamTurn(token, chatId, args.message, args.attachments, args.onProgress);
   return { chatId, replyText };
 }

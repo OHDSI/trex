@@ -15,10 +15,11 @@ import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
+import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
-// OAuth broker wiring (Task 7). index.ts builds this (a DEK-backed OAuthStore +
+// OAuth broker wiring. index.ts builds this (a DEK-backed OAuthStore +
 // the HMAC state secret) only when the worker has a root key; absent → oauth
 // connections are skipped and the /oauth routes 404. Combines OAuthProviderDeps
 // (threaded to the connection provider) with the routes' basePath.
@@ -33,21 +34,21 @@ interface Deps {
   agentName: string;
   basePath: string;
   model?: any;
-  // The worker's pg pool query fn, threaded through to hookCtx.sql (H1) —
+  // The worker's pg pool query fn, threaded through to hookCtx.sql —
   // index.ts passes the real pool query; tests inject a fake. Optional so
   // existing createHandler callers/tests that never configure a hook keep
   // working; a hook that actually calls ctx.sql without one configured
   // fails loudly at call time instead of silently no-oping.
   sql?: QueryFn;
   env?: EnvFn;
-  // Channel layer (task-4). Optional so existing createHandler callers/tests
+  // Channel layer. Optional so existing createHandler callers/tests
   // that never exercise channels keep working; when set, {basePath}/eve/v1/
   // <channelId>/* is dispatched to the channel layer (see the channel branch
   // below). channel routes are auth-exempt at the proxy — see plugin/agents.ts.
   channelStore?: ChannelStore;
-  // Task 6 delivery-registration hook, threaded straight through to the layer.
+  // Delivery-registration hook, threaded straight through to the layer.
   onSessionStarted?: (info: ChannelSessionStarted) => void;
-  // Task 7 OAuth broker. When set: the /eve/v1/oauth/<connector>/{start,callback}
+  // OAuth broker. When set: the /eve/v1/oauth/<connector>/{start,callback}
   // consent routes are mounted (auth-exempt at the proxy, gated by signed state)
   // AND the connection provider gets the broker so kind:"oauth" connections
   // resolve/park tokens. Unset → those routes 404 and oauth connections skip.
@@ -102,7 +103,7 @@ export function stepToEvent(row: { turn_id: string; kind: string; name: string |
     case "text":
       return { type: "message.completed", data: { turnId, message: p.text, finishReason: p.finishReason ?? "stop" } };
     case "custom":
-      // H3: ToolContext.emit's persisted step (runner.ts's toolEmit) — the
+      // ToolContext.emit's persisted step (runner.ts's toolEmit) — the
       // payload IS the data a tool passed to emit(name, data), not
       // necessarily an object, so read `row.payload` raw rather than the
       // `p` fallback above (which coerces null to `{}`, wrong for a tool
@@ -116,14 +117,14 @@ export function stepToEvent(row: { turn_id: string; kind: string; name: string |
   }
 }
 
-// Per-request context for the agent's resolveModel/buildInstructions hooks
-// (H1) — built fresh on every call, never cached. `userId` must come from
-// the caller's x-user-id-derived value only (never metadata, which is
-// client-supplied request payload) — see createHandler's createdBy.
+// Per-request context for the agent's resolveModel/buildInstructions hooks —
+// built fresh on every call, never cached. `userId` must come from the caller's
+// x-user-id-derived value only (never metadata, which is client-supplied
+// request payload) — see createHandler's createdBy.
 function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerToken: string | undefined, userId: string | undefined): HookCtx {
   return {
     sessionId, bearerToken, userId, metadata,
-    // OAuth broker principal (Task 7): a native session's end-user principal IS
+    // OAuth broker principal: a native session's end-user principal IS
     // its x-user-id. A channel session (no x-user-id) leaves this undefined, so
     // a user-scoped oauth connection fails closed (principal_required) until the
     // channel principal is threaded here — see the report's follow-up note.
@@ -133,12 +134,24 @@ function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerTo
   };
 }
 
-// The connection-provider opts (Task 5/7) for a turn: the OAuth broker deps
+// The connection-provider opts for a turn: the OAuth broker deps
 // when configured, so kind:"oauth" connections resolve/park tokens. Built fresh
 // per call; undefined when no broker is wired (oauth connections then skip).
 function connectionOptsFor(deps: Deps) {
   return deps.oauth ? { oauth: deps.oauth } : undefined;
 }
+
+// Matches the brief's original reapStaleTurns(2 * 60 * 60 * 1000) —
+// re-used here as the lazy-reap cutoff (see startTurn) since no periodic
+// scheduler exists to call it on a timer (checked service/index.ts: no
+// setInterval/cron/periodic hook of any kind — see the report).
+const STALE_TURN_MS = 2 * 60 * 60 * 1000;
+
+// A turn's `message` column (and the follow-up queue) both want a plain
+// string; non-string messages (only possible on the native /eve/v1/session
+// routes, which accept arbitrary JSON) are stringified the same way
+// runner.ts's own userContent conversion does.
+const asText = (m: unknown): string => typeof m === "string" ? m : JSON.stringify(m);
 
 function startTurn(
   deps: Deps,
@@ -152,8 +165,154 @@ function startTurn(
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
+    // "One turn at a time per session". 43 of 263 real turns (16%) started
+    // while the previous turn on the same session was still running — in one
+    // case two turns drove the same coding-agent chat 22s apart with
+    // contradictory instructions, and the coder acted on the wrong one. A
+    // message that arrives while a turn is still running is queued instead of
+    // started as a second, concurrent turn; startTurn is the single choke point
+    // every caller (channel adapters via layer.ts's send(), and native
+    // /eve/v1/session[/:id]) goes through, so this check covers all of them.
+    //
+    // Not airtight: the window between this getRunningTurn read and the
+    // addTurn write below is check-then-act, not a DB-level lock, and it is
+    // NOT millisecond-scale — takeFollowUps and historyForModel are each an
+    // additional awaited round trip in between, so the window spans multiple
+    // network round trips, not one. A webhook redelivery or a genuine
+    // double-submit landing in that window can still both pass the check. A
+    // DB-level uniqueness guard (e.g. a partial unique index on
+    // agents.turns(session_id) WHERE status = 'running') would close this
+    // fully but is out of scope for this round — kept as check-then-act on
+    // purpose (see the report).
+    let running = await deps.store.getRunningTurn(sessionId);
+    if (running) {
+      // Lazy reaping, not a scheduler — this repo has none to invent into.
+      // Serialization means a turn stuck `running` forever (a worker
+      // crash/redeploy mid-turn — the same 21-turn defect reapStaleTurns
+      // exists for) now wedges every LATER message on that session too, not
+      // just races one. Rather than adding a scheduler, reap on the way in:
+      // if the running turn is actually stale, this marks it failed and
+      // clears it, so the message below proceeds as a normal turn instead of
+      // being queued behind a zombie forever. A genuinely live turn is
+      // untouched (the cutoff only matches turns older than it) and falls
+      // through to the queue exactly as before.
+      //
+      // This runs on EVERY message that lands on a busy session, so a
+      // transient reap/re-read failure here is a real failure mode, not
+      // hypothetical. It must not escape to the outer
+      // "turn crashed" catch below (no turn was ever created on this path —
+      // same reasoning as the queueFollowUp catch a few lines down) and it
+      // must not silently drop the incoming message either. Degrade to the
+      // safe assumption instead: keep treating the session as busy (the
+      // `running` value already read above), log distinctly, and fall
+      // through to the queue branch so the message still gets queued and
+      // still gets acknowledged.
+      try {
+        await deps.store.reapStaleTurns(sessionId, STALE_TURN_MS);
+        running = await deps.store.getRunningTurn(sessionId);
+      } catch (e) {
+        console.error(`agents: stale-turn reap failed for session ${sessionId} (treating session as busy):`, e);
+      }
+    }
+    if (running) {
+      // A pending approval gate keeps its turn `status='running'` for the whole
+      // approval poll (up to 30 minutes). A QUALIFIED reply to that gate — e.g.
+      // "yes but first explain why the chunk count is wrong" — is not a bare
+      // yes/no, so matchGateText correctly returns null (see gate-text.ts) and
+      // a pre-checking caller (discord.ts's tryResolveGate) falls through to
+      // here with the gate STILL pending. Queueing that reply behind the very
+      // gate it answers stalls the thread for the rest of the poll, with
+      // neither side able to move — the human is waiting on the queued reply to
+      // be seen, and the running turn is waiting on a click that will never
+      // come because the human already replied in words. Deny the pending gate
+      // so the parked awaitApproval returns immediately and the coder revises;
+      // the reply queued just below rides the very next turn as that revision's
+      // driving instruction, matching the skill's existing "Deny -> relay the
+      // team's changes, have the coder revise, gate again" semantics
+      // (facilitate-coding-task.md).
+      //
+      // Deliberately narrow: only a gate the incoming text does NOT already
+      // match is denied here. A caller that never pre-checks the gate (only
+      // discord.ts does today) can still land here with matching text (e.g.
+      // a bare "approve" on a channel with no pre-check) — that text is left
+      // for the existing queue/fold path exactly as before; this fix does
+      // not add gate resolution for callers that opted out of it.
+      //
+      // asText(message) here is the message the channel adapter actually
+      // composed — for Discord (the only
+      // adapter that reaches this path) that's always a `<discord_context>`
+      // block plus the human's words (adapters/discord.ts's sendToThread),
+      // so matchGateText(asText(message), ...) is essentially ALWAYS null —
+      // decision or not. Denying on that alone turned any thread chatter
+      // ("fyi @alice is out today", a stray emoji) into an auto-deny.
+      // looksLikeGateResponse (gate-text.ts) strips the composed wrapper and
+      // asks the narrower question: do the human's actual words look like
+      // they're answering the gate at all? Only deny when BOTH hold: the
+      // composed text isn't a clean resolution (matchGateText -> null) AND
+      // the underlying words plausibly are about the gate.
+      let deniedPendingGate = false;
+      try {
+        const pending = await deps.store.getSinglePendingApproval(sessionId);
+        if (
+          pending && matchGateText(asText(message), pending.options) === null &&
+          looksLikeGateResponse(asText(message), pending.options)
+        ) {
+          const resolved = await resolveApprovalDecision(
+            deps.store,
+            sessionId,
+            { requestId: pending.requestId, decision: "deny" },
+            { plugin: deps.plugin, agentName: deps.agentName, userId },
+          );
+          deniedPendingGate = resolved.ok;
+        }
+      } catch (e) {
+        // Never let a pending-gate check failure escape to the outer "turn
+        // crashed" catch (no turn was created/touched on this path) or block
+        // the queue write below — degrade to "queue without resolving",
+        // same posture as the reap-failure branch above.
+        console.error(`agents: pending-gate check failed for session ${sessionId} (queueing without resolving):`, e);
+      }
+      try {
+        await deps.store.queueFollowUp(sessionId, asText(message));
+        // Queued messages previously vanished with no acknowledgement until
+        // the next turn happened to fold them in. message.queued is a
+        // turn-agnostic trex extension to the event
+        // vocabulary (same pattern as session.waiting/session.failed in
+        // events.ts — live-only, not persisted/replayed) so it reaches
+        // whichever channel delivery subscription is already live for this
+        // session's running turn (delivery.ts passes through any event with
+        // no turnId to every active subscriber). The Discord adapter turns
+        // it into a one-line reply (see discord.ts's builtinEvents) rather
+        // than a message reaction, since the original Discord message id
+        // isn't threaded through session state to react to. `deniedPendingGate`
+        // lets that ack say what actually happened instead of always
+        // implying the ball is still in the running turn's court.
+        publish(sessionId, { type: "message.queued", data: { text: asText(message), deniedPendingGate } });
+      } catch (e) {
+        // Distinct from the "turn crashed" catch below: no turn was ever
+        // created on this path, so that wording would misdescribe a queue
+        // write failure as a turn failure.
+        console.error(`agents: follow-up queue write failed for session ${sessionId} (message dropped):`, e);
+      }
+      return;
+    }
+
+    // Fold in anything queued while an earlier turn on this session was
+    // running (see above) — it rides along with this turn's message instead
+    // of racing it as a separate turn. Ordinary case (nothing queued) is a
+    // no-op DB round trip that leaves `message` untouched.
+    //
+    // `queued` items arrived and were queued BEFORE this call's `message`
+    // (they were queued behind a
+    // turn that has since finished or failed; `message` is what just
+    // triggered THIS startTurn call, chronologically after all of them) —
+    // store.ts's takeFollowUps docstring promises "in the order they
+    // arrived", so they must lead, not trail.
+    const queued = await deps.store.takeFollowUps(sessionId);
+    const turnMessage = queued.length > 0 ? [...queued, asText(message)].join("\n\n") : message;
+
     const history = await historyForModel(deps.store, sessionId);
-    const turn = await deps.store.addTurn(sessionId, message, metadata);
+    const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
     // Surface the freshly-created turn id to the caller (the channel layer uses
     // it to scope its background delivery to THIS turn) BEFORE publishing any
     // event, so a subscriber registered here can't miss the turn's events.
@@ -170,13 +329,26 @@ function startTurn(
     const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
     try {
       await runTurn({
-        agent: deps.agent, sessionId, turnId: turn.id, history, message, metadata,
+        agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
         store: deps.store, emit: (e) => publish(sessionId, e),
         model: deps.model, bearerToken, userId, hookCtx,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
       });
       await deps.store.finishTurn(turn.id, "completed");
+      // A follow-up may have been queued WHILE this turn ran (the
+      // getRunningTurn check above only sees turns that existed before THIS
+      // one started). Drain and run it immediately as the next turn — rather
+      // than publishing session.waiting and waiting for some future message
+      // to arrive and pick it up — so an instruction the user already sent
+      // during the busy window is never silently stranded in the queue.
+      // Reuses onTurnCreated so a channel's delivery still gets registered
+      // for this follow-up turn.
+      const followUps = await deps.store.takeFollowUps(sessionId);
+      if (followUps.length > 0) {
+        startTurn(deps, sessionId, followUps.join("\n\n"), metadata, bearerToken, userId, onTurnCreated);
+        return;
+      }
       // eve's client (t.send()/MessageResponse.result()) ends its per-turn
       // read on session.waiting/session.completed/session.failed, not
       // turn.completed — see events.ts. We have no multi-turn parking state,
@@ -347,14 +519,13 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!session) return json({ error: "session not found" }, 404);
       const body = await req.json().catch(() => ({}));
       if (Array.isArray(body.inputResponses)) {
-        // Session-ownership check (ride-along, task-h5-brief.md): a session
-        // with a known owner (created_by set from x-user-id at creation)
-        // only lets that same owner resolve its pending approvals — without
-        // this, any authenticated caller who learns (sessionId, requestId)
-        // could resolve someone else's approval and, with sticky
-        // always/never, accrue a durable consent on their behalf. Anonymous
-        // sessions (created_by NULL) keep the pre-existing behavior: anyone
-        // who has the sessionId can resolve. Checked once for the whole
+        // Session-ownership check: a session with a known owner (created_by set
+        // from x-user-id at creation) only lets that same owner resolve its
+        // pending approvals — without this, any authenticated caller who learns
+        // (sessionId, requestId) could resolve someone else's approval and,
+        // with sticky always/never, accrue a durable consent on their behalf.
+        // Anonymous sessions (created_by NULL) keep the pre-existing behavior:
+        // anyone who has the sessionId can resolve. Checked once for the whole
         // batch, before any request in it is touched.
         if (session.created_by != null && session.created_by !== createdBy) {
           return json({ error: "approval can only be resolved by the session owner" }, 403);
@@ -481,7 +652,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!Array.isArray(body.messages) || body.messages.length === 0) return json({ error: "messages[] required" }, 400);
       const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
       const turn = await store.addTurn(sessionId, body.messages.at(-1), body.metadata);
-      // Same hooks as the session path (H1): built fresh per request, never
+      // Same hooks as the session path: built fresh per request, never
       // cached — resolveModelForTurn/resolveInstructions apply
       // config.resolveModel/buildInstructions when configured.
       const hookCtx = buildHookCtx(deps, sessionId, body.metadata, bearerToken, createdBy);
@@ -492,7 +663,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // passing the bare Promise as streamText's `messages`; awaiting it is
       // the only change, no effect on the endpoint contract.
       const modelMessages = await convertToModelMessages(body.messages);
-      // H3: /chat's emit channel — writes a `data-${name}` UIMessage part
+      // /chat's emit channel — writes a `data-${name}` UIMessage part
       // interleaved into the SAME stream useChat consumes, AI SDK v6's
       // documented convention for custom data parts. Unlike the session
       // path (runner.ts's toolEmit), this is stream-only: no agents.steps
@@ -504,48 +675,46 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       //
       // Late-bound writer indirection: tools are built HERE, in the setup
       // phase, so a setup-time throw (a throwing filterTools hook, a broken
-      // tool build) still rejects this route with an HTTP error exactly as
-      // it did pre-H3 — moving buildSdkTools inside the stream's execute()
-      // would demote those to a 200 + in-stream SSE error frame. But the
-      // writer that toolEmit needs to write to only exists inside execute()
+      // tool build) still rejects this route with an HTTP error exactly as it
+      // did before this change — moving buildSdkTools inside the stream's
+      // execute() would demote those to a 200 + in-stream SSE error frame. But
+      // the writer that toolEmit needs to write to only exists inside execute()
       // — so toolEmit targets this rebindable slot instead, and execute()
       // points it at the real writer before any tool can run. An emit fired
-      // before the
-      // stream opens is dropped silently — same fire-and-forget posture as
-      // the rest of ToolContext.emit.
+      // before the stream opens is dropped silently — same fire-and-forget
+      // posture as the rest of ToolContext.emit.
       let writeData: ((part: { type: `data-${string}`; data: unknown }) => void) | undefined;
       const toolEmit = (name: string, data: unknown) => {
         writeData?.({ type: `data-${name}`, data });
       };
-      // Shared tool builder (same as the session runner). No emit/turnId
-      // here for the approval AgentEvent channel, so needsApproval tools
-      // answer with an "use the session API" error instead of hanging a
-      // stateless request. H2: async (dynamic-tools.ts provider); hookCtx
-      // is the same one just used for
-      // resolveModelForTurn/resolveInstructions above.
+      // Shared tool builder (same as the session runner). No emit/turnId here
+      // for the approval AgentEvent channel, so needsApproval tools answer with
+      // an "use the session API" error instead of hanging a stateless request.
+      // Async (dynamic-tools.ts provider); hookCtx is the same one just used
+      // for resolveModelForTurn/resolveInstructions above.
       const tools = await buildSdkTools({
         agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
       });
-      // H3: switched from the bare `result.toUIMessageStreamResponse()` to
-      // createUIMessageStream + writer.merge so ToolContext.emit has
-      // somewhere to write on this path — a plain streamText UIMessage
-      // stream has no way to interleave extra parts into itself; wrapping it
-      // in a writer-driven stream does (confirmed against the installed
-      // ai@6.0.219 package: `createUIMessageStream`/`createUIMessageStreamResponse`
-      // and `UIMessageStreamWriter.write`/`.merge` — see task-h3-report.md).
-      // streamText stays inside execute() (it IS the streaming phase); only
-      // the setup calls above run before the stream so their failures keep
-      // pre-H3 HTTP-error semantics.
+      // Switched from the bare `result.toUIMessageStreamResponse()` to
+      // createUIMessageStream + writer.merge so ToolContext.emit has somewhere
+      // to write on this path — a plain streamText UIMessage stream has no way
+      // to interleave extra parts into itself; wrapping it in a writer-driven
+      // stream does (confirmed against the installed ai@6.0.219 package:
+      // `createUIMessageStream`/`createUIMessageStreamResponse` and
+      // `UIMessageStreamWriter.write`/`.merge`). streamText stays inside
+      // execute() (it IS the streaming phase); only the setup calls above run
+      // before the stream so their failures keep the same HTTP-error semantics
+      // as before.
       const uiStream = createUIMessageStream({
         execute: ({ writer }) => {
           writeData = (p) => writer.write(p);
           const result = streamText({
             model,
-            // Task 15 3rd site: same system cache-point wrap as
-            // runner.ts/toolset.ts (see withSystemCachePoint in model.ts) —
-            // bedrock cachePoint / anthropic cacheControl, no-op elsewhere.
+            // Same system cache-point wrap as runner.ts/toolset.ts (see
+            // withSystemCachePoint in model.ts) — bedrock cachePoint /
+            // anthropic cacheControl, no-op elsewhere.
             system: withSystemCachePoint(model, system),
             messages: modelMessages,
             tools,
@@ -575,7 +744,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       return createUIMessageStreamResponse({ stream: uiStream });
     }
 
-    // OAuth consent routes (task-7): {basePath}/eve/v1/oauth/<connector>/{start,
+    // OAuth consent routes: {basePath}/eve/v1/oauth/<connector>/{start,
     // callback}. EXEMPT from proxy auth (channelAuthExemptPattern excludes only
     // session|health|info|eve, so `oauth` falls through to the exemption) — a
     // provider's browser redirect carries no trex JWT; the signed `state` is the
@@ -597,7 +766,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       return kind === "start" ? handleOAuthStart(req, routeDeps) : handleOAuthCallback(req, routeDeps);
     }
 
-    // Channel branch (task-4): {basePath}/eve/v1/{channelId}{routePath}, where
+    // Channel branch: {basePath}/eve/v1/{channelId}{routePath}, where
     // channelId is one of the agent's loaded channels (never `session`/`health`/
     // `info`, which the explicit routes above already handled). Served WITHOUT
     // the x-user-id/JWT the session/chat routes rely on: the proxy exempts these

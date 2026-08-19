@@ -1,7 +1,7 @@
-// The channel layer (spec §6 / task-4): dispatches an inbound HTTP request to
-// the matching channel's route on an agent, builds the per-request
-// ChannelRouteArgs the route handler uses, and turns a route's send() into a
-// resolved session + a started turn.
+// The channel layer (spec §6): dispatches an inbound HTTP request to the
+// matching channel's route on an agent, builds the per-request ChannelRouteArgs
+// the route handler uses, and turns a route's send() into a resolved session +
+// a started turn.
 //
 // TRUST BOUNDARY — channel routes are served WITHOUT the trex JWT / x-user-id
 // that the session/chat routes require. The proxy (plugin/agents.ts) exempts
@@ -20,13 +20,13 @@ import { namespacedToken } from "./continuation.ts";
 import { ndjsonEncode } from "../service/stream.ts";
 import { stepToEvent } from "../service/handler.ts";
 import { type ApprovalDecision, normalizeApprovalDecisions, resolveApprovalDecision } from "../service/approvals.ts";
+import { matchGateText } from "./gate-text.ts";
 import type { AgentEvent } from "../service/events.ts";
 import type { ChannelDef } from "./types.ts";
 import { registerDelivery as defaultRegisterDelivery } from "./delivery.ts";
 
-// Background-delivery executor (Task 5). The Task-0 spike verified
-// EdgeRuntime.waitUntil keeps a background fetch alive past the HTTP response
-// (specs/008-agents-channels/spike-channels.md); when the global is absent
+// Background-delivery executor. A spike verified EdgeRuntime.waitUntil keeps a
+// background fetch alive past the HTTP response; when the global is absent
 // (unit tests, non-edge hosts) fall back to a detached promise so delivery
 // still runs — it just isn't guaranteed against isolate reclamation.
 function edgeWaitUntil(p: Promise<unknown>): void {
@@ -36,9 +36,9 @@ function edgeWaitUntil(p: Promise<unknown>): void {
   else void Promise.resolve(p).catch((e) => console.error("agents: channel delivery task failed:", e));
 }
 
-// Fired right after a send() starts a turn so the delivery layer (Task 6) can
-// register where the agent's reply should be routed. A no-op for Task 4 — the
-// interface is kept stable so delivery can plug in without touching send().
+// Fired right after a send() starts a turn so the delivery layer can register
+// where the agent's reply should be routed. Currently a no-op — the interface
+// is kept stable so delivery can plug in without touching send().
 export interface ChannelSessionStarted {
   channelId: string;
   sessionId: string;
@@ -69,9 +69,9 @@ export interface ChannelLayerDeps {
   subscribe: (sessionId: string, fn: (e: AgentEvent) => void) => () => void;
   env?: (k: string) => string | undefined;
   onSessionStarted?: (info: ChannelSessionStarted) => void;
-  // Task 5 — server-initiated outbound delivery. All three are injectable so a
-  // test can drive delivery without EdgeRuntime; production leaves them unset
-  // and the defaults below (delivery.ts's registerDelivery + EdgeRuntime.waitUntil)
+  // Server-initiated outbound delivery. All three are injectable so a test can
+  // drive delivery without EdgeRuntime; production leaves them unset and the
+  // defaults below (delivery.ts's registerDelivery + EdgeRuntime.waitUntil)
   // apply. When a started channel turn's channel declares `events` handlers,
   // send() registers them as a background subscriber on the session stream.
   registerDelivery?: typeof defaultRegisterDelivery;
@@ -205,13 +205,13 @@ function buildArgs(
       title: opts.title,
     };
 
-    // Server-initiated delivery (Task 5, turn-scoped in Task 19): if this
-    // channel declares `events` handlers, subscribe them to the session's live
-    // stream so the adapter posts the agent's reply back to the platform AFTER
-    // this response returns. Registration is deferred to onTurnCreated so the
-    // subscription is scoped to THIS turn's id — two overlapping turns on one
-    // session no longer cross-cancel each other's delivery. No-op for channels
-    // without events (e.g. the toy webhook).
+    // Server-initiated delivery, turn-scoped: if this channel declares `events`
+    // handlers, subscribe them to the session's live stream so the adapter
+    // posts the agent's reply back to the platform AFTER this response returns.
+    // Registration is deferred to onTurnCreated so the subscription is scoped
+    // to THIS turn's id — two overlapping turns on one session no longer
+    // cross-cancel each other's delivery. No-op for channels without events
+    // (e.g. the toy webhook).
     const registerForTurn = (turnId: string) => {
       if (!channel?.events) return;
       const waitUntil = deps.waitUntil ?? edgeWaitUntil;
@@ -350,14 +350,15 @@ function buildArgs(
       });
     },
 
-    // Channel HITL resume (Task 17/18): apply an approval decision to a parked
-    // session WITHOUT driving a turn (the session's still-alive poll loop
-    // consumes it). Two addressing modes, chosen by the input, both scoped to
-    // THIS channel so a callback can never resolve another channel's approval.
-    // The DB write is delegated to the SAME resolver the native routes use.
-    // Channel sessions carry no trex user, so sticky "always"/"never" (which
-    // needs one) is rejected by the resolver; approve/deny work. Never throws —
-    // an unresolvable input is a logged `{ok:false}` (adapters call it best-effort).
+    // Channel HITL resume: apply an approval decision to a parked session
+    // WITHOUT driving a turn (the session's still-alive poll loop consumes it).
+    // Two addressing modes, chosen by the input, both scoped to THIS channel so
+    // a callback can never resolve another channel's approval. The DB write is
+    // delegated to the SAME resolver the native routes use. Channel sessions
+    // carry no trex user, so sticky "always"/"never" (which needs one) is
+    // rejected by the resolver; approve/deny work. Never throws — an
+    // unresolvable input is a logged `{ok:false}` (adapters call it
+    // best-effort).
     async resume(continuationToken, input) {
       const decisions = normalizeApprovalDecisions(input);
       const consent = { plugin: deps.plugin, agentName: deps.agentName, userId: undefined };
@@ -402,17 +403,42 @@ function buildArgs(
       const token = namespacedToken(channelId, continuationToken);
       const sessionId = await deps.channelStore.getSessionByToken(channelId, token);
       if (!sessionId) {
-        console.error(`agents: channel resume found no session for token '${token}'`);
+        // discord.ts's tryResolveGate calls resume() on EVERY thread message
+        // (not just ones known to be answering a gate), so "no session for
+        // token" is the routine case for an ordinary thread with no gate
+        // pending — not an error worth paging on. Demoted from console.error to
+        // console.warn.
+        console.warn(`agents: channel resume found no session for token '${token}'`);
         return { ok: false, error: "no session for token" };
       }
-      const requestId = await deps.store.getSinglePendingApproval(sessionId);
-      if (!requestId) {
+      const pending = await deps.store.getSinglePendingApproval(sessionId);
+      if (!pending) {
         return { ok: false, error: "no single pending approval" };
+      }
+      // A text-platform reply carries no explicit decision — just the human's
+      // words. Only consulted when the caller didn't already supply an explicit
+      // decision/requestId (the MODE A / structured-decision callers above are
+      // untouched). A miss (the text isn't a decision for THIS gate's
+      // vocabulary) resolves to `{ok:false}`, same as any other MODE B miss —
+      // the adapter falls back to starting an ordinary turn, nothing is
+      // dropped.
+      let decision = decisions[0]?.decision as ApprovalDecision | undefined;
+      if (decision === undefined && typeof input.text === "string") {
+        const match = matchGateText(input.text, pending.options);
+        if (!match) return { ok: false, error: "text is not a decision for the pending gate" };
+        // An "option" match (a postChoice-style gate with an options field on
+        // its approval input) is not yet a verb agents.approvals can persist
+        // (its decision column is CHECK-constrained to approve/deny) — no
+        // authored tool populates `options` today, so this is unreachable in
+        // practice. resolveApprovalDecision's own verb validation rejects it
+        // cleanly ({ok:false}) rather than reaching the DB, same as any other
+        // invalid decision.
+        decision = (match.kind === "option" ? match.optionId : match.kind) as ApprovalDecision;
       }
       return await resolveApprovalDecision(
         deps.store,
         sessionId,
-        { requestId, decision: decisions[0]?.decision as ApprovalDecision | undefined },
+        { requestId: pending.requestId, decision },
         consent,
       );
     },

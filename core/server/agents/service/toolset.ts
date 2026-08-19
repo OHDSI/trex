@@ -23,7 +23,7 @@ export interface ToolBuildCtx {
   store?: AgentStore;
   turnId?: string;
   emit?: (e: AgentEvent) => void;
-  // H3: wired per-endpoint (session runner: publish `tool.event` + persist a
+  // Wired per-endpoint (session runner: publish `tool.event` + persist a
   // `custom` step, see runner.ts's toolEmit; /chat: write an interleaved
   // `data-${name}` UIMessage part, see handler.ts) and handed to every
   // authored tool's execute() as ToolContext.emit (see authoredTool below).
@@ -40,25 +40,24 @@ export interface ToolBuildCtx {
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
   depth?: number;
-  // H4 (sticky tool-consent decisions — task-h4-brief.md): the key
-  // authoredTool's needsApproval branch looks up store.getToolConsent
-  // under, alongside userId and the tool's own name. Set by handler.ts from
-  // its Deps {plugin, agentName} at every buildSdkTools call site (both the
-  // session-runner path, via RunTurnOpts's spread into this ctx, and
-  // /chat's direct buildSdkTools call). Optional so existing callers that
-  // never touch needsApproval tools (or don't care about stickiness) keep
-  // working — the sticky lookup is skipped whenever either is missing, same
-  // as when userId itself is missing (anonymous session).
+  // Sticky tool-consent decisions: the key authoredTool's needsApproval branch
+  // looks up store.getToolConsent under, alongside userId and the tool's own
+  // name. Set by handler.ts from its Deps {plugin, agentName} at every
+  // buildSdkTools call site (both the session-runner path, via RunTurnOpts's
+  // spread into this ctx, and /chat's direct buildSdkTools call). Optional so
+  // existing callers that never touch needsApproval tools (or don't care about
+  // stickiness) keep working — the sticky lookup is skipped whenever either is
+  // missing, same as when userId itself is missing (anonymous session).
   plugin?: string;
   agentName?: string;
-  // H2: threaded through so buildSdkTools can call agent.toolProvider and
+  // Threaded through so buildSdkTools can call agent.toolProvider and
   // agent.config.filterTools with the same per-request context
   // resolveModel/buildInstructions already get (see handler.ts's
   // buildHookCtx). Reusing HookCtx here — instead of adding a parallel
   // "dynamic tools ctx" shape — keeps one request-context type across every
   // agent.ts/dynamic-tools.ts hook.
   hookCtx?: HookCtx;
-  // Task 5: injectable connect/fetch for the connection provider's eager
+  // Injectable connect/fetch for the connection provider's eager
   // realization (step 2b) — tests pass a fake MCP connect so the realized
   // <conn>__<tool> surface (and thus connection_search's discovery output) is
   // deterministic without a live server. Undefined in production → the
@@ -76,7 +75,7 @@ export function buildSystemPrompt(agent: LoadedAgent, metadata?: unknown): strin
   return prompt;
 }
 
-// Per-request system prompt resolution (H1): buildSystemPrompt's result is
+// Per-request system prompt resolution: buildSystemPrompt's result is
 // the BASE handed to the buildInstructions hook (instructions + skills
 // section + <context> metadata block, per the brief); the hook's return
 // value is used verbatim when present. A configured hook with no hookCtx
@@ -105,11 +104,11 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
     execute: async (input: unknown) => {
       if (def.needsApproval) {
         const { store, turnId, emit, userId, plugin, agentName } = ctx;
-        // H4: a sticky decision short-circuits the one-shot flow entirely.
+        // A sticky decision short-circuits the one-shot flow entirely.
         // Only consulted when there's an identity to key it on — an
         // anonymous session (no userId, e.g. no x-user-id header) has no
         // consent to look up and always goes through the per-call approval
-        // flow below, same as before H4.
+        // flow below, same as when there is no sticky consent at all.
         let consent: "always" | "never" | null = null;
         if (store && userId && plugin && agentName) {
           consent = await store.getToolConsent(userId, plugin, agentName, name);
@@ -126,7 +125,10 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
             type: "input.requested",
             data: { turnId, requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName: name, input } }] },
           });
-          const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 300_000);
+          // 7 of 43 real gates were clicked after the 5-minute poll window had
+          // already given up (median human response was ~15 minutes). Raised to
+          // 30 minutes; ctx override (tests, other callers) is unchanged.
+          const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 1_800_000);
           let decision: string | null = null;
           while (Date.now() < deadline) {
             decision = await store.getApprovalDecision(requestId);
@@ -144,15 +146,15 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
         metadata: ctx.metadata,
         userId: ctx.userId,
         emit: ctx.toolEmit,
-        // H1 follow-up: expose the same sql fn resolveModel/buildInstructions
-        // get via HookCtx.sql, so an authored (static, agent.tools) tool can
-        // query Postgres without its own ambient pool. hookCtx is optional on
+        // Expose the same sql fn resolveModel/buildInstructions get via
+        // HookCtx.sql, so an authored (static, agent.tools) tool can query
+        // Postgres without its own ambient pool. hookCtx is optional on
         // ToolBuildCtx (some callers never wire one), so this is undefined
         // rather than a throw when absent — same "safe to omit" posture as
         // emit/userId above. Provider-sourced (dynamic-tools.ts/MCP) tools
-        // NEVER get sql — they're less trusted (arbitrary MCP servers), so
-        // raw Postgres access is withheld; emit/userId/bearerToken stay
-        // available to them since those are lower-privilege by design.
+        // NEVER get sql — they're less trusted (arbitrary MCP servers), so raw
+        // Postgres access is withheld; emit/userId/bearerToken stay available
+        // to them since those are lower-privilege by design.
         sql: isAuthored ? ctx.hookCtx?.sql : undefined,
       });
     },
@@ -188,13 +190,13 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
   const model = target.config.model
     ? resolveModel(target.config.model)
     : ctx.model ?? resolveModel(ctx.agent.config.model);
-  // H2: depth: 1 suppresses the target's own dynamic-tools.ts provider (a
+  // depth: 1 suppresses the target's own dynamic-tools.ts provider (a
   // top-level-only concern, same rationale as skill/agent built-ins being
   // top-level-only — see buildSdkTools) but NOT target.config.filterTools,
   // which still runs against depth-1's (smaller) tool set using the same
   // hookCtx carried in via the ...ctx spread.
   const tools = await buildSdkTools({ ...ctx, agent: target, depth: 1 });
-  // Task 15: same cache-point treatment (bedrock + anthropic) as runner.ts's
+  // Same cache-point treatment (bedrock + anthropic) as runner.ts's
   // primary turn loop, for consistency — a subagent's system+tools prefix is
   // just as stable/repeated (across its own steps) as the top-level turn's.
   const result = streamText({
@@ -248,7 +250,7 @@ function agentTool(ctx: ToolBuildCtx): any {
   });
 }
 
-// The connection_search built-in (Task 5): discovery over an agent's
+// The connection_search built-in: discovery over an agent's
 // connection-backed tools. Closes over `toolMeta` — the <conn>__<tool> names +
 // descriptions collected from the eager connection-provider merge (step 2b) —
 // plus each connection's own description, and ranks them against the query.
@@ -276,7 +278,7 @@ function connectionSearchTool(ctx: ToolBuildCtx, toolMeta: ConnectionToolMeta[])
 }
 
 // Synthetic ToolDefs for the two built-ins, used ONLY as the `def` argument
-// handed to filterTools (H2) — not the real SDK tool (skillTool/agentTool
+// handed to filterTools — not the real SDK tool (skillTool/agentTool
 // build those directly, closing over `ctx`, since their description text is
 // agent-specific). A filter deciding solely on `toolName` (the expected
 // common case, e.g. devx's plan mode dropping "skill"/"agent" outright)
@@ -285,8 +287,7 @@ const BUILTIN_SKILL_DEF: ToolDef = { description: "Load an on-demand skill by na
 const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection-backed tools by keyword (built-in).", inputSchema: { type: "object" } };
 
-// Builds the AI SDK tool set for one buildSdkTools call. Order (H2, spec
-// task-h2-brief.md):
+// Builds the AI SDK tool set for one buildSdkTools call. Order:
 //  1. authored tools/*.ts (static, from the loader)
 //  2. merge in agent.toolProvider's (dynamic-tools.ts) output — TOP LEVEL
 //     (depth 0) ONLY; a provider error (thrown/rejected) or a missing
@@ -317,7 +318,7 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   // static agent.tools) so authoredTool can withhold ToolContext.sql from
   // provider-sourced tools — see authoredTool's `isAuthored` parameter.
   const dynamicNames = new Set<string>();
-  // Task 5: names + descriptions of the realized connection tools, collected
+  // Names + descriptions of the realized connection tools, collected
   // from the eager provider merge below, handed to the connection_search
   // built-in for discovery ranking.
   const connToolMeta: ConnectionToolMeta[] = [];
@@ -341,8 +342,8 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
     }
   }
 
-  // Step 2b: connection-backed tools (connections/*.ts → MCP + static auth,
-  // Task 3). Same depth-0-only, log+continue posture as the dynamic provider
+  // Step 2b: connection-backed tools (connections/*.ts → MCP + static auth).
+  // Same depth-0-only, log+continue posture as the dynamic provider
   // above — a broken connection never fails the turn (the provider also
   // catches per connection). Authored/static and dynamic tools win on a name
   // collision (`<conn>__<tool>` is namespaced, so collisions are unlikely).
@@ -395,7 +396,7 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
     } else {
       console.log("agents: a tool named \"agent\" overrides the built-in agent tool");
     }
-    // connection_search (Task 5): only when the agent actually has connections;
+    // connection_search: only when the agent actually has connections;
     // an authored/dynamic tool of the same name (already in `out`) wins.
     if (Object.keys(agent.connections).length > 0 && !out.connection_search) {
       out.connection_search = connectionSearchTool(ctx, connToolMeta);

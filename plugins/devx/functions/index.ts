@@ -1,5 +1,6 @@
 // @ts-nocheck - Deno edge function, not compiled by tsc
 import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
+import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
@@ -867,7 +868,7 @@ Deno.serve(async (req: Request) => {
               [chatId, fullContent, settings.model, savedToolCalls ? JSON.stringify(savedToolCalls) : null],
             );
 
-            send({ type: "done", message: saveResult.rows[0] });
+            send({ type: "done", message: saveResult.rows[0], content: saveResult.rows[0]?.content ?? "" });
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             clearInterval(heartbeat);
             controller.close();
@@ -875,25 +876,15 @@ Deno.serve(async (req: Request) => {
             clearInterval(heartbeat);
             console.error("Stream error:", err);
             const msg = err instanceof Error ? err.message : String(err);
-            // Pass through actionable error messages from the agent, fall back to generic
-            const lower = msg.toLowerCase();
-            let safeMsg: string;
-            if (msg.startsWith("Invalid API key")
-              || msg.startsWith("API key does not")
-              || msg.startsWith("Model \"")
-              || msg.startsWith("Rate limit")
-              || msg.startsWith("API quota")) {
-              safeMsg = msg;
-            } else if (lower.includes("401") || lower.includes("authentication") || lower.includes("invalid") && lower.includes("key")) {
-              safeMsg = "Invalid API key. Please check your API key in Settings.";
-            } else if (lower.includes("404") || lower.includes("not_found") || lower.includes("not found")) {
-              safeMsg = "Model not found. Check the model name in Settings.";
-            } else if (lower.includes("429") || lower.includes("rate limit")) {
-              safeMsg = "Rate limit exceeded. Please wait and try again.";
-            } else {
-              safeMsg = "An error occurred while generating a response. Check the server logs for details.";
-            }
-            send({ type: "error", error: safeMsg });
+            const classified = classifyCoderError(msg);
+            send({
+              type: "error",
+              error: classified.safe,
+              code: classified.code,
+              // claw is an internal caller with no end-user reading it: give it the real
+              // message so the channel gets something actionable instead of "unknown".
+              ...(streamRemoteChannel ? { raw: msg } : {}),
+            });
             controller.close();
           }
         },
@@ -1192,7 +1183,11 @@ Deno.serve(async (req: Request) => {
               `UPDATE devx.subagent_runs SET status = 'failed', result = $1, completed_at = NOW() WHERE id = $2`,
               [err.message, runId],
             );
-            send({ type: "error", error: err.message });
+            const classifiedRun = classifyCoderError(err.message ?? String(err));
+            // Note: `remoteChannel` is not plumbed into this handler (subagent runs
+            // don't originate from claw), so we omit `raw` here rather than invent
+            // new plumbing — see error_codes.ts for the vocabulary this maps through.
+            send({ type: "error", error: classifiedRun.safe, code: classifiedRun.code });
           } finally {
             clearInterval(heartbeat);
             controller.close();

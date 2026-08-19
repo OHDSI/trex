@@ -24,21 +24,21 @@ interface RunTurnOpts {
   model?: any;
   bearerToken?: string;
   userId?: string;
-  // H4: threaded through to ToolBuildCtx via this function's `{ ...opts,
+  // Threaded through to ToolBuildCtx via this function's `{ ...opts,
   // model, toolEmit }` spread into buildSdkTools below — see toolset.ts's
   // ToolBuildCtx.plugin/agentName. Set by handler.ts's startTurn from its
   // Deps {plugin, agentName}.
   plugin?: string;
   agentName?: string;
   // Per-request context for the agent's resolveModel/buildInstructions
-  // hooks (H1). Optional so existing callers/tests that never touch hooks
+  // hooks. Optional so existing callers/tests that never touch hooks
   // (no agent.config.resolveModel/buildInstructions) keep working unchanged
   // — resolveModelForTurn/resolveInstructions only require it when a hook
   // is actually configured.
   hookCtx?: HookCtx;
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
-  // Task 5/7: connection-provider opts (OAuth broker deps). Threaded into
+  // Connection-provider opts (OAuth broker deps). Threaded into
   // buildSdkTools via the `{ ...opts }` spread below so kind:"oauth"
   // connections resolve/park tokens. Undefined when no broker is wired.
   connectionOpts?: ConnectionProviderOpts;
@@ -65,8 +65,15 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   const clientOnlyNames = new Set(
     Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).clientOnly).map(([n]) => n),
   );
+  // Agent-agnostic — runner.ts does not know any tool by name, so a tool
+  // declares whether ITS OWN execute() already speaks to the channel directly
+  // (outside this turn's emit/message.completed path), the same way it declares
+  // clientOnly. See ToolDef.postsToChannel (eve-shim/types.ts).
+  const postsToChannelNames = new Set(
+    Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).postsToChannel).map(([n]) => n),
+  );
 
-  // H3: ToolContext.emit's session-path channel. A tool's execute() calls
+  // ToolContext.emit's session-path channel. A tool's execute() calls
   // this synchronously (fire-and-forget — see eve-shim/types.ts's
   // ToolContext.emit); it publishes the same live `tool.event` a subscriber
   // to the session stream gets, and persists a `custom` step through the
@@ -91,11 +98,11 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     persist("custom", name, data);
   };
 
-  // H2: async now that a top-level dynamic-tools.ts provider may need to run
+  // Async now that a top-level dynamic-tools.ts provider may need to run
   // (opts already carries hookCtx — see RunTurnOpts — so ToolBuildCtx picks
   // it up via the spread).
   const tools = await buildSdkTools({ ...opts, model, toolEmit });
-  // Task 15: cache the stable TOOLS+SYSTEM prefix on bedrock and the direct
+  // Cache the stable TOOLS+SYSTEM prefix on bedrock and the direct
   // anthropic provider (no-op on every other provider — see
   // withSystemCachePoint in model.ts). `system` here is identical across
   // every step of this turn AND across turns for the same agent+metadata,
@@ -118,6 +125,32 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   let text = "";
   let finishReason = "unknown";
   let textPersisted = false;
+  // A clientOnly tool call ends the turn with no text by DESIGN — the caller
+  // executes it and continues in a follow-up turn, it's a hand-off, not
+  // silence. The no-silent-turn fallback below must not fire for that case (see
+  // the "does not emit message.completed for a clientOnly tool-call turn"
+  // test).
+  let sawClientOnlyCall = false;
+  // Whether the MOST RECENT tool call posted to the channel — not whether one
+  // EVER did. An earlier version made this sticky (true forever once any
+  // postsToChannel tool ran), but claw's skill makes postUpdate immediately
+  // before EVERY askCodeAgent call an invariant (facilitate-coding-task.md) —
+  // so claw's canonical turn shape is postUpdate("starting X") -> askCodeAgent
+  // (long) -> step cap, no closing text. A sticky flag suppressed the
+  // no-silent-turn fallback for that whole shape, leaving "starting X" as the
+  // channel's last word even though askCodeAgent (not postUpdate) was how the
+  // turn actually ended — exactly the 14%-silent-turn defect this fix was
+  // written to remove. Tracking only the LAST tool call means a channel post at
+  // the START of a turn no longer silences a fallback for whatever happened
+  // AFTER it; a channel post that genuinely is the last thing the turn did
+  // still suppresses it.
+  let lastToolWasChannelPost = false;
+  // Distinguishes "the turn genuinely did nothing" (safe to say
+  // "Nothing was changed") from "tools ran but nothing reached the channel
+  // and there's no closing text" (the actually-silent-after-doing-work case
+  // this task exists to fix — must NOT claim nothing changed, since it might
+  // have).
+  let sawAnyToolCall = false;
   // Persist the final assistant text exactly once. Called from the "finish"
   // case BEFORE the "finish" step so the stored seq order (text → finish)
   // matches the live emit order (message.completed → turn.completed) —
@@ -151,6 +184,11 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
         case "tool-call": {
           const p = part as any;
           const clientOnly = clientOnlyNames.has(p.toolName) || undefined;
+          sawAnyToolCall = true;
+          if (clientOnly) sawClientOnlyCall = true;
+          // Reassigned (not OR'd) on every tool call: only the LAST call's
+          // answer survives to the finish case — see the declaration above.
+          lastToolWasChannelPost = postsToChannelNames.has(p.toolName);
           emit({
             type: "actions.requested",
             data: { turnId, actions: [{ kind: "tool-call", callId: p.toolCallId, toolName: p.toolName, input: p.input, clientOnly }] },
@@ -170,7 +208,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
         case "finish": {
           const p = part as any;
           finishReason = p.finishReason ?? "stop";
-          // Task 15: surface cache token counts alongside the existing
+          // Surface cache token counts alongside the existing
           // inputTokens/outputTokens so the eval artifacts (and any other
           // usage consumer) can see cache reuse land. ai@6's
           // LanguageModelUsage nests these under inputTokenDetails
@@ -186,10 +224,41 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
             cacheWriteInputTokens: p.totalUsage?.inputTokenDetails?.cacheWriteTokens,
           };
           // eve's client only reads the final reply off message.completed
-          // (see events.ts) — emit it once, right before turn.completed,
-          // when this turn actually produced text (a pure tool-call step
-          // that stops here with no trailing text has nothing to report).
+          // (see events.ts) — emit it once, right before turn.completed, when
+          // this turn actually produced text. A pure tool-call turn with no
+          // trailing text falls to the clientOnly hand-off check, the
+          // channel-post check, or the no-silent-turn fallback below.
           if (text) {
+            emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
+          } else if (sawClientOnlyCall) {
+            // Unchanged: a clientOnly tool call ends the turn with no text by
+            // DESIGN (the caller executes it and continues in a follow-up
+            // turn) — see the "does not emit message.completed for a
+            // clientOnly tool-call turn" test.
+          } else if (lastToolWasChannelPost) {
+            // The LAST tool call this turn made was a postsToChannel tool
+            // (postUpdate/postChoice/postPlan/
+            // postQuestion/postScreenshots/postDevSummary) — the channel just
+            // heard from the agent as the turn's closing act, so emitting the
+            // fallback here would be pure noise at best, and at worst a false
+            // "Nothing was changed" after a turn that actually changed things.
+            // A channel post EARLIER in the turn (not the last call) falls
+            // through to the branches below instead — see the declaration of
+            // lastToolWasChannelPost for why that distinction matters.
+          } else if (!sawAnyToolCall) {
+            // No-silent-turn guarantee: the turn produced no text, called no
+            // tool at all, and posted nothing anywhere — it genuinely did
+            // nothing, so "Nothing was changed" is true.
+            text =
+              'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.';
+            emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
+          } else {
+            // Tools ran (so work may have happened) but none of
+            // them posted to the channel and the model never produced closing
+            // text — e.g. it hit the step cap mid tool-call loop. This is the
+            // genuinely-silent-after-doing-work case the task exists to fix.
+            // Deliberately makes NO claim about whether anything changed.
+            text = 'That step ended without a reply. Say "retry" and I\'ll run it again.';
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
           }
           emit({ type: "turn.completed", data: { turnId, usage, finishReason } });

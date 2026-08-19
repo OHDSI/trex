@@ -18,6 +18,8 @@ const BLURPLE = 0x5865F2;
 interface Input { channelId: string; title: string; text: string; attachPath?: string }
 
 export default defineTool({
+  // This tool's own execute() posts to the channel directly — see postUpdate.ts.
+  postsToChannel: true,
   description:
     "Display a plan, brainstorm, or set of options in the Discord channel as a rich embed " +
     "(titled, formatted) instead of plain text — use this at each planning gate so the team " +

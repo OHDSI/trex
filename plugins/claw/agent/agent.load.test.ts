@@ -15,6 +15,9 @@ Deno.test("claw agent exposes its facilitator tools", async () => {
   const names = Object.keys(a.tools);
   assertEquals(names.includes("askCodeAgent"), true);
   assertEquals(names.includes("fetchChannelHistory"), true);
+  // recordDecision must be loaded so claw can actually call it per
+  // facilitate-coding-task.md's instruction.
+  assertEquals(names.includes("recordDecision"), true);
   // the old plan/build/ship tools are gone
   assertEquals(names.includes("dispatchToCode"), false);
   assertEquals(names.includes("shipIt"), false);

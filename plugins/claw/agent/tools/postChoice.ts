@@ -3,6 +3,20 @@
 // `eve_choice` branch resumes claw's parked session with the chosen value as a
 // message (see channels/adapters/discord.ts). Use at Gate 1 when there are
 // multiple real options; for a plain go/no-go, use awaitApproval instead.
+//
+// Unlike awaitApproval, the pick is NOT
+// observable here. This tool's execute() only fires once, to POST the
+// dropdown — the resume on selection is driven entirely by
+// core/server/agents/channels/adapters/discord.ts's handleComponent
+// (CHOICE_CUSTOM_ID branch), which resumes the session via `args.send("The
+// team selected: <value>", ...)` outside plugins/claw and outside any
+// authored tool's execute. There is no callback into this file when a pick
+// happens, so postChoice itself cannot append to the decision ledger.
+// Deliberately not hooked from that adapter either — claw.orchestrations is
+// claw-owned and the adapter is shared channel infrastructure, so the
+// layering must not invert. Instead, claw records the pick itself, one
+// step later, by calling recordDecision.ts once the resumed "The team
+// selected: ..." message reaches it (see facilitate-coding-task.md).
 import { defineTool } from "eve/tools";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
@@ -15,6 +29,8 @@ interface OptionIn { label: string; value: string; description?: string }
 interface Input { channelId: string; title: string; intro?: string; options: OptionIn[]; multi?: boolean }
 
 export default defineTool({
+  // This tool's own execute() posts to the channel directly — see postUpdate.ts.
+  postsToChannel: true,
   description:
     "Present design options to the channel as a dropdown (select menu) the team picks from with " +
     "one click — use at Gate 1 when the coder offered multiple real options. `title`/`intro` " +

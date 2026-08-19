@@ -11,6 +11,10 @@ import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 interface Input { channelId: string; text: string }
 
 export default defineTool({
+  // This tool's own execute() posts to Discord directly (see below) — tells
+  // runner.ts's no-silent-turn fallback that the channel already heard from the
+  // agent this turn.
+  postsToChannel: true,
   description:
     "Post a short status line to the channel immediately, so the team sees what you are doing " +
     "while a long step runs. Your normal reply only lands when the turn ends (after a blocking " +

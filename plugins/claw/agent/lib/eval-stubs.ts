@@ -62,6 +62,9 @@ export const evalStubs = {
   // Canned coder reply keyed on the instruction so the gated flow stays coherent
   // (mockups -> screenshot paths, brainstorm -> options, writing-plans -> a plan,
   // a review -> findings, finish -> a PR link, otherwise -> implemented).
+  // `trailer: null` on every branch matches the shape askCore now returns in
+  // production — none of these canned replies carry a real <handoff .../>
+  // block, so there is nothing to parse.
   askCodeAgent(message: string) {
     const m = String(message || "").toLowerCase();
     // Before the brainstorm branch: a mockup hand-off also says "option"/"design".
@@ -71,6 +74,7 @@ export const evalStubs = {
           "Mocked both options and captured them:\n" +
           "- Sidebar layout (filters left, denser table) -> trex/screenshots/mockup-sidebar-layout.png\n" +
           "- Toolbar layout (filters on top, full-width table) -> trex/screenshots/mockup-toolbar-layout.png",
+        trailer: null,
       };
     }
     if (/brainstorm|option|design/.test(m)) {
@@ -78,6 +82,7 @@ export const evalStubs = {
         reply:
           "Two approaches:\n1. Server-side filter endpoint — fast on big data, more work.\n" +
           "2. Client-side virtualization — quick, struggles past ~50k rows.",
+        trailer: null,
       };
     }
     if (/writing-plans|detailed plan|\bspec\b/.test(m)) {
@@ -85,15 +90,16 @@ export const evalStubs = {
         reply:
           "## Plan\n1. Add GET /api/sales/filter (region, date range).\n" +
           "2. Wire the dashboard filter bar to it.\n3. Tests for the endpoint + a load check.",
+        trailer: null,
       };
     }
     if (/review|security|\bqa\b|\bchecks?\b/.test(m)) {
-      return { reply: "Code review: no blocking findings. One nit: extract the date parser. Tests pass." };
+      return { reply: "Code review: no blocking findings. One nit: extract the date parser. Tests pass.", trailer: null };
     }
     if (/finishing-a-development-branch|commit|pull request|\bpr\b/.test(m)) {
-      return { reply: "Committed on branch claw/eval and opened PR #42: https://example.test/pr/42" };
+      return { reply: "Committed on branch claw/eval and opened PR #42: https://example.test/pr/42", trailer: null };
     }
-    return { reply: "Implemented on the feature worktree. Build green, tests pass." };
+    return { reply: "Implemented on the feature worktree. Build green, tests pass.", trailer: null };
   },
   postUpdate() {
     return { posted: true, stub: true };

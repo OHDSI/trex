@@ -47,11 +47,17 @@ interface SendCall {
 
 interface ResumeCall {
   continuationToken: string;
-  input: { requestId?: string; decision?: string; inputResponses?: Array<{ requestId?: string; optionId?: string }> };
+  input: { requestId?: string; decision?: string; inputResponses?: Array<{ requestId?: string; optionId?: string }>; text?: string };
 }
 
 function mockArgs(
-  resumeResult: { ok: boolean; error?: string } = { ok: true },
+  // Realistic default: no pending approval most of the time (gate-text resume
+  // is tried on every thread reply — see discord.ts's tryResolveGate — so a
+  // test that doesn't care about it must see the same "nothing pending" miss
+  // production gets, and fall through to send() as before). Tests that
+  // specifically exercise a HITL resume succeeding pass an explicit { ok: true
+  // } override.
+  resumeResult: { ok: boolean; error?: string } = { ok: false, error: "no single pending approval" },
 ): { args: ChannelRouteArgs; sends: SendCall[]; resumes: ResumeCall[] } {
   const sends: SendCall[] = [];
   const resumes: ResumeCall[] = [];
@@ -420,6 +426,88 @@ Deno.test("message.completed with tool-calls finishReason posts nothing", async 
   assertEquals(called, 0);
 });
 
+// ---- delivery: message.queued ---------------------------------------------
+
+Deno.test("message.queued posts a one-line channel acknowledgement (not a reply-edit, not a reaction)", async () => {
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    calls.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  // Deliberately carries an interactionToken too — message.queued must still
+  // go to the plain channel-message endpoint (not the interaction edit/
+  // followup endpoints message.completed uses), since this is a background
+  // ack for a turn that is NOT the one owning the interaction response.
+  const channelCtx = { state: { channelId: "chan-1", interactionToken: "tok-1", initialResponseSent: false } };
+
+  await channel.events!["message.queued"]({ text: "also rename the tests" }, channelCtx);
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].method, "POST");
+  assertEquals(calls[0].url.endsWith("/channels/chan-1/messages"), true);
+  const content = (calls[0].body as { content: string }).content;
+  assert(content.includes("queued"));
+});
+
+// When the busy branch resolves a pending gate as deny (handler.ts's
+// startTurn, signalled via `deniedPendingGate`), the ack must say so — the
+// generic "queued" line falsely implies the ball is still in the running
+// turn's court.
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  const calls: Array<{ body: unknown }> = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    calls.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  const channelCtx = { state: { channelId: "chan-1" } };
+
+  await channel.events!["message.queued"](
+    { text: "yes but first explain why the chunk count is wrong", deniedPendingGate: true },
+    channelCtx,
+  );
+
+  assertEquals(calls.length, 1);
+  const content = (calls[0].body as { content: string }).content;
+  assert(/closed the pending approval|feedback/i.test(content), `expected the deny-ack wording, got: ${content}`);
+});
+
+Deno.test("message.queued is a no-op without a channelId, and swallows a delivery failure", async () => {
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response("boom", { status: 500 }));
+  };
+  const channel = discordChannel({ credentials: { applicationId: "app-1" }, api: { fetch: fetchMock } });
+
+  // No channelId in state → nothing to post to.
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(called, 0);
+
+  // A channelId that leads to a failed delivery must not throw (best-effort).
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"]({ text: "hi" }, { state: { channelId: "chan-1" } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assert(logged.some((l) => l.includes("message.queued")));
+});
+
 // ---- delivery: input.requested → HITL components --------------------------
 
 Deno.test("input.requested renders approve/deny button components", async () => {
@@ -519,7 +607,9 @@ Deno.test("default resume (no opts.resume) forwards the decoded requestId+option
   const denyCustomId = rendered[0].components[1].custom_id;
 
   const channel = discordChannel({ credentials: { publicKey: publicKeyHex } });
-  const { args, resumes } = mockArgs();
+  // Explicit ok:true — this test asserts the "applied" (✅) outcome, which
+  // needs a real success unlike mockArgs()'s realistic default miss.
+  const { args, resumes } = mockArgs({ ok: true });
   const payload = {
     type: 3,
     id: "i3",
@@ -824,6 +914,98 @@ Deno.test("messages route: human message in bot-owned thread → send keyed to t
   assertEquals(state.channelId, "thread-1");
   assertEquals(state.initialResponseSent, true);
   assertEquals(sends[0].opts.auth?.principalId, "user-1");
+});
+
+// ---- gate-text resolution -------------------------------------------------
+// 27 of 43 real approval gates (63%) were never clicked — the human answered
+// by typing "approve" in the thread instead, and only a button click resumed
+// the parked session. These prove the wiring: a thread reply is tried against
+// the session's pending gate FIRST (args.resume with the SAME continuation
+// token send() would have used), and only starts an ordinary turn when that
+// misses.
+
+Deno.test("messages route: an ordinary reply tries gate-text resume first (miss), then falls through to send()", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = messagesChannel(publicKeyHex, discordRestFetch().fn);
+  // mockArgs()'s default is a realistic "no pending approval" miss.
+  const { args, sends, resumes } = mockArgs();
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(keypair.privateKey, JSON.stringify(MESSAGE_IN_CLAW_THREAD)),
+    args,
+  );
+  assertEquals(res.status, 200);
+  // resume() was tried, keyed to the SAME continuation token send() uses, with
+  // the raw reply text — and only THEN did the ordinary turn start.
+  assertEquals(resumes, [{ continuationToken: "thread-1:thread-1", input: { text: "please also add tests" } }]);
+  assertEquals(sends.length, 1);
+});
+
+Deno.test("messages route: a plain-text 'approve' reply resolves the pending gate — no turn is started", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = messagesChannel(publicKeyHex, discordRestFetch().fn);
+  const { args, sends, resumes } = mockArgs({ ok: true });
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({ ...MESSAGE_IN_CLAW_THREAD, content: "approve" }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(resumes, [{ continuationToken: "thread-1:thread-1", input: { text: "approve" } }]);
+  // The parked turn continues itself (layer.ts resume()) — a SECOND turn for
+  // the same reply must never start (this was a real concurrent-turn bug).
+  assertEquals(sends.length, 0, "resolving the gate must not also start a new turn");
+});
+
+Deno.test("messages route: gate-text resume is also tried for an @mention reply in an existing thread", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const rest = discordRestFetch({
+    "/channels/thread-2/messages?": () => Response.json([]),
+    "/channels/thread-2": () => Response.json({ type: 11, parent_id: "chan-1", owner_id: "someone-else" }),
+  });
+  const channel = messagesChannel(publicKeyHex, rest.fn);
+  const { args, sends, resumes } = mockArgs({ ok: true });
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        id: "msg-31",
+        channel_id: "thread-2",
+        guild_id: "guild-1",
+        content: "<@app-1> approve",
+        author: { id: "user-1", username: "alice", bot: false },
+        mentions: [{ id: "app-1" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(resumes, [{ continuationToken: "thread-2:thread-2", input: { text: "approve" } }]);
+  assertEquals(sends.length, 0);
+  // The (expensive) thread-history fetch for the mention-in-thread path is
+  // skipped once the gate already resolved the reply.
+  assert(!rest.calls.some((c) => c.url.includes("/channels/thread-2/messages?")));
+});
+
+Deno.test("messages route: an attachment-only reply (empty text) never attempts gate resume", async () => {
+  const { keypair, publicKeyHex } = await genKeypair();
+  const channel = messagesChannel(publicKeyHex, discordRestFetch().fn);
+  const { args, sends, resumes } = mockArgs({ ok: true }); // even if it WOULD resolve, there's no text to try
+  const res = await messagesRouteOf(channel).handler(
+    await signedMessagesRequest(
+      keypair.privateKey,
+      JSON.stringify({
+        ...MESSAGE_IN_CLAW_THREAD,
+        content: "",
+        attachments: [{ id: "a1", filename: "screenshot.png", url: "https://cdn.example/screenshot.png" }],
+      }),
+    ),
+    args,
+  );
+  assertEquals(res.status, 200);
+  assertEquals(resumes, []);
+  assertEquals(sends.length, 1);
 });
 
 Deno.test("messages route: bot-authored message ignored", async () => {
