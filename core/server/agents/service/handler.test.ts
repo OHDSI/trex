@@ -1006,7 +1006,12 @@ Deno.test("a follow-up queued during a turn that fails is folded into the next e
   }));
   await until(() => db.turns.length === 2 && settled(db));
   assertEquals(db.turns[1].status, "completed");
-  assertEquals(db.turns[1].message, "try again\n\nqueued while busy");
+  // Final whole-branch review, Important 5: "queued while busy" arrived
+  // BEFORE "try again" (it was queued while the first turn was still
+  // running; "try again" is what finally re-triggered this turn afterward)
+  // — store.ts's takeFollowUps docstring promises "in the order they
+  // arrived", so the queued item must lead, not trail.
+  assertEquals(db.turns[1].message, "queued while busy\n\ntry again");
   assertEquals(db.followUps.length, 0);
 });
 

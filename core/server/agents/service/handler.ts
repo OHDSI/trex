@@ -288,8 +288,15 @@ function startTurn(
     // running (see above) — it rides along with this turn's message instead
     // of racing it as a separate turn. Ordinary case (nothing queued) is a
     // no-op DB round trip that leaves `message` untouched.
+    //
+    // Final whole-branch review, Important 5: `queued` items arrived and
+    // were queued BEFORE this call's `message` (they were queued behind a
+    // turn that has since finished or failed; `message` is what just
+    // triggered THIS startTurn call, chronologically after all of them) —
+    // store.ts's takeFollowUps docstring promises "in the order they
+    // arrived", so they must lead, not trail.
     const queued = await deps.store.takeFollowUps(sessionId);
-    const turnMessage = queued.length > 0 ? [asText(message), ...queued].join("\n\n") : message;
+    const turnMessage = queued.length > 0 ? [...queued, asText(message)].join("\n\n") : message;
 
     const history = await historyForModel(deps.store, sessionId);
     const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
