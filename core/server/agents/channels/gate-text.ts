@@ -29,6 +29,70 @@ function normalize(text: string): string {
   return text.trim().toLowerCase().replace(/[.!,]+$/g, "").replace(/\s+/g, " ");
 }
 
+// Strips the wrapper blocks a channel adapter composes around the human's
+// actual words before they ever reach matchGateText. Discord's inbound
+// message (see adapters/discord.ts's sendToThread call) is
+// `[contextBlock, attachmentsBlock, text].join("\n\n")`, so by the time the
+// busy branch in service/handler.ts sees it, it is always a
+// `<discord_context>` block (~40 words, well past MAX_DECISION_WORDS) plus an
+// optional `<attachments>` block, wrapped around the reply. Only the human's
+// words after stripping those two blocks are meaningful for judging whether
+// the message is *about* the pending gate at all.
+function stripComposedWrapper(text: string): string {
+  return text
+    .replace(/<discord_context>[\s\S]*?<\/discord_context>/g, " ")
+    .replace(/<attachments>[\s\S]*?<\/attachments>/g, " ")
+    .trim();
+}
+
+function containsWholeWord(haystack: string, phrase: string): boolean {
+  const escaped = phrase.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`\\b${escaped}\\b`).test(haystack);
+}
+
+// Final whole-branch review, Critical (R1 residual): the busy branch in
+// service/handler.ts denies a pending gate when the incoming reply doesn't
+// cleanly resolve it (matchGateText -> null), on the theory that a QUALIFIED
+// answer like "yes but first explain why the chunk count is wrong" must not
+// be stranded behind its own gate for the rest of the approval poll. But
+// matchGateText(asText(message), ...) is fed the composed message, which for
+// the only adapter that reaches this path (Discord) is ALWAYS wrapped in a
+// <discord_context> block — so matchGateText returns null for every message,
+// decision or not, and the old guard denied the gate on ANY chatter in the
+// thread ("fyi @alice is out today", a stray emoji, a side note to a
+// teammate), not just on qualified answers.
+//
+// looksLikeGateResponse is the missing predicate: after stripping the
+// composed wrapper, does the human's actual text look like it's ANSWERING
+// the gate at all (containing approve/deny vocabulary, or an option's
+// label/id when the gate has options)? It is deliberately looser than
+// matchGateText — a qualified "yes but…" must count — but still requires the
+// text to be plausibly ABOUT the decision, not just any message that happens
+// to land while a gate is open.
+export function looksLikeGateResponse(
+  text: string,
+  options?: Array<{ id: string; label: string }>,
+): boolean {
+  const stripped = stripComposedWrapper(text);
+  const t = normalize(stripped);
+  if (!t) return false;
+
+  for (const phrase of [...APPROVE, ...DENY]) {
+    if (containsWholeWord(t, phrase)) return true;
+  }
+
+  if (options?.length) {
+    for (const o of options) {
+      const label = normalize(o.label).replace(/\s*[—-]\s*.*$/, "");
+      for (const token of [normalize(o.id), label]) {
+        if (token && containsWholeWord(t, token)) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 export function matchGateText(
   text: string,
   options?: Array<{ id: string; label: string }>,

@@ -15,7 +15,7 @@ import type { ChannelStore } from "../channels/store.ts";
 import { resolveApprovalDecision } from "./approvals.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
-import { matchGateText } from "../channels/gate-text.ts";
+import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -240,10 +240,26 @@ function startTurn(
       // a bare "approve" on a channel with no pre-check) — that text is left
       // for the existing queue/fold path exactly as before; this fix does
       // not add gate resolution for callers that opted out of it.
+      //
+      // Residual fix (R1, final review): asText(message) here is the message
+      // the channel adapter actually composed — for Discord (the only
+      // adapter that reaches this path) that's always a `<discord_context>`
+      // block plus the human's words (adapters/discord.ts's sendToThread),
+      // so matchGateText(asText(message), ...) is essentially ALWAYS null —
+      // decision or not. Denying on that alone turned any thread chatter
+      // ("fyi @alice is out today", a stray emoji) into an auto-deny.
+      // looksLikeGateResponse (gate-text.ts) strips the composed wrapper and
+      // asks the narrower question: do the human's actual words look like
+      // they're answering the gate at all? Only deny when BOTH hold: the
+      // composed text isn't a clean resolution (matchGateText -> null) AND
+      // the underlying words plausibly are about the gate.
       let deniedPendingGate = false;
       try {
         const pending = await deps.store.getSinglePendingApproval(sessionId);
-        if (pending && matchGateText(asText(message), pending.options) === null) {
+        if (
+          pending && matchGateText(asText(message), pending.options) === null &&
+          looksLikeGateResponse(asText(message), pending.options)
+        ) {
           const resolved = await resolveApprovalDecision(
             deps.store,
             sessionId,

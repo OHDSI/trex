@@ -6,6 +6,23 @@ import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
+import { formatDiscordMessageContextBlock } from "../channels/adapters/discord-messages.ts";
+
+// Builds the message the way adapters/discord.ts:807's sendToThread actually
+// composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
+// joined on "\n\n", empty parts filtered) — no attachments, matching the
+// common case. Real shape, not a stand-in, so tests against it exercise what
+// startTurn's busy branch genuinely receives from the only adapter that
+// reaches this path.
+function composeDiscordMessage(humanText: string): string {
+  const contextBlock = formatDiscordMessageContextBlock({
+    userId: "u-1",
+    username: "alice",
+    channelId: "c-1",
+    messageId: "m-1",
+  });
+  return [contextBlock, humanText].join("\n\n");
+}
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 const BASE = "http://local/plugins/trex/toy";
@@ -1287,13 +1304,15 @@ Deno.test("a reply arriving on a busy session with NO pending gate still queues 
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
 });
 
-// Self-review guard (sibling-defect check): a reply that DOES match the
-// pending gate's vocabulary (e.g. a bare "approve") must never reach this
-// deny path — that would be an auto-approve/auto-deny landmine. In practice
-// this only reaches startTurn's busy branch for a caller that never
-// pre-checked the gate (only discord.ts does today; see gate-text.ts) — the
-// message is left exactly where it always was: queued, gate still pending.
-Deno.test("a busy-session reply that matches the pending gate's vocabulary is left alone (not auto-resolved) by the busy branch", async () => {
+// R1 residual (final review): a reply that matches matchGateText's
+// vocabulary CLEANLY (raw, unwrapped text — the shape a hypothetical
+// non-Discord caller that skips tryResolveGate would send directly) must
+// still be left alone here: matchGateText("approve") is non-null, so the
+// deny condition's first clause is false regardless of
+// looksLikeGateResponse. This is the "caller that never pre-checks the
+// gate" case the comment above describes — distinct from, and still valid
+// alongside, the composed-message coverage below.
+Deno.test("a busy-session reply with RAW text that matches the pending gate's vocabulary cleanly is left alone (not auto-resolved)", async () => {
   let releaseGate: () => void = () => {};
   const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
   // deno-lint-ignore no-explicit-any
@@ -1326,6 +1345,138 @@ Deno.test("a busy-session reply that matches the pending gate's vocabulary is le
   releaseGate();
 
   assertEquals(db.approvals.get("r-1")?.decision, null); // untouched — not auto-resolved
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// R1 residual (final review), the actual regression: adapters/discord.ts
+// composes the inbound message as `[contextBlock, attachmentsBlock,
+// text].join("\n\n")` BEFORE it ever reaches startTurn — so asText(message)
+// here is always wrapped in a `<discord_context>` block. Pre-fix,
+// matchGateText(composed text) was always null (the wrapper alone blows past
+// MAX_DECISION_WORDS) so EVERY message on a busy session with a pending gate
+// was denied, not just qualified answers. looksLikeGateResponse must strip
+// the wrapper and judge the human's actual words: a qualified "yes but…"
+// answers the gate (deny + queue as the revision instruction) while ordinary
+// chatter does not (queue only, gate left pending).
+Deno.test("a composed Discord message that qualifiedly answers the pending gate is denied and queued", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const composed = composeDiscordMessage("yes but first explain why the chunk count is wrong");
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, "deny");
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
+});
+
+Deno.test("a composed Discord message that is unrelated chatter does NOT deny the pending gate, only queues", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const composed = composeDiscordMessage("fyi @alice is out today");
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, null); // gate left pending, not denied
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// Composed-message shape, no pending gate: unchanged behaviour (queue only,
+// deniedPendingGate false) — the composition itself must not trip any part
+// of the deny path when there is nothing to deny.
+Deno.test("a composed Discord message on a busy session with NO pending gate still just queues", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  // No pending approval on this session.
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const composed = composeDiscordMessage("also rename the tests to .test.ts");
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
