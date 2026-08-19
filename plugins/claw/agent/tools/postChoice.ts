@@ -3,6 +3,18 @@
 // `eve_choice` branch resumes claw's parked session with the chosen value as a
 // message (see channels/adapters/discord.ts). Use at Gate 1 when there are
 // multiple real options; for a plain go/no-go, use awaitApproval instead.
+//
+// Task 6 (claw-devx-reliability): unlike awaitApproval, the pick is NOT
+// observable here. This tool's execute() only fires once, to POST the
+// dropdown — the resume on selection is driven entirely by
+// core/server/agents/channels/adapters/discord.ts's handleComponent
+// (CHOICE_CUSTOM_ID branch), which resumes the session via `args.send("The
+// team selected: <value>", ...)` outside plugins/claw and outside any
+// authored tool's execute. There is no callback into this file when a pick
+// happens, so postChoice cannot append to the decision ledger — recording it
+// would require either a hook in that adapter (outside this plugin) or claw
+// itself calling a record-decision tool after relaying the pick. Left
+// unrecorded here rather than invented; see task-6-report.md.
 import { defineTool } from "eve/tools";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";

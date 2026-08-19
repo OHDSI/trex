@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { askCore } from "./askCodeAgent.ts";
 import type { CodeTurnArgs } from "../lib/code-stream.ts";
 
@@ -125,4 +125,28 @@ Deno.test("askCore's onProgress posts 'Still on it: <note>' to the channel and s
     if (originalToken === undefined) Deno.env.delete("DISCORD_BOT_TOKEN");
     else Deno.env.set("DISCORD_BOT_TOKEN", originalToken);
   }
+});
+
+// Task 6 (claw-devx-reliability): settled decisions ride every hand-off.
+Deno.test("askCore prepends the decision ledger to the forwarded message when decisions exist", async () => {
+  const sql = fakeSql();
+  sql.store.set("s1", {
+    session_id: "s1",
+    code_session_id: "chat-1",
+    event_cursor: 0,
+    app_id: null,
+    decisions: [{ at: "2026-08-06T12:00:00Z", question: "follow-up window", decision: "configurable, default 365 days" }],
+  });
+  const turn = stubTurn();
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "next step: implement it" }, turn.fn);
+  assertStringIncludes(turn.seen[0].message, "Already settled");
+  assertStringIncludes(turn.seen[0].message, "follow-up window: configurable, default 365 days");
+  assertStringIncludes(turn.seen[0].message, "next step: implement it");
+});
+
+Deno.test("askCore leaves the message untouched when there are no decisions yet", async () => {
+  const sql = fakeSql();
+  const turn = stubTurn();
+  await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "Build X" }, turn.fn);
+  assertEquals(turn.seen[0].message, "Build X");
 });

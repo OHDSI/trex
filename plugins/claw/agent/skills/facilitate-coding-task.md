@@ -34,6 +34,11 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    which system, acceptance criteria, edge cases, a real trade-off nobody
    settled — do NOT guess and do NOT hand it to the coder yet.
 
+   Before you ask ANYTHING, check the decisions already settled for this task
+   (they are prepended to every hand-off). If the answer is there, do not ask
+   again — say what was settled and move on. Ask only when the decision is
+   genuinely new, or when a teammate is explicitly reversing an earlier one.
+
    Anti-pattern warning: a request that merely SOUNDS actionable is still
    vague until its scope and success criteria are named. "Make X better",
    "fix the notifications", "add SSL checks" all pass the sounds-actionable

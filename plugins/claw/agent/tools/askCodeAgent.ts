@@ -12,7 +12,7 @@
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
 import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
-import { readOrchestration, upsertOrchestration, type QueryFn } from "../lib/state.ts";
+import { readOrchestration, upsertOrchestration, readDecisions, renderDecisionLedger, type QueryFn } from "../lib/state.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 
@@ -67,9 +67,14 @@ export async function askCore(
         }).catch(() => {});
       }
     : undefined;
+  // Task 6 (claw-devx-reliability): prepend what the team already settled, so
+  // the coder (and claw, reading its own reply back) is never re-asked
+  // something a hand-off ago already answered.
+  const ledger = renderDecisionLedger(await readDecisions(sql, ctx.sessionId));
+  const message = ledger ? `${ledger}${input.message}` : input.message;
   const { chatId, replyText } = await runTurn({
     chatId: prior?.codeSessionId ?? null,
-    message: input.message,
+    message,
     userId: ctx.userId,
     appId,
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),

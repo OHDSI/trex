@@ -1,5 +1,13 @@
-import { assertEquals } from "jsr:@std/assert";
-import { readOrchestration, upsertOrchestration, renderStateForPrompt, type Orchestration } from "./state.ts";
+import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
+import {
+  readOrchestration,
+  upsertOrchestration,
+  renderStateForPrompt,
+  appendDecision,
+  readDecisions,
+  renderDecisionLedger,
+  type Orchestration,
+} from "./state.ts";
 
 function fakeSql() {
   const calls: { sql: string; params?: unknown[] }[] = [];
@@ -47,4 +55,56 @@ Deno.test("renderStateForPrompt distinguishes no-session from active-session", (
   );
   const active = renderStateForPrompt({ sessionId: "s1", codeSessionId: "c1", eventCursor: 2, appId: null });
   assertEquals(active.includes("active"), true);
+});
+
+Deno.test("appendDecision appends to the ledger", async () => {
+  const f = fakeSql();
+  await appendDecision(f.fn, "s1", { question: "follow-up window", decision: "configurable, default 365 days" });
+  assertEquals(f.calls[0].params?.[0], "s1");
+  assertStringIncludes(f.calls[0].sql, "decisions");
+});
+
+// Ambiguity #2: the ON CONFLICT branch must touch ONLY decisions/updated_at —
+// never code_session_id/app_id, which would silently wipe the live coder-chat
+// link on the next append.
+Deno.test("appendDecision's ON CONFLICT branch never writes code_session_id or app_id", async () => {
+  const f = fakeSql();
+  await appendDecision(f.fn, "s1", { question: "q", decision: "d" });
+  const updateBranch = f.calls[0].sql.slice(f.calls[0].sql.indexOf("DO UPDATE"));
+  assertStringIncludes(updateBranch, "decisions");
+  assertStringIncludes(updateBranch, "updated_at");
+  assertEquals(updateBranch.includes("code_session_id"), false);
+  assertEquals(updateBranch.includes("app_id"), false);
+});
+
+Deno.test("readDecisions maps rows", async () => {
+  const f = fakeSql();
+  f.setRows([{ decisions: [{ at: "2026-08-06T13:00:00Z", question: "window", decision: "configurable" }] }]);
+  const got = await readDecisions(f.fn, "s1");
+  assertEquals(got.length, 1);
+  assertEquals(got[0].decision, "configurable");
+});
+
+Deno.test("readDecisions returns [] when the row has no decisions", async () => {
+  const f = fakeSql();
+  f.setRows([{}]);
+  const got = await readDecisions(f.fn, "s1");
+  assertEquals(got, []);
+});
+
+Deno.test("renderDecisionLedger is empty for no decisions", () => {
+  assertEquals(renderDecisionLedger([]), "");
+});
+
+Deno.test("renderDecisionLedger lists decisions newest last", () => {
+  const out = renderDecisionLedger([
+    { at: "2026-08-06T12:00:00Z", question: "dialect", decision: "HANA only" },
+    { at: "2026-08-06T13:00:00Z", question: "window", decision: "configurable" },
+  ]);
+  assertStringIncludes(out, "Already settled");
+  assertStringIncludes(out, "dialect: HANA only");
+  assertStringIncludes(out, "window: configurable");
+  // oldest-first: dialect (12:00) renders before window (13:00), so the
+  // latest entry is the one closest to the message that follows the ledger.
+  assertEquals(out.indexOf("dialect") < out.indexOf("window"), true);
 });

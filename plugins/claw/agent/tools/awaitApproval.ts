@@ -7,7 +7,25 @@
 // Call it AFTER postPlan so the plan card sits right above the buttons. The
 // button label is currently the generic runtime approve/deny; `what` is recorded
 // on the request and echoed back so the facilitator knows which gate resolved.
+//
+// Task 6 (claw-devx-reliability): execute() runs ONLY on approve (a Deny never
+// reaches here), so this is the one place that unconditionally captures a
+// gate resolution — both a button click and a typed "approve" in the thread
+// (Task 3's text-resume path still ends up here; see channels/layer.ts) land
+// on the same execute(). Appended to the decision ledger so the hand-off
+// after this one never re-asks it.
 import { defineTool } from "eve/tools";
+import { appendDecision, type QueryFn } from "../lib/state.ts";
+
+// Exported separately so the decision-recording behavior is testable without
+// going through defineTool's execute plumbing (same shape as
+// postDevSummaryCore/askCore elsewhere in this package).
+export async function awaitApprovalCore(sql: QueryFn | undefined, sessionId: string, what: string): Promise<{ approved: true; what: string }> {
+  if (sql) {
+    await appendDecision(sql, sessionId, { question: what, decision: "approved" });
+  }
+  return { approved: true, what };
+}
 
 export default defineTool({
   description:
@@ -26,8 +44,8 @@ export default defineTool({
     required: ["what"],
   },
   needsApproval: true,
-  execute: (input) => {
+  execute: (input, ctx) => {
     const { what } = input as { what: string };
-    return { approved: true, what };
+    return awaitApprovalCore(ctx?.sql, ctx?.sessionId ?? "", what);
   },
 });

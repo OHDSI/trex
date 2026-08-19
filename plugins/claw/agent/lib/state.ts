@@ -49,6 +49,51 @@ export async function upsertOrchestration(sql: QueryFn, o: Orchestration): Promi
   );
 }
 
+// A single settled decision, so a hand-off carries what the channel already
+// agreed instead of re-opening it. Append-only: a reversal is recorded as a
+// NEW entry, never an edit of an earlier one (see renderDecisionLedger).
+export interface Decision {
+  at: string; // ISO timestamp, set by appendDecision
+  question: string;
+  decision: string;
+}
+
+// Appends one decision to the ledger. Uses the same upsert-on-conflict shape
+// as upsertOrchestration so a decision can be recorded even before a coder
+// session exists (code_session_id/app_id start NULL) — but unlike
+// upsertOrchestration, the ON CONFLICT branch touches ONLY decisions and
+// updated_at. It must NEVER also write code_session_id/app_id: those columns
+// hold the live coder-chat link, and a concurrent/later appendDecision must
+// not be able to wipe it back to NULL.
+export async function appendDecision(
+  sql: QueryFn,
+  sessionId: string,
+  d: Omit<Decision, "at">,
+): Promise<void> {
+  await sql(
+    `INSERT INTO claw.orchestrations (session_id, code_session_id, event_cursor, app_id, decisions, updated_at)
+       VALUES ($1, NULL, 0, NULL, jsonb_build_array($2::jsonb), now())
+     ON CONFLICT (session_id) DO UPDATE
+       SET decisions = claw.orchestrations.decisions || $2::jsonb, updated_at = now()`,
+    [sessionId, JSON.stringify({ at: new Date().toISOString(), ...d })],
+  );
+}
+
+export async function readDecisions(sql: QueryFn, sessionId: string): Promise<Decision[]> {
+  const { rows } = await sql(`SELECT decisions FROM claw.orchestrations WHERE session_id = $1`, [sessionId]);
+  const r = rows[0] as { decisions?: Decision[] } | undefined;
+  return Array.isArray(r?.decisions) ? r!.decisions : [];
+}
+
+// Renders the ledger oldest-first: it is append-only, so the LAST line is
+// whatever is currently true — a reversal shows up as a new line below the
+// decision it reverses, never as an edit in place.
+export function renderDecisionLedger(ds: Decision[]): string {
+  if (ds.length === 0) return "";
+  const lines = ds.map((d) => `- ${d.question}: ${d.decision}`).join("\n");
+  return `Already settled by the team (do NOT re-open these; if one is reversed it appears again lower down):\n${lines}\n\n`;
+}
+
 export function renderStateForPrompt(o: Orchestration | null): string {
   if (!o || !o.codeSessionId) {
     return "\n\n## Coding-agent session\nNo coding-agent session yet — you have not delegated anything for this conversation. Once the ask is clear, use askCodeAgent to open one.";
