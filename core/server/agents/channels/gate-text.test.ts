@@ -66,6 +66,43 @@ Deno.test("looksLikeGateResponse: strips a leading <discord_context> block and a
   assertEquals(looksLikeGateResponse(wrappedChatter), false);
 });
 
+// R1 residual, second pass: adapters/discord.ts's mention-in-thread trigger
+// composes a THIRD block into the message — `<thread_messages>` (up to 50
+// lines of past conversation, discord-messages.ts's formatMessagesBlock) —
+// and reuses the same continuation token as thread-turn, so it can land on
+// the same pending gate. That history is full of ordinary yes/no/ok words
+// unrelated to the CURRENT reply and must be stripped too, same as
+// mention-in-channel's `<channel_messages>` variant.
+Deno.test("looksLikeGateResponse: strips a <thread_messages> history block full of stale yes/no/ok before judging", () => {
+  const historyBlock = [
+    "<thread_messages>",
+    "[alice] yes let's do that",
+    "[bob] no I don't think so",
+    "[alice] ok fine, moving on",
+    "</thread_messages>",
+  ].join("\n");
+  const contextBlock = [
+    "<discord_context>",
+    "response_medium: discord",
+    "user_id: u-1",
+    "channel_id: c-1",
+    "message_id: m-1",
+    "</discord_context>",
+  ].join("\n");
+
+  const chatterWrapped = [contextBlock, historyBlock, "also rename the tests to .test.ts"].join("\n\n");
+  assertEquals(looksLikeGateResponse(chatterWrapped), false);
+
+  const qualifiedWrapped = [contextBlock, historyBlock, "yes but first explain why the chunk count is wrong"].join(
+    "\n\n",
+  );
+  assertEquals(looksLikeGateResponse(qualifiedWrapped), true);
+
+  const channelHistoryBlock = historyBlock.replace(/thread_messages/g, "channel_messages");
+  const channelWrapped = [contextBlock, channelHistoryBlock, "also rename the tests to .test.ts"].join("\n\n");
+  assertEquals(looksLikeGateResponse(channelWrapped), false);
+});
+
 Deno.test("looksLikeGateResponse: an option label or id counts as a gate response", () => {
   const options = [{ id: "none", label: "None — ship it" }, { id: "code-review", label: "Code review" }];
   assertEquals(looksLikeGateResponse("let's do code review please", options), true);

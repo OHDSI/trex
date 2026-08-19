@@ -6,7 +6,7 @@ import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
-import { formatDiscordMessageContextBlock } from "../channels/adapters/discord-messages.ts";
+import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMessage } from "../channels/adapters/discord-messages.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -22,6 +22,24 @@ function composeDiscordMessage(humanText: string): string {
     messageId: "m-1",
   });
   return [contextBlock, humanText].join("\n\n");
+}
+
+// R1 residual, second pass: adapters/discord.ts:866-869's mention-in-thread
+// trigger composes a THIRD block into the same message —
+// `formatMessagesBlock("thread_messages", history)`, up to 50 lines of past
+// conversation — and reuses the same continuation token as thread-turn
+// (discordContinuationToken(threadId, threadId)), so it can land on the same
+// session/pending gate. Builds that exact three-part shape:
+// `[contextBlock, thread_messages block, attachmentsBlock, text]`.
+function composeMentionInThreadMessage(humanText: string, history: HistoryMessage[]): string {
+  const contextBlock = formatDiscordMessageContextBlock({
+    userId: "u-1",
+    username: "alice",
+    channelId: "c-1",
+    messageId: "m-1",
+  });
+  const block = formatMessagesBlock("thread_messages", history);
+  return [contextBlock, block, humanText].filter((p) => p.length > 0).join("\n\n");
 }
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
@@ -1480,6 +1498,110 @@ Deno.test("a composed Discord message on a busy session with NO pending gate sti
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// R1 residual, second pass (re-review finding): adapters/discord.ts's
+// mention-in-thread trigger composes a THIRD block — `<thread_messages>`,
+// up to 50 lines of past conversation — into the same message, reusing the
+// same continuation token as thread-turn, so it can land on the same
+// session/pending gate. Before stripComposedWrapper also stripped that
+// block, a message that is unambiguously NOT a gate answer
+// ("also rename the tests to .test.ts") flipped to looksLikeGateResponse ==
+// true purely because the STALE history happened to contain ordinary
+// yes/no/ok words — auto-denying the gate on account of someone else's old
+// message, not the human's current reply.
+Deno.test("a composed mention-in-thread message (three-part shape, stale yes/no/ok history) does NOT deny the pending gate on history alone", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const staleHistory: HistoryMessage[] = [
+    { author: "alice", bot: false, content: "yes let's do that" },
+    { author: "bob", bot: false, content: "no I don't think so" },
+    { author: "alice", bot: false, content: "ok fine, moving on" },
+  ];
+  const composed = composeMentionInThreadMessage("also rename the tests to .test.ts", staleHistory);
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, null); // gate left pending, not denied
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// Same three-part shape, but the CURRENT reply (not the history) is a
+// genuine qualified answer — must still deny, same as the two-part shape.
+Deno.test("a composed mention-in-thread message whose CURRENT reply qualifiedly answers the gate is still denied", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const staleHistory: HistoryMessage[] = [
+    { author: "alice", bot: false, content: "yes let's do that" },
+    { author: "bob", bot: false, content: "no I don't think so" },
+  ];
+  const composed = composeMentionInThreadMessage(
+    "yes but first explain why the chunk count is wrong",
+    staleHistory,
+  );
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, "deny");
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
 });
 
 // Final whole-branch review, Important 2: reapStaleTurns must not reach

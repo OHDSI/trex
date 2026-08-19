@@ -31,17 +31,34 @@ function normalize(text: string): string {
 
 // Strips the wrapper blocks a channel adapter composes around the human's
 // actual words before they ever reach matchGateText. Discord's inbound
-// message (see adapters/discord.ts's sendToThread call) is
+// message for a thread-turn (adapters/discord.ts's sendToThread call) is
 // `[contextBlock, attachmentsBlock, text].join("\n\n")`, so by the time the
 // busy branch in service/handler.ts sees it, it is always a
 // `<discord_context>` block (~40 words, well past MAX_DECISION_WORDS) plus an
-// optional `<attachments>` block, wrapped around the reply. Only the human's
-// words after stripping those two blocks are meaningful for judging whether
-// the message is *about* the pending gate at all.
+// optional `<attachments>` block, wrapped around the reply.
+//
+// R1 residual, second pass: the `mention-in-thread` trigger
+// (adapters/discord.ts:866-869) composes a THIRD block into the same
+// message — `formatMessagesBlock("thread_messages", history)`, up to 50
+// lines of past conversation (discord-messages.ts's formatMessagesBlock) —
+// and reuses the same continuation token as thread-turn, so it can land on
+// the very same session/pending gate. That history block is full of
+// ordinary conversational yes/no/ok words that have nothing to do with the
+// CURRENT reply, so it must be stripped too, or a stale exchange in the
+// history — not the human's actual current words — can trip
+// looksLikeGateResponse. `mention-in-channel`'s `<channel_messages>` variant
+// of the same block is stripped for the same reason, even though that
+// trigger always creates a fresh thread/session (no pending gate can exist
+// there yet) — belt and suspenders costs nothing here.
+//
+// Only the human's words after stripping all four blocks are meaningful for
+// judging whether the CURRENT message is about the pending gate at all.
 function stripComposedWrapper(text: string): string {
   return text
     .replace(/<discord_context>[\s\S]*?<\/discord_context>/g, " ")
     .replace(/<attachments>[\s\S]*?<\/attachments>/g, " ")
+    .replace(/<thread_messages>[\s\S]*?<\/thread_messages>/g, " ")
+    .replace(/<channel_messages>[\s\S]*?<\/channel_messages>/g, " ")
     .trim();
 }
 
