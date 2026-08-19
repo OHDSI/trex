@@ -485,6 +485,9 @@ function makeResumeLayer(
     approvalToSession?: Record<string, string>; // requestId -> sessionId (MODE A)
     sessionsInChannel?: Record<string, string[]>; // channel -> sessionIds (MODE A guard)
     singlePending?: Record<string, string | null>; // sessionId -> requestId | null (MODE B)
+    // Task 3: options carried on the pending approval's input, for MODE B's
+    // text-matching (matchGateText) — sessionId -> {id,label}[].
+    singlePendingOptions?: Record<string, Array<{ id: string; label: string }>>;
   },
 ) {
   const lookups: Array<{ channel: string; token: string }> = [];
@@ -518,7 +521,8 @@ function makeResumeLayer(
       const requestId = opts.singlePending?.[sessionId] ?? null;
       // Task 4: the store's real return shape is {requestId, tool, options?} —
       // the fixture only cares about requestId, so `tool` is a fixed stand-in.
-      return Promise.resolve(requestId ? { requestId, tool: "tool" } : null);
+      const options = opts.singlePendingOptions?.[sessionId];
+      return Promise.resolve(requestId ? { requestId, tool: "tool", ...(options ? { options } : {}) } : null);
     },
     getApprovalTool: () => Promise.resolve(null),
     setToolConsent: () => Promise.resolve(),
@@ -636,5 +640,105 @@ Deno.test("channel resume MODE B: zero/ambiguous pending -> {ok:false} 'no singl
   assertEquals(res.status, 200);
   assertEquals(await res.json(), { ok: false, error: "no single pending approval" });
   assertEquals(pendingLookups, ["sess-9"]);
+  assertEquals(resolves, []);
+});
+
+// ---- MODE B, text (Task 3, claw-devx-reliability) --------------------------
+// A text-platform reply carries no explicit decision — resume() matches the
+// raw text against the pending gate's vocabulary (gate-text.ts's matchGateText)
+// itself, using the SAME getSinglePendingApproval it already fetched.
+
+Deno.test("channel resume MODE B text: a bare 'approve' resolves the single pending approval", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves, pendingLookups } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": "req-7" },
+  });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { text: "approve" } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(pendingLookups, ["sess-9"]);
+  assertEquals(resolves, [{ requestId: "req-7", decision: "approve", sessionId: "sess-9" }]);
+});
+
+Deno.test("channel resume MODE B text: 'no' resolves as a deny", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": "req-7" },
+  });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { text: "no" } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(resolves, [{ requestId: "req-7", decision: "deny", sessionId: "sess-9" }]);
+});
+
+Deno.test("channel resume MODE B text: a long qualified sentence does not resolve the gate", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": "req-7" },
+  });
+
+  const res = await handler(
+    resumeRequest({ token: "u-42", input: { text: "yes but first explain why the chunk count is wrong" } }),
+  );
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: false, error: "text is not a decision for the pending gate" });
+  assertEquals(resolves, [], "an unmatched reply must never write a decision");
+});
+
+Deno.test("channel resume MODE B text: no pending approval -> {ok:false}, matcher never consulted", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": null },
+  });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { text: "approve" } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: false, error: "no single pending approval" });
+  assertEquals(resolves, []);
+});
+
+Deno.test("channel resume MODE B text: an explicit decision wins over text when both are given", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": "req-7" },
+  });
+
+  // decision:"deny" is explicit; text ("approve") must NOT override it.
+  const res = await handler(resumeRequest({ token: "u-42", input: { decision: "deny", text: "approve" } }));
+
+  assertEquals(res.status, 200);
+  assertEquals(await res.json(), { ok: true });
+  assertEquals(resolves, [{ requestId: "req-7", decision: "deny", sessionId: "sess-9" }]);
+});
+
+// Known limitation (see layer.ts's resume() comment): agents.approvals.decision
+// is CHECK-constrained to approve/deny, so an "option" match (a postChoice-style
+// gate) can never actually be persisted through this path — no authored tool
+// populates `options` today, so this is unreachable in practice, but the
+// wiring must degrade to a clean {ok:false}, never throw / never miswrite.
+Deno.test("channel resume MODE B text: an option match (non-approve/deny id) fails cleanly, never writes", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler, resolves } = makeResumeLayer(agent, {
+    tokenToSession: { "webhook:u-42": "sess-9" },
+    singlePending: { "sess-9": "req-7" },
+    singlePendingOptions: { "sess-9": [{ id: "none", label: "None — ship it" }] },
+  });
+
+  const res = await handler(resumeRequest({ token: "u-42", input: { text: "no checks open pr" } }));
+
+  assertEquals(res.status, 200);
+  const body = await res.json();
+  assertEquals(body.ok, false);
   assertEquals(resolves, []);
 });

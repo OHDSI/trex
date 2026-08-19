@@ -126,7 +126,11 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
             type: "input.requested",
             data: { turnId, requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName: name, input } }] },
           });
-          const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 300_000);
+          // Task 3 (claw-devx-reliability): 7 of 43 real gates were clicked
+          // after the 5-minute poll window had already given up (median human
+          // response was ~15 minutes). Raised to 30 minutes; ctx override
+          // (tests, other callers) is unchanged.
+          const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 1_800_000);
           let decision: string | null = null;
           while (Date.now() < deadline) {
             decision = await store.getApprovalDecision(requestId);

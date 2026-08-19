@@ -56,12 +56,22 @@ export interface ChannelRouteArgs {
   // needs an authenticated trex user; a platform-webhook caller (no trex user)
   // can only approve/deny. An unknown token resolves to `{ ok: false, error }`
   // (logged, never thrown). Wiring an adapter's default resume to this is Task 18.
+  //
+  // `text` (Task 3, claw-devx-reliability): a plain thread reply carries no
+  // explicit decision/requestId, just the human's words ("approve", "no
+  // checks open pr", …). When `decision`/`inputResponses` are absent and
+  // `text` is given, MODE B matches it against the session's single pending
+  // gate's vocabulary (channels/gate-text.ts's matchGateText) before
+  // resolving — a miss (no pending gate, or text isn't a decision for it)
+  // still resolves to `{ ok: false, error }`, never throws, so a caller can
+  // always fall back to starting an ordinary turn.
   resume(
     continuationToken: string,
     input: {
       requestId?: string;
       decision?: "approve" | "deny" | "always" | "never";
       inputResponses?: Array<{ requestId?: string; optionId?: string }>;
+      text?: string;
     },
   ): Promise<{ ok: boolean; error?: string }>;
   params: Record<string, string>;

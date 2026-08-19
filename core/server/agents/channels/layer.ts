@@ -20,6 +20,7 @@ import { namespacedToken } from "./continuation.ts";
 import { ndjsonEncode } from "../service/stream.ts";
 import { stepToEvent } from "../service/handler.ts";
 import { type ApprovalDecision, normalizeApprovalDecisions, resolveApprovalDecision } from "../service/approvals.ts";
+import { matchGateText } from "./gate-text.ts";
 import type { AgentEvent } from "../service/events.ts";
 import type { ChannelDef } from "./types.ts";
 import { registerDelivery as defaultRegisterDelivery } from "./delivery.ts";
@@ -409,10 +410,30 @@ function buildArgs(
       if (!pending) {
         return { ok: false, error: "no single pending approval" };
       }
+      // Task 3 (claw-devx-reliability): a text-platform reply carries no
+      // explicit decision — just the human's words. Only consulted when the
+      // caller didn't already supply an explicit decision/requestId (the
+      // MODE A / structured-decision callers above are untouched). A miss
+      // (the text isn't a decision for THIS gate's vocabulary) resolves to
+      // `{ok:false}`, same as any other MODE B miss — the adapter falls back
+      // to starting an ordinary turn, nothing is dropped.
+      let decision = decisions[0]?.decision as ApprovalDecision | undefined;
+      if (decision === undefined && typeof input.text === "string") {
+        const match = matchGateText(input.text, pending.options);
+        if (!match) return { ok: false, error: "text is not a decision for the pending gate" };
+        // An "option" match (a postChoice-style gate with an options field on
+        // its approval input) is not yet a verb agents.approvals can persist
+        // (its decision column is CHECK-constrained to approve/deny) — no
+        // authored tool populates `options` today, so this is unreachable in
+        // practice. resolveApprovalDecision's own verb validation rejects it
+        // cleanly ({ok:false}) rather than reaching the DB, same as any other
+        // invalid decision.
+        decision = (match.kind === "option" ? match.optionId : match.kind) as ApprovalDecision;
+      }
       return await resolveApprovalDecision(
         deps.store,
         sessionId,
-        { requestId: pending.requestId, decision: decisions[0]?.decision as ApprovalDecision | undefined },
+        { requestId: pending.requestId, decision },
         consent,
       );
     },

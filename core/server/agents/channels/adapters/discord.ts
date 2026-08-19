@@ -819,7 +819,31 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     // the agent relays the files onward (askCodeAgent attachments) untouched.
     const attachmentsBlock = formatAttachmentsBlock(event.attachments);
 
+    // Task 3 (claw-devx-reliability): 27 of 43 approval gates (63%) were
+    // never clicked — the human answered by typing "approve" in the thread
+    // instead, and only a button click could resume the parked session. Try
+    // resolving the EXISTING thread's session's pending gate from the plain
+    // text FIRST, before ever starting a normal turn. `args.resume` (MODE B,
+    // channels/layer.ts) does the actual matching (gate-text.ts's
+    // matchGateText) against the session's single pending gate's vocabulary —
+    // a miss (no session yet / no pending gate / text isn't a decision for
+    // it) returns {ok:false} and this falls through to the ordinary send()
+    // below exactly as if the check had never run. When it DOES resolve, the
+    // parked turn continues itself (see layer.ts resume()'s docstring) — this
+    // returns immediately so no second turn is ever started for the same reply.
+    const tryResolveGate = async (threadId: string, replyText: string): Promise<boolean> => {
+      if (!replyText.trim()) return false;
+      try {
+        const result = await args.resume(discordContinuationToken(threadId, threadId), { text: replyText });
+        return result.ok;
+      } catch (e) {
+        console.error("discord: gate-text resume failed — falling back to a normal turn:", e);
+        return false;
+      }
+    };
+
     if (trigger.kind === "thread-turn") {
+      if (await tryResolveGate(event.channelId, text)) return ignored();
       // Every prior human message already drove its own turn — no history block.
       // Attachment-only posts (screenshot with no caption) have empty content;
       // give the turn an explicit stand-in so the agent knows what this is.
@@ -829,6 +853,7 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
       return ignored();
     }
     if (trigger.kind === "mention-in-thread") {
+      if (await tryResolveGate(event.channelId, text)) return ignored();
       const block = formatMessagesBlock("thread_messages", await history(event.channelId, 50));
       await sendToThread(event.channelId, [contextBlock, block, attachmentsBlock, text]);
       return ignored();
