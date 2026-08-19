@@ -1,11 +1,5 @@
 // Plain-text matching helpers for a busy or gated session's reply.
 //
-// isStatusPing (Task 4, claw-devx-reliability): a message that only asks
-// whether the agent is still working must never itself start a turn — doing
-// so was part of why 43 of 263 turns (16%) started while the previous turn on
-// the same session was still running. Callers answer a status ping from live
-// state (store.getRunningTurn) instead.
-//
 // matchGateText (Task 3, claw-devx-reliability): 27 of 43 approval gates
 // (63%) were never clicked — the human answered by typing "approve" in the
 // thread instead, and the button-only resume path never saw it. This maps a
@@ -14,18 +8,12 @@
 // so "yes but first explain…" still starts a normal turn rather than
 // silently approving a plan. Consumed by channels/layer.ts's resume() MODE B
 // (by token, single pending), which supplies the pending gate's options.
-
-const STATUS_PINGS = [
-  /^status\??$/,
-  /^any (update|progress)\??$/,
-  /^(are you )?(still )?(working|on it|there|online)\??$/,
-  /^update\??$/,
-];
-
-export function isStatusPing(text: string): boolean {
-  const t = text.trim().toLowerCase().replace(/[.!]+$/, "");
-  return STATUS_PINGS.some((re) => re.test(t));
-}
+//
+// Final whole-branch review, Minor: this file used to also export
+// `isStatusPing` — implemented, tested, but never wired to an immediate reply
+// anywhere (Task 4's architectural move to store.getRunningTurn/queueFollowUp
+// stranded it; the generic queued-ack already covers the user need). Deleted
+// rather than left as a trap for a future caller to half-wire.
 
 export type GateMatch =
   | { kind: "approve" }
