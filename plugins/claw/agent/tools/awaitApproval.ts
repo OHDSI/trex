@@ -8,12 +8,11 @@
 // button label is currently the generic runtime approve/deny; `what` is recorded
 // on the request and echoed back so the facilitator knows which gate resolved.
 //
-// execute() runs ONLY on approve (a Deny never reaches here), so this is
-// the one place that unconditionally captures a
-// gate resolution — both a button click and a typed "approve" in the thread
-// (the text-resume path still ends up here; see channels/layer.ts) land
-// on the same execute(). Appended to the decision ledger so the hand-off
-// after this one never re-asks it.
+// execute() runs ONLY on approve (a Deny never reaches here), so this is the
+// one place that unconditionally captures a gate resolution — both a button
+// click and a typed "approve" in the thread (the text-resume path still ends up
+// here; see channels/layer.ts) land on the same execute(). Appended to the
+// decision ledger so the hand-off after this one never re-asks it.
 //
 // The ledger write must NEVER be able to turn an already-granted
 // human approval into a failed gate. It's wrapped in its own try/catch — a

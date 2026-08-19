@@ -266,8 +266,8 @@ Deno.test("channel layer: a channel with events registers background delivery on
     plugin: "toy-agent",
     agentName: "toy",
     basePath: BASE,
-    // startTurn surfaces the created turn id via onTurnCreated; send()
-    // uses it to scope this turn's delivery.
+    // startTurn surfaces the created turn id via onTurnCreated; send() uses it
+    // to scope this turn's delivery.
     startTurn: (_s, _m, _md, onTurnCreated) => onTurnCreated?.("turn-1"),
     subscribe: () => () => {},
     // Injected: assert send() wired us with the channel + turnId + a waitUntil.
@@ -519,8 +519,8 @@ function makeResumeLayer(
     getSinglePendingApproval(sessionId: string) {
       pendingLookups.push(sessionId);
       const requestId = opts.singlePending?.[sessionId] ?? null;
-      // The store's real return shape is {requestId, tool, options?} —
-      // the fixture only cares about requestId, so `tool` is a fixed stand-in.
+      // The store's real return shape is {requestId, tool, options?} — the
+      // fixture only cares about requestId, so `tool` is a fixed stand-in.
       const options = opts.singlePendingOptions?.[sessionId];
       return Promise.resolve(requestId ? { requestId, tool: "tool", ...(options ? { options } : {}) } : null);
     },
@@ -628,11 +628,10 @@ Deno.test("channel resume MODE B: unknown token -> {ok:false} 'no session for to
   assertEquals(resolves, []);
 });
 
-// discord.ts's tryResolveGate calls resume() on EVERY thread
-// message, not just ones known to answer a gate — so "no session for token"
-// is the ROUTINE case for an ordinary message in a thread with no
-// registered session, not an error worth paging on. Must log at a level
-// below console.error.
+// discord.ts's tryResolveGate calls resume() on EVERY thread message, not just
+// ones known to answer a gate — so "no session for token" is the ROUTINE case
+// for an ordinary message in a thread with no registered session, not an error
+// worth paging on. Must log at a level below console.error.
 Deno.test("channel resume MODE B: an unknown token logs at warn, not error (routine on every thread message)", async () => {
   const agent = await loadAgent(TOY);
   const { handler } = makeResumeLayer(agent, { tokenToSession: {} });
@@ -668,7 +667,7 @@ Deno.test("channel resume MODE B: zero/ambiguous pending -> {ok:false} 'no singl
   assertEquals(resolves, []);
 });
 
-// ---- MODE B, text --------------------------
+// ---- MODE B, text -------------------------------------------------------
 // A text-platform reply carries no explicit decision — resume() matches the
 // raw text against the pending gate's vocabulary (gate-text.ts's matchGateText)
 // itself, using the SAME getSinglePendingApproval it already fetched.

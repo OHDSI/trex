@@ -62,9 +62,9 @@ export const evalStubs = {
   // Canned coder reply keyed on the instruction so the gated flow stays coherent
   // (mockups -> screenshot paths, brainstorm -> options, writing-plans -> a plan,
   // a review -> findings, finish -> a PR link, otherwise -> implemented).
-  // `trailer: null` on every branch matches the shape askCore now returns
-  // in production — none of these canned replies carry a real
-  // <handoff .../> block, so there is nothing to parse.
+  // `trailer: null` on every branch matches the shape askCore now returns in
+  // production — none of these canned replies carry a real <handoff .../>
+  // block, so there is nothing to parse.
   askCodeAgent(message: string) {
     const m = String(message || "").toLowerCase();
     // Before the brainstorm branch: a mockup hand-off also says "option"/"design".

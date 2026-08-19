@@ -66,10 +66,9 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).clientOnly).map(([n]) => n),
   );
   // Agent-agnostic — runner.ts does not know any tool by name, so a tool
-  // declares whether ITS OWN
-  // execute() already speaks to the channel directly (outside this turn's
-  // emit/message.completed path), the same way it declares clientOnly. See
-  // ToolDef.postsToChannel (eve-shim/types.ts).
+  // declares whether ITS OWN execute() already speaks to the channel directly
+  // (outside this turn's emit/message.completed path), the same way it declares
+  // clientOnly. See ToolDef.postsToChannel (eve-shim/types.ts).
   const postsToChannelNames = new Set(
     Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).postsToChannel).map(([n]) => n),
   );
@@ -126,25 +125,25 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   let text = "";
   let finishReason = "unknown";
   let textPersisted = false;
-  // A clientOnly tool call ends the turn with
-  // no text by DESIGN — the caller executes it and continues in a follow-up
-  // turn, it's a hand-off, not silence. The no-silent-turn fallback below
-  // must not fire for that case (see the "does not emit message.completed
-  // for a clientOnly tool-call turn" test).
+  // A clientOnly tool call ends the turn with no text by DESIGN — the caller
+  // executes it and continues in a follow-up turn, it's a hand-off, not
+  // silence. The no-silent-turn fallback below must not fire for that case (see
+  // the "does not emit message.completed for a clientOnly tool-call turn"
+  // test).
   let sawClientOnlyCall = false;
   // Whether the MOST RECENT tool call posted to the channel — not whether one
   // EVER did. An earlier version made this sticky (true forever once any
-  // postsToChannel tool ran), but
-  // claw's skill makes postUpdate immediately before EVERY askCodeAgent call
-  // an invariant (facilitate-coding-task.md) — so claw's canonical turn shape
-  // is postUpdate("starting X") -> askCodeAgent (long) -> step cap, no
-  // closing text. A sticky flag suppressed the no-silent-turn fallback for
-  // that whole shape, leaving "starting X" as the channel's last word even
-  // though askCodeAgent (not postUpdate) was how the turn actually ended —
-  // exactly the 14%-silent-turn defect this fix was written to remove. Tracking
-  // only the LAST tool call means a channel post at the START of a turn no
-  // longer silences a fallback for whatever happened AFTER it; a channel post
-  // that genuinely is the last thing the turn did still suppresses it.
+  // postsToChannel tool ran), but claw's skill makes postUpdate immediately
+  // before EVERY askCodeAgent call an invariant (facilitate-coding-task.md) —
+  // so claw's canonical turn shape is postUpdate("starting X") -> askCodeAgent
+  // (long) -> step cap, no closing text. A sticky flag suppressed the
+  // no-silent-turn fallback for that whole shape, leaving "starting X" as the
+  // channel's last word even though askCodeAgent (not postUpdate) was how the
+  // turn actually ended — exactly the 14%-silent-turn defect this fix was
+  // written to remove. Tracking only the LAST tool call means a channel post at
+  // the START of a turn no longer silences a fallback for whatever happened
+  // AFTER it; a channel post that genuinely is the last thing the turn did
+  // still suppresses it.
   let lastToolWasChannelPost = false;
   // Distinguishes "the turn genuinely did nothing" (safe to say
   // "Nothing was changed") from "tools ran but nothing reached the channel
@@ -248,9 +247,8 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
             // lastToolWasChannelPost for why that distinction matters.
           } else if (!sawAnyToolCall) {
             // No-silent-turn guarantee: the turn produced no text, called no
-            // tool at all, and posted
-            // nothing anywhere — it genuinely did nothing, so "Nothing was
-            // changed" is true.
+            // tool at all, and posted nothing anywhere — it genuinely did
+            // nothing, so "Nothing was changed" is true.
             text =
               'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.';
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });

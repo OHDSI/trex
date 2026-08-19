@@ -142,10 +142,10 @@ Deno.test("getApprovalSession returns the session for a requestId (null when unk
 });
 
 // Channel HITL resume — MODE B lookup: exactly-one-pending semantics.
-// The return shape grew from a bare requestId to {requestId, tool,
-// options?} — the gate-text matcher needs the tool and (for
-// postChoice-style gates) the option id/label pairs to resolve a
-// plain-text reply against the pending gate unambiguously.
+// The return shape grew from a bare requestId to {requestId, tool, options?} —
+// the gate-text matcher needs the tool and (for postChoice-style gates) the
+// option id/label pairs to resolve a plain-text reply against the pending gate
+// unambiguously.
 Deno.test("getSinglePendingApproval returns requestId+tool only when exactly one is pending", async () => {
   const { fn, calls } = fakeQuery([
     { rows: [{ request_id: "r-7", tool: "postChoice", input: null }] }, // exactly one pending
@@ -185,8 +185,8 @@ Deno.test("getSinglePendingApproval omits options when input carries none", asyn
 });
 
 // The "one turn at a time" seam. A busy session's running turn (or lack
-// thereof) — see discord-messages.ts's
-// folding logic and service/handler.ts's startTurn, which both key off this.
+// thereof) — see discord-messages.ts's folding logic and service/handler.ts's
+// startTurn, which both key off this.
 Deno.test("getRunningTurn returns the sole running turn (or null)", async () => {
   const { fn, calls } = fakeQuery([
     { rows: [{ id: "t-1", seq: 3, started_at: new Date("2026-08-19T00:00:00Z") }] },
@@ -259,9 +259,9 @@ Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reve
   );
 });
 
-// The follow-up queue a busy session folds a new message into
-// (instead of racing it against the turn already running) — see
-// service/handler.ts's startTurn.
+// The follow-up queue a busy session folds a new message into (instead of
+// racing it against the turn already running) — see service/handler.ts's
+// startTurn.
 Deno.test("queueFollowUp inserts and takeFollowUps drains oldest-first, removing what it returns", async () => {
   const { fn, calls } = fakeQuery([
     { rows: [] }, // queueFollowUp

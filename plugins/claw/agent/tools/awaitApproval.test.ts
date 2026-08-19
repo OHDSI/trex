@@ -10,9 +10,9 @@ function fakeSql() {
   return { fn, calls };
 }
 
-// execute() only runs on Approve, so it is
-// the one unconditional gate-resolution capture point (button click AND a
-// typed "approve" in the thread both resume through this same execute()).
+// execute() only runs on Approve, so it is the one unconditional
+// gate-resolution capture point (button click AND a typed "approve" in the
+// thread both resume through this same execute()).
 Deno.test("awaitApprovalCore records the approval as a settled decision", async () => {
   const f = fakeSql();
   const out = await awaitApprovalCore(f.fn, "s1", "the plan");

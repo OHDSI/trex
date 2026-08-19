@@ -1,6 +1,6 @@
-// recordDecision (claw-devx-reliability). awaitApproval records
-// a gate's outcome on its own (see that file), but most settled decisions
-// never go through a gate: a postChoice dropdown pick resumes the session as
+// recordDecision. awaitApproval records a gate's outcome on its own (see that
+// file), but most settled decisions never go through a gate: a postChoice
+// dropdown pick resumes the session as
 // a plain message with NO callback into postChoice's execute() (see that
 // file's comment — the majority path in the measured baseline, 63 picks vs
 // 35 approvals), and plenty of decisions are just settled in plain

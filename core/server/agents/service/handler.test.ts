@@ -55,9 +55,9 @@ function inMemoryDb() {
   > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
   const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string }>();
-  // The follow-up queue a busy session's new message folds into
-  // (store.ts's queueFollowUp/takeFollowUps), keyed the
-  // same order-preserving way agents.turn_followups is (insertion order).
+  // The follow-up queue a busy session's new message folds into (store.ts's
+  // queueFollowUp/takeFollowUps), keyed the same order-preserving way
+  // agents.turn_followups is (insertion order).
   const followUps: Array<{ session_id: string; message: string }> = [];
   // (userId, plugin, agent, tool) -> consent, keyed the same way as the
   // real table's primary key.
@@ -745,11 +745,11 @@ Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' with
   await until(() => settled(db), 10_000);
 });
 
-// Ride-along security fix: approval resolution must verify the caller is
-// the session's owner, not just
-// (requestId, sessionId) — otherwise any authenticated user who learns
-// those ids could resolve someone else's pending approval and, with the
-// sticky verbs, accrue a durable consent on their behalf.
+// Ride-along security fix: approval resolution must verify the caller is the
+// session's owner, not just (requestId, sessionId) — otherwise any
+// authenticated user who learns those ids could resolve someone else's pending
+// approval and, with the sticky verbs, accrue a durable consent on their
+// behalf.
 Deno.test("POST /approval: the session owner (matching x-user-id) can resolve their own approval", async () => {
   const { handler, db } = await makeHandler({
     model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
@@ -925,14 +925,14 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
   // sanitizers or an uncaught-error crash IS the assertion here.
 });
 
-// "One turn at a time per session". Measured
-// over two weeks of real transcripts: 43 of 263 turns (16%) started while the
-// previous turn on the same session was still running — one case had two
-// turns drive the same coding-agent chat 22s apart with contradictory
-// instructions ("Option B" then "stop do A instead") and the coder acted on
-// the wrong one. startTurn (this file) is the single choke point every
-// caller (channel adapters' send(), native /eve/v1/session[/:id]) goes
-// through, so the fix lives here rather than in a specific channel adapter.
+// "One turn at a time per session". Measured over two weeks of real
+// transcripts: 43 of 263 turns (16%) started while the previous turn on the
+// same session was still running — one case had two turns drive the same
+// coding-agent chat 22s apart with contradictory instructions ("Option B" then
+// "stop do A instead") and the coder acted on the wrong one. startTurn (this
+// file) is the single choke point every caller (channel adapters' send(),
+// native /eve/v1/session[/:id]) goes through, so the fix lives here rather than
+// in a specific channel adapter.
 Deno.test("a message arriving while a turn is running is queued, not started as a second concurrent turn", async () => {
   let releaseGate: () => void = () => {};
   const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
@@ -1600,12 +1600,11 @@ Deno.test("a composed mention-in-thread message whose CURRENT reply qualifiedly 
 });
 
 // reapStaleTurns must not reach across sessions. Before the fix a message on
-// ANY busy session marked
-// EVERY stale `running` turn deployment-wide, so another session's
-// genuinely long-running turn (plausible: the channel step floor was raised
-// to 200 and streamTurn has no timeout) could be failed out from under
-// it by an unrelated session's traffic, re-opening the two-concurrent-turns
-// hole this reap-scoping fix exists to close.
+// ANY busy session marked EVERY stale `running` turn deployment-wide, so
+// another session's genuinely long-running turn (plausible: the channel step
+// floor was raised to 200 and streamTurn has no timeout) could be failed out
+// from under it by an unrelated session's traffic, re-opening the
+// two-concurrent-turns hole this reap-scoping fix exists to close.
 Deno.test("a stale turn on ANOTHER session is left alone while the calling session's stale turn is reaped", async () => {
   let releaseA: () => void = () => {};
   const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
@@ -1774,11 +1773,11 @@ Deno.test("POST /chat: finish part carries usage in messageMetadata", async () =
   assert(text.includes('"outputTokens"'), `messageMetadata missing usage.outputTokens: ${text}`);
 });
 
-// ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part
-// into the SAME stream useChat consumes (createUIMessageStream +
-// writer.merge — see handler.ts for the v6 API
-// verification). No agents.steps write on this path (unlike the session
-// path) — /chat never persisted tool-call/tool-result steps either.
+// ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part into
+// the SAME stream useChat consumes (createUIMessageStream + writer.merge — see
+// handler.ts for the v6 API verification). No agents.steps write on this path
+// (unlike the session path) — /chat never persisted tool-call/tool-result steps
+// either.
 Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", async () => {
   const { handler } = await makeHandler({
     model: sequencedModel(toolCallChunks("emitter", {}), textChunks("done")),
@@ -1803,13 +1802,12 @@ Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", 
   assert(text.includes('"step":1'), `emitted payload missing from stream: ${text}`);
 });
 
-// /chat setup-phase failures must keep the same HTTP-error
-// semantics as before. buildSdkTools (and its filterTools hook) runs BEFORE
-// createUIMessageStream, so a throwing hook rejects the route — it must
-// NOT be demoted to a 200 response carrying an in-stream SSE error frame
-// (which is what moving tool building inside the stream's execute() would
-// have done). Matches hooks.test.ts's assertRejects posture for a
-// throwing resolveModel on /chat.
+// /chat setup-phase failures must keep the same HTTP-error semantics as before.
+// buildSdkTools (and its filterTools hook) runs BEFORE createUIMessageStream,
+// so a throwing hook rejects the route — it must NOT be demoted to a 200
+// response carrying an in-stream SSE error frame (which is what moving tool
+// building inside the stream's execute() would have done). Matches
+// hooks.test.ts's assertRejects posture for a throwing resolveModel on /chat.
 Deno.test("POST /chat: a throwing filterTools hook rejects the request (setup phase, no 200+SSE-error demotion)", async () => {
   const { handler } = await makeHandler({
     mutate: (agent) => {
@@ -2032,7 +2030,7 @@ Deno.test("GET /stream releases the subscriber when replay (listEvents) fails", 
   assertEquals(subscriberCount(sid), before);
 });
 
-// ── OAuth broker routes ─────────────────────────────────────────────
+// ── OAuth broker routes ──────────────────────────────────────────────────────
 import { signState } from "../connections/oauth/state.ts";
 import type { OAuthConnector, OAuthStore, OAuthToken } from "../connections/oauth/store.ts";
 

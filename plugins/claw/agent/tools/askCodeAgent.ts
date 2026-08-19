@@ -55,11 +55,11 @@ export async function askCore(
   if (prior?.codeSessionId && input.app && input.app !== prior.appId) {
     console.warn(`claw: askCodeAgent ignored app change '${input.app}' — chat is fixed to '${prior.appId}'`);
   }
-  // While this hand-off is blocked, claw can post nothing else to the
-  // channel — the heartbeat is the only sign of life
-  // the thread gets for a long step. No channel, no timer: a channelId-less
-  // caller (no ctx.metadata.channelId) gets no onProgress at all, rather than
-  // a no-op that still burns an interval for nothing.
+  // While this hand-off is blocked, claw can post nothing else to the channel —
+  // the heartbeat is the only sign of life the thread gets for a long step. No
+  // channel, no timer: a channelId-less caller (no ctx.metadata.channelId) gets
+  // no onProgress at all, rather than a no-op that still burns an interval for
+  // nothing.
   const onProgress = ctx.channelId
     ? (note: string) => {
         // Fire-and-forget: a failed heartbeat must never fail the turn — a
@@ -71,9 +71,9 @@ export async function askCore(
         }).catch(() => {});
       }
     : undefined;
-  // Prepend what the team already settled, so
-  // the coder (and claw, reading its own reply back) is never re-asked
-  // something a hand-off ago already answered.
+  // Prepend what the team already settled, so the coder (and claw, reading its
+  // own reply back) is never re-asked something a hand-off ago already
+  // answered.
   const ledger = renderDecisionLedger(await readDecisions(sql, ctx.sessionId));
   const message = ledger ? `${ledger}${input.message}` : input.message;
   const { chatId, replyText } = await runTurn({
@@ -92,9 +92,9 @@ export async function askCore(
     eventCursor: 0,
     appId,
   });
-  // The coder ends its reply with a machine
-  // trailer (see prompts_channel.ts's <reply_contract>); strip it from what
-  // the channel sees and hand the parsed facts back alongside.
+  // The coder ends its reply with a machine trailer (see prompts_channel.ts's
+  // <reply_contract>); strip it from what the channel sees and hand the parsed
+  // facts back alongside.
   const { trailer, body } = parseTrailer(replyText);
   return { reply: body, trailer };
 }

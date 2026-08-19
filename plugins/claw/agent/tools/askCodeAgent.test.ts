@@ -80,8 +80,8 @@ Deno.test("askCore continues the SAME coder chat", async () => {
   assertEquals(turn.seen[0].chatId, "chat-1"); // continues the stored chat
 });
 
-// The heartbeat is wired through askCodeAgent
-// so claw can still show a sign of life while blocked inside this hand-off.
+// The heartbeat is wired through askCodeAgent so claw can still show a sign of
+// life while blocked inside this hand-off.
 Deno.test("askCore passes onProgress to the coder turn when a channelId is available", async () => {
   const sql = fakeSql();
   const turn = stubTurn();

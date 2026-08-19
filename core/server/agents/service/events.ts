@@ -87,11 +87,10 @@ export type AgentEvent =
   // to `tool.event`).
   | { type: "tool.event"; data: { name: string; payload: unknown } }
   // Trex extension (not part of eve's documented vocabulary): fired when
-  // startTurn folds a message into the
-  // follow-up queue instead of starting it as a second concurrent turn on a
-  // busy session, so a channel adapter with a live delivery subscription can
-  // acknowledge receipt instead of the message silently vanishing until the
-  // next turn happens to fold it in. Turn-agnostic (no turnId) and live-only
-  // — not persisted/replayed — same posture as session.waiting/
-  // session.failed above.
+  // startTurn folds a message into the follow-up queue instead of starting it
+  // as a second concurrent turn on a busy session, so a channel adapter with a
+  // live delivery subscription can acknowledge receipt instead of the message
+  // silently vanishing until the next turn happens to fold it in. Turn-agnostic
+  // (no turnId) and live-only — not persisted/replayed — same posture as
+  // session.waiting/session.failed above.
   | { type: "message.queued"; data: { text: string } };

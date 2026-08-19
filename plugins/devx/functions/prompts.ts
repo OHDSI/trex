@@ -480,10 +480,10 @@ const COMMON_GUIDELINES = `- All text you output outside of tool use is displaye
 
 // Exported (not module-private) so prompts_channel.ts can compose
 // CHANNEL_CODER_SYSTEM_PROMPT from these SAME blocks rather than
-// hand-duplicating or silently dropping them — the design intent
-// says "skills, tools, KB and d2e knowledge are identical and are the
-// expensive part to maintain; only the interaction contract differs." One
-// source of truth so the ui/channel profiles cannot drift.
+// hand-duplicating or silently dropping them — the design intent says "skills,
+// tools, KB and d2e knowledge are identical and are the expensive part to
+// maintain; only the interaction contract differs." One source of truth so the
+// ui/channel profiles cannot drift.
 export const GENERAL_GUIDELINES_BLOCK = `<general_guidelines>
 ${COMMON_GUIDELINES}
 - Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it. Prioritize writing safe, secure, and correct code.

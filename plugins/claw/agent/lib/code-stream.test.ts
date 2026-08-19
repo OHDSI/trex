@@ -64,10 +64,10 @@ Deno.test("streamTurn's heartbeat fires on the HEARTBEAT_MS timer, not on chunks
   }
 });
 
-// streamTurn's fetch had no AbortSignal — with per-session turn
-// serialization and a 200-step channel floor, a
-// hung upstream could wedge the WHOLE session, not just this turn, until the
-// 2h reaper eventually ran. A bounded per-turn timeout closes that off.
+// streamTurn's fetch had no AbortSignal — with per-session turn serialization
+// and a 200-step channel floor, a hung upstream could wedge the WHOLE session,
+// not just this turn, until the 2h reaper eventually ran. A bounded per-turn
+// timeout closes that off.
 Deno.test("streamTurn's fetch carries a bounded, not-yet-aborted AbortSignal", async () => {
   const originalFetch = globalThis.fetch;
   // deno-lint-ignore no-explicit-any

@@ -111,8 +111,7 @@ Deno.test("runTurn does not emit message.completed for a clientOnly tool-call tu
   assert(!events.some((e) => e.type === "message.completed"));
 });
 
-// No-silent-turn guarantee — four branches at
-// the "finish" case:
+// No-silent-turn guarantee — four branches at the "finish" case:
 //   1. text present -> emit as always (covered by the first test in this file).
 //   2. clientOnly call, no text -> stay silent (covered just above).
 //   3. no tool calls at all, no text -> "Nothing was changed" (true: nothing ran).
@@ -367,11 +366,11 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   assert("skill" in top);
 });
 
-// ToolContext.emit: the session path publishes a
-// live tool.event and persists a `custom` step through the SAME stepSeq
-// counter as every other step (asserted via the raw insert params here), so
-// every persisted step this turn — including this one — has a unique,
-// monotonically assigned seq and replays in real call order.
+// ToolContext.emit: the session path publishes a live tool.event and persists a
+// `custom` step through the SAME stepSeq counter as every other step (asserted
+// via the raw insert params here), so every persisted step this turn —
+// including this one — has a unique, monotonically assigned seq and replays in
+// real call order.
 Deno.test("ToolContext.emit publishes a live tool.event and persists a custom step", async () => {
   const agent = await loadAgent(TOY);
   agent.tools.emitter = {
@@ -437,9 +436,9 @@ Deno.test("a tool that never calls ctx.emit produces no tool.event", async () =>
   assert(!events.some((e) => e.type === "tool.event"));
 });
 
-// Sticky tool-consent decisions: authoredTool's
-// needsApproval branch checks store.getToolConsent(userId, plugin, agent,
-// tool) BEFORE creating a one-shot approval request.
+// Sticky tool-consent decisions: authoredTool's needsApproval branch checks
+// store.getToolConsent(userId, plugin, agent, tool) BEFORE creating a one-shot
+// approval request.
 Deno.test("needsApproval tool with an 'always' consent on file executes immediately, no approval request", async () => {
   const agent = await loadAgent(TOY);
   agent.tools.guarded = {

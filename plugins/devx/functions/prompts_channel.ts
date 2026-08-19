@@ -7,15 +7,14 @@
 // folded in below so there is one prompt, not a prompt plus a patch.
 //
 // The tool-use/KB guidance blocks are IMPORTED from prompts.ts rather than
-// hand-duplicated or (as before this fix) silently dropped. The design
-// intent is explicit that "skills, tools, KB and d2e knowledge are
-// identical and are the expensive part to
-// maintain; only the interaction contract differs" — composing from the SAME
-// exported consts the ui profile uses is what makes that true by construction
-// instead of by discipline. Only APP_COMMANDS_BLOCK (the preview-panel
-// RestartApp/RefreshPreview tools) and IMAGE_GENERATION_BLOCK are deliberately
-// left out — there is no preview panel on a channel turn and GenerateImage is
-// not part of this contract.
+// hand-duplicated or (as before this fix) silently dropped. The design intent
+// is explicit that "skills, tools, KB and d2e knowledge are identical and are
+// the expensive part to maintain; only the interaction contract differs" —
+// composing from the SAME exported consts the ui profile uses is what makes
+// that true by construction instead of by discipline. Only APP_COMMANDS_BLOCK
+// (the preview-panel RestartApp/RefreshPreview tools) and
+// IMAGE_GENERATION_BLOCK are deliberately left out — there is no preview panel
+// on a channel turn and GenerateImage is not part of this contract.
 import {
   DEVELOPMENT_WORKFLOW_BLOCK,
   FILE_EDITING_TOOL_SELECTION_BLOCK,

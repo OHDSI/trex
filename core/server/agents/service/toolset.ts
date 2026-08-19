@@ -40,15 +40,14 @@ export interface ToolBuildCtx {
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
   depth?: number;
-  // Sticky tool-consent decisions: the key authoredTool's needsApproval
-  // branch looks up store.getToolConsent
-  // under, alongside userId and the tool's own name. Set by handler.ts from
-  // its Deps {plugin, agentName} at every buildSdkTools call site (both the
-  // session-runner path, via RunTurnOpts's spread into this ctx, and
-  // /chat's direct buildSdkTools call). Optional so existing callers that
-  // never touch needsApproval tools (or don't care about stickiness) keep
-  // working — the sticky lookup is skipped whenever either is missing, same
-  // as when userId itself is missing (anonymous session).
+  // Sticky tool-consent decisions: the key authoredTool's needsApproval branch
+  // looks up store.getToolConsent under, alongside userId and the tool's own
+  // name. Set by handler.ts from its Deps {plugin, agentName} at every
+  // buildSdkTools call site (both the session-runner path, via RunTurnOpts's
+  // spread into this ctx, and /chat's direct buildSdkTools call). Optional so
+  // existing callers that never touch needsApproval tools (or don't care about
+  // stickiness) keep working — the sticky lookup is skipped whenever either is
+  // missing, same as when userId itself is missing (anonymous session).
   plugin?: string;
   agentName?: string;
   // Threaded through so buildSdkTools can call agent.toolProvider and
@@ -126,10 +125,9 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
             type: "input.requested",
             data: { turnId, requests: [{ requestId, action: { kind: "tool-call", callId: requestId, toolName: name, input } }] },
           });
-          // 7 of 43 real gates were clicked
-          // after the 5-minute poll window had already given up (median human
-          // response was ~15 minutes). Raised to 30 minutes; ctx override
-          // (tests, other callers) is unchanged.
+          // 7 of 43 real gates were clicked after the 5-minute poll window had
+          // already given up (median human response was ~15 minutes). Raised to
+          // 30 minutes; ctx override (tests, other callers) is unchanged.
           const deadline = Date.now() + (ctx.approvalTimeoutMs ?? 1_800_000);
           let decision: string | null = null;
           while (Date.now() < deadline) {
@@ -148,15 +146,15 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
         metadata: ctx.metadata,
         userId: ctx.userId,
         emit: ctx.toolEmit,
-        // Expose the same sql fn resolveModel/buildInstructions
-        // get via HookCtx.sql, so an authored (static, agent.tools) tool can
-        // query Postgres without its own ambient pool. hookCtx is optional on
+        // Expose the same sql fn resolveModel/buildInstructions get via
+        // HookCtx.sql, so an authored (static, agent.tools) tool can query
+        // Postgres without its own ambient pool. hookCtx is optional on
         // ToolBuildCtx (some callers never wire one), so this is undefined
         // rather than a throw when absent — same "safe to omit" posture as
         // emit/userId above. Provider-sourced (dynamic-tools.ts/MCP) tools
-        // NEVER get sql — they're less trusted (arbitrary MCP servers), so
-        // raw Postgres access is withheld; emit/userId/bearerToken stay
-        // available to them since those are lower-privilege by design.
+        // NEVER get sql — they're less trusted (arbitrary MCP servers), so raw
+        // Postgres access is withheld; emit/userId/bearerToken stay available
+        // to them since those are lower-privilege by design.
         sql: isAuthored ? ctx.hookCtx?.sql : undefined,
       });
     },

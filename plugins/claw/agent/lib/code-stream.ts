@@ -64,7 +64,7 @@ export async function mintToken(userId: string): Promise<string> {
 }
 
 // Pin the coder user to the claude-code provider so the turn lands on
-// streamClaudeCodeChat (the Claude Code sidecar) rather than the API-key ai-sdk
+// streamClaudeCodeChat (the coder sidecar) rather than the API-key ai-sdk
 // loop. claude-code needs no api_key (noKeyProviders in index.ts). Done through
 // the settings API (with the minted token) rather than direct SQL so it stays
 // user-scoped and avoids assuming claw's sql role can write the devx schema.
@@ -149,12 +149,11 @@ export function summarizeActivity(accumulated: string): string {
 // it configurable — the interval was chosen deliberately.
 const HEARTBEAT_MS = 300_000;
 
-// With per-session turn serialization and a raised channel
-// step floor (200), a hung
-// upstream (the devx-api function, or the coder sidecar it drives)
-// could previously wedge the WHOLE session — not just this one turn — until
-// the 2h reaper eventually ran. A generous but bounded per-turn timeout
-// closes that off without needing every hang to wait for the reaper.
+// With per-session turn serialization and a raised channel step floor (200), a
+// hung upstream (the devx-api function, or the coder sidecar it drives) could
+// previously wedge the WHOLE session — not just this one turn — until the 2h
+// reaper eventually ran. A generous but bounded per-turn timeout closes that
+// off without needing every hang to wait for the reaper.
 const TURN_TIMEOUT_MS = 90 * 60_000;
 
 // Run one coder turn and return its reply text. The SSE carries the turn's whole

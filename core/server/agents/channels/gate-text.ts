@@ -1,16 +1,16 @@
 // Plain-text matching helpers for a busy or gated session's reply.
 //
-// matchGateText: 27 of 43 approval gates (63%) were never clicked — the
-// human answered by typing "approve" in the thread instead, and the
-// button-only resume path never saw it. This maps a
-// SHORT thread message onto the pending gate's vocabulary. Deliberately
-// conservative: only a message that is essentially just the decision counts,
-// so "yes but first explain…" still starts a normal turn rather than
-// silently approving a plan. Consumed by channels/layer.ts's resume() MODE B
-// (by token, single pending), which supplies the pending gate's options.
+// matchGateText: 27 of 43 approval gates (63%) were never clicked — the human
+// answered by typing "approve" in the thread instead, and the button-only
+// resume path never saw it. This maps a SHORT thread message onto the pending
+// gate's vocabulary. Deliberately conservative: only a message that is
+// essentially just the decision counts, so "yes but first explain…" still
+// starts a normal turn rather than silently approving a plan. Consumed by
+// channels/layer.ts's resume() MODE B (by token, single pending), which
+// supplies the pending gate's options.
 //
-// This file used to also export `isStatusPing` — implemented, tested, but
-// never wired to an immediate reply anywhere (the architectural move to
+// This file used to also export `isStatusPing` — implemented, tested, but never
+// wired to an immediate reply anywhere (the architectural move to
 // store.getRunningTurn/queueFollowUp stranded it; the generic queued-ack
 // already covers the user need). Deleted rather than left as a trap for a
 // future caller to half-wire.

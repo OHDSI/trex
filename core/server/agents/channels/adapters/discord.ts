@@ -21,11 +21,11 @@
 // HITL: `input.requested` → Discord components (buttons/select/modal via the
 // vendored HITL helpers); the component/modal callback → derive InputResponses
 // (vendored) → resume the parked session. The callback's custom_id carries the
-// requestId, so the channel layer's resume primitive (`args.resume`)
-// resolves BY REQUEST ID (Mode A) with a channel-ownership check — the send-time
+// requestId, so the channel layer's resume primitive (`args.resume`) resolves
+// BY REQUEST ID (Mode A) with a channel-ownership check — the send-time
 // continuation token (channelId:interactionId) never matches the callback's
-// channelId:messageId, but the requestId does, so Discord HITL works without any
-// token match. `opts.resume` remains an injectable override; without it the
+// channelId:messageId, but the requestId does, so Discord HITL works without
+// any token match. `opts.resume` remains an injectable override; without it the
 // default routes the decoded decision through `args.resume` (a miss is logged,
 // never thrown).
 
@@ -344,21 +344,20 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     async "session.failed"(_data, channelCtx) {
       stopTyping(stateOf(channelCtx).channelId);
     },
-    // Acknowledge a message that arrived while a turn was already running
-    // and got queued instead of started as a second concurrent turn —
-    // otherwise it silently disappears until the next turn happens to fold
-    // it in. Posts a plain channel message rather than reusing `deliver()`
-    // (which would call stopTyping — wrong here, the original turn is still
-    // working) or a reaction (the original Discord message id isn't
-    // threaded through session/delivery state to react to). Best-effort:
-    // never affects the turn that's still running.
+    // Acknowledge a message that arrived while a turn was already running and
+    // got queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Posts a
+    // plain channel message rather than reusing `deliver()` (which would call
+    // stopTyping — wrong here, the original turn is still working) or a
+    // reaction (the original Discord message id isn't threaded through
+    // session/delivery state to react to). Best-effort: never affects the turn
+    // that's still running.
     //
     // `deniedPendingGate` (set by handler.ts's startTurn busy branch) says
     // whether this queued reply also denied a pending approval gate — the
-    // generic "queued" line would otherwise tell the human the ball is still
-    // in the running turn's court, when it is actually back in theirs (the
-    // gate was just closed and their reply is about to drive the coder's
-    // revision).
+    // generic "queued" line would otherwise tell the human the ball is still in
+    // the running turn's court, when it is actually back in theirs (the gate
+    // was just closed and their reply is about to drive the coder's revision).
     async "message.queued"(data, channelCtx) {
       const state = stateOf(channelCtx);
       if (!state.channelId) return;
@@ -829,18 +828,18 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     // the agent relays the files onward (askCodeAgent attachments) untouched.
     const attachmentsBlock = formatAttachmentsBlock(event.attachments);
 
-    // 27 of 43 approval gates (63%) were never clicked — the human answered
-    // by typing "approve" in the thread instead, and only a button click
-    // could resume the parked session. Try resolving the EXISTING thread's
-    // session's pending gate from the plain text FIRST, before ever
-    // starting a normal turn. `args.resume` (MODE B,
-    // channels/layer.ts) does the actual matching (gate-text.ts's
-    // matchGateText) against the session's single pending gate's vocabulary —
-    // a miss (no session yet / no pending gate / text isn't a decision for
-    // it) returns {ok:false} and this falls through to the ordinary send()
-    // below exactly as if the check had never run. When it DOES resolve, the
-    // parked turn continues itself (see layer.ts resume()'s docstring) — this
-    // returns immediately so no second turn is ever started for the same reply.
+    // 27 of 43 approval gates (63%) were never clicked — the human answered by
+    // typing "approve" in the thread instead, and only a button click could
+    // resume the parked session. Try resolving the EXISTING thread's session's
+    // pending gate from the plain text FIRST, before ever starting a normal
+    // turn. `args.resume` (MODE B, channels/layer.ts) does the actual matching
+    // (gate-text.ts's matchGateText) against the session's single pending
+    // gate's vocabulary — a miss (no session yet / no pending gate / text isn't
+    // a decision for it) returns {ok:false} and this falls through to the
+    // ordinary send() below exactly as if the check had never run. When it DOES
+    // resolve, the parked turn continues itself (see layer.ts resume()'s
+    // docstring) — this returns immediately so no second turn is ever started
+    // for the same reply.
     const tryResolveGate = async (threadId: string, replyText: string): Promise<boolean> => {
       if (!replyText.trim()) return false;
       try {

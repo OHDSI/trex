@@ -118,9 +118,9 @@ export function stepToEvent(row: { turn_id: string; kind: string; name: string |
 }
 
 // Per-request context for the agent's resolveModel/buildInstructions hooks —
-// built fresh on every call, never cached. `userId` must come from
-// the caller's x-user-id-derived value only (never metadata, which is
-// client-supplied request payload) — see createHandler's createdBy.
+// built fresh on every call, never cached. `userId` must come from the caller's
+// x-user-id-derived value only (never metadata, which is client-supplied
+// request payload) — see createHandler's createdBy.
 function buildHookCtx(deps: Deps, sessionId: string, metadata: unknown, bearerToken: string | undefined, userId: string | undefined): HookCtx {
   return {
     sessionId, bearerToken, userId, metadata,
@@ -165,15 +165,14 @@ function startTurn(
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
-    // "One turn at a time per session". 43 of
-    // 263 real turns (16%) started while the previous turn on the same
-    // session was still running — in one case two turns drove the same
-    // coding-agent chat 22s apart with contradictory instructions, and the
-    // coder acted on the wrong one. A message that arrives while a turn is
-    // still running is queued instead of started as a second, concurrent
-    // turn; startTurn is the single choke point every caller (channel
-    // adapters via layer.ts's send(), and native /eve/v1/session[/:id]) goes
-    // through, so this check covers all of them.
+    // "One turn at a time per session". 43 of 263 real turns (16%) started
+    // while the previous turn on the same session was still running — in one
+    // case two turns drove the same coding-agent chat 22s apart with
+    // contradictory instructions, and the coder acted on the wrong one. A
+    // message that arrives while a turn is still running is queued instead of
+    // started as a second, concurrent turn; startTurn is the single choke point
+    // every caller (channel adapters via layer.ts's send(), and native
+    // /eve/v1/session[/:id]) goes through, so this check covers all of them.
     //
     // Not airtight: the window between this getRunningTurn read and the
     // addTurn write below is check-then-act, not a DB-level lock, and it is
@@ -216,22 +215,21 @@ function startTurn(
       }
     }
     if (running) {
-      // A pending approval gate keeps its turn `status='running'` for the
-      // whole approval poll (up to 30
-      // minutes). A QUALIFIED reply to that gate — e.g.
-      // "yes but first explain why the chunk count is wrong" —
-      // is not a bare yes/no, so matchGateText correctly returns null (see
-      // gate-text.ts) and a pre-checking caller (discord.ts's tryResolveGate)
-      // falls through to here with the gate STILL pending. Queueing that
-      // reply behind the very gate it answers stalls the thread for the rest
-      // of the poll, with neither side able to move — the human is waiting
-      // on the queued reply to be seen, and the running turn is waiting on a
-      // click that will never come because the human already replied in
-      // words. Deny the pending gate so the parked awaitApproval returns
-      // immediately and the coder revises; the reply queued just below rides
-      // the very next turn as that revision's driving instruction, matching
-      // the skill's existing "Deny -> relay the team's changes, have the
-      // coder revise, gate again" semantics (facilitate-coding-task.md).
+      // A pending approval gate keeps its turn `status='running'` for the whole
+      // approval poll (up to 30 minutes). A QUALIFIED reply to that gate — e.g.
+      // "yes but first explain why the chunk count is wrong" — is not a bare
+      // yes/no, so matchGateText correctly returns null (see gate-text.ts) and
+      // a pre-checking caller (discord.ts's tryResolveGate) falls through to
+      // here with the gate STILL pending. Queueing that reply behind the very
+      // gate it answers stalls the thread for the rest of the poll, with
+      // neither side able to move — the human is waiting on the queued reply to
+      // be seen, and the running turn is waiting on a click that will never
+      // come because the human already replied in words. Deny the pending gate
+      // so the parked awaitApproval returns immediately and the coder revises;
+      // the reply queued just below rides the very next turn as that revision's
+      // driving instruction, matching the skill's existing "Deny -> relay the
+      // team's changes, have the coder revise, gate again" semantics
+      // (facilitate-coding-task.md).
       //
       // Deliberately narrow: only a gate the incoming text does NOT already
       // match is denied here. A caller that never pre-checks the gate (only
@@ -521,14 +519,13 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if (!session) return json({ error: "session not found" }, 404);
       const body = await req.json().catch(() => ({}));
       if (Array.isArray(body.inputResponses)) {
-        // Session-ownership check: a session with a known owner (created_by
-        // set from x-user-id at creation)
-        // only lets that same owner resolve its pending approvals — without
-        // this, any authenticated caller who learns (sessionId, requestId)
-        // could resolve someone else's approval and, with sticky
-        // always/never, accrue a durable consent on their behalf. Anonymous
-        // sessions (created_by NULL) keep the pre-existing behavior: anyone
-        // who has the sessionId can resolve. Checked once for the whole
+        // Session-ownership check: a session with a known owner (created_by set
+        // from x-user-id at creation) only lets that same owner resolve its
+        // pending approvals — without this, any authenticated caller who learns
+        // (sessionId, requestId) could resolve someone else's approval and,
+        // with sticky always/never, accrue a durable consent on their behalf.
+        // Anonymous sessions (created_by NULL) keep the pre-existing behavior:
+        // anyone who has the sessionId can resolve. Checked once for the whole
         // batch, before any request in it is touched.
         if (session.created_by != null && session.created_by !== createdBy) {
           return json({ error: "approval can only be resolved by the session owner" }, 403);
@@ -678,48 +675,46 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       //
       // Late-bound writer indirection: tools are built HERE, in the setup
       // phase, so a setup-time throw (a throwing filterTools hook, a broken
-      // tool build) still rejects this route with an HTTP error exactly as
-      // it did before this change — moving buildSdkTools inside the stream's execute()
-      // would demote those to a 200 + in-stream SSE error frame. But the
-      // writer that toolEmit needs to write to only exists inside execute()
+      // tool build) still rejects this route with an HTTP error exactly as it
+      // did before this change — moving buildSdkTools inside the stream's
+      // execute() would demote those to a 200 + in-stream SSE error frame. But
+      // the writer that toolEmit needs to write to only exists inside execute()
       // — so toolEmit targets this rebindable slot instead, and execute()
       // points it at the real writer before any tool can run. An emit fired
-      // before the
-      // stream opens is dropped silently — same fire-and-forget posture as
-      // the rest of ToolContext.emit.
+      // before the stream opens is dropped silently — same fire-and-forget
+      // posture as the rest of ToolContext.emit.
       let writeData: ((part: { type: `data-${string}`; data: unknown }) => void) | undefined;
       const toolEmit = (name: string, data: unknown) => {
         writeData?.({ type: `data-${name}`, data });
       };
-      // Shared tool builder (same as the session runner). No emit/turnId
-      // here for the approval AgentEvent channel, so needsApproval tools
-      // answer with an "use the session API" error instead of hanging a
-      // stateless request. Async (dynamic-tools.ts provider); hookCtx
-      // is the same one just used for
-      // resolveModelForTurn/resolveInstructions above.
+      // Shared tool builder (same as the session runner). No emit/turnId here
+      // for the approval AgentEvent channel, so needsApproval tools answer with
+      // an "use the session API" error instead of hanging a stateless request.
+      // Async (dynamic-tools.ts provider); hookCtx is the same one just used
+      // for resolveModelForTurn/resolveInstructions above.
       const tools = await buildSdkTools({
         agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to
-      // createUIMessageStream + writer.merge so ToolContext.emit has
-      // somewhere to write on this path — a plain streamText UIMessage
-      // stream has no way to interleave extra parts into itself; wrapping it
-      // in a writer-driven stream does (confirmed against the installed
-      // ai@6.0.219 package: `createUIMessageStream`/`createUIMessageStreamResponse`
-      // and `UIMessageStreamWriter.write`/`.merge`).
-      // streamText stays inside execute() (it IS the streaming phase); only
-      // the setup calls above run before the stream so their failures keep
-      // the same HTTP-error semantics as before.
+      // createUIMessageStream + writer.merge so ToolContext.emit has somewhere
+      // to write on this path — a plain streamText UIMessage stream has no way
+      // to interleave extra parts into itself; wrapping it in a writer-driven
+      // stream does (confirmed against the installed ai@6.0.219 package:
+      // `createUIMessageStream`/`createUIMessageStreamResponse` and
+      // `UIMessageStreamWriter.write`/`.merge`). streamText stays inside
+      // execute() (it IS the streaming phase); only the setup calls above run
+      // before the stream so their failures keep the same HTTP-error semantics
+      // as before.
       const uiStream = createUIMessageStream({
         execute: ({ writer }) => {
           writeData = (p) => writer.write(p);
           const result = streamText({
             model,
-            // Same system cache-point wrap as
-            // runner.ts/toolset.ts (see withSystemCachePoint in model.ts) —
-            // bedrock cachePoint / anthropic cacheControl, no-op elsewhere.
+            // Same system cache-point wrap as runner.ts/toolset.ts (see
+            // withSystemCachePoint in model.ts) — bedrock cachePoint /
+            // anthropic cacheControl, no-op elsewhere.
             system: withSystemCachePoint(model, system),
             messages: modelMessages,
             tools,

@@ -119,16 +119,16 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.session_id ?? null;
     },
 
-    // Channel HITL resume — MODE B (by token, single pending). The session's SOLE
-    // still-undecided approval, or null when there are zero or more than one. A
-    // text reply carries a decision but no requestId, so it can only be applied
-    // unambiguously when exactly one approval is pending; >1 is ambiguous (never
-    // guess which the reply answers) and 0 means the reply is an ordinary
-    // message. Widened from a bare requestId to {requestId, tool, options?}
-    // — the plain-text gate matcher needs the
-    // tool name and, for postChoice-style gates, the option id/label pairs
-    // (read from `input.options`, tolerating id|value|label key variants) to
-    // resolve a reply against the pending gate.
+    // Channel HITL resume — MODE B (by token, single pending). The session's
+    // SOLE still-undecided approval, or null when there are zero or more than
+    // one. A text reply carries a decision but no requestId, so it can only be
+    // applied unambiguously when exactly one approval is pending; >1 is
+    // ambiguous (never guess which the reply answers) and 0 means the reply is
+    // an ordinary message. Widened from a bare requestId to {requestId, tool,
+    // options?} — the plain-text gate matcher needs the tool name and, for
+    // postChoice-style gates, the option id/label pairs (read from
+    // `input.options`, tolerating id|value|label key variants) to resolve a
+    // reply against the pending gate.
     async getSinglePendingApproval(
       sessionId: string,
     ): Promise<{ requestId: string; tool: string; options?: Array<{ id: string; label: string }> } | null> {
@@ -177,14 +177,14 @@ export function createStore(query: QueryFn) {
     // Session-scoped on purpose. handler.ts's startTurn calls this lazily
     // whenever a message lands on a BUSY session, to unwedge a zombie turn on
     // THAT session — it never needed to touch any other session. An unscoped
-    // reap marked every running turn deployment-wide, so one session's
-    // message could fail another session's genuinely live turn (long turns
-    // are plausible: the channel step floor was raised to 200 and
-    // streamTurn has no timeout); getRunningTurn on the victim session then
-    // returned null, so ITS next message started a second concurrent turn —
-    // the exact defect this reap-scoping fix exists to remove — and when
-    // the real turn finished later, finishTurn(id, "completed") flipped the
-    // row back, erasing the evidence the reap ever ran.
+    // reap marked every running turn deployment-wide, so one session's message
+    // could fail another session's genuinely live turn (long turns are
+    // plausible: the channel step floor was raised to 200 and streamTurn has no
+    // timeout); getRunningTurn on the victim session then returned null, so ITS
+    // next message started a second concurrent turn — the exact defect this
+    // reap-scoping fix exists to remove — and when the real turn finished
+    // later, finishTurn(id, "completed") flipped the row back, erasing the
+    // evidence the reap ever ran.
     //
     // The cutoff is computed HERE in JS (`new Date(Date.now() -
     // olderThanMs)`) and passed as a plain parameter — the SQL then does a
@@ -212,14 +212,14 @@ export function createStore(query: QueryFn) {
       return r.rows.length;
     },
 
-    // The follow-up queue a busy session's new message folds into
-    // instead of racing the turn already running (service/handler.ts's
-    // startTurn checks getRunningTurn, and queues here rather than starting a
-    // second concurrent turn). No existing session-scoped scratch mechanism
-    // exists in this schema (checked: sessions/turns/steps/approvals/
+    // The follow-up queue a busy session's new message folds into instead of
+    // racing the turn already running (service/handler.ts's startTurn checks
+    // getRunningTurn, and queues here rather than starting a second concurrent
+    // turn). No existing session-scoped scratch mechanism exists in this schema
+    // (checked: sessions/turns/steps/approvals/
     // tool_consents/channel_sessions/oauth_* — none fit), so this is a new
-    // table (migrations/V6__turn_followups.sql), following the same pattern
-    // as agents.approvals/agents.tool_consents.
+    // table (migrations/V6__turn_followups.sql), following the same pattern as
+    // agents.approvals/agents.tool_consents.
     async queueFollowUp(sessionId: string, text: string): Promise<void> {
       await query(
         `INSERT INTO agents.turn_followups (session_id, message) VALUES ($1, $2)`,
@@ -251,10 +251,10 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.tool ?? null;
     },
 
-    // Sticky tool-consent decisions. Checked by
-    // toolset.ts's authoredTool BEFORE creating a one-shot approval request
-    // — "always" executes immediately, "never" denies immediately, and a
-    // miss (null) falls through to the existing per-call approval flow.
+    // Sticky tool-consent decisions. Checked by toolset.ts's authoredTool
+    // BEFORE creating a one-shot approval request — "always" executes
+    // immediately, "never" denies immediately, and a miss (null) falls through
+    // to the existing per-call approval flow.
     async getToolConsent(userId: string, plugin: string, agent: string, tool: string): Promise<"always" | "never" | null> {
       const r = await query(
         `SELECT consent FROM agents.tool_consents WHERE user_id = $1 AND plugin = $2 AND agent = $3 AND tool = $4`,
