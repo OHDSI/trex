@@ -251,8 +251,7 @@ live-tail by event shape.
     derives a non-secret `auth_shape` hint from the unmasked key
     (`plugins/devx/functions/auth_shape.ts`) and `useEffectiveLoop.ts` forces
     `bedrock` + `auth_shape === "iam"` users onto the legacy loop before
-    `/chat` is ever called; the `resolveModel` throw is the backstop — see
-    `plugins/devx/agent/README.md`'s "Bedrock auth" section.
+    `/chat` is ever called; the `resolveModel` throw is the backstop.
 
 ## Channels
 

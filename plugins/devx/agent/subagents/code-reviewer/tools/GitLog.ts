@@ -1,4 +1,5 @@
 // Re-export of the same wrapper tool defined for the top-level devx agent —
-// see plugins/devx/agent/tools/GitLog.ts. "git_log" is in code-reviewer.md's
-// (plugins/devx/agents/code-reviewer.md) allowed-tools list.
+// see plugins/devx/agent/tools/GitLog.ts. Presence in this tools/ dir IS the
+// allow-list entry: the loader takes filename = tool name, and
+// functions/skills/sync.ts derives devx.agents.allowed_tools from these names.
 export { default } from "../../../tools/GitLog.ts";

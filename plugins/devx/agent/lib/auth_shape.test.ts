@@ -3,7 +3,7 @@
 // that GET /provider-configs and GET /settings attach as `auth_shape`,
 // computed from the UNMASKED api_key before masking. Lives here (agent/lib/)
 // rather than next to the route because functions/ has no test harness of
-// its own — this directory's suite invocation (see agent/README.md) is the
+// its own — this directory's suite invocation is the
 // one that runs against functions/ code via relative imports, same as
 // tools_batch_*/parity tests.
 import { assertEquals } from "jsr:@std/assert";
