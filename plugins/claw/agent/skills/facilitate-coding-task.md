@@ -138,9 +138,18 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    doing, THEN make the `askCodeAgent` call. Do not repeat that line in your
    final reply.
 
-5. **Gate 1 — size the task, then design/plan.** Once the ask is clear, call
-   `askCodeAgent` (pass the chosen app id as `app` on this FIRST call) and let
-   the CODER pick the process — sizing is its call, never yours:
+5. **Gate 1 — size the task, then design/plan.**
+
+   **Preflight.** Before the FIRST hand-off of a task, call `codeHealth`. If it
+   reports not ok, post its `detail` to the channel as the blocker (it names the
+   repair and who can do it), say you will pick the task up as soon as it is
+   fixed, and end the turn. Do not open a hand-off you already know will fail,
+   and never ask the team to type "retry" — when a hand-off fails, call
+   `codeHealth` yourself and report what it says.
+
+   Once the ask is clear, call `askCodeAgent` (pass the chosen app id as `app`
+   on this FIRST call) and let the CODER pick the process — sizing is its call,
+   never yours:
    "First assess this task and choose the process yourself:
    - If it is small, well-scoped, and low-risk (a focused fix, a contained
      tweak), take the LIGHT track: skip the full planning pipeline; start your
