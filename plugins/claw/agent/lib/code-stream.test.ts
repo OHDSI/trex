@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert";
 import { FakeTime } from "jsr:@std/testing/time";
 import { streamTurn, summarizeActivity } from "./code-stream.ts";
 
@@ -61,5 +61,37 @@ Deno.test("streamTurn's heartbeat fires on the HEARTBEAT_MS timer, not on chunks
   } finally {
     globalThis.fetch = originalFetch;
     time.restore();
+  }
+});
+
+// Final whole-branch review, Minor: streamTurn's fetch had no AbortSignal —
+// with turn serialization (Task 4) and a 200-step channel floor (Task 7), a
+// hung upstream could wedge the WHOLE session, not just this turn, until the
+// 2h reaper eventually ran. A bounded per-turn timeout closes that off.
+Deno.test("streamTurn's fetch carries a bounded, not-yet-aborted AbortSignal", async () => {
+  const originalFetch = globalThis.fetch;
+  // deno-lint-ignore no-explicit-any
+  let capturedInit: any;
+  try {
+    // deno-lint-ignore no-explicit-any
+    globalThis.fetch = ((_url: string, init?: any) => {
+      capturedInit = init;
+      const body = new ReadableStream<Uint8Array>({
+        start(c) {
+          const enc = new TextEncoder();
+          c.enqueue(enc.encode(`data: ${JSON.stringify({ type: "done", content: "ok" })}\n`));
+          c.close();
+        },
+      });
+      return Promise.resolve(new Response(body, { status: 200 }));
+    }) as typeof fetch;
+
+    const result = await streamTurn("token", "chat-1", "do the thing");
+
+    assertEquals(result, "ok");
+    assert(capturedInit?.signal instanceof AbortSignal, "expected fetch to be called with an AbortSignal");
+    assertEquals(capturedInit.signal.aborted, false, "the signal must not already be aborted at call time");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

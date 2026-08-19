@@ -149,6 +149,14 @@ export function summarizeActivity(accumulated: string): string {
 // it configurable — the interval was chosen deliberately.
 const HEARTBEAT_MS = 300_000;
 
+// Final whole-branch review, Minor: with Task 4's per-session turn
+// serialization and Task 7's raised channel step floor (200), a hung
+// upstream (the devx-api function, or the Claude Code sidecar it drives)
+// could previously wedge the WHOLE session — not just this one turn — until
+// the 2h reaper eventually ran. A generous but bounded per-turn timeout
+// closes that off without needing every hang to wait for the reaper.
+const TURN_TIMEOUT_MS = 90 * 60_000;
+
 // Run one coder turn and return its reply text. The SSE carries the turn's whole
 // life (chunks, tool calls, subagents, questionnaires); we accumulate assistant
 // text and surface a questionnaire inline so claw can relay the coder's question
@@ -182,6 +190,10 @@ export async function streamTurn(
       remoteChannel: true,
       ...(attachments?.length ? { attachments } : {}),
     }),
+    // Bounded so a hung upstream cannot wedge this session forever — see
+    // TURN_TIMEOUT_MS above. Aborts the fetch/stream; the caller (askCore)
+    // sees this as an ordinary turn failure, same as any other stream error.
+    signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
   });
   if (!res.ok || !res.body) throw new Error(`code stream failed: ${res.status} ${res.ok ? "(no body)" : await res.text()}`);
 
