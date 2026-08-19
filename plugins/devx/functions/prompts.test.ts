@@ -77,3 +77,55 @@ Deno.test("channel profile with no ai_rules asserts no tech stack at all", () =>
   assertEquals(prompt.includes("React application"), false);
   assertEquals(prompt.includes("[[AI_RULES]]"), false);
 });
+
+// Final whole-branch review, Important 4: the channel profile used to replace
+// LOCAL_AGENT_SYSTEM_PROMPT wholesale, dropping KNOWLEDGE_BASE_BLOCK and the
+// tool-use guidance blocks even though Task 7's own decision text says "KB
+// stays identical, only the interaction contract differs" — the kb MCP server
+// is still registered, so the coder had the tools but was never told they're
+// authoritative. Composing from the SAME exported blocks the ui profile uses
+// (prompts_channel.ts) fixes this by construction.
+Deno.test("channel profile prompt carries the knowledge base block's distinguishing text", () => {
+  const channelProfile = resolveCoderProfile({ remoteChannel: true });
+  const prompt = constructSystemPrompt("agent", undefined, undefined, channelProfile);
+  assertStringIncludes(prompt, "mcp__kb__KBSearch");
+  assertStringIncludes(prompt, "Prefer the knowledge base over web search for trex, OHDSI/OMOP/Strategus, and d2e questions");
+});
+
+Deno.test("channel profile prompt carries the tool-calling and development-workflow guidance", () => {
+  const channelProfile = resolveCoderProfile({ remoteChannel: true });
+  const prompt = constructSystemPrompt("agent", undefined, undefined, channelProfile);
+  assertStringIncludes(prompt, "<tool_calling>");
+  assertStringIncludes(prompt, "<tool_calling_best_practices>");
+  assertStringIncludes(prompt, "<file_editing_tool_selection>");
+  assertStringIncludes(prompt, "<development_workflow>");
+  assertStringIncludes(prompt, "<web_research>");
+  assertStringIncludes(prompt, "<general_guidelines>");
+});
+
+// Only the preview-panel casualties (APP_COMMANDS_BLOCK / IMAGE_GENERATION_BLOCK)
+// were intended to be dropped — this pins that restoring the other blocks did
+// not also resurrect what has no meaning on a channel turn (there is no
+// preview panel, no RestartApp/RefreshPreview, no GenerateImage tool offered).
+Deno.test("channel profile prompt still omits the preview-panel/iframe framing and RestartApp", () => {
+  const channelProfile = resolveCoderProfile({ remoteChannel: true });
+  const prompt = constructSystemPrompt("agent", undefined, undefined, channelProfile);
+  assertEquals(prompt.includes("iframe"), false);
+  assertEquals(prompt.includes("RestartApp"), false);
+  assertEquals(prompt.includes("RefreshPreview"), false);
+  assertEquals(prompt.includes("<app_commands>"), false);
+  assertEquals(prompt.includes("GenerateImage"), false);
+});
+
+// Final whole-branch review, Important 6: the reply contract's `triggers`
+// attribute must name the SAME four labels, in the SAME wording, that step 5
+// of facilitate-coding-task.md asks the coder to choose among — a mismatch
+// here is exactly how the trailer and the skill's prose silently drift apart.
+Deno.test("channel profile reply contract names the same four FULL-track trigger labels as the skill's step 5", () => {
+  const channelProfile = resolveCoderProfile({ remoteChannel: true });
+  const prompt = constructSystemPrompt("agent", undefined, undefined, channelProfile);
+  assertStringIncludes(prompt, "triggers=");
+  for (const label of ["new subsystem", "schema change", "multiple components", "design space"]) {
+    assertStringIncludes(prompt, label);
+  }
+});

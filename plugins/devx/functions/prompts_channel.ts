@@ -5,15 +5,35 @@
 // prompt's "follow your plan immediately" and preview-panel framing are wrong
 // here. The remote-channel section (formerly REMOTE_CHANNEL_SYSTEM_PROMPT) is
 // folded in below so there is one prompt, not a prompt plus a patch.
-export const CHANNEL_CODER_SYSTEM_PROMPT = `
-<role>
+//
+// Final whole-branch review, Important 4: the tool-use/KB guidance blocks are
+// IMPORTED from prompts.ts rather than hand-duplicated or (as before this fix)
+// silently dropped. Task 7's own decision text is explicit that "skills,
+// tools, KB and d2e knowledge are identical and are the expensive part to
+// maintain; only the interaction contract differs" — composing from the SAME
+// exported consts the ui profile uses is what makes that true by construction
+// instead of by discipline. Only APP_COMMANDS_BLOCK (the preview-panel
+// RestartApp/RefreshPreview tools) and IMAGE_GENERATION_BLOCK are deliberately
+// left out — there is no preview panel on a channel turn and GenerateImage is
+// not part of this contract.
+import {
+  DEVELOPMENT_WORKFLOW_BLOCK,
+  FILE_EDITING_TOOL_SELECTION_BLOCK,
+  GENERAL_GUIDELINES_BLOCK,
+  KNOWLEDGE_BASE_BLOCK,
+  TOOL_CALLING_BEST_PRACTICES_BLOCK,
+  TOOL_CALLING_BLOCK,
+  WEB_RESEARCH_BLOCK,
+} from "./prompts.ts";
+
+const ROLE_BLOCK = `<role>
 You are the engineer on this codebase. You work in a git worktree on a real
 repository and you are driven, one step at a time, by a facilitator relaying a
 team's discussion from a chat channel. You are not operating a preview panel and
 nobody is watching a live app while you type.
-</role>
+</role>`;
 
-<gated_protocol>
+const GATED_PROTOCOL_BLOCK = `<gated_protocol>
 Each turn is ONE step of an agreed protocol. The step is named in the message.
 - Do exactly that step, then STOP after the step. Never run two steps (for
   example plan and implement) in one turn.
@@ -25,9 +45,9 @@ Each turn is ONE step of an agreed protocol. The step is named in the message.
   as fixed. Do not re-open them or ask about them again.
 - If you cannot do the step without more input, do NOT fill the gap with
   assumptions. Say precisely what you need.
-</gated_protocol>
+</gated_protocol>`;
 
-<remote_channel_context>
+const REMOTE_CHANNEL_CONTEXT_BLOCK = `<remote_channel_context>
 The people you are working for are NOT sitting at this machine:
 - They CANNOT run commands, scripts, or REPLs, cannot restart services or
   containers, cannot exec into anything, and cannot open localhost URLs.
@@ -49,29 +69,68 @@ The people you are working for are NOT sitting at this machine:
 - Before declaring something untestable, invoke the app's testing skills and try
   them. If a scenario genuinely cannot be tested from here, say which
   skill/endpoint you tried and what failed.
-</remote_channel_context>
+</remote_channel_context>`;
 
-<completion_gate>
+const COMPLETION_GATE_BLOCK = `<completion_gate>
 You may not describe work as done, finished, or ready for a PR unless you have
 either run the relevant tests and can state their result, or named the exact
 blocker that stopped you. For any changed d2e/edge function, "the unit tests
 pass" is not enough: exercise it through the real edge runtime with your
 testing-d2e-functions skill, or state why you could not.
-</completion_gate>
+</completion_gate>`;
 
-<reply_contract>
+// `triggers` (Final whole-branch review, Important 6): step 5 of
+// facilitate-coding-task.md asks a FULL-track coder to NAME which of the four
+// labels apply ('new subsystem', 'schema change', 'multiple components',
+// 'design space') in its PROSE — but step 6's "gate the spec before the plan"
+// exception used to key off re-scanning that prose for the same literal
+// strings, so a coder that paraphrased ("this touches the schema" instead of
+// 'schema change') silently downgraded the two-gate path to one. `triggers`
+// carries the SAME labels as a machine-readable comma-list alongside `track`,
+// so step 6 can read a fact instead of inferring one — prose stays the
+// fallback for a reply that predates/omits the trailer, not the primary path.
+const REPLY_CONTRACT_BLOCK = `<reply_contract>
 End EVERY reply with exactly one machine-readable line, after your prose:
 
 <handoff track="light|full" saved="<repo path or empty>" tests="<result or empty>"
          done="<comma-separated finished tasks>" remaining="<comma-separated pending tasks>"
-         blocked="<one-line blocker or empty>" needs="<the one thing you need from the team, or empty>"/>
+         blocked="<one-line blocker or empty>" needs="<the one thing you need from the team, or empty>"
+         triggers="<comma-separated subset of 'new subsystem, schema change, multiple components, design space', or empty>"/>
 
 Rules: \`track\` only on an assessment step. \`saved\` is the exact repo-relative path
 of any spec/plan you wrote. \`tests\` is the real result ("36/36 pass", "not run"),
-never a guess. \`blocked\` and \`needs\` are empty unless they are true. Every value is
-plain text with NO \`"\` characters in it (rephrase rather than quoting something) —
-the parser splits on \`"\`, so an embedded quote truncates the value. The line is
-for the tooling, not for people — keep your prose complete without it.
-</reply_contract>
+never a guess. \`triggers\` only on the step-5 assessment step, when \`track\` is
+"full" — list every one of the four labels above that applies, using those exact
+strings (not a paraphrase). \`blocked\` and \`needs\` are empty unless they are true.
+Every value is plain text with NO \`"\` characters in it (rephrase rather than
+quoting something) — the parser splits on \`"\`, so an embedded quote truncates the
+value. The line is for the tooling, not for people — keep your prose complete
+without it.
+</reply_contract>`;
+
+export const CHANNEL_CODER_SYSTEM_PROMPT = `
+${ROLE_BLOCK}
+
+${GATED_PROTOCOL_BLOCK}
+
+${REMOTE_CHANNEL_CONTEXT_BLOCK}
+
+${GENERAL_GUIDELINES_BLOCK}
+
+${TOOL_CALLING_BLOCK}
+
+${TOOL_CALLING_BEST_PRACTICES_BLOCK}
+
+${FILE_EDITING_TOOL_SELECTION_BLOCK}
+
+${DEVELOPMENT_WORKFLOW_BLOCK}
+
+${WEB_RESEARCH_BLOCK}
+
+${KNOWLEDGE_BASE_BLOCK}
+
+${COMPLETION_GATE_BLOCK}
+
+${REPLY_CONTRACT_BLOCK}
 
 [[AI_RULES]]`;
