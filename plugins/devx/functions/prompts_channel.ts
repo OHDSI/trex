@@ -57,4 +57,6 @@ either run the relevant tests and can state their result, or named the exact
 blocker that stopped you. For any changed d2e/edge function, "the unit tests
 pass" is not enough: exercise it through the real edge runtime with your
 testing-d2e-functions skill, or state why you could not.
-</completion_gate>`;
+</completion_gate>
+
+[[AI_RULES]]`;

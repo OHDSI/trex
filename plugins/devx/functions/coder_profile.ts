@@ -20,6 +20,14 @@ export interface CoderProfile {
 
 // The preview panel does not exist on a chat channel: these tools either drive
 // it or produce assets only the workbench can show.
+// DISCLOSED SCAFFOLDING: nothing consumes this list yet. The claude-code
+// sidecar (plugins/devx/fn-claude-code/server.js) has no allowedTools/
+// disallowedTools wiring in its SDK query() opts, and these three tool names
+// aren't even registered as SDK tools on that path in the first place (they
+// only exist in tools/registry.ts's buildToolSet, consumed by agent.ts's own
+// non-claude-code tool-calling path, which doesn't thread `profile` through
+// either). Enforcing this requires wiring one of those two places — do not
+// mistake this list for live protection until then.
 const CHANNEL_DENY_TOOLS = ["RestartApp", "RefreshPreview", "GenerateImage"];
 
 export function resolveCoderProfile(opts: { remoteChannel?: boolean }): CoderProfile {

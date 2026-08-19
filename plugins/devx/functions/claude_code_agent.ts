@@ -100,6 +100,22 @@ async function ensureChatWorktree(userId: string, appId: string, chatId: string)
 const CLAUDE_PORT = 4322;
 const CLAUDE_PROCESS = "claude-code-node-server";
 
+// Only the ui profile (blockingQuestions: true) gets told to call
+// mcp__ask__ask_question — a human is at the keyboard to answer it. That
+// handler (see /pending-responses below and server.js's askServer) polls for
+// up to 5 minutes for a reply written by the browser UI; on a channel turn
+// nobody is watching this devx chat, so calling it just burns the full
+// timeout and comes back empty. The channel profile's own prompt
+// (CHANNEL_CODER_SYSTEM_PROMPT's <gated_protocol>) already tells the coder to
+// put the question in its reply and stop instead — injecting this rule too
+// would tell it to do both, the exact "two agents at once" defect this
+// profile split exists to remove. Exported so it's unit-testable without the
+// network/duckdb side effects the rest of this module carries.
+export function buildAskQuestionRule(profile: { blockingQuestions: boolean }): string {
+  if (!profile.blockingQuestions) return "";
+  return `<asking-questions>\nWhenever you need to ask the user ANYTHING — a clarifying question, a choice between options, or a confirmation — you MUST use the \`mcp__ask__ask_question\` tool. Pass \`options\` for a single choice, add \`multiSelect: true\` for multiple, or omit \`options\` for free text. This applies everywhere, not only during brainstorming. NEVER write a question as plain text in your reply: plain-text questions do NOT render as an interactive prompt and the user may not answer them.\n</asking-questions>`;
+}
+
 // Always-on preamble: the using-skills skill content is injected into
 // every session's system prompt. Loaded lazily and cached for the worker
 // lifecycle (skills/sync.ts already resolves the same plugin base path).
@@ -236,13 +252,13 @@ export async function streamClaudeCodeChat({
   const skillsPreamble = await loadSkillsPreamble();
   if (skillsPreamble) {
     const skillUsageRule = `<skill-usage>\nThe skills above are real and invocable via the Skill tool. When the user asks you to build a feature, component, app, or mockups, FIRST invoke the appropriate skill (e.g. the brainstorming skill to explore the idea and present design options) BEFORE writing app code. Do not jump straight to implementation, and do not write throwaway mockups into the user's app.\n</skill-usage>`;
-    const askQuestionRule = `<asking-questions>\nWhenever you need to ask the user ANYTHING — a clarifying question, a choice between options, or a confirmation — you MUST use the \`mcp__ask__ask_question\` tool. Pass \`options\` for a single choice, add \`multiSelect: true\` for multiple, or omit \`options\` for free text. This applies everywhere, not only during brainstorming. NEVER write a question as plain text in your reply: plain-text questions do NOT render as an interactive prompt and the user may not answer them.\n</asking-questions>`;
+    const askQuestionRule = buildAskQuestionRule(profile);
     // Belt-and-braces with the sidecar's includeCoAuthoredBy=false (server.js
     // disableCoderAttribution): that suppresses the SDK's automatic trailer/
     // footer; this stops the model from MENTIONING the tooling in text it
     // writes itself.
     const commitHygieneRule = `<commit-pr-hygiene>\nCommits, branch names, and pull-request text belong to the user, not the tooling. Never mention Claude, Anthropic, AI, or that the work was generated/assisted, anywhere in a commit message, commit trailer (no Co-Authored-By: Claude or similar), branch name, PR title, or PR description. Write them exactly as the human author of the change would. Branch names always follow <github-username>/<topic> (the connected GitHub account's username, short kebab-case topic, e.g. p-hoffmann/fix-filter-race).\nBranches are created DIRECTLY in the app repository and pushed to its origin — the connected account has push access. Never fork the repository or push to a fork (no \`gh repo fork\`, no \`gh pr create --fork\`); if pushing to origin fails, report the permission problem instead of falling back to a fork.\nIf you wrote a plan or spec for the change (e.g. under trex/plans/), COMMIT that file to the same feature branch before opening the PR — the plan is part of the reviewable change, not a scratch artifact. Keep it updated if the implementation diverges from it.\n</commit-pr-hygiene>`;
-    systemPrompt = `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${skillUsageRule}\n\n${askQuestionRule}\n\n${commitHygieneRule}\n\n${systemPrompt}`;
+    systemPrompt = `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${skillUsageRule}\n\n${askQuestionRule ? askQuestionRule + "\n\n" : ""}${commitHygieneRule}\n\n${systemPrompt}`;
   }
   if (hasComponentSelection) {
     systemPrompt += "\nThe user has selected specific components for editing. Focus your modifications on those components.";

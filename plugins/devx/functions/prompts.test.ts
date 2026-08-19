@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { constructSystemPrompt } from "./prompts.ts";
 import { resolveCoderProfile } from "./coder_profile.ts";
 
@@ -47,4 +47,18 @@ Deno.test("channel profile replaces the base prompt instead of decorating it", (
   const prompt = constructSystemPrompt("agent", undefined, undefined, channelProfile);
   assertEquals(prompt.includes("iframe"), false);
   assertEquals(prompt.includes("STOP after the step"), true);
+});
+
+// Fix round 1: [[AI_RULES]] was silently dropped from the channel prompt
+// because CHANNEL_CODER_SYSTEM_PROMPT had no placeholder for
+// wrapAiRules(...) to land in — String.replace on an absent substring is a
+// silent no-op. This is the assertion that would have caught it: the app's
+// actual project rules (e.g. TREX.md content) must appear in the built
+// channel-profile prompt, not just the literal placeholder disappearing.
+Deno.test("channel profile prompt carries the app's own ai_rules", () => {
+  const channelProfile = resolveCoderProfile({ remoteChannel: true });
+  const rules = "# Project Rules\n- Use the shared SQL pool, never open a new connection.";
+  const prompt = constructSystemPrompt("agent", rules, undefined, channelProfile);
+  assertStringIncludes(prompt, "Use the shared SQL pool, never open a new connection.");
+  assertEquals(prompt.includes("[[AI_RULES]]"), false);
 });
