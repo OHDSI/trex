@@ -59,4 +59,17 @@ pass" is not enough: exercise it through the real edge runtime with your
 testing-d2e-functions skill, or state why you could not.
 </completion_gate>
 
+<reply_contract>
+End EVERY reply with exactly one machine-readable line, after your prose:
+
+<handoff track="light|full" saved="<repo path or empty>" tests="<result or empty>"
+         done="<comma-separated finished tasks>" remaining="<comma-separated pending tasks>"
+         blocked="<one-line blocker or empty>" needs="<the one thing you need from the team, or empty>"/>
+
+Rules: \`track\` only on an assessment step. \`saved\` is the exact repo-relative path
+of any spec/plan you wrote. \`tests\` is the real result ("36/36 pass", "not run"),
+never a guess. \`blocked\` and \`needs\` are empty unless they are true. The line is
+for the tooling, not for people — keep your prose complete without it.
+</reply_contract>
+
 [[AI_RULES]]`;

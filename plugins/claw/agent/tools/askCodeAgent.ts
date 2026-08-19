@@ -1,8 +1,11 @@
 // askCodeAgent — claw's single hand-off to the coding agent. It forwards a
 // message to the SHARED Code agent session (opening one on first use) with the
 // FULL toolset (no devx mode: see lib/code-session.ts for why) and returns the
-// coder's reply verbatim. claw uses it to hand over clear instructions and to
-// relay participants' clarified answers; the coder runs its own gated
+// coder's reply with its machine trailer parsed off (see handoff-trailer.ts) —
+// `reply` is the prose the channel should see, `trailer` the structured facts
+// (track/saved/tests/blocked/needs/done/remaining) the reply ended with, or
+// null when the coder sent none. claw uses it to hand over clear instructions
+// and to relay participants' clarified answers; the coder runs its own gated
 // planning/implementation from there.
 //
 // App scoping: the optional `app` input (devx.apps.id, from listApps) is
@@ -15,6 +18,7 @@ import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
 import { readOrchestration, upsertOrchestration, readDecisions, renderDecisionLedger, type QueryFn } from "../lib/state.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
 import { postChannelMessage } from "../lib/discord-rest.ts";
+import { parseTrailer, type HandoffTrailer } from "../lib/handoff-trailer.ts";
 
 interface Input {
   message: string;
@@ -43,7 +47,7 @@ export async function askCore(
   // Injected for testability (defaults to the real /stream turn); tests pass a
   // stub so askCore's orchestration can be exercised without a live coder.
   runTurn: (args: CodeTurnArgs) => Promise<{ chatId: string; replyText: string }> = runCodeTurn,
-): Promise<{ reply: string }> {
+): Promise<{ reply: string; trailer: HandoffTrailer | null }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
   // codeSessionId now holds the devx chat id; the stored app wins once the chat
   // exists, the input picks it on first use only.
@@ -88,12 +92,16 @@ export async function askCore(
     eventCursor: 0,
     appId,
   });
-  return { reply: replyText };
+  // Task 8 (claw-devx-reliability): the coder ends its reply with a machine
+  // trailer (see prompts_channel.ts's <reply_contract>); strip it from what
+  // the channel sees and hand the parsed facts back alongside.
+  const { trailer, body } = parseTrailer(replyText);
+  return { reply: body, trailer };
 }
 
 export default defineTool({
   description:
-    "Send a message to the shared coding-agent session and return its reply verbatim. " +
+    "Send a message to the shared coding-agent session and return its reply. " +
     "It continues the SAME session across calls, so drive the coder ONE gated step at a " +
     "time: tell it exactly which superpowers skill to run now and to STOP for approval " +
     "(e.g. 'run your brainstorming skill and present options, do not write code, stop'; " +

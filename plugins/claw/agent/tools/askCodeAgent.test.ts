@@ -150,3 +150,24 @@ Deno.test("askCore leaves the message untouched when there are no decisions yet"
   await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "Build X" }, turn.fn);
   assertEquals(turn.seen[0].message, "Build X");
 });
+
+// Task 8 (claw-devx-reliability): the coder's reply ends with a machine
+// trailer; the channel must never see it, and claw gets the parsed facts back.
+Deno.test("askCore strips the handoff trailer from the reply and returns it parsed", async () => {
+  const sql = fakeSql();
+  const reply = 'Implemented and tested.\n\n<handoff track="light" saved="trex/specs/x.md" tests="4/4 pass"/>';
+  const turn = stubTurn(reply);
+  const out = await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
+  assertEquals(out.reply, "Implemented and tested.");
+  assertEquals(out.trailer?.track, "light");
+  assertEquals(out.trailer?.saved, "trex/specs/x.md");
+  assertEquals(out.trailer?.tests, "4/4 pass");
+});
+
+Deno.test("askCore returns a null trailer and the reply unchanged when the coder sends no trailer", async () => {
+  const sql = fakeSql();
+  const turn = stubTurn("Just prose, no trailer.");
+  const out = await askCore(sql.fn, { sessionId: "s1", userId: "u1" }, { message: "go" }, turn.fn);
+  assertEquals(out.reply, "Just prose, no trailer.");
+  assertEquals(out.trailer, null);
+});
