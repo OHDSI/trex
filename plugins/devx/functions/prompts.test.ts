@@ -117,6 +117,36 @@ Deno.test("channel profile prompt still omits the preview-panel/iframe framing a
   assertEquals(prompt.includes("GenerateImage"), false);
 });
 
+// R2 residual (final review): composing the channel prompt from the shared
+// blocks pulled in DEVELOPMENT_WORKFLOW_BLOCK's step 2 ("Use `AskUserQuestion`
+// to ask...") and step 4 ("you must ask the user to interact with the
+// application"), both of which contradict <remote_channel_context>'s "Never
+// hand back instructions for the user to execute" — and fn-claude-code's `ask`
+// MCP server is registered unconditionally, so a channel turn that actually
+// called AskUserQuestion would burn its full 10-minute poll with nobody able
+// to answer. The override block must appear, and it must appear AFTER the
+// dev-workflow block's AskUserQuestion mention so recency favours it.
+Deno.test("channel profile prompt overrides the dev-workflow block's question-tool and user-interaction instructions", () => {
+  const channelProfile = resolveCoderProfile({ remoteChannel: true });
+  const prompt = constructSystemPrompt("agent", undefined, undefined, channelProfile);
+  assertStringIncludes(prompt, "<channel_workflow_override>");
+  assertStringIncludes(prompt, "Never call `AskUserQuestion`");
+  assertStringIncludes(prompt, "Never ask anyone to click, run, submit, or otherwise interact with the app");
+
+  const devWorkflowIdx = prompt.indexOf("Use `AskUserQuestion` to ask 1-3 focused questions");
+  const overrideIdx = prompt.indexOf("<channel_workflow_override>");
+  assertEquals(devWorkflowIdx > -1, true);
+  assertEquals(overrideIdx > -1, true);
+  assertEquals(overrideIdx > devWorkflowIdx, true);
+});
+
+// The UI profile never sees prompts_channel.ts at all — this pins that the
+// override is channel-only, not a change to the shared block itself.
+Deno.test("ui profile prompt carries no channel-workflow override", () => {
+  const prompt = constructSystemPrompt("agent", undefined, undefined, uiProfile);
+  assertEquals(prompt.includes("<channel_workflow_override>"), false);
+});
+
 // Final whole-branch review, Important 6: the reply contract's `triggers`
 // attribute must name the SAME four labels, in the SAME wording, that step 5
 // of facilitate-coding-task.md asks the coder to choose among — a mismatch

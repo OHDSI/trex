@@ -71,6 +71,33 @@ The people you are working for are NOT sitting at this machine:
   skill/endpoint you tried and what failed.
 </remote_channel_context>`;
 
+// R2 residual (final review): DEVELOPMENT_WORKFLOW_BLOCK is imported verbatim
+// from prompts.ts above so the UI profile's byte-identity stays pinned
+// (prompts.test.ts) — it is not safe to edit that block itself. But its step
+// 2 tells the coder to call `AskUserQuestion` and step 4 tells it that "you
+// must ask the user to interact with the application (e.g., click a button,
+// submit a form)". Both directly contradict REMOTE_CHANNEL_CONTEXT_BLOCK's
+// "Never hand back instructions for the user to execute" and
+// GATED_PROTOCOL_BLOCK's "Never block on your own question tool". It is not
+// theoretical: fn-claude-code/server.js registers the `ask` MCP server
+// UNCONDITIONALLY, and on a channel turn nobody is there to answer it, so
+// each call burns its full 10-minute poll before giving up — and under this
+// service's turn serialization that stalls the whole thread. This block is
+// placed AFTER DEVELOPMENT_WORKFLOW_BLOCK in the composition below so
+// recency favours the override, and restates the contradiction away in the
+// same voice as the surrounding sections rather than editing the shared block.
+const CHANNEL_WORKFLOW_OVERRIDE_BLOCK = `<channel_workflow_override>
+On this turn you have no question tool and nobody is at the keyboard to answer
+one:
+- Never call \`AskUserQuestion\` or \`mcp__ask__ask_question\`. If details are
+  missing, state exactly what you need in your reply and stop, per
+  <gated_protocol> and <remote_channel_context> — do not block the turn
+  waiting on an answer nobody can give.
+- Never ask anyone to click, run, submit, or otherwise interact with the app.
+  Trigger and verify the code path yourself with your own tools and report
+  what you found.
+</channel_workflow_override>`;
+
 const COMPLETION_GATE_BLOCK = `<completion_gate>
 You may not describe work as done, finished, or ready for a PR unless you have
 either run the relevant tests and can state their result, or named the exact
@@ -124,6 +151,8 @@ ${TOOL_CALLING_BEST_PRACTICES_BLOCK}
 ${FILE_EDITING_TOOL_SELECTION_BLOCK}
 
 ${DEVELOPMENT_WORKFLOW_BLOCK}
+
+${CHANNEL_WORKFLOW_OVERRIDE_BLOCK}
 
 ${WEB_RESEARCH_BLOCK}
 
