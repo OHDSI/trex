@@ -15,9 +15,15 @@ function inMemoryDb() {
   // Exposed state (turns/steps/approvals) lets tests assert on persistence
   // and drive approval decisions without Postgres.
   const sessions = new Map<string, { status: string; created_by: string | null }>();
-  const turns: Array<{ id: string; session_id: string; seq: number; status: string; error: string | null }> = [];
+  const turns: Array<
+    { id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown; startedAt: Date }
+  > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
   const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string }>();
+  // Task 4 (claw-devx-reliability): the follow-up queue a busy session's new
+  // message folds into (store.ts's queueFollowUp/takeFollowUps), keyed the
+  // same order-preserving way agents.turn_followups is (insertion order).
+  const followUps: Array<{ session_id: string; message: string }> = [];
   // H4: (userId, plugin, agent, tool) -> consent, keyed the same way as the
   // real table's primary key.
   const toolConsents = new Map<string, "always" | "never">();
@@ -37,9 +43,19 @@ function inMemoryDb() {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: s ? [{ id: params[0], status: s.status, created_by: s.created_by }] : [] });
     }
+    if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
+      // Task 4: getRunningTurn — the most-recently-started running turn.
+      const running = turns.filter((t) => t.session_id === params[0] && t.status === "running")
+        .sort((a, b) => b.seq - a.seq);
+      const t = running[0];
+      return Promise.resolve({ rows: t ? [{ id: t.id, seq: t.seq, started_at: t.startedAt }] : [] });
+    }
     if (sql.includes("INSERT INTO agents.turns")) {
       const seq = turns.filter((t) => t.session_id === params[0]).length + 1;
-      const t = { id: `t-${++n}`, session_id: params[0] as string, seq, status: "running", error: null };
+      const t = {
+        id: `t-${++n}`, session_id: params[0] as string, seq, status: "running", error: null,
+        message: JSON.parse(params[1] as string), startedAt: new Date(),
+      };
       turns.push(t);
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
     }
@@ -50,6 +66,20 @@ function inMemoryDb() {
         t.error = (params[2] as string | null) ?? null;
       }
       return Promise.resolve({ rows: [] });
+    }
+    if (sql.includes("INSERT INTO agents.turn_followups")) {
+      // Task 4: queueFollowUp.
+      followUps.push({ session_id: params[0] as string, message: params[1] as string });
+      return Promise.resolve({ rows: [] });
+    }
+    if (sql.includes("DELETE FROM agents.turn_followups")) {
+      // Task 4: takeFollowUps — drains (removes) every queued follow-up for
+      // the session, oldest-first (insertion order, same as the CTE's
+      // ORDER BY created_at against the real table).
+      const sid = params[0] as string;
+      const mine = followUps.filter((f) => f.session_id === sid);
+      for (const f of mine) followUps.splice(followUps.indexOf(f), 1);
+      return Promise.resolve({ rows: mine.map((f) => ({ message: f.message })) });
     }
     if (sql.includes("INSERT INTO agents.steps")) {
       steps.push({
@@ -104,7 +134,7 @@ function inMemoryDb() {
     }
     return Promise.resolve({ rows: [] });
   };
-  return { query, turns, steps, approvals, toolConsents, calls };
+  return { query, turns, steps, approvals, toolConsents, calls, followUps };
 }
 
 // See runner.test.ts's FINISH/sequencedModel comment: ai@6's raw doStream
@@ -830,6 +860,114 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
   assertEquals(live.filter((e) => e.type === "session.failed").length, 1);
   // No unhandled rejection / leaked timer: the test failing on Deno's default
   // sanitizers or an uncaught-error crash IS the assertion here.
+});
+
+// Task 4 (claw-devx-reliability): "one turn at a time per session". Measured
+// over two weeks of real transcripts: 43 of 263 turns (16%) started while the
+// previous turn on the same session was still running — one case had two
+// turns drive the same coding-agent chat 22s apart with contradictory
+// instructions ("Option B" then "stop do A instead") and the coder acted on
+// the wrong one. startTurn (this file) is the single choke point every
+// caller (channel adapters' send(), native /eve/v1/session[/:id]) goes
+// through, so the fix lives here rather than in a specific channel adapter.
+Deno.test("a message arriving while a turn is running is queued, not started as a second concurrent turn", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate; // blocks the first turn "in flight" until the test releases it
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  const second = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "second, urgent" }),
+  }));
+  assertEquals(second.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid)); // drain the fire-and-forget queue write
+
+  // No second, concurrent turn — the message was folded into the queue instead.
+  assertEquals(db.turns.length, 1);
+  assertEquals(db.turns[0].status, "running");
+  assertEquals(db.followUps, [{ session_id: sid, message: "second, urgent" }]);
+
+  releaseGate();
+  // The queued follow-up is run automatically as soon as the first turn
+  // finishes — not left waiting for some future external message to arrive
+  // and pick it up, which would silently strand an instruction the user
+  // already sent during the busy window.
+  await until(() => db.turns.length === 2 && settled(db));
+  assertEquals(db.turns[0].status, "completed");
+  assertEquals(db.turns[1].status, "completed");
+  assertEquals(db.turns[1].message, "second, urgent");
+  assertEquals(db.followUps.length, 0); // drained
+});
+
+Deno.test("a follow-up queued during a turn that fails is folded into the next externally-triggered turn", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      throw new Error("model exploded");
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "queued while busy" }),
+  }));
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    releaseGate();
+    await until(() => db.turns.length === 1 && settled(db)); // the first turn fails; no auto-continuation on failure
+  } finally {
+    console.error = origError;
+  }
+  assertEquals(db.turns[0].status, "failed");
+  // Not lost: still queued, waiting for the next real message.
+  assertEquals(db.followUps, [{ session_id: sid, message: "queued while busy" }]);
+  assert(logged.some((l) => l.includes("model exploded")));
+
+  // Model recovers; a genuinely new message arrives and drains the queue,
+  // folding it into ITS turn's message.
+  const recoveredModel = model("recovered");
+  const agent = await loadAgent(TOY);
+  const recoveredHandler = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: recoveredModel,
+  });
+  await recoveredHandler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "try again" }),
+  }));
+  await until(() => db.turns.length === 2 && settled(db));
+  assertEquals(db.turns[1].status, "completed");
+  assertEquals(db.turns[1].message, "try again\n\nqueued while busy");
+  assertEquals(db.followUps.length, 0);
 });
 
 Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (Task 19 robustness)", async () => {

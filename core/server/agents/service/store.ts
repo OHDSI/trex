@@ -119,18 +119,101 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.session_id ?? null;
     },
 
-    // Channel HITL resume — MODE B (by token, single pending). The request id of
-    // a session's SOLE still-undecided approval, or null when there are zero or
-    // more than one. A text reply carries a decision but no requestId, so it can
-    // only be applied unambiguously when exactly one approval is pending; >1 is
-    // ambiguous (never guess which the reply answers) and 0 means the reply is an
-    // ordinary message.
-    async getSinglePendingApproval(sessionId: string): Promise<string | null> {
+    // Channel HITL resume — MODE B (by token, single pending). The session's SOLE
+    // still-undecided approval, or null when there are zero or more than one. A
+    // text reply carries a decision but no requestId, so it can only be applied
+    // unambiguously when exactly one approval is pending; >1 is ambiguous (never
+    // guess which the reply answers) and 0 means the reply is an ordinary
+    // message. Task 4 (claw-devx-reliability): widened from a bare requestId to
+    // {requestId, tool, options?} — Task 3's plain-text gate matcher needs the
+    // tool name and, for postChoice-style gates, the option id/label pairs
+    // (read from `input.options`, tolerating id|value|label key variants) to
+    // resolve a reply against the pending gate.
+    async getSinglePendingApproval(
+      sessionId: string,
+    ): Promise<{ requestId: string; tool: string; options?: Array<{ id: string; label: string }> } | null> {
       const r = await query(
-        `SELECT request_id FROM agents.approvals WHERE session_id = $1 AND decision IS NULL`,
+        `SELECT request_id, tool, input FROM agents.approvals WHERE session_id = $1 AND decision IS NULL`,
         [sessionId],
       );
-      return r.rows.length === 1 ? r.rows[0].request_id : null;
+      if (r.rows.length !== 1) return null;
+      const row = r.rows[0] as { request_id: string; tool: string; input: Record<string, unknown> | null };
+      const rawOptions = (row.input as { options?: Array<{ id?: string; value?: string; label?: string }> } | null)
+        ?.options;
+      const options = Array.isArray(rawOptions)
+        ? rawOptions
+          .map((o) => ({ id: String(o.id ?? o.value ?? ""), label: String(o.label ?? o.value ?? o.id ?? "") }))
+          .filter((o) => o.id !== "")
+        : undefined;
+      return { requestId: row.request_id, tool: row.tool, ...(options && options.length ? { options } : {}) };
+    },
+
+    // Task 4 (claw-devx-reliability): "one turn at a time per session". The
+    // session's in-flight turn (there should be at most one — see
+    // service/handler.ts's startTurn, which checks this before creating a new
+    // turn), or null when idle. seq DESC LIMIT 1 is defensive: normally there's
+    // exactly one running row, but if a race ever lets two exist, the most
+    // recently started one is the one a fresh message should fold against.
+    async getRunningTurn(sessionId: string): Promise<{ id: string; seq: number; startedAt: Date } | null> {
+      const r = await query(
+        `SELECT id, seq, started_at FROM agents.turns
+          WHERE session_id = $1 AND status = 'running'
+          ORDER BY seq DESC LIMIT 1`,
+        [sessionId],
+      );
+      const row = r.rows[0] as { id: string; seq: number; started_at: Date } | undefined;
+      return row ? { id: row.id, seq: Number(row.seq), startedAt: row.started_at } : null;
+    },
+
+    // Task 4: 21 of 263 turns were observed stuck `running` forever because
+    // nothing ever ended an abandoned turn (a worker crash/redeploy mid-turn
+    // leaves no other signal). Marks every `running` turn older than the
+    // cutoff `failed`, so a hung turn stops blocking getRunningTurn/folding
+    // forever, and returns how many it reaped (for logging/metrics by the
+    // caller). `error` carries the fixed message the plan specifies, with the
+    // cutoff restated in minutes for a human reading the row.
+    async reapStaleTurns(olderThanMs: number): Promise<number> {
+      const minutes = Math.round(olderThanMs / 60000);
+      const r = await query(
+        `UPDATE agents.turns
+            SET status = 'failed',
+                error = $2,
+                finished_at = NOW()
+          WHERE status = 'running' AND started_at < NOW() - ($1 || ' milliseconds')::interval
+          RETURNING id`,
+        [String(olderThanMs), `turn abandoned (no completion within ${minutes} minutes)`],
+      );
+      return r.rows.length;
+    },
+
+    // Task 4: the follow-up queue a busy session's new message folds into
+    // instead of racing the turn already running (service/handler.ts's
+    // startTurn checks getRunningTurn, and queues here rather than starting a
+    // second concurrent turn). No existing session-scoped scratch mechanism
+    // exists in this schema (checked: sessions/turns/steps/approvals/
+    // tool_consents/channel_sessions/oauth_* — none fit), so this is a new
+    // table (migrations/V6__turn_followups.sql), following the same pattern
+    // as agents.approvals/agents.tool_consents.
+    async queueFollowUp(sessionId: string, text: string): Promise<void> {
+      await query(
+        `INSERT INTO agents.turn_followups (session_id, message) VALUES ($1, $2)`,
+        [sessionId, text],
+      );
+    },
+
+    // Drains (deletes and returns) every follow-up queued for the session,
+    // oldest-first, so startTurn can fold them into the next turn's message
+    // in the order they arrived. The DELETE...RETURNING is wrapped in a CTE
+    // because Postgres does not support ORDER BY directly on a DELETE.
+    async takeFollowUps(sessionId: string): Promise<string[]> {
+      const r = await query(
+        `WITH taken AS (
+           DELETE FROM agents.turn_followups WHERE session_id = $1 RETURNING message, created_at
+         )
+         SELECT message FROM taken ORDER BY created_at`,
+        [sessionId],
+      );
+      return r.rows.map((row: { message: string }) => row.message);
     },
 
     // H4: looks up the tool an approval request was raised for, so a sticky

@@ -142,18 +142,98 @@ Deno.test("getApprovalSession returns the session for a requestId (null when unk
 });
 
 // Channel HITL resume — MODE B lookup: exactly-one-pending semantics.
-Deno.test("getSinglePendingApproval returns the id only when exactly one is pending", async () => {
+// Task 4 (claw-devx-reliability): the return shape grew from a bare requestId
+// to {requestId, tool, options?} — Task 3's gate-text matcher needs the tool
+// and (for postChoice-style gates) the option id/label pairs to resolve a
+// plain-text reply against the pending gate unambiguously.
+Deno.test("getSinglePendingApproval returns requestId+tool only when exactly one is pending", async () => {
   const { fn, calls } = fakeQuery([
-    { rows: [{ request_id: "r-7" }] }, // exactly one pending
+    { rows: [{ request_id: "r-7", tool: "postChoice", input: null }] }, // exactly one pending
     { rows: [] }, // zero pending
-    { rows: [{ request_id: "r-1" }, { request_id: "r-2" }] }, // two pending (ambiguous)
+    { rows: [{ request_id: "r-1", tool: "x" }, { request_id: "r-2", tool: "y" }] }, // two pending (ambiguous)
   ]);
   const store = createStore(fn as never);
-  assertEquals(await store.getSinglePendingApproval("s-9"), "r-7");
+  assertEquals(await store.getSinglePendingApproval("s-9"), { requestId: "r-7", tool: "postChoice" });
   assert(calls[0].sql.includes("decision IS NULL"));
   assertEquals(calls[0].params, ["s-9"]);
   assertEquals(await store.getSinglePendingApproval("s-9"), null); // zero
   assertEquals(await store.getSinglePendingApproval("s-9"), null); // >1 → never guess
+});
+
+Deno.test("getSinglePendingApproval maps postChoice-style input.options (id/value/label) into {id,label} pairs", async () => {
+  const { fn } = fakeQuery([
+    {
+      rows: [{
+        request_id: "r-7",
+        tool: "postChoice",
+        input: { options: [{ id: "a", label: "Option A" }, { value: "b" }, { id: "", label: "dropped: no id/value" }] },
+      }],
+    },
+  ]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getSinglePendingApproval("s-9"), {
+    requestId: "r-7",
+    tool: "postChoice",
+    options: [{ id: "a", label: "Option A" }, { id: "b", label: "b" }],
+  });
+});
+
+Deno.test("getSinglePendingApproval omits options when input carries none", async () => {
+  const { fn } = fakeQuery([{ rows: [{ request_id: "r-7", tool: "dangerous_tool", input: { x: 1 } }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getSinglePendingApproval("s-9"), { requestId: "r-7", tool: "dangerous_tool" });
+});
+
+// Task 4 (claw-devx-reliability): the "one turn at a time" seam. A busy
+// session's running turn (or lack thereof) — see discord-messages.ts's
+// folding logic and service/handler.ts's startTurn, which both key off this.
+Deno.test("getRunningTurn returns the sole running turn (or null)", async () => {
+  const { fn, calls } = fakeQuery([
+    { rows: [{ id: "t-1", seq: 3, started_at: new Date("2026-08-19T00:00:00Z") }] },
+    { rows: [] },
+  ]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getRunningTurn("s-1"), { id: "t-1", seq: 3, startedAt: new Date("2026-08-19T00:00:00Z") });
+  assert(calls[0].sql.includes("status = 'running'"));
+  assertEquals(calls[0].params, ["s-1"]);
+  assertEquals(await store.getRunningTurn("s-1"), null);
+});
+
+// Task 4: 21 turns were observed stuck in `running` forever because nothing
+// ever ends an abandoned turn. reapStaleTurns fails only turns whose SQL
+// WHERE clause the store issues — cutoff comparison is asserted via the SQL
+// text since this file's fakeQuery doesn't evaluate the WHERE clause itself.
+Deno.test("reapStaleTurns fails stale running turns and returns the count", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1" }, { id: "t-2" }] }]);
+  const store = createStore(fn as never);
+  const n = await store.reapStaleTurns(2 * 60 * 60 * 1000);
+  assertEquals(n, 2);
+  assert(calls[0].sql.includes("UPDATE agents.turns"));
+  assert(calls[0].sql.includes("status = 'running'"));
+  assert(calls[0].sql.includes("started_at <"));
+  assert(calls[0].sql.includes("RETURNING id"));
+  assert(
+    calls[0].params.includes("turn abandoned (no completion within 120 minutes)"),
+    `expected the exact abandoned-turn error string in params, got: ${JSON.stringify(calls[0].params)}`,
+  );
+});
+
+// Task 4: the follow-up queue a busy session folds a new message into
+// (instead of racing it against the turn already running) — see
+// service/handler.ts's startTurn.
+Deno.test("queueFollowUp inserts and takeFollowUps drains oldest-first, removing what it returns", async () => {
+  const { fn, calls } = fakeQuery([
+    { rows: [] }, // queueFollowUp
+    { rows: [{ message: "also rename the tests" }, { message: "and update the docs" }] }, // takeFollowUps
+  ]);
+  const store = createStore(fn as never);
+  await store.queueFollowUp("s-1", "also rename the tests");
+  assert(calls[0].sql.includes("INSERT INTO agents.turn_followups"));
+  assertEquals(calls[0].params, ["s-1", "also rename the tests"]);
+  const taken = await store.takeFollowUps("s-1");
+  assertEquals(taken, ["also rename the tests", "and update the docs"]);
+  assert(calls[1].sql.includes("DELETE FROM agents.turn_followups"));
+  assertEquals(calls[1].params, ["s-1"]);
 });
 
 Deno.test("getToolConsent returns the stored consent verb", async () => {

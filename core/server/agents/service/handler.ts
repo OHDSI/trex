@@ -152,8 +152,36 @@ function startTurn(
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
+    // Task 4 (claw-devx-reliability): "one turn at a time per session". 43 of
+    // 263 real turns (16%) started while the previous turn on the same
+    // session was still running — in one case two turns drove the same
+    // coding-agent chat 22s apart with contradictory instructions, and the
+    // coder acted on the wrong one. A message that arrives while a turn is
+    // still running is queued instead of started as a second, concurrent
+    // turn; startTurn is the single choke point every caller (channel
+    // adapters via layer.ts's send(), and native /eve/v1/session[/:id]) goes
+    // through, so this check covers all of them. Not airtight under a
+    // millisecond-scale race between two concurrent startTurn calls (no DB
+    // lock — see the report), but it closes the real-world window (seconds,
+    // not milliseconds) that produced the measured 16%.
+    const running = await deps.store.getRunningTurn(sessionId);
+    if (running) {
+      const text = typeof message === "string" ? message : JSON.stringify(message);
+      await deps.store.queueFollowUp(sessionId, text);
+      return;
+    }
+
+    // Fold in anything queued while an earlier turn on this session was
+    // running (see above) — it rides along with this turn's message instead
+    // of racing it as a separate turn. Ordinary case (nothing queued) is a
+    // no-op DB round trip that leaves `message` untouched.
+    const queued = await deps.store.takeFollowUps(sessionId);
+    const turnMessage = queued.length > 0
+      ? [typeof message === "string" ? message : JSON.stringify(message), ...queued].join("\n\n")
+      : message;
+
     const history = await historyForModel(deps.store, sessionId);
-    const turn = await deps.store.addTurn(sessionId, message, metadata);
+    const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
     // Surface the freshly-created turn id to the caller (the channel layer uses
     // it to scope its background delivery to THIS turn) BEFORE publishing any
     // event, so a subscriber registered here can't miss the turn's events.
@@ -170,13 +198,26 @@ function startTurn(
     const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
     try {
       await runTurn({
-        agent: deps.agent, sessionId, turnId: turn.id, history, message, metadata,
+        agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
         store: deps.store, emit: (e) => publish(sessionId, e),
         model: deps.model, bearerToken, userId, hookCtx,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
       });
       await deps.store.finishTurn(turn.id, "completed");
+      // Task 4: a follow-up may have been queued WHILE this turn ran (the
+      // getRunningTurn check above only sees turns that existed before THIS
+      // one started). Drain and run it immediately as the next turn — rather
+      // than publishing session.waiting and waiting for some future message
+      // to arrive and pick it up — so an instruction the user already sent
+      // during the busy window is never silently stranded in the queue.
+      // Reuses onTurnCreated so a channel's delivery still gets registered
+      // for this follow-up turn.
+      const followUps = await deps.store.takeFollowUps(sessionId);
+      if (followUps.length > 0) {
+        startTurn(deps, sessionId, followUps.join("\n\n"), metadata, bearerToken, userId, onTurnCreated);
+        return;
+      }
       // eve's client (t.send()/MessageResponse.result()) ends its per-turn
       // read on session.waiting/session.completed/session.failed, not
       // turn.completed — see events.ts. We have no multi-turn parking state,

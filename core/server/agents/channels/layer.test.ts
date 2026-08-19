@@ -515,7 +515,10 @@ function makeResumeLayer(
     },
     getSinglePendingApproval(sessionId: string) {
       pendingLookups.push(sessionId);
-      return Promise.resolve(opts.singlePending?.[sessionId] ?? null);
+      const requestId = opts.singlePending?.[sessionId] ?? null;
+      // Task 4: the store's real return shape is {requestId, tool, options?} —
+      // the fixture only cares about requestId, so `tool` is a fixed stand-in.
+      return Promise.resolve(requestId ? { requestId, tool: "tool" } : null);
     },
     getApprovalTool: () => Promise.resolve(null),
     setToolConsent: () => Promise.resolve(),

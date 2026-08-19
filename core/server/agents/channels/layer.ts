@@ -405,14 +405,14 @@ function buildArgs(
         console.error(`agents: channel resume found no session for token '${token}'`);
         return { ok: false, error: "no session for token" };
       }
-      const requestId = await deps.store.getSinglePendingApproval(sessionId);
-      if (!requestId) {
+      const pending = await deps.store.getSinglePendingApproval(sessionId);
+      if (!pending) {
         return { ok: false, error: "no single pending approval" };
       }
       return await resolveApprovalDecision(
         deps.store,
         sessionId,
-        { requestId, decision: decisions[0]?.decision as ApprovalDecision | undefined },
+        { requestId: pending.requestId, decision: decisions[0]?.decision as ApprovalDecision | undefined },
         consent,
       );
     },
