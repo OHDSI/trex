@@ -132,11 +132,20 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // must not fire for that case (see the "does not emit message.completed
   // for a clientOnly tool-call turn" test).
   let sawClientOnlyCall = false;
-  // Fix round 1: a postsToChannel tool call means the channel already heard
-  // from the agent this turn over its own REST call (see ToolDef.postsToChannel)
-  // — the fallback below must stay silent rather than layer a redundant (or,
-  // when the turn also did real work, actively misleading) line on top.
-  let sawChannelPost = false;
+  // Final whole-branch review, Important 3: whether the MOST RECENT tool call
+  // posted to the channel — not whether one EVER did. Fix round 1 originally
+  // made this sticky (true forever once any postsToChannel tool ran), but
+  // claw's skill makes postUpdate immediately before EVERY askCodeAgent call
+  // an invariant (facilitate-coding-task.md) — so claw's canonical turn shape
+  // is postUpdate("starting X") -> askCodeAgent (long) -> step cap, no
+  // closing text. A sticky flag suppressed the no-silent-turn fallback for
+  // that whole shape, leaving "starting X" as the channel's last word even
+  // though askCodeAgent (not postUpdate) was how the turn actually ended —
+  // exactly the 14%-silent-turn defect Task 5 was written to remove. Tracking
+  // only the LAST tool call means a channel post at the START of a turn no
+  // longer silences a fallback for whatever happened AFTER it; a channel post
+  // that genuinely is the last thing the turn did still suppresses it.
+  let lastToolWasChannelPost = false;
   // Fix round 1: distinguishes "the turn genuinely did nothing" (safe to say
   // "Nothing was changed") from "tools ran but nothing reached the channel
   // and there's no closing text" (the actually-silent-after-doing-work case
@@ -178,7 +187,9 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           const clientOnly = clientOnlyNames.has(p.toolName) || undefined;
           sawAnyToolCall = true;
           if (clientOnly) sawClientOnlyCall = true;
-          if (postsToChannelNames.has(p.toolName)) sawChannelPost = true;
+          // Reassigned (not OR'd) on every tool call: only the LAST call's
+          // answer survives to the finish case — see the declaration above.
+          lastToolWasChannelPost = postsToChannelNames.has(p.toolName);
           emit({
             type: "actions.requested",
             data: { turnId, actions: [{ kind: "tool-call", callId: p.toolCallId, toolName: p.toolName, input: p.input, clientOnly }] },
@@ -225,13 +236,17 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
             // DESIGN (the caller executes it and continues in a follow-up
             // turn) — see the "does not emit message.completed for a
             // clientOnly tool-call turn" test.
-          } else if (sawChannelPost) {
-            // Fix round 1 (claw-devx-reliability): a postsToChannel tool
-            // (postUpdate/postChoice/postPlan/postQuestion/postScreenshots/
-            // postDevSummary) already told the channel something over its own
-            // REST call this turn — emitting the fallback here would be pure
-            // noise at best, and at worst a false "Nothing was changed" after
-            // a turn that, say, ran askCodeAgent and actually changed things.
+          } else if (lastToolWasChannelPost) {
+            // Fix round 1 (claw-devx-reliability), narrowed by the final
+            // whole-branch review (Important 3): the LAST tool call this turn
+            // made was a postsToChannel tool (postUpdate/postChoice/postPlan/
+            // postQuestion/postScreenshots/postDevSummary) — the channel just
+            // heard from the agent as the turn's closing act, so emitting the
+            // fallback here would be pure noise at best, and at worst a false
+            // "Nothing was changed" after a turn that actually changed things.
+            // A channel post EARLIER in the turn (not the last call) falls
+            // through to the branches below instead — see the declaration of
+            // lastToolWasChannelPost for why that distinction matters.
           } else if (!sawAnyToolCall) {
             // Task 5 (claw-devx-reliability), no-silent-turn guarantee: the
             // turn produced no text, called no tool at all, and posted
