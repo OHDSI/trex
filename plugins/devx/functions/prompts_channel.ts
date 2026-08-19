@@ -68,7 +68,9 @@ End EVERY reply with exactly one machine-readable line, after your prose:
 
 Rules: \`track\` only on an assessment step. \`saved\` is the exact repo-relative path
 of any spec/plan you wrote. \`tests\` is the real result ("36/36 pass", "not run"),
-never a guess. \`blocked\` and \`needs\` are empty unless they are true. The line is
+never a guess. \`blocked\` and \`needs\` are empty unless they are true. Every value is
+plain text with NO \`"\` characters in it (rephrase rather than quoting something) —
+the parser splits on \`"\`, so an embedded quote truncates the value. The line is
 for the tooling, not for people — keep your prose complete without it.
 </reply_contract>
 

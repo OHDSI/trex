@@ -11,17 +11,27 @@ export interface HandoffTrailer {
   remaining?: string[];
 }
 
-const TRAILER_RE = /\n?\s*<handoff\b([^>]*)\/?>\s*$/;
+// Non-greedy but end-anchored: [^>]* would let a `>` embedded inside an
+// attribute value (e.g. blocked="needs decision: A > B") terminate the match
+// early, dropping the whole trailer and leaving the raw markup in the
+// channel-facing body — the exact failure this feature exists to prevent.
+// [\s\S]*? still can't cross the true closing `/>` because \s*$ after it only
+// succeeds once the rest of the string is whitespace, which the interior `>`
+// case never satisfies (there's always more attribute text after it).
+const TRAILER_RE = /\n?\s*<handoff\b([\s\S]*?)\/?>\s*$/;
 
+// Anchored on a preceding boundary (start-of-string or whitespace) so a name
+// that happens to be a suffix of another attribute's name (e.g. a future
+// "remaining" vs. hypothetical "sub-remaining") can't match inside it.
 function attr(raw: string, name: string): string | undefined {
-  const m = new RegExp(`${name}="([^"]*)"`).exec(raw);
+  const m = new RegExp(`(?:^|\\s)${name}="([^"]*)"`).exec(raw);
   const v = m?.[1]?.trim();
   return v ? v : undefined;
 }
 
 function list(raw: string, name: string): string[] | undefined {
   const v = attr(raw, name);
-  if (v === undefined) return new RegExp(`${name}="`).test(raw) ? [] : undefined;
+  if (v === undefined) return new RegExp(`(?:^|\\s)${name}="`).test(raw) ? [] : undefined;
   return v.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
 }
 

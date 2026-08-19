@@ -23,3 +23,51 @@ Deno.test("a blocked trailer keeps the reason", () => {
   const { trailer } = parseTrailer(`Could not run it.\n<handoff track="full" blocked="docker unavailable in sandbox"/>`);
   assertEquals(trailer?.blocked, "docker unavailable in sandbox");
 });
+
+// Review fix (round 1): [^>]* used to let a `>` embedded in an attribute
+// value terminate the match early, dropping the whole trailer AND leaving
+// the raw <handoff .../> markup in the channel-facing body — exactly the
+// leak this feature exists to prevent. blocked/needs are free-prose fields
+// ("one-line blocker", "the one thing you need") where "A > B" or
+// "coverage > 80%" is a natural thing for the coder to write.
+Deno.test("a '>' inside an attribute value does not defeat the match", () => {
+  const reply = 'Done.\n<handoff track="light" blocked="needs decision: A > B"/>';
+  const { trailer, body } = parseTrailer(reply);
+  assertEquals(trailer?.track, "light");
+  assertEquals(trailer?.blocked, "needs decision: A > B");
+  assertEquals(body, "Done.");
+});
+
+// The hardened (non-greedy but still end-anchored) regex must not regress the
+// anchoring guarantee: a <handoff .../> mentioned mid-prose, with real text
+// after it, is not a trailer — it must be left alone, not stripped or mangled.
+Deno.test("mid-prose <handoff> markup with trailing prose is still not treated as a trailer", () => {
+  const reply = 'I discussed the <handoff track="light"/> tag design, then explained more text after.';
+  const { trailer, body } = parseTrailer(reply);
+  assertEquals(trailer, null);
+  assertEquals(body, reply);
+});
+
+// Review fix (round 1), minor #2: the attribute regex is [^"]*, so a literal
+// (unescaped) `"` inside a value truncates that value at the first embedded
+// quote. This is not a crash and the body is still stripped correctly — the
+// contract asks the coder to keep values free of `"` (see prompts_channel.ts)
+// rather than build quote-escaping. Pinned here so the truncation is
+// documented behavior, not a surprise.
+Deno.test("an embedded quote in a value truncates it silently, but the body is still stripped", () => {
+  const reply = 'Done.\n<handoff needs="the "real" answer"/>';
+  const { trailer, body } = parseTrailer(reply);
+  assertEquals(trailer?.needs, "the");
+  assertEquals(body, "Done.");
+});
+
+// Review fix (round 1), minor #4: attr()/list() used to search for
+// `name="..."` anywhere in the raw attribute span, so a name that is a suffix
+// of another attribute's name (separated by a non-word character, e.g. a
+// hypothetical "sub-remaining") could bleed its value into the shorter name.
+// Anchoring on a preceding boundary (start-of-string or whitespace) fixes it.
+Deno.test("an attribute name that is a suffix of another (with a separator) does not steal its value", () => {
+  const reply = 'Done.\n<handoff sub-remaining="x" remaining="a,b"/>';
+  const { trailer } = parseTrailer(reply);
+  assertEquals(trailer?.remaining, ["a", "b"]);
+});
