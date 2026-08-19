@@ -1031,7 +1031,13 @@ export function constructSystemPrompt(mode, aiRules, skillContext, profile) {
   if (profile?.basePrompt) {
     // Channel profile: the caller's contract replaces the workbench identity
     // entirely (not appended — see coder_profile.ts/prompts_channel.ts).
-    prompt = profile.basePrompt.replace("[[AI_RULES]]", wrapAiRules(aiRules, DEFAULT_AI_RULES));
+    // Fallback is "" here, NOT DEFAULT_AI_RULES: the channel coder works on
+    // an arbitrary connected repo (Deno backend, Python flow plugin, ...),
+    // not necessarily the React/Tailwind/shadcn app DEFAULT_AI_RULES
+    // describes. When the repo has no ai_rules/TREX.md, wrapAiRules(aiRules,
+    // "") resolves the placeholder to nothing rather than asserting a wrong
+    // tech stack; trimEnd() drops the resulting trailing blank line.
+    prompt = profile.basePrompt.replace("[[AI_RULES]]", wrapAiRules(aiRules, "")).trimEnd();
   } else if (mode === "plan") {
     prompt = constructPlanModePrompt(aiRules);
   } else if (mode === "agent") {

@@ -23,3 +23,14 @@ Deno.test("channel profile gets no ask_question rule at all", () => {
   const rule = buildAskQuestionRule(channelProfile);
   assertEquals(rule, "");
 });
+
+// Fix round 2 (Minor): pin the ui profile's exact output against the literal
+// template that lived inline in streamClaudeCodeChat before the
+// buildAskQuestionRule extraction, so the refactor's byte-identity is an
+// assertion, not a claim resting on two substring checks.
+Deno.test("ui profile's ask_question rule is byte-identical to the pre-extraction text", () => {
+  const uiProfile = resolveCoderProfile({});
+  const rule = buildAskQuestionRule(uiProfile);
+  const original = `<asking-questions>\nWhenever you need to ask the user ANYTHING — a clarifying question, a choice between options, or a confirmation — you MUST use the \`mcp__ask__ask_question\` tool. Pass \`options\` for a single choice, add \`multiSelect: true\` for multiple, or omit \`options\` for free text. This applies everywhere, not only during brainstorming. NEVER write a question as plain text in your reply: plain-text questions do NOT render as an interactive prompt and the user may not answer them.\n</asking-questions>`;
+  assertEquals(rule, original);
+});

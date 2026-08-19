@@ -62,3 +62,18 @@ Deno.test("channel profile prompt carries the app's own ai_rules", () => {
   assertStringIncludes(prompt, "Use the shared SQL pool, never open a new connection.");
   assertEquals(prompt.includes("[[AI_RULES]]"), false);
 });
+
+// Fix round 2: filling the [[AI_RULES]] gap with DEFAULT_AI_RULES (the
+// React/Tailwind/shadcn workbench boilerplate) made things worse than the
+// round-1 bug — a channel coder on a non-React repo (this repo's own root
+// has neither ai_rules nor TREX.md/AI_RULES.md) would be told, inside its own
+// system prompt, that it's building a React app with shadcn/ui. With no
+// aiRules supplied, the channel prompt must say nothing about a tech stack,
+// not assert a wrong one.
+Deno.test("channel profile with no ai_rules asserts no tech stack at all", () => {
+  const channelProfile = resolveCoderProfile({ remoteChannel: true });
+  const prompt = constructSystemPrompt("agent", undefined, undefined, channelProfile);
+  assertEquals(prompt.toLowerCase().includes("shadcn"), false);
+  assertEquals(prompt.includes("React application"), false);
+  assertEquals(prompt.includes("[[AI_RULES]]"), false);
+});
