@@ -39,6 +39,12 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    again — say what was settled and move on. Ask only when the decision is
    genuinely new, or when a teammate is explicitly reversing an earlier one.
 
+   Whenever a pick, an answer, or a plain-conversation message settles
+   something, call `recordDecision` with the question and what was decided
+   before moving on — e.g. after a `postChoice` pick resumes you with "Option
+   B: server-side filtering", call `recordDecision({question: "filtering
+   approach", decision: "Option B: server-side filtering"})`.
+
    Anti-pattern warning: a request that merely SOUNDS actionable is still
    vague until its scope and success criteria are named. "Make X better",
    "fix the notifications", "add SSL checks" all pass the sounds-actionable

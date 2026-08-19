@@ -14,15 +14,31 @@
 // (Task 3's text-resume path still ends up here; see channels/layer.ts) land
 // on the same execute(). Appended to the decision ledger so the hand-off
 // after this one never re-asks it.
+//
+// Fix round 1: the ledger write must NEVER be able to turn an already-granted
+// human approval into a failed gate. It's wrapped in its own try/catch — a
+// throwing appendDecision (DB blip, connection reset) is logged distinctly
+// and swallowed; the approval still returns normally. A missing sql or
+// sessionId skips the write outright rather than attempting a doomed/
+// mis-keyed one (an empty-string sessionId would otherwise write a row keyed
+// on "").
 import { defineTool } from "eve/tools";
 import { appendDecision, type QueryFn } from "../lib/state.ts";
 
 // Exported separately so the decision-recording behavior is testable without
 // going through defineTool's execute plumbing (same shape as
 // postDevSummaryCore/askCore elsewhere in this package).
-export async function awaitApprovalCore(sql: QueryFn | undefined, sessionId: string, what: string): Promise<{ approved: true; what: string }> {
-  if (sql) {
-    await appendDecision(sql, sessionId, { question: what, decision: "approved" });
+export async function awaitApprovalCore(
+  sql: QueryFn | undefined,
+  sessionId: string | undefined,
+  what: string,
+): Promise<{ approved: true; what: string }> {
+  if (sql && sessionId) {
+    try {
+      await appendDecision(sql, sessionId, { question: what, decision: "approved" });
+    } catch (e) {
+      console.error(`awaitApproval: failed to record decision for session ${sessionId} — approval still stands:`, e);
+    }
   }
   return { approved: true, what };
 }
@@ -46,6 +62,6 @@ export default defineTool({
   needsApproval: true,
   execute: (input, ctx) => {
     const { what } = input as { what: string };
-    return awaitApprovalCore(ctx?.sql, ctx?.sessionId ?? "", what);
+    return awaitApprovalCore(ctx?.sql, ctx?.sessionId, what);
   },
 });

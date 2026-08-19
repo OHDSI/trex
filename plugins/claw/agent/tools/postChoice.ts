@@ -11,10 +11,12 @@
 // (CHOICE_CUSTOM_ID branch), which resumes the session via `args.send("The
 // team selected: <value>", ...)` outside plugins/claw and outside any
 // authored tool's execute. There is no callback into this file when a pick
-// happens, so postChoice cannot append to the decision ledger — recording it
-// would require either a hook in that adapter (outside this plugin) or claw
-// itself calling a record-decision tool after relaying the pick. Left
-// unrecorded here rather than invented.
+// happens, so postChoice itself cannot append to the decision ledger.
+// Deliberately not hooked from that adapter either — claw.orchestrations is
+// claw-owned and the adapter is shared channel infrastructure, so the
+// layering must not invert. Fix round 1: claw records the pick itself, one
+// step later, by calling recordDecision.ts once the resumed "The team
+// selected: ..." message reaches it (see facilitate-coding-task.md).
 import { defineTool } from "eve/tools";
 import { postChannelMessage } from "../lib/discord-rest.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";

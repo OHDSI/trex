@@ -6,11 +6,27 @@
 // claw's own replayed session history, not here.
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
 
+// A single settled decision, so a hand-off carries what the channel already
+// agreed instead of re-opening it. Append-only: a reversal is recorded as a
+// NEW entry, never an edit of an earlier one (see renderDecisionLedger).
+export interface Decision {
+  at: string; // ISO timestamp, set by appendDecision
+  question: string;
+  decision: string;
+}
+
 export interface Orchestration {
   sessionId: string; // claw session id (PK)
   codeSessionId: string | null; // the shared Code agent session, once opened
   eventCursor: number; // position in the Code session's event stream
   appId: string | null; // devx app the Code session is scoped to (fixed per task)
+  // Fix round 1 (claw-devx-reliability): optional, not required — upsertOrchestration
+  // never writes this column (see below), so callers building an Orchestration to
+  // upsert don't need to supply it. readOrchestration always populates it (with
+  // [] when there are none) so claw's own instructions (agent.ts's
+  // buildInstructions -> renderStateForPrompt) can see the ledger too, not just
+  // the coder hand-off in askCore.
+  decisions?: Decision[];
 }
 
 interface Row {
@@ -18,11 +34,12 @@ interface Row {
   code_session_id: string | null;
   event_cursor: number | string;
   app_id: string | null;
+  decisions?: Decision[] | null;
 }
 
 export async function readOrchestration(sql: QueryFn, sessionId: string): Promise<Orchestration | null> {
   const { rows } = await sql(
-    `SELECT session_id, code_session_id, event_cursor, app_id
+    `SELECT session_id, code_session_id, event_cursor, app_id, decisions
        FROM claw.orchestrations WHERE session_id = $1`,
     [sessionId],
   );
@@ -33,6 +50,7 @@ export async function readOrchestration(sql: QueryFn, sessionId: string): Promis
     codeSessionId: r.code_session_id,
     eventCursor: Number(r.event_cursor) || 0,
     appId: r.app_id ?? null,
+    decisions: Array.isArray(r.decisions) ? r.decisions : [],
   };
 }
 
@@ -47,15 +65,6 @@ export async function upsertOrchestration(sql: QueryFn, o: Orchestration): Promi
        updated_at = now()`,
     [o.sessionId, o.codeSessionId, o.eventCursor, o.appId],
   );
-}
-
-// A single settled decision, so a hand-off carries what the channel already
-// agreed instead of re-opening it. Append-only: a reversal is recorded as a
-// NEW entry, never an edit of an earlier one (see renderDecisionLedger).
-export interface Decision {
-  at: string; // ISO timestamp, set by appendDecision
-  question: string;
-  decision: string;
 }
 
 // Appends one decision to the ledger. Uses the same upsert-on-conflict shape
@@ -87,16 +96,27 @@ export async function readDecisions(sql: QueryFn, sessionId: string): Promise<De
 
 // Renders the ledger oldest-first: it is append-only, so the LAST line is
 // whatever is currently true — a reversal shows up as a new line below the
-// decision it reverses, never as an edit in place.
+// decision it reverses, never as an edit in place. Whitespace in
+// question/decision is collapsed to a single space so a multi-line value
+// (e.g. a decision string with an embedded newline) can never break the
+// one-bullet-per-line rendering.
+const collapseWhitespace = (s: string): string => s.replace(/\s+/g, " ").trim();
+
 export function renderDecisionLedger(ds: Decision[]): string {
   if (ds.length === 0) return "";
-  const lines = ds.map((d) => `- ${d.question}: ${d.decision}`).join("\n");
-  return `Already settled by the team (do NOT re-open these; if one is reversed it appears again lower down):\n${lines}\n\n`;
+  const lines = ds.map((d) => `- ${collapseWhitespace(d.question)}: ${collapseWhitespace(d.decision)}`).join("\n");
+  return `Already settled by the team (do NOT re-open these — for the same question, the LATEST entry below is the current answer):\n${lines}\n\n`;
 }
 
 export function renderStateForPrompt(o: Orchestration | null): string {
-  if (!o || !o.codeSessionId) {
-    return "\n\n## Coding-agent session\nNo coding-agent session yet — you have not delegated anything for this conversation. Once the ask is clear, use askCodeAgent to open one.";
-  }
-  return "\n\n## Coding-agent session\nA coding-agent session is active for this conversation (askCodeAgent continues the SAME one). Keep facilitating: relay the team's clarified answers to it and post its replies back to the channel.";
+  const session = !o || !o.codeSessionId
+    ? "\n\n## Coding-agent session\nNo coding-agent session yet — you have not delegated anything for this conversation. Once the ask is clear, use askCodeAgent to open one."
+    : "\n\n## Coding-agent session\nA coding-agent session is active for this conversation (askCodeAgent continues the SAME one). Keep facilitating: relay the team's clarified answers to it and post its replies back to the channel.";
+  // Fix round 1 (claw-devx-reliability): claw's OWN instructions need the
+  // ledger too, not just the coder hand-off in askCore — otherwise claw is
+  // told to "check the decisions already settled" (facilitate-coding-task.md)
+  // with no way to actually see them. Reuses renderDecisionLedger rather than
+  // a second renderer; unchanged (byte-identical) when there are no decisions.
+  const ledger = renderDecisionLedger(o?.decisions ?? []);
+  return ledger ? `${session}\n\n${ledger}` : session;
 }

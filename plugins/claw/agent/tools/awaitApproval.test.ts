@@ -29,3 +29,30 @@ Deno.test("awaitApprovalCore still approves when sql is unavailable (no crash wi
   const out = await awaitApprovalCore(undefined, "s1", "the plan");
   assertEquals(out, { approved: true, what: "the plan" });
 });
+
+// Fix round 1 (Important #3): a throwing ledger write must never turn an
+// already-granted human approval into a failed gate.
+Deno.test("awaitApprovalCore still approves when appendDecision throws, and logs the failure distinctly", async () => {
+  const failing = () => Promise.reject(new Error("connection reset"));
+  const originalError = console.error;
+  const logged: unknown[][] = [];
+  console.error = (...args: unknown[]) => {
+    logged.push(args);
+  };
+  try {
+    const out = await awaitApprovalCore(failing, "s1", "the plan");
+    assertEquals(out, { approved: true, what: "the plan" });
+    assertEquals(logged.length, 1);
+    assertStringIncludes(String(logged[0][0]), "awaitApproval");
+  } finally {
+    console.error = originalError;
+  }
+});
+
+// Minor: an empty/missing sessionId must not write a row keyed on "".
+Deno.test("awaitApprovalCore skips the write when sessionId is missing", async () => {
+  const f = fakeSql();
+  const out = await awaitApprovalCore(f.fn, undefined, "the plan");
+  assertEquals(out, { approved: true, what: "the plan" });
+  assertEquals(f.calls.length, 0);
+});
