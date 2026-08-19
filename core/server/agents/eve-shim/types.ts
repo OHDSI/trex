@@ -105,6 +105,15 @@ export interface ToolDef {
   needsApproval?: boolean;
   clientOnly?: boolean;
   idempotent?: boolean;
+  // Task 5 (claw-devx-reliability), fix round 1: this tool speaks to the
+  // channel directly (its own REST call, outside the emit/message.completed
+  // event path) — set on claw's postUpdate/postChoice/postPlan/postQuestion/
+  // postScreenshots/postDevSummary. runner.ts's no-silent-turn fallback reads
+  // this (agent-agnostic — it does not know any tool by name) to avoid
+  // claiming "nothing happened" after a turn that already told the channel
+  // something, and to avoid claiming "nothing was changed" when it can't
+  // know that.
+  postsToChannel?: boolean;
 }
 
 // zod v3/v4 schemas expose safeParse; JSON Schema objects don't.

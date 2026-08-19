@@ -15,6 +15,8 @@ interface OptionIn { label: string; value: string; description?: string }
 interface Input { channelId: string; title: string; intro?: string; options: OptionIn[]; multi?: boolean }
 
 export default defineTool({
+  // Task 5 (claw-devx-reliability), fix round 1 — see postUpdate.ts.
+  postsToChannel: true,
   description:
     "Present design options to the channel as a dropdown (select menu) the team picks from with " +
     "one click — use at Gate 1 when the coder offered multiple real options. `title`/`intro` " +

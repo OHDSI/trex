@@ -111,13 +111,45 @@ Deno.test("runTurn does not emit message.completed for a clientOnly tool-call tu
   assert(!events.some((e) => e.type === "message.completed"));
 });
 
-// Task 5 (claw-devx-reliability), no-silent-turn guarantee: a turn whose
-// entire step list is server-executed tool calls (the step cap cuts it off
-// before the model ever produces closing text) must still deliver one line,
-// distinct from the clientOnly hand-off case above (which stays silent).
-Deno.test("runTurn delivers a fallback message.completed when a turn ends with only tool calls and no text", async () => {
+// Task 5 (claw-devx-reliability), no-silent-turn guarantee — four branches at
+// the "finish" case, per fix round 1's ruling:
+//   1. text present -> emit as always (covered by the first test in this file).
+//   2. clientOnly call, no text -> stay silent (covered just above).
+//   3. no tool calls at all, no text -> "Nothing was changed" (true: nothing ran).
+//   4. tools ran, none posted, no text -> a line making NO claim about changes.
+//   5. a postsToChannel tool ran, no text -> emit nothing (channel already heard).
+
+Deno.test("runTurn delivers 'Nothing was changed' when a turn calls no tool at all and produces no text", async () => {
   const agent = await loadAgent(TOY);
-  agent.config.maxSteps = 2; // keep the tool-call loop short — the model never produces text
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "...", store, emit: (e) => events.push(e),
+    // A finish with no preceding text-delta or tool-call parts at all — the
+    // model produced literally nothing.
+    model: sequencedModel([FINISH]),
+  });
+  const completed = events.find((e) => e.type === "message.completed") as
+    | { data: { message: string; finishReason: string } }
+    | undefined;
+  assert(completed, "expected a fallback message.completed event");
+  assertEquals(
+    completed!.data.message,
+    'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.',
+  );
+  assertEquals(res.text, completed!.data.message);
+  const completedIdx = events.indexOf(completed as AgentEvent);
+  const finishIdx = events.findIndex((e) => e.type === "turn.completed");
+  assert(completedIdx >= 0 && finishIdx >= 0 && completedIdx < finishIdx);
+});
+
+Deno.test("runTurn delivers a no-claim fallback when tools ran but none posted and no text followed", async () => {
+  // The step cap cuts the loop off mid tool-call loop — the model never
+  // produces closing text, and "echo" is an ordinary server tool with no
+  // postsToChannel flag, so the channel never heard anything either.
+  const agent = await loadAgent(TOY);
+  agent.config.maxSteps = 2; // keep the tool-call loop short
   const { store } = memoryStoreCalls();
   const events: AgentEvent[] = [];
   const res = await runTurn({
@@ -129,16 +161,40 @@ Deno.test("runTurn delivers a fallback message.completed when a turn ends with o
     | { data: { message: string; finishReason: string } }
     | undefined;
   assert(completed, "expected a fallback message.completed event");
-  assertEquals(
-    completed!.data.message,
-    'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.',
-  );
+  // Must NOT claim anything about whether work happened — echo may or may
+  // not have changed anything, and this branch genuinely doesn't know.
+  assertEquals(completed!.data.message, 'That step ended without a reply. Say "retry" and I\'ll run it again.');
+  assert(!completed!.data.message.toLowerCase().includes("nothing was changed"));
   assertEquals(res.text, completed!.data.message);
-  // message.completed still precedes turn.completed for the fallback, same
-  // ordering guarantee as the normal-text path.
   const completedIdx = events.indexOf(completed as AgentEvent);
   const finishIdx = events.findIndex((e) => e.type === "turn.completed");
   assert(completedIdx >= 0 && finishIdx >= 0 && completedIdx < finishIdx);
+});
+
+// The regression fix round 1 exists for: a turn that calls a postsToChannel
+// tool (e.g. claw's postUpdate) and then ends with no text must NOT get the
+// fallback — the channel already heard from the agent, and appending
+// "Nothing was changed" could be an outright false claim if a later step in
+// the SAME turn (e.g. askCodeAgent, an ordinary non-posting tool) did
+// something.
+Deno.test("runTurn emits NO fallback when a postsToChannel tool ran and the turn produced no text", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.maxSteps = 2;
+  agent.tools.notify = {
+    description: "posts a status line to the channel (test double for postUpdate)",
+    inputSchema: { type: "object", properties: {} },
+    postsToChannel: true,
+    execute: () => Promise.resolve({ posted: true }),
+  };
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "notify forever", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("notify", {})),
+  });
+  assert(!events.some((e) => e.type === "message.completed"), "expected NO fallback — the channel already heard from the agent");
+  assertEquals(res.text, "");
 });
 
 Deno.test("runTurn emits clientOnly tool call and does not execute it", async () => {

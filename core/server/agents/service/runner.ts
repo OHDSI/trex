@@ -65,6 +65,14 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   const clientOnlyNames = new Set(
     Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).clientOnly).map(([n]) => n),
   );
+  // Task 5 (claw-devx-reliability), fix round 1: agent-agnostic — runner.ts
+  // does not know any tool by name, so a tool declares whether ITS OWN
+  // execute() already speaks to the channel directly (outside this turn's
+  // emit/message.completed path), the same way it declares clientOnly. See
+  // ToolDef.postsToChannel (eve-shim/types.ts).
+  const postsToChannelNames = new Set(
+    Object.entries(agent.tools).filter(([, d]) => (d as ToolDef).postsToChannel).map(([n]) => n),
+  );
 
   // H3: ToolContext.emit's session-path channel. A tool's execute() calls
   // this synchronously (fire-and-forget — see eve-shim/types.ts's
@@ -124,6 +132,17 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // must not fire for that case (see the "does not emit message.completed
   // for a clientOnly tool-call turn" test).
   let sawClientOnlyCall = false;
+  // Fix round 1: a postsToChannel tool call means the channel already heard
+  // from the agent this turn over its own REST call (see ToolDef.postsToChannel)
+  // — the fallback below must stay silent rather than layer a redundant (or,
+  // when the turn also did real work, actively misleading) line on top.
+  let sawChannelPost = false;
+  // Fix round 1: distinguishes "the turn genuinely did nothing" (safe to say
+  // "Nothing was changed") from "tools ran but nothing reached the channel
+  // and there's no closing text" (the actually-silent-after-doing-work case
+  // this task exists to fix — must NOT claim nothing changed, since it might
+  // have).
+  let sawAnyToolCall = false;
   // Persist the final assistant text exactly once. Called from the "finish"
   // case BEFORE the "finish" step so the stored seq order (text → finish)
   // matches the live emit order (message.completed → turn.completed) —
@@ -157,7 +176,9 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
         case "tool-call": {
           const p = part as any;
           const clientOnly = clientOnlyNames.has(p.toolName) || undefined;
+          sawAnyToolCall = true;
           if (clientOnly) sawClientOnlyCall = true;
+          if (postsToChannelNames.has(p.toolName)) sawChannelPost = true;
           emit({
             type: "actions.requested",
             data: { turnId, actions: [{ kind: "tool-call", callId: p.toolCallId, toolName: p.toolName, input: p.input, clientOnly }] },
@@ -195,18 +216,37 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           // eve's client only reads the final reply off message.completed
           // (see events.ts) — emit it once, right before turn.completed, when
           // this turn actually produced text. A pure tool-call turn with no
-          // trailing text falls to the clientOnly hand-off check or the
-          // no-silent-turn fallback below.
+          // trailing text falls to the clientOnly hand-off check, the
+          // channel-post check, or the no-silent-turn fallback below.
           if (text) {
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
-          } else if (!sawClientOnlyCall) {
-            // Task 5 (claw-devx-reliability), no-silent-turn guarantee: 37 of
-            // 263 real turns ended with nothing posted anywhere — the model
-            // ran only server-executed tool calls (or hit the step cap) and
-            // never produced closing text. Excluding sawClientOnlyCall keeps
-            // the legitimate client hand-off case (above) silent, as before.
+          } else if (sawClientOnlyCall) {
+            // Unchanged: a clientOnly tool call ends the turn with no text by
+            // DESIGN (the caller executes it and continues in a follow-up
+            // turn) — see the "does not emit message.completed for a
+            // clientOnly tool-call turn" test.
+          } else if (sawChannelPost) {
+            // Fix round 1 (claw-devx-reliability): a postsToChannel tool
+            // (postUpdate/postChoice/postPlan/postQuestion/postScreenshots/
+            // postDevSummary) already told the channel something over its own
+            // REST call this turn — emitting the fallback here would be pure
+            // noise at best, and at worst a false "Nothing was changed" after
+            // a turn that, say, ran askCodeAgent and actually changed things.
+          } else if (!sawAnyToolCall) {
+            // Task 5 (claw-devx-reliability), no-silent-turn guarantee: the
+            // turn produced no text, called no tool at all, and posted
+            // nothing anywhere — it genuinely did nothing, so "Nothing was
+            // changed" is true.
             text =
               'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.';
+            emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
+          } else {
+            // Fix round 1: tools ran (so work may have happened) but none of
+            // them posted to the channel and the model never produced closing
+            // text — e.g. it hit the step cap mid tool-call loop. This is the
+            // genuinely-silent-after-doing-work case the task exists to fix.
+            // Deliberately makes NO claim about whether anything changed.
+            text = 'That step ended without a reply. Say "retry" and I\'ll run it again.';
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
           }
           emit({ type: "turn.completed", data: { turnId, usage, finishReason } });
