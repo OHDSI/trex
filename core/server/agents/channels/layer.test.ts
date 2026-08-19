@@ -1,6 +1,6 @@
 // Channel layer (Task 4): route dispatch + ChannelRouteArgs + send().
 // deno-lint-ignore-file no-explicit-any
-import { assertEquals, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { createChannelHandler } from "./layer.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
@@ -626,6 +626,31 @@ Deno.test("channel resume MODE B: unknown token -> {ok:false} 'no session for to
   assertEquals(lookups, [{ channel: "webhook", token: "webhook:ghost" }]);
   assertEquals(pendingLookups, []);
   assertEquals(resolves, []);
+});
+
+// Final whole-branch review, Minor: Task 3 made discord.ts's tryResolveGate
+// call resume() on EVERY thread message, not just ones known to answer a
+// gate — so "no session for token" became the ROUTINE case for an ordinary
+// message in a thread with no registered session, not an error worth paging
+// on. Must log at a level below console.error.
+Deno.test("channel resume MODE B: an unknown token logs at warn, not error (routine on every thread message since Task 3)", async () => {
+  const agent = await loadAgent(TOY);
+  const { handler } = makeResumeLayer(agent, { tokenToSession: {} });
+
+  const errors: unknown[] = [];
+  const warns: unknown[] = [];
+  const origError = console.error;
+  const origWarn = console.warn;
+  console.error = (...args: unknown[]) => errors.push(args);
+  console.warn = (...args: unknown[]) => warns.push(args);
+  try {
+    await handler(resumeRequest({ token: "ghost", input: { decision: "approve" } }));
+  } finally {
+    console.error = origError;
+    console.warn = origWarn;
+  }
+  assertEquals(errors.length, 0, `expected no console.error, got: ${JSON.stringify(errors)}`);
+  assert(warns.some((w) => String(w).includes("no session for token")));
 });
 
 Deno.test("channel resume MODE B: zero/ambiguous pending -> {ok:false} 'no single pending approval'", async () => {

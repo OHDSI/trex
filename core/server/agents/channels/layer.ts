@@ -403,7 +403,12 @@ function buildArgs(
       const token = namespacedToken(channelId, continuationToken);
       const sessionId = await deps.channelStore.getSessionByToken(channelId, token);
       if (!sessionId) {
-        console.error(`agents: channel resume found no session for token '${token}'`);
+        // Final whole-branch review, Minor: Task 3 made discord.ts's
+        // tryResolveGate call resume() on EVERY thread message (not just ones
+        // known to be answering a gate), so "no session for token" is now the
+        // routine case for an ordinary thread with no gate pending — not an
+        // error worth paging on. Demoted from console.error to console.warn.
+        console.warn(`agents: channel resume found no session for token '${token}'`);
         return { ok: false, error: "no session for token" };
       }
       const pending = await deps.store.getSinglePendingApproval(sessionId);
