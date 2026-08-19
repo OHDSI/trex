@@ -9,6 +9,13 @@ export interface HandoffTrailer {
   needs?: string;
   done?: string[];
   remaining?: string[];
+  // Final whole-branch review, Important 6: the FULL-track triggers the
+  // coder named in step 5 (a subset of 'new subsystem' | 'schema change' |
+  // 'multiple components' | 'design space' — see prompts_channel.ts's
+  // <reply_contract>), so step 6's "gate the spec before the plan" exception
+  // can key off a machine-readable fact instead of re-reading the coder's
+  // prose for the literal label strings.
+  triggers?: string[];
 }
 
 // Anchored on the LAST "<handoff" in the reply, then matched forward from
@@ -68,6 +75,7 @@ export function parseTrailer(reply: string): { trailer: HandoffTrailer | null; b
       ...(attr(raw, "needs") ? { needs: attr(raw, "needs") } : {}),
       ...(list(raw, "done") ? { done: list(raw, "done") } : {}),
       ...(list(raw, "remaining") ? { remaining: list(raw, "remaining") } : {}),
+      ...(list(raw, "triggers") ? { triggers: list(raw, "triggers") } : {}),
     },
     body: reply.slice(0, index).trimEnd(),
   };

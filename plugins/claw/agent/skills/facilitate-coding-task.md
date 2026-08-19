@@ -242,9 +242,15 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    `awaitApproval` (`what: "the design spec and the plan"`).
 
    **Exception — keep the two gates separate.** This is a lookup, not a judgement
-   call: if step 5's `TRACK: full` reply named **'schema change'** or
-   **'multiple components'** among its triggers, gate the spec before the plan
-   is written at all:
+   call: if step 5's assessment reply's **`trailer.triggers`** (the machine-readable
+   line every hand-off ends with — see `askCodeAgent`'s return) includes
+   **'schema change'** or **'multiple components'**, gate the spec before the plan
+   is written at all. Only fall back to scanning the reply's PROSE for those same
+   two labels when that step's `trailer` is null or `triggers` is absent (an older
+   or non-conforming reply) — when the trailer is present, trust it over the prose,
+   even if the wording differs (a coder that writes "this touches the schema"
+   instead of the literal label 'schema change' must not silently skip the
+   exception just because the prose lookup would miss it).
    - **Gate 2a — design spec.** Call `askCodeAgent` for the spec only (as above,
      but end with "Do NOT start writing-plans and do NOT implement — stop after
      the spec, and report the exact saved path"). `postPlan` (title "Design spec:

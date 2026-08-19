@@ -3,8 +3,8 @@
 // FULL toolset (no devx mode: see lib/code-session.ts for why) and returns the
 // coder's reply with its machine trailer parsed off (see handoff-trailer.ts) —
 // `reply` is the prose the channel should see, `trailer` the structured facts
-// (track/saved/tests/blocked/needs/done/remaining) the reply ended with, or
-// null when the coder sent none. claw uses it to hand over clear instructions
+// (track/saved/tests/blocked/needs/done/remaining/triggers) the reply ended
+// with, or null when the coder sent none. claw uses it to hand over clear instructions
 // and to relay participants' clarified answers; the coder runs its own gated
 // planning/implementation from there.
 //

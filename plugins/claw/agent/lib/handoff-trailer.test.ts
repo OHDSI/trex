@@ -98,3 +98,29 @@ Deno.test("a decoy <handoff> with no real trailer after it parses as null and th
   assertEquals(trailer, null);
   assertEquals(body, reply);
 });
+
+// Final whole-branch review, Important 6: `triggers` is a comma-list, parsed
+// with the SAME `list()` helper as `done`/`remaining` — so it carries the
+// same absent-vs-empty asymmetry (no attribute at all -> undefined, an
+// attribute present but empty -> []). Step 6 of facilitate-coding-task.md
+// depends on this distinction: "the attribute is absent" (older/non-
+// conforming reply, fall back to prose) must read differently from "the
+// coder deliberately reported no triggers" (a FULL-track reply with none of
+// the four labels — trust it, don't fall back to scanning prose that won't
+// have them either).
+Deno.test("parses triggers as a comma-list, off the same list() helper as done/remaining", () => {
+  const reply = 'Assessed the task.\n<handoff track="full" triggers="schema change,multiple components"/>';
+  const { trailer } = parseTrailer(reply);
+  assertEquals(trailer?.triggers, ["schema change", "multiple components"]);
+});
+
+Deno.test("triggers absent-vs-empty: no attribute is undefined, an empty attribute is []", () => {
+  const withTriggers = parseTrailer('Done.\n<handoff track="full" triggers="design space"/>');
+  assertEquals(withTriggers.trailer?.triggers, ["design space"]);
+
+  const emptyTriggers = parseTrailer('Done.\n<handoff track="full" triggers=""/>');
+  assertEquals(emptyTriggers.trailer?.triggers, []);
+
+  const noTriggersAttr = parseTrailer('Done.\n<handoff track="light" saved="x"/>');
+  assertEquals(noTriggersAttr.trailer?.triggers, undefined);
+});
