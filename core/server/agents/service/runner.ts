@@ -193,9 +193,10 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
             cacheWriteInputTokens: p.totalUsage?.inputTokenDetails?.cacheWriteTokens,
           };
           // eve's client only reads the final reply off message.completed
-          // (see events.ts) — emit it once, right before turn.completed,
-          // when this turn actually produced text (a pure tool-call step
-          // that stops here with no trailing text has nothing to report).
+          // (see events.ts) — emit it once, right before turn.completed, when
+          // this turn actually produced text. A pure tool-call turn with no
+          // trailing text falls to the clientOnly hand-off check or the
+          // no-silent-turn fallback below.
           if (text) {
             emit({ type: "message.completed", data: { turnId, message: text, finishReason } });
           } else if (!sawClientOnlyCall) {
