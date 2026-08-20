@@ -7,6 +7,18 @@
 // for the raw-provider (anthropic/google/bedrock/openai) build/ask turns
 // until it was converted too. This test fails when a future edit
 // reintroduces per-path assembly.
+//
+// Known gap (documented, not closed here — see task-4-report.md): a call
+// site can still diverge at the point the prompt reaches the engine by
+// interpolating past `buildCoderContext`'s result, e.g.
+// `streamX(settings, history, send, systemPrompt + extra)`. That defeats
+// all of the assertions below at once — nothing assigns to `systemPrompt`,
+// `buildCoderContext(` is still present, and no direct construction occurs.
+// This is deliberately not policed with a regex: a text scan cannot
+// reliably distinguish that shape from legitimate uses of `+` near
+// `systemPrompt` (e.g. inside comments or unrelated string building)
+// without a real parser, and a false-positive-prone assertion here would
+// be worse than the documented gap.
 import { assertEquals } from "jsr:@std/assert";
 
 const ENGINES = [
@@ -41,4 +53,51 @@ Deno.test("no dispatch path constructs the base prompt directly", async () => {
       `${path} calls constructSystemPrompt directly; that belongs to coder_context.ts`,
     );
   }
+});
+
+// The ENGINES list above is a hardcoded allowlist of the *known* dispatch
+// paths — it does nothing to stop a future fifth path from assembling its
+// own base prompt and simply not being added to the list. That is exactly
+// how index.ts escaped notice originally: it built its own prompt and was
+// only caught by human review, not by a test. This scans every .ts file
+// under plugins/devx/functions (recursively) instead of a fixed list, so a
+// new file that calls constructSystemPrompt() directly fails immediately
+// without anyone remembering to update an allowlist. It only covers the
+// "direct construction" class — mutation-after-build has no stable anchor
+// to scan for outside the known dispatch files, so that stays on the
+// per-file assertions above.
+const ROOT = "plugins/devx/functions";
+const CONSTRUCT_PROMPT_ALLOWED = new Set([
+  `${ROOT}/coder_context.ts`,
+  `${ROOT}/prompts.ts`,
+]);
+
+async function collectTsFiles(dir: string): Promise<string[]> {
+  const out: string[] = [];
+  for await (const entry of Deno.readDir(dir)) {
+    const path = `${dir}/${entry.name}`;
+    if (entry.isDirectory) {
+      out.push(...(await collectTsFiles(path)));
+    } else if (entry.isFile && path.endsWith(".ts") && !path.endsWith(".test.ts")) {
+      out.push(path);
+    }
+  }
+  return out;
+}
+
+Deno.test("only coder_context.ts and prompts.ts may call constructSystemPrompt anywhere in the package", async () => {
+  const files = await collectTsFiles(ROOT);
+  const offenders: string[] = [];
+  for (const path of files) {
+    if (CONSTRUCT_PROMPT_ALLOWED.has(path)) continue;
+    const src = await Deno.readTextFile(path);
+    if (src.includes("constructSystemPrompt(")) {
+      offenders.push(path);
+    }
+  }
+  assertEquals(
+    offenders,
+    [],
+    "only coder_context.ts and prompts.ts may call constructSystemPrompt() — a new dispatch path must go through buildCoderContext instead",
+  );
 });
