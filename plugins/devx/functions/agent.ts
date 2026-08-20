@@ -8,14 +8,12 @@ import { createAnthropic } from "npm:@ai-sdk/anthropic";
 import { createOpenAI } from "npm:@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "npm:@ai-sdk/google";
 import { createAmazonBedrock } from "npm:@ai-sdk/amazon-bedrock";
-import { constructSystemPrompt } from "./prompts.ts";
 import { buildToolSet, getToolByName } from "./tools/registry.ts";
 import type { AgentContext } from "./tools/types.ts";
 import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
-
-const DEFAULT_MAX_STEPS = 25;
+import { buildCoderContext } from "./coder_context.ts";
 
 /** Clean up all pending consents for a given chat (called on stream abort) */
 export async function clearPendingConsents(chatId, sqlFn?) {
@@ -157,11 +155,11 @@ export async function streamAgentChat({
     return streamCopilotChat({
       chatId, userId, appId, chatMode, settings, history, send, sqlFn,
       skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
+      remoteChannel,
     });
   }
 
   const mode = chatMode || "agent";
-  const maxSteps = settings.max_steps || DEFAULT_MAX_STEPS;
 
   // Apply model override from command if present
   const effectiveSettings = commandOverride?.model
@@ -184,10 +182,10 @@ export async function streamAgentChat({
     if (rules !== undefined) aiRules = rules;
   }
 
-  let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext);
-  if (hasComponentSelection) {
-    systemPrompt += "\nThe user has selected specific components for editing. Component details and code snippets are in the user's message. Focus your modifications on those components.";
-  }
+  const { systemPrompt, maxSteps } = await buildCoderContext({
+    mode, aiRules, skillContext, remoteChannel,
+    hasComponentSelection, settings,
+  });
 
   // Load user consent preferences
   const consentResult = await sqlFn(
