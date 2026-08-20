@@ -27,11 +27,41 @@ Deno.test("a legacy plaintext row still reads with a key configured", async () =
   assertEquals(await readProviderKey({ api_key: "sk-legacy" }), "sk-legacy");
 });
 
-Deno.test("decryption failure is loud — never a silent plaintext fallback", async () => {
+Deno.test("decryption failure (wrong key) is loud — never a silent plaintext fallback", async () => {
   Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
   const fields = await writeProviderKeyFields("sk-secret");
   Deno.env.set("DEVX_ENCRYPTION_KEY", "1".repeat(64)); // rotated/wrong key
-  await assertRejects(() => readProviderKey({ ...fields, api_key: "sk-stale-plaintext" }));
+  await assertRejects(
+    () => readProviderKey({ ...fields, api_key: "sk-stale-plaintext" }),
+    Error,
+    "rotated or corrupted",
+  );
+});
+
+Deno.test("encrypted row with the key removed entirely is loud — never a silent plaintext fallback", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const fields = await writeProviderKeyFields("sk-secret");
+  Deno.env.delete("DEVX_ENCRYPTION_KEY"); // key unset entirely, not just rotated
+  await assertRejects(
+    () => readProviderKey({ ...fields, api_key: "sk-stale-plaintext" }),
+    Error,
+    "is not configured",
+  );
+});
+
+Deno.test("the unset-key and wrong-key failures are distinguishable from each other", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const fields = await writeProviderKeyFields("sk-secret");
+
+  Deno.env.delete("DEVX_ENCRYPTION_KEY");
+  const unsetError = await readProviderKey(fields).catch((e) => e as Error);
+
+  Deno.env.set("DEVX_ENCRYPTION_KEY", "1".repeat(64));
+  const wrongKeyError = await readProviderKey(fields).catch((e) => e as Error);
+
+  assertEquals(unsetError instanceof Error, true);
+  assertEquals(wrongKeyError instanceof Error, true);
+  assertEquals(unsetError.message === wrongKeyError.message, false);
 });
 
 Deno.test("a row with neither column yields null", async () => {
