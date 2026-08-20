@@ -52,7 +52,7 @@ async function loadSkillsPreamble(): Promise<string> {
     const stripped = body.replace(/^---\n[\s\S]*?\n---\n+/, "");
     _skillsPreamble = stripped.trim();
   } catch (err) {
-    console.warn("[claude_code_agent] using-skills preamble not loaded:", err?.message || err);
+    console.warn("[coder_context] using-skills preamble not loaded:", err?.message || err);
     _skillsPreamble = "";
   }
   return _skillsPreamble;
