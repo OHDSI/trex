@@ -60,16 +60,28 @@ Deno.test("no dispatch path constructs the base prompt directly", async () => {
 // own base prompt and simply not being added to the list. That is exactly
 // how index.ts escaped notice originally: it built its own prompt and was
 // only caught by human review, not by a test. This scans every .ts file
-// under plugins/devx/functions (recursively) instead of a fixed list, so a
-// new file that calls constructSystemPrompt() directly fails immediately
-// without anyone remembering to update an allowlist. It only covers the
-// "direct construction" class — mutation-after-build has no stable anchor
-// to scan for outside the known dispatch files, so that stays on the
-// per-file assertions above.
-const ROOT = "plugins/devx/functions";
+// under plugins/devx (recursively) instead of a fixed list, so a new file
+// that calls constructSystemPrompt() directly fails immediately without
+// anyone remembering to update an allowlist. It only covers the "direct
+// construction" class — mutation-after-build has no stable anchor to scan
+// for outside the known dispatch files, so that stays on the per-file
+// assertions above.
+//
+// Root is plugins/devx (not plugins/devx/functions): widened so a future
+// direct constructSystemPrompt( call from plugins/devx/agent/ (the eve
+// agents-loop runtime, a separate module tree from functions/) is caught
+// too. It does NOT close the gap documented in the coder-context-unification
+// review: plugins/devx/agent/agent.ts's buildInstructions (agent.ts:235-259
+// at review time) is a hand-written PORT of constructSystemPrompt's dynamic
+// parts — it re-implements the logic rather than calling
+// constructSystemPrompt or buildCoderContext, so there is no
+// "constructSystemPrompt(" or missing-buildCoderContext( text for this scan
+// (or the ENGINES list above) to catch. Bringing agent.ts onto
+// buildCoderContext is separate, scoped follow-up work, not done here.
+const ROOT = "plugins/devx";
 const CONSTRUCT_PROMPT_ALLOWED = new Set([
-  `${ROOT}/coder_context.ts`,
-  `${ROOT}/prompts.ts`,
+  `${ROOT}/functions/coder_context.ts`,
+  `${ROOT}/functions/prompts.ts`,
 ]);
 
 async function collectTsFiles(dir: string): Promise<string[]> {
