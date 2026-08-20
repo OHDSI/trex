@@ -88,6 +88,13 @@ async function collectTsFiles(dir: string): Promise<string[]> {
   const out: string[] = [];
   for await (const entry of Deno.readDir(dir)) {
     const path = `${dir}/${entry.name}`;
+    // ROOT is plugins/devx (an npm package), not plugins/devx/functions (which
+    // had no node_modules) — skip it. Installed dependencies aren't ours to
+    // fix, and a vendored .ts containing the literal "constructSystemPrompt("
+    // would otherwise fail this guard with an offender nobody on the team can
+    // act on. Un-installed here (278 files, ~13ms) but a real checkout with
+    // deps installed is ~6,900 files — do not remove this.
+    if (entry.isDirectory && entry.name === "node_modules") continue;
     if (entry.isDirectory) {
       out.push(...(await collectTsFiles(path)));
     } else if (entry.isFile && path.endsWith(".ts") && !path.endsWith(".test.ts")) {
