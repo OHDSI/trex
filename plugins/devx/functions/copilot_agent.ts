@@ -58,7 +58,14 @@ export async function streamCopilotChat({
 
   const { systemPrompt, maxSteps } = await buildCoderContext({
     mode, aiRules, skillContext, remoteChannel,
-    hasComponentSelection, settings,
+    // effectiveSettings, not settings — matches claude_code_agent.ts.
+    // buildCoderContext only reads .max_steps today, identical on both, so
+    // this was behaviourally inert; effectiveSettings is the "resolved for
+    // this turn" object (post command-model-override) and is what aiRules
+    // above was already derived from, so it's the correct one to keep the
+    // three engines symmetric and future-proof against buildCoderContext
+    // reading more of settings later.
+    hasComponentSelection, settings: effectiveSettings,
     // fn-copilot/tools.js does not register mcp__ask__ask_question — telling
     // the model to MUST use it (and to NEVER ask in plain text) would take
     // away its only real way to ask.
