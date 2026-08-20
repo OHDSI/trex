@@ -3,6 +3,7 @@ import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
+import { readProviderKey } from "./provider_key.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -416,7 +417,7 @@ Deno.serve(async (req: Request) => {
 
       // Get active provider config (multi-provider) with user-level prefs from settings
       const activeProviderResult = await sql(
-        `SELECT pc.provider, pc.model, pc.api_key, pc.base_url
+        `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
          FROM devx.provider_configs pc
          WHERE pc.user_id = $1 AND pc.is_active = true
          LIMIT 1`,
@@ -432,8 +433,24 @@ Deno.serve(async (req: Request) => {
       // Fall back to devx.settings if no provider_configs row exists (backward compat)
       let settings;
       if (providerConfig) {
+        // Resolve through the encryption helper — never let the raw
+        // api_key_encrypted/api_key_iv columns leak into `settings.api_key`
+        // unresolved. A decryption failure (rotated/corrupt key) must fail
+        // this turn loudly, not silently fall back to a stale plaintext
+        // column, so it is not swallowed here.
+        let resolvedApiKey;
+        try {
+          resolvedApiKey = await readProviderKey(providerConfig);
+        } catch (err) {
+          const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+          return Response.json(
+            { error: classified.safe, code: classified.code },
+            { status: 401, headers: corsHeaders },
+          );
+        }
         settings = {
           ...providerConfig,
+          api_key: resolvedApiKey,
           ai_rules: userPrefs.ai_rules || null,
           auto_approve: userPrefs.auto_approve ?? false,
           max_steps: userPrefs.max_steps ?? 100,
@@ -999,7 +1016,7 @@ Deno.serve(async (req: Request) => {
       // Resolve the active provider (multi-provider) with legacy fallback,
       // mirroring POST /chats/:id/stream, so plan runs can use claude-code.
       const activeProvider = (await sql(
-        `SELECT pc.provider, pc.model, pc.api_key, pc.base_url
+        `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
          FROM devx.provider_configs pc WHERE pc.user_id = $1 AND pc.is_active = true LIMIT 1`,
         [userId],
       )).rows[0];
@@ -1007,18 +1024,34 @@ Deno.serve(async (req: Request) => {
         `SELECT ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
         [userId],
       )).rows[0] || {};
-      let agentSettings = activeProvider
-        ? {
-            ...activeProvider,
-            ai_rules: agentPrefs.ai_rules || null,
-            max_steps: agentPrefs.max_steps ?? 100,
-            max_tool_steps: agentPrefs.max_tool_steps ?? 10,
-            auto_fix_problems: agentPrefs.auto_fix_problems ?? false,
-          }
-        : (await sql(
-            `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
-            [userId],
-          )).rows[0];
+      let agentSettings;
+      if (activeProvider) {
+        // Same "resolve, don't leak, fail loudly" posture as the /stream
+        // read site above.
+        let resolvedApiKey;
+        try {
+          resolvedApiKey = await readProviderKey(activeProvider);
+        } catch (err) {
+          const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+          return Response.json(
+            { error: classified.safe, code: classified.code },
+            { status: 401, headers: corsHeaders },
+          );
+        }
+        agentSettings = {
+          ...activeProvider,
+          api_key: resolvedApiKey,
+          ai_rules: agentPrefs.ai_rules || null,
+          max_steps: agentPrefs.max_steps ?? 100,
+          max_tool_steps: agentPrefs.max_tool_steps ?? 10,
+          auto_fix_problems: agentPrefs.auto_fix_problems ?? false,
+        };
+      } else {
+        agentSettings = (await sql(
+          `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+          [userId],
+        )).rows[0];
+      }
       const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
       if (!agentSettings || (!agentSettings.api_key && !noKeyProviders.has(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
