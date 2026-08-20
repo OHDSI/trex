@@ -102,6 +102,7 @@ export default function SettingsPage() {
   // Edit provider
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editApiKey, setEditApiKey] = useState("");
+  const [encryptingKeys, setEncryptingKeys] = useState(false);
 
   // Git identity + signing fields
   const [gitAuthorName, setGitAuthorName] = useState("");
@@ -197,6 +198,29 @@ export default function SettingsPage() {
       toast.error("Failed to save settings");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Backfill: the only way stored plaintext provider keys actually become
+  // encrypted (new writes are encrypted going forward, but existing rows
+  // aren't touched until this runs). See routes/provider_config_routes.ts's
+  // POST /provider-configs/encrypt-existing.
+  const handleEncryptExistingKeys = async () => {
+    setEncryptingKeys(true);
+    try {
+      const result = await providerConfigs.encryptExisting();
+      if (!result.encryptionConfigured) {
+        toast.error("Server has no encryption key configured — keys were not migrated.");
+      } else if (result.migrated > 0) {
+        toast.success(`Encrypted ${result.migrated} key${result.migrated === 1 ? "" : "s"}.`);
+      } else {
+        toast.success("Nothing to migrate — all keys are already encrypted.");
+      }
+    } catch (err) {
+      console.error("Failed to encrypt existing keys:", err);
+      toast.error("Failed to encrypt existing keys");
+    } finally {
+      setEncryptingKeys(false);
     }
   };
 
@@ -339,11 +363,26 @@ export default function SettingsPage() {
 
           {activeSection === "ai" && (
             <div className="space-y-6">
-              <div>
-                <h2 className="text-lg font-semibold mb-1">AI Providers</h2>
-                <p className="text-sm text-muted-foreground">
-                  Configure multiple AI providers. Click to activate.
-                </p>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold mb-1">AI Providers</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Configure multiple AI providers. Click to activate.
+                  </p>
+                </div>
+                {/* Only new writes are encrypted automatically — existing
+                    plaintext rows need this backfill to actually become
+                    encrypted. Shown only when there's something to migrate. */}
+                {providerConfigs.configs.some((c) => c.is_plaintext) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={encryptingKeys}
+                    onClick={handleEncryptExistingKeys}
+                  >
+                    {encryptingKeys ? "Encrypting..." : "Encrypt stored keys"}
+                  </Button>
+                )}
               </div>
               <Separator />
 
@@ -419,6 +458,18 @@ export default function SettingsPage() {
                       </div>
                       {cfg.api_key && (
                         <p className="text-xs text-muted-foreground mt-1 ml-5">{cfg.api_key}</p>
+                      )}
+                      {/* An undecryptable row (server has an encrypted credential it
+                          can't currently open — usually a rotated or missing
+                          DEVX_ENCRYPTION_KEY) shows no api_key above, which looks
+                          identical to "never had a key" while turns using this
+                          provider fail with "Invalid API key". Name the real cause
+                          and the fix so this isn't a silent dead end. */}
+                      {cfg.key_status === "undecryptable" && (
+                        <p className="text-xs text-yellow-600 mt-1 ml-5">
+                          Stored key can't be decrypted — the server's encryption key
+                          may have changed. Re-enter the API key below to fix it.
+                        </p>
                       )}
                       {/* Inline edit for API key */}
                       {isEditing && (

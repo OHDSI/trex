@@ -212,6 +212,22 @@ export async function activateProviderConfig(id: string): Promise<void> {
   await apiFetch(`/provider-configs/${id}/activate`, { method: "PUT" });
 }
 
+export interface EncryptExistingKeysResult {
+  migrated: number;
+  skipped: number;
+  encryptionConfigured: boolean;
+}
+
+// Backfill: encrypts every remaining plaintext api_key row for this user
+// (routes/provider_config_routes.ts's POST /provider-configs/encrypt-existing).
+// Idempotent and safe to call repeatedly — rows already encrypted are
+// skipped. Returns `encryptionConfigured: false` (migrated: 0) when
+// DEVX_ENCRYPTION_KEY isn't set server-side, which the caller should surface
+// rather than treat as an error.
+export async function encryptExistingKeys(): Promise<EncryptExistingKeysResult> {
+  return apiFetch("/provider-configs/encrypt-existing", { method: "POST" });
+}
+
 // App CRUD
 export interface Prototype {
   name: string;
