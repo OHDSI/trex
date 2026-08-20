@@ -1,5 +1,6 @@
 // @ts-nocheck - Deno edge function, not compiled by tsc
-import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
+import { getMaxHistoryTurns } from "./prompts.ts";
+import { buildCoderContext } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
@@ -711,18 +712,19 @@ Deno.serve(async (req: Request) => {
         if (rules !== undefined) aiRules = rules;
       }
 
-      let systemPrompt = constructSystemPrompt(chatMode, aiRules);
+      const { systemPrompt } = await buildCoderContext({
+        mode: chatMode,
+        aiRules,
+        skillContext,
+        remoteChannel: streamRemoteChannel,
+        hasComponentSelection,
+        settings,
+        // Raw providers (anthropic/google/bedrock/openai) are called directly
+        // below with a single fetch, not through the tool-calling registries —
+        // none of them register mcp__ask__ask_question.
+        askToolAvailable: false,
+      });
       const maxHistory = getMaxHistoryTurns(chatMode);
-
-      // Add minimal behavioral hint when components are selected
-      // (actual code snippets are now inline in the user message via aiPrompt)
-      if (hasComponentSelection) {
-        systemPrompt += "\nThe user has selected specific components for editing. Component details and code snippets are in the user's message. Focus your modifications on those components.";
-      }
-      if (streamRemoteChannel) {
-        const { REMOTE_CHANNEL_SYSTEM_PROMPT } = await import("./prompts.ts");
-        systemPrompt += `\n${REMOTE_CHANNEL_SYSTEM_PROMPT}`;
-      }
 
       // Get most recent messages for context (subquery to get newest, then order ascending)
       const historyResult = await sql(
