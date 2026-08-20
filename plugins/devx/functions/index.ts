@@ -1,9 +1,9 @@
 // @ts-nocheck - Deno edge function, not compiled by tsc
 import { getMaxHistoryTurns } from "./prompts.ts";
-import { buildCoderContext } from "./coder_context.ts";
+import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
-import { readProviderKey } from "./provider_key.ts";
+import { assertProviderConfigEncryptionMigrated, readProviderKey } from "./provider_key.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -415,7 +415,11 @@ Deno.serve(async (req: Request) => {
         return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
       }
 
-      // Get active provider config (multi-provider) with user-level prefs from settings
+      // Get active provider config (multi-provider) with user-level prefs from settings.
+      // Probe before selecting the encrypted columns: if V15 never applied,
+      // this fails with a one-line diagnosis instead of a raw "column does
+      // not exist" thrown outside any try/catch below.
+      await assertProviderConfigEncryptionMigrated(sql);
       const activeProviderResult = await sql(
         `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
          FROM devx.provider_configs pc
@@ -442,14 +446,22 @@ Deno.serve(async (req: Request) => {
         try {
           resolvedApiKey = await readProviderKey(providerConfig);
         } catch (err) {
+          // classifyCoderError's `safe` string is deliberately generic ("Invalid
+          // API key...") for the UI — log the actual cause (e.g. a rotated
+          // DEVX_ENCRYPTION_KEY) so an operator can diagnose it from the server
+          // log instead of only seeing the misleading UI message.
+          console.error("[devx] provider key read failed for chat stream:", err instanceof Error ? err.message : err);
           const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
           return Response.json(
             { error: classified.safe, code: classified.code },
             { status: 401, headers: corsHeaders },
           );
         }
+        // Ciphertext has no business riding along into the engine settings
+        // object — destructure it out rather than spreading it through.
+        const { api_key_encrypted: _providerConfigEnc, api_key_iv: _providerConfigIv, ...providerConfigNoCiphertext } = providerConfig;
         settings = {
-          ...providerConfig,
+          ...providerConfigNoCiphertext,
           api_key: resolvedApiKey,
           ai_rules: userPrefs.ai_rules || null,
           auto_approve: userPrefs.auto_approve ?? false,
@@ -1015,6 +1027,8 @@ Deno.serve(async (req: Request) => {
 
       // Resolve the active provider (multi-provider) with legacy fallback,
       // mirroring POST /chats/:id/stream, so plan runs can use claude-code.
+      // Same pre-select probe as that site — see comment there.
+      await assertProviderConfigEncryptionMigrated(sql);
       const activeProvider = (await sql(
         `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
          FROM devx.provider_configs pc WHERE pc.user_id = $1 AND pc.is_active = true LIMIT 1`,
@@ -1032,14 +1046,21 @@ Deno.serve(async (req: Request) => {
         try {
           resolvedApiKey = await readProviderKey(activeProvider);
         } catch (err) {
+          // See the /stream read site's comment above — log the raw cause,
+          // the UI only gets classifyCoderError's generic message.
+          console.error("[devx] provider key read failed for agent run:", err instanceof Error ? err.message : err);
           const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
           return Response.json(
             { error: classified.safe, code: classified.code },
             { status: 401, headers: corsHeaders },
           );
         }
+        // Same "no ciphertext in the settings object" posture as the
+        // /stream read site above (index.ts:451's fix — the identical
+        // pattern existed here too).
+        const { api_key_encrypted: _activeProviderEnc, api_key_iv: _activeProviderIv, ...activeProviderNoCiphertext } = activeProvider;
         agentSettings = {
-          ...activeProvider,
+          ...activeProviderNoCiphertext,
           api_key: resolvedApiKey,
           ai_rules: agentPrefs.ai_rules || null,
           max_steps: agentPrefs.max_steps ?? 100,
@@ -1345,7 +1366,7 @@ Deno.serve(async (req: Request) => {
            git_author_email = ${hasGitEmailUpdate ? "EXCLUDED.git_author_email" : "devx.settings.git_author_email"},
            updated_at = NOW()
          RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email, created_at, updated_at`,
-        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? 25, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
+        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? DEFAULT_MAX_STEPS, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
       );
       // Re-sync existing repos so a changed identity takes effect immediately.
       if (hasGitNameUpdate || hasGitEmailUpdate) {

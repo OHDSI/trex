@@ -14,7 +14,7 @@ import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { DEFAULT_AI_RULES } from "../functions/prompts.ts";
-import { readProviderKey } from "../functions/provider_key.ts";
+import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
@@ -51,6 +51,9 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   }
   const userId = ctx.userId;
 
+  // Probe before selecting the encrypted columns — see provider_key.ts's
+  // assertProviderConfigEncryptionMigrated header comment.
+  await assertProviderConfigEncryptionMigrated(ctx.sql);
   const activeProviderResult = await ctx.sql(
     `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
      FROM devx.provider_configs pc
@@ -94,6 +97,10 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   try {
     resolvedApiKey = await readProviderKey(row);
   } catch (err) {
+    // classifyCoderError's `safe` string is generic for the UI — log the
+    // actual cause (e.g. a rotated DEVX_ENCRYPTION_KEY) so it's diagnosable
+    // from the server log, not just a misleading UI message.
+    console.error("[devx] provider key read failed for agents-loop turn:", err instanceof Error ? err.message : err);
     const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
     throw new Error(classified.safe);
   }

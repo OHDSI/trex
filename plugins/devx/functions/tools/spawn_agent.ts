@@ -5,7 +5,7 @@
  */
 
 import type { ToolDefinition } from "./types.ts";
-import { readProviderKey } from "../provider_key.ts";
+import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;
@@ -84,7 +84,10 @@ export const spawnAgentTool: ToolDefinition<{
       // Import streamAgentChat dynamically to avoid circular dependency
       const { streamAgentChat } = await import("../agent.ts");
 
-      // Get active provider config + user prefs for model creation
+      // Get active provider config + user prefs for model creation. Probe
+      // before selecting the encrypted columns — see provider_key.ts's
+      // assertProviderConfigEncryptionMigrated header comment.
+      await assertProviderConfigEncryptionMigrated(ctx.sql);
       const activePC = await ctx.sql(
         `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
         [ctx.userId],
@@ -102,7 +105,11 @@ export const spawnAgentTool: ToolDefinition<{
         // the same fail-loud posture as every other failure this tool
         // surfaces, so no new error shape is needed here.
         const resolvedApiKey = await readProviderKey(activePC.rows[0]);
-        settings = { ...activePC.rows[0], api_key: resolvedApiKey, ...(prefsResult.rows[0] || {}) };
+        // The comment above says ciphertext never leaks into `settings` —
+        // make that true by destructuring it out rather than spreading the
+        // raw row (same fix as index.ts's settings/agentSettings assembly).
+        const { api_key_encrypted: _spawnEnc, api_key_iv: _spawnIv, ...activePCNoCiphertext } = activePC.rows[0];
+        settings = { ...activePCNoCiphertext, api_key: resolvedApiKey, ...(prefsResult.rows[0] || {}) };
       } else {
         settings = (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
       }

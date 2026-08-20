@@ -5,11 +5,18 @@
 // failure modes this task warns about are checked without a live database:
 //   1. a write ever leaving BOTH api_key and api_key_encrypted populated
 //   2. an update that omits api_key blanking an existing credential
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "jsr:@std/assert";
 import { handleProviderConfigRoutes } from "./provider_config_routes.ts";
+import { __resetMigrationCacheForTests } from "../provider_key.ts";
 
 const CORS = { "content-type": "application/json" };
 const KEY = "0".repeat(64); // 32 bytes as hex, matches provider_key.test.ts
+
+// assertProviderConfigEncryptionMigrated caches its probe result for the
+// whole process (see provider_key.ts) — reset it so this file's first probe
+// hits its own fake db below rather than inheriting cached state left over
+// by another test file in the same `deno test` run.
+__resetMigrationCacheForTests();
 
 function req(method: string, body?: unknown) {
   return new Request("http://x/provider-configs", {
@@ -28,6 +35,13 @@ function makeFakeDb(seedRows: Record<string, unknown>[] = []) {
 
   const sql = async (q: string, p: unknown[] = []) => {
     calls.push({ q, p });
+
+    // Migration-applied probe (assertProviderConfigEncryptionMigrated) —
+    // simulate V15 applied so every test below exercises real route
+    // behaviour, same as a migrated deployment.
+    if (q.includes("information_schema.columns")) {
+      return { rows: [{ column_name: "api_key_encrypted" }] };
+    }
 
     if (q.includes("INSERT INTO devx.provider_configs")) {
       const [user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, display_name] = p;
@@ -189,6 +203,13 @@ Deno.test("GET /provider-configs: key_status distinguishes an undecryptable row 
   assertEquals(byId["3"].key_status, "ok");
   assertEquals(byId["3"].api_key, null);
   assertEquals(byId["3"].auth_shape, "none");
+  // is_plaintext (IMPORTANT 2 fix): lets the UI offer the encrypt-existing
+  // backfill only for rows that actually still need it. Row 1 is legacy
+  // plaintext; row 2 already holds an encrypted (if undecryptable) pair;
+  // row 3 has no key at all — neither 2 nor 3 have anything to migrate.
+  assertEquals(byId["1"].is_plaintext, true);
+  assertEquals(byId["2"].is_plaintext, false);
+  assertEquals(byId["3"].is_plaintext, false);
 });
 
 Deno.test("POST /provider-configs/encrypt-existing: no key configured is a reported no-op, not an error", async () => {
@@ -235,4 +256,27 @@ Deno.test("POST /provider-configs/encrypt-existing: key configured migrates plai
     "/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", db.sql, CORS,
   );
   assertEquals((await second!.json()), { migrated: 0, skipped: 2, encryptionConfigured: true });
+});
+
+// CRITICAL 1: if V15 never applied, devx.provider_configs.api_key_encrypted
+// doesn't exist and the real SELECT would throw a raw
+// `column "api_key_encrypted" does not exist`. assertProviderConfigEncryptionMigrated
+// probes for the column first and fails with a message naming the migration
+// instead — proven here by making the fake db's information_schema probe
+// report the column missing, the same simulation Critical 1's fix requires.
+Deno.test("GET /provider-configs: fails with a migration-named error when V15 has not applied", async () => {
+  __resetMigrationCacheForTests();
+  const db = makeFakeDb();
+  // Override: report the column as absent, as a real un-migrated database would.
+  const originalSql = db.sql;
+  const unmigratedSql = async (q: string, p: unknown[] = []) => {
+    if (q.includes("information_schema.columns")) return { rows: [] };
+    return originalSql(q, p);
+  };
+  await assertRejects(
+    () => handleProviderConfigRoutes("/x/provider-configs", "GET", req("GET"), "u1", unmigratedSql, CORS),
+    Error,
+    "devx migration V15 has not been applied",
+  );
+  __resetMigrationCacheForTests();
 });

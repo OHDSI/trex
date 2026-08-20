@@ -20,6 +20,13 @@ function fakeHookCtx(rows: { activeProvider?: Row; settings?: Row }, overrides: 
     env: () => undefined,
     userId: "u-1",
     sql: (query: string) => {
+      // resolveModel probes this (via assertProviderConfigEncryptionMigrated)
+      // before selecting the encrypted columns — simulate V15 applied so
+      // every test below exercises the real row-selection behaviour, same
+      // as a migrated deployment.
+      if (query.includes("information_schema.columns")) {
+        return Promise.resolve({ rows: [{ column_name: "api_key_encrypted" }] });
+      }
       if (query.includes("FROM devx.provider_configs")) {
         return Promise.resolve({ rows: rows.activeProvider ? [rows.activeProvider] : [] });
       }

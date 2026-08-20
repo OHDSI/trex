@@ -8,7 +8,7 @@ import { DESIGN_REVIEW_SYSTEM_PROMPT, parseDesignFindings } from "../design_revi
 import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_update_prompt.ts";
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
-import { readProviderKey } from "../provider_key.ts";
+import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
 import { classifyCoderError } from "../error_codes.ts";
 
 const EXCLUDED_DIRS = new Set([
@@ -133,7 +133,10 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     allowedTools: string[];
     maxSteps?: number;
   }) {
-    // Read active provider config, fall back to legacy settings
+    // Read active provider config, fall back to legacy settings. Probe
+    // before selecting the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
     const activePC = await sql(
       `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
       [userId],
@@ -169,6 +172,10 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       try {
         resolvedApiKey = await readProviderKey(providerRow);
       } catch (err) {
+        // classifyCoderError's `safe` string is generic for the UI — log
+        // the actual cause (e.g. a rotated DEVX_ENCRYPTION_KEY) so it's
+        // diagnosable from the server log, not just a misleading UI message.
+        console.error("[devx] provider key read failed for agent review:", err instanceof Error ? err.message : err);
         const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
         return Response.json(
           { error: classified.safe, code: classified.code },
@@ -182,7 +189,11 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 400, headers: corsHeaders },
         );
       }
-      var settings = { ...providerRow, api_key: resolvedApiKey, ...prefs };
+      // The comment above says ciphertext never leaks into `settings` — make
+      // that true by destructuring it out rather than spreading the raw row
+      // (same fix as index.ts's settings/agentSettings assembly).
+      const { api_key_encrypted: _providerRowEnc, api_key_iv: _providerRowIv, ...providerRowNoCiphertext } = providerRow;
+      var settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
     }
 
     // Fetch previous review for context

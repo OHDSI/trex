@@ -4,7 +4,12 @@
  * Manages multiple provider configs per user for multi-provider support.
  */
 import { deriveAuthShape } from "../auth_shape.ts";
-import { encryptionConfigured, readProviderKey, writeProviderKeyFields } from "../provider_key.ts";
+import {
+  assertProviderConfigEncryptionMigrated,
+  encryptionConfigured,
+  readProviderKey,
+  writeProviderKeyFields,
+} from "../provider_key.ts";
 
 // Non-secret display mask, matches the shape the SQL CASE expressions used
 // to produce directly in the column before encryption existed.
@@ -35,8 +40,18 @@ async function resolveForDisplay(row) {
 }
 
 export async function handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) {
+  // handleProviderConfigRoutes is called on every request that reaches this
+  // point in index.ts's `||` dispatch chain (it returns null for a
+  // non-matching path), so the migration probe below is scoped to only the
+  // branches that actually touch api_key_encrypted/api_key_iv — never run
+  // unconditionally here, or an unrelated route would pay for (and fail on)
+  // a devx-provider-configs-specific check.
+
   // GET /provider-configs — list all configs for this user
   if (path.endsWith("/provider-configs") && method === "GET") {
+    // Probe before selecting the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
     // Select the raw key material (plaintext and/or encrypted pair) so both
     // the masked preview and auth_shape can be computed from the actually
     // resolved value — once a row is encrypted, the plaintext api_key column
@@ -52,10 +67,16 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       [userId],
     );
     for (const row of result.rows) {
+      // Captured before resolveForDisplay overwrites row.api_key with the
+      // masked value below — tells the UI whether this row's credential is
+      // still sitting in the legacy plaintext column (so it can offer the
+      // encrypt-existing backfill) without exposing any key material itself.
+      const wasPlaintextOnly = row.api_key != null && row.api_key_encrypted == null;
       const { value: resolved, status: keyStatus } = await resolveForDisplay(row);
       row.auth_shape = deriveAuthShape(resolved);
       row.api_key = maskKey(resolved);
       row.key_status = keyStatus;
+      row.is_plaintext = wasPlaintextOnly;
       delete row.api_key_encrypted;
       delete row.api_key_iv;
     }
@@ -70,6 +91,9 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       return Response.json({ error: "provider and model are required" }, { status: 400, headers: corsHeaders });
     }
 
+    // Probe before writing the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
     // Route through the encryption helper and write all three columns in the
     // same statement, so a row is never half-migrated (plaintext with a
     // dangling encrypted pair, or vice versa).
@@ -123,8 +147,17 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       );
     }
 
+    // Probe before writing the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
+
+    // Excludes rows that already hold an encrypted pair, even though every
+    // write path today nulls api_key once it writes api_key_encrypted (so
+    // this is currently unreachable) — this keeps "never overwrite an
+    // encrypted pair from a stale plaintext column" a structural guarantee
+    // of the query rather than an inference from write-path behaviour.
     const candidates = (await sql(
-      `SELECT id, api_key FROM devx.provider_configs WHERE user_id = $1 AND api_key IS NOT NULL`,
+      `SELECT id, api_key FROM devx.provider_configs WHERE user_id = $1 AND api_key IS NOT NULL AND api_key_encrypted IS NULL`,
       [userId],
     )).rows;
 
@@ -152,6 +185,11 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
   // PUT /provider-configs/:id — update a config
   const updateMatch = path.match(/\/provider-configs\/([^/]+)$/);
   if (updateMatch && method === "PUT" && !path.includes("/activate")) {
+    // Probe before the RETURNING clause below, which always references the
+    // encrypted columns regardless of which fields this request updates —
+    // see provider_key.ts's assertProviderConfigEncryptionMigrated header
+    // comment.
+    await assertProviderConfigEncryptionMigrated(sql);
     const configId = updateMatch[1];
     const body = await req.json();
     const { provider, model, api_key, base_url, display_name } = body;
