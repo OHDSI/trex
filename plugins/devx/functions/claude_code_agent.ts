@@ -214,6 +214,9 @@ export async function streamClaudeCodeChat({
   const { systemPrompt, maxSteps } = await buildCoderContext({
     mode, aiRules, skillContext, remoteChannel,
     hasComponentSelection, settings: effectiveSettings,
+    // Only this sidecar registers mcp__ask__ask_question (see server.js) —
+    // the rule that instructs the model to use it is safe to enable here.
+    askToolAvailable: true,
   });
   // Remote-channel context is no longer appended here: for a channel turn,
   // buildCoderContext's resolveCoderProfile() already selected

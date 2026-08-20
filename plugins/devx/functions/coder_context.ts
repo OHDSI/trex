@@ -65,6 +65,17 @@ export interface CoderContextInput {
   remoteChannel?: boolean;
   hasComponentSelection?: boolean;
   settings: { max_steps?: number };
+  // Whether THIS engine actually registers the mcp__ask__ask_question tool
+  // that buildAskQuestionRule's <asking-questions> block instructs the model
+  // to call. Today that tool exists only in the claude-code sidecar
+  // (fn-claude-code/server.js) — the ai-sdk tool registry (tools/registry.ts)
+  // and Copilot's tools (fn-copilot/tools.js) don't have it. Telling a model
+  // to MUST use a tool it doesn't have, and to NEVER ask in plain text
+  // instead, silently breaks its only real way to ask a question. This is a
+  // per-engine tool-availability fact, not something the ui/channel profile
+  // can infer, so it is threaded in explicitly rather than derived. Defaults
+  // to false (safe: no engine is assumed to have the tool unless it says so).
+  askToolAvailable?: boolean;
 }
 
 export interface CoderContext {
@@ -79,7 +90,10 @@ export async function buildCoderContext(input: CoderContextInput): Promise<Coder
 
   const skillsPreamble = await loadSkillsPreamble();
   if (skillsPreamble) {
-    const askQuestionRule = buildAskQuestionRule(profile);
+    // Gate on BOTH: the profile allowing blocking questions at all (ui, not
+    // channel — buildAskQuestionRule already enforces this), AND the calling
+    // engine actually providing the tool the rule tells the model to call.
+    const askQuestionRule = input.askToolAvailable ? buildAskQuestionRule(profile) : "";
     systemPrompt =
       `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${SKILL_USAGE_RULE}\n\n` +
       `${askQuestionRule ? askQuestionRule + "\n\n" : ""}${COMMIT_HYGIENE_RULE}\n\n${systemPrompt}`;

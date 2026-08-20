@@ -12,14 +12,40 @@ Deno.test("channel turn carries the gated protocol and the reply contract", asyn
 });
 
 Deno.test("channel turn does NOT tell the coder to use the blocking question tool", async () => {
-  const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: true });
+  const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: true, askToolAvailable: true });
   assertEquals(systemPrompt.includes("<asking-questions>"), false);
 });
 
-Deno.test("ui turn keeps the workbench prompt and the question rule", async () => {
-  const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: false });
-  assertStringIncludes(systemPrompt, "<asking-questions>");
+Deno.test("ui turn keeps the workbench prompt", async () => {
+  const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: false, askToolAvailable: true });
   assertEquals(systemPrompt.includes("<gated_protocol>"), false);
+});
+
+// askToolAvailable is a per-engine capability fact (only the claude-code
+// sidecar registers mcp__ask__ask_question), independent of the ui/channel
+// profile split. buildCoderContext must gate the rule on BOTH: the profile
+// allowing blocking questions at all, AND the calling engine actually having
+// the tool the rule instructs the model to call.
+Deno.test("ui turn + tool available: question rule is present", async () => {
+  const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: false, askToolAvailable: true });
+  assertStringIncludes(systemPrompt, "<asking-questions>");
+});
+
+Deno.test("ui turn + tool unavailable: question rule is absent (ai-sdk/copilot have no ask_question tool)", async () => {
+  const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: false, askToolAvailable: false });
+  assertEquals(systemPrompt.includes("<asking-questions>"), false);
+});
+
+Deno.test("ui turn + askToolAvailable omitted: question rule is absent (safe default)", async () => {
+  const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: false });
+  assertEquals(systemPrompt.includes("<asking-questions>"), false);
+});
+
+Deno.test("channel turn: question rule is absent regardless of tool availability", async () => {
+  const withTool = await buildCoderContext({ ...base, remoteChannel: true, askToolAvailable: true });
+  const withoutTool = await buildCoderContext({ ...base, remoteChannel: true, askToolAvailable: false });
+  assertEquals(withTool.systemPrompt.includes("<asking-questions>"), false);
+  assertEquals(withoutTool.systemPrompt.includes("<asking-questions>"), false);
 });
 
 Deno.test("the component-selection line is appended only when selected, one wording", async () => {

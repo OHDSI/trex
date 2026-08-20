@@ -59,6 +59,10 @@ export async function streamCopilotChat({
   const { systemPrompt, maxSteps } = await buildCoderContext({
     mode, aiRules, skillContext, remoteChannel,
     hasComponentSelection, settings,
+    // fn-copilot/tools.js does not register mcp__ask__ask_question — telling
+    // the model to MUST use it (and to NEVER ask in plain text) would take
+    // away its only real way to ask.
+    askToolAvailable: false,
   });
 
   const messages = history
