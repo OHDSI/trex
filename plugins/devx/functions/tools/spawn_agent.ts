@@ -5,6 +5,7 @@
  */
 
 import type { ToolDefinition } from "./types.ts";
+import { readProviderKey } from "../provider_key.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;
@@ -85,16 +86,26 @@ export const spawnAgentTool: ToolDefinition<{
 
       // Get active provider config + user prefs for model creation
       const activePC = await ctx.sql(
-        `SELECT provider, model, api_key, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
+        `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
         [ctx.userId],
       );
       const prefsResult = await ctx.sql(
         `SELECT ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`,
         [ctx.userId],
       );
-      const settings = activePC.rows[0]
-        ? { ...activePC.rows[0], ...(prefsResult.rows[0] || {}) }
-        : (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
+      let settings;
+      if (activePC.rows[0]) {
+        // Resolve through the encryption helper — never let the raw
+        // api_key_encrypted/api_key_iv columns leak into settings.api_key
+        // unresolved. A decryption failure propagates uncaught to the outer
+        // catch below, which already reports it as "Subagent error: ..." —
+        // the same fail-loud posture as every other failure this tool
+        // surfaces, so no new error shape is needed here.
+        const resolvedApiKey = await readProviderKey(activePC.rows[0]);
+        settings = { ...activePC.rows[0], api_key: resolvedApiKey, ...(prefsResult.rows[0] || {}) };
+      } else {
+        settings = (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
+      }
 
       // Determine model — use agent's model or inherit parent's
       const effectiveModel = agentDef.model === "inherit" ? settings.model : agentDef.model;

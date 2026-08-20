@@ -8,6 +8,7 @@
 import { assertEquals, assertRejects } from "jsr:@std/assert";
 import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import agentConfig from "../agent.ts";
+import { encryptToken } from "../../functions/crypto.ts";
 
 const resolveModel = agentConfig.resolveModel!;
 
@@ -147,4 +148,67 @@ Deno.test("resolveModel: bedrock with a JSON-scalar api_key ('null', numbers, ba
 Deno.test("resolveModel: no ctx.userId throws a clear error", async () => {
   const ctx = fakeHookCtx({}, { userId: undefined });
   await assertRejects(() => resolveModel(ctx), Error, "devx agent requires an authenticated user");
+});
+
+// Fix round 1 (task-6): resolveModel must route the active provider_configs
+// row through the same encryption helper as index.ts's read sites, and must
+// NEVER let a decrypt failure fall through to apiKey: undefined — core's
+// buildModel (model.ts) backfills an undefined apiKey from the operator's own
+// ANTHROPIC_API_KEY/GOOGLE_GENERATIVE_AI_API_KEY/OPENAI_API_KEY env var, which
+// on a shared deployment is cross-tenant credential substitution, not a UX gap.
+const KEY = "0".repeat(64);
+
+Deno.test("resolveModel: an encrypted provider_configs row decrypts onto ModelSpec.apiKey", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const { ciphertext, iv } = await encryptToken("sk-ant-encrypted");
+  const ctx = fakeHookCtx({
+    activeProvider: {
+      provider: "anthropic", model: "claude-sonnet-5", api_key: null,
+      api_key_encrypted: ciphertext, api_key_iv: iv, base_url: null,
+    },
+  });
+  const spec = await resolveModel(ctx);
+  assertEquals(spec, { provider: "anthropic", modelId: "claude-sonnet-5", apiKey: "sk-ant-encrypted", baseURL: undefined });
+});
+
+Deno.test("resolveModel: an encrypted row with no DEVX_ENCRYPTION_KEY configured throws — never falls through to apiKey undefined", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const { ciphertext, iv } = await encryptToken("sk-ant-encrypted");
+  Deno.env.delete("DEVX_ENCRYPTION_KEY");
+  const ctx = fakeHookCtx({
+    activeProvider: {
+      provider: "anthropic", model: "claude-sonnet-5", api_key: null,
+      api_key_encrypted: ciphertext, api_key_iv: iv, base_url: null,
+    },
+  });
+  // The critical regression this fix round exists to close: silently
+  // resolving to { apiKey: undefined } here would make core's buildModel
+  // fall back to the operator's own ANTHROPIC_API_KEY env var.
+  await assertRejects(() => resolveModel(ctx), Error);
+});
+
+Deno.test("resolveModel: an encrypted row that fails to decrypt (rotated key) throws instead of falling through", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const { ciphertext, iv } = await encryptToken("sk-ant-encrypted");
+  Deno.env.set("DEVX_ENCRYPTION_KEY", "1".repeat(64)); // rotated/wrong key
+  const ctx = fakeHookCtx({
+    activeProvider: {
+      provider: "anthropic", model: "claude-sonnet-5", api_key: null,
+      api_key_encrypted: ciphertext, api_key_iv: iv, base_url: null,
+    },
+  });
+  await assertRejects(() => resolveModel(ctx), Error);
+});
+
+Deno.test("resolveModel: a bedrock row's bearer token still unpacks correctly after decrypting the encrypted JSON blob", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const { ciphertext, iv } = await encryptToken(JSON.stringify({ bearerToken: "bt-encrypted" }));
+  const ctx = fakeHookCtx({
+    activeProvider: {
+      provider: "bedrock", model: "anthropic.claude-3-5-sonnet", api_key: null,
+      api_key_encrypted: ciphertext, api_key_iv: iv, base_url: "us-east-1",
+    },
+  });
+  const spec = await resolveModel(ctx);
+  assertEquals(spec, { provider: "bedrock", modelId: "anthropic.claude-3-5-sonnet", apiKey: "bt-encrypted", baseURL: "us-east-1" });
 });

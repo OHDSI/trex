@@ -17,15 +17,20 @@ function maskKey(plaintext) {
 // the coder-turn read sites (index.ts), a row this can't decrypt must not take
 // down the whole management UI (list/rename/delete) with it — degrade to
 // "unknown" for that one row and log, rather than failing the request.
+// Returns `status` alongside the value so the caller can distinguish "this
+// row has no key" (status "ok", value null) from "this row has a key we
+// can't currently read" (status "undecryptable", value null) — both
+// otherwise collapse into auth_shape "none", which would silently hide a
+// broken (possibly genuinely IAM-shaped) credential behind "not configured".
 async function resolveForDisplay(row) {
   try {
-    return await readProviderKey(row);
+    return { value: await readProviderKey(row), status: "ok" };
   } catch (err) {
     console.error(
       "[provider-configs] could not decrypt api_key for display (row id " + row.id + "):",
       err instanceof Error ? err.message : err,
     );
-    return null;
+    return { value: null, status: "undecryptable" };
   }
 }
 
@@ -47,9 +52,10 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       [userId],
     );
     for (const row of result.rows) {
-      const resolved = await resolveForDisplay(row);
+      const { value: resolved, status: keyStatus } = await resolveForDisplay(row);
       row.auth_shape = deriveAuthShape(resolved);
       row.api_key = maskKey(resolved);
+      row.key_status = keyStatus;
       delete row.api_key_encrypted;
       delete row.api_key_iv;
     }
@@ -90,8 +96,9 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     }
 
     const created = result.rows[0];
-    const resolvedKey = await resolveForDisplay(created);
+    const { value: resolvedKey, status: createdKeyStatus } = await resolveForDisplay(created);
     created.api_key = maskKey(resolvedKey);
+    created.key_status = createdKeyStatus;
     delete created.api_key_encrypted;
     delete created.api_key_iv;
 
@@ -187,8 +194,9 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
     }
     const updated = result.rows[0];
-    const resolvedKey = await resolveForDisplay(updated);
+    const { value: resolvedKey, status: updatedKeyStatus } = await resolveForDisplay(updated);
     updated.api_key = maskKey(resolvedKey);
+    updated.key_status = updatedKeyStatus;
     delete updated.api_key_encrypted;
     delete updated.api_key_iv;
     return Response.json(updated, { headers: corsHeaders });

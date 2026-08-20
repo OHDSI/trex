@@ -8,6 +8,8 @@ import { DESIGN_REVIEW_SYSTEM_PROMPT, parseDesignFindings } from "../design_revi
 import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_update_prompt.ts";
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
+import { readProviderKey } from "../provider_key.ts";
+import { classifyCoderError } from "../error_codes.ts";
 
 const EXCLUDED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".venv", "venv",
@@ -133,7 +135,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
   }) {
     // Read active provider config, fall back to legacy settings
     const activePC = await sql(
-      `SELECT provider, model, api_key, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
+      `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
       [userId],
     );
     const prefsResult = await sql(
@@ -156,14 +158,31 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
         );
       }
     } else {
+      // Resolve through the encryption helper before the noKeyProviders check
+      // (which must run on the resolved value, same as index.ts) and before
+      // `settings` is built — never let the raw api_key_encrypted/api_key_iv
+      // columns leak into settings.api_key unresolved, and never swallow a
+      // decrypt failure (this streams straight into streamAgentChat's
+      // createModel, which would otherwise fall through to an env-var
+      // credential on a NULL api_key).
+      let resolvedApiKey;
+      try {
+        resolvedApiKey = await readProviderKey(providerRow);
+      } catch (err) {
+        const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+        return Response.json(
+          { error: classified.safe, code: classified.code },
+          { status: 401, headers: corsHeaders },
+        );
+      }
       const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
-      if (!providerRow.api_key && !noKeyProviders.has(providerRow.provider)) {
+      if (!resolvedApiKey && !noKeyProviders.has(providerRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
         );
       }
-      var settings = { ...providerRow, ...prefs };
+      var settings = { ...providerRow, api_key: resolvedApiKey, ...prefs };
     }
 
     // Fetch previous review for context

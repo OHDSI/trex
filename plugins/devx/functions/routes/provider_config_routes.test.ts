@@ -138,6 +138,12 @@ Deno.test("PUT /provider-configs/:id: omitting api_key leaves all three key colu
   assertEquals(row.api_key, null);
   assertEquals(row.api_key_encrypted, "ENC");
   assertEquals(row.api_key_iv, "IV");
+  // "ENC"/"IV" are garbage, not real ciphertext, so display-resolution can't
+  // decrypt them — the response must say so via key_status (PUT doesn't
+  // return auth_shape at all, same as before this task; only GET does).
+  const body = await res!.json();
+  assertEquals(body.key_status, "undecryptable");
+  assertEquals(body.api_key, null);
 });
 
 Deno.test("PUT /provider-configs/:id: providing api_key rewrites all three columns consistently", async () => {
@@ -157,6 +163,32 @@ Deno.test("PUT /provider-configs/:id: providing api_key rewrites all three colum
   assertEquals(typeof row.api_key_encrypted, "string");
   assertEquals(typeof row.api_key_iv, "string");
   assertEquals(!!row.api_key && !!row.api_key_encrypted, false);
+});
+
+Deno.test("GET /provider-configs: key_status distinguishes an undecryptable row from a genuinely keyless one", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const db = makeFakeDb([
+    // Row 1: legacy plaintext, decrypts trivially (readProviderKey passes it through).
+    { id: "1", user_id: "u1", provider: "anthropic", model: "claude", api_key: "sk-legacy", api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: "a", is_active: true, created_at: "t0", updated_at: "t0" },
+    // Row 2: encrypted pair the currently-configured key can't open (garbage ciphertext).
+    { id: "2", user_id: "u1", provider: "bedrock", model: "claude", api_key: null, api_key_encrypted: "garbage", api_key_iv: "garbage", base_url: null, display_name: "b", is_active: false, created_at: "t0", updated_at: "t0" },
+    // Row 3: genuinely no key configured (subscription provider).
+    { id: "3", user_id: "u1", provider: "claude-code", model: "claude", api_key: null, api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: "c", is_active: false, created_at: "t0", updated_at: "t0" },
+  ]);
+  const res = await handleProviderConfigRoutes("/x/provider-configs", "GET", req("GET"), "u1", db.sql, CORS);
+  assertEquals(res!.status, 200);
+  const body = await res!.json();
+  const byId = Object.fromEntries(body.map((r: any) => [r.id, r]));
+  assertEquals(byId["1"].key_status, "ok");
+  assertEquals(byId["1"].api_key, "sk-legacy".substring(0, 8) + "..." + "sk-legacy".slice(-4));
+  assertEquals(byId["2"].key_status, "undecryptable");
+  assertEquals(byId["2"].api_key, null);
+  // Undecryptable must not be conflated with auth_shape "iam" — the point is
+  // exactly that a bedrock row can be either shape and we currently can't tell.
+  assertEquals(byId["2"].auth_shape, "none");
+  assertEquals(byId["3"].key_status, "ok");
+  assertEquals(byId["3"].api_key, null);
+  assertEquals(byId["3"].auth_shape, "none");
 });
 
 Deno.test("POST /provider-configs/encrypt-existing: no key configured is a reported no-op, not an error", async () => {
