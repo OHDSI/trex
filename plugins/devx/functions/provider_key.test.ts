@@ -1,6 +1,12 @@
 // deno test --no-check --allow-all plugins/devx/functions/provider_key.test.ts
 import { assertEquals, assertRejects } from "jsr:@std/assert";
-import { encryptionConfigured, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
+import {
+  __resetMigrationCacheForTests,
+  assertProviderConfigEncryptionMigrated,
+  encryptionConfigured,
+  readProviderKey,
+  writeProviderKeyFields,
+} from "./provider_key.ts";
 
 const KEY = "0".repeat(64); // 32 bytes as hex
 
@@ -67,4 +73,56 @@ Deno.test("the unset-key and wrong-key failures are distinguishable from each ot
 Deno.test("a row with neither column yields null", async () => {
   Deno.env.delete("DEVX_ENCRYPTION_KEY");
   assertEquals(await readProviderKey({}), null);
+});
+
+Deno.test("assertProviderConfigEncryptionMigrated: fails closed, naming V15, when the column is absent", async () => {
+  __resetMigrationCacheForTests();
+  let calls = 0;
+  const sql = async (_q: string, _p?: unknown[]) => {
+    calls++;
+    return { rows: [] }; // information_schema probe finds no matching column
+  };
+  await assertRejects(
+    () => assertProviderConfigEncryptionMigrated(sql),
+    Error,
+    "devx migration V15 has not been applied",
+  );
+  assertEquals(calls, 1);
+});
+
+Deno.test("assertProviderConfigEncryptionMigrated: does not fire when the column is present", async () => {
+  __resetMigrationCacheForTests();
+  let calls = 0;
+  const sql = async (_q: string, _p?: unknown[]) => {
+    calls++;
+    return { rows: [{ "?column?": 1 }] }; // information_schema probe finds the column
+  };
+  await assertProviderConfigEncryptionMigrated(sql); // must not throw
+  assertEquals(calls, 1);
+});
+
+Deno.test("assertProviderConfigEncryptionMigrated: caches the result — one query per process, not per call", async () => {
+  __resetMigrationCacheForTests();
+  let calls = 0;
+  const sql = async (_q: string, _p?: unknown[]) => {
+    calls++;
+    return { rows: [{ "?column?": 1 }] };
+  };
+  await assertProviderConfigEncryptionMigrated(sql);
+  await assertProviderConfigEncryptionMigrated(sql);
+  await assertProviderConfigEncryptionMigrated(sql);
+  assertEquals(calls, 1, "the probe query must run at most once per process");
+});
+
+Deno.test("assertProviderConfigEncryptionMigrated: a cached negative result keeps failing without re-querying", async () => {
+  __resetMigrationCacheForTests();
+  let calls = 0;
+  const sql = async (_q: string, _p?: unknown[]) => {
+    calls++;
+    return { rows: [] };
+  };
+  await assertRejects(() => assertProviderConfigEncryptionMigrated(sql));
+  await assertRejects(() => assertProviderConfigEncryptionMigrated(sql));
+  assertEquals(calls, 1);
+  __resetMigrationCacheForTests();
 });

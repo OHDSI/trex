@@ -20,6 +20,57 @@ export function encryptionConfigured(): boolean {
   return typeof v === "string" && v.trim() !== "";
 }
 
+// Minimal shape every call site's `sql`/`ctx.sql` helper satisfies.
+type SqlFn = (query: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
+
+// Cache for assertProviderConfigEncryptionMigrated below: one probe query per
+// process, not per request. `undefined` = not yet probed.
+let migrationApplied: boolean | undefined;
+
+// V15 (plugins/devx/migrations/V15__provider_config_key_encryption.sql) adds
+// devx.provider_configs.api_key_encrypted/api_key_iv. core/server's plugin
+// migration runner applies these at boot but is deliberately non-fatal on
+// failure (core/server/plugin/plugin.ts:302-305 — "Failures are logged but
+// never crash startup") and has a known, previously-observed startup race
+// with no retry (plugin.ts:319-324) that can leave a plugin's migrations
+// never applied for the life of the process.
+//
+// Every credential read site in this plugin selects the new columns
+// directly (`SELECT pc.api_key, pc.api_key_encrypted, pc.api_key_iv, ...`).
+// If V15 never applied, that SELECT itself throws a raw
+// `column "api_key_encrypted" does not exist` — a string that gives no hint
+// that a migration is the cause, thrown before readProviderKey's own
+// try/catch even runs. Call this first, so the failure is diagnosable in one
+// line instead of requiring someone to correlate a boot-time log line that
+// has long since scrolled past.
+//
+// Cheap by design: probes information_schema.columns (not the table itself)
+// and caches the boolean for the rest of the process, so this is one extra
+// query total, not one per request.
+export async function assertProviderConfigEncryptionMigrated(sql: SqlFn): Promise<void> {
+  if (migrationApplied === undefined) {
+    const result = await sql(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema = 'devx' AND table_name = 'provider_configs' AND column_name = 'api_key_encrypted'`,
+    );
+    migrationApplied = result.rows.length > 0;
+  }
+  if (!migrationApplied) {
+    throw new Error(
+      "devx migration V15 has not been applied — devx.provider_configs.api_key_encrypted " +
+        "is missing, so provider credentials cannot be read. Restart core/server (plugin " +
+        "migrations apply at boot) or check the startup log for why V15 failed to apply.",
+    );
+  }
+}
+
+// Test-only: clears the cache above so a test can exercise both the
+// "not applied" and "applied" branches of assertProviderConfigEncryptionMigrated
+// within the same process. Not called anywhere outside tests.
+export function __resetMigrationCacheForTests(): void {
+  migrationApplied = undefined;
+}
+
 function warnOnce(): void {
   if (warned) return;
   warned = true;
