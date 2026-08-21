@@ -231,7 +231,7 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 // appId, legacy's gate) || the user's devx.settings.ai_rules ||
 // DEFAULT_AI_RULES. The surrounding prompt is no longer hand-assembled here:
 // the resolved winner is handed to functions/coder_context.ts's
-// buildCoderContext (the same builder the ai-sdk/Claude Agent SDK/Copilot
+// buildCoderContext (the same builder the ai-sdk/coder-sidecar/Copilot
 // engines use), which interpolates it via prompts.ts's own wrapAiRules — the
 // exact "wrap a real winner in <user_defined_ai_rules>, leave the
 // DEFAULT_AI_RULES fallback unwrapped" logic this function used to replicate
@@ -276,7 +276,8 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 // coder profile), never a chat channel.
 //
 // settings.max_steps: undefined — this loop's step budget is set once at
-// definition time (defineAgent's maxSteps below), not per turn; see Task 2.
+// definition time (defineAgent's maxSteps below), not per turn — see the
+// comment there for why the per-user setting cannot reach this loop.
 export async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {
   const userId = ctx.userId;
 
