@@ -2,6 +2,7 @@
 import { assertEquals, assertRejects } from "jsr:@std/assert";
 import {
   __resetMigrationCacheForTests,
+  assertEncryptionMigrated,
   assertProviderConfigEncryptionMigrated,
   encryptionConfigured,
   readProviderKey,
@@ -125,4 +126,78 @@ Deno.test("assertProviderConfigEncryptionMigrated: a cached negative result keep
   await assertRejects(() => assertProviderConfigEncryptionMigrated(sql));
   assertEquals(calls, 1);
   __resetMigrationCacheForTests();
+});
+
+Deno.test("assertEncryptionMigrated: fails closed, naming V16, when the settings column is absent", async () => {
+  __resetMigrationCacheForTests();
+  let calls = 0;
+  const sql = async (_q: string, _p?: unknown[]) => {
+    calls++;
+    return { rows: [] }; // information_schema probe finds no matching column
+  };
+  await assertRejects(
+    () => assertEncryptionMigrated("settings", sql),
+    Error,
+    "devx migration V16 has not been applied",
+  );
+  assertEquals(calls, 1);
+});
+
+Deno.test("assertEncryptionMigrated: does not fire for settings when the column is present", async () => {
+  __resetMigrationCacheForTests();
+  let calls = 0;
+  const sql = async (_q: string, _p?: unknown[]) => {
+    calls++;
+    return { rows: [{ "?column?": 1 }] };
+  };
+  await assertEncryptionMigrated("settings", sql); // must not throw
+  assertEquals(calls, 1);
+});
+
+Deno.test("per-table cache: a satisfied provider_configs check does not satisfy settings", async () => {
+  __resetMigrationCacheForTests();
+  // provider_configs' column is present...
+  await assertProviderConfigEncryptionMigrated(async () => ({ rows: [{ "?column?": 1 }] }));
+  // ...but settings' column is not — this must still throw, naming V16, not be
+  // waved through by provider_configs' cached "applied" answer.
+  await assertRejects(
+    () => assertEncryptionMigrated("settings", async () => ({ rows: [] })),
+    Error,
+    "devx migration V16 has not been applied",
+  );
+});
+
+Deno.test("per-table cache: a failed settings check does not block provider_configs", async () => {
+  __resetMigrationCacheForTests();
+  // settings' column is missing...
+  await assertRejects(() => assertEncryptionMigrated("settings", async () => ({ rows: [] })));
+  // ...but provider_configs' column is present — this must succeed, not
+  // inherit settings' cached "not applied" answer.
+  await assertProviderConfigEncryptionMigrated(async () => ({ rows: [{ "?column?": 1 }] }));
+  __resetMigrationCacheForTests();
+});
+
+Deno.test("__resetMigrationCacheForTests clears both tables' caches", async () => {
+  __resetMigrationCacheForTests();
+  let providerCalls = 0;
+  let settingsCalls = 0;
+  const providerSql = async (_q: string, _p?: unknown[]) => {
+    providerCalls++;
+    return { rows: [{ "?column?": 1 }] };
+  };
+  const settingsSql = async (_q: string, _p?: unknown[]) => {
+    settingsCalls++;
+    return { rows: [{ "?column?": 1 }] };
+  };
+  await assertProviderConfigEncryptionMigrated(providerSql);
+  await assertEncryptionMigrated("settings", settingsSql);
+  assertEquals(providerCalls, 1);
+  assertEquals(settingsCalls, 1);
+
+  __resetMigrationCacheForTests();
+
+  await assertProviderConfigEncryptionMigrated(providerSql);
+  await assertEncryptionMigrated("settings", settingsSql);
+  assertEquals(providerCalls, 2, "reset must force a re-probe of provider_configs");
+  assertEquals(settingsCalls, 2, "reset must force a re-probe of settings");
 });

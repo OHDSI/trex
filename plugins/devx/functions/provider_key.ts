@@ -23,12 +23,22 @@ export function encryptionConfigured(): boolean {
 // Minimal shape every call site's `sql`/`ctx.sql` helper satisfies.
 type SqlFn = (query: string, params?: unknown[]) => Promise<{ rows: unknown[] }>;
 
-// Cache for assertProviderConfigEncryptionMigrated below: one probe query per
-// process, not per request. `undefined` = not yet probed.
-let migrationApplied: boolean | undefined;
+// Tables whose api_key column has an encrypted-pair migration, and the
+// migration that adds it.
+const ENCRYPTION_MIGRATIONS = {
+  provider_configs: "V15",
+  settings: "V16",
+} as const;
+type EncryptionMigratedTable = keyof typeof ENCRYPTION_MIGRATIONS;
 
-// V15 (plugins/devx/migrations/V15__provider_config_key_encryption.sql) adds
-// devx.provider_configs.api_key_encrypted/api_key_iv. core/server's plugin
+// Cache for assertEncryptionMigrated below: one probe query per table per
+// process, not per request. Keyed by table name so that checking one table
+// can never answer for another — a missing key means "not yet probed".
+const migrationApplied = new Map<EncryptionMigratedTable, boolean>();
+
+// V15 (plugins/devx/migrations/V15__provider_config_key_encryption.sql) and
+// V16 (plugins/devx/migrations/V16__settings_key_encryption.sql) each add an
+// api_key_encrypted/api_key_iv pair to one table. core/server's plugin
 // migration runner applies these at boot but is deliberately non-fatal on
 // failure (core/server/plugin/plugin.ts:302-305 — "Failures are logged but
 // never crash startup") and has a known, previously-observed startup race
@@ -37,7 +47,7 @@ let migrationApplied: boolean | undefined;
 //
 // Every credential read site in this plugin selects the new columns
 // directly (`SELECT pc.api_key, pc.api_key_encrypted, pc.api_key_iv, ...`).
-// If V15 never applied, that SELECT itself throws a raw
+// If the relevant migration never applied, that SELECT itself throws a raw
 // `column "api_key_encrypted" does not exist` — a string that gives no hint
 // that a migration is the cause, thrown before readProviderKey's own
 // try/catch even runs. Call this first, so the failure is diagnosable in one
@@ -46,29 +56,46 @@ let migrationApplied: boolean | undefined;
 //
 // Cheap by design: probes information_schema.columns (not the table itself)
 // and caches the boolean for the rest of the process, so this is one extra
-// query total, not one per request.
-export async function assertProviderConfigEncryptionMigrated(sql: SqlFn): Promise<void> {
-  if (migrationApplied === undefined) {
+// query per table total, not one per request.
+export async function assertEncryptionMigrated(
+  table: EncryptionMigratedTable,
+  sql: SqlFn,
+): Promise<void> {
+  let applied = migrationApplied.get(table);
+  if (applied === undefined) {
     const result = await sql(
       `SELECT 1 FROM information_schema.columns
-       WHERE table_schema = 'devx' AND table_name = 'provider_configs' AND column_name = 'api_key_encrypted'`,
+       WHERE table_schema = 'devx' AND table_name = $1 AND column_name = 'api_key_encrypted'`,
+      [table],
     );
-    migrationApplied = result.rows.length > 0;
+    // Assign only after the query resolves, and only into this table's slot
+    // — a transient query failure throws above and leaves the cache
+    // untouched, and a result for one table can never poison another's.
+    applied = result.rows.length > 0;
+    migrationApplied.set(table, applied);
   }
-  if (!migrationApplied) {
+  if (!applied) {
+    const migration = ENCRYPTION_MIGRATIONS[table];
     throw new Error(
-      "devx migration V15 has not been applied — devx.provider_configs.api_key_encrypted " +
+      `devx migration ${migration} has not been applied — devx.${table}.api_key_encrypted ` +
         "is missing, so provider credentials cannot be read. Restart core/server (plugin " +
-        "migrations apply at boot) or check the startup log for why V15 failed to apply.",
+        `migrations apply at boot) or check the startup log for why ${migration} failed to apply.`,
     );
   }
 }
 
-// Test-only: clears the cache above so a test can exercise both the
-// "not applied" and "applied" branches of assertProviderConfigEncryptionMigrated
+// Thin wrapper kept so the many existing provider_configs call sites do not
+// churn: same name, same signature, just delegates to the generalised,
+// per-table assertion above.
+export async function assertProviderConfigEncryptionMigrated(sql: SqlFn): Promise<void> {
+  return assertEncryptionMigrated("provider_configs", sql);
+}
+
+// Test-only: clears the cache above (both tables) so a test can exercise
+// both the "not applied" and "applied" branches of assertEncryptionMigrated
 // within the same process. Not called anywhere outside tests.
 export function __resetMigrationCacheForTests(): void {
-  migrationApplied = undefined;
+  migrationApplied.clear();
 }
 
 function warnOnce(): void {
