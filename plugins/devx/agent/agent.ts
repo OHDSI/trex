@@ -13,9 +13,9 @@ import type { HookCtx, ModelSpec } from "eve";
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
-import { DEFAULT_AI_RULES } from "../functions/prompts.ts";
 import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
+import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -224,22 +224,61 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
   return true;
 }
 
-// Port of the dynamic parts of functions/prompts.ts's constructSystemPrompt
-// that V1's static instructions.md extraction deferred (that file is
-// LOCAL_AGENT_SYSTEM_PROMPT with the trailing `[[AI_RULES]]` placeholder
-// removed — see prompts.ts:654-676). Legacy semantics reproduced exactly
-// (functions/agent.ts:171-177 + prompts.ts's wrapAiRules, :982-987): a
-// SINGLE winner is chosen — workspace project rules (TREX.md/AI_RULES.md,
-// read ONLY when metadata carries an appId, legacy's gate) || the user's
-// devx.settings.ai_rules || DEFAULT_AI_RULES — and stands in for
-// [[AI_RULES]]. A user/project winner is wrapped in <user_defined_ai_rules>
-// exactly as wrapAiRules wraps a non-default value; the DEFAULT_AI_RULES
-// fallback goes in unwrapped, also per wrapAiRules. The one residual
-// divergence is POSITION only: the winner is appended after base (the
-// static instructions.md has no placeholder to substitute mid-prompt) —
-// in the legacy LOCAL_AGENT_SYSTEM_PROMPT the [[AI_RULES]] slot was the
-// final section anyway, so the appended position matches it.
-async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {
+// This loop's own contribution is ONLY the ai_rules winner-selection below —
+// legacy semantics reproduced exactly (functions/agent.ts:171-177 +
+// prompts.ts's wrapAiRules, :982-987): a SINGLE winner is chosen — workspace
+// project rules (TREX.md/AI_RULES.md, read ONLY when metadata carries an
+// appId, legacy's gate) || the user's devx.settings.ai_rules ||
+// DEFAULT_AI_RULES. The surrounding prompt is no longer hand-assembled here:
+// the resolved winner is handed to functions/coder_context.ts's
+// buildCoderContext (the same builder the ai-sdk/coder-sidecar/Copilot
+// engines use), which interpolates it via prompts.ts's own wrapAiRules — the
+// exact "wrap a real winner in <user_defined_ai_rules>, leave the
+// DEFAULT_AI_RULES fallback unwrapped" logic this function used to replicate
+// by hand. Passing the RAW resolved winner (not pre-wrapped) is deliberate:
+// wrapAiRules already does the wrapping, so wrapping here first would
+// double-wrap a real winner. Verified empirically (task-1-report.md) by
+// diffing the assembled ai_rules section before/after this change for all
+// three precedence cases — identical wrapped/unwrapped treatment in both.
+//
+// `base` (instructions + agent.skills listing + <context> metadata, built by
+// toolset.ts's buildSystemPrompt) is accepted for hook-signature
+// compatibility but is NO LONGER the prompt's spine for a TOP-LEVEL turn —
+// buildCoderContext supplies its own base (prompts.ts's
+// LOCAL_AGENT_SYSTEM_PROMPT via mode:"agent"). The static
+// agent/instructions.md file this used to extend is intentionally left in
+// place. It is not merely vestigial, for two reasons:
+//   1. It still carries the "## d2e / edge functions" steer (test the
+//      function through testing-d2e-functions, not just deno test, before
+//      declaring done) that this rewrite otherwise silently dropped from
+//      this loop; that steer now also lives in the shared prompt as
+//      prompts.ts's D2E_TESTING_BLOCK (part of LOCAL_AGENT_SYSTEM_PROMPT),
+//      the same fix applied for every other UI engine that never had it.
+//   2. `base` — i.e. this exact file's content, unprocessed by this hook —
+//      is verbatim what a SELF-DELEGATED SUBAGENT turn runs on: the `agent`
+//      built-in's runSubagent (core/server/agents/service/toolset.ts:204)
+//      builds its system prompt from the static buildSystemPrompt(target,
+//      ctx.metadata), which never calls resolveInstructions and therefore
+//      never calls this function. See the defineAgent comment below for
+//      why that means self-delegated subagent turns do not get the shared
+//      contract at all.
+//
+// askToolAvailable: false — this loop registers no mcp__ask__ask_question
+// tool. eve's ask_question is unimplemented on this runtime altogether (see
+// core/server/agents/COMPAT.md's "HITL is approval-only" note); the only
+// question-asking tool here is the differently-named, legacy-ported
+// AskUserQuestion (tools/AskUserQuestion.ts, a thin wrapper over
+// planningQuestionnaireTool), which is NOT what buildAskQuestionRule's
+// <asking-questions> block instructs the model to call. Passing `true` here
+// would tell the model to MUST call a tool that does not exist.
+//
+// remoteChannel: false — this loop is the browser workbench (the "ui"
+// coder profile), never a chat channel.
+//
+// settings.max_steps: undefined — this loop's step budget is set once at
+// definition time (defineAgent's maxSteps below), not per turn — see the
+// comment there for why the per-user setting cannot reach this loop.
+export async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {
   const userId = ctx.userId;
 
   // User-level rules from devx.settings — same source functions/agent.ts:173
@@ -260,13 +299,72 @@ async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {
     if (projectRules !== undefined) rules = projectRules;
   }
 
-  // wrapAiRules replica: a real winner is wrapped, the default is not.
-  const section = rules ? `<user_defined_ai_rules>\n${rules}\n</user_defined_ai_rules>` : DEFAULT_AI_RULES;
-  return `${base}\n\n${section}`;
+  const { systemPrompt } = await buildCoderContext({
+    mode: "agent",
+    aiRules: rules,
+    remoteChannel: false,
+    askToolAvailable: false,
+    settings: { max_steps: undefined },
+  });
+  return systemPrompt;
 }
 
+// NOT closed by this file: a self-delegated subagent turn does not get the
+// shared contract above. `agent` (toolset.ts's agentTool, registered
+// unconditionally at depth 0) resolves `target = ctx.agent` — a copy of
+// THIS agent — whenever the model omits the `agent` argument; its tool
+// description literally invites that ("Omit `agent` to delegate to a copy
+// of yourself"). That path is reachable in exactly the mode that matters:
+// useAgentsChat.ts's toAgentMode sends mode: undefined for this loop's main
+// coder chat, and filterTools treats an undefined mode as "no restriction",
+// so the `agent` tool is available there. The resulting nested turn is run
+// by runSubagent (core/server/agents/service/toolset.ts:204), which builds
+// its system prompt from the STATIC buildSystemPrompt(target, ctx.metadata)
+// — agent.instructions + a skills listing + a <context> block — and never
+// calls resolveInstructions, the only function that ever invokes
+// agent.config.buildInstructions (i.e. buildInstructions above). So a
+// self-delegated devx coder subagent runs on raw instructions.md: no
+// ai_rules (project or user), no <commit-pr-hygiene>, no
+// <skills-protocol>, and no cross-repo guard. Fixing this means routing
+// runSubagent through resolveInstructions in core/ — deliberately NOT done
+// here; it is separate work in core/ with its own review, not a
+// plugins/devx change. plugins/devx/functions/prompt_divergence.test.ts's
+// ENGINES-list guard cannot catch this either — see that file's header
+// comment for why. This is the fifth surface a "one coder contract" review
+// has found; treat that count, not this file's list of engines, as the
+// measure of how done the contract actually is.
 export default defineAgent({
-  maxSteps: 25,
+  // Definition-time, not per-turn: eve's AgentConfig.maxSteps (eve-shim/
+  // types.ts) is read once here and consumed by every streamText call that
+  // reads agent.config.maxSteps for this agent — runner.ts:118 (top-level
+  // session turns), handler.ts:721 (the /chat endpoint), AND
+  // toolset.ts:207 (a self-delegated OR named subagent run via runSubagent,
+  // which reads target.config.maxSteps — the same defineAgent config below
+  // when target is a copy of this agent) — not per turn. There is no
+  // runtime hook that can override it, so the per-user settings.max_steps
+  // and the channel profile's maxStepsFloor (both applied inside
+  // buildCoderContext for the other three engines) CANNOT reach this loop
+  // — buildInstructions above deliberately passes
+  // `settings: { max_steps: undefined }` because there is nowhere for a
+  // resolved value to go. Reaching per-turn control here would require the
+  // agents runner (runner.ts) to accept a maxSteps override from a hook
+  // result (e.g. buildInstructions or a new hook) instead of only reading
+  // the static config value — out of scope for this change. Using the
+  // shared DEFAULT_MAX_STEPS at least keeps this single hardcoded number in
+  // sync with the other engines' fallback instead of drifting silently.
+  //
+  // Silent effect on a user's own setting: this went 25 -> 100 (DEFAULT_MAX_
+  // STEPS), a 4x jump, for BOTH this loop's top-level turns and every nested
+  // self-delegated/named subagent run (toolset.ts:207 reads the same
+  // agent.config.maxSteps). A user who deliberately set settings.max_steps
+  // to something lower (e.g. 25) to cap spend gets 100 here with no signal
+  // that their setting was ignored — devx.settings.max_steps is read and
+  // applied for the other three engines but, per the paragraph above, has
+  // nowhere to go on this loop. Do not flip a user to loop='agents' as a
+  // silent default until either (a) the agents runner accepts a per-turn
+  // maxSteps override sourced from settings/buildInstructions, or (b) the UI
+  // tells the user their max_steps setting does not apply on this loop.
+  maxSteps: DEFAULT_MAX_STEPS,
   resolveModel,
   filterTools,
   buildInstructions,
