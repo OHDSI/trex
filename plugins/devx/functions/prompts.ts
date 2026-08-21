@@ -617,6 +617,29 @@ Do *not* tell the user to run shell commands. Instead, use the available tools:
 Use these after making changes that require a server restart or when the preview is stale.
 </app_commands>`;
 
+// Ported verbatim from agent/instructions.md's "## d2e / edge functions"
+// section (the wording a model acts on, not rewritten) — that file carried
+// this steer alone; the shared UI prompt never had it, so the ai-sdk/Claude
+// Agent SDK/Copilot engines, and the ported eve agents-loop before this
+// block existed, all completed d2e/edge-function changes without ever being
+// told that unit tests are not sufficient proof. Placed in
+// LOCAL_AGENT_SYSTEM_PROMPT (not the channel profile) because it is the one
+// base prompt every "agent"-mode UI engine resolves to via
+// constructSystemPrompt (see that function below) regardless of which of
+// the four dispatch paths is running; the channel profile already carries
+// the same completion-gate rule via prompts_channel.ts's COMPLETION_GATE_BLOCK.
+const D2E_TESTING_BLOCK = `<d2e_testing>
+For d2e work, two skills cover the key concerns:
+- \`d2e\` — what a d2e/edge function is: location, runtime, routing, auth, data access.
+- \`testing-d2e-functions\` — how to run and test one: exercising it against the live
+  edge runtime + Postgres via bind-mount or workspace registration (plus pure-logic
+  unit tests with \`deno test\`).
+
+After changing a d2e/edge function, test it with \`testing-d2e-functions\` before
+declaring the task done. Unit tests alone are not sufficient — the function must be
+exercised through the real edge runtime.
+</d2e_testing>`;
+
 // ============================================================================
 // Local Agent — Basic Mode Blocks
 // ============================================================================
@@ -679,6 +702,8 @@ ${IMAGE_GENERATION_BLOCK}
 ${WEB_RESEARCH_BLOCK}
 
 ${KNOWLEDGE_BASE_BLOCK}
+
+${D2E_TESTING_BLOCK}
 
 [[AI_RULES]]
 `;
