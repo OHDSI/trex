@@ -26,6 +26,7 @@ const ENGINES = [
   "plugins/devx/functions/claude_code_agent.ts",
   "plugins/devx/functions/copilot_agent.ts",
   "plugins/devx/functions/index.ts",
+  "plugins/devx/agent/agent.ts",
 ];
 
 Deno.test("no dispatch path mutates the system prompt after building the coder context", async () => {
@@ -70,14 +71,21 @@ Deno.test("no dispatch path constructs the base prompt directly", async () => {
 // Root is plugins/devx (not plugins/devx/functions): widened so a future
 // direct constructSystemPrompt( call from plugins/devx/agent/ (the eve
 // agents-loop runtime, a separate module tree from functions/) is caught
-// too. It does NOT close the gap documented in the coder-context-unification
-// review: plugins/devx/agent/agent.ts's buildInstructions (agent.ts:235-259
-// at review time) is a hand-written PORT of constructSystemPrompt's dynamic
-// parts — it re-implements the logic rather than calling
-// constructSystemPrompt or buildCoderContext, so there is no
-// "constructSystemPrompt(" or missing-buildCoderContext( text for this scan
-// (or the ENGINES list above) to catch. Bringing agent.ts onto
-// buildCoderContext is separate, scoped follow-up work, not done here.
+// too. plugins/devx/agent/agent.ts's buildInstructions now CALLS
+// buildCoderContext rather than re-implementing constructSystemPrompt's
+// dynamic parts by hand (see that file's buildInstructions header comment),
+// so it is listed in ENGINES above like the other three dispatch paths and
+// is policed the same way: no direct constructSystemPrompt( call, no
+// post-build systemPrompt mutation, buildCoderContext( required.
+//
+// What is NOT closed: eve's AgentConfig.maxSteps is read once at
+// agent-definition time (runner.ts:118), not per turn, so unlike the other
+// three engines this loop cannot thread settings.max_steps or the channel
+// profile's maxStepsFloor through to buildCoderContext's maxSteps result —
+// buildInstructions passes settings: { max_steps: undefined } for exactly
+// this reason. Making that per-turn needs an override plumbed through the
+// agents runner itself; that is out of scope here (see agent.ts's
+// defineAgent call site for the full explanation).
 const ROOT = "plugins/devx";
 const CONSTRUCT_PROMPT_ALLOWED = new Set([
   `${ROOT}/functions/coder_context.ts`,
