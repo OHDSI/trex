@@ -5,6 +5,7 @@
  */
 
 import type { ToolDefinition } from "./types.ts";
+import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;
@@ -83,18 +84,35 @@ export const spawnAgentTool: ToolDefinition<{
       // Import streamAgentChat dynamically to avoid circular dependency
       const { streamAgentChat } = await import("../agent.ts");
 
-      // Get active provider config + user prefs for model creation
+      // Get active provider config + user prefs for model creation. Probe
+      // before selecting the encrypted columns — see provider_key.ts's
+      // assertProviderConfigEncryptionMigrated header comment.
+      await assertProviderConfigEncryptionMigrated(ctx.sql);
       const activePC = await ctx.sql(
-        `SELECT provider, model, api_key, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
+        `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
         [ctx.userId],
       );
       const prefsResult = await ctx.sql(
         `SELECT ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`,
         [ctx.userId],
       );
-      const settings = activePC.rows[0]
-        ? { ...activePC.rows[0], ...(prefsResult.rows[0] || {}) }
-        : (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
+      let settings;
+      if (activePC.rows[0]) {
+        // Resolve through the encryption helper — never let the raw
+        // api_key_encrypted/api_key_iv columns leak into settings.api_key
+        // unresolved. A decryption failure propagates uncaught to the outer
+        // catch below, which already reports it as "Subagent error: ..." —
+        // the same fail-loud posture as every other failure this tool
+        // surfaces, so no new error shape is needed here.
+        const resolvedApiKey = await readProviderKey(activePC.rows[0]);
+        // The comment above says ciphertext never leaks into `settings` —
+        // make that true by destructuring it out rather than spreading the
+        // raw row (same fix as index.ts's settings/agentSettings assembly).
+        const { api_key_encrypted: _spawnEnc, api_key_iv: _spawnIv, ...activePCNoCiphertext } = activePC.rows[0];
+        settings = { ...activePCNoCiphertext, api_key: resolvedApiKey, ...(prefsResult.rows[0] || {}) };
+      } else {
+        settings = (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
+      }
 
       // Determine model — use agent's model or inherit parent's
       const effectiveModel = agentDef.model === "inherit" ? settings.model : agentDef.model;

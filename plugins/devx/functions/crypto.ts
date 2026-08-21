@@ -4,13 +4,15 @@
  * Key sourced from DEVX_ENCRYPTION_KEY env var (64 hex chars = 32 bytes).
  */
 
-let keyPromise: Promise<CryptoKey> | null = null;
-
+// Deliberately not cached: the key is re-derived from DEVX_ENCRYPTION_KEY on
+// every call. A module-level cache would keep serving the key that was
+// current on the first call for the lifetime of the process — masking a
+// rotated/corrected env var and, if the very first call happened before the
+// var was set, pinning every subsequent call to a permanently rejected
+// promise. Re-deriving is cheap (a single crypto.subtle.importKey) and
+// guarantees decryption fails loudly against whatever key is configured now.
 async function getKey(): Promise<CryptoKey> {
-  if (!keyPromise) {
-    keyPromise = importKey();
-  }
-  return keyPromise;
+  return importKey();
 }
 
 async function importKey(): Promise<CryptoKey> {

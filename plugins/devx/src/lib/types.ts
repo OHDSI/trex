@@ -75,6 +75,19 @@ export interface ProviderConfigRecord {
   model: string;
   api_key?: string;
   auth_shape?: AuthShape;
+  // Per-row decrypt outcome for this display read (routes/provider_config_
+  // routes.ts). "undecryptable" means the row holds an encrypted pair that
+  // the server's current DEVX_ENCRYPTION_KEY cannot open (rotated/missing
+  // key) — auth_shape falls back to "none" in that case too, which is NOT
+  // the same claim as "this row genuinely has no key"; check key_status
+  // before treating auth_shape === "none" as "not configured". Absent on
+  // older server builds.
+  key_status?: "ok" | "undecryptable";
+  // True when this row's credential still lives in the legacy plaintext
+  // api_key column (not yet run through the encrypt-existing backfill).
+  // Absent on older server builds; a row with no key at all is not
+  // plaintext either (nothing to migrate).
+  is_plaintext?: boolean;
   base_url?: string;
   display_name?: string;
   is_active: boolean;

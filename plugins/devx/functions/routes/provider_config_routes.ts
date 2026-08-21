@@ -4,28 +4,81 @@
  * Manages multiple provider configs per user for multi-provider support.
  */
 import { deriveAuthShape } from "../auth_shape.ts";
+import {
+  assertProviderConfigEncryptionMigrated,
+  encryptionConfigured,
+  readProviderKey,
+  writeProviderKeyFields,
+} from "../provider_key.ts";
+
+// Non-secret display mask, matches the shape the SQL CASE expressions used
+// to produce directly in the column before encryption existed.
+function maskKey(plaintext) {
+  if (!plaintext) return null;
+  return plaintext.substring(0, 8) + "..." + plaintext.slice(-4);
+}
+
+// Resolve a row's key for display (masking, auth_shape) purposes only. Unlike
+// the coder-turn read sites (index.ts), a row this can't decrypt must not take
+// down the whole management UI (list/rename/delete) with it — degrade to
+// "unknown" for that one row and log, rather than failing the request.
+// Returns `status` alongside the value so the caller can distinguish "this
+// row has no key" (status "ok", value null) from "this row has a key we
+// can't currently read" (status "undecryptable", value null) — both
+// otherwise collapse into auth_shape "none", which would silently hide a
+// broken (possibly genuinely IAM-shaped) credential behind "not configured".
+async function resolveForDisplay(row) {
+  try {
+    return { value: await readProviderKey(row), status: "ok" };
+  } catch (err) {
+    console.error(
+      "[provider-configs] could not decrypt api_key for display (row id " + row.id + "):",
+      err instanceof Error ? err.message : err,
+    );
+    return { value: null, status: "undecryptable" };
+  }
+}
 
 export async function handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) {
+  // handleProviderConfigRoutes is called on every request that reaches this
+  // point in index.ts's `||` dispatch chain (it returns null for a
+  // non-matching path), so the migration probe below is scoped to only the
+  // branches that actually touch api_key_encrypted/api_key_iv — never run
+  // unconditionally here, or an unrelated route would pay for (and fail on)
+  // a devx-provider-configs-specific check.
+
   // GET /provider-configs — list all configs for this user
   if (path.endsWith("/provider-configs") && method === "GET") {
-    // api_key_raw is selected ONLY to derive the non-secret auth_shape hint
-    // below (masking is a SQL expression, so the shape must be computed from
-    // the raw column before it's lost) — it is deleted from every row before
-    // the response is serialized. The masked api_key stays exactly as-is.
+    // Probe before selecting the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
+    // Select the raw key material (plaintext and/or encrypted pair) so both
+    // the masked preview and auth_shape can be computed from the actually
+    // resolved value — once a row is encrypted, the plaintext api_key column
+    // alone is NULL, so deriving these straight from SQL would silently show
+    // "no key" / auth_shape "none" for a row that has one (auth_shape "iam"
+    // gates the bedrock legacy-loop fallback in useEffectiveLoop.ts, so this
+    // isn't just cosmetic).
     const result = await sql(
-      `SELECT id, user_id, provider, model,
-              CASE WHEN api_key IS NOT NULL AND api_key != '' THEN
-                CONCAT(LEFT(api_key, 8), '...', RIGHT(api_key, 4))
-              ELSE NULL END AS api_key,
-              api_key AS api_key_raw,
+      `SELECT id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv,
               base_url, display_name, is_active, created_at, updated_at
        FROM devx.provider_configs WHERE user_id = $1
        ORDER BY is_active DESC, updated_at DESC`,
       [userId],
     );
     for (const row of result.rows) {
-      row.auth_shape = deriveAuthShape(row.api_key_raw);
-      delete row.api_key_raw;
+      // Captured before resolveForDisplay overwrites row.api_key with the
+      // masked value below — tells the UI whether this row's credential is
+      // still sitting in the legacy plaintext column (so it can offer the
+      // encrypt-existing backfill) without exposing any key material itself.
+      const wasPlaintextOnly = row.api_key != null && row.api_key_encrypted == null;
+      const { value: resolved, status: keyStatus } = await resolveForDisplay(row);
+      row.auth_shape = deriveAuthShape(resolved);
+      row.api_key = maskKey(resolved);
+      row.key_status = keyStatus;
+      row.is_plaintext = wasPlaintextOnly;
+      delete row.api_key_encrypted;
+      delete row.api_key_iv;
     }
     return Response.json(result.rows, { headers: corsHeaders });
   }
@@ -38,15 +91,19 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       return Response.json({ error: "provider and model are required" }, { status: 400, headers: corsHeaders });
     }
 
+    // Probe before writing the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
+    // Route through the encryption helper and write all three columns in the
+    // same statement, so a row is never half-migrated (plaintext with a
+    // dangling encrypted pair, or vice versa).
+    const keyFields = await writeProviderKeyFields(api_key || null);
     const result = await sql(
-      `INSERT INTO devx.provider_configs (user_id, provider, model, api_key, base_url, display_name)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, user_id, provider, model,
-                 CASE WHEN api_key IS NOT NULL AND api_key != '' THEN
-                   CONCAT(LEFT(api_key, 8), '...', RIGHT(api_key, 4))
-                 ELSE NULL END AS api_key,
+      `INSERT INTO devx.provider_configs (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, display_name)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv,
                  base_url, display_name, is_active, created_at, updated_at`,
-      [userId, provider, model, api_key || null, base_url || null, display_name || null],
+      [userId, provider, model, keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, base_url || null, display_name || null],
     );
 
     // If this is the first config, auto-activate it
@@ -62,12 +119,77 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       result.rows[0].is_active = true;
     }
 
-    return Response.json(result.rows[0], { status: 201, headers: corsHeaders });
+    const created = result.rows[0];
+    const { value: resolvedKey, status: createdKeyStatus } = await resolveForDisplay(created);
+    created.api_key = maskKey(resolvedKey);
+    created.key_status = createdKeyStatus;
+    delete created.api_key_encrypted;
+    delete created.api_key_iv;
+
+    return Response.json(created, { status: 201, headers: corsHeaders });
+  }
+
+  // POST /provider-configs/encrypt-existing — encrypt every row still holding
+  // a plaintext key. Idempotent: rows that are already encrypted are skipped,
+  // and running it twice changes nothing. A no-op when no encryption key is
+  // configured — it reports that rather than failing.
+  if (path.endsWith("/provider-configs/encrypt-existing") && method === "POST") {
+    const totalResult = await sql(
+      `SELECT COUNT(*) as cnt FROM devx.provider_configs WHERE user_id = $1`,
+      [userId],
+    );
+    const total = parseInt(totalResult.rows[0]?.cnt ?? "0");
+
+    if (!encryptionConfigured()) {
+      return Response.json(
+        { migrated: 0, skipped: total, encryptionConfigured: false },
+        { headers: corsHeaders },
+      );
+    }
+
+    // Probe before writing the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
+
+    // Excludes rows that already hold an encrypted pair, even though every
+    // write path today nulls api_key once it writes api_key_encrypted (so
+    // this is currently unreachable) — this keeps "never overwrite an
+    // encrypted pair from a stale plaintext column" a structural guarantee
+    // of the query rather than an inference from write-path behaviour.
+    const candidates = (await sql(
+      `SELECT id, api_key FROM devx.provider_configs WHERE user_id = $1 AND api_key IS NOT NULL AND api_key_encrypted IS NULL`,
+      [userId],
+    )).rows;
+
+    let migrated = 0;
+    for (const row of candidates) {
+      // One statement per row, all three columns together: the plaintext
+      // column is nulled in the same UPDATE that writes the encrypted pair,
+      // so a row is never observed half-migrated.
+      const keyFields = await writeProviderKeyFields(row.api_key);
+      await sql(
+        `UPDATE devx.provider_configs
+         SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3, updated_at = NOW()
+         WHERE id = $4 AND user_id = $5`,
+        [keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, row.id, userId],
+      );
+      migrated++;
+    }
+
+    return Response.json(
+      { migrated, skipped: total - migrated, encryptionConfigured: true },
+      { headers: corsHeaders },
+    );
   }
 
   // PUT /provider-configs/:id — update a config
   const updateMatch = path.match(/\/provider-configs\/([^/]+)$/);
   if (updateMatch && method === "PUT" && !path.includes("/activate")) {
+    // Probe before the RETURNING clause below, which always references the
+    // encrypted columns regardless of which fields this request updates —
+    // see provider_key.ts's assertProviderConfigEncryptionMigrated header
+    // comment.
+    await assertProviderConfigEncryptionMigrated(sql);
     const configId = updateMatch[1];
     const body = await req.json();
     const { provider, model, api_key, base_url, display_name } = body;
@@ -79,7 +201,16 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
 
     if (provider !== undefined) { sets.push(`provider = $${paramIdx++}`); params.push(provider); }
     if (model !== undefined) { sets.push(`model = $${paramIdx++}`); params.push(model); }
-    if (api_key !== undefined) { sets.push(`api_key = $${paramIdx++}`); params.push(api_key || null); }
+    if (api_key !== undefined) {
+      // All three key columns are set together, only when the request
+      // actually sends a key — an update that omits api_key (e.g. renaming a
+      // config) must leave the existing credential, encrypted or plaintext,
+      // completely untouched rather than nulling it.
+      const keyFields = await writeProviderKeyFields(api_key || null);
+      sets.push(`api_key = $${paramIdx++}`); params.push(keyFields.api_key);
+      sets.push(`api_key_encrypted = $${paramIdx++}`); params.push(keyFields.api_key_encrypted);
+      sets.push(`api_key_iv = $${paramIdx++}`); params.push(keyFields.api_key_iv);
+    }
     if (base_url !== undefined) { sets.push(`base_url = $${paramIdx++}`); params.push(base_url || null); }
     if (display_name !== undefined) { sets.push(`display_name = $${paramIdx++}`); params.push(display_name || null); }
 
@@ -92,10 +223,7 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     const result = await sql(
       `UPDATE devx.provider_configs SET ${sets.join(", ")}
        WHERE id = $1 AND user_id = $2
-       RETURNING id, user_id, provider, model,
-                 CASE WHEN api_key IS NOT NULL AND api_key != '' THEN
-                   CONCAT(LEFT(api_key, 8), '...', RIGHT(api_key, 4))
-                 ELSE NULL END AS api_key,
+       RETURNING id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv,
                  base_url, display_name, is_active, created_at, updated_at`,
       params,
     );
@@ -103,7 +231,13 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     if (result.rows.length === 0) {
       return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
     }
-    return Response.json(result.rows[0], { headers: corsHeaders });
+    const updated = result.rows[0];
+    const { value: resolvedKey, status: updatedKeyStatus } = await resolveForDisplay(updated);
+    updated.api_key = maskKey(resolvedKey);
+    updated.key_status = updatedKeyStatus;
+    delete updated.api_key_encrypted;
+    delete updated.api_key_iv;
+    return Response.json(updated, { headers: corsHeaders });
   }
 
   // PUT /provider-configs/:id/activate — set as active (deactivates others)

@@ -14,6 +14,8 @@ import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { DEFAULT_AI_RULES } from "../functions/prompts.ts";
+import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
+import { classifyCoderError } from "../functions/error_codes.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -34,6 +36,8 @@ interface ProviderRow {
   provider: string;
   model: string;
   api_key: string | null;
+  api_key_encrypted?: string | null;
+  api_key_iv?: string | null;
   base_url: string | null;
 }
 
@@ -47,8 +51,11 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   }
   const userId = ctx.userId;
 
+  // Probe before selecting the encrypted columns — see provider_key.ts's
+  // assertProviderConfigEncryptionMigrated header comment.
+  await assertProviderConfigEncryptionMigrated(ctx.sql);
   const activeProviderResult = await ctx.sql(
-    `SELECT pc.provider, pc.model, pc.api_key, pc.base_url
+    `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
      FROM devx.provider_configs pc
      WHERE pc.user_id = $1 AND pc.is_active = true
      LIMIT 1`,
@@ -58,6 +65,9 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 
   // Fall back to the legacy devx.settings row (backward compat) when the
   // user has no active provider_configs row — functions/index.ts:305-333.
+  // devx.settings was never migrated to encrypted storage, so it carries no
+  // api_key_encrypted/api_key_iv — readProviderKey below treats that as an
+  // ordinary plaintext row, same as it always has.
   if (!row) {
     const legacyResult = await ctx.sql(
       `SELECT provider, model, api_key, base_url FROM devx.settings WHERE user_id = $1`,
@@ -71,6 +81,28 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   // running unconfigured users on the operator's account.
   if (!row) {
     throw new Error("devx: no model provider configured — set up a provider in devx Settings");
+  }
+
+  // Resolve through the encryption helper before ANY use of the key below —
+  // never let row.api_key (NULL once a row is encrypted) reach ModelSpec.apiKey
+  // as undefined, which core's buildModel (model.ts:55/60/71) silently
+  // backfills from the operator's own ANTHROPIC_API_KEY / GOOGLE_GENERATIVE_AI_
+  // API_KEY / OPENAI_API_KEY env var — cross-tenant credential substitution on
+  // any deployment where those vars happen to be set. A decrypt failure must
+  // fail this turn the same way every other throw in this function does
+  // (module header: "propagates and fails the turn"), never continue with an
+  // absent key. classifyCoderError mirrors the wording index.ts's read sites
+  // use, so the failure reads the same regardless of which loop produced it.
+  let resolvedApiKey: string | null;
+  try {
+    resolvedApiKey = await readProviderKey(row);
+  } catch (err) {
+    // classifyCoderError's `safe` string is generic for the UI — log the
+    // actual cause (e.g. a rotated DEVX_ENCRYPTION_KEY) so it's diagnosable
+    // from the server log, not just a misleading UI message.
+    console.error("[devx] provider key read failed for agents-loop turn:", err instanceof Error ? err.message : err);
+    const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+    throw new Error(classified.safe);
   }
 
   // The UI routes these to the legacy /stream endpoint (claude_code_agent.ts /
@@ -107,12 +139,12 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   // out of sync, and failing loud here is strictly better than a silent
   // wrong-credential turn (same "a thrown resolveModel fails the turn"
   // posture as every other error path in this file).
-  let apiKey: string | undefined = row.api_key ?? undefined;
-  if (provider === "bedrock" && row.api_key) {
+  let apiKey: string | undefined = resolvedApiKey ?? undefined;
+  if (provider === "bedrock" && resolvedApiKey) {
     let parsed: unknown;
     let parseable = true;
     try {
-      parsed = JSON.parse(row.api_key);
+      parsed = JSON.parse(resolvedApiKey);
     } catch {
       // Not JSON — legacy's own createModel silently falls through to the
       // AWS_BEARER_TOKEN_BEDROCK env var in this case (its catch{} is

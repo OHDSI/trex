@@ -5,7 +5,7 @@
  * SDK built-in tools are enabled.
  */
 import { duckdb, escapeSql } from "./duckdb.ts";
-import { constructSystemPrompt } from "./prompts.ts";
+import { buildCoderContext } from "./coder_context.ts";
 import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 
@@ -39,10 +39,9 @@ async function ensureCopilotServer() {
 
 export async function streamCopilotChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-  skillContext, commandOverride, hasComponentSelection,
+  skillContext, commandOverride, hasComponentSelection, remoteChannel,
 }) {
   const mode = chatMode || "agent";
-  const maxSteps = settings.max_steps || 100;
   const effectiveSettings = commandOverride?.model
     ? { ...settings, model: commandOverride.model }
     : settings;
@@ -57,10 +56,21 @@ export async function streamCopilotChat({
     if (rules !== undefined) aiRules = rules;
   }
 
-  let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext);
-  if (hasComponentSelection) {
-    systemPrompt += "\nThe user has selected specific components for editing. Focus your modifications on those components.";
-  }
+  const { systemPrompt, maxSteps } = await buildCoderContext({
+    mode, aiRules, skillContext, remoteChannel,
+    // effectiveSettings, not settings — matches claude_code_agent.ts.
+    // buildCoderContext only reads .max_steps today, identical on both, so
+    // this was behaviourally inert; effectiveSettings is the "resolved for
+    // this turn" object (post command-model-override) and is what aiRules
+    // above was already derived from, so it's the correct one to keep the
+    // three engines symmetric and future-proof against buildCoderContext
+    // reading more of settings later.
+    hasComponentSelection, settings: effectiveSettings,
+    // fn-copilot/tools.js does not register mcp__ask__ask_question — telling
+    // the model to MUST use it (and to NEVER ask in plain text) would take
+    // away its only real way to ask.
+    askToolAvailable: false,
+  });
 
   const messages = history
     .filter((m) => m.content && (typeof m.content === "string" ? m.content.trim() !== "" : m.content.length > 0))
