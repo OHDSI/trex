@@ -77,8 +77,8 @@ Deno.test({
     }
 
     // maxSteps now mirrors coder_context.ts's shared DEFAULT_MAX_STEPS
-    // (Task 2, 2026-08-21-agents-loop-coder-contract) rather than a second
-    // hardcoded 25 — see agent.ts's defineAgent call site comment for why
+    // rather than a second hardcoded 25 — see agent.ts's defineAgent call
+    // site comment for why
     // this value is definition-time and cannot vary per turn. Asserted
     // against the imported constant, not a literal 100, so a future change
     // to DEFAULT_MAX_STEPS fails here with one clear message instead of two

@@ -619,8 +619,8 @@ Use these after making changes that require a server restart or when the preview
 
 // Ported verbatim from agent/instructions.md's "## d2e / edge functions"
 // section (the wording a model acts on, not rewritten) — that file carried
-// this steer alone; the shared UI prompt never had it, so the ai-sdk/Claude
-// Agent SDK/Copilot engines, and the ported eve agents-loop before this
+// this steer alone; the shared UI prompt never had it, so the ai-sdk,
+// coder-sidecar and Copilot engines, and the ported eve agents-loop before this
 // block existed, all completed d2e/edge-function changes without ever being
 // told that unit tests are not sufficient proof. Placed in
 // LOCAL_AGENT_SYSTEM_PROMPT (not the channel profile) because it is the one
