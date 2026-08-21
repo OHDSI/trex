@@ -112,9 +112,9 @@ export async function resolveStoredSettingsKey(sql: SqlFn, userId: string): Prom
   }
 }
 
-// The whole PUT /settings key guard, in one testable call: given the api_key a
-// request wants to store, returns a reason string when it must be DISCARDED
-// (and the stored credential left alone), or null when it is a real update.
+// Given the api_key a request wants to store, returns a reason string when it
+// may be DISCARDED (and the stored credential left alone), or null when it is
+// a real update.
 //
 // Callers must not pass an explicit clear (null): clearing a key is a genuine
 // intent that this guard has no business overriding.
@@ -131,4 +131,55 @@ export async function discardableKeyUpdateReason(
     return "it is the masked value this row's key is displayed as, not a key";
   }
   return null;
+}
+
+// What PUT /settings should do with the three key columns for one request.
+export interface SettingsKeyWrite {
+  // false: leave api_key, api_key_encrypted and api_key_iv exactly as they are.
+  apply: boolean;
+  // Only meaningful when apply is true. null means "clear all three".
+  plaintext: string | null;
+  // Why the write was declined, for the log. null when there is nothing to say.
+  reason: string | null;
+}
+
+// The complete PUT /settings key decision, in one call a test can drive. The
+// route does nothing with `body.api_key` except pass it here — a decision that
+// can only be checked by reading the request handler is a decision nobody
+// reviews.
+//
+// The cases, and why:
+//
+// - **absent (`undefined`)** — the field wasn't sent. Never touch the stored
+//   credential; a save of an unrelated setting must not disturb it.
+//
+// - **empty string** — also treated as absent, NOT as a clear. GET /settings
+//   returns `api_key: null` whenever there is no readable key, including when
+//   a rotated or lost DEVX_ENCRYPTION_KEY leaves the stored one undecryptable.
+//   A client that seeds a form field from that null holds `""` and posts it
+//   back on its next save of anything at all. Reading that as "clear" deletes
+//   the ciphertext of a credential that was still recoverable by restoring the
+//   old encryption key — turning a recoverable state into a permanent loss, on
+//   a save the user made for an unrelated reason. An intent to clear is
+//   therefore expressed as JSON null, which no round trip produces by accident.
+//
+// - **null** — an explicit clear. Honoured, never second-guessed.
+//
+// - **a string** — a candidate credential, subject to the mask/empty-blob
+//   guard above.
+//
+// - **anything else** (number, boolean, object) — treated as absent. A
+//   malformed payload is never a reason to destroy a working credential.
+export async function settingsKeyWriteDecision(
+  raw: unknown,
+  sql: SqlFn,
+  userId: string,
+): Promise<SettingsKeyWrite> {
+  if (raw === null) return { apply: true, plaintext: null, reason: null };
+  if (typeof raw !== "string" || raw === "") {
+    return { apply: false, plaintext: null, reason: null };
+  }
+  const discardReason = await discardableKeyUpdateReason(raw, sql, userId);
+  if (discardReason) return { apply: false, plaintext: null, reason: discardReason };
+  return { apply: true, plaintext: raw, reason: null };
 }

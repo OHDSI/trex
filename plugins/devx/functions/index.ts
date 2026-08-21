@@ -3,7 +3,7 @@ import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
-import { discardableKeyUpdateReason, maskKey } from "./api_key_mask.ts";
+import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
@@ -1420,27 +1420,23 @@ Deno.serve(async (req: Request) => {
       if (body.ai_rules && body.ai_rules.length > 4000) {
         return Response.json({ error: "AI rules must be under 4000 characters" }, { status: 400, headers: corsHeaders });
       }
-      // Distinguish between "not provided" (undefined) and "explicitly cleared" (empty string)
-      const apiKey = body.api_key === undefined ? undefined : (body.api_key || null);
-      let hasApiKeyUpdate = body.api_key !== undefined;
-      // GET /settings returns this row's api_key MASKED (see above). A client
-      // that seeds its form from that response and posts the whole form back
-      // on save sends that mask here as though it were a key — or, if it
-      // unpacks the value into per-field credential inputs first, an empty
-      // blob, because the mask never parses. With encryption configured we
-      // would faithfully encrypt either one over the real credential,
-      // destroying it in a way nothing downstream can detect. The Settings
-      // page no longer round-trips anything, but bundles already cached in
-      // browsers do, so the guard lives on the server where a stale client
-      // cannot skip it. An explicit clear (api_key null) is a real intent and
-      // is never second-guessed. See api_key_mask.ts.
-      if (hasApiKeyUpdate && apiKey !== null) {
-        const discardReason = await discardableKeyUpdateReason(apiKey, sql, userId);
-        if (discardReason) {
-          console.warn(`[devx] PUT /settings: ignoring the api_key it was sent because ${discardReason} — keeping the stored credential`);
-          hasApiKeyUpdate = false;
-        }
+      // Everything this route decides about the three key columns lives in
+      // settingsKeyWriteDecision (api_key_mask.ts), where it is unit-tested:
+      // which payloads count as "not an update" (a field that wasn't sent, an
+      // empty string, the mask this row's key is displayed as, a re-packed
+      // empty credential blob), which count as an explicit clear (JSON null,
+      // and only that), and which are a real credential. GET /settings hands
+      // clients a mask — or a null when the stored key can't be read — so a
+      // client that echoes its loaded form back on save posts one of those
+      // non-credentials here, and with encryption configured we would
+      // faithfully store it over the real key. The current Settings page sends
+      // no api_key at all; bundles already cached in browsers do, which is why
+      // this decision is made server-side.
+      const keyWrite = await settingsKeyWriteDecision(body.api_key, sql, userId);
+      if (keyWrite.reason) {
+        console.warn(`[devx] PUT /settings: ignoring the api_key it was sent because ${keyWrite.reason} — keeping the stored credential`);
       }
+      const hasApiKeyUpdate = keyWrite.apply;
       // task-u1 (V11__loop_flag.sql): same "only touch it if the caller
       // actually sent it" posture as api_key above. SettingsPage.tsx now
       // sends `loop` on every save, but any OTHER caller of this endpoint
@@ -1461,17 +1457,16 @@ Deno.serve(async (req: Request) => {
       if (hasGitEmailUpdate && body.git_author_email && !/^[^\s@]+@[^\s@]+$/.test(String(body.git_author_email))) {
         return Response.json({ error: "git author email must be a valid email address" }, { status: 400, headers: corsHeaders });
       }
-      // All three key columns are written together, only when the request
-      // actually sends api_key (hasApiKeyUpdate) — a save that omits it
-      // (e.g. flipping auto_approve) must leave the existing credential,
-      // encrypted or plaintext, completely untouched rather than nulling it.
-      // When hasApiKeyUpdate is false this still needs a value for the plain
-      // INSERT-new-row branch: writeProviderKeyFields(null) yields the same
-      // all-null triple `apiKey ?? null` used to insert alone, so a brand
-      // new row is unaffected. Gating on hasApiKeyUpdate rather than on
-      // `apiKey` alone also means a rejected masked round trip (above) never
-      // gets encrypted into the VALUES list in the first place.
-      const keyFields = await writeProviderKeyFields(hasApiKeyUpdate ? (apiKey ?? null) : null);
+      // All three key columns are written together, only when the decision
+      // above says to (hasApiKeyUpdate) — a save that leaves the key alone
+      // (an omitted field, an echoed non-credential, flipping auto_approve)
+      // must leave the existing credential, encrypted or plaintext, completely
+      // untouched rather than nulling it. When hasApiKeyUpdate is false this
+      // still needs a value for the plain INSERT-new-row branch:
+      // writeProviderKeyFields(null) yields an all-null triple, so a brand new
+      // row is unaffected — and a declined payload is never even encrypted
+      // into the VALUES list.
+      const keyFields = await writeProviderKeyFields(keyWrite.apply ? keyWrite.plaintext : null);
       const result = await sql(
         `INSERT INTO devx.settings (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, 'legacy'), $14, $15)

@@ -56,6 +56,32 @@ Deno.test("encrypted row with the key removed entirely is loud — never a silen
   );
 });
 
+// Defence in depth: no write path can produce a half-pair (all three columns
+// are always set in one statement), but if one ever did, requiring BOTH halves
+// to recognise an encrypted row would send it down the plaintext fallback —
+// where an encrypted row's api_key is NULL — and lost key material would
+// surface as "no key configured": a 400 telling the user to set a key they
+// already set, instead of a failure naming the real problem.
+Deno.test("a half-written pair (ciphertext, no IV) fails loud instead of reading as no key", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const fields = await writeProviderKeyFields("sk-secret");
+  await assertRejects(
+    () => readProviderKey({ api_key: null, api_key_encrypted: fields.api_key_encrypted, api_key_iv: null }),
+    Error,
+    "half-written",
+  );
+});
+
+Deno.test("a half-written pair (IV, no ciphertext) fails loud too, and never serves the stale plaintext", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const fields = await writeProviderKeyFields("sk-secret");
+  await assertRejects(
+    () => readProviderKey({ api_key: "sk-stale-plaintext", api_key_encrypted: null, api_key_iv: fields.api_key_iv }),
+    Error,
+    "half-written",
+  );
+});
+
 Deno.test("the unset-key and wrong-key failures are distinguishable from each other", async () => {
   Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
   const fields = await writeProviderKeyFields("sk-secret");

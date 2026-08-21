@@ -110,14 +110,29 @@ function warnOnce(): void {
 export async function readProviderKey(
   row: Partial<ProviderKeyFields>,
 ): Promise<string | null> {
-  if (row.api_key_encrypted && row.api_key_iv) {
+  // EITHER half present means this is an encrypted row. Requiring both would
+  // let a half-written pair (ciphertext with no IV, or the reverse) fall
+  // through to the plaintext column below — NULL on an encrypted row — so
+  // lost key material would read as "no key configured" and surface as a 400
+  // inviting the user to set a key they already set, instead of the loud
+  // failure this module's header promises. Structurally unreachable today
+  // (every write path sets all three columns in one statement), but the
+  // fallback is the dangerous direction to be wrong in.
+  if (row.api_key_encrypted || row.api_key_iv) {
     // The row holds an encrypted credential: never fall back to row.api_key
     // (a stale/legacy plaintext column that may still be populated) — that
-    // would silently serve an unreachable or stale key. Both failure shapes
-    // below are deliberate, distinguished errors whose message classifies as
+    // would silently serve an unreachable or stale key. Every failure shape
+    // below is a deliberate, distinguished error whose message classifies as
     // `invalid_key` in error_codes.ts, so the route layer (Task 6) can
     // classify them the same way it classifies every other coder-turn error
     // instead of leaking a raw crypto/WebCrypto string.
+    if (!row.api_key_encrypted || !row.api_key_iv) {
+      throw new Error(
+        "Invalid encryption key: the stored provider API key is half-written — " +
+          `api_key_encrypted is ${row.api_key_encrypted ? "present" : "missing"} but api_key_iv is ` +
+          `${row.api_key_iv ? "present" : "missing"}. This credential cannot be decrypted; re-enter the API key.`,
+      );
+    }
     if (!encryptionConfigured()) {
       throw new Error(
         "Invalid encryption key: provider API key is encrypted but DEVX_ENCRYPTION_KEY " +
