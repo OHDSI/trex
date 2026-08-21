@@ -18,6 +18,7 @@
 // as every other test in this dir.
 import { assert, assertEquals } from "jsr:@std/assert";
 import { loadAgent } from "../../../../core/server/agents/loader.ts";
+import { DEFAULT_MAX_STEPS } from "../../functions/coder_context.ts";
 
 // loadAgent builds file:// URLs from the dir string, so it needs an absolute
 // path; derive it from this file's own URL to stay checkout-relative.
@@ -75,7 +76,15 @@ Deno.test({
       assert(typeof def.execute === "function", `${name} has no execute`);
     }
 
-    assertEquals(agent.config.maxSteps, 25);
+    // maxSteps now mirrors coder_context.ts's shared DEFAULT_MAX_STEPS
+    // rather than a second hardcoded 25 — see agent.ts's defineAgent call
+    // site comment for why
+    // this value is definition-time and cannot vary per turn. Asserted
+    // against the imported constant, not a literal 100, so a future change
+    // to DEFAULT_MAX_STEPS fails here with one clear message instead of two
+    // (this file and coder_context.test.ts) each reporting a bare number
+    // mismatch.
+    assertEquals(agent.config.maxSteps, DEFAULT_MAX_STEPS);
     assert(agent.instructions.length > 0);
 
     // Part 4 (task-v3-brief.md): plugins/devx/agent/skills is a relative
