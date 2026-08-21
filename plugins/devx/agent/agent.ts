@@ -13,9 +13,9 @@ import type { HookCtx, ModelSpec } from "eve";
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
-import { DEFAULT_AI_RULES } from "../functions/prompts.ts";
 import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
+import { buildCoderContext } from "../functions/coder_context.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -224,22 +224,46 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
   return true;
 }
 
-// Port of the dynamic parts of functions/prompts.ts's constructSystemPrompt
-// that V1's static instructions.md extraction deferred (that file is
-// LOCAL_AGENT_SYSTEM_PROMPT with the trailing `[[AI_RULES]]` placeholder
-// removed — see prompts.ts:654-676). Legacy semantics reproduced exactly
-// (functions/agent.ts:171-177 + prompts.ts's wrapAiRules, :982-987): a
-// SINGLE winner is chosen — workspace project rules (TREX.md/AI_RULES.md,
-// read ONLY when metadata carries an appId, legacy's gate) || the user's
-// devx.settings.ai_rules || DEFAULT_AI_RULES — and stands in for
-// [[AI_RULES]]. A user/project winner is wrapped in <user_defined_ai_rules>
-// exactly as wrapAiRules wraps a non-default value; the DEFAULT_AI_RULES
-// fallback goes in unwrapped, also per wrapAiRules. The one residual
-// divergence is POSITION only: the winner is appended after base (the
-// static instructions.md has no placeholder to substitute mid-prompt) —
-// in the legacy LOCAL_AGENT_SYSTEM_PROMPT the [[AI_RULES]] slot was the
-// final section anyway, so the appended position matches it.
-async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {
+// This loop's own contribution is ONLY the ai_rules winner-selection below —
+// legacy semantics reproduced exactly (functions/agent.ts:171-177 +
+// prompts.ts's wrapAiRules, :982-987): a SINGLE winner is chosen — workspace
+// project rules (TREX.md/AI_RULES.md, read ONLY when metadata carries an
+// appId, legacy's gate) || the user's devx.settings.ai_rules ||
+// DEFAULT_AI_RULES. The surrounding prompt is no longer hand-assembled here:
+// the resolved winner is handed to functions/coder_context.ts's
+// buildCoderContext (the same builder the ai-sdk/Claude Agent SDK/Copilot
+// engines use), which interpolates it via prompts.ts's own wrapAiRules — the
+// exact "wrap a real winner in <user_defined_ai_rules>, leave the
+// DEFAULT_AI_RULES fallback unwrapped" logic this function used to replicate
+// by hand. Passing the RAW resolved winner (not pre-wrapped) is deliberate:
+// wrapAiRules already does the wrapping, so wrapping here first would
+// double-wrap a real winner. Verified empirically (task-1-report.md) by
+// diffing the assembled ai_rules section before/after this change for all
+// three precedence cases — identical wrapped/unwrapped treatment in both.
+//
+// `base` (instructions + agent.skills listing + <context> metadata, built by
+// toolset.ts's buildSystemPrompt) is accepted for hook-signature
+// compatibility but is NO LONGER the prompt's spine — buildCoderContext
+// supplies its own base (prompts.ts's LOCAL_AGENT_SYSTEM_PROMPT via
+// mode:"agent"). The static agent/instructions.md file this used to extend
+// is intentionally left in place; see task-1-report.md for what it still
+// contains that the shared prompt does not.
+//
+// askToolAvailable: false — this loop registers no mcp__ask__ask_question
+// tool. eve's ask_question is unimplemented on this runtime altogether (see
+// core/server/agents/COMPAT.md's "HITL is approval-only" note); the only
+// question-asking tool here is the differently-named, legacy-ported
+// AskUserQuestion (tools/AskUserQuestion.ts, a thin wrapper over
+// planningQuestionnaireTool), which is NOT what buildAskQuestionRule's
+// <asking-questions> block instructs the model to call. Passing `true` here
+// would tell the model to MUST call a tool that does not exist.
+//
+// remoteChannel: false — this loop is the browser workbench (the "ui"
+// coder profile), never a chat channel.
+//
+// settings.max_steps: undefined — this loop's step budget is set once at
+// definition time (defineAgent's maxSteps below), not per turn; see Task 2.
+export async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {
   const userId = ctx.userId;
 
   // User-level rules from devx.settings — same source functions/agent.ts:173
@@ -260,9 +284,14 @@ async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {
     if (projectRules !== undefined) rules = projectRules;
   }
 
-  // wrapAiRules replica: a real winner is wrapped, the default is not.
-  const section = rules ? `<user_defined_ai_rules>\n${rules}\n</user_defined_ai_rules>` : DEFAULT_AI_RULES;
-  return `${base}\n\n${section}`;
+  const { systemPrompt } = await buildCoderContext({
+    mode: "agent",
+    aiRules: rules,
+    remoteChannel: false,
+    askToolAvailable: false,
+    settings: { max_steps: undefined },
+  });
+  return systemPrompt;
 }
 
 export default defineAgent({

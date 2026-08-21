@@ -1,17 +1,40 @@
-// Unit tests for agent.ts's buildInstructions hook (task-v3-brief.md, revised
-// per the V3 review adjudication): legacy single-winner override chain
-// (functions/agent.ts:171-177 + prompts.ts's wrapAiRules) reproduced exactly —
-// project rules (appId-gated) || devx.settings.ai_rules || DEFAULT_AI_RULES,
-// exactly ONE rules section appended after the static base. A user/project
-// winner arrives wrapped in <user_defined_ai_rules>; the DEFAULT_AI_RULES
-// fallback arrives unwrapped, per wrapAiRules.
-import { assert, assertEquals } from "jsr:@std/assert";
+// Unit tests for agent.ts's buildInstructions hook (task-1-brief.md,
+// 2026-08-21-agents-loop-coder-contract: buildInstructions now consumes the
+// shared functions/coder_context.ts::buildCoderContext instead of hand-
+// assembling the prompt). This loop's own remaining contribution is the
+// legacy single-winner ai_rules override chain (functions/agent.ts:171-177 +
+// prompts.ts's wrapAiRules) — project rules (appId-gated) ||
+// devx.settings.ai_rules || DEFAULT_AI_RULES — which is now handed to
+// buildCoderContext as the RAW winner and wrapped by prompts.ts's own
+// wrapAiRules (a real winner in <user_defined_ai_rules>; DEFAULT_AI_RULES
+// unwrapped), rather than wrapped by hand here.
+//
+// `base` (the first argument) is accepted for hook-signature compatibility
+// only and is IGNORED — the assembled prompt's spine now comes entirely from
+// buildCoderContext, not from the static instructions.md content the caller
+// hands in as `base`. Tests below assert `base`'s literal text ("BASE
+// PROMPT") does NOT appear in the result, to make that explicit.
+import { assert, assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import agentConfig from "../agent.ts";
 import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
 import { DEFAULT_AI_RULES } from "../../functions/prompts.ts";
 
 const buildInstructions = agentConfig.buildInstructions!;
+
+// The shared contract markers buildCoderContext adds that the old
+// hand-assembled prompt never carried (task-1-brief.md's whole point: this
+// loop got none of these before).
+function assertCarriesSharedContract(result: string) {
+  assertStringIncludes(result, "<skills-protocol>");
+  assertStringIncludes(result, "<skill-usage>");
+  assertStringIncludes(result, "<commit-pr-hygiene>");
+  // askToolAvailable is false on this loop (no mcp__ask__ask_question tool
+  // registered) — the blocking ask-question rule must NOT be injected.
+  assert(!result.includes("<asking-questions>"), "ask-question rule must be absent: this loop has no mcp__ask__ask_question tool");
+  // `base` is accepted but ignored; it must not leak into the result.
+  assert(!result.includes("BASE PROMPT"), "the static `base` argument must not appear in the assembled prompt");
+}
 
 // Redirect workspace.ts's DEFAULT_WORKSPACE_DIR to a scratch dir, same
 // precedent as context.test.ts / tools_batch_a.test.ts.
@@ -38,7 +61,7 @@ function wrapped(rules: string): string {
   return `<user_defined_ai_rules>\n${rules}\n</user_defined_ai_rules>`;
 }
 
-Deno.test("buildInstructions: project rules win when appId is set and a rules file exists (user ai_rules discarded, single section)", async () => {
+Deno.test("buildInstructions: project rules win when appId is set and a rules file exists (user ai_rules discarded, single section) — and now carries the shared coder contract", async () => {
   const userId = "u-project-wins";
   const appId = "app-1";
   const wsPath = await ensureAppWorkspace(userId, appId);
@@ -46,7 +69,8 @@ Deno.test("buildInstructions: project rules win when appId is set and a rules fi
 
   const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1", appId }, aiRules: "Always use TypeScript." });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, `BASE PROMPT\n\n${wrapped("Use 2-space indentation.")}`);
+  assertCarriesSharedContract(result);
+  assertStringIncludes(result, wrapped("Use 2-space indentation."));
   // Loser must NOT appear anywhere — override, not append.
   assert(!result.includes("Always use TypeScript."), "user ai_rules must be overridden, not appended alongside");
 });
@@ -58,19 +82,21 @@ Deno.test("buildInstructions: user ai_rules win when appId is set but no project
 
   const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1", appId }, aiRules: "Always use TypeScript." });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, `BASE PROMPT\n\n${wrapped("Always use TypeScript.")}`);
+  assertCarriesSharedContract(result);
+  assertStringIncludes(result, wrapped("Always use TypeScript."));
 });
 
-Deno.test("buildInstructions: user ai_rules win when there is no appId", async () => {
+Deno.test("buildInstructions: user ai_rules win when there is no appId — the shared coder contract carries the legacy precedence winner, wrapped", async () => {
   const ctx = fakeHookCtx({ metadata: { chatId: "c-1" }, aiRules: "Always use TypeScript." });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, `BASE PROMPT\n\n${wrapped("Always use TypeScript.")}`);
+  assertCarriesSharedContract(result);
+  assertStringIncludes(result, wrapped("Always use TypeScript."));
 });
 
 Deno.test("buildInstructions: DEFAULT_AI_RULES (unwrapped) when neither project rules nor user ai_rules exist", async () => {
   const ctx = fakeHookCtx({ metadata: { chatId: "c-1" } });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, `BASE PROMPT\n\n${DEFAULT_AI_RULES}`);
+  assertCarriesSharedContract(result);
   // A distinctive substring of the real constant, and NOT wrapAiRules's
   // user-rules wrapper (the default goes in unwrapped, per wrapAiRules).
   assert(result.includes("ALWAYS try to use the shadcn/ui library."), "expected a distinctive DEFAULT_AI_RULES substring");
@@ -84,14 +110,15 @@ Deno.test("buildInstructions: readProjectRules is NOT consulted without an appId
 
   const ctx = fakeHookCtx({ userId, metadata: { chatId: "c-1" }, aiRules: "Always use TypeScript." });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, `BASE PROMPT\n\n${wrapped("Always use TypeScript.")}`);
+  assertStringIncludes(result, wrapped("Always use TypeScript."));
   assert(!result.includes("Rules that must stay invisible."), "project rules must not be read without an appId");
 });
 
 Deno.test("buildInstructions: empty-string user ai_rules falls through to DEFAULT_AI_RULES (legacy `|| undefined` falsiness)", async () => {
   const ctx = fakeHookCtx({ metadata: { chatId: "c-1" }, aiRules: "" });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, `BASE PROMPT\n\n${DEFAULT_AI_RULES}`);
+  assert(result.includes("ALWAYS try to use the shadcn/ui library."), "expected DEFAULT_AI_RULES to win");
+  assert(!result.includes("<user_defined_ai_rules>"), "DEFAULT_AI_RULES must not be wrapped");
 });
 
 Deno.test("buildInstructions: no ctx.userId appends DEFAULT_AI_RULES (no settings/workspace lookup possible, no throw)", async () => {
@@ -101,5 +128,24 @@ Deno.test("buildInstructions: no ctx.userId appends DEFAULT_AI_RULES (no setting
     sql: () => Promise.reject(new Error("should not query without a userId")),
   });
   const result = await buildInstructions("BASE PROMPT", ctx);
-  assertEquals(result, `BASE PROMPT\n\n${DEFAULT_AI_RULES}`);
+  assert(result.includes("ALWAYS try to use the shadcn/ui library."), "expected DEFAULT_AI_RULES to win");
+  assert(!result.includes("<user_defined_ai_rules>"), "DEFAULT_AI_RULES must not be wrapped");
+});
+
+// task-1-brief.md Step 2's required tests: the assembled instructions now
+// carry the shared coder contract, and the legacy ai_rules precedence
+// survives the switch to buildCoderContext.
+Deno.test("agents-loop instructions carry the shared coder contract", async () => {
+  const ctx = fakeHookCtx({ metadata: { chatId: "c-1" } });
+  const out = await buildInstructions("BASE PROMPT", ctx);
+  assertStringIncludes(out, "<skills-protocol>");
+  assertStringIncludes(out, "<commit-pr-hygiene>");
+});
+
+Deno.test("agents-loop instructions keep the legacy ai_rules precedence", async () => {
+  // user rules present, no appId -> user rules win, wrapped
+  const ctx = fakeHookCtx({ metadata: { chatId: "c-1" }, aiRules: "USER RULES" });
+  const out = await buildInstructions("BASE PROMPT", ctx);
+  assertStringIncludes(out, "<user_defined_ai_rules>");
+  assertStringIncludes(out, "USER RULES");
 });
