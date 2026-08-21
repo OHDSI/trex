@@ -78,14 +78,34 @@ Deno.test("no dispatch path constructs the base prompt directly", async () => {
 // is policed the same way: no direct constructSystemPrompt( call, no
 // post-build systemPrompt mutation, buildCoderContext( required.
 //
-// What is NOT closed: eve's AgentConfig.maxSteps is read once at
-// agent-definition time (runner.ts:118), not per turn, so unlike the other
-// three engines this loop cannot thread settings.max_steps or the channel
-// profile's maxStepsFloor through to buildCoderContext's maxSteps result —
-// buildInstructions passes settings: { max_steps: undefined } for exactly
-// this reason. Making that per-turn needs an override plumbed through the
-// agents runner itself; that is out of scope here (see agent.ts's
-// defineAgent call site for the full explanation).
+// What is NOT closed, part 1 (maxSteps): eve's AgentConfig.maxSteps is read
+// once at agent-definition time (runner.ts:118), not per turn, so unlike the
+// other three engines this loop cannot thread settings.max_steps or the
+// channel profile's maxStepsFloor through to buildCoderContext's maxSteps
+// result — buildInstructions passes settings: { max_steps: undefined } for
+// exactly this reason. Making that per-turn needs an override plumbed
+// through the agents runner itself; that is out of scope here (see
+// agent.ts's defineAgent call site for the full explanation).
+//
+// What is NOT closed, part 2 (a fifth dispatch path this file cannot see):
+// a self-delegated subagent turn from plugins/devx/agent/agent.ts does not
+// go through buildInstructions/buildCoderContext at all. The `agent`
+// built-in tool (core/server/agents/service/toolset.ts) resolves to a copy
+// of the calling agent when the model omits its `agent` argument — exactly
+// the mode this loop's main coder chat runs in (useAgentsChat.ts sends
+// mode: undefined) — and that nested turn's system prompt is built by
+// runSubagent (toolset.ts:204) via the STATIC buildSystemPrompt(target,
+// ctx.metadata), which never calls resolveInstructions and therefore never
+// reaches agent.ts's buildInstructions hook or buildCoderContext. See
+// agent.ts's defineAgent call site for the full explanation.
+//
+// The ENGINES list two tests up (and the recursive scan below) is NOT
+// evidence this gap doesn't exist: both only read files under plugins/devx,
+// and runSubagent's static prompt assembly lives in
+// core/server/agents/service/toolset.ts — a different package this file
+// never opens. A green run here means "the five known plugins/devx dispatch
+// paths don't hand-roll a base prompt," not "every prompt this loop can
+// produce goes through the shared contract."
 const ROOT = "plugins/devx";
 const CONSTRUCT_PROMPT_ALLOWED = new Set([
   `${ROOT}/functions/coder_context.ts`,
