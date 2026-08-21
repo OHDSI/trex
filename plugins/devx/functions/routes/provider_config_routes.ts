@@ -187,14 +187,24 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       // One statement per row, all three columns together: the plaintext
       // column is nulled in the same UPDATE that writes the encrypted pair,
       // so a row is never observed half-migrated.
+      //
+      // The WHERE clause repeats the candidate predicate rather than trusting
+      // the SELECT above: a write landing in between has already replaced (or
+      // encrypted) this row's key, and matching on the id alone would
+      // overwrite that newer credential with the encrypted form of the
+      // plaintext this loop read a moment earlier.
       const keyFields = await writeProviderKeyFields(row.api_key);
-      await sql(
+      // RETURNING so the count reports rows actually rewritten: a row the
+      // guard above declined to touch was migrated by whoever raced us, not
+      // by this run.
+      const written = await sql(
         `UPDATE devx.provider_configs
          SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3, updated_at = NOW()
-         WHERE id = $4 AND user_id = $5`,
+         WHERE id = $4 AND user_id = $5 AND api_key IS NOT NULL AND api_key_encrypted IS NULL
+         RETURNING id`,
         [keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, row.id, userId],
       );
-      configsMigrated++;
+      if (written.rows.length > 0) configsMigrated++;
     }
 
     // The legacy devx.settings row. V7__multi_provider.sql seeded
@@ -202,8 +212,10 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     // user predating the multi-provider UI can hold the same key in both
     // tables — encrypting only one of them leaves the plaintext copy behind,
     // which is the whole reason the backfill can't stop at provider_configs.
-    // Same candidate predicate and same all-columns-in-one-statement rewrite
-    // as above.
+    // Same candidate predicate, same all-columns-in-one-statement rewrite and
+    // same repeat-the-predicate-in-the-WHERE guard as above — the interleaving
+    // write here is a PUT /settings, which is reachable from the same page
+    // that offers this backfill.
     const settingsCandidates = (await sql(
       `SELECT api_key FROM devx.settings WHERE user_id = $1 AND api_key IS NOT NULL AND api_key_encrypted IS NULL`,
       [userId],
@@ -212,13 +224,14 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     let settingsMigrated = 0;
     for (const row of settingsCandidates) {
       const keyFields = await writeProviderKeyFields(row.api_key);
-      await sql(
+      const written = await sql(
         `UPDATE devx.settings
          SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3, updated_at = NOW()
-         WHERE user_id = $4`,
+         WHERE user_id = $4 AND api_key IS NOT NULL AND api_key_encrypted IS NULL
+         RETURNING user_id`,
         [keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, userId],
       );
-      settingsMigrated++;
+      if (written.rows.length > 0) settingsMigrated++;
     }
 
     // Top-level migrated/skipped are the totals across both tables (the

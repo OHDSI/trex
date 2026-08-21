@@ -370,12 +370,21 @@ export default function SettingsPage() {
                   key). It shows up nowhere else on this page — the provider
                   list below is a different store — so without this the user
                   sees a perfectly healthy Settings page while every turn that
-                  falls back to that key fails with "Invalid API key". */}
+                  falls back to that key fails with "Invalid API key".
+                  The wording deliberately stops short of promising that adding
+                  a provider fixes this for everyone: bedrock is declared
+                  requiresApiKey: false (lib/types.ts), which gates both the
+                  add-form key input and the inline editor's pencil, so a
+                  bedrock user has no field to enter a replacement in anywhere
+                  on this page. */}
               {settings?.key_status === "undecryptable" && (
                 <p className="text-xs text-yellow-600">
                   A previously stored API key can't be decrypted — the server's
-                  encryption key may have changed. Add or re-enter the API key for
-                  the provider you use below to replace it.
+                  encryption key may have changed, so any request that falls back
+                  to it will fail. For providers with an API key field below,
+                  adding one with a fresh key replaces it. AWS Bedrock
+                  credentials have no entry field here yet, and can only be
+                  recovered by restoring the server's previous encryption key.
                 </p>
               )}
 

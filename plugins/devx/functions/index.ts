@@ -3,7 +3,7 @@ import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
-import { isMaskOf, maskKey } from "./api_key_mask.ts";
+import { discardableKeyUpdateReason, maskKey } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
@@ -1424,33 +1424,21 @@ Deno.serve(async (req: Request) => {
       const apiKey = body.api_key === undefined ? undefined : (body.api_key || null);
       let hasApiKeyUpdate = body.api_key !== undefined;
       // GET /settings returns this row's api_key MASKED (see above). A client
-      // that seeds a form field from that response and posts the whole form
-      // back on save sends the mask here as though it were a key — and with
-      // encryption configured we would faithfully encrypt the mask over the
-      // real credential, destroying it in a way nothing downstream can
-      // detect. The Settings page no longer round-trips it, but bundles
-      // already cached in browsers do, so this guard lives on the server
-      // where a stale client cannot skip it: a value that is exactly the mask
-      // of the key we already store is not a key update.
+      // that seeds its form from that response and posts the whole form back
+      // on save sends that mask here as though it were a key — or, if it
+      // unpacks the value into per-field credential inputs first, an empty
+      // blob, because the mask never parses. With encryption configured we
+      // would faithfully encrypt either one over the real credential,
+      // destroying it in a way nothing downstream can detect. The Settings
+      // page no longer round-trips anything, but bundles already cached in
+      // browsers do, so the guard lives on the server where a stale client
+      // cannot skip it. An explicit clear (api_key null) is a real intent and
+      // is never second-guessed. See api_key_mask.ts.
       if (hasApiKeyUpdate && apiKey !== null) {
-        const currentRow = (await sql(
-          `SELECT api_key, api_key_encrypted, api_key_iv FROM devx.settings WHERE user_id = $1`,
-          [userId],
-        )).rows[0];
-        if (currentRow) {
-          let currentKey: string | null = null;
-          try {
-            currentKey = await readProviderKey(currentRow);
-          } catch (err) {
-            // Undecryptable: no mask to compare against. Let the write
-            // proceed — the stored credential is already unusable, and
-            // refusing here would leave the user no way to replace it.
-            console.warn("[devx] could not resolve the stored settings key to check for a masked round trip:", err instanceof Error ? err.message : err);
-          }
-          if (isMaskOf(apiKey, currentKey)) {
-            console.warn("[devx] PUT /settings was sent the masked api_key back — keeping the stored credential instead of overwriting it with its own mask");
-            hasApiKeyUpdate = false;
-          }
+        const discardReason = await discardableKeyUpdateReason(apiKey, sql, userId);
+        if (discardReason) {
+          console.warn(`[devx] PUT /settings: ignoring the api_key it was sent because ${discardReason} — keeping the stored credential`);
+          hasApiKeyUpdate = false;
         }
       }
       // task-u1 (V11__loop_flag.sql): same "only touch it if the caller

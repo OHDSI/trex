@@ -54,7 +54,12 @@ function makeFakeDb(
       return { rows: [{ cnt: String(settingsRows.filter((r) => r.user_id === p[0]).length) }] };
     }
 
-    if (q.includes("SELECT api_key FROM devx.settings WHERE user_id = $1 AND api_key IS NOT NULL")) {
+    // Matched on the FULL predicate, not a prefix: the "already encrypted
+    // rows are skipped" guarantee lives in the route's WHERE clause, so if the
+    // route ever drops `AND api_key_encrypted IS NULL` this must stop matching
+    // and fall through to the throw below — not be re-applied in JS here,
+    // which would prove only that the fake filters correctly.
+    if (q.includes("SELECT api_key FROM devx.settings WHERE user_id = $1 AND api_key IS NOT NULL AND api_key_encrypted IS NULL")) {
       return {
         rows: settingsRows
           .filter((r) => r.user_id === p[0] && r.api_key != null && r.api_key_encrypted == null)
@@ -62,15 +67,18 @@ function makeFakeDb(
       };
     }
 
-    if (q.includes("UPDATE devx.settings")) {
+    // Same for the rewrite's own WHERE clause, which repeats the predicate to
+    // close the read/write race.
+    if (q.includes("UPDATE devx.settings") && q.includes("WHERE user_id = $4 AND api_key IS NOT NULL AND api_key_encrypted IS NULL")) {
       const [api_key, api_key_encrypted, api_key_iv, user_id] = p;
-      const row = settingsRows.find((r) => r.user_id === user_id);
-      if (row) {
-        row.api_key = api_key;
-        row.api_key_encrypted = api_key_encrypted;
-        row.api_key_iv = api_key_iv;
-      }
-      return { rows: [] };
+      const row = settingsRows.find(
+        (r) => r.user_id === user_id && r.api_key != null && r.api_key_encrypted == null,
+      );
+      if (!row) return { rows: [] };
+      row.api_key = api_key;
+      row.api_key_encrypted = api_key_encrypted;
+      row.api_key_iv = api_key_iv;
+      return { rows: [{ user_id }] };
     }
 
     if (q.includes("INSERT INTO devx.provider_configs")) {
@@ -85,16 +93,18 @@ function makeFakeDb(
       return { rows: [{ ...row }] };
     }
 
-    // Backfill's per-row rewrite: SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3 ...
-    if (q.includes("UPDATE devx.provider_configs") && q.includes("SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3")) {
+    // Backfill's per-row rewrite, matched including the race guard in its
+    // WHERE clause (see the devx.settings equivalents above).
+    if (q.includes("UPDATE devx.provider_configs") && q.includes("WHERE id = $4 AND user_id = $5 AND api_key IS NOT NULL AND api_key_encrypted IS NULL")) {
       const [api_key, api_key_encrypted, api_key_iv, id, user_id] = p;
-      const row = rows.find((r) => r.id === id && r.user_id === user_id);
-      if (row) {
-        row.api_key = api_key;
-        row.api_key_encrypted = api_key_encrypted;
-        row.api_key_iv = api_key_iv;
-      }
-      return { rows: [] };
+      const row = rows.find(
+        (r) => r.id === id && r.user_id === user_id && r.api_key != null && r.api_key_encrypted == null,
+      );
+      if (!row) return { rows: [] };
+      row.api_key = api_key;
+      row.api_key_encrypted = api_key_encrypted;
+      row.api_key_iv = api_key_iv;
+      return { rows: [{ id }] };
     }
 
     // PUT's dynamic UPDATE ... RETURNING (params: [configId, userId, ...dynamic set values in push order])
@@ -117,8 +127,12 @@ function makeFakeDb(
       return { rows: [{ cnt: String(rows.filter((r) => r.user_id === p[0]).length) }] };
     }
 
-    if (q.includes("SELECT id, api_key FROM devx.provider_configs WHERE user_id = $1 AND api_key IS NOT NULL")) {
-      return { rows: rows.filter((r) => r.user_id === p[0] && r.api_key != null).map((r) => ({ id: r.id, api_key: r.api_key })) };
+    if (q.includes("SELECT id, api_key FROM devx.provider_configs WHERE user_id = $1 AND api_key IS NOT NULL AND api_key_encrypted IS NULL")) {
+      return {
+        rows: rows
+          .filter((r) => r.user_id === p[0] && r.api_key != null && r.api_key_encrypted == null)
+          .map((r) => ({ id: r.id, api_key: r.api_key })),
+      };
     }
 
     if (q.includes("FROM devx.provider_configs WHERE user_id = $1") && q.includes("ORDER BY is_active DESC")) {
@@ -376,6 +390,35 @@ Deno.test("POST /provider-configs/encrypt-existing: an already-encrypted setting
   assertEquals(body.tables.settings, { migrated: 0, skipped: 1 });
   assertEquals(db.settingsRows[0].api_key_encrypted, "enc");
   assertEquals(db.settingsRows[0].api_key_iv, "iv");
+});
+
+Deno.test("POST /provider-configs/encrypt-existing: a PUT landing between the SELECT and the UPDATE is not clobbered", async () => {
+  // The read/write race the rewrite's WHERE clause exists for: the backfill
+  // reads a plaintext key, and before it writes the encrypted form back, a
+  // PUT /settings stores a NEW key. Matching on user_id alone would replace
+  // that new credential with the encrypted form of the old one.
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const db = makeFakeDb([], [settingsRow({ api_key: "sk-old-plaintext" })]);
+  const racingSql = async (q: string, p: unknown[] = []) => {
+    const result = await db.sql(q, p);
+    if (q.includes("SELECT api_key FROM devx.settings WHERE user_id = $1")) {
+      // The interleaved PUT: new key, already encrypted, plaintext nulled.
+      db.settingsRows[0].api_key = null;
+      db.settingsRows[0].api_key_encrypted = "NEWER-ENC";
+      db.settingsRows[0].api_key_iv = "NEWER-IV";
+    }
+    return result;
+  };
+  const res = await handleProviderConfigRoutes(
+    "/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", racingSql, CORS,
+  );
+  const body = await res!.json();
+  // The newer credential survives byte-for-byte...
+  assertEquals(db.settingsRows[0].api_key_encrypted, "NEWER-ENC");
+  assertEquals(db.settingsRows[0].api_key_iv, "NEWER-IV");
+  // ...and the count reports what was actually rewritten, which is nothing:
+  // the row was migrated by the racing write, not by this run.
+  assertEquals(body.tables.settings, { migrated: 0, skipped: 1 });
 });
 
 Deno.test("POST /provider-configs/encrypt-existing: fails with a migration-named error, before writing anything, when V16 has not applied", async () => {
