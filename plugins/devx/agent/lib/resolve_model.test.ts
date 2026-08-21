@@ -230,6 +230,44 @@ Deno.test("resolveModel: an encrypted row that fails to decrypt (rotated key) th
   await assertRejects(() => resolveModel(ctx), Error);
 });
 
+// The legacy devx.settings fallback carries the same encrypted-pair columns
+// as provider_configs (V16) — resolved through the same readProviderKey
+// call, not a second, differently-shaped resolution.
+Deno.test("resolveModel: a plaintext legacy devx.settings row still resolves with no encryption key configured", async () => {
+  Deno.env.delete("DEVX_ENCRYPTION_KEY");
+  const ctx = fakeHookCtx({
+    settings: { provider: "anthropic", model: "claude-sonnet-5", api_key: "sk-legacy-plain", base_url: null },
+  });
+  const spec = await resolveModel(ctx);
+  assertEquals(spec, { provider: "anthropic", modelId: "claude-sonnet-5", apiKey: "sk-legacy-plain", baseURL: undefined });
+});
+
+Deno.test("resolveModel: an encrypted legacy devx.settings row decrypts onto ModelSpec.apiKey", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const { ciphertext, iv } = await encryptToken("sk-settings-encrypted");
+  const ctx = fakeHookCtx({
+    settings: {
+      provider: "anthropic", model: "claude-sonnet-5", api_key: null,
+      api_key_encrypted: ciphertext, api_key_iv: iv, base_url: null,
+    },
+  });
+  const spec = await resolveModel(ctx);
+  assertEquals(spec, { provider: "anthropic", modelId: "claude-sonnet-5", apiKey: "sk-settings-encrypted", baseURL: undefined });
+});
+
+Deno.test("resolveModel: an encrypted legacy devx.settings row that fails to decrypt (rotated key) throws — never falls back to plaintext", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const { ciphertext, iv } = await encryptToken("sk-settings-encrypted");
+  Deno.env.set("DEVX_ENCRYPTION_KEY", "1".repeat(64)); // rotated/wrong key
+  const ctx = fakeHookCtx({
+    settings: {
+      provider: "anthropic", model: "claude-sonnet-5", api_key: null,
+      api_key_encrypted: ciphertext, api_key_iv: iv, base_url: null,
+    },
+  });
+  await assertRejects(() => resolveModel(ctx), Error);
+});
+
 Deno.test("resolveModel: a bedrock row's bearer token still unpacks correctly after decrypting the encrypted JSON blob", async () => {
   Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
   const { ciphertext, iv } = await encryptToken(JSON.stringify({ bearerToken: "bt-encrypted" }));
