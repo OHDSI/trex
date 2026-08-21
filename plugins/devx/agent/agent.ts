@@ -15,7 +15,7 @@ import { readMetadata } from "./lib/context.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
-import { buildCoderContext } from "../functions/coder_context.ts";
+import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -295,7 +295,21 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
 }
 
 export default defineAgent({
-  maxSteps: 25,
+  // Definition-time, not per-turn: eve's AgentConfig.maxSteps (eve-shim/
+  // types.ts) is read once here and consumed at runner.ts:118 as
+  // `agent.config.maxSteps ?? 25` when the agent is defined, not per turn.
+  // There is no runtime hook that can override it, so the per-user
+  // settings.max_steps and the channel profile's maxStepsFloor (both
+  // applied inside buildCoderContext for the other three engines) CANNOT
+  // reach this loop — buildInstructions above deliberately passes
+  // `settings: { max_steps: undefined }` because there is nowhere for a
+  // resolved value to go. Reaching per-turn control here would require the
+  // agents runner (runner.ts) to accept a maxSteps override from a hook
+  // result (e.g. buildInstructions or a new hook) instead of only reading
+  // the static config value — out of scope for this change. Using the
+  // shared DEFAULT_MAX_STEPS at least keeps this single hardcoded number in
+  // sync with the other engines' fallback instead of drifting silently.
+  maxSteps: DEFAULT_MAX_STEPS,
   resolveModel,
   filterTools,
   buildInstructions,

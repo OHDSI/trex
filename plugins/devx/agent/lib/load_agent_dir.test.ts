@@ -75,7 +75,11 @@ Deno.test({
       assert(typeof def.execute === "function", `${name} has no execute`);
     }
 
-    assertEquals(agent.config.maxSteps, 25);
+    // maxSteps now mirrors coder_context.ts's shared DEFAULT_MAX_STEPS
+    // (Task 2, 2026-08-21-agents-loop-coder-contract) rather than a second
+    // hardcoded 25 — see agent.ts's defineAgent call site comment for why
+    // this value is definition-time and cannot vary per turn.
+    assertEquals(agent.config.maxSteps, 100);
     assert(agent.instructions.length > 0);
 
     // Part 4 (task-v3-brief.md): plugins/devx/agent/skills is a relative
