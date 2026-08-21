@@ -196,12 +196,18 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
   // which still runs against depth-1's (smaller) tool set using the same
   // hookCtx carried in via the ...ctx spread.
   const tools = await buildSdkTools({ ...ctx, agent: target, depth: 1 });
+  // Resolved through the same path a top-level turn uses (resolveInstructions),
+  // not the bare static buildSystemPrompt — a subagent is not a
+  // second-class turn, and its target may define its own buildInstructions
+  // hook (e.g. project rules, session state) that a static prompt can never
+  // carry. hookCtx comes along via the `...ctx` spread above.
+  const system = await resolveInstructions(target, ctx.metadata, ctx.hookCtx);
   // Same cache-point treatment (bedrock + anthropic) as runner.ts's
   // primary turn loop, for consistency — a subagent's system+tools prefix is
   // just as stable/repeated (across its own steps) as the top-level turn's.
   const result = streamText({
     model,
-    system: withSystemCachePoint(model, buildSystemPrompt(target, ctx.metadata)),
+    system: withSystemCachePoint(model, system),
     messages: [{ role: "user" as const, content: prompt }],
     tools,
     stopWhen: stepCountIs(target.config.maxSteps ?? 25),
