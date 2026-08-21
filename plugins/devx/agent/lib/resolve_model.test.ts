@@ -261,11 +261,22 @@ Deno.test("resolveModel: an encrypted legacy devx.settings row that fails to dec
   Deno.env.set("DEVX_ENCRYPTION_KEY", "1".repeat(64)); // rotated/wrong key
   const ctx = fakeHookCtx({
     settings: {
-      provider: "anthropic", model: "claude-sonnet-5", api_key: null,
+      provider: "anthropic", model: "claude-sonnet-5",
+      // A stale plaintext value in the legacy column is what makes the
+      // "never falls back" claim observable: with api_key null there is
+      // nothing to fall back TO, so the test would pass even if the fallback
+      // existed. V7__multi_provider.sql left exactly this state behind on
+      // real rows (it copied the key out without clearing the source).
+      api_key: "sk-settings-stale-plaintext",
       api_key_encrypted: ciphertext, api_key_iv: iv, base_url: null,
     },
   });
-  await assertRejects(() => resolveModel(ctx), Error);
+  // Matched on the message, not just `Error`: a bare Error matcher also
+  // accepts fakeHookCtx's own "unexpected query" throw, which would pass
+  // while proving nothing about decryption. resolveModel rethrows
+  // classifyCoderError's safe string (agent.ts), so this is the invalid_key
+  // wording the UI shows — not the raw crypto detail, which goes to the log.
+  await assertRejects(() => resolveModel(ctx), Error, "Invalid API key");
 });
 
 Deno.test("resolveModel: a bedrock row's bearer token still unpacks correctly after decrypting the encrypted JSON blob", async () => {

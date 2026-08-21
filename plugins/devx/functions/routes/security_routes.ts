@@ -148,6 +148,8 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     const providerRow = activePC.rows[0];
     const prefs = prefsResult.rows[0] || {};
 
+    // Assigned by exactly one of the two branches below and read after them.
+    let settings;
     if (!providerRow) {
       // Legacy fallback. devx.settings carries the same encrypted-pair
       // columns as provider_configs (V16) now — resolved through
@@ -186,7 +188,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       // Same "no ciphertext in the settings object" posture as the
       // providerRow branch below.
       const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
-      var settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
+      settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
     } else {
       // Resolve through the encryption helper before the noKeyProviders check
       // (which must run on the resolved value, same as index.ts) and before
@@ -234,7 +236,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       // that true by destructuring it out rather than spreading the raw row
       // (same fix as index.ts's settings/agentSettings assembly).
       const { api_key_encrypted: _providerRowEnc, api_key_iv: _providerRowIv, ...providerRowNoCiphertext } = providerRow;
-      var settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
+      settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
     }
 
     // Fetch previous review for context

@@ -4,19 +4,14 @@
  * Manages multiple provider configs per user for multi-provider support.
  */
 import { deriveAuthShape } from "../auth_shape.ts";
+import { maskKey } from "../api_key_mask.ts";
 import {
+  assertEncryptionMigrated,
   assertProviderConfigEncryptionMigrated,
   encryptionConfigured,
   readProviderKey,
   writeProviderKeyFields,
 } from "../provider_key.ts";
-
-// Non-secret display mask, matches the shape the SQL CASE expressions used
-// to produce directly in the column before encryption existed.
-function maskKey(plaintext) {
-  if (!plaintext) return null;
-  return plaintext.substring(0, 8) + "..." + plaintext.slice(-4);
-}
 
 // Resolve a row's key for display (masking, auth_shape) purposes only. Unlike
 // the coder-turn read sites (index.ts), a row this can't decrypt must not take
@@ -130,26 +125,52 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
   }
 
   // POST /provider-configs/encrypt-existing — encrypt every row still holding
-  // a plaintext key. Idempotent: rows that are already encrypted are skipped,
-  // and running it twice changes nothing. A no-op when no encryption key is
+  // a plaintext key, in BOTH tables that store one: devx.provider_configs and
+  // the caller's legacy devx.settings row. The route keeps its
+  // provider-configs path for compatibility with clients already calling it;
+  // the two-table split is an implementation detail nobody using the Settings
+  // page should have to know about, so there is deliberately one route and
+  // one button rather than two of each.
+  //
+  // Idempotent: rows that already hold an encrypted pair are skipped, and
+  // running it twice changes nothing. A no-op when no encryption key is
   // configured — it reports that rather than failing.
   if (path.endsWith("/provider-configs/encrypt-existing") && method === "POST") {
     const totalResult = await sql(
       `SELECT COUNT(*) as cnt FROM devx.provider_configs WHERE user_id = $1`,
       [userId],
     );
-    const total = parseInt(totalResult.rows[0]?.cnt ?? "0");
+    const configsTotal = parseInt(totalResult.rows[0]?.cnt ?? "0");
+    // 0 or 1 — devx.settings is keyed by user_id. Counted the same way as
+    // provider_configs so `skipped` means the same thing in both halves:
+    // "rows this backfill looked at and left alone".
+    const settingsTotalResult = await sql(
+      `SELECT COUNT(*) as cnt FROM devx.settings WHERE user_id = $1`,
+      [userId],
+    );
+    const settingsTotal = parseInt(settingsTotalResult.rows[0]?.cnt ?? "0");
 
     if (!encryptionConfigured()) {
       return Response.json(
-        { migrated: 0, skipped: total, encryptionConfigured: false },
+        {
+          migrated: 0,
+          skipped: configsTotal + settingsTotal,
+          encryptionConfigured: false,
+          tables: {
+            provider_configs: { migrated: 0, skipped: configsTotal },
+            settings: { migrated: 0, skipped: settingsTotal },
+          },
+        },
         { headers: corsHeaders },
       );
     }
 
-    // Probe before writing the encrypted columns — see provider_key.ts's
-    // assertProviderConfigEncryptionMigrated header comment.
+    // Probe BOTH tables before writing anything: a half-run that migrates
+    // provider_configs and then dies on a missing V16 would report an error
+    // for work it actually did. See provider_key.ts's assertEncryptionMigrated
+    // header comment.
     await assertProviderConfigEncryptionMigrated(sql);
+    await assertEncryptionMigrated("settings", sql);
 
     // Excludes rows that already hold an encrypted pair, even though every
     // write path today nulls api_key once it writes api_key_encrypted (so
@@ -161,7 +182,7 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
       [userId],
     )).rows;
 
-    let migrated = 0;
+    let configsMigrated = 0;
     for (const row of candidates) {
       // One statement per row, all three columns together: the plaintext
       // column is nulled in the same UPDATE that writes the encrypted pair,
@@ -173,11 +194,47 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
          WHERE id = $4 AND user_id = $5`,
         [keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, row.id, userId],
       );
-      migrated++;
+      configsMigrated++;
     }
 
+    // The legacy devx.settings row. V7__multi_provider.sql seeded
+    // provider_configs from devx.settings WITHOUT clearing the source, so a
+    // user predating the multi-provider UI can hold the same key in both
+    // tables — encrypting only one of them leaves the plaintext copy behind,
+    // which is the whole reason the backfill can't stop at provider_configs.
+    // Same candidate predicate and same all-columns-in-one-statement rewrite
+    // as above.
+    const settingsCandidates = (await sql(
+      `SELECT api_key FROM devx.settings WHERE user_id = $1 AND api_key IS NOT NULL AND api_key_encrypted IS NULL`,
+      [userId],
+    )).rows;
+
+    let settingsMigrated = 0;
+    for (const row of settingsCandidates) {
+      const keyFields = await writeProviderKeyFields(row.api_key);
+      await sql(
+        `UPDATE devx.settings
+         SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3, updated_at = NOW()
+         WHERE user_id = $4`,
+        [keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, userId],
+      );
+      settingsMigrated++;
+    }
+
+    // Top-level migrated/skipped are the totals across both tables (the
+    // pre-existing response shape, and what the UI reports); `tables` breaks
+    // them down for anyone debugging which store still holds plaintext.
+    const migrated = configsMigrated + settingsMigrated;
     return Response.json(
-      { migrated, skipped: total - migrated, encryptionConfigured: true },
+      {
+        migrated,
+        skipped: (configsTotal + settingsTotal) - migrated,
+        encryptionConfigured: true,
+        tables: {
+          provider_configs: { migrated: configsMigrated, skipped: configsTotal - configsMigrated },
+          settings: { migrated: settingsMigrated, skipped: settingsTotal - settingsMigrated },
+        },
+      },
       { headers: corsHeaders },
     );
   }

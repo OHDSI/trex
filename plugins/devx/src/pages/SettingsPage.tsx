@@ -53,7 +53,7 @@ const SECTIONS: { id: Section; label: string; icon: React.ElementType }[] = [
 
 export default function SettingsPage() {
   const navigate = useNavigate();
-  const { settings, save } = useSettings();
+  const { settings, save, refresh: refreshSettings } = useSettings();
   const github = useGitHub();
   const gitSigning = useGitSigning();
   const claudeCode = useClaudeCode();
@@ -66,18 +66,17 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [claudeLoginCode, setClaudeLoginCode] = useState("");
 
-  // AI fields
+  // AI fields. No api_key state: GET /settings returns the legacy row's key
+  // masked, and this page has no field to enter a new one — the per-provider
+  // key editor below (provider_configs) is the only place a credential is
+  // set. Holding the mask in state is how it used to get posted straight back
+  // over the real key on save.
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  // base_url doubles as the AWS region for the bedrock provider. Loaded and
+  // echoed back unchanged — there is no field for it here either.
   const [baseUrl, setBaseUrl] = useState("");
   const [aiRules, setAiRules] = useState("");
-  // AWS Bedrock fields
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
-  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
-  const [awsRegion, setAwsRegion] = useState("us-east-1");
-  const [awsBearerToken, setAwsBearerToken] = useState("");
-  const [awsAuthMode, setAwsAuthMode] = useState<"bearer" | "iam">("bearer");
 
   // Agent fields
   const [autoApprove, setAutoApprove] = useState(false);
@@ -128,30 +127,6 @@ export default function SettingsPage() {
       setLoop(settings.loop ?? "legacy");
       setGitAuthorName(settings.git_author_name || "");
       setGitAuthorEmail(settings.git_author_email || "");
-
-      // Unpack Bedrock credentials from api_key JSON
-      if (settings.provider === "bedrock" && settings.api_key) {
-        try {
-          const creds = JSON.parse(settings.api_key);
-          if (creds.bearerToken) {
-            setAwsAuthMode("bearer");
-            setAwsBearerToken(creds.bearerToken);
-            setAwsAccessKeyId("");
-            setAwsSecretAccessKey("");
-          } else {
-            setAwsAuthMode("iam");
-            setAwsAccessKeyId(creds.accessKeyId || "");
-            setAwsSecretAccessKey(creds.secretAccessKey || "");
-            setAwsBearerToken("");
-          }
-          setAwsRegion(settings.base_url || "us-east-1");
-          setApiKey("");
-        } catch {
-          setApiKey(settings.api_key || "");
-        }
-      } else {
-        setApiKey(settings.api_key || "");
-      }
     }
   }, [settings]);
 
@@ -163,23 +138,20 @@ export default function SettingsPage() {
   const handleSave = async () => {
     setSaving(true);
     try {
-      // Pack Bedrock credentials into api_key/base_url columns
-      const effectiveApiKey = provider === "claude-code"
-        ? ""
-        : provider === "bedrock"
-        ? JSON.stringify(
-            awsAuthMode === "bearer"
-              ? { bearerToken: awsBearerToken }
-              : { accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey }
-          )
-        : apiKey;
-      const effectiveBaseUrl = provider === "bedrock" ? awsRegion : baseUrl;
-
+      // api_key is deliberately absent from this payload, and PUT /settings
+      // leaves the stored credential untouched when the field is omitted. The
+      // value this page loads is the server's mask, not a key, so sending it
+      // back would overwrite the real credential with its own mask — and once
+      // DEVX_ENCRYPTION_KEY is configured that mask gets encrypted and the
+      // damage becomes indistinguishable from a genuine key.
+      //
+      // base_url round-trips as loaded (for bedrock it carries the region);
+      // this page has no field for it either, so it is echoed, not composed
+      // from defaults.
       await save({
         provider,
         model,
-        api_key: effectiveApiKey,
-        base_url: effectiveBaseUrl,
+        base_url: baseUrl,
         ai_rules: aiRules || undefined,
         auto_approve: autoApprove,
         max_steps: maxSteps,
@@ -198,20 +170,27 @@ export default function SettingsPage() {
     }
   };
 
-  // Backfill: the only way stored plaintext provider keys actually become
-  // encrypted (new writes are encrypted going forward, but existing rows
-  // aren't touched until this runs). See routes/provider_config_routes.ts's
+  // Backfill: the only way stored plaintext keys actually become encrypted
+  // (new writes are encrypted going forward, but existing rows aren't touched
+  // until this runs). Covers both stores — the provider configs above and the
+  // legacy settings row behind them — so the counts reported here are totals;
+  // which table a key sits in isn't something a user should have to reason
+  // about. See routes/provider_config_routes.ts's
   // POST /provider-configs/encrypt-existing.
   const handleEncryptExistingKeys = async () => {
     setEncryptingKeys(true);
     try {
       const result = await providerConfigs.encryptExisting();
+      // The settings row's own is_plaintext flag drives half of this button's
+      // visibility, and it only changes on a settings refetch — encryptExisting
+      // refreshes the provider configs but knows nothing about this hook.
+      await refreshSettings();
       if (!result.encryptionConfigured) {
         toast.error("Server has no encryption key configured — keys were not migrated.");
       } else if (result.migrated > 0) {
-        toast.success(`Encrypted ${result.migrated} key${result.migrated === 1 ? "" : "s"}.`);
+        toast.success(`Encrypted ${result.migrated} stored key${result.migrated === 1 ? "" : "s"}.`);
       } else {
-        toast.success("Nothing to migrate — all keys are already encrypted.");
+        toast.success("Nothing to migrate — all stored keys are already encrypted.");
       }
     } catch (err) {
       console.error("Failed to encrypt existing keys:", err);
@@ -369,8 +348,11 @@ export default function SettingsPage() {
                 </div>
                 {/* Only new writes are encrypted automatically — existing
                     plaintext rows need this backfill to actually become
-                    encrypted. Shown only when there's something to migrate. */}
-                {providerConfigs.configs.some((c) => c.is_plaintext) && (
+                    encrypted. Shown only when there's something to migrate,
+                    which includes the legacy settings row: a user who predates
+                    the multi-provider UI can have their only plaintext key
+                    there, with no provider config to raise the flag. */}
+                {(providerConfigs.configs.some((c) => c.is_plaintext) || settings?.is_plaintext) && (
                   <Button
                     variant="outline"
                     size="sm"
@@ -382,6 +364,20 @@ export default function SettingsPage() {
                 )}
               </div>
               <Separator />
+
+              {/* The legacy settings row holds an encrypted credential the
+                  server can't currently open (rotated or missing encryption
+                  key). It shows up nowhere else on this page — the provider
+                  list below is a different store — so without this the user
+                  sees a perfectly healthy Settings page while every turn that
+                  falls back to that key fails with "Invalid API key". */}
+              {settings?.key_status === "undecryptable" && (
+                <p className="text-xs text-yellow-600">
+                  A previously stored API key can't be decrypted — the server's
+                  encryption key may have changed. Add or re-enter the API key for
+                  the provider you use below to replace it.
+                </p>
+              )}
 
               {/* Configured providers list */}
               <div className="space-y-2">

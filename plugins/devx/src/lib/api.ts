@@ -213,17 +213,27 @@ export async function activateProviderConfig(id: string): Promise<void> {
 }
 
 export interface EncryptExistingKeysResult {
+  // Totals across BOTH stores below — what the UI reports, so a user never
+  // has to know their key can live in two places.
   migrated: number;
   skipped: number;
   encryptionConfigured: boolean;
+  // Per-store breakdown for diagnosing which store still holds plaintext.
+  // Absent on older server builds (which only migrated provider_configs).
+  tables?: {
+    provider_configs: { migrated: number; skipped: number };
+    settings: { migrated: number; skipped: number };
+  };
 }
 
-// Backfill: encrypts every remaining plaintext api_key row for this user
-// (routes/provider_config_routes.ts's POST /provider-configs/encrypt-existing).
-// Idempotent and safe to call repeatedly — rows already encrypted are
-// skipped. Returns `encryptionConfigured: false` (migrated: 0) when
-// DEVX_ENCRYPTION_KEY isn't set server-side, which the caller should surface
-// rather than treat as an error.
+// Backfill: encrypts every remaining plaintext api_key this user has — both
+// their devx.provider_configs rows and their legacy devx.settings row
+// (routes/provider_config_routes.ts's POST /provider-configs/encrypt-existing;
+// the path keeps its provider-configs name for compatibility with clients
+// already calling it). Idempotent and safe to call repeatedly — rows already
+// encrypted are skipped. Returns `encryptionConfigured: false` (migrated: 0)
+// when DEVX_ENCRYPTION_KEY isn't set server-side, which the caller should
+// surface rather than treat as an error.
 export async function encryptExistingKeys(): Promise<EncryptExistingKeysResult> {
   return apiFetch("/provider-configs/encrypt-existing", { method: "POST" });
 }

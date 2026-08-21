@@ -3,6 +3,7 @@ import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
+import { isMaskOf, maskKey } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
@@ -1371,12 +1372,28 @@ Deno.serve(async (req: Request) => {
       // the coder-turn read sites above, a row this can't decrypt must not
       // take down the whole Settings page — degrade to "unknown" and log,
       // same posture as GET /provider-configs' resolveForDisplay.
+      // Captured before the columns are stripped below — tells the client
+      // whether this row's credential still sits in the legacy plaintext
+      // column, so the Settings page can offer the encrypt-existing backfill
+      // to a user whose ONLY plaintext key is here (they have no
+      // provider_configs row to raise the flag for them). Exposes no key
+      // material itself.
+      const settingsIsPlaintext = row.api_key != null && row.api_key_encrypted == null;
       let resolvedApiKey: string | null;
+      // "ok" vs "undecryptable" — a decrypt failure and "no key configured"
+      // both end up as api_key null / auth_shape "none", which are very
+      // different claims: one means nothing was ever set, the other means a
+      // credential exists that this server currently cannot open (rotated or
+      // missing DEVX_ENCRYPTION_KEY). Same signal GET /provider-configs
+      // returns, so the page can say which one it is instead of showing a
+      // configured user "not configured".
+      let keyStatus: "ok" | "undecryptable" = "ok";
       try {
         resolvedApiKey = await readProviderKey(row);
       } catch (err) {
         console.error("[devx] settings key read failed for GET /settings display:", err instanceof Error ? err.message : err);
         resolvedApiKey = null;
+        keyStatus = "undecryptable";
       }
       delete row.api_key_encrypted;
       delete row.api_key_iv;
@@ -1386,7 +1403,9 @@ Deno.serve(async (req: Request) => {
       // itself (useEffectiveLoop.ts gates bedrock-IAM users onto the legacy
       // loop with it; see functions/auth_shape.ts).
       row.auth_shape = deriveAuthShape(resolvedApiKey);
-      row.api_key = resolvedApiKey ? resolvedApiKey.substring(0, 8) + "..." + resolvedApiKey.slice(-4) : null;
+      row.api_key = maskKey(resolvedApiKey);
+      row.key_status = keyStatus;
+      row.is_plaintext = settingsIsPlaintext;
       return Response.json(row, { headers: corsHeaders });
     }
 
@@ -1403,7 +1422,37 @@ Deno.serve(async (req: Request) => {
       }
       // Distinguish between "not provided" (undefined) and "explicitly cleared" (empty string)
       const apiKey = body.api_key === undefined ? undefined : (body.api_key || null);
-      const hasApiKeyUpdate = body.api_key !== undefined;
+      let hasApiKeyUpdate = body.api_key !== undefined;
+      // GET /settings returns this row's api_key MASKED (see above). A client
+      // that seeds a form field from that response and posts the whole form
+      // back on save sends the mask here as though it were a key — and with
+      // encryption configured we would faithfully encrypt the mask over the
+      // real credential, destroying it in a way nothing downstream can
+      // detect. The Settings page no longer round-trips it, but bundles
+      // already cached in browsers do, so this guard lives on the server
+      // where a stale client cannot skip it: a value that is exactly the mask
+      // of the key we already store is not a key update.
+      if (hasApiKeyUpdate && apiKey !== null) {
+        const currentRow = (await sql(
+          `SELECT api_key, api_key_encrypted, api_key_iv FROM devx.settings WHERE user_id = $1`,
+          [userId],
+        )).rows[0];
+        if (currentRow) {
+          let currentKey: string | null = null;
+          try {
+            currentKey = await readProviderKey(currentRow);
+          } catch (err) {
+            // Undecryptable: no mask to compare against. Let the write
+            // proceed — the stored credential is already unusable, and
+            // refusing here would leave the user no way to replace it.
+            console.warn("[devx] could not resolve the stored settings key to check for a masked round trip:", err instanceof Error ? err.message : err);
+          }
+          if (isMaskOf(apiKey, currentKey)) {
+            console.warn("[devx] PUT /settings was sent the masked api_key back — keeping the stored credential instead of overwriting it with its own mask");
+            hasApiKeyUpdate = false;
+          }
+        }
+      }
       // task-u1 (V11__loop_flag.sql): same "only touch it if the caller
       // actually sent it" posture as api_key above. SettingsPage.tsx now
       // sends `loop` on every save, but any OTHER caller of this endpoint
@@ -1431,8 +1480,10 @@ Deno.serve(async (req: Request) => {
       // When hasApiKeyUpdate is false this still needs a value for the plain
       // INSERT-new-row branch: writeProviderKeyFields(null) yields the same
       // all-null triple `apiKey ?? null` used to insert alone, so a brand
-      // new row is unaffected.
-      const keyFields = await writeProviderKeyFields(apiKey ?? null);
+      // new row is unaffected. Gating on hasApiKeyUpdate rather than on
+      // `apiKey` alone also means a rejected masked round trip (above) never
+      // gets encrypted into the VALUES list in the first place.
+      const keyFields = await writeProviderKeyFields(hasApiKeyUpdate ? (apiKey ?? null) : null);
       const result = await sql(
         `INSERT INTO devx.settings (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, 'legacy'), $14, $15)

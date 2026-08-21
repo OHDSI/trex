@@ -7,7 +7,7 @@
 //   2. an update that omits api_key blanking an existing credential
 import { assertEquals, assertRejects } from "jsr:@std/assert";
 import { handleProviderConfigRoutes } from "./provider_config_routes.ts";
-import { __resetMigrationCacheForTests } from "../provider_key.ts";
+import { __resetMigrationCacheForTests, readProviderKey } from "../provider_key.ts";
 
 const CORS = { "content-type": "application/json" };
 const KEY = "0".repeat(64); // 32 bytes as hex, matches provider_key.test.ts
@@ -25,22 +25,52 @@ function req(method: string, body?: unknown) {
   });
 }
 
-// A minimal fake of devx.provider_configs, driven off the literal query
-// shapes provider_config_routes.ts issues today. Intimate with the SQL on
-// purpose — it's a colocated white-box test, not a generic DB stub.
-function makeFakeDb(seedRows: Record<string, unknown>[] = []) {
+// A minimal fake of devx.provider_configs (and, for the backfill, the
+// caller's devx.settings row), driven off the literal query shapes
+// provider_config_routes.ts issues today. Intimate with the SQL on purpose —
+// it's a colocated white-box test, not a generic DB stub.
+function makeFakeDb(
+  seedRows: Record<string, unknown>[] = [],
+  seedSettings: Record<string, unknown>[] = [],
+) {
   const rows = seedRows.map((r) => ({ ...r }));
+  const settingsRows = seedSettings.map((r) => ({ ...r }));
   let nextId = rows.length + 1;
   const calls: Array<{ q: string; p: unknown[] }> = [];
 
   const sql = async (q: string, p: unknown[] = []) => {
     calls.push({ q, p });
 
-    // Migration-applied probe (assertProviderConfigEncryptionMigrated) —
-    // simulate V15 applied so every test below exercises real route
-    // behaviour, same as a migrated deployment.
+    // Migration-applied probe (assertEncryptionMigrated) — simulate V15/V16
+    // applied so every test below exercises real route behaviour, same as a
+    // migrated deployment. The probed table arrives as $1.
     if (q.includes("information_schema.columns")) {
       return { rows: [{ column_name: "api_key_encrypted" }] };
+    }
+
+    // --- devx.settings (backfill only) ---
+
+    if (q.includes("SELECT COUNT(*) as cnt FROM devx.settings WHERE user_id = $1")) {
+      return { rows: [{ cnt: String(settingsRows.filter((r) => r.user_id === p[0]).length) }] };
+    }
+
+    if (q.includes("SELECT api_key FROM devx.settings WHERE user_id = $1 AND api_key IS NOT NULL")) {
+      return {
+        rows: settingsRows
+          .filter((r) => r.user_id === p[0] && r.api_key != null && r.api_key_encrypted == null)
+          .map((r) => ({ api_key: r.api_key })),
+      };
+    }
+
+    if (q.includes("UPDATE devx.settings")) {
+      const [api_key, api_key_encrypted, api_key_iv, user_id] = p;
+      const row = settingsRows.find((r) => r.user_id === user_id);
+      if (row) {
+        row.api_key = api_key;
+        row.api_key_encrypted = api_key_encrypted;
+        row.api_key_iv = api_key_iv;
+      }
+      return { rows: [] };
     }
 
     if (q.includes("INSERT INTO devx.provider_configs")) {
@@ -56,7 +86,7 @@ function makeFakeDb(seedRows: Record<string, unknown>[] = []) {
     }
 
     // Backfill's per-row rewrite: SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3 ...
-    if (q.includes("SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3")) {
+    if (q.includes("UPDATE devx.provider_configs") && q.includes("SET api_key = $1, api_key_encrypted = $2, api_key_iv = $3")) {
       const [api_key, api_key_encrypted, api_key_iv, id, user_id] = p;
       const row = rows.find((r) => r.id === id && r.user_id === user_id);
       if (row) {
@@ -98,7 +128,7 @@ function makeFakeDb(seedRows: Record<string, unknown>[] = []) {
     throw new Error("unstubbed query in test fake: " + q);
   };
 
-  return { sql, calls, rows };
+  return { sql, calls, rows, settingsRows };
 }
 
 Deno.test("POST /provider-configs: no key configured writes plaintext, never touches the encrypted columns", async () => {
@@ -212,50 +242,166 @@ Deno.test("GET /provider-configs: key_status distinguishes an undecryptable row 
   assertEquals(byId["3"].is_plaintext, false);
 });
 
+// The settings row a user predating the multi-provider UI still has (see
+// V7__multi_provider.sql, which copied the key into provider_configs without
+// clearing the source).
+function settingsRow(overrides: Record<string, unknown> = {}) {
+  return {
+    user_id: "u1", provider: "anthropic", model: "claude",
+    api_key: null, api_key_encrypted: null, api_key_iv: null,
+    ...overrides,
+  };
+}
+
 Deno.test("POST /provider-configs/encrypt-existing: no key configured is a reported no-op, not an error", async () => {
   Deno.env.delete("DEVX_ENCRYPTION_KEY");
   const db = makeFakeDb([
     { id: "1", user_id: "u1", provider: "a", model: "m", api_key: "sk-1", api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: null, is_active: true, created_at: "t0", updated_at: "t0" },
     { id: "2", user_id: "u1", provider: "a", model: "m", api_key: "sk-2", api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: null, is_active: false, created_at: "t0", updated_at: "t0" },
-  ]);
+  ], [settingsRow({ api_key: "sk-settings" })]);
   const res = await handleProviderConfigRoutes(
     "/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", db.sql, CORS,
   );
   assertEquals(res!.status, 200);
   const body = await res!.json();
-  assertEquals(body, { migrated: 0, skipped: 2, encryptionConfigured: false });
-  // Untouched.
+  assertEquals(body, {
+    migrated: 0,
+    skipped: 3,
+    encryptionConfigured: false,
+    tables: {
+      provider_configs: { migrated: 0, skipped: 2 },
+      settings: { migrated: 0, skipped: 1 },
+    },
+  });
+  // Untouched — in BOTH stores. This is the live deployment's state
+  // (DEVX_ENCRYPTION_KEY is empty there), so "no key configured" must stay a
+  // reported no-op rather than a half-migration or a 500.
   assertEquals(db.rows[0].api_key, "sk-1");
   assertEquals(db.rows[1].api_key, "sk-2");
+  assertEquals(db.settingsRows[0].api_key, "sk-settings");
+  assertEquals(db.settingsRows[0].api_key_encrypted, null);
 });
 
-Deno.test("POST /provider-configs/encrypt-existing: key configured migrates plaintext rows and is idempotent", async () => {
+Deno.test("POST /provider-configs/encrypt-existing: key configured migrates plaintext rows in both tables and is idempotent", async () => {
   Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
   const db = makeFakeDb([
     { id: "1", user_id: "u1", provider: "a", model: "m", api_key: "sk-1", api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: null, is_active: true, created_at: "t0", updated_at: "t0" },
     { id: "2", user_id: "u1", provider: "a", model: "m", api_key: null, api_key_encrypted: "already-enc", api_key_iv: "already-iv", base_url: null, display_name: null, is_active: false, created_at: "t0", updated_at: "t0" },
-  ]);
+  ], [settingsRow({ api_key: "sk-settings-plain" })]);
 
   const first = await handleProviderConfigRoutes(
     "/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", db.sql, CORS,
   );
-  assertEquals((await first!.json()), { migrated: 1, skipped: 1, encryptionConfigured: true });
+  assertEquals((await first!.json()), {
+    migrated: 2,
+    skipped: 1,
+    encryptionConfigured: true,
+    tables: {
+      provider_configs: { migrated: 1, skipped: 1 },
+      settings: { migrated: 1, skipped: 0 },
+    },
+  });
   assertEquals(db.rows[0].api_key, null);
   assertEquals(typeof db.rows[0].api_key_encrypted, "string");
   assertEquals(typeof db.rows[0].api_key_iv, "string");
   // Row 2 (already encrypted) is untouched byte-for-byte.
   assertEquals(db.rows[1].api_key_encrypted, "already-enc");
   assertEquals(db.rows[1].api_key_iv, "already-iv");
-  // Never both populated, for any row.
-  for (const row of db.rows) {
+  // The settings row migrated the same way: plaintext nulled in the same
+  // statement that wrote the pair.
+  assertEquals(db.settingsRows[0].api_key, null);
+  assertEquals(typeof db.settingsRows[0].api_key_encrypted, "string");
+  assertEquals(typeof db.settingsRows[0].api_key_iv, "string");
+  // The encrypted settings key still decrypts to the original.
+  assertEquals(
+    await readProviderKey(db.settingsRows[0] as Record<string, string | null>),
+    "sk-settings-plain",
+  );
+  // Never both populated, in either table.
+  for (const row of [...db.rows, ...db.settingsRows]) {
     assertEquals(!!row.api_key && !!row.api_key_encrypted, false);
   }
 
-  // Second run: nothing left to migrate.
+  // Second run: nothing left to migrate, and nothing re-encrypted.
+  const encryptedBefore = db.settingsRows[0].api_key_encrypted;
   const second = await handleProviderConfigRoutes(
     "/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", db.sql, CORS,
   );
-  assertEquals((await second!.json()), { migrated: 0, skipped: 2, encryptionConfigured: true });
+  assertEquals((await second!.json()), {
+    migrated: 0,
+    skipped: 3,
+    encryptionConfigured: true,
+    tables: {
+      provider_configs: { migrated: 0, skipped: 2 },
+      settings: { migrated: 0, skipped: 1 },
+    },
+  });
+  assertEquals(db.settingsRows[0].api_key_encrypted, encryptedBefore);
+});
+
+Deno.test("POST /provider-configs/encrypt-existing: a settings-only plaintext key still migrates (no provider_configs rows at all)", async () => {
+  // The user the visibility flag exists for: everything they have predates
+  // the multi-provider UI, so provider_configs is empty and the only
+  // plaintext credential is in devx.settings.
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const db = makeFakeDb([], [settingsRow({ api_key: "sk-only-in-settings" })]);
+  const res = await handleProviderConfigRoutes(
+    "/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", db.sql, CORS,
+  );
+  assertEquals((await res!.json()), {
+    migrated: 1,
+    skipped: 0,
+    encryptionConfigured: true,
+    tables: {
+      provider_configs: { migrated: 0, skipped: 0 },
+      settings: { migrated: 1, skipped: 0 },
+    },
+  });
+  assertEquals(db.settingsRows[0].api_key, null);
+  assertEquals(
+    await readProviderKey(db.settingsRows[0] as Record<string, string | null>),
+    "sk-only-in-settings",
+  );
+});
+
+Deno.test("POST /provider-configs/encrypt-existing: an already-encrypted settings row is never re-encrypted from a stale plaintext column", async () => {
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  // Both columns populated — a state no write path produces, but the
+  // candidate query excludes it structurally rather than relying on that.
+  const db = makeFakeDb([], [settingsRow({ api_key: "sk-stale", api_key_encrypted: "enc", api_key_iv: "iv" })]);
+  const res = await handleProviderConfigRoutes(
+    "/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", db.sql, CORS,
+  );
+  const body = await res!.json();
+  assertEquals(body.tables.settings, { migrated: 0, skipped: 1 });
+  assertEquals(db.settingsRows[0].api_key_encrypted, "enc");
+  assertEquals(db.settingsRows[0].api_key_iv, "iv");
+});
+
+Deno.test("POST /provider-configs/encrypt-existing: fails with a migration-named error, before writing anything, when V16 has not applied", async () => {
+  __resetMigrationCacheForTests();
+  Deno.env.set("DEVX_ENCRYPTION_KEY", KEY);
+  const db = makeFakeDb([
+    { id: "1", user_id: "u1", provider: "a", model: "m", api_key: "sk-1", api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: null, is_active: true, created_at: "t0", updated_at: "t0" },
+  ], [settingsRow({ api_key: "sk-settings" })]);
+  // V15 applied, V16 not — the probe's table arrives as $1.
+  const originalSql = db.sql;
+  const partiallyMigratedSql = async (q: string, p: unknown[] = []) => {
+    if (q.includes("information_schema.columns")) {
+      return p[0] === "settings" ? { rows: [] } : { rows: [{ column_name: "api_key_encrypted" }] };
+    }
+    return originalSql(q, p);
+  };
+  await assertRejects(
+    () => handleProviderConfigRoutes("/x/provider-configs/encrypt-existing", "POST", req("POST"), "u1", partiallyMigratedSql, CORS),
+    Error,
+    "devx migration V16 has not been applied",
+  );
+  // Both tables are probed before any row is rewritten, so a failure here
+  // cannot report an error for work it already did.
+  assertEquals(db.rows[0].api_key, "sk-1");
+  assertEquals(db.settingsRows[0].api_key, "sk-settings");
+  __resetMigrationCacheForTests();
 });
 
 // CRITICAL 1: if V15 never applied, devx.provider_configs.api_key_encrypted
