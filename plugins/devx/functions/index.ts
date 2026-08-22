@@ -485,8 +485,14 @@ Deno.serve(async (req: Request) => {
         }
       }
 
-      // Subscription-based and Bedrock providers don't require an API key
-      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
+      // Subscription-based and Bedrock providers don't require an API key.
+      // Nothing else belongs in this set: waiving the key gate for a provider
+      // that has no engine behind it lets the row fall through to the
+      // OpenAI-compatible branch below, whose client resolves an absent key
+      // from the worker's own OPENAI_API_KEY — one user's turn billed to, and
+      // authenticated as, the operator. A row left on a removed provider must
+      // fail this gate instead.
+      const noKeyProviders = new Set(["claude-code", "bedrock"]);
       if (!settings.api_key && !noKeyProviders.has(settings.provider)) {
         return Response.json(
           { error: "No API key configured. Please set up your provider in Settings." },
@@ -1052,7 +1058,11 @@ Deno.serve(async (req: Request) => {
           [userId],
         )).rows[0];
       }
-      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
+      // Same membership rule as the /stream read site above — only providers
+      // that genuinely authenticate without a stored key belong here, or the
+      // row reaches createModel's OpenAI-compatible fallback on the worker's
+      // own credentials.
+      const noKeyProviders = new Set(["claude-code", "bedrock"]);
       if (!agentSettings || (!agentSettings.api_key && !noKeyProviders.has(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
       }
