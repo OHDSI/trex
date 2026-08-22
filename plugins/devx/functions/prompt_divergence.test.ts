@@ -1,5 +1,5 @@
-// The four dispatch paths (claude-code agent, ai-sdk agent, copilot agent,
-// and the raw-provider chat dispatch in index.ts) must not assemble prompts
+// The three dispatch paths (claude-code agent, ai-sdk agent, and the
+// raw-provider chat dispatch in index.ts) must not assemble prompts
 // themselves. Before the shared coder context existed they each did, and
 // drifted: the channel profile reached only claude-code, the skills and
 // commit-hygiene rules only claude-code, and the component-selection
@@ -24,7 +24,6 @@ import { assertEquals } from "jsr:@std/assert";
 const ENGINES = [
   "plugins/devx/functions/agent.ts",
   "plugins/devx/functions/claude_code_agent.ts",
-  "plugins/devx/functions/copilot_agent.ts",
   "plugins/devx/functions/index.ts",
   "plugins/devx/agent/agent.ts",
 ];
@@ -106,7 +105,7 @@ Deno.test("no dispatch path constructs the base prompt directly", async () => {
 // prompt this loop can produce goes through the shared contract. Both only
 // read files under plugins/devx, and runSubagent's system-prompt assembly
 // lives in core/server/agents/service/toolset.ts — a different package this
-// file never opens. A green run here means "the five known plugins/devx
+// file never opens. A green run here means "the four known plugins/devx
 // dispatch paths don't hand-roll a base prompt," never anything about
 // core/. This file would not have caught the subagent gap while it
 // existed, and it cannot catch a regression of it — or any other

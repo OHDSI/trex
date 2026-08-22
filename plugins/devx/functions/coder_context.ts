@@ -1,11 +1,11 @@
 // @ts-nocheck - Deno edge function, not compiled by tsc
 // plugins/devx/functions/coder_context.ts
 // The one place a coder turn's system prompt and step budget are assembled.
-// All three engines (ai-sdk, the Claude Agent SDK sidecar, Copilot) consume
-// this; none of them may append to the prompt afterwards. Before this existed
-// the three assembled it separately and had already drifted apart — the
-// channel profile reached only one of them, and even the component-selection
-// sentence was worded three ways.
+// Both engines (ai-sdk, the Claude Agent SDK sidecar) consume this; neither
+// may append to the prompt afterwards. Before this existed the two assembled
+// it separately and had already drifted apart — the channel profile reached
+// only one of them, and even the component-selection sentence was worded
+// two ways.
 import { constructSystemPrompt } from "./prompts.ts";
 import { resolveCoderProfile } from "./coder_profile.ts";
 
@@ -69,12 +69,12 @@ export interface CoderContextInput {
   // that buildAskQuestionRule's <asking-questions> block instructs the model
   // to call. Today that tool exists only in the claude-code sidecar
   // (fn-claude-code/server.js) — the ai-sdk tool registry (tools/registry.ts)
-  // and Copilot's tools (fn-copilot/tools.js) don't have it. Telling a model
-  // to MUST use a tool it doesn't have, and to NEVER ask in plain text
-  // instead, silently breaks its only real way to ask a question. This is a
-  // per-engine tool-availability fact, not something the ui/channel profile
-  // can infer, so it is threaded in explicitly rather than derived. Defaults
-  // to false (safe: no engine is assumed to have the tool unless it says so).
+  // doesn't have it. Telling a model to MUST use a tool it doesn't have, and
+  // to NEVER ask in plain text instead, silently breaks its only real way to
+  // ask a question. This is a per-engine tool-availability fact, not
+  // something the ui/channel profile can infer, so it is threaded in
+  // explicitly rather than derived. Defaults to false (safe: no engine is
+  // assumed to have the tool unless it says so).
   askToolAvailable?: boolean;
 }
 

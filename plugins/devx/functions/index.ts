@@ -41,7 +41,6 @@ import { handleSkillsRoutes } from "./routes/skills_routes.ts";
 import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
 import { handleClaudeCodeModelsRoutes } from "./routes/claude_code_models_routes.ts";
 import { handleFigmaMcpRoutes } from "./routes/figma_mcp_routes.ts";
-import { handleCopilotRoutes } from "./routes/copilot_routes.ts";
 import { handleProviderConfigRoutes } from "./routes/provider_config_routes.ts";
 import { handleSupportRoutes } from "./routes/support_routes.ts";
 import { syncBuiltins } from "./skills/sync.ts";
@@ -215,7 +214,6 @@ Deno.serve(async (req: Request) => {
       await handleClaudeCodeRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeModelsRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleFigmaMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
-      await handleCopilotRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSupabaseRoutes(path, method, req, userId, sql, corsHeaders) ||
@@ -848,25 +846,6 @@ Deno.serve(async (req: Request) => {
                 useWorktree: streamUseWorktree,
                 remoteChannel: streamRemoteChannel,
                 attachments: streamAttachments,
-              });
-              fullContent = agentResult.content;
-              if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;
-            } else if (settings.provider === "copilot") {
-              // Copilot SDK: use agent-style streaming even in build/ask mode
-              const { streamCopilotChat } = await import("./copilot_agent.ts");
-              const agentResult = await streamCopilotChat({
-                chatId,
-                userId,
-                appId: chatCheck.rows[0].app_id,
-                chatMode,
-                settings,
-                history,
-                send,
-                sqlFn: sql,
-                skillContext,
-                commandOverride,
-                hasComponentSelection,
-                remoteChannel: streamRemoteChannel,
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;

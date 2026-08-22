@@ -149,16 +149,6 @@ export async function streamAgentChat({
     });
   }
 
-  // Dispatch to GitHub Copilot SDK agent when that provider is selected
-  if (settings.provider === "copilot") {
-    const { streamCopilotChat } = await import("./copilot_agent.ts");
-    return streamCopilotChat({
-      chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-      skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
-      remoteChannel,
-    });
-  }
-
   const mode = chatMode || "agent";
 
   // Apply model override from command if present
@@ -189,7 +179,7 @@ export async function streamAgentChat({
     // this was behaviourally inert; effectiveSettings is the "resolved for
     // this turn" object (post command-model-override) and is what aiRules
     // above was already derived from, so it's the correct one to keep the
-    // three engines symmetric and future-proof against buildCoderContext
+    // two engines symmetric and future-proof against buildCoderContext
     // reading more of settings later.
     hasComponentSelection, settings: effectiveSettings,
     // The ai-sdk tool registry (tools/registry.ts) does not register

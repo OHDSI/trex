@@ -31,7 +31,7 @@ Deno.test("ui turn + tool available: question rule is present", async () => {
   assertStringIncludes(systemPrompt, "<asking-questions>");
 });
 
-Deno.test("ui turn + tool unavailable: question rule is absent (ai-sdk/copilot have no ask_question tool)", async () => {
+Deno.test("ui turn + tool unavailable: question rule is absent (ai-sdk has no ask_question tool)", async () => {
   const { systemPrompt } = await buildCoderContext({ ...base, remoteChannel: false, askToolAvailable: false });
   assertEquals(systemPrompt.includes("<asking-questions>"), false);
 });
