@@ -93,4 +93,12 @@ export type AgentEvent =
   // silently vanishing until the next turn happens to fold it in. Turn-agnostic
   // (no turnId) and live-only — not persisted/replayed — same posture as
   // session.waiting/session.failed above.
-  | { type: "message.queued"; data: { text: string } };
+  //
+  // `deniedPendingGate` is set when the queued message ALSO denied a pending
+  // approval gate (handler.ts's startTurn resolves it before queueing). It
+  // changes what the acknowledgement can truthfully say: the generic "queued,
+  // I'll get to it" line implies the ball is still in the running turn's court,
+  // when a denied gate puts it back in the human's — the gate is closed and
+  // their reply is about to drive the revision. Optional so a publisher that
+  // never checks a gate can omit it (absent === false).
+  | { type: "message.queued"; data: { text: string; deniedPendingGate?: boolean } };

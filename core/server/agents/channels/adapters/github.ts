@@ -60,6 +60,7 @@ import { createGitHubIssueComment } from "../vendor/github/api.ts";
 import { splitGitHubCommentBody } from "../vendor/github/limits.ts";
 import { renderGitHubInputRequest } from "../vendor/github/hitl.ts";
 import { defaultGitHubAuth } from "../vendor/github/defaults.ts";
+import { queuedAckText } from "../queued-ack.ts";
 
 // Per-session GitHub thread routing threaded as the channel session `state` — set
 // on send() and read by the delivery (`events`) handlers so REST comments go back
@@ -290,6 +291,23 @@ export function githubChannel(opts: GitHubChannelOptions = {}): ChannelDef {
         }
       } catch (e) {
         console.error("github: input.requested delivery failed:", e);
+      }
+    },
+    // Acknowledge a message that arrived while a turn was already running and
+    // got queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Posts an
+    // issue/PR comment via postComment — the same REST primitive
+    // message.completed uses. The app's own comment comes back authored by a
+    // Bot, which the inbound loop guard already drops, so the ack cannot start
+    // a turn of its own.
+    // Best-effort: a failed ack never affects the turn that is still running.
+    async "message.queued"(data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.owner) return;
+      try {
+        await postComment(state, queuedAckText(data?.deniedPendingGate === true));
+      } catch (e) {
+        console.warn("github: message.queued acknowledgement failed — swallowed:", e);
       }
     },
   };

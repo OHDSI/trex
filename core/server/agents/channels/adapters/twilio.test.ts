@@ -329,3 +329,75 @@ Deno.test("defaultTwilioResume forwards the decoded decision to args.resume; ret
   assertEquals(resumes[0].continuationToken, `${USER}:${TWILIO_NUMBER}`);
   assertEquals(resumes[0].input.decision, "deny"); // "2" → deny
 });
+
+// ---- delivery: message.queued ---------------------------------------------
+
+// A message that arrives while a turn is running is queued, not started; the
+// ack is what stops it looking like the message vanished. Twilio's primitive is
+// an unsolicited REST SMS — the inbound webhook that queued the message has
+// already been answered, so TwiML is no longer available.
+Deno.test("message.queued sends a one-line acknowledgement SMS via REST", async () => {
+  const calls: Array<{ url: string; body: URLSearchParams }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    calls.push({ url: String(input), body: new URLSearchParams(String(init?.body)) });
+    return Promise.resolve(new Response(JSON.stringify({ sid: "SMout" }), { status: 201 }));
+  };
+  const channel = twilioChannel({
+    credentials: { authToken: AUTH_TOKEN, accountSid: ACCOUNT_SID },
+    api: { fetch: fetchMock },
+  });
+
+  await channel.events!["message.queued"]({ text: "also rename the tests" }, { state: { from: USER, to: TWILIO_NUMBER } });
+
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0].url, `/Accounts/${ACCOUNT_SID}/Messages.json`);
+  assertEquals(calls[0].body.get("To"), USER); // the ack goes to the human
+  assertEquals(calls[0].body.get("From"), TWILIO_NUMBER);
+  assertStringIncludes(calls[0].body.get("Body") ?? "", "queued");
+});
+
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  const bodies: string[] = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    bodies.push(new URLSearchParams(String(init?.body)).get("Body") ?? "");
+    return Promise.resolve(new Response(JSON.stringify({ sid: "SMout" }), { status: 201 }));
+  };
+  const channel = twilioChannel({
+    credentials: { authToken: AUTH_TOKEN, accountSid: ACCOUNT_SID },
+    api: { fetch: fetchMock },
+  });
+
+  await channel.events!["message.queued"](
+    { text: "yes but explain the chunk count first", deniedPendingGate: true },
+    { state: { from: USER, to: TWILIO_NUMBER } },
+  );
+
+  assertEquals(bodies.length, 1);
+  assertEquals(/closed the pending approval|feedback/i.test(bodies[0]), true, `expected the deny-ack wording, got: ${bodies[0]}`);
+});
+
+Deno.test("message.queued is a no-op without a sender, and swallows a delivery failure", async () => {
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response("boom", { status: 500 }));
+  };
+  const channel = twilioChannel({
+    credentials: { authToken: AUTH_TOKEN, accountSid: ACCOUNT_SID },
+    api: { fetch: fetchMock },
+  });
+
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(called, 0);
+
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"]({ text: "hi" }, { state: { from: USER, to: TWILIO_NUMBER } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assertEquals(logged.some((l) => l.includes("message.queued")), true);
+});

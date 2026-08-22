@@ -57,6 +57,7 @@ import {
 import { emptyTwilioResponse } from "../vendor/twilio/twiml.ts";
 import { renderTwilioInputRequest } from "../vendor/twilio/hitl.ts";
 import { defaultTwilioAuth } from "../vendor/twilio/defaults.ts";
+import { queuedAckText } from "../queued-ack.ts";
 
 // Per-session Twilio routing threaded as the channel session `state` — set on
 // send() and read by the delivery (`events`) handlers so REST replies go back to
@@ -209,6 +210,25 @@ export function twilioChannel(opts: TwilioChannelOptions = {}): ChannelDef {
         for (const chunk of splitTwilioMessageBody(text)) {
           await sendReply(state, chunk);
         }
+      }
+    },
+    // Acknowledge a message that arrived while a turn was already running and
+    // got queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Sent over
+    // REST via sendReply (the same primitive message.completed uses), NOT as a
+    // TwiML response: the inbound webhook that queued the message has already
+    // been answered by then, so an unsolicited SMS is the only way to reach the
+    // sender. Split defensively, like the other outbound bodies here.
+    // Best-effort: a failed ack never affects the turn that is still running.
+    async "message.queued"(data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.from) return;
+      try {
+        for (const chunk of splitTwilioMessageBody(queuedAckText(data?.deniedPendingGate === true))) {
+          await sendReply(state, chunk);
+        }
+      } catch (e) {
+        console.warn("twilio: message.queued acknowledgement failed — swallowed:", e);
       }
     },
   };

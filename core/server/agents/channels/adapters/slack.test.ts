@@ -482,3 +482,66 @@ Deno.test("threads off (default): thread replies are ignored even with an existi
   assertEquals(res.status, 200);
   assertEquals(sends.length, 0);
 });
+
+// ---- delivery: message.queued ---------------------------------------------
+
+// A message that arrives while a turn is running is queued, not started; the
+// ack is what stops it looking like the message vanished. Slack's primitive is
+// an ordinary thread post (chat.postMessage), not the transient typing status.
+Deno.test("message.queued posts a one-line acknowledgement into the thread", async () => {
+  const calls: Array<{ url: string; body: Record<string, string> }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    calls.push({ url: String(input), body: Object.fromEntries(new URLSearchParams(String(init?.body))) });
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, ts: "1.2" }), { status: 200 }));
+  };
+  const channel = slackChannel({ credentials: { botToken: "xoxb-1" }, api: { fetch: fetchMock } });
+  const channelCtx = { state: { channelId: "C555", threadTs: "1700000000.000001" } };
+
+  await channel.events!["message.queued"]({ text: "also rename the tests" }, channelCtx);
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].url.endsWith("/chat.postMessage"), true);
+  assertEquals(calls[0].body.channel, "C555");
+  assertEquals(calls[0].body.thread_ts, "1700000000.000001");
+  assertEquals(calls[0].body.text.includes("queued"), true);
+});
+
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  const texts: string[] = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    texts.push(new URLSearchParams(String(init?.body)).get("text") ?? "");
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, ts: "1.2" }), { status: 200 }));
+  };
+  const channel = slackChannel({ credentials: { botToken: "xoxb-1" }, api: { fetch: fetchMock } });
+
+  await channel.events!["message.queued"](
+    { text: "yes but first explain why the chunk count is wrong", deniedPendingGate: true },
+    { state: { channelId: "C555", threadTs: "1.1" } },
+  );
+
+  assertEquals(texts.length, 1);
+  assertEquals(/closed the pending approval|feedback/i.test(texts[0]), true, `expected the deny-ack wording, got: ${texts[0]}`);
+});
+
+Deno.test("message.queued is a no-op without a channelId, and swallows a delivery failure", async () => {
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response(JSON.stringify({ ok: false, error: "channel_not_found" }), { status: 500 }));
+  };
+  const channel = slackChannel({ credentials: { botToken: "xoxb-1" }, api: { fetch: fetchMock } });
+
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(called, 0);
+
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"]({ text: "hi" }, { state: { channelId: "C555" } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assertEquals(logged.some((l) => l.includes("message.queued")), true);
+});

@@ -32,6 +32,7 @@
 import { defineChannel, POST } from "eve/channels";
 import type { ChannelAllowList, ChannelAuth, ChannelDef, ChannelEventHandlers, ChannelRouteArgs } from "eve/channels";
 import { channelAllows, envAllowList } from "../allow.ts";
+import { queuedAckText } from "../queued-ack.ts";
 
 import {
   type DiscordCredentials,
@@ -358,13 +359,12 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
     // generic "queued" line would otherwise tell the human the ball is still in
     // the running turn's court, when it is actually back in theirs (the gate
     // was just closed and their reply is about to drive the coder's revision).
+    // The wording is shared with the other adapters (queued-ack.ts); the eyes
+    // emoji is Discord's own decoration.
     async "message.queued"(data, channelCtx) {
       const state = stateOf(channelCtx);
       if (!state.channelId) return;
-      const deniedPendingGate = (data as { deniedPendingGate?: boolean } | undefined)?.deniedPendingGate === true;
-      const content = deniedPendingGate
-        ? "👀 Got it — that's more than a plain yes/no, so I'm treating it as feedback: I closed the pending approval and I'll send this to the coder as the revision."
-        : "👀 Got it — queued. I'll get to it right after the current step finishes.";
+      const content = `👀 ${queuedAckText(data?.deniedPendingGate === true)}`;
       try {
         await sendDiscordChannelMessage({
           ...apiOpts(),
