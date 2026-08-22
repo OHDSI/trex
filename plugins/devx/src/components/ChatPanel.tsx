@@ -31,7 +31,7 @@ interface ChatPanelProps {
 }
 
 // task-u1: the single flag branch point (task-u1-brief.md's Requirement 4).
-// devx.settings.loop === 'agents' (and no claude-code/copilot provider
+// devx.settings.loop === 'agents' (and no claude-code provider
 // override — see useEffectiveLoop.ts) renders AgentsChatPanel; everything
 // else renders LegacyChatPanel below, whose body is byte-for-byte what
 // ChatPanel used to be before this task (see git history) — same hook

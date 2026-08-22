@@ -546,7 +546,7 @@ export interface Attachment {
   size_bytes: number;
 }
 
-export type Provider = "anthropic" | "openai" | "google" | "openai-compatible" | "bedrock" | "claude-code" | "copilot";
+export type Provider = "anthropic" | "openai" | "google" | "openai-compatible" | "bedrock" | "claude-code";
 
 export interface ProviderConfig {
   id: Provider;
@@ -622,18 +622,6 @@ export const PROVIDERS: ProviderConfig[] = [
     id: "claude-code",
     name: "Claude Code (Subscription)",
     models: ["default", "sonnet", "haiku"], // fallback only; real list comes from GET /claude-code/models
-    requiresApiKey: false,
-    requiresBaseUrl: false,
-  },
-  {
-    id: "copilot",
-    name: "GitHub Copilot (Subscription)",
-    models: [
-      "gpt-5.3-codex",
-      "gpt-5-mini",
-      "claude-sonnet-4-6",
-      "gemini-3.1-pro",
-    ],
     requiresApiKey: false,
     requiresBaseUrl: false,
   },
