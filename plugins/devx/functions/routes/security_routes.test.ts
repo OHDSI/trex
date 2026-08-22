@@ -79,7 +79,7 @@ function reviewRequest() {
   return new Request(`http://x/apps/${APP}/security/review`, { method: "POST" });
 }
 
-Deno.test("security review: an active provider_configs row left on the removed copilot provider is rejected by the key gate", async () => {
+Deno.test("security review: an active provider_configs row left on the removed copilot provider is rejected, and says so", async () => {
   await withWorkspace(async () => {
     const db = makeFakeDb({
       provider: "copilot",
@@ -100,15 +100,50 @@ Deno.test("security review: an active provider_configs row left on the removed c
     );
 
     assertEquals(res.status, 400);
-    assertEquals(await res.json(), { error: "AI provider not configured. Set your API key in Settings." });
+    assertEquals(await res.json(), {
+      error: "GitHub Copilot support has been removed — choose another provider in Settings.",
+    });
 
     // Guard against a false pass: the 400 must come from the gate acting on
     // the copilot provider_configs row, not from the "no rows at all" legacy
-    // branch (which returns the identical message) and not from the earlier
-    // "No code files found to review" bail-out.
+    // branch and not from the earlier "No code files found to review" bail-out.
     assertEquals(db.calls.some((q) => q.includes("FROM devx.provider_configs")), true);
     assertEquals(db.calls.some((q) => q.includes("FROM devx.settings") && q.includes("provider")), false);
     // Rejected before any review row could be written.
+    assertEquals(db.calls.some((q) => q.includes("devx.agent_results")), false);
+  });
+});
+
+// The reason the copilot gate keys on the provider NAME rather than on the
+// absent key: POST /provider-configs accepts any provider string with any
+// api_key (provider_config_routes.ts:89-106), so "copilot rows are always
+// keyless" is a Settings-UI habit, not a server invariant. A key gate alone
+// would wave this row into createModel's OpenAI-compatible branch and spend a
+// GitHub credential as an OpenAI one.
+Deno.test("security review: a copilot row WITH an api_key is still rejected (the gate does not rely on the key being absent)", async () => {
+  await withWorkspace(async () => {
+    const db = makeFakeDb({
+      provider: "copilot",
+      model: "gpt-4o",
+      api_key: "ghu_some_github_token",
+      api_key_encrypted: null,
+      api_key_iv: null,
+      base_url: null,
+    });
+
+    const res = await handleSecurityRoutes(
+      `/apps/${APP}/security/review`,
+      "POST",
+      reviewRequest(),
+      USER,
+      db.sql,
+      CORS,
+    );
+
+    assertEquals(res.status, 400);
+    assertEquals(await res.json(), {
+      error: "GitHub Copilot support has been removed — choose another provider in Settings.",
+    });
     assertEquals(db.calls.some((q) => q.includes("devx.agent_results")), false);
   });
 });

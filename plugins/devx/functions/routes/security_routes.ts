@@ -182,6 +182,15 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 401, headers: corsHeaders },
         );
       }
+      // Removed-engine rows are rejected on the provider NAME, ahead of the key
+      // gate — see index.ts's /stream read site for why the key gate alone is
+      // not a structural guarantee (a copilot row WITH a key would pass it).
+      if (providerRow.provider === "copilot") {
+        return Response.json(
+          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
       // Only providers that genuinely authenticate without a stored key belong
       // in this set (kept in sync with index.ts's two read sites). A provider
       // whose engine no longer exists must NOT be waived: streamAgentChat's

@@ -485,13 +485,30 @@ Deno.serve(async (req: Request) => {
         }
       }
 
+      // Rows naming the removed Copilot engine are still in the database (the
+      // provider_configs/settings tables were deliberately left unmigrated).
+      // Reject them on the provider NAME, not on the missing key: the key gate
+      // below catches today's rows only because the Settings UI happens to
+      // write an empty api_key for them, but POST /provider-configs accepts any
+      // provider string with any key, so a copilot row WITH a key would sail
+      // through it into createModel's OpenAI-compatible branch and spend a
+      // GitHub credential as an OpenAI one. Keying on the provider makes the
+      // guarantee structural, matching what agent.ts's resolveModel already
+      // does on the other loop — and says what actually happened, which "No API
+      // key configured" does not.
+      if (settings.provider === "copilot") {
+        return Response.json(
+          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+
       // Subscription-based and Bedrock providers don't require an API key.
       // Nothing else belongs in this set: waiving the key gate for a provider
       // that has no engine behind it lets the row fall through to the
       // OpenAI-compatible branch below, whose client resolves an absent key
       // from the worker's own OPENAI_API_KEY — one user's turn billed to, and
-      // authenticated as, the operator. A row left on a removed provider must
-      // fail this gate instead.
+      // authenticated as, the operator.
       const noKeyProviders = new Set(["claude-code", "bedrock"]);
       if (!settings.api_key && !noKeyProviders.has(settings.provider)) {
         return Response.json(
@@ -1057,6 +1074,15 @@ Deno.serve(async (req: Request) => {
           `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
           [userId],
         )).rows[0];
+      }
+      // Removed-engine rows are rejected on the provider name here too — see
+      // the /stream read site's comment for why the key gate below is not
+      // enough on its own.
+      if (agentSettings?.provider === "copilot") {
+        return Response.json(
+          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
       }
       // Same membership rule as the /stream read site above — only providers
       // that genuinely authenticate without a stored key belong here, or the
