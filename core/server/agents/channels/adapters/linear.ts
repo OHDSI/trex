@@ -62,6 +62,7 @@ import { createLinearComment } from "../vendor/linear/api.ts";
 import { splitLinearCommentBody } from "../vendor/linear/limits.ts";
 import { renderLinearInputRequest } from "../vendor/linear/hitl.ts";
 import { defaultLinearAuth } from "../vendor/linear/defaults.ts";
+import { queuedAckText } from "../queued-ack.ts";
 
 // Per-session Linear routing threaded as the channel session `state` — set on
 // send() and read by the delivery (`events`) handlers so comments go back to the
@@ -243,6 +244,23 @@ export function linearChannel(opts: LinearChannelOptions = {}): ChannelDef {
         }
       } catch (e) {
         console.error("linear: input.requested delivery failed:", e);
+      }
+    },
+    // Acknowledge a message that arrived while a turn was already running and
+    // got queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Posts an
+    // issue comment via postComment — the same GraphQL primitive
+    // message.completed uses — which also stamps the hidden marker, so Linear's
+    // echo of our own comment is dropped by the loop guard and the ack cannot
+    // start a turn of its own.
+    // Best-effort: a failed ack never affects the turn that is still running.
+    async "message.queued"(data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.issueId) return;
+      try {
+        await postComment(state, queuedAckText(data?.deniedPendingGate === true));
+      } catch (e) {
+        console.warn("linear: message.queued acknowledgement failed — swallowed:", e);
       }
     },
   };

@@ -517,3 +517,77 @@ Deno.test("defaultGitHubResume forwards the decoded decision to args.resume; ret
   assertEquals(resumes[0].continuationToken, "acme/widgets#42");
   assertEquals(resumes[0].input.decision, "deny"); // "/deny" → deny
 });
+
+// ---- delivery: message.queued ---------------------------------------------
+
+// A message that arrives while a turn is running is queued, not started; the
+// ack is what stops it looking like the message vanished. GitHub's primitive is
+// an issue/PR comment; the app's own comment comes back authored by a Bot, which
+// the inbound loop guard already drops.
+Deno.test("message.queued posts a one-line acknowledgement comment on the thread", async () => {
+  clearGitHubInstallationTokenCache();
+  const calls: Array<{ url: string; method?: string; body?: unknown }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    calls.push({ url: String(input), method: init?.method, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve(new Response(JSON.stringify({ id: 1 }), { status: 201 }));
+  };
+  const channel = githubChannel({
+    credentials: { webhookSecret: SECRET, installationToken: "ghs_direct" },
+    api: { fetch: fetchMock },
+  });
+
+  await channel.events!["message.queued"]({ text: "also rename the tests" }, { state: { owner: "acme", repo: "widgets", number: 42 } });
+
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0].url, "/repos/acme/widgets/issues/42/comments");
+  assertEquals(calls[0].method, "POST");
+  assertStringIncludes((calls[0].body as { body: string }).body, "queued");
+});
+
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  clearGitHubInstallationTokenCache();
+  const comments: string[] = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    comments.push((JSON.parse(String(init?.body)) as { body: string }).body);
+    return Promise.resolve(new Response(JSON.stringify({ id: 1 }), { status: 201 }));
+  };
+  const channel = githubChannel({
+    credentials: { webhookSecret: SECRET, installationToken: "ghs_direct" },
+    api: { fetch: fetchMock },
+  });
+
+  await channel.events!["message.queued"](
+    { text: "yes but explain the chunk count first", deniedPendingGate: true },
+    { state: { owner: "acme", repo: "widgets", number: 42 } },
+  );
+
+  assertEquals(comments.length, 1);
+  assertEquals(/closed the pending approval|feedback/i.test(comments[0]), true, `expected the deny-ack wording, got: ${comments[0]}`);
+});
+
+Deno.test("message.queued is a no-op without an owner, and swallows a delivery failure", async () => {
+  clearGitHubInstallationTokenCache();
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response("boom", { status: 500 }));
+  };
+  const channel = githubChannel({
+    credentials: { webhookSecret: SECRET, installationToken: "ghs_direct" },
+    api: { fetch: fetchMock },
+  });
+
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(called, 0);
+
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"]({ text: "hi" }, { state: { owner: "acme", repo: "widgets", number: 42 } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assertEquals(logged.some((l) => l.includes("message.queued")), true);
+});

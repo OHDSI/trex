@@ -64,6 +64,7 @@ import {
 import { buildSlackAuthContext } from "../vendor/slack/auth.ts";
 import { decodeSlackApiBody } from "../vendor/slack/api-encoding.ts";
 import { getEnv, type InputResponse } from "../vendor/slack/shared.ts";
+import { queuedAckText } from "../queued-ack.ts";
 import { channelAllows, envAllowList } from "../allow.ts";
 import type { ChannelAllowList } from "../types.ts";
 
@@ -223,6 +224,27 @@ export function slackChannel(opts: SlackChannelOptions = {}): ChannelDef {
       if (!state.channelId) return;
       for (const chunk of splitSlackMessageText(message)) {
         await postSlackMessage({ ...apiOpts(), channelId: state.channelId, threadTs: state.threadTs, text: chunk });
+      }
+    },
+    // Acknowledge a message that arrived while a turn was already running and
+    // got queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Posts an
+    // ordinary thread message (Slack's own send primitive, the same one
+    // message.completed uses) rather than a typing status, which is transient
+    // and would be overwritten by the running turn's next "Working..." update.
+    // Best-effort: a failed ack never affects the turn that is still running.
+    async "message.queued"(data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.channelId) return;
+      try {
+        await postSlackMessage({
+          ...apiOpts(),
+          channelId: state.channelId,
+          threadTs: state.threadTs,
+          text: queuedAckText(data?.deniedPendingGate === true),
+        });
+      } catch (e) {
+        console.warn("slack: message.queued acknowledgement failed — swallowed:", e);
       }
     },
   };

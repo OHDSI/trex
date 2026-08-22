@@ -528,3 +528,99 @@ Deno.test("defaultTeamsResume forwards derived responses to args.resume", async 
   assertEquals(resumes[0].continuationToken, "conv-1");
   assertEquals(resumes[0].input.inputResponses, [{ requestId: "r1", optionId: "approve" }]);
 });
+
+// ---- delivery: message.queued ---------------------------------------------
+
+// A message that arrives while a turn is running is queued, not started; the
+// ack is what stops it looking like the message vanished. Teams' primitive is a
+// reply Activity on the inbound activity, so the ack threads with the rest.
+Deno.test("message.queued posts a one-line acknowledgement as a reply Activity", async () => {
+  clearTeamsAccessTokenCache();
+  const calls: Array<{ url: string; body?: unknown }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    const url = String(input);
+    if (url.includes("/oauth2/v2.0/token")) {
+      return Promise.resolve(new Response(JSON.stringify({ access_token: "cc-token", expires_in: 3600 }), { status: 200 }));
+    }
+    calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve(new Response(JSON.stringify({ id: "reply-1" }), { status: 200 }));
+  };
+  const channel = teamsChannel({
+    appId: APP_ID,
+    credentials: { appId: APP_ID, appPassword: "secret" },
+    api: { fetch: fetchMock },
+    jwks: [],
+  });
+
+  await channel.events!["message.queued"](
+    { text: "also rename the tests" },
+    { state: { serviceUrl: SERVICE_URL, conversationId: "conv-1", activityId: "activity-1" } },
+  );
+
+  assertEquals(calls.length, 1);
+  assertStringIncludes(calls[0].url, "/v3/conversations/conv-1/activities/activity-1");
+  assertStringIncludes((calls[0].body as { text: string }).text, "queued");
+});
+
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  clearTeamsAccessTokenCache();
+  const texts: string[] = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    const url = String(input);
+    if (url.includes("/oauth2/v2.0/token")) {
+      return Promise.resolve(new Response(JSON.stringify({ access_token: "cc", expires_in: 3600 }), { status: 200 }));
+    }
+    texts.push((JSON.parse(String(init?.body)) as { text: string }).text);
+    return Promise.resolve(new Response(JSON.stringify({ id: "r" }), { status: 200 }));
+  };
+  const channel = teamsChannel({
+    appId: APP_ID,
+    credentials: { appId: APP_ID, appPassword: "secret" },
+    api: { fetch: fetchMock },
+    jwks: [],
+  });
+
+  await channel.events!["message.queued"](
+    { text: "yes but explain the chunk count first", deniedPendingGate: true },
+    { state: { serviceUrl: SERVICE_URL, conversationId: "conv-1", activityId: "activity-1" } },
+  );
+
+  assertEquals(texts.length, 1);
+  assertEquals(/closed the pending approval|feedback/i.test(texts[0]), true, `expected the deny-ack wording, got: ${texts[0]}`);
+});
+
+Deno.test("message.queued is a no-op without a serviceUrl, and swallows a delivery failure", async () => {
+  clearTeamsAccessTokenCache();
+  let posted = 0;
+  const fetchMock: typeof fetch = (input) => {
+    const url = String(input);
+    if (url.includes("/oauth2/v2.0/token")) {
+      return Promise.resolve(new Response(JSON.stringify({ access_token: "cc", expires_in: 3600 }), { status: 200 }));
+    }
+    posted++;
+    return Promise.resolve(new Response("boom", { status: 500 }));
+  };
+  const channel = teamsChannel({
+    appId: APP_ID,
+    credentials: { appId: APP_ID, appPassword: "secret" },
+    api: { fetch: fetchMock },
+    jwks: [],
+  });
+
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(posted, 0);
+
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"](
+      { text: "hi" },
+      { state: { serviceUrl: SERVICE_URL, conversationId: "conv-1", activityId: "activity-1" } },
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(posted, 1);
+  assertEquals(logged.some((l) => l.includes("message.queued")), true);
+});

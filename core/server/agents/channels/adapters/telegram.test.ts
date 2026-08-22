@@ -319,3 +319,62 @@ Deno.test("renderTelegramInputRequest callback_data round-trips through decode (
   assertEquals(approve, encodeTelegramCallbackData(requestId, "approve"));
   assertEquals(deriveTelegramInputResponse(approve), { requestId, optionId: "approve" });
 });
+
+// ---- delivery: message.queued ---------------------------------------------
+
+// A message that arrives while a turn is running is queued, not started; the
+// ack is what stops it looking like the message vanished. Telegram's primitive
+// is sendMessage (a typing action expires and carries no text).
+Deno.test("message.queued posts a one-line acknowledgement to the chat", async () => {
+  const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { message_id: 7, chat: { id: 555, type: "private" } } }), { status: 200 }));
+  };
+  const channel = telegramChannel({ credentials: { botToken: "bot-1" }, api: { fetch: fetchMock } });
+
+  await channel.events!["message.queued"]({ text: "also rename the tests" }, { state: { chatId: "555", messageThreadId: 12 } });
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].url.endsWith("/sendMessage"), true);
+  assertEquals(calls[0].body.chat_id, "555");
+  assertEquals(calls[0].body.message_thread_id, 12);
+  assertEquals(String(calls[0].body.text).includes("queued"), true);
+});
+
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  const texts: string[] = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    texts.push((JSON.parse(String(init?.body)) as { text: string }).text);
+    return Promise.resolve(new Response(JSON.stringify({ ok: true, result: { message_id: 1, chat: { id: 555, type: "private" } } }), { status: 200 }));
+  };
+  const channel = telegramChannel({ credentials: { botToken: "bot-1" }, api: { fetch: fetchMock } });
+
+  await channel.events!["message.queued"]({ text: "yes but explain the chunk count first", deniedPendingGate: true }, { state: { chatId: "555" } });
+
+  assertEquals(texts.length, 1);
+  assertEquals(/closed the pending approval|feedback/i.test(texts[0]), true, `expected the deny-ack wording, got: ${texts[0]}`);
+});
+
+Deno.test("message.queued is a no-op without a chatId, and swallows a delivery failure", async () => {
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response(JSON.stringify({ ok: false, description: "chat not found" }), { status: 400 }));
+  };
+  const channel = telegramChannel({ credentials: { botToken: "bot-1" }, api: { fetch: fetchMock } });
+
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(called, 0);
+
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"]({ text: "hi" }, { state: { chatId: "555" } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assertEquals(logged.some((l) => l.includes("message.queued")), true);
+});
