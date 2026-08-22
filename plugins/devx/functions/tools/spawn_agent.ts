@@ -81,9 +81,6 @@ export const spawnAgentTool: ToolDefinition<{
     });
 
     try {
-      // Import streamAgentChat dynamically to avoid circular dependency
-      const { streamAgentChat } = await import("../agent.ts");
-
       // Get active provider config + user prefs for model creation. Probe
       // before selecting the encrypted columns — see provider_key.ts's
       // assertProviderConfigEncryptionMigrated header comment.
@@ -113,6 +110,36 @@ export const spawnAgentTool: ToolDefinition<{
       } else {
         settings = (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
       }
+
+      // This tool re-reads the active provider row itself rather than reusing
+      // the caller's, so the gates the route layer applied to the parent turn
+      // (index.ts's two /stream sites, security_routes.ts's runAgentReview) do
+      // NOT cover it: a user who activates a different provider while a turn
+      // is in flight lands here with a row nothing has vetted. Re-apply both
+      // route-layer gates on the row this tool actually resolved.
+      //
+      // Copilot first, keyed on the provider name rather than on the missing
+      // key: the engine that used to serve these rows is gone, so without this
+      // the row reaches createModel's final `return openai(model)` — the
+      // OpenAI-compatible client, which resolves an absent key from the
+      // worker's own OPENAI_API_KEY and runs the subagent turn on the
+      // operator's account.
+      if (settings.provider === "copilot") {
+        throw new Error("GitHub Copilot support has been removed — choose another provider in Settings.");
+      }
+      // Then the key gate, same membership rule as the three route sites: only
+      // providers that genuinely authenticate without a stored key are waived.
+      // Also catches the `|| {}` empty-settings case above, which has the same
+      // fallthrough.
+      const noKeyProviders = new Set(["claude-code", "bedrock"]);
+      if (!settings.api_key && !noKeyProviders.has(settings.provider)) {
+        throw new Error("No provider configured. Please set up your provider in Settings.");
+      }
+
+      // Import streamAgentChat dynamically to avoid circular dependency.
+      // Loaded after the gates above so a rejected turn never pulls in the
+      // engine (and its provider SDKs) at all.
+      const { streamAgentChat } = await import("../agent.ts");
 
       // Determine model — use agent's model or inherit parent's
       const effectiveModel = agentDef.model === "inherit" ? settings.model : agentDef.model;

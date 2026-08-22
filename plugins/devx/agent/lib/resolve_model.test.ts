@@ -75,11 +75,34 @@ Deno.test("resolveModel: claude-code provider throws (sidecar providers use the 
   await assertRejects(() => resolveModel(ctx), Error, "sidecar providers use the legacy endpoint");
 });
 
-Deno.test("resolveModel: copilot provider throws (sidecar providers use the legacy endpoint)", async () => {
+// The copilot engine is gone but its provider_configs/devx.settings rows were
+// deliberately left unmigrated, so this input is still reachable in production.
+// Match the removal message specifically, not a bare Error: if the arm is ever
+// dropped, copilot falls into the OpenAI-compatible branch with apiKey
+// undefined and core's buildModel backfills the operator's OPENAI_API_KEY.
+// A bare `Error` matcher would not fail on that; asserting the message does.
+Deno.test("resolveModel: a row left on the removed copilot provider throws the removal message, never the OpenAI fallback", async () => {
   const ctx = fakeHookCtx({
     activeProvider: { provider: "copilot", model: "gpt-4o", api_key: null, base_url: null },
   });
-  await assertRejects(() => resolveModel(ctx), Error, "sidecar providers use the legacy endpoint");
+  await assertRejects(
+    () => resolveModel(ctx),
+    Error,
+    "GitHub Copilot support has been removed — choose another provider in devx Settings",
+  );
+});
+
+// Same row shape, but arriving via the legacy devx.settings fallback rather
+// than provider_configs — that table was never migrated either.
+Deno.test("resolveModel: a legacy devx.settings row left on copilot throws the same removal message", async () => {
+  const ctx = fakeHookCtx({
+    settings: { provider: "copilot", model: "gpt-4o", api_key: null, base_url: null },
+  });
+  await assertRejects(
+    () => resolveModel(ctx),
+    Error,
+    "GitHub Copilot support has been removed — choose another provider in devx Settings",
+  );
 });
 
 Deno.test("resolveModel: bedrock with no api_key configured returns apiKey undefined (core resolves the env-based bearer token)", async () => {

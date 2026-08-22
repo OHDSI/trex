@@ -28,7 +28,6 @@ import { useGitHub } from "@/hooks/useGitHub";
 import { useGitSigning } from "@/hooks/useGitSigning";
 import { useClaudeCode } from "@/hooks/useClaudeCode";
 import { useClaudeCodeModels } from "@/hooks/useClaudeCodeModels";
-import { useCopilot } from "@/hooks/useCopilot";
 import { useProviderConfigs } from "@/hooks/useProviderConfigs";
 import { useMcpServers } from "@/hooks/useMcpServers";
 import { useTheme } from "@/hooks/useTheme";
@@ -59,7 +58,6 @@ export default function SettingsPage() {
   const gitSigning = useGitSigning();
   const claudeCode = useClaudeCode();
   const claudeCodeModels = useClaudeCodeModels();
-  const copilot = useCopilot();
   const providerConfigs = useProviderConfigs();
   const mcp = useMcpServers();
   const { theme, setTheme } = useTheme();
@@ -160,14 +158,13 @@ export default function SettingsPage() {
   // Refresh SDK auth status when provider changes to a subscription provider
   useEffect(() => {
     if (provider === "claude-code") claudeCode.refreshStatus();
-    if (provider === "copilot") copilot.refreshStatus();
   }, [provider]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
       // Pack Bedrock credentials into api_key/base_url columns
-      const effectiveApiKey = provider === "claude-code" || provider === "copilot"
+      const effectiveApiKey = provider === "claude-code"
         ? ""
         : provider === "bedrock"
         ? JSON.stringify(
@@ -340,7 +337,7 @@ export default function SettingsPage() {
                   the hand-rolled SSE loop (functions/agent.ts), 'agents' is
                   the ported eve/agents runtime (plugins/devx/agent/). Forced
                   back to legacy regardless of this setting when the active
-                  provider is claude-code/copilot (see useEffectiveLoop.ts) -
+                  provider is claude-code (see useEffectiveLoop.ts) -
                   noted inline since the toggle would otherwise look like a
                   no-op for those users. */}
               <div className="space-y-2">
@@ -354,7 +351,7 @@ export default function SettingsPage() {
                   <option value="agents">Agents (experimental)</option>
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  Agents mode is forced back to Legacy for the Claude Code and Copilot providers.
+                  Agents mode is forced back to Legacy for the Claude Code provider.
                   Takes effect on your next chat open.
                 </p>
               </div>
@@ -532,36 +529,6 @@ export default function SettingsPage() {
                             <Button variant="outline" size="sm" className="h-7 text-xs"
                               disabled={claudeCode.loading} onClick={claudeCode.startLogin}>
                               {claudeCode.loading ? "Starting..." : "Sign in with Claude"}
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                      {/* Copilot auth status */}
-                      {cfg.provider === "copilot" && (
-                        <div className="mt-2 ml-5" onClick={(e) => e.stopPropagation()}>
-                          {copilot.status.authenticated ? (
-                            <span className="text-xs text-muted-foreground flex items-center gap-1">
-                              <Check className="h-3 w-3 text-green-500" />
-                              Authenticated{copilot.status.account ? ` as ${copilot.status.account}` : ""}
-                            </span>
-                          ) : copilot.loginUrl ? (
-                            <div className="space-y-2">
-                              <a href={copilot.loginUrl} target="_blank" rel="noopener noreferrer"
-                                className="text-xs text-primary underline flex items-center gap-1">
-                                Open GitHub <ExternalLink className="h-3 w-3" />
-                              </a>
-                              {copilot.userCode && (
-                                <code className="px-2 py-1 bg-muted rounded font-mono text-sm tracking-wider">
-                                  {copilot.userCode}
-                                </code>
-                              )}
-                              {copilot.polling && <p className="text-xs text-muted-foreground">Waiting...</p>}
-                            </div>
-                          ) : (
-                            <Button variant="outline" size="sm" className="h-7 text-xs gap-1"
-                              disabled={copilot.loading} onClick={copilot.startLogin}>
-                              <Github className="h-3 w-3" />
-                              {copilot.loading ? "Starting..." : "Sign in with GitHub"}
                             </Button>
                           )}
                         </div>

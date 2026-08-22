@@ -105,11 +105,23 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
     throw new Error(classified.safe);
   }
 
-  // The UI routes these to the legacy /stream endpoint (claude_code_agent.ts /
-  // copilot_agent.ts) — the eve/agents runtime has no sidecar-process
-  // equivalent (V4 concern per the brief).
-  if (row.provider === "claude-code" || row.provider === "copilot") {
+  // The UI routes this one to the legacy /stream endpoint
+  // (claude_code_agent.ts) — the eve/agents runtime has no sidecar-process
+  // equivalent.
+  if (row.provider === "claude-code") {
     throw new Error("sidecar providers use the legacy endpoint");
+  }
+
+  // The GitHub Copilot engine is gone, but stored rows still name it — the
+  // provider_configs/settings tables were deliberately left unmigrated. This
+  // arm must stay an explicit throw rather than being deleted: with no arm,
+  // the fallback a few lines down maps every unrecognized provider name onto
+  // `openai`, and a Copilot row carries no api_key, so core's buildModel would
+  // backfill ModelSpec.apiKey from the operator's own OPENAI_API_KEY — one
+  // user's turn billed to, and authenticated as, the operator. Fail the turn
+  // with something the user can act on instead.
+  if (row.provider === "copilot") {
+    throw new Error("GitHub Copilot support has been removed — choose another provider in devx Settings");
   }
 
   // anthropic/google/bedrock map straight onto ModelSpec.provider; any other
@@ -231,8 +243,8 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 // appId, legacy's gate) || the user's devx.settings.ai_rules ||
 // DEFAULT_AI_RULES. The surrounding prompt is no longer hand-assembled here:
 // the resolved winner is handed to functions/coder_context.ts's
-// buildCoderContext (the same builder the ai-sdk/coder-sidecar/Copilot
-// engines use), which interpolates it via prompts.ts's own wrapAiRules — the
+// buildCoderContext (the same builder the ai-sdk/coder-sidecar engines use),
+// which interpolates it via prompts.ts's own wrapAiRules — the
 // exact "wrap a real winner in <user_defined_ai_rules>, leave the
 // DEFAULT_AI_RULES fallback unwrapped" logic this function used to replicate
 // by hand. Passing the RAW resolved winner (not pre-wrapped) is deliberate:

@@ -182,7 +182,21 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 401, headers: corsHeaders },
         );
       }
-      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
+      // Removed-engine rows are rejected on the provider NAME, ahead of the key
+      // gate — see index.ts's /stream read site for why the key gate alone is
+      // not a structural guarantee (a copilot row WITH a key would pass it).
+      if (providerRow.provider === "copilot") {
+        return Response.json(
+          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+      // Only providers that genuinely authenticate without a stored key belong
+      // in this set (kept in sync with index.ts's two read sites). A provider
+      // whose engine no longer exists must NOT be waived: streamAgentChat's
+      // createModel would route it to the OpenAI-compatible client, which
+      // resolves an absent key from the worker's own OPENAI_API_KEY.
+      const noKeyProviders = new Set(["claude-code", "bedrock"]);
       if (!resolvedApiKey && !noKeyProviders.has(providerRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },

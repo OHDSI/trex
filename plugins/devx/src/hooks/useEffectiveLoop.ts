@@ -1,7 +1,7 @@
 // task-u1: resolves the per-user devx.settings.loop flag into the actual
 // loop ChatPanel.tsx should render, applying the overrides the brief calls
-// out: claude-code/copilot providers force legacy regardless of the flag,
-// because plugins/devx/agent/agent.ts's resolveModel throws for them
+// out: the claude-code provider forces legacy regardless of the flag,
+// because plugins/devx/agent/agent.ts's resolveModel throws for it
 // ("sidecar providers use the legacy endpoint") and /chat has no try/catch
 // around that setup-phase call — an uncaught throw there surfaces as a bare
 // 500 with no parseable error shape (confirmed against
@@ -13,7 +13,7 @@
 // for a bedrock row whose api_key JSON is IAM-shaped (accessKeyId/
 // secretAccessKey, no bearerToken) — the agents loop only implements
 // bearer-token bedrock auth (see agent.ts's resolveModel comment). Same
-// "gate it before /chat ever sees it" posture as claude-code/copilot.
+// "gate it before /chat ever sees it" posture as claude-code.
 // Detection uses the server-derived `auth_shape` hint (merge-gate re-review:
 // every GET response MASKS api_key — LEFT(...,8)||'...'||RIGHT(...,4) — so
 // client-side JSON sniffing of it can never match; the server computes the
@@ -40,7 +40,6 @@ export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
         const wantsAgents = settings?.loop === "agents";
         const providerForcesLegacy =
           active.provider === "claude-code" ||
-          active.provider === "copilot" ||
           (active.provider === "bedrock" && active.auth_shape === "iam");
         setState({ loop: wantsAgents && !providerForcesLegacy ? "agents" : "legacy", resolved: true });
       })

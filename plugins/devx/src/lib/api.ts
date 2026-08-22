@@ -159,16 +159,16 @@ export interface ActiveProviderConfig {
 
 // task-u1: mirrors plugins/devx/agent/agent.ts's resolveModel fallback chain
 // (active devx.provider_configs row, else the legacy devx.settings row, else
-// "anthropic") so the UI can gate claude-code/copilot away from the agents
-// loop BEFORE ever calling /chat — resolveModel throws for those two
-// providers (eve/agents has no sidecar-process equivalent), which /chat
+// "anthropic") so the UI can gate claude-code away from the agents
+// loop BEFORE ever calling /chat — resolveModel throws for that
+// provider (eve/agents has no sidecar-process equivalent), which /chat
 // surfaces as a bare uncaught 500, not a parseable error. Read-only; never
 // used for anything security-sensitive, same posture as the server-side
 // fallback it mirrors. Also carries `auth_shape` (final-007 review finding
 // #4 + merge-gate re-review) so useEffectiveLoop.ts can detect IAM-shaped
 // bedrock credentials — resolveModel throws for those too (agents loop is
 // bearer-token-only), the exact same "gate it before /chat" reasoning as the
-// claude-code/copilot case above.
+// claude-code case above.
 export async function getActiveProviderConfig(): Promise<ActiveProviderConfig> {
   const configs = await getProviderConfigs().catch(() => [] as ProviderConfigRecord[]);
   const active = configs.find((c) => c.is_active);
@@ -600,30 +600,6 @@ export async function figmaMcpLogout(): Promise<{ connected: boolean }> {
 
 export function getClaudeCodeModels(): Promise<{ models: ModelInfo[]; source: string }> {
   return apiFetch<{ models: ModelInfo[]; source: string }>("/claude-code/models");
-}
-
-// --- GitHub Copilot Auth ---
-
-export async function getCopilotAuthStatus(): Promise<{
-  installed: boolean;
-  authenticated: boolean;
-  version: string | null;
-  account: string | null;
-}> {
-  return apiFetch("/copilot/auth-status");
-}
-
-export async function startCopilotLogin(): Promise<{
-  status: string;
-  login_url?: string;
-  user_code?: string;
-  message: string;
-}> {
-  return apiFetch("/copilot/login", { method: "POST" });
-}
-
-export async function copilotLogout(): Promise<{ ok: boolean; message: string }> {
-  return apiFetch("/copilot/logout", { method: "POST" });
 }
 
 // --- GitHub Repos ---
