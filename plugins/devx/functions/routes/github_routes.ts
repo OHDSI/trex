@@ -1,7 +1,7 @@
 // @ts-nocheck - Deno edge function
 import { encryptToken, decryptToken } from "../crypto.ts";
-import { duckdb, escapeSql } from "../duckdb.ts";
 import { gitOps } from "../git.ts";
+import { runShell, type ShellResult } from "../shell.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
 
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
@@ -83,39 +83,19 @@ const GH_LOGIN_OUTPUT_PATH = "/tmp/.devx-gh-cli-login.out";
 // authorizes (or the code expires), so this only bounds the initial handshake.
 const GH_LOGIN_HANDSHAKE_TIMEOUT_SECONDS = 12;
 
-/** Result of a shell command run through the DuckDB devx-ext bridge. */
-export interface ShellResult {
-  output: string;
-  exit_code: number;
-}
+// A `GH_TOKEN`/`GITHUB_TOKEN` in the container environment silently outranks
+// the stored credential: `gh auth status` then exits 0 off the env token
+// alone (so the CLI reports as authenticated when the credential store is
+// empty), and `gh auth login`/`logout` refuse to run at all. devx documents
+// setting GITHUB_TOKEN for other purposes (see functions/d2e/trex_md.ts), so
+// this is a live configuration, not a hypothetical. Blanking both makes every
+// command below act on the credential store these routes actually manage.
+// `gh` treats an empty value as absent.
+const GH_ENV = "GH_TOKEN= GITHUB_TOKEN=";
 
 type ShellRunner = (command: string) => Promise<ShellResult>;
 
-/**
- * Run a shell command via temp script + DuckDB devx-ext `sh` execution.
- * The Deno edge runtime sandbox does not allow Deno.Command directly, so
- * everything that needs a subprocess goes through trex_devx_run_command.
- */
-async function runShellViaDuckdb(command: string): Promise<ShellResult> {
-  const scriptPath =`/tmp/.devx-cmd-${crypto.randomUUID().slice(0, 8)}.sh`;
-  try {
-    await Deno.writeTextFile(scriptPath, command + "\n");
-    const raw = await duckdb(
-      `SELECT * FROM trex_devx_run_command('/tmp', 'sh ${escapeSql(scriptPath)}')`,
-    );
-    const result = JSON.parse(raw);
-    try { await Deno.remove(scriptPath); } catch { /* best-effort */ }
-    return {
-      output: result.output || "",
-      exit_code: result.exit_code ?? (result.error ? 1 : 0),
-    };
-  } catch (err) {
-    try { await Deno.remove(scriptPath); } catch { /* best-effort */ }
-    return { output: err?.message || String(err), exit_code: 1 };
-  }
-}
-
-let shellRunner: ShellRunner = runShellViaDuckdb;
+let shellRunner: ShellRunner = runShell;
 
 /**
  * Swap the shell layer for a fake. The real one needs a live DuckDB instance
@@ -139,17 +119,34 @@ export function parseUserCode(text: string): string | null {
   return codeMatch ? codeMatch[0] : null;
 }
 
-/** Parse the logged-in account from `gh auth status` output. */
+/**
+ * Narrow `gh auth status` output to the active account's block.
+ *
+ * `gh` can hold several accounts for one host and prints a
+ * "Logged in to <host> account <name>" block for each, distinguished only by a
+ * following "Active account: true|false" line. The active one is the
+ * credential every other `gh` invocation will actually use, and it is not
+ * necessarily printed first — so reporting the first block would name an
+ * account whose token nothing uses. Falls back to the whole text for
+ * single-account output, which carries no "Active account" line at all.
+ */
+function activeAccountBlock(text: string): string {
+  const blocks = text.split(/(?=Logged in to )/);
+  return blocks.find((b) => /Active account:\s*true/i.test(b)) || text;
+}
+
+/** Parse the active account from `gh auth status` output. */
 export function parseGhAccount(text: string): string | null {
-  const match = text.match(/Logged in to \S+ account (\S+)/i) ||
-    text.match(/Logged in to \S+ as (\S+)/i) ||
-    text.match(/\baccount\s+(\S+)/i);
+  const source = activeAccountBlock(text);
+  const match = source.match(/Logged in to \S+ account (\S+)/i) ||
+    source.match(/Logged in to \S+ as (\S+)/i) ||
+    source.match(/\baccount\s+(\S+)/i);
   return match ? match[1] : null;
 }
 
-/** Parse the `Token scopes: 'a', 'b'` line from `gh auth status` output. */
+/** Parse the active account's `Token scopes: 'a', 'b'` line. */
 export function parseGhScopes(text: string): string | null {
-  const match = text.match(/Token scopes:\s*(.+)/i);
+  const match = activeAccountBlock(text).match(/Token scopes:\s*(.+)/i);
   if (!match) return null;
   return match[1].trim().replace(/['"]/g, "") || null;
 }
@@ -170,9 +167,12 @@ export function parseGhScopes(text: string): string | null {
 export function buildGhLoginCommand(): string {
   return [
     `rm -f ${GH_LOGIN_OUTPUT_PATH}`,
-    `{ BROWSER=false DISPLAY= NO_COLOR=1 GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 ` +
+    // The env prefix is repeated on both commands rather than exported once:
+    // an `&&`-chained command does not inherit the assignments of the one
+    // before it, and setup-git must ignore the env token too.
+    `{ ${GH_ENV} BROWSER=false DISPLAY= NO_COLOR=1 GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 ` +
       `gh auth login --hostname github.com --git-protocol https --web --scopes '${GH_CLI_SCOPES}' ` +
-      `&& gh auth setup-git --hostname github.com; } ` +
+      `&& ${GH_ENV} gh auth setup-git --hostname github.com; } ` +
       `< /dev/null > ${GH_LOGIN_OUTPUT_PATH} 2>&1 &`,
     `login_pid=$!`,
     `i=0`,
@@ -192,13 +192,13 @@ export function buildGhLoginCommand(): string {
 
 /** Probe `gh`: installed, authenticated, as whom, with which scopes. */
 async function readGhCliAuthState() {
-  const ghVersion = await shellRunner("gh --version 2>&1");
+  const ghVersion = await shellRunner(`${GH_ENV} gh --version 2>&1`);
   const installed = ghVersion.exit_code === 0 || ghVersion.output.includes("gh version");
   if (!installed) {
     return { installed: false, authenticated: false, version: null, account: null, scopes: null };
   }
 
-  const authStatus = await shellRunner("gh auth status 2>&1");
+  const authStatus = await shellRunner(`${GH_ENV} gh auth status 2>&1`);
   const authenticated = authStatus.exit_code === 0;
 
   return {
@@ -264,26 +264,33 @@ export async function handleGithubRoutes(path, method, req, userId, sql, corsHea
         output: login.output.slice(0, 500),
       }, { headers: corsHeaders });
     } catch (err) {
+      // 200, like every other outcome here: apiFetch throws on non-2xx, which
+      // would replace this message with a raw "API error 500: {...}" blob.
       return Response.json({
         status: "error",
         message: err?.message || "Failed to start the gh login flow",
-      }, { status: 500, headers: corsHeaders });
+      }, { headers: corsHeaders });
     }
   }
 
   // POST /integrations/github/cli-auth/logout
   if (path.endsWith("/integrations/github/cli-auth/logout") && method === "POST") {
     try {
-      const result = await shellRunner("echo y | gh auth logout --hostname github.com 2>&1");
+      const result = await shellRunner(`echo y | ${GH_ENV} gh auth logout --hostname github.com 2>&1`);
+      // `gh auth logout` genuinely fails in ways worth surfacing — a token
+      // supplied via the environment, or no account to log out of. Reporting
+      // ok:true regardless left the user clicking Sign out, seeing the block
+      // still say "Signed in as ...", and being told nothing.
       return Response.json({
-        ok: true,
-        message: result.output.trim() || "Signed out.",
+        ok: result.exit_code === 0,
+        message: result.output.trim() ||
+          (result.exit_code === 0 ? "Signed out." : "Sign out failed."),
       }, { headers: corsHeaders });
     } catch (err) {
       return Response.json({
         ok: false,
         message: err?.message || String(err),
-      }, { status: 500, headers: corsHeaders });
+      }, { headers: corsHeaders });
     }
   }
 

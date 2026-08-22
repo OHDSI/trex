@@ -126,14 +126,16 @@ Deno.test("the login command detaches gh and releases the runner's pipe", () => 
   // waits on the inherited pipe until the device code expires. The redirect
   // must apply to the whole { ... } group, not just the last command in it.
   assertStringIncludes(cmd, "; } < /dev/null > /tmp/.devx-gh-cli-login.out 2>&1 &");
-  assertStringIncludes(cmd, "{ BROWSER=false");
+  assertStringIncludes(cmd, "{ GH_TOKEN= GITHUB_TOKEN= BROWSER=false");
   // Chained onto a successful login so an already-running coder sidecar gets
   // push credentials without a restart.
-  assertStringIncludes(cmd, "&& gh auth setup-git --hostname github.com");
+  assertStringIncludes(cmd, "gh auth setup-git --hostname github.com");
   // The stale-attempt guard: unlink before launching.
   assertStringIncludes(cmd, "rm -f /tmp/.devx-gh-cli-login.out");
-  // Non-interactive selection of the browser flow; without --web gh refuses
-  // to run without a TTY.
+  // --web selects the device flow explicitly. gh does run `auth login` without
+  // a TTY, and --web does not switch to a localhost callback: verified against
+  // real gh, it prints the one-time code and https://github.com/login/device,
+  // which is exactly what parseUserCode/parseLoginUrl read.
   assertStringIncludes(cmd, "--web");
   assertStringIncludes(cmd, "GH_PROMPT_DISABLED=1");
   // A gh that dies without printing anything must not make the caller sit out
@@ -316,7 +318,117 @@ Deno.test("POST cli-auth/logout answers gh's confirmation prompt", async () => {
     );
     assertEquals(res!.status, 200);
     assertEquals(await res!.json(), { ok: true, message: "✓ Logged out of github.com account octocat" });
-    assertStringIncludes(shell.commands[0], "echo y | gh auth logout --hostname github.com");
+    assertStringIncludes(shell.commands[0], "gh auth logout --hostname github.com");
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("POST cli-auth/logout reports ok:false when gh refuses", async () => {
+  // The real failure, observed with GITHUB_TOKEN set: gh exits 1 and explains
+  // itself on stdout. Returning ok:true here left the user clicking Sign out,
+  // watching the block keep saying "Signed in as ...", and being told nothing.
+  const shell = fakeShell([["gh auth logout", {
+    output: "The value of the GITHUB_TOKEN environment variable is being used for authentication.",
+    exit_code: 1,
+  }]]);
+  const restore = __setShellRunnerForTests(shell.run);
+  try {
+    const res = await handleGithubRoutes(
+      "/x/integrations/github/cli-auth/logout", "POST", req("POST"), "u1", noDb, CORS,
+    );
+    assertEquals(res!.status, 200);
+    const body = await res!.json();
+    assertEquals(body.ok, false);
+    // gh's own explanation is what the user needs; don't swallow it.
+    assertStringIncludes(body.message, "GITHUB_TOKEN environment variable");
+  } finally {
+    restore();
+  }
+});
+
+Deno.test("POST cli-auth/logout still reports a failure that printed nothing", async () => {
+  const shell = fakeShell([["gh auth logout", { output: "", exit_code: 1 }]]);
+  const restore = __setShellRunnerForTests(shell.run);
+  try {
+    const res = await handleGithubRoutes(
+      "/x/integrations/github/cli-auth/logout", "POST", req("POST"), "u1", noDb, CORS,
+    );
+    assertEquals(await res!.json(), { ok: false, message: "Sign out failed." });
+  } finally {
+    restore();
+  }
+});
+
+// --- environment-token scrubbing -----------------------------------------
+
+Deno.test("every gh command blanks GH_TOKEN and GITHUB_TOKEN", async () => {
+  // An env token outranks the credential store: `gh auth status` exits 0 off
+  // it alone (so the GET would report authenticated for a token these routes
+  // do not manage and no skill can renew), and login/logout refuse outright.
+  // devx documents setting GITHUB_TOKEN elsewhere, so this is a real config.
+  const shell = fakeShell([
+    ["gh --version", GH_VERSION_OK],
+    ["gh auth status", GH_STATUS_LOGGED_OUT],
+    ["gh auth login", { output: "https://github.com/login/device ABCD-1234", exit_code: 0 }],
+    ["gh auth logout", { output: "done", exit_code: 0 }],
+  ]);
+  const restore = __setShellRunnerForTests(shell.run);
+  try {
+    await handleGithubRoutes("/x/integrations/github/cli-auth", "GET", req("GET"), "u1", noDb, CORS);
+    await handleGithubRoutes("/x/integrations/github/cli-auth/login", "POST", req("POST"), "u1", noDb, CORS);
+    await handleGithubRoutes("/x/integrations/github/cli-auth/logout", "POST", req("POST"), "u1", noDb, CORS);
+
+    assert(shell.commands.length >= 4);
+    for (const cmd of shell.commands) {
+      assertStringIncludes(cmd, "GH_TOKEN= GITHUB_TOKEN=");
+    }
+    // The login script runs two gh commands; `&&` does not carry the first
+    // command's assignments to the second, so setup-git needs its own.
+    const loginCmd = shell.commands.find((c) => c.includes("gh auth login"))!;
+    assertStringIncludes(loginCmd, "&& GH_TOKEN= GITHUB_TOKEN= gh auth setup-git");
+  } finally {
+    restore();
+  }
+});
+
+// --- multi-account output -------------------------------------------------
+
+// gh holding two accounts for one host. The active one is NOT printed first
+// here — that is the whole point: it is the only credential other gh
+// invocations use, so naming the first would report an account whose token
+// nothing actually runs as.
+const GH_STATUS_TWO_ACCOUNTS = {
+  output: [
+    "github.com",
+    "  ✓ Logged in to github.com account stale-user (/home/node/.config/gh/hosts.yml)",
+    "  - Active account: false",
+    "  - Token: gho_************************************",
+    "  - Token scopes: 'gist'",
+    "  ✓ Logged in to github.com account octocat (/home/node/.config/gh/hosts.yml)",
+    "  - Active account: true",
+    "  - Token: gho_************************************",
+    "  - Token scopes: 'gist', 'read:org', 'repo'",
+  ].join("\n"),
+  exit_code: 0,
+};
+
+Deno.test("parseGhAccount and parseGhScopes read the ACTIVE account, not the first", () => {
+  assertEquals(parseGhAccount(GH_STATUS_TWO_ACCOUNTS.output), "octocat");
+  assertEquals(parseGhScopes(GH_STATUS_TWO_ACCOUNTS.output), "gist, read:org, repo");
+});
+
+Deno.test("GET cli-auth reports the active account for a multi-account gh", async () => {
+  const shell = fakeShell([
+    ["gh --version", GH_VERSION_OK],
+    ["gh auth status", GH_STATUS_TWO_ACCOUNTS],
+  ]);
+  const restore = __setShellRunnerForTests(shell.run);
+  try {
+    const res = await handleGithubRoutes("/x/integrations/github/cli-auth", "GET", req("GET"), "u1", noDb, CORS);
+    const body = await res!.json();
+    assertEquals(body.account, "octocat");
+    assertEquals(body.scopes, "gist, read:org, repo");
   } finally {
     restore();
   }
@@ -324,21 +436,37 @@ Deno.test("POST cli-auth/logout answers gh's confirmation prompt", async () => {
 
 // --- dispatch -------------------------------------------------------------
 
-Deno.test("cli-auth paths do not collide with the OAuth connection routes", async () => {
-  // DELETE /integrations/github (disconnect the stored OAuth token) must not
-  // be reachable through a cli-auth path, and vice versa.
+Deno.test("a DELETE to a cli-auth path cannot reach the OAuth disconnect route", async () => {
+  // The routes are matched by path SUFFIX, and DELETE /integrations/github
+  // deletes the stored OAuth token. So the risk worth testing is a cli-auth
+  // URL that also satisfies that matcher — not a method nothing accepts.
+  // noDb throws on any query, so reaching the disconnect route fails loudly
+  // rather than quietly returning a passing null.
   const shell = fakeShell([]);
   const restore = __setShellRunnerForTests(shell.run);
   try {
-    // Wrong method on a cli-auth path falls through to the rest of the chain.
-    assertEquals(
-      await handleGithubRoutes("/x/integrations/github/cli-auth", "PUT", req("PUT"), "u1", noDb, CORS),
-      null,
-    );
-    // ...and the cli-auth suffix never satisfies the bare /integrations/github
-    // matcher, so no shell command ran and no SQL was attempted.
+    for (const p of [
+      "/x/integrations/github/cli-auth",
+      "/x/integrations/github/cli-auth/login",
+      "/x/integrations/github/cli-auth/logout",
+    ]) {
+      assertEquals(await handleGithubRoutes(p, "DELETE", req("DELETE"), "u1", noDb, CORS), null);
+    }
     assertEquals(shell.commands.length, 0);
   } finally {
     restore();
   }
+});
+
+Deno.test("the OAuth disconnect route still matches its own path", async () => {
+  // Keeps the test above from passing for the wrong reason: if the DELETE
+  // matcher were deleted outright, every assertion above would still hold.
+  let deleted = false;
+  const sql = async (q: string) => {
+    if (q.includes("DELETE FROM devx.integrations")) { deleted = true; return { rows: [] }; }
+    throw new Error("unexpected query: " + q);
+  };
+  const res = await handleGithubRoutes("/x/integrations/github", "DELETE", req("DELETE"), "u1", sql, CORS);
+  assertEquals(res!.status, 200);
+  assert(deleted);
 });

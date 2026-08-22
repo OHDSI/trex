@@ -836,16 +836,38 @@ export default function SettingsPage() {
                       from the account connection above — authorizing one does not authorize the
                       other, and both are usually wanted.
                     </p>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Unlike the account connection, which is yours alone, this one is shared by
+                      everyone on this deployment: there is a single{" "}
+                      <code className="font-mono text-xs">gh</code> installation, so whoever signs
+                      in last is the account all coder pull requests and pushes are attributed to,
+                      and signing out signs everyone out. A coder that is already running keeps its
+                      old commit identity until it is restarted.
+                    </p>
                   </div>
 
                   {!github.cliChecked ? (
                     <p className="text-sm text-muted-foreground">Checking...</p>
                   ) : !github.cliStatus.installed ? (
                     <div className="space-y-2">
-                      <p className="text-sm text-muted-foreground">
-                        The <code className="font-mono text-xs">gh</code> CLI is not available in
-                        this container, so pull-request tooling will not work here.
-                      </p>
+                      {/* installed:false is also what a broken shell bridge
+                          looks like, so say which one this is. */}
+                      {github.cliStatus.error ? (
+                        <>
+                          <p className="text-sm text-muted-foreground">
+                            Could not check the <code className="font-mono text-xs">gh</code> CLI,
+                            so its state is unknown.
+                          </p>
+                          <p className="text-xs text-destructive break-all">
+                            {github.cliStatus.error}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          The <code className="font-mono text-xs">gh</code> CLI is not available in
+                          this container, so pull-request tooling will not work here.
+                        </p>
+                      )}
                       <Button
                         variant="ghost"
                         size="sm"
@@ -877,31 +899,63 @@ export default function SettingsPage() {
                           Scopes: {github.cliStatus.scopes}
                         </p>
                       )}
+                      {/* A refused sign-out leaves us in this branch, so the
+                          reason has to render here too — the error branch
+                          below is unreachable while still authenticated. */}
+                      {github.cliLogin?.status === "error" && github.cliLogin.message && (
+                        <p className="text-xs text-destructive">{github.cliLogin.message}</p>
+                      )}
                     </div>
                   ) : github.cliLogin?.status === "pending" ? (
                     <div className="space-y-2 text-sm">
-                      <p>Enter this code at GitHub to authorize the CLI:</p>
-                      <div className="flex items-center gap-2">
-                        <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
-                          {github.cliLogin.user_code || "see GitHub"}
-                        </code>
-                        <a
-                          href={github.cliLogin.login_url || "https://github.com/login/device"}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-xs text-primary underline"
-                        >
-                          Open GitHub
-                        </a>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={github.cancelCliAuth}
-                        >
-                          Cancel
-                        </Button>
-                      </div>
+                      {github.cliLogin.user_code ? (
+                        <>
+                          <p>Enter this code at GitHub to authorize the CLI:</p>
+                          <div className="flex items-center gap-2">
+                            <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
+                              {github.cliLogin.user_code}
+                            </code>
+                            <a
+                              href={github.cliLogin.login_url || "https://github.com/login/device"}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-primary underline"
+                            >
+                              Open GitHub
+                            </a>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={github.cancelCliAuth}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        // The URL parsed but the code did not. Sending the user
+                        // to GitHub with a placeholder in the code box would be
+                        // worse than telling them the code is on the far side.
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={github.cliLogin.login_url || "https://github.com/login/device"}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary underline"
+                          >
+                            Open GitHub to authorize the CLI
+                          </a>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={github.cancelCliAuth}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      )}
                       <p className="text-xs text-muted-foreground">
                         Waiting for authorization...
                       </p>

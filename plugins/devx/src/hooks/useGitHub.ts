@@ -46,9 +46,17 @@ export function useGitHub() {
       const s = await api.getGitHubCliAuthStatus();
       setCliStatus(s);
       return s;
-    } catch {
-      setCliStatus(UNKNOWN_CLI_STATUS);
-      return UNKNOWN_CLI_STATUS;
+    } catch (err) {
+      // The route answers 200-with-`error` for a shell layer that threw, so
+      // reaching here means the request itself failed. Either way the caller
+      // must be able to tell "the probe broke" from "gh is missing" — both
+      // arrive as installed:false, so carry the reason instead of dropping it.
+      const failed = {
+        ...UNKNOWN_CLI_STATUS,
+        error: err instanceof Error ? err.message : String(err),
+      };
+      setCliStatus(failed);
+      return failed;
     } finally {
       setCliChecked(true);
     }
@@ -117,8 +125,16 @@ export function useGitHub() {
     stopCliPolling();
     setCliLogin(null);
     try {
-      await api.signOutGitHubCli();
-    } catch { /* report through the refreshed status below */ }
+      const result = await api.signOutGitHubCli();
+      // A refused sign-out leaves the status unchanged, so without this the
+      // block would simply keep saying "Signed in as ..." with no explanation
+      // of why the button did nothing.
+      if (!result.ok) {
+        setCliLogin({ status: "error", message: result.message || "Sign out failed." });
+      }
+    } catch (err) {
+      setCliLogin({ status: "error", message: err instanceof Error ? err.message : String(err) });
+    }
     await refreshCliStatus();
     setCliBusy(false);
   }, [refreshCliStatus, stopCliPolling]);
