@@ -373,6 +373,29 @@ export interface GitHubStatus {
   username?: string;
 }
 
+/**
+ * State of the `gh` CLI installed in the container — separate from
+ * GitHubStatus, which describes the stored OAuth token this service uses for
+ * its own git operations.
+ */
+export interface GitHubCliAuthStatus {
+  installed: boolean;
+  authenticated: boolean;
+  version: string | null;
+  account: string | null;
+  scopes: string | null;
+  error?: string;
+}
+
+export interface GitHubCliAuthLogin {
+  status: "pending" | "already_authenticated" | "not_installed" | "error";
+  login_url?: string | null;
+  user_code?: string | null;
+  account?: string | null;
+  message?: string;
+  output?: string;
+}
+
 export interface GitHubDeviceCode {
   device_code: string;
   user_code: string;

@@ -8,6 +8,7 @@ import {
   Plug,
   Github,
   GitBranch,
+  Terminal,
   Check,
   Copy,
   X,
@@ -756,60 +757,227 @@ export default function SettingsPage() {
               <FigmaSection />
               <Separator />
 
-              {/* GitHub */}
-              <div className="space-y-3">
+              {/* GitHub — two independent credentials, see the copy below */}
+              <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <Github className="h-4 w-4" />
                   <Label className="text-base">GitHub</Label>
                 </div>
-                {github.status.connected ? (
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground flex items-center gap-1.5">
-                      <Check className="h-3.5 w-3.5 text-green-500" />
-                      Connected as {github.status.username}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 text-xs"
-                      onClick={github.disconnect}
-                    >
-                      Disconnect
-                    </Button>
+
+                <div className="space-y-3">
+                  <div>
+                    <Label className="text-sm">Account connection</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Authorizes devx itself to clone, pull and push your repositories and to
+                      create a repo for an app. The token is stored encrypted in this deployment.
+                    </p>
                   </div>
-                ) : github.deviceCode ? (
-                  <div className="space-y-2 text-sm">
-                    <p>Enter this code at GitHub:</p>
-                    <div className="flex items-center gap-2">
-                      <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
-                        {github.deviceCode.user_code}
-                      </code>
-                      <a
-                        href={github.deviceCode.verification_uri}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs text-primary underline"
+                  {github.status.connected ? (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground flex items-center gap-1.5">
+                        <Check className="h-3.5 w-3.5 text-green-500" />
+                        Connected as {github.status.username}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={github.disconnect}
                       >
-                        Open GitHub
-                      </a>
+                        Disconnect
+                      </Button>
                     </div>
-                    {github.polling && (
+                  ) : github.deviceCode ? (
+                    <div className="space-y-2 text-sm">
+                      <p>Enter this code at GitHub:</p>
+                      <div className="flex items-center gap-2">
+                        <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
+                          {github.deviceCode.user_code}
+                        </code>
+                        <a
+                          href={github.deviceCode.verification_uri}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-primary underline"
+                        >
+                          Open GitHub
+                        </a>
+                      </div>
+                      {github.polling && (
+                        <p className="text-xs text-muted-foreground">
+                          Waiting for authorization...
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={github.startDeviceFlow}
+                    >
+                      <Github className="h-3.5 w-3.5" />
+                      Connect GitHub
+                    </Button>
+                  )}
+                </div>
+
+                {/* The container's `gh` binary — a different credential store
+                    (~/.config/gh) from the account connection above. */}
+                <div className="space-y-3 pt-1">
+                  <div>
+                    <Label className="text-sm">
+                      Command line (<code className="font-mono text-xs">gh</code>)
+                    </Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Signs in the GitHub CLI installed in this container. The coder shells out
+                      to it to open pull requests and read review threads, and derives the commit
+                      identity for the branches it pushes from it. This is a separate credential
+                      from the account connection above — authorizing one does not authorize the
+                      other, and both are usually wanted.
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Unlike the account connection, which is yours alone, this one is shared by
+                      everyone on this deployment: there is a single{" "}
+                      <code className="font-mono text-xs">gh</code> installation, so whoever signs
+                      in last is the account all coder pull requests and pushes are attributed to,
+                      and signing out signs everyone out. A coder that is already running keeps its
+                      old commit identity until it is restarted.
+                    </p>
+                  </div>
+
+                  {!github.cliChecked ? (
+                    <p className="text-sm text-muted-foreground">Checking...</p>
+                  ) : !github.cliStatus.installed ? (
+                    <div className="space-y-2">
+                      {/* installed:false is also what a broken shell bridge
+                          looks like, so say which one this is. */}
+                      {github.cliStatus.error ? (
+                        <>
+                          <p className="text-sm text-muted-foreground">
+                            Could not check the <code className="font-mono text-xs">gh</code> CLI,
+                            so its state is unknown.
+                          </p>
+                          <p className="text-xs text-destructive break-all">
+                            {github.cliStatus.error}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          The <code className="font-mono text-xs">gh</code> CLI is not available in
+                          this container, so pull-request tooling will not work here.
+                        </p>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={github.refreshCliStatus}
+                      >
+                        Check again
+                      </Button>
+                    </div>
+                  ) : github.cliStatus.authenticated ? (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-muted-foreground flex items-center gap-1.5">
+                          <Check className="h-3.5 w-3.5 text-green-500" />
+                          Signed in as {github.cliStatus.account || "an unknown account"}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs"
+                          disabled={github.cliBusy}
+                          onClick={github.signOutCli}
+                        >
+                          Sign out
+                        </Button>
+                      </div>
+                      {github.cliStatus.scopes && (
+                        <p className="text-xs text-muted-foreground">
+                          Scopes: {github.cliStatus.scopes}
+                        </p>
+                      )}
+                      {/* A refused sign-out leaves us in this branch, so the
+                          reason has to render here too — the error branch
+                          below is unreachable while still authenticated. */}
+                      {github.cliLogin?.status === "error" && github.cliLogin.message && (
+                        <p className="text-xs text-destructive">{github.cliLogin.message}</p>
+                      )}
+                    </div>
+                  ) : github.cliLogin?.status === "pending" ? (
+                    <div className="space-y-2 text-sm">
+                      {github.cliLogin.user_code ? (
+                        <>
+                          <p>Enter this code at GitHub to authorize the CLI:</p>
+                          <div className="flex items-center gap-2">
+                            <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
+                              {github.cliLogin.user_code}
+                            </code>
+                            <a
+                              href={github.cliLogin.login_url || "https://github.com/login/device"}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-primary underline"
+                            >
+                              Open GitHub
+                            </a>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={github.cancelCliAuth}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        // The URL parsed but the code did not. Sending the user
+                        // to GitHub with a placeholder in the code box would be
+                        // worse than telling them the code is on the far side.
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={github.cliLogin.login_url || "https://github.com/login/device"}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary underline"
+                          >
+                            Open GitHub to authorize the CLI
+                          </a>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={github.cancelCliAuth}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      )}
                       <p className="text-xs text-muted-foreground">
                         Waiting for authorization...
                       </p>
-                    )}
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1.5"
-                    onClick={github.startDeviceFlow}
-                  >
-                    <Github className="h-3.5 w-3.5" />
-                    Connect GitHub
-                  </Button>
-                )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {github.cliLogin?.message && (
+                        <p className="text-xs text-destructive">{github.cliLogin.message}</p>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={github.cliBusy}
+                        onClick={github.startCliAuth}
+                      >
+                        <Terminal className="h-3.5 w-3.5" />
+                        {github.cliBusy ? "Starting..." : "Authenticate gh CLI"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <Separator />
