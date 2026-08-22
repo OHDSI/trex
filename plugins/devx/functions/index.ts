@@ -3,7 +3,8 @@ import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
-import { assertProviderConfigEncryptionMigrated, readProviderKey } from "./provider_key.ts";
+import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
+import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -468,21 +469,39 @@ Deno.serve(async (req: Request) => {
           auto_fix_problems: userPrefs.auto_fix_problems ?? false,
         };
       } else {
-        // Legacy fallback
+        // Legacy fallback. devx.settings carries the same encrypted-pair
+        // columns as provider_configs (V16) now — probe and resolve the same
+        // way, not a second, differently-shaped resolution.
+        await assertEncryptionMigrated("settings", sql);
         const legacyResult = await sql(
-          `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+          `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
           [userId],
         );
-        settings = legacyResult.rows[0];
+        const legacyRow = legacyResult.rows[0];
         // No silent model fallback (kept in sync with agent.ts's resolveModel):
         // the former hardcoded anthropic/claude-sonnet default row always died
         // on the api_key check below anyway — error explicitly instead.
-        if (!settings) {
+        if (!legacyRow) {
           return Response.json(
             { error: "No provider configured. Please set up your provider in Settings." },
             { status: 400, headers: corsHeaders },
           );
         }
+        let resolvedLegacyApiKey;
+        try {
+          resolvedLegacyApiKey = await readProviderKey(legacyRow);
+        } catch (err) {
+          console.error("[devx] settings key read failed for chat stream:", err instanceof Error ? err.message : err);
+          const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+          return Response.json(
+            { error: classified.safe, code: classified.code },
+            { status: 401, headers: corsHeaders },
+          );
+        }
+        // Ciphertext has no business riding along into the engine settings
+        // object — destructure it out rather than spreading it through.
+        const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+        settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
       }
 
       // Rows naming the removed Copilot engine are still in the database (the
@@ -1070,10 +1089,31 @@ Deno.serve(async (req: Request) => {
           auto_fix_problems: agentPrefs.auto_fix_problems ?? false,
         };
       } else {
-        agentSettings = (await sql(
-          `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+        // Legacy fallback, same resolve-don't-leak posture as the
+        // provider_configs branch above (devx.settings carries the same
+        // encrypted-pair columns as of V16).
+        await assertEncryptionMigrated("settings", sql);
+        const legacyRow = (await sql(
+          `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
           [userId],
         )).rows[0];
+        if (legacyRow) {
+          let resolvedLegacyApiKey;
+          try {
+            resolvedLegacyApiKey = await readProviderKey(legacyRow);
+          } catch (err) {
+            console.error("[devx] settings key read failed for agent run:", err instanceof Error ? err.message : err);
+            const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+            return Response.json(
+              { error: classified.safe, code: classified.code },
+              { status: 401, headers: corsHeaders },
+            );
+          }
+          const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+          agentSettings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
+        } else {
+          agentSettings = undefined;
+        }
       }
       // Removed-engine rows are rejected on the provider name here too — see
       // the /stream read site's comment for why the key gate below is not
@@ -1310,8 +1350,11 @@ Deno.serve(async (req: Request) => {
 
     // GET /settings
     if (path.endsWith("/settings") && method === "GET") {
+      // Probe before selecting the encrypted columns — see provider_key.ts's
+      // assertEncryptionMigrated header comment.
+      await assertEncryptionMigrated("settings", sql);
       const result = await sql(
-        `SELECT id, user_id, provider, model, api_key, base_url, ai_rules,
+        `SELECT id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules,
                 auto_approve, max_steps, max_tool_steps, auto_fix_problems,
                 loop, git_author_name, git_author_email, created_at, updated_at
          FROM devx.settings WHERE user_id = $1`,
@@ -1320,29 +1363,80 @@ Deno.serve(async (req: Request) => {
       if (result.rows.length === 0) {
         return Response.json(null, { headers: corsHeaders });
       }
+      const row = result.rows[0];
+      // Resolve through the encryption helper before masking/auth_shape —
+      // once a row is encrypted the plaintext api_key column alone is NULL,
+      // so deriving those straight from SQL would silently show "no key" for
+      // a row that has one (auth_shape "iam" gates the bedrock legacy-loop
+      // fallback in useEffectiveLoop.ts, so this isn't just cosmetic). Unlike
+      // the coder-turn read sites above, a row this can't decrypt must not
+      // take down the whole Settings page — degrade to "unknown" and log,
+      // same posture as GET /provider-configs' resolveForDisplay.
+      // Captured before the columns are stripped below — tells the client
+      // whether this row's credential still sits in the legacy plaintext
+      // column, so the Settings page can offer the encrypt-existing backfill
+      // to a user whose ONLY plaintext key is here (they have no
+      // provider_configs row to raise the flag for them). Exposes no key
+      // material itself.
+      const settingsIsPlaintext = row.api_key != null && row.api_key_encrypted == null;
+      let resolvedApiKey: string | null;
+      // "ok" vs "undecryptable" — a decrypt failure and "no key configured"
+      // both end up as api_key null / auth_shape "none", which are very
+      // different claims: one means nothing was ever set, the other means a
+      // credential exists that this server currently cannot open (rotated or
+      // missing DEVX_ENCRYPTION_KEY). Same signal GET /provider-configs
+      // returns, so the page can say which one it is instead of showing a
+      // configured user "not configured".
+      let keyStatus: "ok" | "undecryptable" = "ok";
+      try {
+        resolvedApiKey = await readProviderKey(row);
+      } catch (err) {
+        console.error("[devx] settings key read failed for GET /settings display:", err instanceof Error ? err.message : err);
+        resolvedApiKey = null;
+        keyStatus = "undecryptable";
+      }
+      delete row.api_key_encrypted;
+      delete row.api_key_iv;
       // Mask API key. auth_shape is a derived, NON-SECRET hint (bearer/iam/
       // plain/none) computed from the raw key BEFORE masking — the masked
       // api_key is never valid JSON, so a client cannot derive the shape
       // itself (useEffectiveLoop.ts gates bedrock-IAM users onto the legacy
       // loop with it; see functions/auth_shape.ts).
-      const row = result.rows[0];
-      row.auth_shape = deriveAuthShape(row.api_key);
-      if (row.api_key) {
-        row.api_key = row.api_key.substring(0, 8) + "..." + row.api_key.slice(-4);
-      }
+      row.auth_shape = deriveAuthShape(resolvedApiKey);
+      row.api_key = maskKey(resolvedApiKey);
+      row.key_status = keyStatus;
+      row.is_plaintext = settingsIsPlaintext;
       return Response.json(row, { headers: corsHeaders });
     }
 
     // PUT /settings
     if (path.endsWith("/settings") && method === "PUT") {
+      // Probe before the INSERT below, which always references the
+      // encrypted columns regardless of whether this request updates them —
+      // see provider_key.ts's assertEncryptionMigrated header comment.
+      await assertEncryptionMigrated("settings", sql);
       const body = await req.json();
       // Enforce max length on ai_rules to prevent context flooding
       if (body.ai_rules && body.ai_rules.length > 4000) {
         return Response.json({ error: "AI rules must be under 4000 characters" }, { status: 400, headers: corsHeaders });
       }
-      // Distinguish between "not provided" (undefined) and "explicitly cleared" (empty string)
-      const apiKey = body.api_key === undefined ? undefined : (body.api_key || null);
-      const hasApiKeyUpdate = body.api_key !== undefined;
+      // Everything this route decides about the three key columns lives in
+      // settingsKeyWriteDecision (api_key_mask.ts), where it is unit-tested:
+      // which payloads count as "not an update" (a field that wasn't sent, an
+      // empty string, the mask this row's key is displayed as, a re-packed
+      // empty credential blob), which count as an explicit clear (JSON null,
+      // and only that), and which are a real credential. GET /settings hands
+      // clients a mask — or a null when the stored key can't be read — so a
+      // client that echoes its loaded form back on save posts one of those
+      // non-credentials here, and with encryption configured we would
+      // faithfully store it over the real key. The current Settings page sends
+      // no api_key at all; bundles already cached in browsers do, which is why
+      // this decision is made server-side.
+      const keyWrite = await settingsKeyWriteDecision(body.api_key, sql, userId);
+      if (keyWrite.reason) {
+        console.warn(`[devx] PUT /settings: ignoring the api_key it was sent because ${keyWrite.reason} — keeping the stored credential`);
+      }
+      const hasApiKeyUpdate = keyWrite.apply;
       // task-u1 (V11__loop_flag.sql): same "only touch it if the caller
       // actually sent it" posture as api_key above. SettingsPage.tsx now
       // sends `loop` on every save, but any OTHER caller of this endpoint
@@ -1363,13 +1457,25 @@ Deno.serve(async (req: Request) => {
       if (hasGitEmailUpdate && body.git_author_email && !/^[^\s@]+@[^\s@]+$/.test(String(body.git_author_email))) {
         return Response.json({ error: "git author email must be a valid email address" }, { status: 400, headers: corsHeaders });
       }
+      // All three key columns are written together, only when the decision
+      // above says to (hasApiKeyUpdate) — a save that leaves the key alone
+      // (an omitted field, an echoed non-credential, flipping auto_approve)
+      // must leave the existing credential, encrypted or plaintext, completely
+      // untouched rather than nulling it. When hasApiKeyUpdate is false this
+      // still needs a value for the plain INSERT-new-row branch:
+      // writeProviderKeyFields(null) yields an all-null triple, so a brand new
+      // row is unaffected — and a declined payload is never even encrypted
+      // into the VALUES list.
+      const keyFields = await writeProviderKeyFields(keyWrite.apply ? keyWrite.plaintext : null);
       const result = await sql(
-        `INSERT INTO devx.settings (user_id, provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'legacy'), $12, $13)
+        `INSERT INTO devx.settings (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, 'legacy'), $14, $15)
          ON CONFLICT (user_id) DO UPDATE SET
            provider = EXCLUDED.provider,
            model = EXCLUDED.model,
            api_key = ${hasApiKeyUpdate ? "EXCLUDED.api_key" : "devx.settings.api_key"},
+           api_key_encrypted = ${hasApiKeyUpdate ? "EXCLUDED.api_key_encrypted" : "devx.settings.api_key_encrypted"},
+           api_key_iv = ${hasApiKeyUpdate ? "EXCLUDED.api_key_iv" : "devx.settings.api_key_iv"},
            base_url = EXCLUDED.base_url,
            ai_rules = EXCLUDED.ai_rules,
            auto_approve = EXCLUDED.auto_approve,
@@ -1381,7 +1487,7 @@ Deno.serve(async (req: Request) => {
            git_author_email = ${hasGitEmailUpdate ? "EXCLUDED.git_author_email" : "devx.settings.git_author_email"},
            updated_at = NOW()
          RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email, created_at, updated_at`,
-        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? DEFAULT_MAX_STEPS, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
+        [userId, body.provider, body.model, keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? DEFAULT_MAX_STEPS, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
       );
       // Re-sync existing repos so a changed identity takes effect immediately.
       if (hasGitNameUpdate || hasGitEmailUpdate) {

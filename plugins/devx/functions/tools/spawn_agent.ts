@@ -5,7 +5,7 @@
  */
 
 import type { ToolDefinition } from "./types.ts";
-import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
+import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;
@@ -108,7 +108,22 @@ export const spawnAgentTool: ToolDefinition<{
         const { api_key_encrypted: _spawnEnc, api_key_iv: _spawnIv, ...activePCNoCiphertext } = activePC.rows[0];
         settings = { ...activePCNoCiphertext, api_key: resolvedApiKey, ...(prefsResult.rows[0] || {}) };
       } else {
-        settings = (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
+        // Legacy fallback. devx.settings carries the same encrypted-pair
+        // columns as provider_configs (V16) now — resolved through
+        // readProviderKey below, the same shape as the activePC branch
+        // above, not a second, differently-shaped resolution.
+        await assertEncryptionMigrated("settings", ctx.sql);
+        const legacyRow = (await ctx.sql(
+          `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`,
+          [ctx.userId],
+        )).rows[0];
+        if (legacyRow) {
+          const resolvedLegacyApiKey = await readProviderKey(legacyRow);
+          const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+          settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
+        } else {
+          settings = {};
+        }
       }
 
       // This tool re-reads the active provider row itself rather than reusing

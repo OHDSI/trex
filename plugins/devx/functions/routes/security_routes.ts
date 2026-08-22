@@ -8,7 +8,7 @@ import { DESIGN_REVIEW_SYSTEM_PROMPT, parseDesignFindings } from "../design_revi
 import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_update_prompt.ts";
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
-import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
+import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
 import { classifyCoderError } from "../error_codes.ts";
 
 const EXCLUDED_DIRS = new Set([
@@ -148,18 +148,61 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     const providerRow = activePC.rows[0];
     const prefs = prefsResult.rows[0] || {};
 
+    // Assigned by exactly one of the two branches below and read after them.
+    let settings;
     if (!providerRow) {
-      // Legacy fallback
+      // Legacy fallback. devx.settings carries the same encrypted-pair
+      // columns as provider_configs (V16) now — resolved through
+      // readProviderKey below, the same shape as the providerRow branch,
+      // not a second, differently-shaped resolution.
+      await assertEncryptionMigrated("settings", sql);
       const legacyResult = await sql(
-        `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1 LIMIT 1`,
+        `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1 LIMIT 1`,
         [userId],
       );
-      if (legacyResult.rows.length === 0 || !legacyResult.rows[0].api_key) {
+      const legacyRow = legacyResult.rows[0];
+      if (!legacyRow) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
         );
       }
+      let resolvedLegacyApiKey;
+      try {
+        resolvedLegacyApiKey = await readProviderKey(legacyRow);
+      } catch (err) {
+        console.error("[devx] settings key read failed for agent review:", err instanceof Error ? err.message : err);
+        const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+        return Response.json(
+          { error: classified.safe, code: classified.code },
+          { status: 401, headers: corsHeaders },
+        );
+      }
+      // Removed-engine rows are rejected on the provider NAME, ahead of the key
+      // gate, exactly as in the providerRow branch below. The legacy row needs
+      // its own copy because it resolves its provider independently — a
+      // devx.settings row still naming a deleted engine reaches this branch
+      // whenever the user has no active provider_configs row.
+      if (legacyRow.provider === "copilot") {
+        return Response.json(
+          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+      // Only providers that genuinely authenticate without a stored key belong
+      // in this set — see the providerRow branch below for why a removed
+      // engine must never be waived past the key gate.
+      const noKeyProviders = new Set(["claude-code", "bedrock"]);
+      if (!resolvedLegacyApiKey && !noKeyProviders.has(legacyRow.provider)) {
+        return Response.json(
+          { error: "AI provider not configured. Set your API key in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+      // Same "no ciphertext in the settings object" posture as the
+      // providerRow branch below.
+      const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+      settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
     } else {
       // Resolve through the encryption helper before the noKeyProviders check
       // (which must run on the resolved value, same as index.ts) and before
@@ -207,7 +250,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       // that true by destructuring it out rather than spreading the raw row
       // (same fix as index.ts's settings/agentSettings assembly).
       const { api_key_encrypted: _providerRowEnc, api_key_iv: _providerRowIv, ...providerRowNoCiphertext } = providerRow;
-      var settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
+      settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
     }
 
     // Fetch previous review for context

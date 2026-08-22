@@ -42,8 +42,23 @@ export interface DevxSettings {
   user_id: string;
   provider: string;
   model: string;
+  // MASKED by GET /settings (first 8 + "..." + last 4) — never a usable
+  // credential, so it must never be posted back on PUT /settings as though
+  // it were one: that stores (and, with encryption configured, permanently
+  // encrypts) the mask over the real key.
   api_key?: string;
   auth_shape?: AuthShape;
+  // Decrypt outcome for this display read, same meaning as
+  // ProviderConfigRecord.key_status below: "undecryptable" means a
+  // credential exists that the server's current DEVX_ENCRYPTION_KEY cannot
+  // open — NOT the same claim as "no key configured", even though both show
+  // api_key null / auth_shape "none". Absent on older server builds.
+  key_status?: "ok" | "undecryptable";
+  // True when this legacy settings row's credential still sits in the
+  // plaintext api_key column. Drives the encrypt-existing backfill offer for
+  // a user whose only plaintext key lives here rather than in a
+  // provider_configs row. Absent on older server builds.
+  is_plaintext?: boolean;
   base_url?: string;
   ai_rules?: string;
   auto_approve?: boolean;

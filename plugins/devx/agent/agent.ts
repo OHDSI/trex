@@ -13,7 +13,7 @@ import type { HookCtx, ModelSpec } from "eve";
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
-import { assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
+import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
 
@@ -65,12 +65,13 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 
   // Fall back to the legacy devx.settings row (backward compat) when the
   // user has no active provider_configs row — functions/index.ts:305-333.
-  // devx.settings was never migrated to encrypted storage, so it carries no
-  // api_key_encrypted/api_key_iv — readProviderKey below treats that as an
-  // ordinary plaintext row, same as it always has.
+  // devx.settings now carries the same encrypted-pair columns as
+  // provider_configs (V16) — resolved through the same readProviderKey call
+  // below, not a second, differently-shaped resolution.
   if (!row) {
+    await assertEncryptionMigrated("settings", ctx.sql);
     const legacyResult = await ctx.sql(
-      `SELECT provider, model, api_key, base_url FROM devx.settings WHERE user_id = $1`,
+      `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.settings WHERE user_id = $1`,
       [userId],
     );
     row = legacyResult.rows[0] as ProviderRow | undefined;

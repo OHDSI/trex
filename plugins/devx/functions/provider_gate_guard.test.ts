@@ -56,7 +56,9 @@ const REMOVAL_MESSAGE =
 // wording change.
 const GATE_SITES: Record<string, number> = {
   [`${ROOT}/functions/index.ts`]: 2,
-  [`${ROOT}/functions/routes/security_routes.ts`]: 1,
+  // Two: the active-provider_configs branch and the legacy devx.settings
+  // fallback each resolve a provider row of their own, so each carries a gate.
+  [`${ROOT}/functions/routes/security_routes.ts`]: 2,
   [`${ROOT}/functions/tools/spawn_agent.ts`]: 1,
 };
 
