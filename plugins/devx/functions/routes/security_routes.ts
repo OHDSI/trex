@@ -178,7 +178,21 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           { status: 401, headers: corsHeaders },
         );
       }
-      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
+      // Removed-engine rows are rejected on the provider NAME, ahead of the key
+      // gate, exactly as in the providerRow branch below. The legacy row needs
+      // its own copy because it resolves its provider independently — a
+      // devx.settings row still naming a deleted engine reaches this branch
+      // whenever the user has no active provider_configs row.
+      if (legacyRow.provider === "copilot") {
+        return Response.json(
+          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+      // Only providers that genuinely authenticate without a stored key belong
+      // in this set — see the providerRow branch below for why a removed
+      // engine must never be waived past the key gate.
+      const noKeyProviders = new Set(["claude-code", "bedrock"]);
       if (!resolvedLegacyApiKey && !noKeyProviders.has(legacyRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
