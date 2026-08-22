@@ -87,25 +87,30 @@ Deno.test("no dispatch path constructs the base prompt directly", async () => {
 // through the agents runner itself; that is out of scope here (see
 // agent.ts's defineAgent call site for the full explanation).
 //
-// What is NOT closed, part 2 (a fifth dispatch path this file cannot see):
-// a self-delegated subagent turn from plugins/devx/agent/agent.ts does not
-// go through buildInstructions/buildCoderContext at all. The `agent`
-// built-in tool (core/server/agents/service/toolset.ts) resolves to a copy
-// of the calling agent when the model omits its `agent` argument — exactly
-// the mode this loop's main coder chat runs in (useAgentsChat.ts sends
-// mode: undefined) — and that nested turn's system prompt is built by
-// runSubagent (toolset.ts:204) via the STATIC buildSystemPrompt(target,
-// ctx.metadata), which never calls resolveInstructions and therefore never
-// reaches agent.ts's buildInstructions hook or buildCoderContext. See
-// agent.ts's defineAgent call site for the full explanation.
+// What was NOT closed, part 2 (a fifth dispatch path this file cannot see),
+// is now closed: a self-delegated subagent turn from
+// plugins/devx/agent/agent.ts DOES go through buildInstructions/
+// buildCoderContext. The `agent` built-in tool (core/server/agents/service/
+// toolset.ts) resolves to a copy of the calling agent when the model omits
+// its `agent` argument — exactly the mode this loop's main coder chat runs
+// in (useAgentsChat.ts sends mode: undefined) — and that nested turn's
+// system prompt is now built by runSubagent via resolveInstructions(target,
+// ctx.metadata, ctx.hookCtx), toolset.ts:204, the same per-request path a
+// top-level turn takes, instead of the old static buildSystemPrompt(target,
+// ctx.metadata), which never called resolveInstructions. See agent.ts's
+// defineAgent call site for what a subagent turn gets as a result (the
+// ai_rules winner, <skills-protocol>, <commit-pr-hygiene>).
 //
-// The ENGINES list two tests up (and the recursive scan below) is NOT
-// evidence this gap doesn't exist: both only read files under plugins/devx,
-// and runSubagent's static prompt assembly lives in
-// core/server/agents/service/toolset.ts — a different package this file
-// never opens. A green run here means "the five known plugins/devx dispatch
-// paths don't hand-roll a base prompt," not "every prompt this loop can
-// produce goes through the shared contract."
+// That fix doesn't retire this paragraph, though: the ENGINES list two
+// tests up (and the recursive scan below) is still not evidence that every
+// prompt this loop can produce goes through the shared contract. Both only
+// read files under plugins/devx, and runSubagent's system-prompt assembly
+// lives in core/server/agents/service/toolset.ts — a different package this
+// file never opens. A green run here means "the five known plugins/devx
+// dispatch paths don't hand-roll a base prompt," never anything about
+// core/. This file would not have caught the subagent gap while it
+// existed, and it cannot catch a regression of it — or any other
+// core/-side divergence — either.
 const ROOT = "plugins/devx";
 const CONSTRUCT_PROMPT_ALLOWED = new Set([
   `${ROOT}/functions/coder_context.ts`,

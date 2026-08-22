@@ -255,13 +255,18 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 //      prompts.ts's D2E_TESTING_BLOCK (part of LOCAL_AGENT_SYSTEM_PROMPT),
 //      the same fix applied for every other UI engine that never had it.
 //   2. `base` — i.e. this exact file's content, unprocessed by this hook —
-//      is verbatim what a SELF-DELEGATED SUBAGENT turn runs on: the `agent`
-//      built-in's runSubagent (core/server/agents/service/toolset.ts:204)
-//      builds its system prompt from the static buildSystemPrompt(target,
-//      ctx.metadata), which never calls resolveInstructions and therefore
-//      never calls this function. See the defineAgent comment below for
-//      why that means self-delegated subagent turns do not get the shared
-//      contract at all.
+//      used to be verbatim what a SELF-DELEGATED SUBAGENT turn ran on: the
+//      `agent` built-in's runSubagent (core/server/agents/service/
+//      toolset.ts) built its system prompt from the static
+//      buildSystemPrompt(target, ctx.metadata) and never called
+//      resolveInstructions, so it never reached this function either. That
+//      gap is closed — runSubagent now resolves through
+//      resolveInstructions(target, ctx.metadata, ctx.hookCtx), toolset.ts:204,
+//      the same per-request path a top-level turn takes, so a
+//      self-delegated (or named) subagent turn reaches buildInstructions
+//      too and its `base` gets discarded here exactly like a top-level
+//      turn's does. See the defineAgent comment below for what a subagent
+//      turn gets instead.
 //
 // askToolAvailable: false — this loop registers no mcp__ask__ask_question
 // tool. eve's ask_question is unimplemented on this runtime altogether (see
@@ -309,36 +314,39 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
   return systemPrompt;
 }
 
-// NOT closed by this file: a self-delegated subagent turn does not get the
-// shared contract above. `agent` (toolset.ts's agentTool, registered
-// unconditionally at depth 0) resolves `target = ctx.agent` — a copy of
-// THIS agent — whenever the model omits the `agent` argument; its tool
-// description literally invites that ("Omit `agent` to delegate to a copy
-// of yourself"). That path is reachable in exactly the mode that matters:
-// useAgentsChat.ts's toAgentMode sends mode: undefined for this loop's main
-// coder chat, and filterTools treats an undefined mode as "no restriction",
-// so the `agent` tool is available there. The resulting nested turn is run
-// by runSubagent (core/server/agents/service/toolset.ts:204), which builds
-// its system prompt from the STATIC buildSystemPrompt(target, ctx.metadata)
-// — agent.instructions + a skills listing + a <context> block — and never
-// calls resolveInstructions, the only function that ever invokes
-// agent.config.buildInstructions (i.e. buildInstructions above). So a
-// self-delegated devx coder subagent runs on raw instructions.md: no
-// ai_rules (project or user), no <commit-pr-hygiene>, no
-// <skills-protocol>, and no cross-repo guard. Fixing this means routing
-// runSubagent through resolveInstructions in core/ — deliberately NOT done
-// here; it is separate work in core/ with its own review, not a
-// plugins/devx change. plugins/devx/functions/prompt_divergence.test.ts's
-// ENGINES-list guard cannot catch this either — see that file's header
-// comment for why. This is the fifth surface a "one coder contract" review
-// has found; treat that count, not this file's list of engines, as the
-// measure of how done the contract actually is.
+// CLOSED: a self-delegated subagent turn now gets the shared contract
+// above. `agent` (toolset.ts's agentTool, registered unconditionally at
+// depth 0) resolves `target = ctx.agent` — a copy of THIS agent — whenever
+// the model omits the `agent` argument; its tool description literally
+// invites that ("Omit `agent` to delegate to a copy of yourself"). That
+// path is reachable in exactly the mode that matters: useAgentsChat.ts's
+// toAgentMode sends mode: undefined for this loop's main coder chat, and
+// filterTools treats an undefined mode as "no restriction", so the `agent`
+// tool is available there. The resulting nested turn is run by runSubagent
+// (core/server/agents/service/toolset.ts), which now builds its system
+// prompt via resolveInstructions(target, ctx.metadata, ctx.hookCtx) — the
+// same per-request resolution path a top-level turn takes — instead of the
+// old static buildSystemPrompt(target, ctx.metadata), which never called
+// resolveInstructions and so never reached agent.config.buildInstructions
+// (i.e. buildInstructions above). So a self-delegated (or explicitly named)
+// devx coder subagent now runs buildInstructions the same way a top-level
+// turn does: the resolved ai_rules winner, <skills-protocol>,
+// <commit-pr-hygiene>, and the cross-repo guard (GENERAL_GUIDELINES_BLOCK,
+// prompts.ts) all reach it. The fix lives entirely in core/ (toolset.ts's
+// runSubagent and resolveInstructions) — nothing in this file changed to
+// close it. plugins/devx/functions/prompt_divergence.test.ts's ENGINES-list
+// guard still cannot take credit for that, and still cannot catch a
+// regression of it: the guard only ever scans plugins/devx, and both
+// runSubagent and resolveInstructions live in
+// core/server/agents/service/toolset.ts, a tree it never opens — see that
+// file's header comment for why a green run there is not evidence either
+// way for this path.
 export default defineAgent({
   // Definition-time, not per-turn: eve's AgentConfig.maxSteps (eve-shim/
   // types.ts) is read once here and consumed by every streamText call that
   // reads agent.config.maxSteps for this agent — runner.ts:118 (top-level
   // session turns), handler.ts:721 (the /chat endpoint), AND
-  // toolset.ts:207 (a self-delegated OR named subagent run via runSubagent,
+  // toolset.ts:213 (a self-delegated OR named subagent run via runSubagent,
   // which reads target.config.maxSteps — the same defineAgent config below
   // when target is a copy of this agent) — not per turn. There is no
   // runtime hook that can override it, so the per-user settings.max_steps
@@ -355,7 +363,7 @@ export default defineAgent({
   //
   // Silent effect on a user's own setting: this went 25 -> 100 (DEFAULT_MAX_
   // STEPS), a 4x jump, for BOTH this loop's top-level turns and every nested
-  // self-delegated/named subagent run (toolset.ts:207 reads the same
+  // self-delegated/named subagent run (toolset.ts:213 reads the same
   // agent.config.maxSteps). A user who deliberately set settings.max_steps
   // to something lower (e.g. 25) to cap spend gets 100 here with no signal
   // that their setting was ignored — devx.settings.max_steps is read and
