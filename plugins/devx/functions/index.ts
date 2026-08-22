@@ -5,7 +5,7 @@ import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
 import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
-import { NO_KEY_PROVIDERS, removedProviderResponse } from "./provider_support.ts";
+import { isNoKeyProvider, removedProviderResponse } from "./provider_support.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -520,13 +520,13 @@ Deno.serve(async (req: Request) => {
       if (removedProviderRejection) return removedProviderRejection;
 
       // Subscription-based and Bedrock providers don't require an API key.
-      // The membership set is shared (provider_support.ts) so this waiver
+      // The membership is shared (provider_support.ts) so this waiver
       // cannot drift between read sites: waiving the key gate for a provider
       // that has no engine behind it lets the row fall through to the
       // OpenAI-compatible branch below, whose client resolves an absent key
       // from the worker's own OPENAI_API_KEY — one user's turn billed to, and
       // authenticated as, the operator.
-      if (!settings.api_key && !NO_KEY_PROVIDERS.has(settings.provider)) {
+      if (!settings.api_key && !isNoKeyProvider(settings.provider)) {
         return Response.json(
           { error: "No API key configured. Please set up your provider in Settings." },
           { status: 400, headers: corsHeaders },
@@ -1117,11 +1117,11 @@ Deno.serve(async (req: Request) => {
       // enough on its own.
       const removedAgentProviderRejection = removedProviderResponse(agentSettings?.provider, corsHeaders);
       if (removedAgentProviderRejection) return removedAgentProviderRejection;
-      // Same membership set as the /stream read site above — only providers
+      // Same shared membership as the /stream read site above — only providers
       // that genuinely authenticate without a stored key belong in it, or the
       // row reaches createModel's OpenAI-compatible fallback on the worker's
       // own credentials.
-      if (!agentSettings || (!agentSettings.api_key && !NO_KEY_PROVIDERS.has(agentSettings.provider))) {
+      if (!agentSettings || (!agentSettings.api_key && !isNoKeyProvider(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
       }
       // Agent-driven runs are autonomous.

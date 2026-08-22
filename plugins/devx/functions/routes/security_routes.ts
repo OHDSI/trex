@@ -9,7 +9,7 @@ import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_upda
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
-import { NO_KEY_PROVIDERS, removedProviderResponse } from "../provider_support.ts";
+import { isNoKeyProvider, removedProviderResponse } from "../provider_support.ts";
 import { classifyCoderError } from "../error_codes.ts";
 
 const EXCLUDED_DIRS = new Set([
@@ -187,9 +187,9 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       const removedLegacyProviderRejection = removedProviderResponse(legacyRow.provider, corsHeaders);
       if (removedLegacyProviderRejection) return removedLegacyProviderRejection;
       // Only providers that genuinely authenticate without a stored key belong
-      // in the shared set — see the providerRow branch below for why a removed
+      // in the shared waiver — see the providerRow branch below for why a removed
       // engine must never be waived past the key gate.
-      if (!resolvedLegacyApiKey && !NO_KEY_PROVIDERS.has(legacyRow.provider)) {
+      if (!resolvedLegacyApiKey && !isNoKeyProvider(legacyRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
@@ -227,12 +227,12 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       const removedProviderRejection = removedProviderResponse(providerRow.provider, corsHeaders);
       if (removedProviderRejection) return removedProviderRejection;
       // Only providers that genuinely authenticate without a stored key belong
-      // in the shared set (provider_support.ts, one definition for every read
-      // site). A provider whose engine no longer exists must NOT be waived:
+      // in the shared waiver (provider_support.ts, one definition for every
+      // read site). A provider whose engine no longer exists must NOT be waived:
       // streamAgentChat's createModel would route it to the OpenAI-compatible
       // client, which resolves an absent key from the worker's own
       // OPENAI_API_KEY.
-      if (!resolvedApiKey && !NO_KEY_PROVIDERS.has(providerRow.provider)) {
+      if (!resolvedApiKey && !isNoKeyProvider(providerRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },

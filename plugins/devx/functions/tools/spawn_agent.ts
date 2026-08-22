@@ -6,7 +6,7 @@
 
 import type { ToolDefinition } from "./types.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
-import { assertProviderSupported, NO_KEY_PROVIDERS } from "../provider_support.ts";
+import { assertProviderSupported, isNoKeyProvider } from "../provider_support.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;
@@ -143,11 +143,11 @@ export const spawnAgentTool: ToolDefinition<{
       // rather than answering a request, so it takes the throwing wrapper over
       // the same shared predicate the route sites return a 400 from.
       assertProviderSupported(settings.provider);
-      // Then the key gate, same membership set as the three route sites: only
+      // Then the key gate, same shared membership as the three route sites: only
       // providers that genuinely authenticate without a stored key are waived.
       // Also catches the `|| {}` empty-settings case above, which has the same
       // fallthrough.
-      if (!settings.api_key && !NO_KEY_PROVIDERS.has(settings.provider)) {
+      if (!settings.api_key && !isNoKeyProvider(settings.provider)) {
         throw new Error("No provider configured. Please set up your provider in Settings.");
       }
 

@@ -12,83 +12,128 @@
 // (agent/agent.ts) do have real behavioural tests colocated with them, and
 // this file is belt-and-braces for those.
 //
-// What goes wrong when the invariant breaks. The no-key set waives the
+// What goes wrong when the invariant breaks. The no-key waiver skips the
 // "no API key configured" check for providers that genuinely authenticate
-// without a stored key. Put a provider in that set whose engine has been
-// deleted, and the row falls through to createModel's last branch — the
-// OpenAI-compatible client — which resolves an absent apiKey from the
-// worker's own OPENAI_API_KEY. One user's turn then runs on, and is billed
-// to, the operator's account. That is a cross-tenant credential
-// substitution, not a UX gap, which is why it is worth a guard that fails
-// loudly rather than a comment nobody reads.
+// without a stored key. Waive a provider whose engine has been deleted, and
+// the row falls through to createModel's last branch — the OpenAI-compatible
+// client — which resolves an absent apiKey from the worker's own
+// OPENAI_API_KEY. One user's turn then runs on, and is billed to, the
+// operator's account. That is a cross-tenant credential substitution, not a
+// UX gap, which is why it is worth a guard that fails loudly rather than a
+// comment nobody reads.
 //
-// Why the set membership is not enough on its own, and both tests exist.
-// The key check is `!api_key && !NO_KEY_PROVIDERS.has(provider)`. For a
-// removed provider that happens to be keyless it fails closed by accident —
-// but the create-config route accepts any provider string with any api_key, so
-// a row naming a removed engine WITH a key would pass a key check. The gates
+// Why the waiver membership is not enough on its own, and both tests exist.
+// The key check is `!api_key && !isNoKeyProvider(provider)`. For a removed
+// provider that happens to be keyless it fails closed by accident — but the
+// create-config route accepts any provider string with any api_key, so a row
+// naming a removed engine WITH a key would pass a key check. The gates
 // therefore reject on the provider NAME, ahead of the key check. Test 1 keeps
-// the removed provider out of the waiver set; test 2 keeps the name-based
-// gates from being deleted, and keeps them ahead of the key check. Neither
-// implies the other.
+// the removed provider out of the waiver; test 2 keeps the name-based gates
+// from being deleted, keeps them wired, keeps the wording they ask for, and
+// keeps them ahead of a key check that still exists. Neither implies the
+// other.
 //
-// What changed when the gate was made shared. The gate and the waiver set now
-// have one definition, in provider_support.ts, and the read sites call into
-// it. That moves two things out of this file's reach and into ordinary unit
-// coverage: the rejection's wording and status are asserted behaviourally
-// against the shared helpers (routes/security_routes.test.ts,
-// tools/spawn_agent.test.ts, ../agent/lib/resolve_model.test.ts), so this file
-// no longer greps for the sentence. What is still only reachable here is
-// structural and is what the two tests below assert: every read site still
-// CALLS the gate, each call is still WIRED to a rejection rather than
-// evaluated and dropped, each call still runs AHEAD of that site's key check,
-// and no waiver set — shared or freshly copied — names a removed provider.
+// What changed when the gate was made shared, and what this file had to take
+// on as a result. The gate and the waiver now have one definition, in
+// provider_support.ts, and the read sites call into it. The rejection's
+// wording is therefore no longer visible at the call sites, so this file can
+// no longer grep for the sentence — provider_support.test.ts pins the two
+// endings by value instead, and the colocated behavioural tests
+// (routes/security_routes.test.ts, tools/spawn_agent.test.ts,
+// ../agent/lib/resolve_model.test.ts) pin them end-to-end for four of the six
+// sites. What remains reachable only here is structural, and is what test 2
+// asserts, one property per mutation it is meant to survive:
+//   - every read site still CALLS the gate (a deleted gate);
+//   - each call is WIRED to a rejection rather than evaluated and dropped
+//     (a `Response` returned into the void, which nothing notices at runtime);
+//   - each call asks for the message STYLE that site is supposed to produce —
+//     index.ts has no behavioural coverage at all, so without this a one-word
+//     argument change would silently reword the 400 on the busiest route;
+//   - each call runs AHEAD of that site's key check, and that site still HAS
+//     the expected number of key checks — otherwise deleting the key checks
+//     would delete the ordering assertion along with them.
 //
 // The merge hazard this is really here for: an in-flight branch that predates
-// the removal can carry the old inline gate or the old three-element set and
-// touch disjoint lines, so git merges it cleanly with no conflict for a human
-// to notice. Whichever side lands second, this test fails.
+// the removal can carry the old inline gate or the old three-element waiver
+// and touch disjoint lines, so git merges it cleanly with no conflict for a
+// human to notice. Whichever side lands second, this test fails.
 import { assertEquals } from "jsr:@std/assert";
-import { NO_KEY_PROVIDERS, REMOVED_PROVIDERS } from "./provider_support.ts";
+import { isNoKeyProvider, REMOVED_PROVIDER_NAMES } from "./provider_support.ts";
 
 const ROOT = "plugins/devx";
 
-// The module the gate and the waiver set now live in. Read sites must import
-// from here rather than re-declaring either.
+// The module the gate and the waiver now live in. Read sites must import from
+// here rather than re-declaring either.
 const SHARED_MODULE = "provider_support.ts";
 
-// The two shapes the shared gate is called in. Four sites answer an HTTP
-// request and take the Response-returning wrapper; two fail a turn (a tool,
-// and the agents loop) and take the throwing one. Both wrap the same
-// predicate — the split is about the call site's contract, not about two
-// gates.
+// The two shapes the shared gate is called in, and how many arguments each
+// takes before an optional message style. Four sites answer an HTTP request
+// and take the Response-returning wrapper; two fail a turn (a tool, and the
+// agents loop) and take the throwing one. Both wrap the same predicate — the
+// split is about the call site's contract, not about two gates.
 const RESPONSE_GATE = "removedProviderResponse";
 const THROW_GATE = "assertProviderSupported";
+const GATE_BASE_ARGS: Record<string, number> = {
+  [RESPONSE_GATE]: 2, // (provider, corsHeaders)
+  [THROW_GATE]: 1, // (provider)
+};
 
-// Files carrying a name-based gate today, how many each carries, and which
-// wrapper they call. A site that starts reading a provider row is added here;
-// a site that stops reading one is removed. A site that keeps reading one and
-// drops its gate is the failure this test exists to catch.
-const GATE_SITES: Record<string, { calls: number; gate: string }> = {
+// `plugin` is the default, so it is spelled by OMITTING the style argument;
+// any other style must be passed explicitly. Pinning this is what stops a
+// site's user-visible wording from being changed by a one-word edit.
+const DEFAULT_STYLE = "plugin";
+
+// Files carrying a name-based gate today: how many gate calls each carries,
+// which wrapper they call, which message style each asks for, and how many key
+// checks sit alongside. A site that starts reading a provider row is added
+// here; a site that stops reading one is removed. A site that keeps reading
+// one and drops, unwires, rewords, or reorders its gate is the failure this
+// test exists to catch.
+interface GateSite {
+  calls: number;
+  gate: string;
+  style: string;
+  keyChecks: number;
+}
+
+const GATE_SITES: Record<string, GateSite> = {
   // Two: POST /chats/:id/stream and the agent/plan run stream each resolve a
-  // provider row of their own, so each carries a gate.
-  [`${ROOT}/functions/index.ts`]: { calls: 2, gate: RESPONSE_GATE },
+  // provider row of their own, so each carries a gate and a key check.
+  [`${ROOT}/functions/index.ts`]: { calls: 2, gate: RESPONSE_GATE, style: "plugin", keyChecks: 2 },
   // Two: the active-provider_configs branch and the legacy devx.settings
   // fallback each resolve a provider row of their own, so each carries a gate.
-  [`${ROOT}/functions/routes/security_routes.ts`]: { calls: 2, gate: RESPONSE_GATE },
-  [`${ROOT}/functions/tools/spawn_agent.ts`]: { calls: 1, gate: THROW_GATE },
+  [`${ROOT}/functions/routes/security_routes.ts`]: {
+    calls: 2,
+    gate: RESPONSE_GATE,
+    style: "plugin",
+    keyChecks: 2,
+  },
+  [`${ROOT}/functions/tools/spawn_agent.ts`]: {
+    calls: 1,
+    gate: THROW_GATE,
+    style: "plugin",
+    keyChecks: 1,
+  },
   // The agents-loop equivalent. It was outside this list while the gate was
   // copy-pasted, because its wording differs (it surfaces through a
   // plugin-agnostic runtime) and asserting the sentence here would have meant
-  // two places to edit for one wording change. Counting gate CALLS rather than
-  // sentences removes that objection, so it is covered here now too.
-  [`${ROOT}/agent/agent.ts`]: { calls: 1, gate: THROW_GATE },
+  // two places to edit for one wording change. Pinning the style ARGUMENT
+  // rather than the sentence removes that objection, so it is covered here
+  // now too — including the fact that its wording is the host-agnostic one.
+  // It resolves a model rather than serving a request and has no key check of
+  // its own, hence zero.
+  [`${ROOT}/agent/agent.ts`]: {
+    calls: 1,
+    gate: THROW_GATE,
+    style: "hostAgnostic",
+    keyChecks: 0,
+  },
 };
 
 // Where the key check happens at a read site. Deliberately matches the USE of
-// the shared set, not its import, so the ordering check below compares gates
-// against key checks rather than against an import line.
-const KEY_CHECK = /NO_KEY_PROVIDERS\.has\(/g;
+// the shared predicate, not its import, so the ordering check below compares
+// gates against key checks rather than against an import line.
+const KEY_CHECK = /\bisNoKeyProvider\(/g;
 
 async function collectTsFiles(dir: string): Promise<string[]> {
   const out: string[] = [];
@@ -109,19 +154,68 @@ async function collectTsFiles(dir: string): Promise<string[]> {
 }
 
 // Matches a waiver set literal wherever it is declared, under either naming
-// convention and with or without a type annotation: the shared
-// NO_KEY_PROVIDERS, and equally a `noKeyProviders` copy reintroduced in a file
-// that does not exist yet — the whole point of scanning the tree rather than
-// only asserting the shared set.
+// convention and with or without a type annotation: the shared module's
+// private NO_KEY_PROVIDERS, and equally a `noKeyProviders` copy reintroduced
+// in a file that does not exist yet — the whole point of scanning the tree
+// rather than only asking the shared predicate.
 const WAIVER_SET = /no_?key_?providers\s*(?::[^=\n]*)?=\s*new Set\(\s*\[([\s\S]*?)\]\s*\)/gi;
 
-Deno.test("no API-key waiver set lists a provider whose engine has been removed", async () => {
+// Splits a call's argument list on top-level commas, starting from the index
+// of its opening paren. Quote- and nesting-aware so an argument containing a
+// comma inside a string or a nested call is not miscounted.
+function callArguments(src: string, openParen: number): string[] {
+  const args: string[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let current = "";
+  for (let i = openParen; i < src.length; i++) {
+    const ch = src[i];
+    if (quote) {
+      current += ch;
+      if (ch === "\\") {
+        current += src[++i] ?? "";
+      } else if (ch === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === "`") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "(" || ch === "[" || ch === "{") {
+      depth++;
+      if (depth === 1) continue; // skip the call's own opening paren
+      current += ch;
+      continue;
+    }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      depth--;
+      if (depth === 0) {
+        if (current.trim() !== "") args.push(current.trim());
+        return args;
+      }
+      current += ch;
+      continue;
+    }
+    if (ch === "," && depth === 1) {
+      args.push(current.trim());
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  return args;
+}
+
+Deno.test("no API-key waiver lists a provider whose engine has been removed", async () => {
   const offenders: string[] = [];
 
-  // The shared set first, by value rather than by source text — this is the
-  // one every read site actually consults.
-  for (const provider of REMOVED_PROVIDERS) {
-    if (NO_KEY_PROVIDERS.has(provider)) {
+  // The shared waiver first, through the predicate every read site actually
+  // consults rather than through its source text.
+  for (const provider of REMOVED_PROVIDER_NAMES) {
+    if (isNoKeyProvider(provider)) {
       offenders.push(`${ROOT}/functions/${SHARED_MODULE} (waives "${provider}")`);
     }
   }
@@ -133,7 +227,7 @@ Deno.test("no API-key waiver set lists a provider whose engine has been removed"
     const src = await Deno.readTextFile(path);
     for (const match of src.matchAll(WAIVER_SET)) {
       const contents = match[1];
-      for (const provider of REMOVED_PROVIDERS) {
+      for (const provider of REMOVED_PROVIDER_NAMES) {
         if (contents.includes(`"${provider}"`) || contents.includes(`'${provider}'`)) {
           offenders.push(`${path} (waives "${provider}")`);
         }
@@ -144,11 +238,11 @@ Deno.test("no API-key waiver set lists a provider whose engine has been removed"
   assertEquals(
     offenders,
     [],
-    "an API-key waiver set names a provider with no engine behind it. Such a row has " +
+    "an API-key waiver names a provider with no engine behind it. Such a row has " +
       "no usable credential, so waiving the key check drops it into the " +
       "OpenAI-compatible client, which falls back to the worker's own " +
       "OPENAI_API_KEY — the turn then runs on the operator's account instead of " +
-      "the user's. Remove the provider from the set; the row is rejected by the " +
+      "the user's. Remove the provider from the waiver; the row is rejected by the " +
       "name-based gate above it. If this fired after a merge, the other branch " +
       "predates the engine's removal and reintroduced the old set. Offenders: ",
   );
@@ -157,40 +251,66 @@ Deno.test("no API-key waiver set lists a provider whose engine has been removed"
 Deno.test("every request path that reads a provider row still invokes the shared removed-provider gate", async () => {
   const missing: string[] = [];
 
-  for (const [path, { calls: expected, gate }] of Object.entries(GATE_SITES)) {
+  for (const [path, site] of Object.entries(GATE_SITES)) {
     const src = await Deno.readTextFile(path);
 
     // The gate must come from the shared module. A local re-declaration would
-    // satisfy the call count below while being free to diverge.
-    const importLine = src.match(
-      new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"[^"]*${SHARED_MODULE}"`),
-    );
-    if (!importLine || !importLine[1].includes(gate)) {
-      missing.push(`${path}: does not import ${gate} from ${SHARED_MODULE}`);
+    // satisfy the call count below while being free to diverge. Every import
+    // of the module is inspected, not just the first.
+    const imported = [
+      ...src.matchAll(new RegExp(`import\\s*\\{([^}]*)\\}\\s*from\\s*"[^"]*${SHARED_MODULE}"`, "g")),
+    ]
+      .map((m) => m[1])
+      .join(",");
+    if (!imported.includes(site.gate)) {
+      missing.push(`${path}: does not import ${site.gate} from ${SHARED_MODULE}`);
       continue;
     }
 
-    const gateCalls = [...src.matchAll(new RegExp(`\\b${gate}\\s*\\(`, "g"))];
-    if (gateCalls.length !== expected) {
-      missing.push(`${path}: expected ${expected} gate call(s), found ${gateCalls.length}`);
+    const gateCalls = [...src.matchAll(new RegExp(`\\b${site.gate}\\s*\\(`, "g"))];
+    if (gateCalls.length !== site.calls) {
+      missing.push(`${path}: expected ${site.calls} gate call(s), found ${gateCalls.length}`);
       continue;
+    }
+
+    // Which wording each call asks for. `plugin` is the default and must be
+    // spelled by omission; anything else must name itself. Nothing else covers
+    // this for index.ts, whose two gates have no behavioural test at all.
+    const baseArgs = GATE_BASE_ARGS[site.gate];
+    const expectedArgs = site.style === DEFAULT_STYLE ? baseArgs : baseArgs + 1;
+    for (let i = 0; i < gateCalls.length; i++) {
+      const args = callArguments(src, gateCalls[i].index! + gateCalls[i][0].length - 1);
+      if (args.length !== expectedArgs) {
+        missing.push(
+          `${path}: gate #${i + 1} passes ${args.length} argument(s), expected ${expectedArgs} ` +
+            `for style "${site.style}"`,
+        );
+        continue;
+      }
+      if (site.style !== DEFAULT_STYLE && args[baseArgs] !== `"${site.style}"`) {
+        missing.push(
+          `${path}: gate #${i + 1} asks for style ${args[baseArgs]}, expected "${site.style}"`,
+        );
+      }
     }
 
     // A Response-returning gate that is called and dropped is the same as no
     // gate at all, and unlike the throwing wrapper nothing at runtime notices.
-    // Require each call to be wired straight to a return.
-    if (gate === RESPONSE_GATE) {
+    // Require each call to be wired straight to a return. Whitespace between
+    // the assignment and the guard is free-form so that reformatting cannot
+    // raise a security failure over a line break.
+    if (site.gate === RESPONSE_GATE) {
       const wired = [
         ...src.matchAll(
           new RegExp(
-            `const\\s+(\\w+)\\s*=\\s*${RESPONSE_GATE}\\([^;]*\\);\\s*\\n\\s*if\\s*\\(\\1\\)\\s*return\\s+\\1;`,
+            `const\\s+(\\w+)\\s*=\\s*${RESPONSE_GATE}\\([^;]*\\);\\s*if\\s*\\(\\s*\\1\\s*\\)\\s*(?:return\\s+\\1\\s*;|\\{\\s*return\\s+\\1\\s*;\\s*\\})`,
             "g",
           ),
         ),
       ];
-      if (wired.length !== expected) {
+      if (wired.length !== site.calls) {
         missing.push(
-          `${path}: ${wired.length} of ${expected} gate call(s) return their rejection`,
+          `${path}: ${wired.length} of ${site.calls} gate call(s) return their rejection`,
         );
         continue;
       }
@@ -198,10 +318,16 @@ Deno.test("every request path that reads a provider row still invokes the shared
 
     // Rejecting on the name only helps if it happens BEFORE the key check —
     // that ordering is what makes the guarantee structural rather than an
-    // accident of these rows being keyless. Compare the n-th gate against the
-    // n-th key check; a site with no key check (the agents loop) has no pair
-    // to compare and is skipped by the zip.
+    // accident of these rows being keyless. Count the key checks first:
+    // zipping alone would let the ordering assertion be deleted by deleting
+    // the key checks it compares against.
     const keyChecks = [...src.matchAll(KEY_CHECK)];
+    if (keyChecks.length !== site.keyChecks) {
+      missing.push(
+        `${path}: expected ${site.keyChecks} key check(s), found ${keyChecks.length}`,
+      );
+      continue;
+    }
     for (let i = 0; i < Math.min(gateCalls.length, keyChecks.length); i++) {
       if (gateCalls[i].index! > keyChecks[i].index!) {
         missing.push(`${path}: gate #${i + 1} runs after that read site's key check`);
@@ -213,11 +339,13 @@ Deno.test("every request path that reads a provider row still invokes the shared
     missing,
     [],
     "a request path that resolves a provider row no longer rejects removed providers " +
-      "by name, ahead of the API-key check. That ordering is what makes the " +
-      "guarantee structural: the key check only fails closed for these rows because they " +
-      "happen to be keyless, and the create-config route accepts any provider string with " +
-      "any key, so a removed-engine row WITH a key would pass it and spend that credential " +
-      "against the wrong provider. If a gate moved to a new file, update GATE_SITES; do not " +
-      "delete the gate. Sites: ",
+      "by name, with the wording that site owes its users, ahead of an API-key check that " +
+      "still exists. That ordering is what makes the guarantee structural: the key check " +
+      "only fails closed for these rows because they happen to be keyless, and the " +
+      "create-config route accepts any provider string with any key, so a removed-engine " +
+      "row WITH a key would pass it and spend that credential against the wrong provider. " +
+      "If a gate moved to a new file, update GATE_SITES; do not delete the gate. If the " +
+      "gate is present and correct, the call may use an idiom these patterns do not " +
+      "recognise — widen the pattern rather than dropping the site. Sites: ",
   );
 });
