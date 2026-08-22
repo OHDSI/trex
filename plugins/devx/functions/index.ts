@@ -5,6 +5,7 @@ import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
 import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
+import { NO_KEY_PROVIDERS, removedProviderResponse } from "./provider_support.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -504,32 +505,28 @@ Deno.serve(async (req: Request) => {
         settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
       }
 
-      // Rows naming the removed Copilot engine are still in the database (the
+      // Rows naming a removed engine are still in the database (the
       // provider_configs/settings tables were deliberately left unmigrated).
       // Reject them on the provider NAME, not on the missing key: the key gate
       // below catches today's rows only because the Settings UI happens to
       // write an empty api_key for them, but POST /provider-configs accepts any
-      // provider string with any key, so a copilot row WITH a key would sail
-      // through it into createModel's OpenAI-compatible branch and spend a
-      // GitHub credential as an OpenAI one. Keying on the provider makes the
-      // guarantee structural, matching what agent.ts's resolveModel already
+      // provider string with any key, so such a row WITH a key would sail
+      // through it into createModel's OpenAI-compatible branch and spend one
+      // provider's credential as an OpenAI one. Keying on the provider makes
+      // the guarantee structural, matching what agent.ts's resolveModel already
       // does on the other loop — and says what actually happened, which "No API
-      // key configured" does not.
-      if (settings.provider === "copilot") {
-        return Response.json(
-          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
-          { status: 400, headers: corsHeaders },
-        );
-      }
+      // key configured" does not. See provider_support.ts.
+      const removedProviderRejection = removedProviderResponse(settings.provider, corsHeaders);
+      if (removedProviderRejection) return removedProviderRejection;
 
       // Subscription-based and Bedrock providers don't require an API key.
-      // Nothing else belongs in this set: waiving the key gate for a provider
+      // The membership set is shared (provider_support.ts) so this waiver
+      // cannot drift between read sites: waiving the key gate for a provider
       // that has no engine behind it lets the row fall through to the
       // OpenAI-compatible branch below, whose client resolves an absent key
       // from the worker's own OPENAI_API_KEY — one user's turn billed to, and
       // authenticated as, the operator.
-      const noKeyProviders = new Set(["claude-code", "bedrock"]);
-      if (!settings.api_key && !noKeyProviders.has(settings.provider)) {
+      if (!settings.api_key && !NO_KEY_PROVIDERS.has(settings.provider)) {
         return Response.json(
           { error: "No API key configured. Please set up your provider in Settings." },
           { status: 400, headers: corsHeaders },
@@ -1118,18 +1115,13 @@ Deno.serve(async (req: Request) => {
       // Removed-engine rows are rejected on the provider name here too — see
       // the /stream read site's comment for why the key gate below is not
       // enough on its own.
-      if (agentSettings?.provider === "copilot") {
-        return Response.json(
-          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
-          { status: 400, headers: corsHeaders },
-        );
-      }
-      // Same membership rule as the /stream read site above — only providers
-      // that genuinely authenticate without a stored key belong here, or the
+      const removedAgentProviderRejection = removedProviderResponse(agentSettings?.provider, corsHeaders);
+      if (removedAgentProviderRejection) return removedAgentProviderRejection;
+      // Same membership set as the /stream read site above — only providers
+      // that genuinely authenticate without a stored key belong in it, or the
       // row reaches createModel's OpenAI-compatible fallback on the worker's
       // own credentials.
-      const noKeyProviders = new Set(["claude-code", "bedrock"]);
-      if (!agentSettings || (!agentSettings.api_key && !noKeyProviders.has(agentSettings.provider))) {
+      if (!agentSettings || (!agentSettings.api_key && !NO_KEY_PROVIDERS.has(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
       }
       // Agent-driven runs are autonomous.

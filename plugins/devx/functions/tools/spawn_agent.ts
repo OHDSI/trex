@@ -6,6 +6,7 @@
 
 import type { ToolDefinition } from "./types.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
+import { assertProviderSupported, NO_KEY_PROVIDERS } from "../provider_support.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;
@@ -133,21 +134,20 @@ export const spawnAgentTool: ToolDefinition<{
       // is in flight lands here with a row nothing has vetted. Re-apply both
       // route-layer gates on the row this tool actually resolved.
       //
-      // Copilot first, keyed on the provider name rather than on the missing
-      // key: the engine that used to serve these rows is gone, so without this
-      // the row reaches createModel's final `return openai(model)` — the
-      // OpenAI-compatible client, which resolves an absent key from the
-      // worker's own OPENAI_API_KEY and runs the subagent turn on the
-      // operator's account.
-      if (settings.provider === "copilot") {
-        throw new Error("GitHub Copilot support has been removed — choose another provider in Settings.");
-      }
-      // Then the key gate, same membership rule as the three route sites: only
+      // The removed-engine gate first, keyed on the provider name rather than
+      // on the missing key: the engine that used to serve these rows is gone,
+      // so without this the row reaches createModel's final
+      // `return openai(model)` — the OpenAI-compatible client, which resolves
+      // an absent key from the worker's own OPENAI_API_KEY and runs the
+      // subagent turn on the operator's account. This tool fails the turn
+      // rather than answering a request, so it takes the throwing wrapper over
+      // the same shared predicate the route sites return a 400 from.
+      assertProviderSupported(settings.provider);
+      // Then the key gate, same membership set as the three route sites: only
       // providers that genuinely authenticate without a stored key are waived.
       // Also catches the `|| {}` empty-settings case above, which has the same
       // fallthrough.
-      const noKeyProviders = new Set(["claude-code", "bedrock"]);
-      if (!settings.api_key && !noKeyProviders.has(settings.provider)) {
+      if (!settings.api_key && !NO_KEY_PROVIDERS.has(settings.provider)) {
         throw new Error("No provider configured. Please set up your provider in Settings.");
       }
 

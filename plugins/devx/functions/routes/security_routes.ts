@@ -9,6 +9,7 @@ import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_upda
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
+import { NO_KEY_PROVIDERS, removedProviderResponse } from "../provider_support.ts";
 import { classifyCoderError } from "../error_codes.ts";
 
 const EXCLUDED_DIRS = new Set([
@@ -180,20 +181,15 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       }
       // Removed-engine rows are rejected on the provider NAME, ahead of the key
       // gate, exactly as in the providerRow branch below. The legacy row needs
-      // its own copy because it resolves its provider independently — a
+      // its own gate call because it resolves its provider independently — a
       // devx.settings row still naming a deleted engine reaches this branch
       // whenever the user has no active provider_configs row.
-      if (legacyRow.provider === "copilot") {
-        return Response.json(
-          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
-          { status: 400, headers: corsHeaders },
-        );
-      }
+      const removedLegacyProviderRejection = removedProviderResponse(legacyRow.provider, corsHeaders);
+      if (removedLegacyProviderRejection) return removedLegacyProviderRejection;
       // Only providers that genuinely authenticate without a stored key belong
-      // in this set — see the providerRow branch below for why a removed
+      // in the shared set — see the providerRow branch below for why a removed
       // engine must never be waived past the key gate.
-      const noKeyProviders = new Set(["claude-code", "bedrock"]);
-      if (!resolvedLegacyApiKey && !noKeyProviders.has(legacyRow.provider)) {
+      if (!resolvedLegacyApiKey && !NO_KEY_PROVIDERS.has(legacyRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
@@ -204,7 +200,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
       settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
     } else {
-      // Resolve through the encryption helper before the noKeyProviders check
+      // Resolve through the encryption helper before the no-key check
       // (which must run on the resolved value, same as index.ts) and before
       // `settings` is built — never let the raw api_key_encrypted/api_key_iv
       // columns leak into settings.api_key unresolved, and never swallow a
@@ -227,20 +223,16 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
       }
       // Removed-engine rows are rejected on the provider NAME, ahead of the key
       // gate — see index.ts's /stream read site for why the key gate alone is
-      // not a structural guarantee (a copilot row WITH a key would pass it).
-      if (providerRow.provider === "copilot") {
-        return Response.json(
-          { error: "GitHub Copilot support has been removed — choose another provider in Settings." },
-          { status: 400, headers: corsHeaders },
-        );
-      }
+      // not a structural guarantee (such a row WITH a key would pass it).
+      const removedProviderRejection = removedProviderResponse(providerRow.provider, corsHeaders);
+      if (removedProviderRejection) return removedProviderRejection;
       // Only providers that genuinely authenticate without a stored key belong
-      // in this set (kept in sync with index.ts's two read sites). A provider
-      // whose engine no longer exists must NOT be waived: streamAgentChat's
-      // createModel would route it to the OpenAI-compatible client, which
-      // resolves an absent key from the worker's own OPENAI_API_KEY.
-      const noKeyProviders = new Set(["claude-code", "bedrock"]);
-      if (!resolvedApiKey && !noKeyProviders.has(providerRow.provider)) {
+      // in the shared set (provider_support.ts, one definition for every read
+      // site). A provider whose engine no longer exists must NOT be waived:
+      // streamAgentChat's createModel would route it to the OpenAI-compatible
+      // client, which resolves an absent key from the worker's own
+      // OPENAI_API_KEY.
+      if (!resolvedApiKey && !NO_KEY_PROVIDERS.has(providerRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },

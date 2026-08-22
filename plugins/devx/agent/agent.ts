@@ -14,6 +14,7 @@ import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
+import { assertProviderSupported } from "../functions/provider_support.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
 
@@ -113,17 +114,19 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
     throw new Error("sidecar providers use the legacy endpoint");
   }
 
-  // The GitHub Copilot engine is gone, but stored rows still name it — the
+  // Engines that are gone, but whose stored rows still name them — the
   // provider_configs/settings tables were deliberately left unmigrated. This
-  // arm must stay an explicit throw rather than being deleted: with no arm,
+  // gate must stay an explicit throw rather than being deleted: with no gate,
   // the fallback a few lines down maps every unrecognized provider name onto
-  // `openai`, and a Copilot row carries no api_key, so core's buildModel would
+  // `openai`, and such a row carries no api_key, so core's buildModel would
   // backfill ModelSpec.apiKey from the operator's own OPENAI_API_KEY — one
   // user's turn billed to, and authenticated as, the operator. Fail the turn
   // with something the user can act on instead.
-  if (row.provider === "copilot") {
-    throw new Error("GitHub Copilot support has been removed — choose another provider in devx Settings");
-  }
+  //
+  // The `hostAgnostic` wording is why this passes a style: the message
+  // surfaces through a runtime shared with other plugins, where an
+  // unqualified "Settings" would not tell the user where to go.
+  assertProviderSupported(row.provider, "hostAgnostic");
 
   // anthropic/google/bedrock map straight onto ModelSpec.provider; any other
   // provider name (including self-hosted/OpenAI-compatible endpoints) is the
