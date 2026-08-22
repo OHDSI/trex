@@ -8,6 +8,11 @@
 // Only the WORDS are shared. Each adapter still owns how it sends: its own
 // primitive, its own destination in delivery state, and any platform
 // decoration (Discord prefixes an emoji; the plain-text transports don't).
+//
+// The `eve` adapter (adapters/eve.ts) needs nothing from here and defines no
+// events map at all: its browser client reads the NDJSON event tail directly,
+// so it already receives `message.queued` verbatim and renders it itself.
+// Adding a server-composed line there would duplicate what the client shows.
 
 /**
  * The one-line acknowledgement text, minus any platform decoration.
@@ -22,4 +27,26 @@ export function queuedAckText(deniedPendingGate: boolean): string {
   return deniedPendingGate
     ? "Got it — that's more than a plain yes/no, so I'm treating it as feedback: I closed the pending approval and I'll send this to the coder as the revision."
     : "Got it — queued. I'll get to it right after the current step finishes.";
+}
+
+// The only non-ASCII character in either variant. On SMS it is the difference
+// between one billable segment and three: a single character outside GSM-7
+// forces the whole body into UCS-2, which drops the per-segment budget from 160
+// septets to 70 code units. The denial variant is 152 characters, so UCS-2 bills
+// it as ceil(152/67) = 3 segments; as GSM-7 it is a single segment.
+const EM_DASH = "\u2014";
+
+/**
+ * The same acknowledgement, rendered so every character is ASCII (and within
+ * GSM-7's basic set) by swapping the em dash for a hyphen. Identical copy — this
+ * is an encoding concern, not a wording one.
+ *
+ * For transports that bill per encoding unit. Only twilio.ts uses it; every
+ * other adapter takes `queuedAckText` unchanged, so their strings are
+ * unaffected. `queued-ack.test.ts` pins the ASCII-only property, because the
+ * cost is silently reintroduced by any future copy edit that reaches for a
+ * typographic dash, quote, or ellipsis.
+ */
+export function queuedAckTextGsm7(deniedPendingGate: boolean): string {
+  return queuedAckText(deniedPendingGate).replaceAll(EM_DASH, "-");
 }

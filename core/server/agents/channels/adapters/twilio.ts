@@ -57,7 +57,7 @@ import {
 import { emptyTwilioResponse } from "../vendor/twilio/twiml.ts";
 import { renderTwilioInputRequest } from "../vendor/twilio/hitl.ts";
 import { defaultTwilioAuth } from "../vendor/twilio/defaults.ts";
-import { queuedAckText } from "../queued-ack.ts";
+import { queuedAckTextGsm7 } from "../queued-ack.ts";
 
 // Per-session Twilio routing threaded as the channel session `state` — set on
 // send() and read by the delivery (`events`) handlers so REST replies go back to
@@ -219,12 +219,17 @@ export function twilioChannel(opts: TwilioChannelOptions = {}): ChannelDef {
     // TwiML response: the inbound webhook that queued the message has already
     // been answered by then, so an unsolicited SMS is the only way to reach the
     // sender. Split defensively, like the other outbound bodies here.
+    //
+    // Takes the GSM-7 rendering of the shared copy: same words, but no em dash.
+    // SMS bills per encoding unit, and one non-GSM-7 character forces the whole
+    // body into UCS-2 — which turns the 152-character denial variant from one
+    // billable segment into three.
     // Best-effort: a failed ack never affects the turn that is still running.
     async "message.queued"(data, channelCtx) {
       const state = stateOf(channelCtx);
       if (!state.from) return;
       try {
-        for (const chunk of splitTwilioMessageBody(queuedAckText(data?.deniedPendingGate === true))) {
+        for (const chunk of splitTwilioMessageBody(queuedAckTextGsm7(data?.deniedPendingGate === true))) {
           await sendReply(state, chunk);
         }
       } catch (e) {

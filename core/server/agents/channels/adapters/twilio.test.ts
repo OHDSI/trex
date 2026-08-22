@@ -374,6 +374,13 @@ Deno.test("message.queued names the closed gate when deniedPendingGate is set", 
 
   assertEquals(bodies.length, 1);
   assertEquals(/closed the pending approval|feedback/i.test(bodies[0]), true, `expected the deny-ack wording, got: ${bodies[0]}`);
+  // SMS bills per encoding unit: a single non-GSM-7 character would force the
+  // whole body into UCS-2 and bill this 152-character ack as 3 segments instead
+  // of 1. This is the adapter-level half of the guard — it pins that twilio
+  // actually reaches for the GSM-7 rendering, not just that one exists.
+  const isAscii = (t: string) => [...t].every((c) => (c.codePointAt(0) ?? 0) <= 0x7f);
+  assertEquals(isAscii(bodies[0]), true, `outbound SMS must be ASCII-only, got: ${bodies[0]}`);
+  assertEquals(bodies[0].length <= 160, true, `outbound SMS is ${bodies[0].length} septets — over a single segment`);
 });
 
 Deno.test("message.queued is a no-op without a sender, and swallows a delivery failure", async () => {
