@@ -3,6 +3,7 @@ import type {
   Chat, Message, DevxSettings, ProviderConfigRecord, AgentTodo, ToolCall, ConsentRequest,
   App, DevServerStatus, FileTreeEntry, Problem,
   GitFile, GitCommit, GitBranches, GitWorktree, GitHubStatus, GitHubDeviceCode, GitHubRepo,
+  GitHubCliAuthStatus, GitHubCliAuthLogin,
   McpServer, McpTool, Plan, QuestionnaireRequest, BuildAction,
   SupabaseStatus, SupabaseDeployConfig, SupabaseProject, Deployment, DeployStep,
   SecurityReview,
@@ -525,6 +526,21 @@ export async function getGitHubStatus(): Promise<GitHubStatus> {
 
 export async function disconnectGitHub(): Promise<void> {
   await apiFetch("/integrations/github", { method: "DELETE" });
+}
+
+// GitHub CLI. Not the same credential as the OAuth connection above: these
+// authenticate the `gh` binary inside the container, which the coder's git and
+// pull-request tooling shells out to.
+export async function getGitHubCliAuthStatus(): Promise<GitHubCliAuthStatus> {
+  return apiFetch("/integrations/github/cli-auth");
+}
+
+export async function startGitHubCliAuth(): Promise<GitHubCliAuthLogin> {
+  return apiFetch("/integrations/github/cli-auth/login", { method: "POST" });
+}
+
+export async function signOutGitHubCli(): Promise<{ ok: boolean; message?: string }> {
+  return apiFetch("/integrations/github/cli-auth/logout", { method: "POST" });
 }
 
 // Git commit signing. The private key never crosses this API — generate/import
