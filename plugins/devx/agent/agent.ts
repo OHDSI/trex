@@ -107,7 +107,7 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 
   // The UI routes this one to the legacy /stream endpoint
   // (claude_code_agent.ts) — the eve/agents runtime has no sidecar-process
-  // equivalent (V4 concern per the brief).
+  // equivalent.
   if (row.provider === "claude-code") {
     throw new Error("sidecar providers use the legacy endpoint");
   }
