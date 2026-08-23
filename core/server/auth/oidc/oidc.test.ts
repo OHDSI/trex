@@ -73,6 +73,7 @@ Deno.test("claims carry the role and honour the requested scopes", () => {
     email: "admin@trex.local",
     name: "Admin",
     role: "admin",
+    appRoles: [],
     emailVerified: true,
   };
 
@@ -108,7 +109,7 @@ Deno.test("claims carry the role and honour the requested scopes", () => {
 Deno.test("claims expire and are not issued in the past", () => {
   const now = Math.floor(Date.now() / 1000);
   const claims = buildIdTokenClaims(
-    { id: "u", email: "e@x", role: "user" },
+    { id: "u", email: "e@x", role: "user", appRoles: [] },
     { issuer: "https://i", audience: "a", scopes: ["openid"], ttlSeconds: 60 },
   );
   assertEquals(claims.exp - claims.iat, 60);
@@ -182,12 +183,24 @@ Deno.test("a code issued without a challenge needs no verifier", async () => {
   assertEquals(await verifyPkce({ codeChallenge: null, codeChallengeMethod: null }, undefined), true);
 });
 
-Deno.test("the role is also emitted as a list for relying parties that map one", () => {
+Deno.test("the roles claim carries application roles, not the system role", () => {
   const claims = buildIdTokenClaims(
-    { id: "u", email: "e@x", role: "admin" },
+    { id: "u", email: "e@x", role: "user", appRoles: ["USER_ADMIN", "RESEARCHER.Demo"] },
     { issuer: "https://i", audience: "a", scopes: ["openid"] },
   );
-  assertEquals(claims.roles, ["admin"]);
+  // The system role gates trex's own admin features and is reported separately.
+  assertEquals(claims.trex_role, "user");
+  assertEquals(claims.roles, ["USER_ADMIN", "RESEARCHER.Demo"]);
+});
+
+Deno.test("a user with no application roles gets an empty list, not their system role", () => {
+  const claims = buildIdTokenClaims(
+    { id: "u", email: "e@x", role: "admin", appRoles: [] },
+    { issuer: "https://i", audience: "a", scopes: ["openid"] },
+  );
+  // Leaking the system role here would grant application access to anyone whom
+  // trex happens to consider an administrator.
+  assertEquals(claims.roles, []);
   assertEquals(claims.trex_role, "admin");
 });
 

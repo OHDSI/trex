@@ -52,11 +52,22 @@ async function fetchUser(id: string): Promise<IdTokenUser | null> {
   );
   if (!result.rows.length) return null;
   const row = result.rows[0];
+
+  const roles = await pool.query<{ name: string }>(
+    `SELECT r.name
+       FROM trexdb.user_role ur
+       JOIN trexdb.role r ON r.id = ur."roleId"
+      WHERE ur."userId" = $1
+      ORDER BY r.name`,
+    [id],
+  );
+
   return {
     id: row.id,
     email: row.email,
     name: row.name,
     role: row.role,
+    appRoles: roles.rows.map((r) => r.name),
     emailVerified: Boolean(row.emailVerified),
   };
 }
