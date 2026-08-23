@@ -75,3 +75,16 @@ export async function verifyPkce(
     .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
   return encoded === record.codeChallenge;
 }
+
+/**
+ * Absolute URL to send the browser back to after it has signed in.
+ *
+ * The issuer carries the mount's base path (`https://host/trex`) because every
+ * advertised endpoint is built from it, and Express's `req.originalUrl` carries
+ * that same prefix (`/trex/oidc/authorize?...`). Concatenating the two doubles
+ * it — `/trex/trex/oidc/authorize` — and the return trip 404s, leaving the user
+ * on the login page with no way forward. Only the issuer's origin belongs here.
+ */
+export function buildReturnTo(issuer: string, originalUrl: string): string {
+  return new URL(issuer).origin + originalUrl;
+}

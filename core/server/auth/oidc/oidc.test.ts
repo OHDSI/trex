@@ -1,5 +1,6 @@
 import { assertEquals, assertNotEquals } from "jsr:@std/assert";
 import {
+  buildReturnTo,
   grantedScopes,
   isPublicClient,
   isRegisteredPostLogoutUri,
@@ -238,4 +239,38 @@ Deno.test("a seeded client without a secret is public and falls back to its id f
   assertEquals(spec?.clientSecret, undefined);
   assertEquals(spec?.name, "atlas");
   assertEquals(spec?.postLogoutRedirectUris, []);
+});
+
+Deno.test("return_to keeps the base path exactly once", () => {
+  // The issuer carries the mount prefix and so does originalUrl. Concatenating
+  // them yields /trex/trex/oidc/authorize, which 404s, so the user signs in and
+  // lands nowhere. Regression guard for that doubling.
+  assertEquals(
+    buildReturnTo("https://d2e.example:41100/trex", "/trex/oidc/authorize?client_id=d2e-webapi"),
+    "https://d2e.example:41100/trex/oidc/authorize?client_id=d2e-webapi",
+  );
+});
+
+Deno.test("return_to preserves the query string untouched", () => {
+  // The whole authorization request has to survive the round trip: dropping
+  // code_challenge or state would break PKCE and CSRF protection respectively.
+  const url = "/trex/oidc/authorize?scope=openid&code_challenge=abc&code_challenge_method=S256&state=xyz";
+  assertEquals(
+    buildReturnTo("https://d2e.example:41100/trex", url),
+    `https://d2e.example:41100${url}`,
+  );
+});
+
+Deno.test("return_to ignores any path on the issuer, however deep", () => {
+  assertEquals(
+    buildReturnTo("https://d2e.example:41100/a/b/c", "/a/b/c/oidc/authorize"),
+    "https://d2e.example:41100/a/b/c/oidc/authorize",
+  );
+});
+
+Deno.test("return_to keeps a non-default port and the scheme", () => {
+  assertEquals(
+    buildReturnTo("http://localhost:33001", "/oidc/authorize"),
+    "http://localhost:33001/oidc/authorize",
+  );
 });
