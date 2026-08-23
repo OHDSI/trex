@@ -1,6 +1,7 @@
 // @ts-nocheck - Deno edge function
 import { encryptToken, decryptToken } from "../crypto.ts";
 import { gitOps } from "../git.ts";
+import { runShell, type ShellResult } from "../shell.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
 
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
@@ -51,7 +52,248 @@ export function injectToken(url: string, token: string | null): string {
   return url;
 }
 
+// --- GitHub CLI (`gh`) authentication -------------------------------------
+//
+// Distinct from the OAuth connection above. That one stores a token in
+// devx.integrations and is used by this service's own git push/pull/clone.
+// This one authenticates the `gh` binary installed in the container, whose
+// credential store lives on a volume at ~/.config/gh. The coder sidecar calls
+// `gh auth setup-git` / `gh api user` at boot to get non-interactive push
+// credentials and a commit identity, and the branch/review skills shell out to
+// `gh pr create` and `gh api`. Without this, a freshly provisioned deployment
+// ships an unauthenticated `gh` and those all fail.
+
+// Scopes requested for the CLI token. `repo` is what `gh pr create` and
+// `gh api repos/...` need on private repositories; `read:org` lets those
+// resolve org-owned repos and team reviewers. `gh` unions these with its own
+// minimum set, so the granted token also carries `gist`. Deliberately NOT
+// requested: `workflow` (would let pushes rewrite CI definitions),
+// `delete_repo`, or any `admin:*`.
+export const GH_CLI_SCOPES = "repo,read:org";
+
+// Fixed path — nothing a caller supplies ever reaches a shell command in this
+// module. The launcher unlinks it first, so a stale login process left over
+// from an abandoned attempt keeps writing to the old (now unreferenced) inode
+// instead of interleaving with the new attempt's output.
+const GH_LOGIN_OUTPUT_PATH = "/tmp/.devx-gh-cli-login.out";
+
+// Seconds the login route waits for `gh` to print its code + URL before giving
+// up and reporting whatever it has. The device flow is asynchronous: `gh auth
+// login` keeps running in the background polling GitHub until the user
+// authorizes (or the code expires), so this only bounds the initial handshake.
+const GH_LOGIN_HANDSHAKE_TIMEOUT_SECONDS = 12;
+
+// A `GH_TOKEN`/`GITHUB_TOKEN` in the container environment silently outranks
+// the stored credential: `gh auth status` then exits 0 off the env token
+// alone (so the CLI reports as authenticated when the credential store is
+// empty), and `gh auth login`/`logout` refuse to run at all. devx documents
+// setting GITHUB_TOKEN for other purposes (see functions/d2e/trex_md.ts), so
+// this is a live configuration, not a hypothetical. Blanking both makes every
+// command below act on the credential store these routes actually manage.
+// `gh` treats an empty value as absent.
+const GH_ENV = "GH_TOKEN= GITHUB_TOKEN=";
+
+type ShellRunner = (command: string) => Promise<ShellResult>;
+
+let shellRunner: ShellRunner = runShell;
+
+/**
+ * Swap the shell layer for a fake. The real one needs a live DuckDB instance
+ * with devx-ext loaded, which no unit test has; returns a restore function.
+ */
+export function __setShellRunnerForTests(fn: ShellRunner): () => void {
+  const previous = shellRunner;
+  shellRunner = fn;
+  return () => { shellRunner = previous; };
+}
+
+/** Parse a URL from command output. */
+export function parseLoginUrl(text: string): string | null {
+  const urlMatch = text.match(/https:\/\/[^\s"'<>]+/);
+  return urlMatch ? urlMatch[0] : null;
+}
+
+/** Parse a device code (e.g. ABCD-1234) from command output. */
+export function parseUserCode(text: string): string | null {
+  const codeMatch = text.match(/\b[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/);
+  return codeMatch ? codeMatch[0] : null;
+}
+
+/**
+ * Narrow `gh auth status` output to the active account's block.
+ *
+ * `gh` can hold several accounts for one host and prints a
+ * "Logged in to <host> account <name>" block for each, distinguished only by a
+ * following "Active account: true|false" line. The active one is the
+ * credential every other `gh` invocation will actually use, and it is not
+ * necessarily printed first — so reporting the first block would name an
+ * account whose token nothing uses. Falls back to the whole text for
+ * single-account output, which carries no "Active account" line at all.
+ */
+function activeAccountBlock(text: string): string {
+  const blocks = text.split(/(?=Logged in to )/);
+  return blocks.find((b) => /Active account:\s*true/i.test(b)) || text;
+}
+
+/** Parse the active account from `gh auth status` output. */
+export function parseGhAccount(text: string): string | null {
+  const source = activeAccountBlock(text);
+  const match = source.match(/Logged in to \S+ account (\S+)/i) ||
+    source.match(/Logged in to \S+ as (\S+)/i) ||
+    source.match(/\baccount\s+(\S+)/i);
+  return match ? match[1] : null;
+}
+
+/** Parse the active account's `Token scopes: 'a', 'b'` line. */
+export function parseGhScopes(text: string): string | null {
+  const match = activeAccountBlock(text).match(/Token scopes:\s*(.+)/i);
+  if (!match) return null;
+  return match[1].trim().replace(/['"]/g, "") || null;
+}
+
+/**
+ * The command that starts the device flow. A fixed string — no interpolation
+ * of anything a caller supplies. `gh auth login` blocks until the user
+ * authorizes in a browser, so the whole group is backgrounded with its output
+ * redirected to a file (which also releases the pipe the runner waits on); the
+ * script then waits for the code + URL to appear and prints them.
+ *
+ * `gh auth setup-git` is chained onto a successful login so the credential
+ * helper is installed the moment authorization lands. The coder sidecar runs
+ * it too, but only at its own startup — a sidecar already running when the
+ * user signs in here would otherwise stay without push credentials until it
+ * was restarted.
+ */
+export function buildGhLoginCommand(): string {
+  return [
+    `rm -f ${GH_LOGIN_OUTPUT_PATH}`,
+    // The env prefix is repeated on both commands rather than exported once:
+    // an `&&`-chained command does not inherit the assignments of the one
+    // before it, and setup-git must ignore the env token too.
+    `{ ${GH_ENV} BROWSER=false DISPLAY= NO_COLOR=1 GH_PROMPT_DISABLED=1 GH_NO_UPDATE_NOTIFIER=1 ` +
+      `gh auth login --hostname github.com --git-protocol https --web --scopes '${GH_CLI_SCOPES}' ` +
+      `&& ${GH_ENV} gh auth setup-git --hostname github.com; } ` +
+      `< /dev/null > ${GH_LOGIN_OUTPUT_PATH} 2>&1 &`,
+    `login_pid=$!`,
+    `i=0`,
+    `while [ $i -lt ${GH_LOGIN_HANDSHAKE_TIMEOUT_SECONDS} ]; do`,
+    // Read the file before testing liveness, so output written by a process
+    // that has since exited is never missed.
+    `  grep -q 'https://' ${GH_LOGIN_OUTPUT_PATH} 2>/dev/null && break`,
+    // gh died without ever printing a URL — stop waiting out the full timeout
+    // and let the caller report the error now.
+    `  kill -0 $login_pid 2>/dev/null || break`,
+    `  sleep 1`,
+    `  i=$((i+1))`,
+    `done`,
+    `cat ${GH_LOGIN_OUTPUT_PATH} 2>/dev/null || true`,
+  ].join("\n");
+}
+
+/** Probe `gh`: installed, authenticated, as whom, with which scopes. */
+async function readGhCliAuthState() {
+  const ghVersion = await shellRunner(`${GH_ENV} gh --version 2>&1`);
+  const installed = ghVersion.exit_code === 0 || ghVersion.output.includes("gh version");
+  if (!installed) {
+    return { installed: false, authenticated: false, version: null, account: null, scopes: null };
+  }
+
+  const authStatus = await shellRunner(`${GH_ENV} gh auth status 2>&1`);
+  const authenticated = authStatus.exit_code === 0;
+
+  return {
+    installed: true,
+    authenticated,
+    version: ghVersion.output.trim().split("\n")[0] || null,
+    account: authenticated ? parseGhAccount(authStatus.output) : null,
+    scopes: authenticated ? parseGhScopes(authStatus.output) : null,
+  };
+}
+
 export async function handleGithubRoutes(path, method, req, userId, sql, corsHeaders) {
+  // GET /integrations/github/cli-auth — is `gh` installed/authenticated
+  if (path.endsWith("/integrations/github/cli-auth") && method === "GET") {
+    try {
+      return Response.json(await readGhCliAuthState(), { headers: corsHeaders });
+    } catch (err) {
+      return Response.json({
+        installed: false,
+        authenticated: false,
+        version: null,
+        account: null,
+        scopes: null,
+        error: err?.message || String(err),
+      }, { headers: corsHeaders });
+    }
+  }
+
+  // POST /integrations/github/cli-auth/login — start the device flow
+  if (path.endsWith("/integrations/github/cli-auth/login") && method === "POST") {
+    try {
+      const state = await readGhCliAuthState();
+      if (!state.installed) {
+        return Response.json({
+          status: "not_installed",
+          message: "The `gh` CLI is not installed in this container.",
+        }, { headers: corsHeaders });
+      }
+      if (state.authenticated) {
+        return Response.json({
+          status: "already_authenticated",
+          account: state.account,
+          message: `The gh CLI is already authenticated as ${state.account || "an unknown account"}.`,
+        }, { headers: corsHeaders });
+      }
+
+      const login = await shellRunner(buildGhLoginCommand());
+      const login_url = parseLoginUrl(login.output);
+      const user_code = parseUserCode(login.output);
+
+      if (login_url) {
+        return Response.json({
+          status: "pending",
+          login_url,
+          user_code,
+          message: "Open the URL and enter the code to authorize the CLI.",
+        }, { headers: corsHeaders });
+      }
+
+      return Response.json({
+        status: "error",
+        message: "Could not start the gh login flow.",
+        output: login.output.slice(0, 500),
+      }, { headers: corsHeaders });
+    } catch (err) {
+      // 200, like every other outcome here: apiFetch throws on non-2xx, which
+      // would replace this message with a raw "API error 500: {...}" blob.
+      return Response.json({
+        status: "error",
+        message: err?.message || "Failed to start the gh login flow",
+      }, { headers: corsHeaders });
+    }
+  }
+
+  // POST /integrations/github/cli-auth/logout
+  if (path.endsWith("/integrations/github/cli-auth/logout") && method === "POST") {
+    try {
+      const result = await shellRunner(`echo y | ${GH_ENV} gh auth logout --hostname github.com 2>&1`);
+      // `gh auth logout` genuinely fails in ways worth surfacing — a token
+      // supplied via the environment, or no account to log out of. Reporting
+      // ok:true regardless left the user clicking Sign out, seeing the block
+      // still say "Signed in as ...", and being told nothing.
+      return Response.json({
+        ok: result.exit_code === 0,
+        message: result.output.trim() ||
+          (result.exit_code === 0 ? "Signed out." : "Sign out failed."),
+      }, { headers: corsHeaders });
+    } catch (err) {
+      return Response.json({
+        ok: false,
+        message: err?.message || String(err),
+      }, { headers: corsHeaders });
+    }
+  }
+
   // POST /integrations/github/device-code — start device flow
   if (path.endsWith("/integrations/github/device-code") && method === "POST") {
     const clientId = getClientId();

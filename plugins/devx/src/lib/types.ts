@@ -42,8 +42,23 @@ export interface DevxSettings {
   user_id: string;
   provider: string;
   model: string;
+  // MASKED by GET /settings (first 8 + "..." + last 4) — never a usable
+  // credential, so it must never be posted back on PUT /settings as though
+  // it were one: that stores (and, with encryption configured, permanently
+  // encrypts) the mask over the real key.
   api_key?: string;
   auth_shape?: AuthShape;
+  // Decrypt outcome for this display read, same meaning as
+  // ProviderConfigRecord.key_status below: "undecryptable" means a
+  // credential exists that the server's current DEVX_ENCRYPTION_KEY cannot
+  // open — NOT the same claim as "no key configured", even though both show
+  // api_key null / auth_shape "none". Absent on older server builds.
+  key_status?: "ok" | "undecryptable";
+  // True when this legacy settings row's credential still sits in the
+  // plaintext api_key column. Drives the encrypt-existing backfill offer for
+  // a user whose only plaintext key lives here rather than in a
+  // provider_configs row. Absent on older server builds.
+  is_plaintext?: boolean;
   base_url?: string;
   ai_rules?: string;
   auto_approve?: boolean;
@@ -75,6 +90,19 @@ export interface ProviderConfigRecord {
   model: string;
   api_key?: string;
   auth_shape?: AuthShape;
+  // Per-row decrypt outcome for this display read (routes/provider_config_
+  // routes.ts). "undecryptable" means the row holds an encrypted pair that
+  // the server's current DEVX_ENCRYPTION_KEY cannot open (rotated/missing
+  // key) — auth_shape falls back to "none" in that case too, which is NOT
+  // the same claim as "this row genuinely has no key"; check key_status
+  // before treating auth_shape === "none" as "not configured". Absent on
+  // older server builds.
+  key_status?: "ok" | "undecryptable";
+  // True when this row's credential still lives in the legacy plaintext
+  // api_key column (not yet run through the encrypt-existing backfill).
+  // Absent on older server builds; a row with no key at all is not
+  // plaintext either (nothing to migrate).
+  is_plaintext?: boolean;
   base_url?: string;
   display_name?: string;
   is_active: boolean;
@@ -345,6 +373,29 @@ export interface GitHubStatus {
   username?: string;
 }
 
+/**
+ * State of the `gh` CLI installed in the container — separate from
+ * GitHubStatus, which describes the stored OAuth token this service uses for
+ * its own git operations.
+ */
+export interface GitHubCliAuthStatus {
+  installed: boolean;
+  authenticated: boolean;
+  version: string | null;
+  account: string | null;
+  scopes: string | null;
+  error?: string;
+}
+
+export interface GitHubCliAuthLogin {
+  status: "pending" | "already_authenticated" | "not_installed" | "error";
+  login_url?: string | null;
+  user_code?: string | null;
+  account?: string | null;
+  message?: string;
+  output?: string;
+}
+
 export interface GitHubDeviceCode {
   device_code: string;
   user_code: string;
@@ -533,7 +584,7 @@ export interface Attachment {
   size_bytes: number;
 }
 
-export type Provider = "anthropic" | "openai" | "google" | "openai-compatible" | "bedrock" | "claude-code" | "copilot";
+export type Provider = "anthropic" | "openai" | "google" | "openai-compatible" | "bedrock" | "claude-code";
 
 export interface ProviderConfig {
   id: Provider;
@@ -609,18 +660,6 @@ export const PROVIDERS: ProviderConfig[] = [
     id: "claude-code",
     name: "Claude Code (Subscription)",
     models: ["default", "sonnet", "haiku"], // fallback only; real list comes from GET /claude-code/models
-    requiresApiKey: false,
-    requiresBaseUrl: false,
-  },
-  {
-    id: "copilot",
-    name: "GitHub Copilot (Subscription)",
-    models: [
-      "gpt-5.3-codex",
-      "gpt-5-mini",
-      "claude-sonnet-4-6",
-      "gemini-3.1-pro",
-    ],
     requiresApiKey: false,
     requiresBaseUrl: false,
   },

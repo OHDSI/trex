@@ -1,1 +1,7 @@
-{:max-steps 15}
+;; :description is read by functions/skills/sync.ts, which registers this
+;; subagent as a legacy-loop built-in. The agents loader reads only
+;; :max-steps/:model and ignores the rest, so it stays inert there.
+;; No :model here on purpose — the legacy "inherit" sentinel is not a
+;; valid agents-loop model spec; sync.ts defaults it instead.
+{:max-steps 15
+ :description "Use this agent to review code for bugs, logic errors, security vulnerabilities, and code quality issues. Returns structured findings with severity levels."}

@@ -8,14 +8,12 @@ import { createAnthropic } from "npm:@ai-sdk/anthropic";
 import { createOpenAI } from "npm:@ai-sdk/openai";
 import { createGoogleGenerativeAI } from "npm:@ai-sdk/google";
 import { createAmazonBedrock } from "npm:@ai-sdk/amazon-bedrock";
-import { constructSystemPrompt } from "./prompts.ts";
 import { buildToolSet, getToolByName } from "./tools/registry.ts";
 import type { AgentContext } from "./tools/types.ts";
 import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
-
-const DEFAULT_MAX_STEPS = 25;
+import { buildCoderContext } from "./coder_context.ts";
 
 /** Clean up all pending consents for a given chat (called on stream abort) */
 export async function clearPendingConsents(chatId, sqlFn?) {
@@ -151,17 +149,7 @@ export async function streamAgentChat({
     });
   }
 
-  // Dispatch to GitHub Copilot SDK agent when that provider is selected
-  if (settings.provider === "copilot") {
-    const { streamCopilotChat } = await import("./copilot_agent.ts");
-    return streamCopilotChat({
-      chatId, userId, appId, chatMode, settings, history, send, sqlFn,
-      skillContext, commandOverride, hasComponentSelection, workspacePathOverride,
-    });
-  }
-
   const mode = chatMode || "agent";
-  const maxSteps = settings.max_steps || DEFAULT_MAX_STEPS;
 
   // Apply model override from command if present
   const effectiveSettings = commandOverride?.model
@@ -184,10 +172,21 @@ export async function streamAgentChat({
     if (rules !== undefined) aiRules = rules;
   }
 
-  let systemPrompt = constructSystemPrompt(mode, aiRules, skillContext);
-  if (hasComponentSelection) {
-    systemPrompt += "\nThe user has selected specific components for editing. Component details and code snippets are in the user's message. Focus your modifications on those components.";
-  }
+  const { systemPrompt, maxSteps } = await buildCoderContext({
+    mode, aiRules, skillContext, remoteChannel,
+    // effectiveSettings, not settings — matches claude_code_agent.ts.
+    // buildCoderContext only reads .max_steps today, identical on both, so
+    // this was behaviourally inert; effectiveSettings is the "resolved for
+    // this turn" object (post command-model-override) and is what aiRules
+    // above was already derived from, so it's the correct one to keep the
+    // two engines symmetric and future-proof against buildCoderContext
+    // reading more of settings later.
+    hasComponentSelection, settings: effectiveSettings,
+    // The ai-sdk tool registry (tools/registry.ts) does not register
+    // mcp__ask__ask_question — telling the model to MUST use it (and to
+    // NEVER ask in plain text) would take away its only real way to ask.
+    askToolAvailable: false,
+  });
 
   // Load user consent preferences
   const consentResult = await sqlFn(

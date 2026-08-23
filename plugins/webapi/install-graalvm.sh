@@ -1,6 +1,12 @@
 #!/bin/bash
 
+# Pinned, not "latest". Whether a native image honours runtime
+# javax.net.ssl.trustStore* properties is a property of the toolchain build, so
+# a floating version can change TLS trust behaviour with no code change. 21.0.12
+# is the build that was verified to honour them. Bump deliberately, and re-verify
+# the runtime-truststore behaviour when you do.
 GRAAL_VERSION=21
+GRAAL_FULL_VERSION=21.0.12
 
 # Validate that GRAAL_HOME is provided from environment
 if [[ -z "${GRAAL_HOME:-}" ]]; then
@@ -18,7 +24,15 @@ case "$(uname -m)" in
     *) echo "Error: unsupported architecture $(uname -m)"; exit 1 ;;
 esac
 
-curl -fsSL -o /tmp/graal.tar.gz "https://download.oracle.com/graalvm/${GRAAL_VERSION}/latest/graalvm-jdk-${GRAAL_VERSION}_linux-${GRAAL_ARCH}_bin.tar.gz"
+case "${GRAAL_ARCH}" in
+    x64)     GRAAL_SHA256=b007ff64c425f85bbe0e686107044fba6ca5054a7e89271a473767f546aaddc1 ;;
+    aarch64) GRAAL_SHA256=e37877e3a67cd5c7be6172e8e26ecae7e5b4c76dd78f1d34f880cb7b985ebfd8 ;;
+esac
+
+curl -fsSL -o /tmp/graal.tar.gz "https://download.oracle.com/graalvm/${GRAAL_VERSION}/archive/graalvm-jdk-${GRAAL_FULL_VERSION}_linux-${GRAAL_ARCH}_bin.tar.gz"
+
+echo "${GRAAL_SHA256}  /tmp/graal.tar.gz" | sha256sum -c - \
+    || { echo "Error: GraalVM tarball checksum mismatch"; exit 1; }
 
 mkdir -p /opt
 tar -xzf /tmp/graal.tar.gz -C /opt

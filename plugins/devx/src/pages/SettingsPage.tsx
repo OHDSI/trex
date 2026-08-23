@@ -8,6 +8,7 @@ import {
   Plug,
   Github,
   GitBranch,
+  Terminal,
   Check,
   Copy,
   X,
@@ -22,12 +23,12 @@ import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { SupportSection } from "@/components/settings/SupportSection";
+import { FigmaSection } from "@/components/settings/FigmaSection";
 import { useSettings } from "@/hooks/useSettings";
 import { useGitHub } from "@/hooks/useGitHub";
 import { useGitSigning } from "@/hooks/useGitSigning";
 import { useClaudeCode } from "@/hooks/useClaudeCode";
 import { useClaudeCodeModels } from "@/hooks/useClaudeCodeModels";
-import { useCopilot } from "@/hooks/useCopilot";
 import { useProviderConfigs } from "@/hooks/useProviderConfigs";
 import { useMcpServers } from "@/hooks/useMcpServers";
 import { useTheme } from "@/hooks/useTheme";
@@ -53,12 +54,11 @@ const SECTIONS: { id: Section; label: string; icon: React.ElementType }[] = [
 
 export default function SettingsPage() {
   const navigate = useNavigate();
-  const { settings, save } = useSettings();
+  const { settings, save, refresh: refreshSettings } = useSettings();
   const github = useGitHub();
   const gitSigning = useGitSigning();
   const claudeCode = useClaudeCode();
   const claudeCodeModels = useClaudeCodeModels();
-  const copilot = useCopilot();
   const providerConfigs = useProviderConfigs();
   const mcp = useMcpServers();
   const { theme, setTheme } = useTheme();
@@ -67,18 +67,17 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [claudeLoginCode, setClaudeLoginCode] = useState("");
 
-  // AI fields
+  // AI fields. No api_key state: GET /settings returns the legacy row's key
+  // masked, and this page has no field to enter a new one — the per-provider
+  // key editor below (provider_configs) is the only place a credential is
+  // set. Holding the mask in state is how it used to get posted straight back
+  // over the real key on save.
   const [provider, setProvider] = useState<Provider>("anthropic");
   const [model, setModel] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  // base_url doubles as the AWS region for the bedrock provider. Loaded and
+  // echoed back unchanged — there is no field for it here either.
   const [baseUrl, setBaseUrl] = useState("");
   const [aiRules, setAiRules] = useState("");
-  // AWS Bedrock fields
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState("");
-  const [awsSecretAccessKey, setAwsSecretAccessKey] = useState("");
-  const [awsRegion, setAwsRegion] = useState("us-east-1");
-  const [awsBearerToken, setAwsBearerToken] = useState("");
-  const [awsAuthMode, setAwsAuthMode] = useState<"bearer" | "iam">("bearer");
 
   // Agent fields
   const [autoApprove, setAutoApprove] = useState(false);
@@ -101,6 +100,7 @@ export default function SettingsPage() {
   // Edit provider
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editApiKey, setEditApiKey] = useState("");
+  const [encryptingKeys, setEncryptingKeys] = useState(false);
 
   // Git identity + signing fields
   const [gitAuthorName, setGitAuthorName] = useState("");
@@ -128,59 +128,31 @@ export default function SettingsPage() {
       setLoop(settings.loop ?? "legacy");
       setGitAuthorName(settings.git_author_name || "");
       setGitAuthorEmail(settings.git_author_email || "");
-
-      // Unpack Bedrock credentials from api_key JSON
-      if (settings.provider === "bedrock" && settings.api_key) {
-        try {
-          const creds = JSON.parse(settings.api_key);
-          if (creds.bearerToken) {
-            setAwsAuthMode("bearer");
-            setAwsBearerToken(creds.bearerToken);
-            setAwsAccessKeyId("");
-            setAwsSecretAccessKey("");
-          } else {
-            setAwsAuthMode("iam");
-            setAwsAccessKeyId(creds.accessKeyId || "");
-            setAwsSecretAccessKey(creds.secretAccessKey || "");
-            setAwsBearerToken("");
-          }
-          setAwsRegion(settings.base_url || "us-east-1");
-          setApiKey("");
-        } catch {
-          setApiKey(settings.api_key || "");
-        }
-      } else {
-        setApiKey(settings.api_key || "");
-      }
     }
   }, [settings]);
 
   // Refresh SDK auth status when provider changes to a subscription provider
   useEffect(() => {
     if (provider === "claude-code") claudeCode.refreshStatus();
-    if (provider === "copilot") copilot.refreshStatus();
   }, [provider]);
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      // Pack Bedrock credentials into api_key/base_url columns
-      const effectiveApiKey = provider === "claude-code" || provider === "copilot"
-        ? ""
-        : provider === "bedrock"
-        ? JSON.stringify(
-            awsAuthMode === "bearer"
-              ? { bearerToken: awsBearerToken }
-              : { accessKeyId: awsAccessKeyId, secretAccessKey: awsSecretAccessKey }
-          )
-        : apiKey;
-      const effectiveBaseUrl = provider === "bedrock" ? awsRegion : baseUrl;
-
+      // api_key is deliberately absent from this payload, and PUT /settings
+      // leaves the stored credential untouched when the field is omitted. The
+      // value this page loads is the server's mask, not a key, so sending it
+      // back would overwrite the real credential with its own mask — and once
+      // DEVX_ENCRYPTION_KEY is configured that mask gets encrypted and the
+      // damage becomes indistinguishable from a genuine key.
+      //
+      // base_url round-trips as loaded (for bedrock it carries the region);
+      // this page has no field for it either, so it is echoed, not composed
+      // from defaults.
       await save({
         provider,
         model,
-        api_key: effectiveApiKey,
-        base_url: effectiveBaseUrl,
+        base_url: baseUrl,
         ai_rules: aiRules || undefined,
         auto_approve: autoApprove,
         max_steps: maxSteps,
@@ -196,6 +168,36 @@ export default function SettingsPage() {
       toast.error("Failed to save settings");
     } finally {
       setSaving(false);
+    }
+  };
+
+  // Backfill: the only way stored plaintext keys actually become encrypted
+  // (new writes are encrypted going forward, but existing rows aren't touched
+  // until this runs). Covers both stores — the provider configs above and the
+  // legacy settings row behind them — so the counts reported here are totals;
+  // which table a key sits in isn't something a user should have to reason
+  // about. See routes/provider_config_routes.ts's
+  // POST /provider-configs/encrypt-existing.
+  const handleEncryptExistingKeys = async () => {
+    setEncryptingKeys(true);
+    try {
+      const result = await providerConfigs.encryptExisting();
+      // The settings row's own is_plaintext flag drives half of this button's
+      // visibility, and it only changes on a settings refetch — encryptExisting
+      // refreshes the provider configs but knows nothing about this hook.
+      await refreshSettings();
+      if (!result.encryptionConfigured) {
+        toast.error("Server has no encryption key configured — keys were not migrated.");
+      } else if (result.migrated > 0) {
+        toast.success(`Encrypted ${result.migrated} stored key${result.migrated === 1 ? "" : "s"}.`);
+      } else {
+        toast.success("Nothing to migrate — all stored keys are already encrypted.");
+      }
+    } catch (err) {
+      console.error("Failed to encrypt existing keys:", err);
+      toast.error("Failed to encrypt existing keys");
+    } finally {
+      setEncryptingKeys(false);
     }
   };
 
@@ -315,7 +317,7 @@ export default function SettingsPage() {
                   the hand-rolled SSE loop (functions/agent.ts), 'agents' is
                   the ported eve/agents runtime (plugins/devx/agent/). Forced
                   back to legacy regardless of this setting when the active
-                  provider is claude-code/copilot (see useEffectiveLoop.ts) -
+                  provider is claude-code (see useEffectiveLoop.ts) -
                   noted inline since the toggle would otherwise look like a
                   no-op for those users. */}
               <div className="space-y-2">
@@ -329,7 +331,7 @@ export default function SettingsPage() {
                   <option value="agents">Agents (experimental)</option>
                 </select>
                 <p className="text-xs text-muted-foreground">
-                  Agents mode is forced back to Legacy for the Claude Code and Copilot providers.
+                  Agents mode is forced back to Legacy for the Claude Code provider.
                   Takes effect on your next chat open.
                 </p>
               </div>
@@ -338,13 +340,54 @@ export default function SettingsPage() {
 
           {activeSection === "ai" && (
             <div className="space-y-6">
-              <div>
-                <h2 className="text-lg font-semibold mb-1">AI Providers</h2>
-                <p className="text-sm text-muted-foreground">
-                  Configure multiple AI providers. Click to activate.
-                </p>
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 className="text-lg font-semibold mb-1">AI Providers</h2>
+                  <p className="text-sm text-muted-foreground">
+                    Configure multiple AI providers. Click to activate.
+                  </p>
+                </div>
+                {/* Only new writes are encrypted automatically — existing
+                    plaintext rows need this backfill to actually become
+                    encrypted. Shown only when there's something to migrate,
+                    which includes the legacy settings row: a user who predates
+                    the multi-provider UI can have their only plaintext key
+                    there, with no provider config to raise the flag. */}
+                {(providerConfigs.configs.some((c) => c.is_plaintext) || settings?.is_plaintext) && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    disabled={encryptingKeys}
+                    onClick={handleEncryptExistingKeys}
+                  >
+                    {encryptingKeys ? "Encrypting..." : "Encrypt stored keys"}
+                  </Button>
+                )}
               </div>
               <Separator />
+
+              {/* The legacy settings row holds an encrypted credential the
+                  server can't currently open (rotated or missing encryption
+                  key). It shows up nowhere else on this page — the provider
+                  list below is a different store — so without this the user
+                  sees a perfectly healthy Settings page while every turn that
+                  falls back to that key fails with "Invalid API key".
+                  The wording deliberately stops short of promising that adding
+                  a provider fixes this for everyone: bedrock is declared
+                  requiresApiKey: false (lib/types.ts), which gates both the
+                  add-form key input and the inline editor's pencil, so a
+                  bedrock user has no field to enter a replacement in anywhere
+                  on this page. */}
+              {settings?.key_status === "undecryptable" && (
+                <p className="text-xs text-yellow-600">
+                  A previously stored API key can't be decrypted — the server's
+                  encryption key may have changed, so any request that falls back
+                  to it will fail. For providers with an API key field below,
+                  adding one with a fresh key replaces it. AWS Bedrock
+                  credentials have no entry field here yet, and can only be
+                  recovered by restoring the server's previous encryption key.
+                </p>
+              )}
 
               {/* Configured providers list */}
               <div className="space-y-2">
@@ -419,6 +462,18 @@ export default function SettingsPage() {
                       {cfg.api_key && (
                         <p className="text-xs text-muted-foreground mt-1 ml-5">{cfg.api_key}</p>
                       )}
+                      {/* An undecryptable row (server has an encrypted credential it
+                          can't currently open — usually a rotated or missing
+                          DEVX_ENCRYPTION_KEY) shows no api_key above, which looks
+                          identical to "never had a key" while turns using this
+                          provider fail with "Invalid API key". Name the real cause
+                          and the fix so this isn't a silent dead end. */}
+                      {cfg.key_status === "undecryptable" && (
+                        <p className="text-xs text-yellow-600 mt-1 ml-5">
+                          Stored key can't be decrypted — the server's encryption key
+                          may have changed. Re-enter the API key below to fix it.
+                        </p>
+                      )}
                       {/* Inline edit for API key */}
                       {isEditing && (
                         <div className="flex items-center gap-2 mt-2 ml-5" onClick={(e) => e.stopPropagation()}>
@@ -480,36 +535,6 @@ export default function SettingsPage() {
                             <Button variant="outline" size="sm" className="h-7 text-xs"
                               disabled={claudeCode.loading} onClick={claudeCode.startLogin}>
                               {claudeCode.loading ? "Starting..." : "Sign in with Claude"}
-                            </Button>
-                          )}
-                        </div>
-                      )}
-                      {/* Copilot auth status */}
-                      {cfg.provider === "copilot" && (
-                        <div className="mt-2 ml-5" onClick={(e) => e.stopPropagation()}>
-                          {copilot.status.authenticated ? (
-                            <span className="text-xs text-muted-foreground flex items-center gap-1">
-                              <Check className="h-3 w-3 text-green-500" />
-                              Authenticated{copilot.status.account ? ` as ${copilot.status.account}` : ""}
-                            </span>
-                          ) : copilot.loginUrl ? (
-                            <div className="space-y-2">
-                              <a href={copilot.loginUrl} target="_blank" rel="noopener noreferrer"
-                                className="text-xs text-primary underline flex items-center gap-1">
-                                Open GitHub <ExternalLink className="h-3 w-3" />
-                              </a>
-                              {copilot.userCode && (
-                                <code className="px-2 py-1 bg-muted rounded font-mono text-sm tracking-wider">
-                                  {copilot.userCode}
-                                </code>
-                              )}
-                              {copilot.polling && <p className="text-xs text-muted-foreground">Waiting...</p>}
-                            </div>
-                          ) : (
-                            <Button variant="outline" size="sm" className="h-7 text-xs gap-1"
-                              disabled={copilot.loading} onClick={copilot.startLogin}>
-                              <Github className="h-3 w-3" />
-                              {copilot.loading ? "Starting..." : "Sign in with GitHub"}
                             </Button>
                           )}
                         </div>
@@ -729,60 +754,230 @@ export default function SettingsPage() {
               </div>
               <Separator />
 
-              {/* GitHub */}
-              <div className="space-y-3">
+              <FigmaSection />
+              <Separator />
+
+              {/* GitHub — two independent credentials, see the copy below */}
+              <div className="space-y-4">
                 <div className="flex items-center gap-2">
                   <Github className="h-4 w-4" />
                   <Label className="text-base">GitHub</Label>
                 </div>
-                {github.status.connected ? (
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm text-muted-foreground flex items-center gap-1.5">
-                      <Check className="h-3.5 w-3.5 text-green-500" />
-                      Connected as {github.status.username}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-7 text-xs"
-                      onClick={github.disconnect}
-                    >
-                      Disconnect
-                    </Button>
+
+                <div className="space-y-3">
+                  <div>
+                    <Label className="text-sm">Account connection</Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Authorizes devx itself to clone, pull and push your repositories and to
+                      create a repo for an app. The token is stored encrypted in this deployment.
+                    </p>
                   </div>
-                ) : github.deviceCode ? (
-                  <div className="space-y-2 text-sm">
-                    <p>Enter this code at GitHub:</p>
-                    <div className="flex items-center gap-2">
-                      <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
-                        {github.deviceCode.user_code}
-                      </code>
-                      <a
-                        href={github.deviceCode.verification_uri}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs text-primary underline"
+                  {github.status.connected ? (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-muted-foreground flex items-center gap-1.5">
+                        <Check className="h-3.5 w-3.5 text-green-500" />
+                        Connected as {github.status.username}
+                      </span>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={github.disconnect}
                       >
-                        Open GitHub
-                      </a>
+                        Disconnect
+                      </Button>
                     </div>
-                    {github.polling && (
+                  ) : github.deviceCode ? (
+                    <div className="space-y-2 text-sm">
+                      <p>Enter this code at GitHub:</p>
+                      <div className="flex items-center gap-2">
+                        <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
+                          {github.deviceCode.user_code}
+                        </code>
+                        <a
+                          href={github.deviceCode.verification_uri}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-xs text-primary underline"
+                        >
+                          Open GitHub
+                        </a>
+                      </div>
+                      {github.polling && (
+                        <p className="text-xs text-muted-foreground">
+                          Waiting for authorization...
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="gap-1.5"
+                      onClick={github.startDeviceFlow}
+                    >
+                      <Github className="h-3.5 w-3.5" />
+                      Connect GitHub
+                    </Button>
+                  )}
+                </div>
+
+                {/* The container's `gh` binary — a different credential store
+                    (~/.config/gh) from the account connection above. */}
+                <div className="space-y-3 pt-1">
+                  <div>
+                    <Label className="text-sm">
+                      Command line (<code className="font-mono text-xs">gh</code>)
+                    </Label>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      Signs in the GitHub CLI installed in this container. The coder shells out
+                      to it to open pull requests and read review threads, and derives the commit
+                      identity for the branches it pushes from it. This is a separate credential
+                      from the account connection above — authorizing one does not authorize the
+                      other, and both are usually wanted.
+                    </p>
+                    <p className="text-xs text-muted-foreground mt-2">
+                      Unlike the account connection, which is yours alone, this one is shared by
+                      everyone on this deployment: there is a single{" "}
+                      <code className="font-mono text-xs">gh</code> installation, so whoever signs
+                      in last is the account all coder pull requests and pushes are attributed to,
+                      and signing out signs everyone out. A coder that is already running keeps its
+                      old commit identity until it is restarted.
+                    </p>
+                  </div>
+
+                  {!github.cliChecked ? (
+                    <p className="text-sm text-muted-foreground">Checking...</p>
+                  ) : !github.cliStatus.installed ? (
+                    <div className="space-y-2">
+                      {/* installed:false is also what a broken shell bridge
+                          looks like, so say which one this is. */}
+                      {github.cliStatus.error ? (
+                        <>
+                          <p className="text-sm text-muted-foreground">
+                            Could not check the <code className="font-mono text-xs">gh</code> CLI,
+                            so its state is unknown.
+                          </p>
+                          <p className="text-xs text-destructive break-all">
+                            {github.cliStatus.error}
+                          </p>
+                        </>
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          The <code className="font-mono text-xs">gh</code> CLI is not available in
+                          this container, so pull-request tooling will not work here.
+                        </p>
+                      )}
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-xs"
+                        onClick={github.refreshCliStatus}
+                      >
+                        Check again
+                      </Button>
+                    </div>
+                  ) : github.cliStatus.authenticated ? (
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-muted-foreground flex items-center gap-1.5">
+                          <Check className="h-3.5 w-3.5 text-green-500" />
+                          Signed in as {github.cliStatus.account || "an unknown account"}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-7 text-xs"
+                          disabled={github.cliBusy}
+                          onClick={github.signOutCli}
+                        >
+                          Sign out
+                        </Button>
+                      </div>
+                      {github.cliStatus.scopes && (
+                        <p className="text-xs text-muted-foreground">
+                          Scopes: {github.cliStatus.scopes}
+                        </p>
+                      )}
+                      {/* A refused sign-out leaves us in this branch, so the
+                          reason has to render here too — the error branch
+                          below is unreachable while still authenticated. */}
+                      {github.cliLogin?.status === "error" && github.cliLogin.message && (
+                        <p className="text-xs text-destructive">{github.cliLogin.message}</p>
+                      )}
+                    </div>
+                  ) : github.cliLogin?.status === "pending" ? (
+                    <div className="space-y-2 text-sm">
+                      {github.cliLogin.user_code ? (
+                        <>
+                          <p>Enter this code at GitHub to authorize the CLI:</p>
+                          <div className="flex items-center gap-2">
+                            <code className="px-3 py-1.5 bg-muted rounded font-mono text-lg tracking-wider">
+                              {github.cliLogin.user_code}
+                            </code>
+                            <a
+                              href={github.cliLogin.login_url || "https://github.com/login/device"}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-primary underline"
+                            >
+                              Open GitHub
+                            </a>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={github.cancelCliAuth}
+                            >
+                              Cancel
+                            </Button>
+                          </div>
+                        </>
+                      ) : (
+                        // The URL parsed but the code did not. Sending the user
+                        // to GitHub with a placeholder in the code box would be
+                        // worse than telling them the code is on the far side.
+                        <div className="flex items-center gap-2">
+                          <a
+                            href={github.cliLogin.login_url || "https://github.com/login/device"}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary underline"
+                          >
+                            Open GitHub to authorize the CLI
+                          </a>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={github.cancelCliAuth}
+                          >
+                            Cancel
+                          </Button>
+                        </div>
+                      )}
                       <p className="text-xs text-muted-foreground">
                         Waiting for authorization...
                       </p>
-                    )}
-                  </div>
-                ) : (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="gap-1.5"
-                    onClick={github.startDeviceFlow}
-                  >
-                    <Github className="h-3.5 w-3.5" />
-                    Connect GitHub
-                  </Button>
-                )}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {github.cliLogin?.message && (
+                        <p className="text-xs text-destructive">{github.cliLogin.message}</p>
+                      )}
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5"
+                        disabled={github.cliBusy}
+                        onClick={github.startCliAuth}
+                      >
+                        <Terminal className="h-3.5 w-3.5" />
+                        {github.cliBusy ? "Starting..." : "Authenticate gh CLI"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
               </div>
 
               <Separator />

@@ -5,7 +5,8 @@
  * work without a terminal). We generate the PKCE challenge, build the auth URL,
  * and exchange the code for tokens ourselves, storing them where the SDK expects.
  */
-import { duckdb, escapeSql } from "../duckdb.ts";
+import { escapeSql } from "../duckdb.ts";
+import { runShell } from "../shell.ts";
 
 // Claude OAuth constants (from the CLI's auth flow)
 const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
@@ -98,20 +99,6 @@ async function clearPending(userId: string) {
     delete all[userId];
     await Deno.writeTextFile(PENDING_FILE, JSON.stringify(all));
   } catch {}
-}
-
-async function runShell(command: string): Promise<{ output: string; exit_code: number }> {
-  const scriptPath = `/tmp/.devx-cmd-${crypto.randomUUID().slice(0, 8)}.sh`;
-  try {
-    await Deno.writeTextFile(scriptPath, command + "\n");
-    const raw = await duckdb(`SELECT * FROM trex_devx_run_command('/tmp', 'sh ${escapeSql(scriptPath)}')`);
-    const result = JSON.parse(raw);
-    try { await Deno.remove(scriptPath); } catch {}
-    return { output: result.output || "", exit_code: result.exit_code ?? 0 };
-  } catch (err) {
-    try { await Deno.remove(scriptPath); } catch {}
-    return { output: err.message || String(err), exit_code: 1 };
-  }
 }
 
 function base64url(buf: ArrayBuffer): string {

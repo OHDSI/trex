@@ -17,6 +17,11 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <spring.boot.version>3.5.6</spring.boot.version>
+    <!-- Default off so an ad-hoc `mvn package` in this module does not need the
+         ephemeral PostgreSQL that Spring AOT requires. build-native-lib.sh passes
+         -DskipTests=false explicitly, which is what makes the unit tests run in
+         CI; that script is the only Maven invocation for this module. Do not add
+         a bare -DskipTests to that command — it silently disables them again. -->
     <skipTests>true</skipTests>
     <!-- Overridden by build-native-lib.sh with the version `lein install`
          actually published, so bumping the plugin cannot orphan this. -->
@@ -95,6 +100,13 @@
       <artifactId>graal-build-time</artifactId>
       <version>1.0.6</version>
     </dependency>
+
+    <!-- Unit tests for RuntimeTrustStore (version from the Spring Boot BOM above). -->
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <!-- graal-build-time is published to Clojars, not Maven Central. -->
@@ -116,6 +128,14 @@
         <configuration>
           <release>21</release>
         </configuration>
+      </plugin>
+
+      <!-- The super-pom's surefire 2.12.4 predates JUnit 5 and would silently run
+           nothing; 3.x discovers Jupiter tests. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.2.5</version>
       </plugin>
 
       <!-- Spring Boot AOT: refreshes the WebApi context at build time and generates

@@ -14,7 +14,7 @@ import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { resolveModelForTurn } from "./model.ts";
 import { runTurn } from "./runner.ts";
 import { createHandler } from "./handler.ts";
-import { buildSdkTools } from "./toolset.ts";
+import { buildSdkTools, buildSystemPrompt } from "./toolset.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { _resetMcpCache, type McpClient, type McpConnectFn } from "../connections/mcp.ts";
@@ -284,6 +284,60 @@ Deno.test("runTurn: ToolContext.sql is undefined (not a throw) when no hookCtx i
   ) as { data: { result: { output: { hasSql?: boolean } } } };
   assert(result, "expected the query tool to have executed");
   assertEquals(result.data.result.output.hasSql, false);
+});
+
+// ---------------------------------------------------------------------------
+// runSubagent (toolset.ts, via the built-in `agent` tool): a subagent's
+// system prompt resolves through the same buildInstructions hook path as a
+// top-level turn, not just the static buildSystemPrompt.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent tool: a target subagent's buildInstructions hook runs and its return reaches the nested model's system prompt", async () => {
+  const agent = await loadAgent(TOY);
+  const shouter = agent.subagents.shouter;
+  let seenBase = "";
+  shouter.config.buildInstructions = (base: string, _ctx: HookCtx) => {
+    seenBase = base;
+    return Promise.resolve(base + "\n\nSUBAGENT HOOK MARKER");
+  };
+  const { model, calls } = capturingModel(textChunks("done"));
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx() });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout banana" });
+  assertEquals(result.text, "done");
+  // base handed to the hook is exactly buildSystemPrompt's output for shouter.
+  assert(seenBase.includes(shouter.instructions));
+  assertEquals(calls.length, 1);
+  const systemMsg = calls[0].prompt.find((m: { role: string }) => m.role === "system");
+  assert(systemMsg, "expected a system message in the nested model's prompt");
+  assert(systemMsg.content.includes("SUBAGENT HOOK MARKER"));
+});
+
+Deno.test("agent tool: a target subagent with no buildInstructions hook gets exactly buildSystemPrompt's output, unchanged", async () => {
+  const agent = await loadAgent(TOY);
+  const shouter = agent.subagents.shouter;
+  const { model, calls } = capturingModel(textChunks("done"));
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx() });
+  await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout banana" });
+  const systemMsg = calls[0].prompt.find((m: { role: string }) => m.role === "system");
+  assert(systemMsg, "expected a system message in the nested model's prompt");
+  assertEquals(systemMsg.content, buildSystemPrompt(shouter, undefined));
+});
+
+Deno.test("agent tool: a target subagent's buildInstructions hook without a hookCtx fails loudly instead of silently using the base prompt", async () => {
+  const agent = await loadAgent(TOY);
+  const shouter = agent.subagents.shouter;
+  shouter.config.buildInstructions = (base: string) => Promise.resolve(base);
+  const { model } = capturingModel(textChunks("done"));
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model }); // no hookCtx
+  await assertRejects(
+    () =>
+      (tools.agent as { execute: (input: unknown) => Promise<unknown> })
+        .execute({ agent: "shouter", prompt: "shout banana" }),
+    Error,
+    "hookCtx",
+  );
 });
 
 // ---------------------------------------------------------------------------

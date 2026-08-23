@@ -10,8 +10,8 @@
 //   c) workspace path parity
 //   d) instructions (system prompt) structural parity
 //
-// Deferred to a manual/live checklist (see plugins/devx/agent/README.md's
-// "Parity status" table) — none of these are reproducible with fakes:
+// Deferred to a manual/live checklist — none of these are reproducible with
+// fakes:
 //   - a needsApproval tool's actual approval round-trip (approval routes)
 //   - an MCP tool appearing AND executing against a real MCP server
 //   - a subagent run completing
@@ -260,13 +260,43 @@ Deno.test("parity smoke (c): userId comes ONLY from ToolContext.userId, never fr
 // (d) Instructions parity — structural comparison, not byte-equality
 // ===========================================================================
 //
-// A structural comparison, per task-v4-brief.md: same static blocks IN
-// ORDER, and the same effective rules winner. Position divergence (the
-// ported [[AI_RULES]] section is appended at the END, since instructions.md
-// has no [[AI_RULES]] placeholder to substitute mid-prompt, whereas legacy's
-// LOCAL_AGENT_SYSTEM_PROMPT substitutes it at its [[AI_RULES]] slot — which
-// happens to ALSO be the last section) is already documented in agent.ts's
-// buildInstructions header comment and is NOT re-asserted here as an error.
+// What this verifies today: two different things, not one, now that
+// agent.ts's buildInstructions no longer uses its `base` argument as the
+// prompt's spine (it calls buildCoderContext, which supplies prompts.ts's
+// LOCAL_AGENT_SYSTEM_PROMPT itself — see agent.ts's buildInstructions header
+// comment).
+//   - The block-order test below compares TWO INDEPENDENTLY MAINTAINED
+//     artifacts — instructions.md's static block order vs.
+//     LOCAL_AGENT_SYSTEM_PROMPT's — not "what buildInstructions produces" vs.
+//     "what legacy produces" the way it did before buildCoderContext existed.
+//     It still has a real job: instructions.md is not dead code. It is
+//     exactly what a SELF-DELEGATED SUBAGENT turn runs on verbatim
+//     (runSubagent, core/server/agents/service/toolset.ts:204, builds its
+//     prompt from the static buildSystemPrompt() and never reaches
+//     buildInstructions at all — see agent.ts's defineAgent comment) — so a
+//     block missing or reordered here is a real regression on that surface,
+//     even though it no longer affects the top-level loop's prompt.
+//   - The rules-winner tests further down DO call the real production
+//     buildInstructions hook, so they test real behavior — but they pass
+//     agent.instructions as `base`, an argument buildInstructions ignores
+//     entirely (kept only for hook-signature compatibility). Its content is
+//     irrelevant to those tests' outcome; only the hook's own
+//     buildCoderContext call determines the result.
+//
+// The block-order check is ORDER-ONLY: it asserts the same tags appear in
+// the same relative order, not that each tagged section's CONTENT matches.
+// It passes today even though <general_guidelines> has drifted:
+// GENERAL_GUIDELINES_BLOCK (prompts.ts) carries a cross-repo guard bullet
+// ("Your workspace is ONE app...") that instructions.md's <general_guidelines>
+// does not have. Treat a green run here as weaker evidence of parity than
+// "structural comparison" suggests — it rules out a missing or reordered
+// section, not a reworded or incomplete one.
+//
+// Position divergence (the ported [[AI_RULES]] section is appended at the
+// END, since instructions.md has no [[AI_RULES]] placeholder to substitute
+// mid-prompt, whereas legacy's LOCAL_AGENT_SYSTEM_PROMPT substitutes it at
+// its [[AI_RULES]] slot — which happens to ALSO be the last section) is
+// documented here and NOT re-asserted as an error.
 
 // The 10 static <tag> blocks instructions.md was extracted from
 // (prompts.ts's LOCAL_AGENT_SYSTEM_PROMPT minus its trailing [[AI_RULES]]

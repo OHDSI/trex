@@ -3,6 +3,7 @@ import type {
   Chat, Message, DevxSettings, ProviderConfigRecord, AgentTodo, ToolCall, ConsentRequest,
   App, DevServerStatus, FileTreeEntry, Problem,
   GitFile, GitCommit, GitBranches, GitWorktree, GitHubStatus, GitHubDeviceCode, GitHubRepo,
+  GitHubCliAuthStatus, GitHubCliAuthLogin,
   McpServer, McpTool, Plan, QuestionnaireRequest, BuildAction,
   SupabaseStatus, SupabaseDeployConfig, SupabaseProject, Deployment, DeployStep,
   SecurityReview,
@@ -159,16 +160,16 @@ export interface ActiveProviderConfig {
 
 // task-u1: mirrors plugins/devx/agent/agent.ts's resolveModel fallback chain
 // (active devx.provider_configs row, else the legacy devx.settings row, else
-// "anthropic") so the UI can gate claude-code/copilot away from the agents
-// loop BEFORE ever calling /chat — resolveModel throws for those two
-// providers (eve/agents has no sidecar-process equivalent), which /chat
+// "anthropic") so the UI can gate claude-code away from the agents
+// loop BEFORE ever calling /chat — resolveModel throws for that
+// provider (eve/agents has no sidecar-process equivalent), which /chat
 // surfaces as a bare uncaught 500, not a parseable error. Read-only; never
 // used for anything security-sensitive, same posture as the server-side
 // fallback it mirrors. Also carries `auth_shape` (final-007 review finding
 // #4 + merge-gate re-review) so useEffectiveLoop.ts can detect IAM-shaped
 // bedrock credentials — resolveModel throws for those too (agents loop is
 // bearer-token-only), the exact same "gate it before /chat" reasoning as the
-// claude-code/copilot case above.
+// claude-code case above.
 export async function getActiveProviderConfig(): Promise<ActiveProviderConfig> {
   const configs = await getProviderConfigs().catch(() => [] as ProviderConfigRecord[]);
   const active = configs.find((c) => c.is_active);
@@ -210,6 +211,32 @@ export async function deleteProviderConfig(id: string): Promise<void> {
 
 export async function activateProviderConfig(id: string): Promise<void> {
   await apiFetch(`/provider-configs/${id}/activate`, { method: "PUT" });
+}
+
+export interface EncryptExistingKeysResult {
+  // Totals across BOTH stores below — what the UI reports, so a user never
+  // has to know their key can live in two places.
+  migrated: number;
+  skipped: number;
+  encryptionConfigured: boolean;
+  // Per-store breakdown for diagnosing which store still holds plaintext.
+  // Absent on older server builds (which only migrated provider_configs).
+  tables?: {
+    provider_configs: { migrated: number; skipped: number };
+    settings: { migrated: number; skipped: number };
+  };
+}
+
+// Backfill: encrypts every remaining plaintext api_key this user has — both
+// their devx.provider_configs rows and their legacy devx.settings row
+// (routes/provider_config_routes.ts's POST /provider-configs/encrypt-existing;
+// the path keeps its provider-configs name for compatibility with clients
+// already calling it). Idempotent and safe to call repeatedly — rows already
+// encrypted are skipped. Returns `encryptionConfigured: false` (migrated: 0)
+// when DEVX_ENCRYPTION_KEY isn't set server-side, which the caller should
+// surface rather than treat as an error.
+export async function encryptExistingKeys(): Promise<EncryptExistingKeysResult> {
+  return apiFetch("/provider-configs/encrypt-existing", { method: "POST" });
 }
 
 // App CRUD
@@ -501,6 +528,21 @@ export async function disconnectGitHub(): Promise<void> {
   await apiFetch("/integrations/github", { method: "DELETE" });
 }
 
+// GitHub CLI. Not the same credential as the OAuth connection above: these
+// authenticate the `gh` binary inside the container, which the coder's git and
+// pull-request tooling shells out to.
+export async function getGitHubCliAuthStatus(): Promise<GitHubCliAuthStatus> {
+  return apiFetch("/integrations/github/cli-auth");
+}
+
+export async function startGitHubCliAuth(): Promise<GitHubCliAuthLogin> {
+  return apiFetch("/integrations/github/cli-auth/login", { method: "POST" });
+}
+
+export async function signOutGitHubCli(): Promise<{ ok: boolean; message?: string }> {
+  return apiFetch("/integrations/github/cli-auth/logout", { method: "POST" });
+}
+
 // Git commit signing. The private key never crosses this API — generate/import
 // return only the public half (+ an optional server-config warning).
 export async function getGitSigningStatus(): Promise<GitSigningStatus> {
@@ -556,32 +598,23 @@ export async function claudeCodeLogout(): Promise<{ ok: boolean; message: string
   return apiFetch("/claude-code/logout", { method: "POST" });
 }
 
+export async function getFigmaStatus(): Promise<{ connected: boolean; handle: string | null }> {
+  return apiFetch("/figma/status");
+}
+
+export async function setFigmaToken(token: string): Promise<{ connected: boolean; handle: string | null }> {
+  return apiFetch("/figma/token", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+}
+
+export async function figmaLogout(): Promise<{ connected: boolean }> {
+  return apiFetch("/figma/logout", { method: "POST" });
+}
+
 export function getClaudeCodeModels(): Promise<{ models: ModelInfo[]; source: string }> {
   return apiFetch<{ models: ModelInfo[]; source: string }>("/claude-code/models");
-}
-
-// --- GitHub Copilot Auth ---
-
-export async function getCopilotAuthStatus(): Promise<{
-  installed: boolean;
-  authenticated: boolean;
-  version: string | null;
-  account: string | null;
-}> {
-  return apiFetch("/copilot/auth-status");
-}
-
-export async function startCopilotLogin(): Promise<{
-  status: string;
-  login_url?: string;
-  user_code?: string;
-  message: string;
-}> {
-  return apiFetch("/copilot/login", { method: "POST" });
-}
-
-export async function copilotLogout(): Promise<{ ok: boolean; message: string }> {
-  return apiFetch("/copilot/logout", { method: "POST" });
 }
 
 // --- GitHub Repos ---

@@ -66,6 +66,7 @@ import {
 } from "../vendor/teams/hitl.ts";
 import { parseJsonObject } from "../vendor/teams/shared.ts";
 import { defaultTeamsAuth } from "../vendor/teams/defaults.ts";
+import { queuedAckText } from "../queued-ack.ts";
 
 // Per-session Teams routing threaded as the channel session `state` — set on
 // send() and read by the delivery (`events`) handlers so replies go back to the
@@ -216,6 +217,25 @@ export function teamsChannel(opts: TeamsChannelOptions = {}): ChannelDef {
         }
       } catch (e) {
         console.error("teams: input.requested delivery failed:", e);
+      }
+    },
+    // Acknowledge a message that arrived while a turn was already running and
+    // got queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Posts a
+    // plain reply Activity via postReply — the same connector primitive
+    // message.completed uses — so the ack threads under the inbound activity.
+    // Best-effort: a failed ack never affects the turn that is still running.
+    async "message.queued"(data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.serviceUrl) return;
+      try {
+        await postReply(state, {
+          text: queuedAckText(data?.deniedPendingGate === true),
+          textFormat: "markdown",
+          type: "message",
+        });
+      } catch (e) {
+        console.warn("teams: message.queued acknowledgement failed — swallowed:", e);
       }
     },
   };

@@ -1,8 +1,11 @@
 // askCodeAgent — claw's single hand-off to the coding agent. It forwards a
 // message to the SHARED Code agent session (opening one on first use) with the
 // FULL toolset (no devx mode: see lib/code-session.ts for why) and returns the
-// coder's reply verbatim. claw uses it to hand over clear instructions and to
-// relay participants' clarified answers; the coder runs its own gated
+// coder's reply with its machine trailer parsed off (see handoff-trailer.ts) —
+// `reply` is the prose the channel should see, `trailer` the structured facts
+// (track/saved/tests/blocked/needs/done/remaining/triggers) the reply ended
+// with, or null when the coder sent none. claw uses it to hand over clear instructions
+// and to relay participants' clarified answers; the coder runs its own gated
 // planning/implementation from there.
 //
 // App scoping: the optional `app` input (devx.apps.id, from listApps) is
@@ -12,8 +15,10 @@
 // `app` mid-task is ignored (one task = one thread = one app).
 import { defineTool } from "eve/tools";
 import { runCodeTurn, type CodeTurnArgs } from "../lib/code-stream.ts";
-import { readOrchestration, upsertOrchestration, type QueryFn } from "../lib/state.ts";
+import { readOrchestration, upsertOrchestration, readDecisions, renderDecisionLedger, type QueryFn } from "../lib/state.ts";
 import { isEvalMode, evalStubs } from "../lib/eval-stubs.ts";
+import { postChannelMessage } from "../lib/discord-rest.ts";
+import { parseTrailer, type HandoffTrailer } from "../lib/handoff-trailer.ts";
 
 interface Input {
   message: string;
@@ -37,12 +42,12 @@ export function effectiveUserId(ctxUserId: string | undefined, env: (k: string) 
 
 export async function askCore(
   sql: QueryFn,
-  ctx: { sessionId: string; userId: string },
+  ctx: { sessionId: string; userId: string; channelId?: string },
   input: Input,
   // Injected for testability (defaults to the real /stream turn); tests pass a
   // stub so askCore's orchestration can be exercised without a live coder.
   runTurn: (args: CodeTurnArgs) => Promise<{ chatId: string; replyText: string }> = runCodeTurn,
-): Promise<{ reply: string }> {
+): Promise<{ reply: string; trailer: HandoffTrailer | null }> {
   const prior = await readOrchestration(sql, ctx.sessionId);
   // codeSessionId now holds the devx chat id; the stored app wins once the chat
   // exists, the input picks it on first use only.
@@ -50,12 +55,34 @@ export async function askCore(
   if (prior?.codeSessionId && input.app && input.app !== prior.appId) {
     console.warn(`claw: askCodeAgent ignored app change '${input.app}' — chat is fixed to '${prior.appId}'`);
   }
+  // While this hand-off is blocked, claw can post nothing else to the channel —
+  // the heartbeat is the only sign of life the thread gets for a long step. No
+  // channel, no timer: a channelId-less caller (no ctx.metadata.channelId) gets
+  // no onProgress at all, rather than a no-op that still burns an interval for
+  // nothing.
+  const onProgress = ctx.channelId
+    ? (note: string) => {
+        // Fire-and-forget: a failed heartbeat must never fail the turn — a
+        // Discord outage must not break a coding hand-off.
+        postChannelMessage(fetch, {
+          botToken: Deno.env.get("DISCORD_BOT_TOKEN")!,
+          channelId: ctx.channelId!,
+          content: `Still on it: ${note}`,
+        }).catch(() => {});
+      }
+    : undefined;
+  // Prepend what the team already settled, so the coder (and claw, reading its
+  // own reply back) is never re-asked something a hand-off ago already
+  // answered.
+  const ledger = renderDecisionLedger(await readDecisions(sql, ctx.sessionId));
+  const message = ledger ? `${ledger}${input.message}` : input.message;
   const { chatId, replyText } = await runTurn({
     chatId: prior?.codeSessionId ?? null,
-    message: input.message,
+    message,
     userId: ctx.userId,
     appId,
     ...(input.attachments?.length ? { attachments: input.attachments } : {}),
+    ...(onProgress ? { onProgress } : {}),
   });
   // eventCursor is unused on the /stream path (each turn streams to completion);
   // the column is retained for schema compatibility.
@@ -65,12 +92,16 @@ export async function askCore(
     eventCursor: 0,
     appId,
   });
-  return { reply: replyText };
+  // The coder ends its reply with a machine trailer (see prompts_channel.ts's
+  // <reply_contract>); strip it from what the channel sees and hand the parsed
+  // facts back alongside.
+  const { trailer, body } = parseTrailer(replyText);
+  return { reply: body, trailer };
 }
 
 export default defineTool({
   description:
-    "Send a message to the shared coding-agent session and return its reply verbatim. " +
+    "Send a message to the shared coding-agent session and return its reply. " +
     "It continues the SAME session across calls, so drive the coder ONE gated step at a " +
     "time: tell it exactly which superpowers skill to run now and to STOP for approval " +
     "(e.g. 'run your brainstorming skill and present options, do not write code, stop'; " +
@@ -116,6 +147,7 @@ export default defineTool({
     // The coder chat is user-scoped (workspaces, app ownership, minted token
     // subject); without a resolvable user there is nothing to talk to.
     if (!userId) throw new Error("askCodeAgent: no user id (set CLAW_CODE_USER_ID)");
-    return askCore(ctx.sql, { sessionId: ctx.sessionId, userId }, input as Input);
+    const channelId = (ctx.metadata as { channelId?: string } | undefined)?.channelId;
+    return askCore(ctx.sql, { sessionId: ctx.sessionId, userId, channelId }, input as Input);
   },
 });

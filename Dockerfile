@@ -493,11 +493,10 @@ COPY plugins/devx/ /work/
 # build-time snapshot. (The `d2e` local source is authored in-repo under
 # fn-claude-code/kb-local/d2e and ships via the COPY above.)
 COPY plugins/docs/docs/ /work/fn-claude-code/kb-local/trex-docs/
-# Build the SPA, then install runtime deps for the two agent sidecar servers.
+# Build the SPA, then install runtime deps for the agent sidecar server.
 RUN npm ci && \
     npm run build && \
     (cd fn-claude-code && npm install --omit=dev) && \
-    (cd fn-copilot && npm install --omit=dev) && \
     # Root node_modules are build-only (vite/tsc); the runtime uses dist/ + the
     # Deno functions, so drop them to keep the image small.
     rm -rf node_modules
@@ -538,7 +537,7 @@ RUN npm install -g playwright@latest && \
 # Claude Code CLI for subscription-based AI usage
 RUN npm install -g @anthropic-ai/claude-code
 
-# GitHub CLI for subscription-based AI usage / gh copilot
+# GitHub CLI for the git/PR skills and the coder sidecar
 RUN curl -fsSL https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${TARGETARCH}.deb -o /tmp/gh.deb && \
     dpkg -i /tmp/gh.deb && rm /tmp/gh.deb
 

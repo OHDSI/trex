@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { createHandler } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
@@ -6,6 +6,41 @@ import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
+import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMessage } from "../channels/adapters/discord-messages.ts";
+
+// Builds the message the way adapters/discord.ts:807's sendToThread actually
+// composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
+// joined on "\n\n", empty parts filtered) — no attachments, matching the
+// common case. Real shape, not a stand-in, so tests against it exercise what
+// startTurn's busy branch genuinely receives from the only adapter that
+// reaches this path.
+function composeDiscordMessage(humanText: string): string {
+  const contextBlock = formatDiscordMessageContextBlock({
+    userId: "u-1",
+    username: "alice",
+    channelId: "c-1",
+    messageId: "m-1",
+  });
+  return [contextBlock, humanText].join("\n\n");
+}
+
+// adapters/discord.ts:866-869's mention-in-thread
+// trigger composes a THIRD block into the same message —
+// `formatMessagesBlock("thread_messages", history)`, up to 50 lines of past
+// conversation — and reuses the same continuation token as thread-turn
+// (discordContinuationToken(threadId, threadId)), so it can land on the same
+// session/pending gate. Builds that exact three-part shape:
+// `[contextBlock, thread_messages block, attachmentsBlock, text]`.
+function composeMentionInThreadMessage(humanText: string, history: HistoryMessage[]): string {
+  const contextBlock = formatDiscordMessageContextBlock({
+    userId: "u-1",
+    username: "alice",
+    channelId: "c-1",
+    messageId: "m-1",
+  });
+  const block = formatMessagesBlock("thread_messages", history);
+  return [contextBlock, block, humanText].filter((p) => p.length > 0).join("\n\n");
+}
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 const BASE = "http://local/plugins/trex/toy";
@@ -15,10 +50,16 @@ function inMemoryDb() {
   // Exposed state (turns/steps/approvals) lets tests assert on persistence
   // and drive approval decisions without Postgres.
   const sessions = new Map<string, { status: string; created_by: string | null }>();
-  const turns: Array<{ id: string; session_id: string; seq: number; status: string; error: string | null }> = [];
+  const turns: Array<
+    { id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown; startedAt: Date }
+  > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
   const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string }>();
-  // H4: (userId, plugin, agent, tool) -> consent, keyed the same way as the
+  // The follow-up queue a busy session's new message folds into (store.ts's
+  // queueFollowUp/takeFollowUps), keyed the same order-preserving way
+  // agents.turn_followups is (insertion order).
+  const followUps: Array<{ session_id: string; message: string }> = [];
+  // (userId, plugin, agent, tool) -> consent, keyed the same way as the
   // real table's primary key.
   const toolConsents = new Map<string, "always" | "never">();
   // Every call the store issues, in order — lets tests assert on the exact
@@ -37,11 +78,39 @@ function inMemoryDb() {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: s ? [{ id: params[0], status: s.status, created_by: s.created_by }] : [] });
     }
+    if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
+      // getRunningTurn — the most-recently-started running turn.
+      const running = turns.filter((t) => t.session_id === params[0] && t.status === "running")
+        .sort((a, b) => b.seq - a.seq);
+      const t = running[0];
+      return Promise.resolve({ rows: t ? [{ id: t.id, seq: t.seq, started_at: t.startedAt }] : [] });
+    }
     if (sql.includes("INSERT INTO agents.turns")) {
       const seq = turns.filter((t) => t.session_id === params[0]).length + 1;
-      const t = { id: `t-${++n}`, session_id: params[0] as string, seq, status: "running", error: null };
+      const t = {
+        id: `t-${++n}`, session_id: params[0] as string, seq, status: "running", error: null,
+        message: JSON.parse(params[1] as string), startedAt: new Date(),
+      };
       turns.push(t);
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
+    }
+    if (sql.includes("UPDATE agents.turns") && sql.includes("RETURNING id")) {
+      // reapStaleTurns — cutoff is a JS-computed Date passed as a param (see
+      // store.ts), matched against each turn's real startedAt the same way
+      // the real `started_at < $n` predicate would. Also session-scoped —
+      // params are [sessionId, cutoff, errorText], matching the real
+      // `session_id = $1 AND started_at < $2` predicate.
+      const sid = params[0] as string;
+      const cutoff = params[1] as Date;
+      const errorText = params[2] as string;
+      const stale = turns.filter((t) =>
+        t.session_id === sid && t.status === "running" && t.startedAt.getTime() < cutoff.getTime()
+      );
+      for (const t of stale) {
+        t.status = "failed";
+        t.error = errorText;
+      }
+      return Promise.resolve({ rows: stale.map((t) => ({ id: t.id })) });
     }
     if (sql.includes("UPDATE agents.turns")) {
       const t = turns.find((t) => t.id === params[0]);
@@ -50,6 +119,20 @@ function inMemoryDb() {
         t.error = (params[2] as string | null) ?? null;
       }
       return Promise.resolve({ rows: [] });
+    }
+    if (sql.includes("INSERT INTO agents.turn_followups")) {
+      // queueFollowUp.
+      followUps.push({ session_id: params[0] as string, message: params[1] as string });
+      return Promise.resolve({ rows: [] });
+    }
+    if (sql.includes("DELETE FROM agents.turn_followups")) {
+      // takeFollowUps — drains (removes) every queued follow-up for
+      // the session, oldest-first (insertion order, same as the CTE's
+      // ORDER BY created_at against the real table).
+      const sid = params[0] as string;
+      const mine = followUps.filter((f) => f.session_id === sid);
+      for (const f of mine) followUps.splice(followUps.indexOf(f), 1);
+      return Promise.resolve({ rows: mine.map((f) => ({ message: f.message })) });
     }
     if (sql.includes("INSERT INTO agents.steps")) {
       steps.push({
@@ -70,6 +153,16 @@ function inMemoryDb() {
       if (!a || a.decision !== null || a.sessionId !== params[2]) return Promise.resolve({ rows: [] });
       a.decision = params[1] as string;
       return Promise.resolve({ rows: [{ request_id: params[0] }] });
+    }
+    if (sql.includes("SELECT request_id, tool, input FROM agents.approvals")) {
+      // getSinglePendingApproval — the session's sole still-undecided
+      // approval, mirroring store.ts's
+      // `WHERE session_id = $1 AND decision IS NULL`.
+      const sid = params[0] as string;
+      const pending = [...approvals.entries()].filter(([, a]) => a.sessionId === sid && a.decision === null);
+      return Promise.resolve({
+        rows: pending.map(([id, a]) => ({ request_id: id, tool: a.tool, input: null })),
+      });
     }
     if (sql.includes("SELECT decision")) {
       const a = approvals.get(params[0] as string);
@@ -104,7 +197,7 @@ function inMemoryDb() {
     }
     return Promise.resolve({ rows: [] });
   };
-  return { query, turns, steps, approvals, toolConsents, calls };
+  return { query, turns, steps, approvals, toolConsents, calls, followUps };
 }
 
 // See runner.test.ts's FINISH/sequencedModel comment: ai@6's raw doStream
@@ -247,7 +340,7 @@ Deno.test("replay preserves live event order: message.completed before turn.comp
   assert(completedIdx < finishIdx, `replay order inverted: [${types.join(", ")}]`);
 });
 
-// H3: replay maps a persisted `custom` step (from ToolContext.emit on the
+// Replay maps a persisted `custom` step (from ToolContext.emit on the
 // session path — runner.test.ts covers the live side) back to the same
 // `tool.event` a live subscriber would have seen, same as every other step
 // kind (see handler.ts's stepToEvent).
@@ -282,7 +375,7 @@ Deno.test("GET /stream replays a persisted custom step as tool.event", async () 
   assertEquals(toolEvent.data.payload, { step: 1 });
 });
 
-// H3 regression guard for replay ordering: a custom step (persisted through
+// Regression guard for replay ordering: a custom step (persisted through
 // the shared stepSeq counter during the tool phase) must replay BEFORE the
 // text step's message.completed, which in turn must replay BEFORE finish's
 // turn.completed — the eve-client ordering fix (persistText before the
@@ -479,7 +572,7 @@ Deno.test("POST /approval 404s a requestId that belongs to a different session",
   assertEquals(db.turns[0].status, "completed");
 });
 
-// H4 (sticky tool-consent decisions — task-h4-brief.md): POST /approval's
+// Sticky tool-consent decisions: POST /approval's
 // "always"/"never" decisions resolve the pending request (as approve/deny)
 // AND upsert agents.tool_consents for the authenticated user.
 Deno.test("POST /approval with decision 'always' resolves as approve and upserts a sticky consent", async () => {
@@ -542,7 +635,7 @@ Deno.test("POST /approval with decision 'never' resolves as deny and upserts a s
   assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "never");
 
   // Drain the fire-and-forget turn (denied tool call still lets the turn
-  // finish, per the pre-H4 deny path) — see the `until` helper's own comment
+  // finish, per the existing deny path) — see the `until` helper's own comment
   // on why leaving this pending leaks a timer into the next test.
   await until(() => settled(db), 10_000);
 });
@@ -641,7 +734,7 @@ Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' with
   }));
   assertEquals(rejected.status, 400);
   assertEquals(db.approvals.get(requestId)!.decision, null);
-  // H4 review Minor: the 400 must not have produced a sticky consent row.
+  // The 400 must not have produced a sticky consent row.
   assertEquals(db.toolConsents.size, 0);
 
   // Drain the fire-and-forget turn (see the sibling /approval test's comment).
@@ -652,11 +745,11 @@ Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' with
   await until(() => settled(db), 10_000);
 });
 
-// Ride-along security fix (task-h5-brief.md, from the H4 review): approval
-// resolution must verify the caller is the session's owner, not just
-// (requestId, sessionId) — otherwise any authenticated user who learns
-// those ids could resolve someone else's pending approval and, with H4's
-// sticky verbs, accrue a durable consent on their behalf.
+// Ride-along security fix: approval resolution must verify the caller is the
+// session's owner, not just (requestId, sessionId) — otherwise any
+// authenticated user who learns those ids could resolve someone else's pending
+// approval and, with the sticky verbs, accrue a durable consent on their
+// behalf.
 Deno.test("POST /approval: the session owner (matching x-user-id) can resolve their own approval", async () => {
   const { handler, db } = await makeHandler({
     model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
@@ -832,7 +925,759 @@ Deno.test("model failure marks the turn failed and persists an error event (no u
   // sanitizers or an uncaught-error crash IS the assertion here.
 });
 
-Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (Task 19 robustness)", async () => {
+// "One turn at a time per session". Measured over two weeks of real
+// transcripts: 43 of 263 turns (16%) started while the previous turn on the
+// same session was still running — one case had two turns drive the same
+// coding-agent chat 22s apart with contradictory instructions ("Option B" then
+// "stop do A instead") and the coder acted on the wrong one. startTurn (this
+// file) is the single choke point every caller (channel adapters' send(),
+// native /eve/v1/session[/:id]) goes through, so the fix lives here rather than
+// in a specific channel adapter.
+Deno.test("a message arriving while a turn is running is queued, not started as a second concurrent turn", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate; // blocks the first turn "in flight" until the test releases it
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  // A queued message must not silently vanish — it gets a live,
+  // turn-agnostic acknowledgement event a channel adapter
+  // can turn into a reply/reaction (see discord.ts's "message.queued"
+  // handler for the Discord-side consumption of this).
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const second = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "second, urgent" }),
+  }));
+  assertEquals(second.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid)); // drain the fire-and-forget queue write
+  unsub();
+
+  // No second, concurrent turn — the message was folded into the queue instead.
+  assertEquals(db.turns.length, 1);
+  assertEquals(db.turns[0].status, "running");
+  assertEquals(db.followUps, [{ session_id: sid, message: "second, urgent" }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
+  assertEquals((ack.data as { text: string }).text, "second, urgent");
+
+  releaseGate();
+  // The queued follow-up is run automatically as soon as the first turn
+  // finishes — not left waiting for some future external message to arrive
+  // and pick it up, which would silently strand an instruction the user
+  // already sent during the busy window.
+  await until(() => db.turns.length === 2 && settled(db));
+  assertEquals(db.turns[0].status, "completed");
+  assertEquals(db.turns[1].status, "completed");
+  assertEquals(db.turns[1].message, "second, urgent");
+  assertEquals(db.followUps.length, 0); // drained
+});
+
+Deno.test("a follow-up queued during a turn that fails is folded into the next externally-triggered turn", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      throw new Error("model exploded");
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "queued while busy" }),
+  }));
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    releaseGate();
+    await until(() => db.turns.length === 1 && settled(db)); // the first turn fails; no auto-continuation on failure
+  } finally {
+    console.error = origError;
+  }
+  assertEquals(db.turns[0].status, "failed");
+  // Not lost: still queued, waiting for the next real message.
+  assertEquals(db.followUps, [{ session_id: sid, message: "queued while busy" }]);
+  assert(logged.some((l) => l.includes("model exploded")));
+
+  // Model recovers; a genuinely new message arrives and drains the queue,
+  // folding it into ITS turn's message.
+  const recoveredModel = model("recovered");
+  const agent = await loadAgent(TOY);
+  const recoveredHandler = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: recoveredModel,
+  });
+  await recoveredHandler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "try again" }),
+  }));
+  await until(() => db.turns.length === 2 && settled(db));
+  assertEquals(db.turns[1].status, "completed");
+  // "queued while busy" arrived BEFORE "try again" (it was queued while the
+  // first turn was still running; "try again" is what finally re-triggered
+  // this turn afterward) — store.ts's takeFollowUps docstring promises "in
+  // the order they arrived", so the queued item must lead, not trail.
+  assertEquals(db.turns[1].message, "queued while busy\n\ntry again");
+  assertEquals(db.followUps.length, 0);
+});
+
+// Lazy reaping, not a scheduler. Serialization means a turn stuck `running`
+// forever (the same defect reapStaleTurns exists for — 21 turns observed) now
+// wedges every LATER message on that session too, since nothing else ever
+// un-blocks getRunningTurn. There is no periodic hook in this runtime to run
+// reapStaleTurns on a timer, so startTurn reaps on the way in instead:
+// finding a running turn, it calls
+// reapStaleTurns, then re-reads getRunningTurn — a genuinely stale turn is
+// now failed and the new message proceeds normally; a live one still folds
+// into the queue exactly as before (covered by the sibling tests above).
+Deno.test("a stale (abandoned) running turn is reaped when a new message arrives, and that message runs immediately instead of queuing behind it forever", async () => {
+  let releaseStuckGate: () => void = () => {};
+  const stuckGate = new Promise<void>((resolve) => { releaseStuckGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const stuckModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await stuckGate;
+      return { stream: simulateReadableStream({ chunks: textChunks("stuck turn finally answers") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: stuckModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  // Simulate an abandoned turn (e.g. a worker crash/redeploy mid-turn): well
+  // past the 2h reap cutoff. No DB-backed backdateTurn helper exists in this
+  // file's fake-store convention (see store.test.ts's own tests, which drive
+  // the store's SQL/params directly instead) — this file's equivalent is
+  // direct fake-state mutation, same as every other test here that reads/
+  // asserts on `db.turns` directly.
+  db.turns[0].startedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+
+  // A second handler instance shares the same underlying fake store/db —
+  // standing in for "a different request hits the worker" (the stuck turn's
+  // own model call above never resolves on its own).
+  const agent = await loadAgent(TOY);
+  const recoveredHandler = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: model("recovered"),
+  });
+  await recoveredHandler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "are you there?" }),
+  }));
+  await until(() => db.turns.length === 2 && db.turns[1].status === "completed");
+
+  assertEquals(db.turns[0].status, "failed"); // reaped, not left running forever
+  assert(db.turns[0].error?.includes("turn abandoned"));
+  // Ran immediately as its own turn — NOT folded/queued behind the zombie.
+  assertEquals(db.turns[1].message, "are you there?");
+  assertEquals(db.followUps.length, 0);
+
+  releaseStuckGate(); // let the original stuck call settle so it doesn't leak past the test
+  await until(() => true); // yield a tick for the release to be observed
+});
+
+// The lazy-reap call must sit INSIDE the queue branch's try/catch — a
+// transient reap failure (a real failure mode, since this runs on every
+// message that lands on a busy session, not a hypothetical) would otherwise
+// escape to the outer "turn crashed" catch and silently drop the incoming
+// message (queueFollowUp never reached, no queue row, no ack). It must
+// instead degrade to the safe assumption: treat the session as still busy
+// and queue the message exactly as if reaping had found nothing stale.
+Deno.test("a reap failure during the busy-check still queues and acknowledges the message (not dropped, not logged as a turn crash)", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const db = inMemoryDb();
+  const baseStore = createStore(db.query as never);
+  const brokenReapStore = {
+    ...baseStore,
+    reapStaleTurns: () => Promise.reject(new Error("reap query timed out")),
+  };
+  const agent = await loadAgent(TOY);
+  const handler = createHandler({
+    agent, store: brokenReapStore as never, plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: gatedModel,
+  });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "second" }),
+    }));
+    await until(() => db.followUps.some((f) => f.session_id === sid));
+  } finally {
+    console.error = origError;
+    unsub();
+    releaseGate();
+  }
+
+  assertEquals(db.turns.length, 1); // no second, concurrent turn
+  assertEquals(db.followUps, [{ session_id: sid, message: "second" }]); // still queued despite the reap failure
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
+  assertEquals((ack.data as { text: string }).text, "second");
+  assert(
+    logged.some((l) => l.includes("stale-turn reap failed") && l.includes("treating session as busy")),
+    `expected the distinct reap-failure log, got: ${JSON.stringify(logged)}`,
+  );
+  assert(!logged.some((l) => l.includes("turn crashed")), `"turn crashed" must not fire for a reap failure: ${JSON.stringify(logged)}`);
+});
+
+// The queue-write path (busy session) must not be misreported through the
+// generic "turn crashed" log — no turn was ever created on that path.
+Deno.test("a follow-up queue write failure is logged distinctly from a turn crash", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const db = inMemoryDb();
+  const baseStore = createStore(db.query as never);
+  const brokenStore = {
+    ...baseStore,
+    queueFollowUp: () => Promise.reject(new Error("db unavailable")),
+  };
+  const agent = await loadAgent(TOY);
+  const handler = createHandler({
+    agent, store: brokenStore as never, plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: gatedModel,
+  });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  const logged: string[] = [];
+  const origError = console.error;
+  console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ message: "second" }),
+    }));
+    await until(() => logged.some((l) => l.includes("db unavailable")));
+  } finally {
+    console.error = origError;
+    releaseGate();
+  }
+  assert(logged.some((l) => l.includes("follow-up queue write failed") && !l.includes("turn crashed")));
+  assert(!logged.some((l) => l.includes("turn crashed")));
+});
+
+// A QUALIFIED reply to a pending approval gate ("yes but first explain why
+// the chunk count is wrong") is not
+// a bare yes/no — matchGateText returns null for it (gate-text.ts) — so a
+// pre-checking caller (discord.ts's tryResolveGate) falls through to send()/
+// startTurn with the gate STILL pending. Before this fix that reply was
+// queued behind the very gate it answered, for up to the whole 30-minute
+// approval poll, with neither side able to move. The busy branch now denies
+// the pending gate itself (letting the parked awaitApproval return and the
+// coder revise) and still queues the reply to ride the next turn as the
+// revision's driving instruction.
+Deno.test("a qualified reply arriving while a gate is pending resolves the gate as deny and does not strand the message", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate; // stands in for the turn parked inside a poll on the pending gate
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  // A pending gate on this session — direct fake-state mutation, same
+  // convention as the stale-turn test above backdating db.turns[0].startedAt.
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const reply = "yes but first explain why the chunk count is wrong";
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: reply }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  // The gate was resolved as deny — the parked awaitApproval poll returns
+  // instead of sitting there for the rest of the 30-minute window.
+  assertEquals(db.approvals.get("r-1")?.decision, "deny");
+  // The reply itself is NOT stranded — it is queued to drive the revision.
+  assertEquals(db.followUps, [{ session_id: sid, message: reply }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
+  assertEquals((ack.data as { text: string; deniedPendingGate: boolean }).text, reply);
+  // The ack carries what actually happened, so the channel adapter can say
+  // something other than the generic "the ball is not in your court" line.
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
+});
+
+Deno.test("a reply arriving on a busy session with NO pending gate still queues exactly as it does today", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  // No pending approval on this session.
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "also rename the tests to .test.ts" }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.followUps, [{ session_id: sid, message: "also rename the tests to .test.ts" }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// A reply that matches matchGateText's
+// vocabulary CLEANLY (raw, unwrapped text — the shape a hypothetical
+// non-Discord caller that skips tryResolveGate would send directly) must
+// still be left alone here: matchGateText("approve") is non-null, so the
+// deny condition's first clause is false regardless of
+// looksLikeGateResponse. This is the "caller that never pre-checks the
+// gate" case the comment above describes — distinct from, and still valid
+// alongside, the composed-message coverage below.
+Deno.test("a busy-session reply with RAW text that matches the pending gate's vocabulary cleanly is left alone (not auto-resolved)", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "approve" }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, null); // untouched — not auto-resolved
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// The actual regression: adapters/discord.ts
+// composes the inbound message as `[contextBlock, attachmentsBlock,
+// text].join("\n\n")` BEFORE it ever reaches startTurn — so asText(message)
+// here is always wrapped in a `<discord_context>` block. Pre-fix,
+// matchGateText(composed text) was always null (the wrapper alone blows past
+// MAX_DECISION_WORDS) so EVERY message on a busy session with a pending gate
+// was denied, not just qualified answers. looksLikeGateResponse must strip
+// the wrapper and judge the human's actual words: a qualified "yes but…"
+// answers the gate (deny + queue as the revision instruction) while ordinary
+// chatter does not (queue only, gate left pending).
+Deno.test("a composed Discord message that qualifiedly answers the pending gate is denied and queued", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const composed = composeDiscordMessage("yes but first explain why the chunk count is wrong");
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, "deny");
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
+});
+
+Deno.test("a composed Discord message that is unrelated chatter does NOT deny the pending gate, only queues", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const composed = composeDiscordMessage("fyi @alice is out today");
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, null); // gate left pending, not denied
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// Composed-message shape, no pending gate: unchanged behaviour (queue only,
+// deniedPendingGate false) — the composition itself must not trip any part
+// of the deny path when there is nothing to deny.
+Deno.test("a composed Discord message on a busy session with NO pending gate still just queues", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  // No pending approval on this session.
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const composed = composeDiscordMessage("also rename the tests to .test.ts");
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// adapters/discord.ts's
+// mention-in-thread trigger composes a THIRD block — `<thread_messages>`,
+// up to 50 lines of past conversation — into the same message, reusing the
+// same continuation token as thread-turn, so it can land on the same
+// session/pending gate. Before stripComposedWrapper also stripped that
+// block, a message that is unambiguously NOT a gate answer
+// ("also rename the tests to .test.ts") flipped to looksLikeGateResponse ==
+// true purely because the STALE history happened to contain ordinary
+// yes/no/ok words — auto-denying the gate on account of someone else's old
+// message, not the human's current reply.
+Deno.test("a composed mention-in-thread message (three-part shape, stale yes/no/ok history) does NOT deny the pending gate on history alone", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const staleHistory: HistoryMessage[] = [
+    { author: "alice", bot: false, content: "yes let's do that" },
+    { author: "bob", bot: false, content: "no I don't think so" },
+    { author: "alice", bot: false, content: "ok fine, moving on" },
+  ];
+  const composed = composeMentionInThreadMessage("also rename the tests to .test.ts", staleHistory);
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, null); // gate left pending, not denied
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
+});
+
+// Same three-part shape, but the CURRENT reply (not the history) is a
+// genuine qualified answer — must still deny, same as the two-part shape.
+Deno.test("a composed mention-in-thread message whose CURRENT reply qualifiedly answers the gate is still denied", async () => {
+  let releaseGate: () => void = () => {};
+  const gate = new Promise<void>((resolve) => { releaseGate = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const gatedModel = new MockLanguageModelV3({
+    doStream: async () => {
+      await gate;
+      return { stream: simulateReadableStream({ chunks: textChunks("first done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: gatedModel });
+
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "first" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+
+  const live: AgentEvent[] = [];
+  const unsub = subscribe(sid, (e) => live.push(e));
+
+  const staleHistory: HistoryMessage[] = [
+    { author: "alice", bot: false, content: "yes let's do that" },
+    { author: "bob", bot: false, content: "no I don't think so" },
+  ];
+  const composed = composeMentionInThreadMessage(
+    "yes but first explain why the chunk count is wrong",
+    staleHistory,
+  );
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: composed }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  unsub();
+  releaseGate();
+
+  assertEquals(db.approvals.get("r-1")?.decision, "deny");
+  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  const ack = live.find((e) => e.type === "message.queued");
+  assertExists(ack);
+  assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
+});
+
+// reapStaleTurns must not reach across sessions. Before the fix a message on
+// ANY busy session marked EVERY stale `running` turn deployment-wide, so
+// another session's genuinely long-running turn (plausible: the channel step
+// floor was raised to 200 and streamTurn has no timeout) could be failed out
+// from under it by an unrelated session's traffic, re-opening the
+// two-concurrent-turns hole this reap-scoping fix exists to close.
+Deno.test("a stale turn on ANOTHER session is left alone while the calling session's stale turn is reaped", async () => {
+  let releaseA: () => void = () => {};
+  const gateA = new Promise<void>((resolve) => { releaseA = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const modelA = new MockLanguageModelV3({
+    doStream: async () => {
+      await gateA;
+      return { stream: simulateReadableStream({ chunks: textChunks("a done") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model: modelA });
+
+  // Session A: its own stale (abandoned) running turn, well past the 2h cutoff.
+  const createA = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "a-first" }),
+  }));
+  const sidA = createA.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.some((t) => t.session_id === sidA && t.status === "running"));
+  const turnA = db.turns.find((t) => t.session_id === sidA)!;
+  turnA.startedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+
+  // Session B: a DIFFERENT, unrelated session with its own live-but-old
+  // running turn — stands in for a genuinely long-running turn elsewhere in
+  // the deployment (not the caller's own zombie).
+  let releaseB: () => void = () => {};
+  const gateB = new Promise<void>((resolve) => { releaseB = resolve; });
+  // deno-lint-ignore no-explicit-any
+  const modelB = new MockLanguageModelV3({
+    doStream: async () => {
+      await gateB;
+      return { stream: simulateReadableStream({ chunks: textChunks("b done") }) };
+    },
+  });
+  const agent = await loadAgent(TOY);
+  const handlerB = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: modelB,
+  });
+  const createB = await handlerB(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "b-first" }),
+  }));
+  const sidB = createB.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.some((t) => t.session_id === sidB && t.status === "running"));
+  const turnB = db.turns.find((t) => t.session_id === sidB)!;
+  turnB.startedAt = new Date(Date.now() - 3 * 60 * 60 * 1000); // also past the cutoff
+
+  // A new message lands on session A ONLY — this is what triggers the lazy
+  // reap, and it must only touch session A's own stale turn.
+  const recoveredHandler = createHandler({
+    agent, store: createStore(db.query as never), plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: model("a recovered"),
+  });
+  await recoveredHandler(new Request(`${BASE}/eve/v1/session/${sidA}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "are you there?" }),
+  }));
+  await until(() => turnA.status === "failed");
+
+  assertEquals(turnA.status, "failed"); // reaped — the caller's own session
+  assert(turnA.error?.includes("turn abandoned"));
+  // Session B's stale turn is UNTOUCHED — still running, not reaped out from
+  // under it by session A's traffic.
+  assertEquals(turnB.status, "running");
+  assertEquals(turnB.error, null);
+
+  releaseA();
+  releaseB();
+  await until(() => true);
+});
+
+Deno.test("channel turn: a throwing delivery registration (onTurnCreated) does NOT abort the turn (robustness)", async () => {
   const agent = await loadAgent(TOY);
   // A channel whose `events` access throws — this fires inside startTurn's
   // onTurnCreated (the delivery-registration callback: layer.ts's registerForTurn
@@ -928,11 +1773,11 @@ Deno.test("POST /chat: finish part carries usage in messageMetadata", async () =
   assert(text.includes('"outputTokens"'), `messageMetadata missing usage.outputTokens: ${text}`);
 });
 
-// H3: ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part
-// into the SAME stream useChat consumes (createUIMessageStream +
-// writer.merge — see handler.ts and task-h3-report.md for the v6 API
-// verification). No agents.steps write on this path (unlike the session
-// path) — /chat never persisted tool-call/tool-result steps either.
+// ToolContext.emit on /chat interleaves a `data-${name}` UIMessage part into
+// the SAME stream useChat consumes (createUIMessageStream + writer.merge — see
+// handler.ts for the v6 API verification). No agents.steps write on this path
+// (unlike the session path) — /chat never persisted tool-call/tool-result steps
+// either.
 Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", async () => {
   const { handler } = await makeHandler({
     model: sequencedModel(toolCallChunks("emitter", {}), textChunks("done")),
@@ -957,13 +1802,12 @@ Deno.test("POST /chat interleaves ToolContext.emit as a data-* UIMessage part", 
   assert(text.includes('"step":1'), `emitted payload missing from stream: ${text}`);
 });
 
-// H3 review fix: /chat setup-phase failures must keep pre-H3 HTTP-error
-// semantics. buildSdkTools (and its filterTools hook) runs BEFORE
-// createUIMessageStream, so a throwing hook rejects the route — it must
-// NOT be demoted to a 200 response carrying an in-stream SSE error frame
-// (which is what moving tool building inside the stream's execute() would
-// have done). Matches hooks.test.ts's pre-H3 assertRejects posture for a
-// throwing resolveModel on /chat.
+// /chat setup-phase failures must keep the same HTTP-error semantics as before.
+// buildSdkTools (and its filterTools hook) runs BEFORE createUIMessageStream,
+// so a throwing hook rejects the route — it must NOT be demoted to a 200
+// response carrying an in-stream SSE error frame (which is what moving tool
+// building inside the stream's execute() would have done). Matches
+// hooks.test.ts's assertRejects posture for a throwing resolveModel on /chat.
 Deno.test("POST /chat: a throwing filterTools hook rejects the request (setup phase, no 200+SSE-error demotion)", async () => {
   const { handler } = await makeHandler({
     mutate: (agent) => {
@@ -1186,7 +2030,7 @@ Deno.test("GET /stream releases the subscriber when replay (listEvents) fails", 
   assertEquals(subscriberCount(sid), before);
 });
 
-// ── OAuth broker routes (task-7) ─────────────────────────────────────────────
+// ── OAuth broker routes ──────────────────────────────────────────────────────
 import { signState } from "../connections/oauth/state.ts";
 import type { OAuthConnector, OAuthStore, OAuthToken } from "../connections/oauth/store.ts";
 

@@ -17,10 +17,35 @@ su postgres -c "psql -d webapi -c 'CREATE SCHEMA IF NOT EXISTS webapi AUTHORIZAT
 # discovery doc and now eagerly throws if security.auth.oidc.url is blank, so serve
 # a static discovery doc locally and point the bean at it — real issuer/clientId/
 # secret are supplied from env in production.
-echo "[smoke] starting mock OIDC discovery server"
+# Serve the discovery document over HTTPS from a CA the native image's baked
+# truststore does not contain. That is what gives WEBAPI_TRUST_CERTS something to
+# do: if the runtime truststore does not work, WebAPI's eager discovery fetch
+# fails and boot dies, so "status=running" below becomes the assertion.
+#
+# Generated per run rather than checked in: nothing expires, and no private key
+# lives in the repo. The IP SAN is required -- Java verifies the hostname and
+# rejects a CN-only certificate for https://127.0.0.1.
+echo "[smoke] generating throwaway CA for the mock OIDC provider"
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+  -keyout /tmp/smoke-ca.key -out /tmp/smoke-ca.pem \
+  -subj "/CN=trex-smoke-ca" \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
+openssl req -newkey rsa:2048 -nodes \
+  -keyout /tmp/smoke-server.key -out /tmp/smoke-server.csr \
+  -subj "/CN=127.0.0.1" >/dev/null 2>&1
+openssl x509 -req -in /tmp/smoke-server.csr -sha256 -days 825 \
+  -CA /tmp/smoke-ca.pem -CAkey /tmp/smoke-ca.key -CAcreateserial \
+  -out /tmp/smoke-server.pem \
+  -extfile <(printf "subjectAltName=IP:127.0.0.1\nbasicConstraints=CA:FALSE\nextendedKeyUsage=serverAuth\n") \
+  >/dev/null 2>&1
+[ -s /tmp/smoke-ca.pem ] && [ -s /tmp/smoke-server.pem ] \
+  || { echo "[smoke] FATAL: could not generate the smoke CA/server certificate"; exit 1; }
+
+echo "[smoke] starting mock OIDC discovery server (https)"
 python3 - <<'PY' >/dev/null 2>&1 &
-import http.server, socketserver
-body = b'{"issuer":"http://127.0.0.1:8099/oidc","authorization_endpoint":"http://127.0.0.1:8099/oidc/auth","token_endpoint":"http://127.0.0.1:8099/oidc/token","jwks_uri":"http://127.0.0.1:8099/oidc/jwks","userinfo_endpoint":"http://127.0.0.1:8099/oidc/me","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],"scopes_supported":["openid","profile","email"]}'
+import http.server, socketserver, ssl
+body = b'{"issuer":"https://127.0.0.1:8099/oidc","authorization_endpoint":"https://127.0.0.1:8099/oidc/auth","token_endpoint":"https://127.0.0.1:8099/oidc/token","jwks_uri":"https://127.0.0.1:8099/oidc/jwks","userinfo_endpoint":"https://127.0.0.1:8099/oidc/me","response_types_supported":["code"],"subject_types_supported":["public"],"id_token_signing_alg_values_supported":["RS256"],"scopes_supported":["openid","profile","email"]}'
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -29,22 +54,34 @@ class H(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
     def log_message(self, *a): pass
-socketserver.TCPServer(("127.0.0.1", 8099), H).serve_forever()
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain("/tmp/smoke-server.pem", "/tmp/smoke-server.key")
+srv = socketserver.TCPServer(("127.0.0.1", 8099), H)
+srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+srv.serve_forever()
 PY
 echo $! > /tmp/oidc_mock.pid
 oidc_up=0
-for _ in $(seq 1 20); do curl -sf http://127.0.0.1:8099/oidc/.well-known/openid-configuration >/dev/null 2>&1 && { oidc_up=1; break; }; sleep 0.5; done
+for _ in $(seq 1 20); do curl -sf --cacert /tmp/smoke-ca.pem https://127.0.0.1:8099/oidc/.well-known/openid-configuration >/dev/null 2>&1 && { oidc_up=1; break; }; sleep 0.5; done
 # The mock relies on python3's http.server/socketserver stdlib (needs the full
 # python3 package, not python3-minimal). If it never bound, WebAPI's eager OIDC
 # discovery fetch will fail with "Connection refused" and boot dies — fail loudly
 # here instead of letting that surface as an inscrutable bean-instantiation error.
-[ "$oidc_up" = 1 ] || { echo "[smoke] FATAL: mock OIDC server never came up on 127.0.0.1:8099"; exit 1; }
+[ "$oidc_up" = 1 ] || { echo "[smoke] FATAL: mock OIDC server never came up on https://127.0.0.1:8099"; exit 1; }
 
 # cache.generation.cleanupInterval is shrunk so CleanupScheduler.removeOldCache
 # fires within seconds. It runs an entity-graph (Cosium) derived query, which
 # exercises a dynamic JDK proxy that static analysis can't see — without this the
 # smoke never hits that path and a missing proxy registration slips through.
-export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","trexsql.cache-path":"/tmp/trexcache","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_","cache.generation.cleanupInterval":"3000","cache.generation.invalidAfterDays":"1","logging.level.org.hibernate.SQL":"DEBUG","security.auth.oidc.enabled":"true","security.auth.oidc.clientId":"smoke","security.auth.oidc.apiSecret":"smoke","security.auth.oidc.url":"http://127.0.0.1:8099/oidc/.well-known/openid-configuration","security.auth.oauth.callback.api":"http://127.0.0.1:8099/cb","security.auth.oauth.callback.ui":"http://127.0.0.1:8099/ui"}'
+export SPRING_APPLICATION_JSON='{"trexsql.enabled":"true","trexsql.cache-path":"/tmp/trexcache","datasource.url":"jdbc:postgresql://localhost:5432/webapi","datasource.username":"ohdsi_app_user","datasource.password":"app1","datasource.ohdsi.schema":"webapi","spring.flyway.url":"jdbc:postgresql://localhost:5432/webapi","spring.flyway.user":"ohdsi_app_user","spring.flyway.password":"app1","spring.flyway.schemas":"webapi","spring.batch.repository.table-prefix":"webapi.BATCH_","cache.generation.cleanupInterval":"3000","cache.generation.invalidAfterDays":"1","logging.level.org.hibernate.SQL":"DEBUG","security.auth.oidc.enabled":"true","security.auth.oidc.clientId":"smoke","security.auth.oidc.apiSecret":"smoke","security.auth.oidc.url":"https://127.0.0.1:8099/oidc/.well-known/openid-configuration","security.auth.oauth.callback.api":"https://127.0.0.1:8099/cb","security.auth.oauth.callback.ui":"https://127.0.0.1:8099/ui"}'
+
+# The point of the HTTPS provider above: WebAPI's eager OIDC discovery fetch now
+# crosses TLS to a certificate signed by a CA the native image's build-time
+# truststore does not contain. It can only succeed if applyExtraTrust merged this
+# CA into the runtime truststore -- so WEBAPI_STATUS=running is itself the proof
+# that the feature works in a real native image, which no unit test on a stock
+# JVM can establish.
+export WEBAPI_TRUST_CERTS=/tmp/smoke-ca.pem
 
 echo "[smoke] launching native WebAPI host"
 /app/harness > /tmp/harness.log 2>&1 &
@@ -78,6 +115,19 @@ fi
 
 echo "=== webapi_start result ==="
 grep -E "ISOLATE_OK|WEBAPI_START=" /tmp/harness.log | head -3
+
+# Asserted in plugin-ci.yml by grepping for SMOKE_TRUST=installed. smoke.sh always
+# exits 0 by design, so without that grep a regression here would print the failure
+# and still pass the build green.
+echo "=== runtime TLS trust (WEBAPI_TRUST_CERTS) ==="
+if grep -q "installed runtime TLS trust" /tmp/harness.log; then
+  echo "SMOKE_TRUST=installed"
+  grep -E "trusting extra CA|installed runtime TLS trust|runtime truststore verified|did not take effect" /tmp/harness.log | head -5
+else
+  echo "SMOKE_TRUST=missing"
+  echo "FAIL: applyExtraTrust never installed the extra CA — WEBAPI_TRUST_CERTS was ignored"
+  grep -iE "WEBAPI_TRUST_CERTS|InvalidTrustSource" /tmp/harness.log | head -5
+fi
 echo "=== deepest cause (reflection frames) ==="
 grep -nE "Caused by|NoSuchField|NoSuchMethod|ClassNotFound|getField|getDeclaredField|getMethod|at org.trex|at trexsql|at clojure|at reitit|at muuntaja|at jsonista|at honeysql" /tmp/harness.log | tail -30
 echo "=== harness.log boot output (full) ==="

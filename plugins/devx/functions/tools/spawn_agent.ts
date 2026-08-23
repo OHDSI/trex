@@ -5,6 +5,8 @@
  */
 
 import type { ToolDefinition } from "./types.ts";
+import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
+import { assertProviderSupported, isNoKeyProvider } from "../provider_support.ts";
 
 export const spawnAgentTool: ToolDefinition<{
   agent_name: string;
@@ -80,21 +82,79 @@ export const spawnAgentTool: ToolDefinition<{
     });
 
     try {
-      // Import streamAgentChat dynamically to avoid circular dependency
-      const { streamAgentChat } = await import("../agent.ts");
-
-      // Get active provider config + user prefs for model creation
+      // Get active provider config + user prefs for model creation. Probe
+      // before selecting the encrypted columns — see provider_key.ts's
+      // assertProviderConfigEncryptionMigrated header comment.
+      await assertProviderConfigEncryptionMigrated(ctx.sql);
       const activePC = await ctx.sql(
-        `SELECT provider, model, api_key, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
+        `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
         [ctx.userId],
       );
       const prefsResult = await ctx.sql(
         `SELECT ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`,
         [ctx.userId],
       );
-      const settings = activePC.rows[0]
-        ? { ...activePC.rows[0], ...(prefsResult.rows[0] || {}) }
-        : (await ctx.sql(`SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`, [ctx.userId])).rows[0] || {};
+      let settings;
+      if (activePC.rows[0]) {
+        // Resolve through the encryption helper — never let the raw
+        // api_key_encrypted/api_key_iv columns leak into settings.api_key
+        // unresolved. A decryption failure propagates uncaught to the outer
+        // catch below, which already reports it as "Subagent error: ..." —
+        // the same fail-loud posture as every other failure this tool
+        // surfaces, so no new error shape is needed here.
+        const resolvedApiKey = await readProviderKey(activePC.rows[0]);
+        // The comment above says ciphertext never leaks into `settings` —
+        // make that true by destructuring it out rather than spreading the
+        // raw row (same fix as index.ts's settings/agentSettings assembly).
+        const { api_key_encrypted: _spawnEnc, api_key_iv: _spawnIv, ...activePCNoCiphertext } = activePC.rows[0];
+        settings = { ...activePCNoCiphertext, api_key: resolvedApiKey, ...(prefsResult.rows[0] || {}) };
+      } else {
+        // Legacy fallback. devx.settings carries the same encrypted-pair
+        // columns as provider_configs (V16) now — resolved through
+        // readProviderKey below, the same shape as the activePC branch
+        // above, not a second, differently-shaped resolution.
+        await assertEncryptionMigrated("settings", ctx.sql);
+        const legacyRow = (await ctx.sql(
+          `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1`,
+          [ctx.userId],
+        )).rows[0];
+        if (legacyRow) {
+          const resolvedLegacyApiKey = await readProviderKey(legacyRow);
+          const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+          settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
+        } else {
+          settings = {};
+        }
+      }
+
+      // This tool re-reads the active provider row itself rather than reusing
+      // the caller's, so the gates the route layer applied to the parent turn
+      // (index.ts's two /stream sites, security_routes.ts's runAgentReview) do
+      // NOT cover it: a user who activates a different provider while a turn
+      // is in flight lands here with a row nothing has vetted. Re-apply both
+      // route-layer gates on the row this tool actually resolved.
+      //
+      // The removed-engine gate first, keyed on the provider name rather than
+      // on the missing key: the engine that used to serve these rows is gone,
+      // so without this the row reaches createModel's final
+      // `return openai(model)` — the OpenAI-compatible client, which resolves
+      // an absent key from the worker's own OPENAI_API_KEY and runs the
+      // subagent turn on the operator's account. This tool fails the turn
+      // rather than answering a request, so it takes the throwing wrapper over
+      // the same shared predicate the route sites return a 400 from.
+      assertProviderSupported(settings.provider);
+      // Then the key gate, same shared membership as the three route sites: only
+      // providers that genuinely authenticate without a stored key are waived.
+      // Also catches the `|| {}` empty-settings case above, which has the same
+      // fallthrough.
+      if (!settings.api_key && !isNoKeyProvider(settings.provider)) {
+        throw new Error("No provider configured. Please set up your provider in Settings.");
+      }
+
+      // Import streamAgentChat dynamically to avoid circular dependency.
+      // Loaded after the gates above so a rejected turn never pulls in the
+      // engine (and its provider SDKs) at all.
+      const { streamAgentChat } = await import("../agent.ts");
 
       // Determine model — use agent's model or inherit parent's
       const effectiveModel = agentDef.model === "inherit" ? settings.model : agentDef.model;

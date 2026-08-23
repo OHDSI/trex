@@ -458,3 +458,67 @@ Deno.test("defaultLinearResume forwards the decoded decision to args.resume; ret
   assertEquals(resumes[0].continuationToken, "issue-abc");
   assertEquals(resumes[0].input.decision, "deny"); // "/deny" → deny
 });
+
+// ---- delivery: message.queued ---------------------------------------------
+
+// A message that arrives while a turn is running is queued, not started; the
+// ack is what stops it looking like the message vanished. Linear's primitive is
+// an issue comment, marker-stamped so the loop guard drops our own echo.
+Deno.test("message.queued posts a one-line acknowledgement comment carrying the loop-guard marker", async () => {
+  const calls: Array<{ url: string; auth?: string; body?: unknown }> = [];
+  const channel = linearChannel({
+    credentials: { webhookSecret: SECRET, accessToken: "lin_api_secret" },
+    api: { fetch: graphqlFetchMock(calls) },
+  });
+
+  await channel.events!["message.queued"]({ text: "also rename the tests" }, { state: { issueId: "issue-abc" } });
+
+  assertEquals(calls.length, 1);
+  const gql = calls[0].body as { variables: { input: { issueId: string; body: string } } };
+  assertEquals(gql.variables.input.issueId, "issue-abc");
+  assertStringIncludes(gql.variables.input.body, "queued");
+  assertStringIncludes(gql.variables.input.body, "<!-- trex:linear:agent -->");
+});
+
+Deno.test("message.queued names the closed gate when deniedPendingGate is set", async () => {
+  const calls: Array<{ url: string; auth?: string; body?: unknown }> = [];
+  const channel = linearChannel({
+    credentials: { webhookSecret: SECRET, accessToken: "lin_api_secret" },
+    api: { fetch: graphqlFetchMock(calls) },
+  });
+
+  await channel.events!["message.queued"](
+    { text: "yes but explain the chunk count first", deniedPendingGate: true },
+    { state: { issueId: "issue-abc" } },
+  );
+
+  assertEquals(calls.length, 1);
+  const body = (calls[0].body as { variables: { input: { body: string } } }).variables.input.body;
+  assertEquals(/closed the pending approval|feedback/i.test(body), true, `expected the deny-ack wording, got: ${body}`);
+});
+
+Deno.test("message.queued is a no-op without an issueId, and swallows a delivery failure", async () => {
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response("boom", { status: 500 }));
+  };
+  const channel = linearChannel({
+    credentials: { webhookSecret: SECRET, accessToken: "lin_api_secret" },
+    api: { fetch: fetchMock },
+  });
+
+  await channel.events!["message.queued"]({ text: "hi" }, { state: {} });
+  assertEquals(called, 0);
+
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["message.queued"]({ text: "hi" }, { state: { issueId: "issue-abc" } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assertEquals(logged.some((l) => l.includes("message.queued")), true);
+});

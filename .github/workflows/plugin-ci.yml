@@ -737,6 +737,25 @@ jobs:
           if ! grep -q "status=running" smoke.out; then
             echo "::error::webapi_start did not reach running state"; exit 1
           fi
+          # smoke.sh serves OIDC discovery over HTTPS from a throwaway CA and sets
+          # WEBAPI_TRUST_CERTS, so reaching "running" already proves the runtime
+          # truststore worked. This asserts the install itself ran, which catches the
+          # case where the discovery URL stops being HTTPS and the coverage silently
+          # lapses. smoke.sh always exits 0, so the assertion has to live here.
+          if ! grep -q "SMOKE_TRUST=installed" smoke.out; then
+            echo "::error::WEBAPI_TRUST_CERTS was not honoured in the native image"; exit 1
+          fi
+          # A shared-library native image installs no signal handlers, so SIGPIPE keeps the
+          # host default of terminate and the close_notify write during TLS teardown kills
+          # the process silently mid-boot. SigPipeGuard fixes that; assert it actually ran.
+          # The harness deliberately leaves SIGPIPE at its lethal default, so "running"
+          # above already proves the library protects itself - do NOT harden harness.c or
+          # this coverage disappears. See docs/design/webapi-native-sigpipe.md.
+          if ! grep -q "SIGPIPE: ignored" smoke.out; then
+            echo "::error::SigPipeGuard did not ignore SIGPIPE; a peer-closed TLS socket can kill the host process"
+            grep -E "SIGPIPE:" smoke.out || true
+            exit 1
+          fi
           if grep -iqE "not registered for reflection|UnsupportedFeatureError|MissingReflectionRegistrationError|NoClassDefFoundError" smoke.out; then
             echo "::error::native-image reachability gap hit during boot smoke"; exit 1
           fi
@@ -1387,6 +1406,26 @@ jobs:
                 # before /usr/src/plugins, so the image's baked (unpatched) seed would
                 # win — overwrite it directly so the patch actually takes effect.
                 - ./plugins/functions/mri-pg-config/src/db/seeds/03_Config.ts:/usr/src/bundled-plugins/d2e-functions/mri-pg-config/src/db/seeds/03_Config.ts:ro
+              # d2e's notebook-migrate waits only on Postgres, so it provisions the
+              # `notebook` schema CONCURRENTLY with trex's own core trexdb migration.
+              # The two then write the same system catalog rows and one loses with
+              # "tuple concurrently updated", which fails V1__initial_schema, leaves
+              # trexdb empty, and boot dies 60s later on "kek_wrapped_dek not present".
+              # It also GRANTs to anon/authenticated before pg-mgmt-init has created
+              # those roles. Serialise the three so nothing provisions in parallel:
+              #   pg-mgmt-init -> notebook-migrate -> trex
+              # Remove this once d2e provisions from trex instead (OHDSI/d2e).
+              depends_on: !override
+                alp-minerva-pg-mgmt-init:
+                  condition: service_completed_successfully
+                alp-logto-post-init:
+                  condition: service_completed_successfully
+                notebook-migrate:
+                  condition: service_completed_successfully
+            notebook-migrate:
+              depends_on: !override
+                alp-minerva-pg-mgmt-init:
+                  condition: service_completed_successfully
           EOF
           cat d2e/docker-compose-ci.yml
 

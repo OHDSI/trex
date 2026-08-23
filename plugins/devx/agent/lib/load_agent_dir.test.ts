@@ -18,6 +18,7 @@
 // as every other test in this dir.
 import { assert, assertEquals } from "jsr:@std/assert";
 import { loadAgent } from "../../../../core/server/agents/loader.ts";
+import { DEFAULT_MAX_STEPS } from "../../functions/coder_context.ts";
 
 // loadAgent builds file:// URLs from the dir string, so it needs an absolute
 // path; derive it from this file's own URL to stay checkout-relative.
@@ -41,8 +42,8 @@ Deno.test({
   async fn() {
     const agent = await loadAgent(AGENT_DIR);
 
-    // Every ported tool (batch A + batch B) is discovered under its
-    // filename-derived name…
+    // Every ported tool (batch A + batch B, plus anything ported since) is
+    // discovered under its filename-derived name…
     const expected = [
       // Batch A (25)
       "AddDependency", "Bash", "CodeSearch", "CopyFile", "DeleteFile", "Edit",
@@ -60,6 +61,8 @@ Deno.test({
       "SendMessage", "SetChatSummary", "TableData", "TaskCreate", "TaskGet",
       "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch",
       "TypeCheck", "WebCrawl", "WebFetch", "WebSearch", "WritePlan",
+      // Figma (2) — added to the legacy registry after batch B closed
+      "FigmaListFrames", "FigmaPullMockups",
     ];
     for (const name of expected) {
       assert(name in agent.tools, `tool ${name} missing from loaded agent`);
@@ -75,7 +78,15 @@ Deno.test({
       assert(typeof def.execute === "function", `${name} has no execute`);
     }
 
-    assertEquals(agent.config.maxSteps, 25);
+    // maxSteps now mirrors coder_context.ts's shared DEFAULT_MAX_STEPS
+    // rather than a second hardcoded 25 — see agent.ts's defineAgent call
+    // site comment for why
+    // this value is definition-time and cannot vary per turn. Asserted
+    // against the imported constant, not a literal 100, so a future change
+    // to DEFAULT_MAX_STEPS fails here with one clear message instead of two
+    // (this file and coder_context.test.ts) each reporting a bare number
+    // mismatch.
+    assertEquals(agent.config.maxSteps, DEFAULT_MAX_STEPS);
     assert(agent.instructions.length > 0);
 
     // Part 4 (task-v3-brief.md): plugins/devx/agent/skills is a relative
@@ -94,13 +105,15 @@ Deno.test({
 
     // Part 5 (task-v3-brief.md): code-reviewer/code-explorer subagents load
     // as full agent dirs (loadAgent's own one-level-deep subagents/ scan —
-    // see loader.ts), each with the ported max-steps and exactly the tools
-    // named in the legacy agents/*.md frontmatter's allowed-tools list.
+    // see loader.ts), each with its :max-steps and exactly the tools in its
+    // tools/ dir. These dirs are now the SINGLE definition of the built-in
+    // agents — functions/skills/sync.ts registers the same ones for the
+    // legacy loop (see builtin_agents_sync.test.ts).
     const EXPECTED_SUBAGENT_TOOLS = ["Read", "Glob", "Grep", "CodeSearch", "GitLog", "GitDiff"];
     for (const name of ["code-reviewer", "code-explorer"]) {
       const sub = agent.subagents[name];
       assert(sub, `expected subagent "${name}" to be loaded`);
-      assertEquals(sub.config.maxSteps, 15, `${name}: max-steps should be ported from the legacy frontmatter`);
+      assertEquals(sub.config.maxSteps, 15, `${name}: max-steps should come from agent.edn`);
       assert(sub.instructions.length > 0, `${name}: instructions.md body should be non-empty`);
       assertEquals(
         Object.keys(sub.tools).sort(),

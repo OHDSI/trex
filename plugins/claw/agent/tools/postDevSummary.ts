@@ -80,6 +80,8 @@ export async function postDevSummaryCore(sql: QueryFn, input: Input, deps: Deps)
 }
 
 export default defineTool({
+  // This tool's own execute() posts to the channel directly — see postUpdate.ts.
+  postsToChannel: true,
   description:
     "Notify the dev channel about a support task: posts the summary mentioning the resolved " +
     "Discord ids, opens a review thread, seeds it with the proposed user reply, and records " +

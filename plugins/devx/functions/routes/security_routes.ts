@@ -8,6 +8,9 @@ import { DESIGN_REVIEW_SYSTEM_PROMPT, parseDesignFindings } from "../design_revi
 import { DOCS_UPDATE_SYSTEM_PROMPT, parseDocsUpdateFindings } from "../docs_update_prompt.ts";
 import { gitOps } from "../git.ts";
 import { devServerManager } from "../dev_server.ts";
+import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../provider_key.ts";
+import { isNoKeyProvider, removedProviderResponse } from "../provider_support.ts";
+import { classifyCoderError } from "../error_codes.ts";
 
 const EXCLUDED_DIRS = new Set([
   "node_modules", ".git", "dist", "build", ".next", ".venv", "venv",
@@ -131,9 +134,12 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     allowedTools: string[];
     maxSteps?: number;
   }) {
-    // Read active provider config, fall back to legacy settings
+    // Read active provider config, fall back to legacy settings. Probe
+    // before selecting the encrypted columns — see provider_key.ts's
+    // assertProviderConfigEncryptionMigrated header comment.
+    await assertProviderConfigEncryptionMigrated(sql);
     const activePC = await sql(
-      `SELECT provider, model, api_key, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
+      `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url FROM devx.provider_configs WHERE user_id = $1 AND is_active = true LIMIT 1`,
       [userId],
     );
     const prefsResult = await sql(
@@ -143,27 +149,100 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
     const providerRow = activePC.rows[0];
     const prefs = prefsResult.rows[0] || {};
 
+    // Assigned by exactly one of the two branches below and read after them.
+    let settings;
     if (!providerRow) {
-      // Legacy fallback
+      // Legacy fallback. devx.settings carries the same encrypted-pair
+      // columns as provider_configs (V16) now — resolved through
+      // readProviderKey below, the same shape as the providerRow branch,
+      // not a second, differently-shaped resolution.
+      await assertEncryptionMigrated("settings", sql);
       const legacyResult = await sql(
-        `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1 LIMIT 1`,
+        `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps FROM devx.settings WHERE user_id = $1 LIMIT 1`,
         [userId],
       );
-      if (legacyResult.rows.length === 0 || !legacyResult.rows[0].api_key) {
+      const legacyRow = legacyResult.rows[0];
+      if (!legacyRow) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
         );
       }
+      let resolvedLegacyApiKey;
+      try {
+        resolvedLegacyApiKey = await readProviderKey(legacyRow);
+      } catch (err) {
+        console.error("[devx] settings key read failed for agent review:", err instanceof Error ? err.message : err);
+        const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+        return Response.json(
+          { error: classified.safe, code: classified.code },
+          { status: 401, headers: corsHeaders },
+        );
+      }
+      // Removed-engine rows are rejected on the provider NAME, ahead of the key
+      // gate, exactly as in the providerRow branch below. The legacy row needs
+      // its own gate call because it resolves its provider independently — a
+      // devx.settings row still naming a deleted engine reaches this branch
+      // whenever the user has no active provider_configs row.
+      const removedLegacyProviderRejection = removedProviderResponse(legacyRow.provider, corsHeaders);
+      if (removedLegacyProviderRejection) return removedLegacyProviderRejection;
+      // Only providers that genuinely authenticate without a stored key belong
+      // in the shared waiver — see the providerRow branch below for why a removed
+      // engine must never be waived past the key gate.
+      if (!resolvedLegacyApiKey && !isNoKeyProvider(legacyRow.provider)) {
+        return Response.json(
+          { error: "AI provider not configured. Set your API key in Settings." },
+          { status: 400, headers: corsHeaders },
+        );
+      }
+      // Same "no ciphertext in the settings object" posture as the
+      // providerRow branch below.
+      const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+      settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
     } else {
-      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
-      if (!providerRow.api_key && !noKeyProviders.has(providerRow.provider)) {
+      // Resolve through the encryption helper before the no-key check
+      // (which must run on the resolved value, same as index.ts) and before
+      // `settings` is built — never let the raw api_key_encrypted/api_key_iv
+      // columns leak into settings.api_key unresolved, and never swallow a
+      // decrypt failure (this streams straight into streamAgentChat's
+      // createModel, which would otherwise fall through to an env-var
+      // credential on a NULL api_key).
+      let resolvedApiKey;
+      try {
+        resolvedApiKey = await readProviderKey(providerRow);
+      } catch (err) {
+        // classifyCoderError's `safe` string is generic for the UI — log
+        // the actual cause (e.g. a rotated DEVX_ENCRYPTION_KEY) so it's
+        // diagnosable from the server log, not just a misleading UI message.
+        console.error("[devx] provider key read failed for agent review:", err instanceof Error ? err.message : err);
+        const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+        return Response.json(
+          { error: classified.safe, code: classified.code },
+          { status: 401, headers: corsHeaders },
+        );
+      }
+      // Removed-engine rows are rejected on the provider NAME, ahead of the key
+      // gate — see index.ts's /stream read site for why the key gate alone is
+      // not a structural guarantee (such a row WITH a key would pass it).
+      const removedProviderRejection = removedProviderResponse(providerRow.provider, corsHeaders);
+      if (removedProviderRejection) return removedProviderRejection;
+      // Only providers that genuinely authenticate without a stored key belong
+      // in the shared waiver (provider_support.ts, one definition for every
+      // read site). A provider whose engine no longer exists must NOT be waived:
+      // streamAgentChat's createModel would route it to the OpenAI-compatible
+      // client, which resolves an absent key from the worker's own
+      // OPENAI_API_KEY.
+      if (!resolvedApiKey && !isNoKeyProvider(providerRow.provider)) {
         return Response.json(
           { error: "AI provider not configured. Set your API key in Settings." },
           { status: 400, headers: corsHeaders },
         );
       }
-      var settings = { ...providerRow, ...prefs };
+      // The comment above says ciphertext never leaks into `settings` — make
+      // that true by destructuring it out rather than spreading the raw row
+      // (same fix as index.ts's settings/agentSettings assembly).
+      const { api_key_encrypted: _providerRowEnc, api_key_iv: _providerRowIv, ...providerRowNoCiphertext } = providerRow;
+      settings = { ...providerRowNoCiphertext, api_key: resolvedApiKey, ...prefs };
     }
 
     // Fetch previous review for context

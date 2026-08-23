@@ -1,6 +1,11 @@
 // @ts-nocheck - Deno edge function, not compiled by tsc
-import { constructSystemPrompt, getMaxHistoryTurns } from "./prompts.ts";
+import { getMaxHistoryTurns } from "./prompts.ts";
+import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
+import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
+import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
+import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
+import { isNoKeyProvider, removedProviderResponse } from "./provider_support.ts";
 import { streamAgentChat, resolveConsent, clearPendingConsents } from "./agent.ts";
 import { clearPendingResponses } from "./tools/plan_tools.ts";
 import { ensureAppWorkspace, getAppWorkspacePath, getRunWorktreePath, ensureWorktreeParent, readProjectRules } from "./tools/workspace.ts";
@@ -37,7 +42,7 @@ import { handleSupabaseRoutes } from "./routes/supabase_routes.ts";
 import { handleSkillsRoutes } from "./routes/skills_routes.ts";
 import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
 import { handleClaudeCodeModelsRoutes } from "./routes/claude_code_models_routes.ts";
-import { handleCopilotRoutes } from "./routes/copilot_routes.ts";
+import { handleFigmaRoutes } from "./routes/figma_routes.ts";
 import { handleProviderConfigRoutes } from "./routes/provider_config_routes.ts";
 import { handleSupportRoutes } from "./routes/support_routes.ts";
 import { syncBuiltins } from "./skills/sync.ts";
@@ -210,7 +215,7 @@ Deno.serve(async (req: Request) => {
       await handleSigningRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeModelsRoutes(path, method, req, userId, sql, corsHeaders) ||
-      await handleCopilotRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleFigmaRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSupabaseRoutes(path, method, req, userId, sql, corsHeaders) ||
@@ -410,9 +415,13 @@ Deno.serve(async (req: Request) => {
         return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
       }
 
-      // Get active provider config (multi-provider) with user-level prefs from settings
+      // Get active provider config (multi-provider) with user-level prefs from settings.
+      // Probe before selecting the encrypted columns: if V15 never applied,
+      // this fails with a one-line diagnosis instead of a raw "column does
+      // not exist" thrown outside any try/catch below.
+      await assertProviderConfigEncryptionMigrated(sql);
       const activeProviderResult = await sql(
-        `SELECT pc.provider, pc.model, pc.api_key, pc.base_url
+        `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
          FROM devx.provider_configs pc
          WHERE pc.user_id = $1 AND pc.is_active = true
          LIMIT 1`,
@@ -428,8 +437,32 @@ Deno.serve(async (req: Request) => {
       // Fall back to devx.settings if no provider_configs row exists (backward compat)
       let settings;
       if (providerConfig) {
+        // Resolve through the encryption helper — never let the raw
+        // api_key_encrypted/api_key_iv columns leak into `settings.api_key`
+        // unresolved. A decryption failure (rotated/corrupt key) must fail
+        // this turn loudly, not silently fall back to a stale plaintext
+        // column, so it is not swallowed here.
+        let resolvedApiKey;
+        try {
+          resolvedApiKey = await readProviderKey(providerConfig);
+        } catch (err) {
+          // classifyCoderError's `safe` string is deliberately generic ("Invalid
+          // API key...") for the UI — log the actual cause (e.g. a rotated
+          // DEVX_ENCRYPTION_KEY) so an operator can diagnose it from the server
+          // log instead of only seeing the misleading UI message.
+          console.error("[devx] provider key read failed for chat stream:", err instanceof Error ? err.message : err);
+          const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+          return Response.json(
+            { error: classified.safe, code: classified.code },
+            { status: 401, headers: corsHeaders },
+          );
+        }
+        // Ciphertext has no business riding along into the engine settings
+        // object — destructure it out rather than spreading it through.
+        const { api_key_encrypted: _providerConfigEnc, api_key_iv: _providerConfigIv, ...providerConfigNoCiphertext } = providerConfig;
         settings = {
-          ...providerConfig,
+          ...providerConfigNoCiphertext,
+          api_key: resolvedApiKey,
           ai_rules: userPrefs.ai_rules || null,
           auto_approve: userPrefs.auto_approve ?? false,
           max_steps: userPrefs.max_steps ?? 100,
@@ -437,26 +470,63 @@ Deno.serve(async (req: Request) => {
           auto_fix_problems: userPrefs.auto_fix_problems ?? false,
         };
       } else {
-        // Legacy fallback
+        // Legacy fallback. devx.settings carries the same encrypted-pair
+        // columns as provider_configs (V16) now — probe and resolve the same
+        // way, not a second, differently-shaped resolution.
+        await assertEncryptionMigrated("settings", sql);
         const legacyResult = await sql(
-          `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+          `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
           [userId],
         );
-        settings = legacyResult.rows[0];
+        const legacyRow = legacyResult.rows[0];
         // No silent model fallback (kept in sync with agent.ts's resolveModel):
         // the former hardcoded anthropic/claude-sonnet default row always died
         // on the api_key check below anyway — error explicitly instead.
-        if (!settings) {
+        if (!legacyRow) {
           return Response.json(
             { error: "No provider configured. Please set up your provider in Settings." },
             { status: 400, headers: corsHeaders },
           );
         }
+        let resolvedLegacyApiKey;
+        try {
+          resolvedLegacyApiKey = await readProviderKey(legacyRow);
+        } catch (err) {
+          console.error("[devx] settings key read failed for chat stream:", err instanceof Error ? err.message : err);
+          const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+          return Response.json(
+            { error: classified.safe, code: classified.code },
+            { status: 401, headers: corsHeaders },
+          );
+        }
+        // Ciphertext has no business riding along into the engine settings
+        // object — destructure it out rather than spreading it through.
+        const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+        settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
       }
 
-      // Subscription-based and Bedrock providers don't require an API key
-      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
-      if (!settings.api_key && !noKeyProviders.has(settings.provider)) {
+      // Rows naming a removed engine are still in the database (the
+      // provider_configs/settings tables were deliberately left unmigrated).
+      // Reject them on the provider NAME, not on the missing key: the key gate
+      // below catches today's rows only because the Settings UI happens to
+      // write an empty api_key for them, but POST /provider-configs accepts any
+      // provider string with any key, so such a row WITH a key would sail
+      // through it into createModel's OpenAI-compatible branch and spend one
+      // provider's credential as an OpenAI one. Keying on the provider makes
+      // the guarantee structural, matching what agent.ts's resolveModel already
+      // does on the other loop — and says what actually happened, which "No API
+      // key configured" does not. See provider_support.ts.
+      const removedProviderRejection = removedProviderResponse(settings.provider, corsHeaders);
+      if (removedProviderRejection) return removedProviderRejection;
+
+      // Subscription-based and Bedrock providers don't require an API key.
+      // The membership is shared (provider_support.ts) so this waiver
+      // cannot drift between read sites: waiving the key gate for a provider
+      // that has no engine behind it lets the row fall through to the
+      // OpenAI-compatible branch below, whose client resolves an absent key
+      // from the worker's own OPENAI_API_KEY — one user's turn billed to, and
+      // authenticated as, the operator.
+      if (!settings.api_key && !isNoKeyProvider(settings.provider)) {
         return Response.json(
           { error: "No API key configured. Please set up your provider in Settings." },
           { status: 400, headers: corsHeaders },
@@ -708,18 +778,19 @@ Deno.serve(async (req: Request) => {
         if (rules !== undefined) aiRules = rules;
       }
 
-      let systemPrompt = constructSystemPrompt(chatMode, aiRules);
+      const { systemPrompt } = await buildCoderContext({
+        mode: chatMode,
+        aiRules,
+        skillContext,
+        remoteChannel: streamRemoteChannel,
+        hasComponentSelection,
+        settings,
+        // Raw providers (anthropic/google/bedrock/openai) are called directly
+        // below with a single fetch, not through the tool-calling registries —
+        // none of them register mcp__ask__ask_question.
+        askToolAvailable: false,
+      });
       const maxHistory = getMaxHistoryTurns(chatMode);
-
-      // Add minimal behavioral hint when components are selected
-      // (actual code snippets are now inline in the user message via aiPrompt)
-      if (hasComponentSelection) {
-        systemPrompt += "\nThe user has selected specific components for editing. Component details and code snippets are in the user's message. Focus your modifications on those components.";
-      }
-      if (streamRemoteChannel) {
-        const { REMOTE_CHANNEL_SYSTEM_PROMPT } = await import("./prompts.ts");
-        systemPrompt += `\n${REMOTE_CHANNEL_SYSTEM_PROMPT}`;
-      }
 
       // Get most recent messages for context (subquery to get newest, then order ascending)
       const historyResult = await sql(
@@ -817,24 +888,6 @@ Deno.serve(async (req: Request) => {
               });
               fullContent = agentResult.content;
               if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;
-            } else if (settings.provider === "copilot") {
-              // Copilot SDK: use agent-style streaming even in build/ask mode
-              const { streamCopilotChat } = await import("./copilot_agent.ts");
-              const agentResult = await streamCopilotChat({
-                chatId,
-                userId,
-                appId: chatCheck.rows[0].app_id,
-                chatMode,
-                settings,
-                history,
-                send,
-                sqlFn: sql,
-                skillContext,
-                commandOverride,
-                hasComponentSelection,
-              });
-              fullContent = agentResult.content;
-              if (agentResult.toolCalls?.length > 0) savedToolCalls = agentResult.toolCalls;
             } else if (settings.provider === "anthropic") {
               fullContent = await streamAnthropic(settings, history, send, systemPrompt);
             } else if (settings.provider === "google") {
@@ -865,7 +918,7 @@ Deno.serve(async (req: Request) => {
               [chatId, fullContent, settings.model, savedToolCalls ? JSON.stringify(savedToolCalls) : null],
             );
 
-            send({ type: "done", message: saveResult.rows[0] });
+            send({ type: "done", message: saveResult.rows[0], content: saveResult.rows[0]?.content ?? "" });
             controller.enqueue(encoder.encode("data: [DONE]\n\n"));
             clearInterval(heartbeat);
             controller.close();
@@ -873,25 +926,15 @@ Deno.serve(async (req: Request) => {
             clearInterval(heartbeat);
             console.error("Stream error:", err);
             const msg = err instanceof Error ? err.message : String(err);
-            // Pass through actionable error messages from the agent, fall back to generic
-            const lower = msg.toLowerCase();
-            let safeMsg: string;
-            if (msg.startsWith("Invalid API key")
-              || msg.startsWith("API key does not")
-              || msg.startsWith("Model \"")
-              || msg.startsWith("Rate limit")
-              || msg.startsWith("API quota")) {
-              safeMsg = msg;
-            } else if (lower.includes("401") || lower.includes("authentication") || lower.includes("invalid") && lower.includes("key")) {
-              safeMsg = "Invalid API key. Please check your API key in Settings.";
-            } else if (lower.includes("404") || lower.includes("not_found") || lower.includes("not found")) {
-              safeMsg = "Model not found. Check the model name in Settings.";
-            } else if (lower.includes("429") || lower.includes("rate limit")) {
-              safeMsg = "Rate limit exceeded. Please wait and try again.";
-            } else {
-              safeMsg = "An error occurred while generating a response. Check the server logs for details.";
-            }
-            send({ type: "error", error: safeMsg });
+            const classified = classifyCoderError(msg);
+            send({
+              type: "error",
+              error: classified.safe,
+              code: classified.code,
+              // claw is an internal caller with no end-user reading it: give it the real
+              // message so the channel gets something actionable instead of "unknown".
+              ...(streamRemoteChannel ? { raw: msg } : {}),
+            });
             controller.close();
           }
         },
@@ -1002,8 +1045,10 @@ Deno.serve(async (req: Request) => {
 
       // Resolve the active provider (multi-provider) with legacy fallback,
       // mirroring POST /chats/:id/stream, so plan runs can use claude-code.
+      // Same pre-select probe as that site — see comment there.
+      await assertProviderConfigEncryptionMigrated(sql);
       const activeProvider = (await sql(
-        `SELECT pc.provider, pc.model, pc.api_key, pc.base_url
+        `SELECT pc.provider, pc.model, pc.api_key, pc.api_key_encrypted, pc.api_key_iv, pc.base_url
          FROM devx.provider_configs pc WHERE pc.user_id = $1 AND pc.is_active = true LIMIT 1`,
         [userId],
       )).rows[0];
@@ -1011,20 +1056,72 @@ Deno.serve(async (req: Request) => {
         `SELECT ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
         [userId],
       )).rows[0] || {};
-      let agentSettings = activeProvider
-        ? {
-            ...activeProvider,
-            ai_rules: agentPrefs.ai_rules || null,
-            max_steps: agentPrefs.max_steps ?? 100,
-            max_tool_steps: agentPrefs.max_tool_steps ?? 10,
-            auto_fix_problems: agentPrefs.auto_fix_problems ?? false,
+      let agentSettings;
+      if (activeProvider) {
+        // Same "resolve, don't leak, fail loudly" posture as the /stream
+        // read site above.
+        let resolvedApiKey;
+        try {
+          resolvedApiKey = await readProviderKey(activeProvider);
+        } catch (err) {
+          // See the /stream read site's comment above — log the raw cause,
+          // the UI only gets classifyCoderError's generic message.
+          console.error("[devx] provider key read failed for agent run:", err instanceof Error ? err.message : err);
+          const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+          return Response.json(
+            { error: classified.safe, code: classified.code },
+            { status: 401, headers: corsHeaders },
+          );
+        }
+        // Same "no ciphertext in the settings object" posture as the
+        // /stream read site above (index.ts:451's fix — the identical
+        // pattern existed here too).
+        const { api_key_encrypted: _activeProviderEnc, api_key_iv: _activeProviderIv, ...activeProviderNoCiphertext } = activeProvider;
+        agentSettings = {
+          ...activeProviderNoCiphertext,
+          api_key: resolvedApiKey,
+          ai_rules: agentPrefs.ai_rules || null,
+          max_steps: agentPrefs.max_steps ?? 100,
+          max_tool_steps: agentPrefs.max_tool_steps ?? 10,
+          auto_fix_problems: agentPrefs.auto_fix_problems ?? false,
+        };
+      } else {
+        // Legacy fallback, same resolve-don't-leak posture as the
+        // provider_configs branch above (devx.settings carries the same
+        // encrypted-pair columns as of V16).
+        await assertEncryptionMigrated("settings", sql);
+        const legacyRow = (await sql(
+          `SELECT provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
+          [userId],
+        )).rows[0];
+        if (legacyRow) {
+          let resolvedLegacyApiKey;
+          try {
+            resolvedLegacyApiKey = await readProviderKey(legacyRow);
+          } catch (err) {
+            console.error("[devx] settings key read failed for agent run:", err instanceof Error ? err.message : err);
+            const classified = classifyCoderError(err instanceof Error ? err.message : String(err));
+            return Response.json(
+              { error: classified.safe, code: classified.code },
+              { status: 401, headers: corsHeaders },
+            );
           }
-        : (await sql(
-            `SELECT provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems FROM devx.settings WHERE user_id = $1`,
-            [userId],
-          )).rows[0];
-      const noKeyProviders = new Set(["claude-code", "copilot", "bedrock"]);
-      if (!agentSettings || (!agentSettings.api_key && !noKeyProviders.has(agentSettings.provider))) {
+          const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
+          agentSettings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
+        } else {
+          agentSettings = undefined;
+        }
+      }
+      // Removed-engine rows are rejected on the provider name here too — see
+      // the /stream read site's comment for why the key gate below is not
+      // enough on its own.
+      const removedAgentProviderRejection = removedProviderResponse(agentSettings?.provider, corsHeaders);
+      if (removedAgentProviderRejection) return removedAgentProviderRejection;
+      // Same shared membership as the /stream read site above — only providers
+      // that genuinely authenticate without a stored key belong in it, or the
+      // row reaches createModel's OpenAI-compatible fallback on the worker's
+      // own credentials.
+      if (!agentSettings || (!agentSettings.api_key && !isNoKeyProvider(agentSettings.provider))) {
         return Response.json({ error: "AI provider not configured" }, { status: 400, headers: corsHeaders });
       }
       // Agent-driven runs are autonomous.
@@ -1190,7 +1287,11 @@ Deno.serve(async (req: Request) => {
               `UPDATE devx.subagent_runs SET status = 'failed', result = $1, completed_at = NOW() WHERE id = $2`,
               [err.message, runId],
             );
-            send({ type: "error", error: err.message });
+            const classifiedRun = classifyCoderError(err.message ?? String(err));
+            // Note: `remoteChannel` is not plumbed into this handler (subagent runs
+            // don't originate from claw), so we omit `raw` here rather than invent
+            // new plumbing — see error_codes.ts for the vocabulary this maps through.
+            send({ type: "error", error: classifiedRun.safe, code: classifiedRun.code });
           } finally {
             clearInterval(heartbeat);
             controller.close();
@@ -1241,8 +1342,11 @@ Deno.serve(async (req: Request) => {
 
     // GET /settings
     if (path.endsWith("/settings") && method === "GET") {
+      // Probe before selecting the encrypted columns — see provider_key.ts's
+      // assertEncryptionMigrated header comment.
+      await assertEncryptionMigrated("settings", sql);
       const result = await sql(
-        `SELECT id, user_id, provider, model, api_key, base_url, ai_rules,
+        `SELECT id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules,
                 auto_approve, max_steps, max_tool_steps, auto_fix_problems,
                 loop, git_author_name, git_author_email, created_at, updated_at
          FROM devx.settings WHERE user_id = $1`,
@@ -1251,29 +1355,80 @@ Deno.serve(async (req: Request) => {
       if (result.rows.length === 0) {
         return Response.json(null, { headers: corsHeaders });
       }
+      const row = result.rows[0];
+      // Resolve through the encryption helper before masking/auth_shape —
+      // once a row is encrypted the plaintext api_key column alone is NULL,
+      // so deriving those straight from SQL would silently show "no key" for
+      // a row that has one (auth_shape "iam" gates the bedrock legacy-loop
+      // fallback in useEffectiveLoop.ts, so this isn't just cosmetic). Unlike
+      // the coder-turn read sites above, a row this can't decrypt must not
+      // take down the whole Settings page — degrade to "unknown" and log,
+      // same posture as GET /provider-configs' resolveForDisplay.
+      // Captured before the columns are stripped below — tells the client
+      // whether this row's credential still sits in the legacy plaintext
+      // column, so the Settings page can offer the encrypt-existing backfill
+      // to a user whose ONLY plaintext key is here (they have no
+      // provider_configs row to raise the flag for them). Exposes no key
+      // material itself.
+      const settingsIsPlaintext = row.api_key != null && row.api_key_encrypted == null;
+      let resolvedApiKey: string | null;
+      // "ok" vs "undecryptable" — a decrypt failure and "no key configured"
+      // both end up as api_key null / auth_shape "none", which are very
+      // different claims: one means nothing was ever set, the other means a
+      // credential exists that this server currently cannot open (rotated or
+      // missing DEVX_ENCRYPTION_KEY). Same signal GET /provider-configs
+      // returns, so the page can say which one it is instead of showing a
+      // configured user "not configured".
+      let keyStatus: "ok" | "undecryptable" = "ok";
+      try {
+        resolvedApiKey = await readProviderKey(row);
+      } catch (err) {
+        console.error("[devx] settings key read failed for GET /settings display:", err instanceof Error ? err.message : err);
+        resolvedApiKey = null;
+        keyStatus = "undecryptable";
+      }
+      delete row.api_key_encrypted;
+      delete row.api_key_iv;
       // Mask API key. auth_shape is a derived, NON-SECRET hint (bearer/iam/
       // plain/none) computed from the raw key BEFORE masking — the masked
       // api_key is never valid JSON, so a client cannot derive the shape
       // itself (useEffectiveLoop.ts gates bedrock-IAM users onto the legacy
       // loop with it; see functions/auth_shape.ts).
-      const row = result.rows[0];
-      row.auth_shape = deriveAuthShape(row.api_key);
-      if (row.api_key) {
-        row.api_key = row.api_key.substring(0, 8) + "..." + row.api_key.slice(-4);
-      }
+      row.auth_shape = deriveAuthShape(resolvedApiKey);
+      row.api_key = maskKey(resolvedApiKey);
+      row.key_status = keyStatus;
+      row.is_plaintext = settingsIsPlaintext;
       return Response.json(row, { headers: corsHeaders });
     }
 
     // PUT /settings
     if (path.endsWith("/settings") && method === "PUT") {
+      // Probe before the INSERT below, which always references the
+      // encrypted columns regardless of whether this request updates them —
+      // see provider_key.ts's assertEncryptionMigrated header comment.
+      await assertEncryptionMigrated("settings", sql);
       const body = await req.json();
       // Enforce max length on ai_rules to prevent context flooding
       if (body.ai_rules && body.ai_rules.length > 4000) {
         return Response.json({ error: "AI rules must be under 4000 characters" }, { status: 400, headers: corsHeaders });
       }
-      // Distinguish between "not provided" (undefined) and "explicitly cleared" (empty string)
-      const apiKey = body.api_key === undefined ? undefined : (body.api_key || null);
-      const hasApiKeyUpdate = body.api_key !== undefined;
+      // Everything this route decides about the three key columns lives in
+      // settingsKeyWriteDecision (api_key_mask.ts), where it is unit-tested:
+      // which payloads count as "not an update" (a field that wasn't sent, an
+      // empty string, the mask this row's key is displayed as, a re-packed
+      // empty credential blob), which count as an explicit clear (JSON null,
+      // and only that), and which are a real credential. GET /settings hands
+      // clients a mask — or a null when the stored key can't be read — so a
+      // client that echoes its loaded form back on save posts one of those
+      // non-credentials here, and with encryption configured we would
+      // faithfully store it over the real key. The current Settings page sends
+      // no api_key at all; bundles already cached in browsers do, which is why
+      // this decision is made server-side.
+      const keyWrite = await settingsKeyWriteDecision(body.api_key, sql, userId);
+      if (keyWrite.reason) {
+        console.warn(`[devx] PUT /settings: ignoring the api_key it was sent because ${keyWrite.reason} — keeping the stored credential`);
+      }
+      const hasApiKeyUpdate = keyWrite.apply;
       // task-u1 (V11__loop_flag.sql): same "only touch it if the caller
       // actually sent it" posture as api_key above. SettingsPage.tsx now
       // sends `loop` on every save, but any OTHER caller of this endpoint
@@ -1294,13 +1449,25 @@ Deno.serve(async (req: Request) => {
       if (hasGitEmailUpdate && body.git_author_email && !/^[^\s@]+@[^\s@]+$/.test(String(body.git_author_email))) {
         return Response.json({ error: "git author email must be a valid email address" }, { status: 400, headers: corsHeaders });
       }
+      // All three key columns are written together, only when the decision
+      // above says to (hasApiKeyUpdate) — a save that leaves the key alone
+      // (an omitted field, an echoed non-credential, flipping auto_approve)
+      // must leave the existing credential, encrypted or plaintext, completely
+      // untouched rather than nulling it. When hasApiKeyUpdate is false this
+      // still needs a value for the plain INSERT-new-row branch:
+      // writeProviderKeyFields(null) yields an all-null triple, so a brand new
+      // row is unaffected — and a declined payload is never even encrypted
+      // into the VALUES list.
+      const keyFields = await writeProviderKeyFields(keyWrite.apply ? keyWrite.plaintext : null);
       const result = await sql(
-        `INSERT INTO devx.settings (user_id, provider, model, api_key, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, COALESCE($11, 'legacy'), $12, $13)
+        `INSERT INTO devx.settings (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, 'legacy'), $14, $15)
          ON CONFLICT (user_id) DO UPDATE SET
            provider = EXCLUDED.provider,
            model = EXCLUDED.model,
            api_key = ${hasApiKeyUpdate ? "EXCLUDED.api_key" : "devx.settings.api_key"},
+           api_key_encrypted = ${hasApiKeyUpdate ? "EXCLUDED.api_key_encrypted" : "devx.settings.api_key_encrypted"},
+           api_key_iv = ${hasApiKeyUpdate ? "EXCLUDED.api_key_iv" : "devx.settings.api_key_iv"},
            base_url = EXCLUDED.base_url,
            ai_rules = EXCLUDED.ai_rules,
            auto_approve = EXCLUDED.auto_approve,
@@ -1312,7 +1479,7 @@ Deno.serve(async (req: Request) => {
            git_author_email = ${hasGitEmailUpdate ? "EXCLUDED.git_author_email" : "devx.settings.git_author_email"},
            updated_at = NOW()
          RETURNING id, user_id, provider, model, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email, created_at, updated_at`,
-        [userId, body.provider, body.model, apiKey ?? null, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? 25, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
+        [userId, body.provider, body.model, keyFields.api_key, keyFields.api_key_encrypted, keyFields.api_key_iv, body.base_url || null, body.ai_rules || null, body.auto_approve ?? false, body.max_steps ?? DEFAULT_MAX_STEPS, body.max_tool_steps ?? 10, body.auto_fix_problems ?? false, body.loop ?? null, body.git_author_name || null, body.git_author_email || null],
       );
       // Re-sync existing repos so a changed identity takes effect immediately.
       if (hasGitNameUpdate || hasGitEmailUpdate) {

@@ -52,7 +52,17 @@ export function useProviderConfigs() {
     await refresh();
   }, [refresh]);
 
+  // Backfill: encrypts every row still holding a plaintext api_key. Refreshes
+  // afterwards so `configs` reflects the migrated rows (masked key/key_status
+  // are unaffected — encryption only changes at-rest storage, never the
+  // resolved value shown in the UI).
+  const encryptExisting = useCallback(async () => {
+    const result = await api.encryptExistingKeys();
+    await refresh();
+    return result;
+  }, [refresh]);
+
   const active = configs.find((c) => c.is_active) || null;
 
-  return { configs, active, loading, create, update, remove, activate, refresh };
+  return { configs, active, loading, create, update, remove, activate, encryptExisting, refresh };
 }

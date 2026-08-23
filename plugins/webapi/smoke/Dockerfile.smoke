@@ -40,7 +40,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry --mount=type=cache,target=/s
 FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl gcc libc6-dev python3 \
+        ca-certificates curl gcc libc6-dev python3 openssl \
         postgresql postgresql-contrib \
         libfreetype6 fontconfig zlib1g \
     && rm -rf /var/lib/apt/lists/*

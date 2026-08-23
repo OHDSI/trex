@@ -111,6 +111,154 @@ Deno.test("runTurn does not emit message.completed for a clientOnly tool-call tu
   assert(!events.some((e) => e.type === "message.completed"));
 });
 
+// No-silent-turn guarantee — four branches at the "finish" case:
+//   1. text present -> emit as always (covered by the first test in this file).
+//   2. clientOnly call, no text -> stay silent (covered just above).
+//   3. no tool calls at all, no text -> "Nothing was changed" (true: nothing ran).
+//   4. tools ran, none posted, no text -> a line making NO claim about changes.
+//   5. the LAST tool call posted to the channel, no text -> emit nothing (the
+//      channel already heard the turn's closing act — see the "final act,
+//      not sticky" tests below the postsToChannel test for why this is
+//      recency-based, not "did any tool call ever post this turn").
+
+Deno.test("runTurn delivers 'Nothing was changed' when a turn calls no tool at all and produces no text", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "...", store, emit: (e) => events.push(e),
+    // A finish with no preceding text-delta or tool-call parts at all — the
+    // model produced literally nothing.
+    model: sequencedModel([FINISH]),
+  });
+  const completed = events.find((e) => e.type === "message.completed") as
+    | { data: { message: string; finishReason: string } }
+    | undefined;
+  assert(completed, "expected a fallback message.completed event");
+  assertEquals(
+    completed!.data.message,
+    'That step finished without producing a reply. Nothing was changed — say "retry" and I\'ll run it again.',
+  );
+  assertEquals(res.text, completed!.data.message);
+  const completedIdx = events.indexOf(completed as AgentEvent);
+  const finishIdx = events.findIndex((e) => e.type === "turn.completed");
+  assert(completedIdx >= 0 && finishIdx >= 0 && completedIdx < finishIdx);
+});
+
+Deno.test("runTurn delivers a no-claim fallback when tools ran but none posted and no text followed", async () => {
+  // The step cap cuts the loop off mid tool-call loop — the model never
+  // produces closing text, and "echo" is an ordinary server tool with no
+  // postsToChannel flag, so the channel never heard anything either.
+  const agent = await loadAgent(TOY);
+  agent.config.maxSteps = 2; // keep the tool-call loop short
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "echo forever", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("echo", { text: "hi" })),
+  });
+  const completed = events.find((e) => e.type === "message.completed") as
+    | { data: { message: string; finishReason: string } }
+    | undefined;
+  assert(completed, "expected a fallback message.completed event");
+  // Must NOT claim anything about whether work happened — echo may or may
+  // not have changed anything, and this branch genuinely doesn't know.
+  assertEquals(completed!.data.message, 'That step ended without a reply. Say "retry" and I\'ll run it again.');
+  assert(!completed!.data.message.toLowerCase().includes("nothing was changed"));
+  assertEquals(res.text, completed!.data.message);
+  const completedIdx = events.indexOf(completed as AgentEvent);
+  const finishIdx = events.findIndex((e) => e.type === "turn.completed");
+  assert(completedIdx >= 0 && finishIdx >= 0 && completedIdx < finishIdx);
+});
+
+// The regression this exists for: a turn that calls a postsToChannel
+// tool (e.g. claw's postUpdate) and then ends with no text must NOT get the
+// fallback — the channel already heard from the agent, and appending
+// "Nothing was changed" could be an outright false claim if a later step in
+// the SAME turn (e.g. askCodeAgent, an ordinary non-posting tool) did
+// something.
+Deno.test("runTurn emits NO fallback when a postsToChannel tool ran and the turn produced no text", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.maxSteps = 2;
+  agent.tools.notify = {
+    description: "posts a status line to the channel (test double for postUpdate)",
+    inputSchema: { type: "object", properties: {} },
+    postsToChannel: true,
+    execute: () => Promise.resolve({ posted: true }),
+  };
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "notify forever", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("notify", {})),
+  });
+  assert(!events.some((e) => e.type === "message.completed"), "expected NO fallback — the channel already heard from the agent");
+  assertEquals(res.text, "");
+});
+
+// sawChannelPost was STICKY (true forever once ANY postsToChannel tool ran
+// this turn), but claw's skill
+// makes postUpdate immediately before every askCodeAgent an invariant
+// (facilitate-coding-task.md:125) — so claw's canonical turn is
+// postUpdate("starting X") -> askCodeAgent (long) -> step cap, no closing
+// text. The sticky flag suppressed the fallback for that whole shape,
+// leaving "starting X" as the channel's last word. The fix tracks only the
+// MOST RECENT tool call; a channel post that is NOT the turn's last act must
+// no longer suppress the fallback.
+Deno.test("runTurn emits the fallback when a postsToChannel tool ran but was NOT the last tool call of the turn", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.maxSteps = 2; // cuts the loop off after exactly 2 steps, no closing text
+  agent.tools.notify = {
+    description: "posts a status line to the channel (test double for postUpdate)",
+    inputSchema: { type: "object", properties: {} },
+    postsToChannel: true,
+    execute: () => Promise.resolve({ posted: true }),
+  };
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    // Claw's canonical shape: postUpdate first, then a long non-posting call
+    // (askCodeAgent stand-in: "echo", an ordinary server tool) that ends the
+    // turn with no text.
+    message: "notify then echo", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("notify", {}), toolCallChunks("echo", { text: "hi" })),
+  });
+  const completed = events.find((e) => e.type === "message.completed") as
+    | { data: { message: string; finishReason: string } }
+    | undefined;
+  assert(completed, "expected the fallback to fire — the channel post was not the turn's last act");
+  assert(!completed!.data.message.toLowerCase().includes("nothing was changed"));
+  assertEquals(res.text, completed!.data.message);
+});
+
+// The other half of the same fix: a channel post that genuinely IS the
+// turn's last act still suppresses the fallback, even when an earlier,
+// non-posting tool call preceded it (proves this is about recency, not mere
+// presence-anywhere-in-the-turn).
+Deno.test("runTurn emits NO fallback when a postsToChannel tool IS the last tool call of the turn", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.maxSteps = 2;
+  agent.tools.notify = {
+    description: "posts a status line to the channel (test double for postUpdate)",
+    inputSchema: { type: "object", properties: {} },
+    postsToChannel: true,
+    execute: () => Promise.resolve({ posted: true }),
+  };
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "echo then notify", store, emit: (e) => events.push(e),
+    model: sequencedModel(toolCallChunks("echo", { text: "hi" }), toolCallChunks("notify", {})),
+  });
+  assert(!events.some((e) => e.type === "message.completed"), "expected NO fallback — the channel post was the turn's last act");
+  assertEquals(res.text, "");
+});
+
 Deno.test("runTurn emits clientOnly tool call and does not execute it", async () => {
   const agent = await loadAgent(TOY);
   const { store } = memoryStoreCalls();
@@ -218,11 +366,11 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   assert("skill" in top);
 });
 
-// H3: ToolContext.emit — see task-h3-brief.md. The session path publishes a
-// live tool.event and persists a `custom` step through the SAME stepSeq
-// counter as every other step (asserted via the raw insert params here), so
-// every persisted step this turn — including this one — has a unique,
-// monotonically assigned seq and replays in real call order.
+// ToolContext.emit: the session path publishes a live tool.event and persists a
+// `custom` step through the SAME stepSeq counter as every other step (asserted
+// via the raw insert params here), so every persisted step this turn —
+// including this one — has a unique, monotonically assigned seq and replays in
+// real call order.
 Deno.test("ToolContext.emit publishes a live tool.event and persists a custom step", async () => {
   const agent = await loadAgent(TOY);
   agent.tools.emitter = {
@@ -288,9 +436,9 @@ Deno.test("a tool that never calls ctx.emit produces no tool.event", async () =>
   assert(!events.some((e) => e.type === "tool.event"));
 });
 
-// H4 (sticky tool-consent decisions — task-h4-brief.md): authoredTool's
-// needsApproval branch checks store.getToolConsent(userId, plugin, agent,
-// tool) BEFORE creating a one-shot approval request.
+// Sticky tool-consent decisions: authoredTool's needsApproval branch checks
+// store.getToolConsent(userId, plugin, agent, tool) BEFORE creating a one-shot
+// approval request.
 Deno.test("needsApproval tool with an 'always' consent on file executes immediately, no approval request", async () => {
   const agent = await loadAgent(TOY);
   agent.tools.guarded = {

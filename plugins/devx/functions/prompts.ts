@@ -478,7 +478,13 @@ const COMMON_GUIDELINES = `- All text you output outside of tool use is displaye
 - Keep explanations concise and focused
 - If the user asks for help or wants to give feedback, tell them to use the Help button in the bottom left.`;
 
-const GENERAL_GUIDELINES_BLOCK = `<general_guidelines>
+// Exported (not module-private) so prompts_channel.ts can compose
+// CHANNEL_CODER_SYSTEM_PROMPT from these SAME blocks rather than
+// hand-duplicating or silently dropping them — the design intent says "skills,
+// tools, KB and d2e knowledge are identical and are the expensive part to
+// maintain; only the interaction contract differs." One source of truth so the
+// ui/channel profiles cannot drift.
+export const GENERAL_GUIDELINES_BLOCK = `<general_guidelines>
 ${COMMON_GUIDELINES}
 - Be careful not to introduce security vulnerabilities such as command injection, XSS, SQL injection, and other OWASP top 10 vulnerabilities. If you notice that you wrote insecure code, immediately fix it. Prioritize writing safe, secure, and correct code.
 - Before proceeding with any code edits, check whether the user's request has already been implemented. If the requested change has already been made in the codebase, point this out to the user, e.g., "This feature is already implemented as described."
@@ -495,7 +501,7 @@ ${COMMON_GUIDELINES}
   - Avoid backwards-compatibility hacks like renaming unused _vars, re-exporting types, adding // removed comments for removed code, etc. If you are certain that something is unused, you can delete it completely.
 </general_guidelines>`;
 
-const TOOL_CALLING_BLOCK = `<tool_calling>
+export const TOOL_CALLING_BLOCK = `<tool_calling>
 You have tools at your disposal to solve the coding task. Follow these rules regarding tool calls:
 1. ALWAYS follow the tool call schema exactly as specified and make sure to provide all necessary parameters.
 2. The conversation may reference tools that are no longer available. NEVER call tools that are not explicitly provided.
@@ -512,14 +518,14 @@ You have tools at your disposal to solve the coding task. Follow these rules reg
 // Local Agent — Pro Mode Blocks
 // ============================================================================
 
-const TOOL_CALLING_BEST_PRACTICES_BLOCK = `<tool_calling_best_practices>
+export const TOOL_CALLING_BEST_PRACTICES_BLOCK = `<tool_calling_best_practices>
 - **Read before writing**: Use \`Read\` and \`Glob\` to understand the codebase before making changes
 - **Use \`Edit\` for edits**: For modifying existing files, prefer \`Edit\` over \`Write\`
 - **Be surgical**: Only change what's necessary to accomplish the task
 - **Handle errors gracefully**: If a tool fails, explain the issue and suggest alternatives
 </tool_calling_best_practices>`;
 
-const FILE_EDITING_TOOL_SELECTION_BLOCK = `<file_editing_tool_selection>
+export const FILE_EDITING_TOOL_SELECTION_BLOCK = `<file_editing_tool_selection>
 You have three tools for editing files. Choose based on the scope of your change:
 
 | Scope | Tool | Examples |
@@ -536,7 +542,7 @@ You have three tools for editing files. Choose based on the scope of your change
 After every edit, read the file to verify changes applied correctly. If something went wrong, try a different tool and verify again.
 </file_editing_tool_selection>`;
 
-const DEVELOPMENT_WORKFLOW_BLOCK = `<development_workflow>
+export const DEVELOPMENT_WORKFLOW_BLOCK = `<development_workflow>
 1. **Understand:** Think about the user's request and the relevant codebase context. Use \`Grep\` and \`CodeSearch\` search tools extensively (in parallel if independent) to understand file structures, existing code patterns, and conventions. Use \`Read\` to understand context and validate any assumptions you may have. If you need to read multiple files, you should make multiple parallel calls to \`Read\`.
 2. **Clarify (when needed):** Use \`AskUserQuestion\` to ask 1-3 focused questions when details are missing. Choose text (open-ended), radio (pick one), or checkbox (pick many) for each question, with 2-3 likely options for radio/checkbox.
    **Use when:** creating a new app/project, the request is vague (e.g. "Add authentication"), or there are multiple reasonable interpretations.
@@ -557,7 +563,7 @@ When a user explicitly requests custom images, illustrations, or visual media fo
 - Reference the file path in code (e.g., \`<img src="/assets/hero-banner.png" />\`)
 </image_generation_guidelines>`;
 
-const WEB_RESEARCH_BLOCK = `<web_research>
+export const WEB_RESEARCH_BLOCK = `<web_research>
 You have web research capabilities. Use them proactively when you need current information:
 - \`WebSearch\` - Search the web for documentation, examples, error solutions, or any current information
 - \`WebFetch\` - Fetch and read the content of a specific URL
@@ -572,7 +578,7 @@ Use web research when:
 Do NOT ask the user for permission to search — just do it when it would help.
 </web_research>`;
 
-const KNOWLEDGE_BASE_BLOCK = `<knowledge_base>
+export const KNOWLEDGE_BASE_BLOCK = `<knowledge_base>
 You have a knowledge base of reference docs and code, exposed as MCP tools (their full
 names are \`mcp__kb__KBListRepos\`, \`mcp__kb__KBInit\`, \`mcp__kb__KBSearch\`,
 \`mcp__kb__KBFindSymbols\`, \`mcp__kb__KBRead\`, \`mcp__kb__KBListFiles\`, \`mcp__kb__KBOverview\`).
@@ -610,6 +616,29 @@ Do *not* tell the user to run shell commands. Instead, use the available tools:
 - \`RefreshPreview\` - Refresh the app preview in the browser
 Use these after making changes that require a server restart or when the preview is stale.
 </app_commands>`;
+
+// Ported verbatim from agent/instructions.md's "## d2e / edge functions"
+// section (the wording a model acts on, not rewritten) — that file carried
+// this steer alone; the shared UI prompt never had it, so the ai-sdk and
+// coder-sidecar engines, and the ported eve agents-loop before this
+// block existed, all completed d2e/edge-function changes without ever being
+// told that unit tests are not sufficient proof. Placed in
+// LOCAL_AGENT_SYSTEM_PROMPT (not the channel profile) because it is the one
+// base prompt every "agent"-mode UI engine resolves to via
+// constructSystemPrompt (see that function below) regardless of which of
+// the three dispatch paths is running; the channel profile already carries
+// the same completion-gate rule via prompts_channel.ts's COMPLETION_GATE_BLOCK.
+const D2E_TESTING_BLOCK = `<d2e_testing>
+For d2e work, two skills cover the key concerns:
+- \`d2e\` — what a d2e/edge function is: location, runtime, routing, auth, data access.
+- \`testing-d2e-functions\` — how to run and test one: exercising it against the live
+  edge runtime + Postgres via bind-mount or workspace registration (plus pure-logic
+  unit tests with \`deno test\`).
+
+After changing a d2e/edge function, test it with \`testing-d2e-functions\` before
+declaring the task done. Unit tests alone are not sufficient — the function must be
+exercised through the real edge runtime.
+</d2e_testing>`;
 
 // ============================================================================
 // Local Agent — Basic Mode Blocks
@@ -673,6 +702,8 @@ ${IMAGE_GENERATION_BLOCK}
 ${WEB_RESEARCH_BLOCK}
 
 ${KNOWLEDGE_BASE_BLOCK}
+
+${D2E_TESTING_BLOCK}
 
 [[AI_RULES]]
 `;
@@ -988,12 +1019,11 @@ function wrapAiRules(aiRules, fallback) {
   return `<user_defined_ai_rules>\n${rules}\n</user_defined_ai_rules>`;
 }
 
-// Appended to the system prompt ONLY for remote-channel turns (claw driving the
-// coder on behalf of a chat channel, body.remoteChannel === true on /stream).
-// The devx browser UI never sets it: there the human sits at the workbench and
-// CAN run commands, restart services, and open localhost. On a remote channel
-// none of that is true, and suggestions like "run this in your terminal" or
-// "restart the container and tell me" are dead ends the team cannot execute.
+// DEPRECATED: kept exported for one release so any other importer keeps
+// working. The channel coder no longer appends this to the workbench prompt —
+// its content is folded into CHANNEL_CODER_SYSTEM_PROMPT in prompts_channel.ts,
+// which REPLACES the base prompt for a remote-channel turn instead of
+// decorating it. New code should use resolveCoderProfile()/prompts_channel.ts.
 export const REMOTE_CHANNEL_SYSTEM_PROMPT = `
 <remote_channel_context>
 You are running inside the project sandbox on behalf of a chat channel (e.g.
@@ -1026,10 +1056,20 @@ Discord). The people you are working for are NOT sitting at this machine:
   failed, not that the environment lacks a stack.
 </remote_channel_context>`;
 
-export function constructSystemPrompt(mode, aiRules, skillContext) {
+export function constructSystemPrompt(mode, aiRules, skillContext, profile) {
   let prompt;
 
-  if (mode === "plan") {
+  if (profile?.basePrompt) {
+    // Channel profile: the caller's contract replaces the workbench identity
+    // entirely (not appended — see coder_profile.ts/prompts_channel.ts).
+    // Fallback is "" here, NOT DEFAULT_AI_RULES: the channel coder works on
+    // an arbitrary connected repo (Deno backend, Python flow plugin, ...),
+    // not necessarily the React/Tailwind/shadcn app DEFAULT_AI_RULES
+    // describes. When the repo has no ai_rules/TREX.md, wrapAiRules(aiRules,
+    // "") resolves the placeholder to nothing rather than asserting a wrong
+    // tech stack; trimEnd() drops the resulting trailing blank line.
+    prompt = profile.basePrompt.replace("[[AI_RULES]]", wrapAiRules(aiRules, "")).trimEnd();
+  } else if (mode === "plan") {
     prompt = constructPlanModePrompt(aiRules);
   } else if (mode === "agent") {
     prompt = constructLocalAgentPrompt(aiRules);

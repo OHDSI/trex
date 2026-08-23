@@ -24,9 +24,12 @@ import { addPluginRoutes } from "./routes/plugin.ts";
 import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
+import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
+import { seedClientFromEnv } from "./auth/oidc/seed.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
-import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { applyD2eCompat, applyD2eCompatEarly, D2E_COMPAT, runD2eBoot, runD2eBootstrap, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { parseReadyPort, startBootstrapReadySignal } from "./d2e-compat/bootstrap-ready.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
@@ -169,6 +172,19 @@ if (nativeIdpEnabled()) {
       });
     },
   );
+}
+
+// OIDC provider. Separate switch from the native IdP: a deployment may want the
+// protocol surface for its relying parties without exposing email/password
+// login, or the reverse. Off by default, so nothing changes for a stack that
+// does not ask for it.
+if (oidcProviderEnabled()) {
+  app.use(`${BASE_PATH}/oidc`, registerOidcRoutes(BASE_PATH));
+  console.log(`OIDC provider mounted on ${BASE_PATH}/oidc`);
+  // Registers the client named in the environment, if any. Not awaited: a
+  // client is only needed once a browser arrives at /authorize, and boot must
+  // not wait on the database for it.
+  void seedClientFromEnv();
 }
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
@@ -503,6 +519,30 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
     error_description: "Studio API is admin-only",
   });
 });
+
+// Provision d2e's roles/schemas/grants before plugins load — plugin init
+// functions and plugin migrations both connect using the users created here.
+// Deliberately OUTSIDE the plugin-init try/catch below: that catch logs and
+// carries on to server.listen, which would leave trex reporting healthy on an
+// unprovisioned database. A bootstrap failure is fatal, same abort idiom as the
+// DEK init further down.
+try {
+  await runD2eBootstrap();
+} catch (err) {
+  console.error("[boot] FATAL: d2e bootstrap failed:", err);
+  if (typeof Deno.exit === "function") Deno.exit(1);
+  throw err;
+}
+
+// Signal downstream d2e services (e.g. alp-logto) that the roles/schemas/grants
+// above now exist. They cannot `depends_on: trex` for this — that edge would be
+// circular with trex -> alp-logto-post-init -> alp-logto, and compose allows
+// only one healthcheck condition on trex anyway — so they poll this instead.
+// Opt-in only: no-op unless both D2E_COMPAT and D2E_BOOTSTRAP_READY_PORT are set.
+if (D2E_COMPAT) {
+  const readyPort = parseReadyPort(Deno.env.get("D2E_BOOTSTRAP_READY_PORT"));
+  if (readyPort !== null) startBootstrapReadySignal(readyPort);
+}
 
 try {
 // The studio SPA is served entirely by the Studio Node sidecar via the

@@ -53,6 +53,7 @@ import {
 import { deriveTelegramInputResponse, renderTelegramInputRequest } from "../vendor/telegram/hitl.ts";
 import { defaultTelegramAuth } from "../vendor/telegram/defaults.ts";
 import { getEnv, type InputResponse } from "../vendor/telegram/shared.ts";
+import { queuedAckText } from "../queued-ack.ts";
 
 // Per-session Telegram routing threaded as the channel session `state` — set on
 // send() and read by the delivery (`events`) handlers to post into the chat.
@@ -180,6 +181,26 @@ export function telegramChannel(opts: TelegramChannelOptions = {}): ChannelDef {
           chatId: state.chatId,
           body: { text: chunk, message_thread_id: state.messageThreadId },
         });
+      }
+    },
+    // Acknowledge a message that arrived while a turn was already running and
+    // got queued instead of started as a second concurrent turn — otherwise it
+    // silently disappears until the next turn happens to fold it in. Sends an
+    // ordinary chat message (the same sendMessage primitive message.completed
+    // uses, into the same forum topic) rather than a typing action, which
+    // expires after a few seconds and carries no text.
+    // Best-effort: a failed ack never affects the turn that is still running.
+    async "message.queued"(data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.chatId) return;
+      try {
+        await sendTelegramMessage({
+          ...apiOpts(),
+          chatId: state.chatId,
+          body: { text: queuedAckText(data?.deniedPendingGate === true), message_thread_id: state.messageThreadId },
+        });
+      } catch (e) {
+        console.warn("telegram: message.queued acknowledgement failed — swallowed:", e);
       }
     },
   };
