@@ -136,6 +136,32 @@ Deno.test("grants the logtoManager manage privileges with grant option", () => {
   );
 });
 
+Deno.test("grants database-level CREATE before the schema grants land", () => {
+  const stmts = buildBootstrapStatements(CFG);
+  // alp-logto's seed opens with `create schema if not exists logto`, and
+  // Postgres checks CREATE on the database before the IF NOT EXISTS.
+  for (const user of ["alp_pg_admin_user", "logto_postgres"]) {
+    const grant = `GRANT CREATE ON DATABASE "alp" TO "${user}"`;
+    assertEquals(stmts.includes(grant), true, `missing database grant for ${user}`);
+    // Downstream services gate on the schema grant, so the database grant has
+    // to be in place by the time that one lands.
+    assertEquals(
+      stmts.indexOf(grant) <
+        stmts.findIndex((s) => s.startsWith("CREATE SCHEMA IF NOT EXISTS")),
+      true,
+    );
+  }
+});
+
+Deno.test("grants database-level CREATE once when manager and logtoManager are the same role", () => {
+  const cfg = structuredClone(CFG);
+  cfg.manageUsers.alp.logtoManager = cfg.manageUsers.alp.manager;
+  const grants = buildBootstrapStatements(cfg).filter((s) =>
+    s.startsWith("GRANT CREATE ON DATABASE")
+  );
+  assertEquals(grants, ['GRANT CREATE ON DATABASE "alp" TO "alp_pg_admin_user"']);
+});
+
 Deno.test("emits no logtoManager grants when it is not configured", () => {
   const cfg = structuredClone(CFG);
   delete cfg.manageUsers.alp.logtoManager;

@@ -187,6 +187,16 @@ export function buildBootstrapStatements(cfg: BootstrapConfig): string[] {
     if (users.reader) out.push(`GRANT anon TO ${quoteIdent(users.reader)}`);
     if (users.writer) out.push(`GRANT authenticated TO ${quoteIdent(users.writer)}`);
 
+    // ── Database-level CREATE ────────────────────────────────────────────────
+    // `CREATE SCHEMA IF NOT EXISTS` checks CREATE on the database before it
+    // checks whether the schema exists, so a service that opens with that
+    // statement (alp-logto's seed does) fails even when trex already created
+    // the schema for it.
+    const db = quoteIdent(dbName);
+    for (const user of new Set([users.manager, users.logtoManager])) {
+      if (user) out.push(`GRANT CREATE ON DATABASE ${db} TO ${quoteIdent(user)}`);
+    }
+
     // ── Schemas + grants ─────────────────────────────────────────────────────
     const schemas = cfg.manageConfig.databases[dbKey].schemas || {};
     // Roles that create objects in these schemas (they run the migrations).
