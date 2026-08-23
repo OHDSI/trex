@@ -1,5 +1,9 @@
 /**
- * Logto authn middleware for d2e-compat Express routes.
+ * Bearer-token authn middleware for d2e-compat Express routes.
+ *
+ * The IdP is selectable (D2E_IDP: `logto` — the default — or `trex`); see
+ * idp.ts. Everything below reads the resolved config rather than LOGTO__*
+ * directly, so pointing d2e at trex's own OIDC provider is a config change.
  *
  * Ported from d2e services/trex/core/server/auth/authn.ts (Hono → Express).
  * Adaptations:
@@ -13,17 +17,23 @@ import type { RequestHandler } from "express";
 import { createRemoteJWKSet, jwtVerify, decodeJwt } from "npm:jose";
 import type { JWTVerifyOptions } from "npm:jose";
 import { getWebApiToken, getTokenSubject } from "./lib/token-exchange.ts";
+import { type D2eIdp, isSystemAdminClaims, resolveIdpConfig } from "./idp.ts";
 
 // Lazily initialised so Deno.env is read at first request (D2E_COMPAT path only).
-// Both `requireAdmin` and `logtoAuthn` share this module-level singleton, keyed on LOGTO__ISSUER at first use.
+// Both `requireAdmin` and `logtoAuthn` share this module-level singleton, keyed
+// on the resolved IdP config at first use.
 let _JWKS: ReturnType<typeof createRemoteJWKSet> | null = null;
 function getJWKS(): ReturnType<typeof createRemoteJWKSet> {
   if (!_JWKS) {
-    const issuer = Deno.env.get("LOGTO__ISSUER");
-    if (!issuer) {
-      throw new Error("[d2e-compat] LOGTO__ISSUER env var is not set");
+    const { idp, jwksUri } = resolveIdpConfig(Deno.env.toObject());
+    if (!jwksUri) {
+      throw new Error(
+        idp === "trex"
+          ? "[d2e-compat] TREX_OIDC_ISSUER env var is not set"
+          : "[d2e-compat] LOGTO__ISSUER env var is not set",
+      );
     }
-    _JWKS = createRemoteJWKSet(new URL(`${issuer}/jwks`));
+    _JWKS = createRemoteJWKSet(new URL(jwksUri));
   }
   return _JWKS;
 }
@@ -38,23 +48,19 @@ const ACCEPTED_ALGS = [
   "EdDSA",
 ];
 
-// Build the jose verification options from the same env the deployment already
-// declares (docker-compose trex service): the token's `iss` must equal
-// LOGTO__ISSUER and, when a resource audience is configured, its `aud` must be
-// one of LOGTO__AUDIENCES / LOGTO__RESOURCE_API. Without these checks any token
-// signed by the Logto instance — issued for a different app or API resource — is
-// accepted, which is a cross-audience/issuer authentication bypass.
-function logtoVerifyOptions(): JWTVerifyOptions {
+// Build the jose verification options from the resolved IdP config: the token's
+// `iss` must equal the configured issuer and, when an audience is configured,
+// its `aud` must be one of them. Without these checks any token signed by that
+// IdP — issued for a different app or API resource — is accepted, which is a
+// cross-audience/issuer authentication bypass.
+export function idpVerifyOptions(
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+): JWTVerifyOptions {
   const opts: JWTVerifyOptions = { algorithms: ACCEPTED_ALGS };
-  const issuer = Deno.env.get("LOGTO__ISSUER");
+  const { issuer, audiences } = resolveIdpConfig(env);
   if (issuer) opts.issuer = issuer;
-  const audRaw = Deno.env.get("LOGTO__AUDIENCES") ??
-    Deno.env.get("LOGTO__RESOURCE_API");
-  if (audRaw) {
-    const auds = audRaw.split(",").map((a) => a.trim()).filter(Boolean);
-    if (auds.length === 1) opts.audience = auds[0];
-    else if (auds.length > 1) opts.audience = auds;
-  }
+  if (audiences.length === 1) opts.audience = audiences[0];
+  else if (audiences.length > 1) opts.audience = audiences;
   return opts;
 }
 
@@ -81,19 +87,19 @@ export function extractToken(req: import("express").Request): string | null {
 }
 
 /**
- * Verify a Logto JWT (signature, expiry, issuer, audience, and a pinned set of
- * asymmetric algorithms) and return its decoded claims, or null if the token is
- * missing or invalid. Shared by the d2e plugin auth gate.
+ * Verify a JWT from the selected IdP (signature, expiry, issuer, audience, and a
+ * pinned set of asymmetric algorithms) and return its decoded claims, or null if
+ * the token is missing or invalid. Shared by the d2e plugin auth gate.
  */
-export async function verifyLogtoToken(
+export async function verifyIdpToken(
   token: string | null,
 ): Promise<Record<string, unknown> | null> {
   if (!token) return null;
   try {
-    await jwtVerify(token, getJWKS(), logtoVerifyOptions());
+    await jwtVerify(token, getJWKS(), idpVerifyOptions());
     return decodeJwt(token) as Record<string, unknown>;
   } catch (err) {
-    console.error(`[d2e-compat] verifyLogtoToken: invalid Logto token: ${err}`);
+    console.error(`[d2e-compat] verifyIdpToken: invalid token: ${err}`);
     return null;
   }
 }
@@ -133,9 +139,9 @@ export const logtoAuthn: RequestHandler = async (req, res, next) => {
   }
 
   try {
-    await jwtVerify(token, jwks, logtoVerifyOptions());
+    await jwtVerify(token, jwks, idpVerifyOptions());
   } catch (err) {
-    console.error(`[d2e-compat] authn: invalid Logto token: ${err}`);
+    console.error(`[d2e-compat] authn: invalid token: ${err}`);
     res.status(401).send("Authentication Token not valid");
     return;
   }
@@ -159,8 +165,7 @@ export const logtoAuthn: RequestHandler = async (req, res, next) => {
 // is deferred to the parity phase.
 //
 // How "admin" is derived (from d2e services/trex/core/server/auth/authz.ts):
-//  1. The Logto JWT payload carries `userMgmtGroups.alp_role_system_admin: boolean`.
-//     When true the user has `ALP_SYSTEM_ADMIN` role — this is the system-admin flag.
+//  1. The per-IdP system-admin claim shapes — see isSystemAdminClaims in idp.ts.
 //  2. Service-account / client-credentials tokens (grant_type === "client_credentials"
 //     OR sub === client_id) are also treated as admin in d2e.
 //  Both cases are checked here. All other tokens are rejected 403.
@@ -169,8 +174,8 @@ export const logtoAuthn: RequestHandler = async (req, res, next) => {
 /**
  * ADMIN-ONLY middleware — unlike logtoAuthn, a missing token is ALWAYS a 401.
  *
- * Env vars consumed (same names as d2e env.ts):
- *   LOGTO__ISSUER — the Logto issuer URL used to fetch the JWKS for verification.
+ * Env vars consumed: D2E_IDP selects the provider; the issuer/JWKS/audience
+ * come from it (LOGTO__ISSUER for the default Logto, TREX_OIDC_ISSUER for trex).
  */
 export const requireAdmin: RequestHandler = async (req: any, res: any, next: any) => {
   const token = extractToken(req);
@@ -191,7 +196,7 @@ export const requireAdmin: RequestHandler = async (req: any, res: any, next: any
 
   // Verify the JWT signature, expiry, issuer, audience, and algorithm.
   try {
-    await jwtVerify(token, jwks, logtoVerifyOptions());
+    await jwtVerify(token, jwks, idpVerifyOptions());
   } catch (err) {
     console.error(`[d2e-compat] requireAdmin: invalid token: ${err}`);
     res.status(401).send("Authentication Token not valid");
@@ -208,22 +213,22 @@ export const requireAdmin: RequestHandler = async (req: any, res: any, next: any
     return;
   }
 
-  // Check admin status: service-account OR alp_role_system_admin flag.
+  // Check admin status: service-account OR a system-admin claim.
   const grantType = payload["grant_type"] as string | undefined;
   const sub = payload["sub"] as string | undefined;
   const clientId = payload["client_id"] as string | undefined;
   const isClientCred = grantType === "client_credentials" || (!!sub && sub === clientId);
 
-  // Two token shapes carry system-admin status depending on the Logto custom-JWT
-  // build: (a) the legacy `userMgmtGroups.alp_role_system_admin` boolean, and
-  // (b) this stack's `roles` array containing `role.systemadmin` (LOGTO_ROLES.
-  // SYSTEM_ADMIN — the same claim usermgmt's getUserGroupsMetadataFromLogto reads).
-  // Accept either so the admin gate matches however the IdP issued the token.
-  const userMgmtGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
-  const roles = payload["roles"];
-  const hasSystemAdminRole = Array.isArray(roles) && roles.includes("role.systemadmin");
-  const isSystemAdmin = userMgmtGroups?.["alp_role_system_admin"] === true ||
-    hasSystemAdminRole;
+  // Claim shapes differ per IdP — see isSystemAdminClaims.
+  let idp: D2eIdp;
+  try {
+    idp = resolveIdpConfig(Deno.env.toObject()).idp;
+  } catch (err) {
+    console.error(`[d2e-compat] requireAdmin: IdP config invalid: ${err}`);
+    res.status(500).json({ error: "Auth configuration error" });
+    return;
+  }
+  const isSystemAdmin = isSystemAdminClaims(payload as Record<string, unknown>, idp);
 
   if (!isClientCred && !isSystemAdmin) {
     console.warn(`[d2e-compat] requireAdmin: forbidden — not system admin (sub=${sub})`);

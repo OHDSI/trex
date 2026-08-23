@@ -15,6 +15,7 @@
  *  /trex/log             — requireAdmin (d2e: authn + authz → trex.log.write scope, assigned to ALP_SYSTEM_ADMIN)
  *
  * Env vars consumed (d2e names → trex Deno.env key):
+ *   D2E_IDP                      — `logto` (default) or `trex`; selects the IdP
  *   LOGTO__ISSUER                — Logto issuer URL (shared with auth.ts)
  *   GATEWAY__WO_PROTOCOL_FQDN   — hostname used to build portal URLs
  *   LOGTO__CLIENT_ID             — OIDC client id
@@ -43,6 +44,7 @@ import { getTrexPublications, syncTrexDatabaseManager } from "./dbm-sync.ts";
 import { syncPrefectDatabaseCredentials } from "./prefect-sync.ts";
 import { upsertDatabaseCredential } from "./db-credential.ts";
 import { decryptSecret } from "../auth/crypto.ts";
+import { resolveIdpConfig } from "./idp.ts";
 import {
   CACHE_DIR,
   ensureCacheAttached,
@@ -334,19 +336,18 @@ export function mountD2eRoutes(app: Express): void {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // /oauth/token — Logto PKCE token exchange  (PUBLIC)
+  // /oauth/token — PKCE token exchange against the selected IdP  (PUBLIC)
   //
   // Ported from d2e services/trex/core/server/routes/base.ts.
-  // Forwards the form body to LOGTO__TOKEN_URL, appending client_secret and
-  // resource from env if not already present.
-  //
-  // Env vars: LOGTO__TOKEN_URL, LOGTO__RESOURCE_API, SECURITY_AUTH_OIDC_APISECRET
+  // Forwards the form body to the IdP's token endpoint, appending client_secret
+  // and resource from the resolved config if not already present (see idp.ts).
   // ─────────────────────────────────────────────────────────────────────────
   app.post("/oauth/token", express.urlencoded({ extended: true, limit: "1mb" }), async (req: any, res: any) => {
     console.log("[d2e-compat] /oauth/token: exchange code");
-    const tokenUrl = envGet("LOGTO__TOKEN_URL");
+    const idpCfg = resolveIdpConfig(Deno.env.toObject());
+    const tokenUrl = idpCfg.tokenUrl;
     if (!tokenUrl) {
-      console.error("[d2e-compat] /oauth/token: LOGTO__TOKEN_URL not set");
+      console.error("[d2e-compat] /oauth/token: no token endpoint configured for the selected IdP");
       (res as any).status(500).json({ error: "Token URL not configured" });
       return;
     }
@@ -373,13 +374,10 @@ export function mountD2eRoutes(app: Express): void {
       new URLSearchParams(new TextDecoder().decode(buf)).forEach((v, k) => params.append(k, v));
     }
 
-    const resource = envGet("LOGTO__RESOURCE_API");
+    const resource = idpCfg.resource;
     if (!params.has("resource") && resource) params.append("resource", resource);
 
-    // d2e env.ts maps env.LOGTO_CLIENT_SECRET <- SECURITY_AUTH_OIDC_APISECRET;
-    // accept either name (fall back to LOGTO__CLIENT_SECRET) in case only one
-    // reaches the worker env.
-    const clientSecret = envGet("SECURITY_AUTH_OIDC_APISECRET") || envGet("LOGTO__CLIENT_SECRET");
+    const clientSecret = idpCfg.clientSecret;
     if (!params.has("client_secret") && clientSecret) params.append("client_secret", clientSecret);
     console.log(
       `[d2e-compat] /oauth/token: secret_present=${clientSecret.length > 0} len=${clientSecret.length} keys=${[...params.keys()].join(",")}`,
@@ -431,8 +429,7 @@ export function mountD2eRoutes(app: Express): void {
   // Ported from d2e services/trex/core/server/routes/portal.ts.
   //
   // Env vars consumed (d2e name → Deno.env key):
-  //   GATEWAY__WO_PROTOCOL_FQDN, LOGTO__CLIENT_ID, LOGTO__SCOPE,
-  //   LOGTO__ISSUER, APP_LOCALE, GIT_COMMIT, IDP__RELYING_PARTY,
+  //   GATEWAY__WO_PROTOCOL_FQDN, APP_LOCALE, GIT_COMMIT, IDP__RELYING_PARTY,
   //   IDP__REQUIRED_CLAIM, DB_CREDENTIALS__PUBLIC_KEYS,
   //   PORTAL__LOG_DISCLAIMER, USE_PUBLIC_WEBAPI_PROXY,
   //   PUBLIC_WEBAPI_PROXY_URL, PUBLIC_WEBAPI_DATASOURCE
@@ -440,12 +437,13 @@ export function mountD2eRoutes(app: Express): void {
   app.get("/portal/env.js", (_req: any, res: any) => {
     const gatewayHost = envGet("GATEWAY__WO_PROTOCOL_FQDN") || "localhost";
     const gatewayBase = `https://${gatewayHost}/`;
-    const clientId = envGet("LOGTO__CLIENT_ID");
-    const scope = envGet("LOGTO__SCOPE");
-    const issuer = envGet("LOGTO__ISSUER");
-    const authorizationUrl = `${gatewayBase}oidc/auth`;
+    const idpCfg = resolveIdpConfig(Deno.env.toObject());
+    const clientId = idpCfg.clientId;
+    const scope = idpCfg.scope;
+    const issuer = idpCfg.issuer;
+    const authorizationUrl = `${gatewayBase}${idpCfg.authorizePath}`;
     const endSessionUrl =
-      `${gatewayBase}oidc/session/end?client_id=${clientId}&redirect={window.location.origin}/d2e/portal`;
+      `${gatewayBase}${idpCfg.endSessionPath}?client_id=${clientId}&redirect={window.location.origin}/d2e/portal`;
 
     const clientEnv = {
       PUBLIC_URL: "/d2e/portal",
