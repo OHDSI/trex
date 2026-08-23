@@ -42,8 +42,8 @@ Deno.test({
   async fn() {
     const agent = await loadAgent(AGENT_DIR);
 
-    // Every ported tool (batch A + batch B) is discovered under its
-    // filename-derived name…
+    // Every ported tool (batch A + batch B, plus anything ported since) is
+    // discovered under its filename-derived name…
     const expected = [
       // Batch A (25)
       "AddDependency", "Bash", "CodeSearch", "CopyFile", "DeleteFile", "Edit",
@@ -61,6 +61,8 @@ Deno.test({
       "SendMessage", "SetChatSummary", "TableData", "TaskCreate", "TaskGet",
       "TaskList", "TaskStop", "TaskUpdate", "TodoWrite", "ToolSearch",
       "TypeCheck", "WebCrawl", "WebFetch", "WebSearch", "WritePlan",
+      // Figma (2) — added to the legacy registry after batch B closed
+      "FigmaListFrames", "FigmaPullMockups",
     ];
     for (const name of expected) {
       assert(name in agent.tools, `tool ${name} missing from loaded agent`);

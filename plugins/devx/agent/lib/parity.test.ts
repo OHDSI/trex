@@ -67,6 +67,9 @@ Deno.test("parity: ported tool-name set equals legacy TOOL_DEFINITIONS minus the
   assertEquals(portedNames.size, expectedPorted.size);
 });
 
-Deno.test("parity: registry total accounts for exactly batch A (25) + batch B (41) + exclusions (3)", () => {
-  assertEquals(TOOL_DEFINITIONS.length, 25 + 41 + 3);
+// A and B are the historical port batches and are closed. Tools added to the
+// legacy registry afterwards get their own term, so a later addition surfaces
+// here as a distinct number instead of silently inflating a closed batch.
+Deno.test("parity: registry total accounts for exactly batch A (25) + batch B (41) + Figma (2) + exclusions (3)", () => {
+  assertEquals(TOOL_DEFINITIONS.length, 25 + 41 + 2 + 3);
 });
