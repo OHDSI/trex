@@ -35,6 +35,10 @@ export interface IdTokenClaims {
   email_verified?: boolean;
   name?: string;
   trex_role: string;
+  // The same role as a list. Relying parties that map a role claim generally
+  // expect a collection — Spring's OAuth2 mapping among them — and would take a
+  // bare string as an unparseable single value.
+  roles: string[];
   app_metadata: { trex_role: string };
 }
 
@@ -54,6 +58,7 @@ export function buildIdTokenClaims(user: IdTokenUser, opts: IdTokenOptions): IdT
     exp: now + (opts.ttlSeconds ?? DEFAULT_ID_TOKEN_TTL_SECONDS),
     auth_time: opts.authTime ?? now,
     trex_role: user.role,
+    roles: [user.role],
     app_metadata: { trex_role: user.role },
   };
 

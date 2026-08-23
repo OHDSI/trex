@@ -18,6 +18,7 @@ import {
   getClient,
   grantedScopes,
   isPublicClient,
+  isRegisteredPostLogoutUri,
   isRegisteredRedirectUri,
   verifyClientSecret,
 } from "./clients.ts";
@@ -94,6 +95,7 @@ export function registerOidcRoutes(basePath: string) {
       token_endpoint: `${issuer}/oidc/token`,
       userinfo_endpoint: `${issuer}/oidc/userinfo`,
       jwks_uri: `${issuer}/oidc/.well-known/jwks.json`,
+      end_session_endpoint: `${issuer}/oidc/session/end`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code"],
       subject_types_supported: ["public"],
@@ -263,6 +265,44 @@ export function registerOidcRoutes(basePath: string) {
       });
     } catch (err) {
       console.error("[oidc] token error:", err);
+      res.status(500).json({ error: "server_error" });
+    }
+  });
+
+  // RP-initiated logout. trex owns the session cookie the flow depends on, so it
+  // is cleared here; the relying party clears its own and sends the browser on.
+  router.get("/session/end", apiLimiter, async (req, res) => {
+    try {
+      const requested = req.query.post_logout_redirect_uri as string | undefined;
+      const clientId = req.query.client_id as string | undefined;
+      const state = req.query.state as string | undefined;
+
+      // Cleared unconditionally: logging out must not depend on the caller
+      // getting its redirect parameters right.
+      res.clearCookie("sb-access-token", { path: "/" });
+
+      if (!requested) {
+        res.status(204).end();
+        return;
+      }
+
+      // Only a URI the client registered is honoured — the same reasoning as
+      // redirect_uri at /authorize, since this one also takes a browser
+      // somewhere on trex's say-so.
+      const client = clientId ? await getClient(clientId) : null;
+      if (!client || !isRegisteredPostLogoutUri(client, requested)) {
+        res.status(400).json({
+          error: "invalid_request",
+          error_description: "unregistered post_logout_redirect_uri",
+        });
+        return;
+      }
+
+      const target = new URL(requested);
+      if (state) target.searchParams.set("state", state);
+      res.redirect(302, target.toString());
+    } catch (err) {
+      console.error("[oidc] end session error:", err);
       res.status(500).json({ error: "server_error" });
     }
   });

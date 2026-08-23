@@ -25,6 +25,7 @@ import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
+import { seedClientFromEnv } from "./auth/oidc/seed.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, D2E_COMPAT, runD2eBoot, runD2eBootstrap, syncD2ePlugins } from "./d2e-compat/index.ts";
@@ -180,6 +181,10 @@ if (nativeIdpEnabled()) {
 if (oidcProviderEnabled()) {
   app.use(`${BASE_PATH}/oidc`, registerOidcRoutes(BASE_PATH));
   console.log(`OIDC provider mounted on ${BASE_PATH}/oidc`);
+  // Registers the client named in the environment, if any. Not awaited: a
+  // client is only needed once a browser arrives at /authorize, and boot must
+  // not wait on the database for it.
+  void seedClientFromEnv();
 }
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
