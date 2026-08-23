@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertRejects } from "jsr:@std/assert";
 import { parseReadyPort, startBootstrapReadySignal } from "./bootstrap-ready.ts";
 
 Deno.test("parseReadyPort rejects missing, non-numeric, and out-of-range values", () => {
@@ -16,6 +16,7 @@ Deno.test("parseReadyPort accepts a positive integer string", () => {
 Deno.test("a started listener answers 200 with the bootstrapped body on any path/method", async () => {
   const port = 20000 + Math.floor(Math.random() * 20000);
   const signal = startBootstrapReadySignal(port);
+  await signal.listening;
   try {
     for (const { path, method } of [
       { path: "/", method: "GET" },
@@ -37,6 +38,23 @@ Deno.test("a started listener answers 200 with the bootstrapped body on any path
   }
 });
 
+Deno.test("the port is bound before `listening` resolves", async () => {
+  const port = 45000 + Math.floor(Math.random() * 15000);
+  // Nothing is listening yet, so a connection is refused.
+  await assertRejects(() => Deno.connect({ hostname: "127.0.0.1", port }));
+  const signal = startBootstrapReadySignal(port);
+  await signal.listening;
+  try {
+    // Resolving means a real TCP listener accepts connections — the beacon's
+    // only contract, and the one Deno.serve silently failed to honour in the
+    // trex runtime (a failure no test under plain `deno test` can reproduce).
+    const conn = await Deno.connect({ hostname: "127.0.0.1", port });
+    conn.close();
+  } finally {
+    signal.stop();
+  }
+});
+
 Deno.test("no listener is started for an invalid or absent port (nothing to stop, nothing to fetch)", async () => {
   const port = parseReadyPort(undefined);
   assertEquals(port, null);
@@ -49,8 +67,12 @@ Deno.test("no listener is started for an invalid or absent port (nothing to stop
 Deno.test("start does not throw when the port is already bound — it degrades to a warning", async () => {
   const port = 25000 + Math.floor(Math.random() * 20000);
   const first = startBootstrapReadySignal(port);
+  await first.listening;
   try {
     const second = startBootstrapReadySignal(port);
+    // The clash is reported through `listening`, never as a throw from the call
+    // itself and never as an unhandled "error" event that would end the node.
+    await assertRejects(() => second.listening);
     // second failed to bind; its stop() must still be safe to call.
     second.stop();
     // The original listener is unaffected.
