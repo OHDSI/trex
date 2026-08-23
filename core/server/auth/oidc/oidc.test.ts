@@ -8,7 +8,13 @@ import {
   verifyPkce,
 } from "./policy.ts";
 import { buildIdTokenClaims } from "./claims.ts";
-import { issuerUrl, loginUrl, oidcProviderEnabled, readCookie } from "./config.ts";
+import {
+  issuerUrl,
+  loginUrl,
+  oidcProviderEnabled,
+  parseSeedClient,
+  readCookie,
+} from "./config.ts";
 
 const client: OidcClient = {
   clientId: "atlas",
@@ -174,4 +180,49 @@ Deno.test("PKCE refuses plain, whatever verifier is offered", async () => {
 
 Deno.test("a code issued without a challenge needs no verifier", async () => {
   assertEquals(await verifyPkce({ codeChallenge: null, codeChallengeMethod: null }, undefined), true);
+});
+
+Deno.test("the role is also emitted as a list for relying parties that map one", () => {
+  const claims = buildIdTokenClaims(
+    { id: "u", email: "e@x", role: "admin" },
+    { issuer: "https://i", audience: "a", scopes: ["openid"] },
+  );
+  assertEquals(claims.roles, ["admin"]);
+  assertEquals(claims.trex_role, "admin");
+});
+
+Deno.test("no seeded client without an id or a redirect uri", () => {
+  assertEquals(parseSeedClient({}), null);
+  assertEquals(parseSeedClient({ TREX_OIDC_CLIENT_ID: "  " }), null);
+  // An id with nowhere to redirect could never complete a flow.
+  assertEquals(parseSeedClient({ TREX_OIDC_CLIENT_ID: "app" }), null);
+  assertEquals(
+    parseSeedClient({ TREX_OIDC_CLIENT_ID: "app", TREX_OIDC_CLIENT_REDIRECT_URIS: "  " }),
+    null,
+  );
+});
+
+Deno.test("a seeded client reads its uris as a list, however they are separated", () => {
+  const spec = parseSeedClient({
+    TREX_OIDC_CLIENT_ID: "d2e-webapi",
+    TREX_OIDC_CLIENT_SECRET: "s3cret",
+    TREX_OIDC_CLIENT_NAME: "WebAPI",
+    TREX_OIDC_CLIENT_REDIRECT_URIS: "https://a.test/cb/openid, https://b.test/cb/openid",
+    TREX_OIDC_CLIENT_POST_LOGOUT_URIS: "https://a.test/atlas/",
+  });
+  assertEquals(spec?.clientId, "d2e-webapi");
+  assertEquals(spec?.clientSecret, "s3cret");
+  assertEquals(spec?.name, "WebAPI");
+  assertEquals(spec?.redirectUris, ["https://a.test/cb/openid", "https://b.test/cb/openid"]);
+  assertEquals(spec?.postLogoutRedirectUris, ["https://a.test/atlas/"]);
+});
+
+Deno.test("a seeded client without a secret is public and falls back to its id for a name", () => {
+  const spec = parseSeedClient({
+    TREX_OIDC_CLIENT_ID: "atlas",
+    TREX_OIDC_CLIENT_REDIRECT_URIS: "https://a.test/cb",
+  });
+  assertEquals(spec?.clientSecret, undefined);
+  assertEquals(spec?.name, "atlas");
+  assertEquals(spec?.postLogoutRedirectUris, []);
 });
