@@ -26,7 +26,8 @@ import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
-import { applyD2eCompat, applyD2eCompatEarly, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { applyD2eCompat, applyD2eCompatEarly, D2E_COMPAT, runD2eBoot, runD2eBootstrap, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { parseReadyPort, startBootstrapReadySignal } from "./d2e-compat/bootstrap-ready.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
@@ -503,6 +504,30 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
     error_description: "Studio API is admin-only",
   });
 });
+
+// Provision d2e's roles/schemas/grants before plugins load — plugin init
+// functions and plugin migrations both connect using the users created here.
+// Deliberately OUTSIDE the plugin-init try/catch below: that catch logs and
+// carries on to server.listen, which would leave trex reporting healthy on an
+// unprovisioned database. A bootstrap failure is fatal, same abort idiom as the
+// DEK init further down.
+try {
+  await runD2eBootstrap();
+} catch (err) {
+  console.error("[boot] FATAL: d2e bootstrap failed:", err);
+  if (typeof Deno.exit === "function") Deno.exit(1);
+  throw err;
+}
+
+// Signal downstream d2e services (e.g. alp-logto) that the roles/schemas/grants
+// above now exist. They cannot `depends_on: trex` for this — that edge would be
+// circular with trex -> alp-logto-post-init -> alp-logto, and compose allows
+// only one healthcheck condition on trex anyway — so they poll this instead.
+// Opt-in only: no-op unless both D2E_COMPAT and D2E_BOOTSTRAP_READY_PORT are set.
+if (D2E_COMPAT) {
+  const readyPort = parseReadyPort(Deno.env.get("D2E_BOOTSTRAP_READY_PORT"));
+  if (readyPort !== null) startBootstrapReadySignal(readyPort);
+}
 
 try {
 // The studio SPA is served entirely by the Studio Node sidecar via the
