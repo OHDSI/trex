@@ -29,8 +29,9 @@ import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
 import { seedClientFromEnv } from "./auth/oidc/seed.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
-import { applyD2eCompat, applyD2eCompatEarly, D2E_COMPAT, runD2eBoot, runD2eBootstrap, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { applyD2eCompat, applyD2eCompatEarly, assertD2eProvisioned, D2E_COMPAT, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
 import { parseReadyPort, startBootstrapReadySignal } from "./d2e-compat/bootstrap-ready.ts";
+import { collectProvisionTargets, runProvisionTargets } from "./plugin/provision.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
@@ -526,16 +527,29 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
   });
 });
 
-// Provision d2e's roles/schemas/grants before plugins load — plugin init
-// functions and plugin migrations both connect using the users created here.
+// Run every plugin-declared `trex.provision` module before plugins load —
+// plugin init functions and plugin migrations both connect using the roles these
+// create. Collected by a filesystem pre-pass so the modules can run ahead of the
+// scan that would otherwise register them.
 // Deliberately OUTSIDE the plugin-init try/catch below: that catch logs and
 // carries on to server.listen, which would leave trex reporting healthy on an
-// unprovisioned database. A bootstrap failure is fatal, same abort idiom as the
-// DEK init further down.
+// unprovisioned database. A provisioning failure is fatal, same abort idiom as
+// the DEK init further down.
 try {
-  await runD2eBootstrap();
+  const provisionTargets = await collectProvisionTargets([
+    Deno.env.get("PLUGINS_DEV_PATH") || "./plugins-dev",
+    Deno.env.get("PLUGINS_PATH") || "./plugins",
+  ]);
+  assertD2eProvisioned(provisionTargets.length);
+  if (provisionTargets.length > 0) {
+    const applied = await runProvisionTargets(provisionTargets, {
+      exec: (sql) => pool.query(sql),
+      env: Deno.env.toObject(),
+    });
+    console.log(`provision: ${provisionTargets.length} plugin(s), ${applied} statement(s) applied`);
+  }
 } catch (err) {
-  console.error("[boot] FATAL: d2e bootstrap failed:", err);
+  console.error("[boot] FATAL: database provisioning failed:", err);
   if (typeof Deno.exit === "function") Deno.exit(1);
   throw err;
 }
