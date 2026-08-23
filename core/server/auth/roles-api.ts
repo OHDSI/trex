@@ -10,18 +10,11 @@ import express from "express";
 import { pool } from "../db.ts";
 import { verifyAccessToken } from "./jwt.ts";
 import { apiLimiter } from "../middleware/rate-limit.ts";
+import { parseRoleAssignment } from "./roles-policy.ts";
+
+export { parseRoleAssignment };
 
 export const rolesRouter = Router();
-
-export function parseRoleAssignment(body: unknown): { userId: string; role: string } | null {
-  if (!body || typeof body !== "object") return null;
-  const { userId, role } = body as Record<string, unknown>;
-  if (typeof userId !== "string" || typeof role !== "string") return null;
-  const trimmedUser = userId.trim();
-  const trimmedRole = role.trim();
-  if (!trimmedUser || !trimmedRole) return null;
-  return { userId: trimmedUser, role: trimmedRole };
-}
 
 async function requireAdmin(req: express.Request, res: express.Response): Promise<boolean> {
   const header = req.headers.authorization;

@@ -1,5 +1,5 @@
 import { assertEquals } from "jsr:@std/assert";
-import { parseRoleAssignment } from "./roles-api.ts";
+import { parseRoleAssignment } from "./roles-policy.ts";
 
 Deno.test("a role assignment needs both a user and a role name", () => {
   assertEquals(parseRoleAssignment({ userId: "u1", role: "USER_ADMIN" }), {
