@@ -1,6 +1,6 @@
 import { assertEquals } from "jsr:@std/assert";
 import { exportJWK, generateKeyPair, SignJWT } from "npm:jose";
-import { verifyLogtoToken } from "./auth.ts";
+import { verifyIdpToken } from "./auth.ts";
 
 // A local JWKS server stands in for Logto. Tokens are signed with its private
 // key, so the SIGNATURE is always valid — these tests isolate the claim checks
@@ -31,7 +31,7 @@ async function sign(
   return await t.sign(privateKey);
 }
 
-Deno.test("verifyLogtoToken claim validation", async (t) => {
+Deno.test("verifyIdpToken claim validation", async (t) => {
   Deno.env.set("LOGTO__ISSUER", ISSUER);
   Deno.env.set("LOGTO__AUDIENCES", AUDIENCE);
 
@@ -48,7 +48,7 @@ Deno.test("verifyLogtoToken claim validation", async (t) => {
   try {
     await t.step("accepts a token with correct issuer and audience", async () => {
       const token = await sign({ roles: ["role.researcher"] });
-      const payload = await verifyLogtoToken(token);
+      const payload = await verifyIdpToken(token);
       assertEquals(payload?.sub, "user-1");
     });
 
@@ -58,7 +58,7 @@ Deno.test("verifyLogtoToken claim validation", async (t) => {
       const token = await sign({ roles: ["role.systemadmin"] }, {
         iss: "https://evil.example/oidc",
       });
-      const payload = await verifyLogtoToken(token);
+      const payload = await verifyIdpToken(token);
       assertEquals(payload, null);
     });
 
@@ -68,7 +68,7 @@ Deno.test("verifyLogtoToken claim validation", async (t) => {
       const token = await sign({ roles: ["role.systemadmin"] }, {
         aud: "https://some-other-resource",
       });
-      const payload = await verifyLogtoToken(token);
+      const payload = await verifyIdpToken(token);
       assertEquals(payload, null);
     });
 
@@ -83,7 +83,7 @@ Deno.test("verifyLogtoToken claim validation", async (t) => {
         exp: Math.floor(Date.now() / 1000) + 300,
       })).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
       const token = `${header}.${body}.`;
-      const payload = await verifyLogtoToken(token);
+      const payload = await verifyIdpToken(token);
       assertEquals(payload, null);
     });
   } finally {
