@@ -24,6 +24,7 @@ import { addPluginRoutes } from "./routes/plugin.ts";
 import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
+import { rolesRouter } from "./auth/roles-api.ts";
 import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
 import { seedClientFromEnv } from "./auth/oidc/seed.ts";
 import { fnmap } from "./plugin/function.ts";
@@ -173,6 +174,11 @@ if (nativeIdpEnabled()) {
     },
   );
 }
+
+// Application-role administration. Always mounted: it is an admin API guarded by
+// the caller's own token, not part of the login surface the native IdP switch
+// turns off.
+app.use(`${BASE_PATH}/admin/roles`, rolesRouter);
 
 // OIDC provider. Separate switch from the native IdP: a deployment may want the
 // protocol surface for its relying parties without exposing email/password
