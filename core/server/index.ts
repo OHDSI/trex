@@ -193,13 +193,6 @@ if (oidcProviderEnabled()) {
   // client is only needed once a browser arrives at /authorize, and boot must
   // not wait on the database for it.
   void seedClientFromEnv();
-  // Mint the signing key now rather than on the first token. Relying parties
-  // fetch jwks_uri as soon as they discover the provider, and a JWKS served
-  // empty can be cached that way, leaving every id_token unverifiable until
-  // the client happens to refresh. Same fire-and-forget reasoning as the seed.
-  void getActiveSigningKey().catch((err) =>
-    console.error("[oidc] could not prepare the signing key:", err)
-  );
 }
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
@@ -826,6 +819,17 @@ app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res)
 try {
   await initDek(pool);
   console.log("[boot] DEK initialized");
+  // Mint the OIDC signing key now rather than on the first token. Relying
+  // parties fetch jwks_uri as soon as they discover the provider, and a JWKS
+  // served empty can be cached that way, leaving every id_token unverifiable
+  // until the client happens to refresh. It has to come after initDek: the
+  // private key is stored encrypted, so minting it any earlier fails with
+  // "DEK not initialized". Fire-and-forget, like the client seed.
+  if (oidcProviderEnabled()) {
+    void getActiveSigningKey().catch((err) =>
+      console.error("[oidc] could not prepare the signing key:", err)
+    );
+  }
 } catch (err) {
   console.error("[boot] FATAL: DEK init failed:", err);
   // This service runs inside the trex host's embedded edge runtime, which does
