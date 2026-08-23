@@ -27,6 +27,7 @@ import { nativeIdpEnabled } from "./auth/native-idp.ts";
 import { rolesRouter } from "./auth/roles-api.ts";
 import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
 import { seedClientFromEnv } from "./auth/oidc/seed.ts";
+import { getActiveSigningKey } from "./auth/oidc/keys.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
 import { applyD2eCompat, applyD2eCompatEarly, D2E_COMPAT, runD2eBoot, runD2eBootstrap, syncD2ePlugins } from "./d2e-compat/index.ts";
@@ -191,6 +192,13 @@ if (oidcProviderEnabled()) {
   // client is only needed once a browser arrives at /authorize, and boot must
   // not wait on the database for it.
   void seedClientFromEnv();
+  // Mint the signing key now rather than on the first token. Relying parties
+  // fetch jwks_uri as soon as they discover the provider, and a JWKS served
+  // empty can be cached that way, leaving every id_token unverifiable until
+  // the client happens to refresh. Same fire-and-forget reasoning as the seed.
+  void getActiveSigningKey().catch((err) =>
+    console.error("[oidc] could not prepare the signing key:", err)
+  );
 }
 
 // Deno doesn't have `global` — polyfill for npm packages that expect Node.js
