@@ -31,6 +31,7 @@ import {
 } from "./id-token.ts";
 import { getJwks } from "./keys.ts";
 import { issuerUrl, loginUrl, oidcProviderEnabled, readCookie } from "./config.ts";
+import { buildReturnTo } from "./policy.ts";
 
 export { issuerUrl, oidcProviderEnabled, readCookie };
 
@@ -180,7 +181,7 @@ export function registerOidcRoutes(basePath: string) {
           return;
         }
         const target = new URL(login);
-        target.searchParams.set("return_to", `${issuer}${req.originalUrl}`);
+        target.searchParams.set("return_to", buildReturnTo(issuer, req.originalUrl));
         res.redirect(302, target.toString());
         return;
       }
