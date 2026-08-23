@@ -178,6 +178,10 @@ export class Plugins {
           case "migrations":
             Plugins.registerMigrations(dir, shortName, value);
             break;
+          case "provision":
+            // Already collected and run by the pre-pass in index.ts, before this
+            // scan — the roles it creates are what the plugins below connect as.
+            break;
           case "agents":
             await addAgentsPlugin(app, value, dir, fullName, DECLARED_MEMORY_NAMES);
             if (!Plugins.migrationTargets.some((t) => t.name === "agents-core")) {
