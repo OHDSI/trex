@@ -27,6 +27,8 @@ import {
 } from "./git.ts";
 // GitHub
 import { gitPushTool, gitPullTool } from "./github.ts";
+// Figma
+import { figmaListFramesTool, figmaPullMockupsTool } from "./figma.ts";
 // Trex
 import { executeSqlTool } from "./execute_sql.ts";
 // Plan mode
@@ -109,6 +111,9 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   // GitHub
   gitPushTool,
   gitPullTool,
+  // Figma
+  figmaListFramesTool,
+  figmaPullMockupsTool,
   // Trex
   executeSqlTool,
   // Plan mode
