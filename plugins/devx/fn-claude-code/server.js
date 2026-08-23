@@ -95,10 +95,14 @@ const server = http.createServer(async (req, res) => {
     let body = "";
     for await (const chunk of req) body += chunk;
 
-    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId, figmaMcp } = JSON.parse(body);
+    const { prompt, systemPrompt, model, maxTurns, oauthToken, cwd, chatId, figmaToken } = JSON.parse(body);
     const sessionKey = chatId || "__default__";
 
     if (oauthToken) process.env.CLAUDE_CODE_OAUTH_TOKEN = oauthToken;
+    // Figma PAT for the pulling-figma-mockups skill's curl fallback. Cleared
+    // when absent so a disconnect upstream doesn't leave a stale token behind.
+    if (figmaToken) process.env.FIGMA_TOKEN = figmaToken;
+    else delete process.env.FIGMA_TOKEN;
 
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -172,13 +176,6 @@ const server = http.createServer(async (req, res) => {
         mcpServers: {
           kb: kbMcpServer,
           ask: askServer,
-          // Official Figma remote MCP server (design context behind Figma
-          // links). Only present when the deployment completed the OAuth
-          // connect in devx Settings; token refresh happens upstream
-          // (figma_mcp_routes.ts), each turn gets a fresh bearer.
-          ...(figmaMcp?.url && figmaMcp?.accessToken
-            ? { figma: { type: "http", url: figmaMcp.url, headers: { Authorization: `Bearer ${figmaMcp.accessToken}` } } }
-            : {}),
         },
         // Discover the materialized devx skills from ~/.claude/skills so the
         // agent's Skill tool can autonomously invoke them (brainstorming, etc.).
