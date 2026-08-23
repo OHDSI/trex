@@ -1,62 +1,38 @@
 import { useCallback, useEffect, useState } from "react";
-import {
-  exchangeFigmaMcpCode,
-  figmaMcpLogout,
-  getFigmaMcpStatus,
-  startFigmaMcpLogin,
-} from "@/lib/api";
-
-// The OAuth redirect target is THIS settings page (plus a marker param so the
-// callback params are unambiguous). The page is authenticated in the browser,
-// so the code/state relay to the backend needs no unauthenticated callback
-// route — see figma_mcp_routes.ts.
-function redirectUri(): string {
-  return `${window.location.origin}${window.location.pathname}?figma=1`;
-}
+import { figmaLogout, getFigmaStatus, setFigmaToken } from "@/lib/api";
 
 export function FigmaSection() {
   const [connected, setConnected] = useState<boolean | null>(null);
+  const [handle, setHandle] = useState<string | null>(null);
+  const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const status = await getFigmaMcpStatus();
+      const status = await getFigmaStatus();
       setConnected(status.connected);
+      setHandle(status.handle);
     } catch {
       setConnected(null);
     }
   }, []);
 
-  // Complete the OAuth round-trip: Figma redirected back to this page with
-  // ?figma=1&code=...&state=... — relay them, then clean the URL.
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("figma") === "1" && params.get("code") && params.get("state")) {
-      setBusy(true);
-      exchangeFigmaMcpCode(params.get("code")!, params.get("state")!)
-        .then(() => setConnected(true))
-        .catch((err) => setError(err?.message || "Figma connection failed"))
-        .finally(() => {
-          setBusy(false);
-          const clean = new URL(window.location.href);
-          ["figma", "code", "state"].forEach((k) => clean.searchParams.delete(k));
-          window.history.replaceState({}, "", clean.toString());
-        });
-    } else {
-      refresh();
-    }
+    refresh();
   }, [refresh]);
 
   const connect = async () => {
     setBusy(true);
     setError(null);
     try {
-      const { authUrl } = await startFigmaMcpLogin(redirectUri());
-      // Full-page redirect: Figma sends the browser back to this page.
-      window.location.href = authUrl;
+      const result = await setFigmaToken(token.trim());
+      setConnected(result.connected);
+      setHandle(result.handle);
+      setToken("");
     } catch (err) {
-      setError((err as Error)?.message || "Could not start the Figma login");
+      setError((err as Error)?.message || "Figma rejected the token");
+    } finally {
       setBusy(false);
     }
   };
@@ -64,8 +40,9 @@ export function FigmaSection() {
   const disconnect = async () => {
     setBusy(true);
     try {
-      await figmaMcpLogout();
+      await figmaLogout();
       setConnected(false);
+      setHandle(null);
     } finally {
       setBusy(false);
     }
@@ -75,12 +52,15 @@ export function FigmaSection() {
     <div className="space-y-2">
       <h3 className="text-sm font-medium">Figma</h3>
       <p className="text-xs text-muted-foreground">
-        Connect Figma so the coding agent can read designs behind Figma links
-        (official Figma MCP server).
+        Paste a Figma personal access token (Figma → Settings → Security, scope
+        “File content: read”) so the coding agent can pull mockups behind Figma
+        links.
       </p>
       {connected ? (
         <div className="flex items-center gap-3">
-          <span className="text-xs text-green-600">Connected</span>
+          <span className="text-xs text-green-600">
+            Connected{handle ? ` as ${handle}` : ""}
+          </span>
           <button
             type="button"
             className="text-xs underline text-muted-foreground disabled:opacity-50"
@@ -91,14 +71,24 @@ export function FigmaSection() {
           </button>
         </div>
       ) : (
-        <button
-          type="button"
-          className="rounded border px-3 py-1 text-xs disabled:opacity-50"
-          disabled={busy || connected === null}
-          onClick={connect}
-        >
-          {busy ? "Connecting..." : "Connect Figma"}
-        </button>
+        <div className="flex items-center gap-2">
+          <input
+            type="password"
+            value={token}
+            placeholder="figd_..."
+            autoComplete="off"
+            className="rounded border px-2 py-1 text-xs w-64"
+            onChange={(e) => setToken(e.target.value)}
+          />
+          <button
+            type="button"
+            className="rounded border px-3 py-1 text-xs disabled:opacity-50"
+            disabled={busy || !token.trim()}
+            onClick={connect}
+          >
+            {busy ? "Checking..." : "Connect"}
+          </button>
+        </div>
       )}
       {error && <p className="text-xs text-red-600">{error}</p>}
     </div>
