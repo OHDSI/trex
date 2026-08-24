@@ -13,6 +13,7 @@ import {
 } from "./tools/workspace.ts";
 import { ensureGitConfig } from "./git_identity.ts";
 import { ensureChatWorktree } from "./chat_worktree.ts";
+import { materializeAttachments, renderAttachmentBlock } from "./attachments.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 import { getFigmaToken } from "./routes/figma_routes.ts";
@@ -57,39 +58,6 @@ export async function ensureClaudeCodeServer() {
     } catch {}
   }
   throw new Error("Claude Code Node.js server failed to start");
-}
-
-// Materialize channel attachments (screenshots etc., relayed by claw as
-// name/url metadata) into `<workspace>/attachments/` so the coder can Read
-// them — images render multimodally through the Read tool, so nothing is ever
-// inlined into a prompt. Returns the workspace-relative paths written; failures
-// are per-file and non-fatal (the turn still runs, the miss is logged).
-const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
-async function materializeAttachments(
-  workspacePath,
-  attachments,
-) {
-  const saved = [];
-  const dir = `${workspacePath}/attachments`;
-  for (const a of attachments) {
-    // Basename only, conservative charset — the name is remote input.
-    const base = String(a.name).split(/[\\/]/).pop() || "file";
-    const safe = base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-    try {
-      const res = await fetch(a.url);
-      if (!res.ok) throw new Error(`fetch ${res.status}`);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (bytes.byteLength > ATTACHMENT_MAX_BYTES) throw new Error(`too large (${bytes.byteLength} bytes)`);
-      await Deno.mkdir(dir, { recursive: true });
-      // Prefix with an index to keep same-named files from clobbering.
-      const rel = `attachments/${saved.length}-${safe}`;
-      await Deno.writeFile(`${workspacePath}/${rel}`, bytes);
-      saved.push({ path: rel, contentType: a.contentType });
-    } catch (err) {
-      console.warn(`[claude-code] attachment '${safe}' skipped:`, err?.message || err);
-    }
-  }
-  return saved;
 }
 
 export async function streamClaudeCodeChat({
@@ -157,12 +125,7 @@ export async function streamClaudeCodeChat({
   // content; the coder Reads images multimodally on its own.
   if (attachments?.length) {
     const saved = await materializeAttachments(workspacePath, attachments);
-    if (saved.length > 0) {
-      const listing = saved
-        .map((s) => `- ${s.path}${s.contentType ? ` (${s.contentType})` : ""}`)
-        .join("\n");
-      prompt += `\n\n<user_attachments>\nThe user attached files with this request; they are saved in the workspace:\n${listing}\nView them with the Read tool (images render visually) when they are relevant to the task.\n</user_attachments>`;
-    }
+    prompt += renderAttachmentBlock(saved);
   }
 
   // Refreshes the token in-place when expired (it lives ~1h) so long-lived

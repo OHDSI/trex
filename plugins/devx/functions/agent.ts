@@ -12,6 +12,7 @@ import { buildToolSet, getToolByName } from "./tools/registry.ts";
 import type { AgentContext } from "./tools/types.ts";
 import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
 import { ensureChatWorktree } from "./chat_worktree.ts";
+import { materializeAttachments, renderAttachmentBlock } from "./attachments.ts";
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
 import { buildCoderContext } from "./coder_context.ts";
@@ -468,6 +469,22 @@ export async function streamAgentChat({
       role: m.role,
       content: m.content,
     }));
+
+  // Channel attachments (claw relay): download into the resolved workspace —
+  // AFTER worktree resolution so they land where the coder actually runs — and
+  // point the coder at the paths. Only paths enter the prompt, never content.
+  if (attachments?.length) {
+    const saved = await materializeAttachments(workspacePath, attachments);
+    const block = renderAttachmentBlock(saved);
+    if (block) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") {
+          messages[i] = { ...messages[i], content: `${messages[i].content}${block}` };
+          break;
+        }
+      }
+    }
+  }
 
   const model = createModel(effectiveSettings);
   let fullContent = "";
