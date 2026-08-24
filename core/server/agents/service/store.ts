@@ -4,6 +4,28 @@
 
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 
+// Denies (WHERE decision IS NULL — never overwrites an already-decided row)
+// every approval belonging to the given turns. Exported standalone so a
+// caller reaping turns any other way (there is only reapStaleTurns today,
+// but the coupling shouldn't be implicit) can reuse it, and so it's
+// independently testable. See reapStaleTurns's own comment for why this
+// exists: a turn reaped without also denying its approval leaves a
+// `decision IS NULL` row that a LATER message matching gate vocabulary
+// (e.g. "continue" — literally in gate-text.ts's APPROVE list) can still
+// resolve, silently discarding that message and starting nothing, because
+// resolveApprovalDecision only writes a decision — it never drives a turn.
+export async function denyApprovalsForTurns(turnIds: string[], query: QueryFn): Promise<number> {
+  if (turnIds.length === 0) return 0;
+  const r = await query(
+    `UPDATE agents.approvals
+        SET decision = 'deny', decided_at = NOW()
+      WHERE turn_id = ANY($1) AND decision IS NULL
+      RETURNING request_id`,
+    [turnIds],
+  );
+  return r.rows.length;
+}
+
 export function createStore(query: QueryFn) {
   return {
     async createSession(plugin: string, agent: string, createdBy?: string): Promise<string> {
@@ -209,7 +231,59 @@ export function createStore(query: QueryFn) {
           RETURNING id`,
         [sessionId, cutoff, `turn abandoned (no completion within ${minutes} minutes)`],
       );
+      const turnIds = r.rows.map((row: { id: string }) => row.id);
+      // Deliberately isolated from the turns UPDATE above, which has already
+      // committed by the time we get here (there is no surrounding
+      // transaction). If denyApprovalsForTurns throws (e.g. a DB blip), that
+      // must not propagate out of reapStaleTurns: on the lazy path
+      // (handler.ts's busy-session branch) the caller's catch deliberately
+      // degrades to "treat the session as busy" and skips re-reading
+      // getRunningTurn, so a thrown reapStaleTurns would strand the incoming
+      // message behind a turn that no longer exists — precisely the
+      // silently-stranded-message failure this branch exists to eliminate;
+      // on the sweep path the same throw would skip onReap and suppress the
+      // notification for turns that WERE successfully reaped. Swallowing the
+      // failure here and still returning r.rows.length is safe by design: an
+      // approval left un-denied is exactly the orphan case
+      // getApprovalTurnStatus's "turn not running" guard (see
+      // resolveApprovalDecision) already exists to catch, so a later
+      // gate-vocabulary message still can't silently resolve it.
+      try {
+        await denyApprovalsForTurns(turnIds, query);
+      } catch (e) {
+        console.error(
+          `agents: reapStaleTurns reaped ${r.rows.length} turn(s) on session ${sessionId} but failed to deny their approvals (will remain orphaned until resolveApprovalDecision's turn-status guard catches them):`,
+          e,
+        );
+      }
       return r.rows.length;
+    },
+
+    // The set of sessions with at least one turn stuck `running` past the
+    // cutoff, for the periodic sweep (service/sweep.ts) to reap individually
+    // through the existing, unchanged, session-scoped reapStaleTurns — kept
+    // session-scoped on purpose (see reapStaleTurns's own header comment: an
+    // earlier unscoped reap caused a worse bug by failing a DIFFERENT session's
+    // genuinely live turn).
+    //
+    // Scoped to the calling worker's own (plugin, agent) via a join against
+    // agents.sessions — agents.turns itself carries no plugin/agent column.
+    // Without this, with multiple agents deployed (claw, devx-coder,
+    // d2esupport, ...) every worker's sweep would list every OTHER agent's
+    // stale sessions too. The reap itself stays race-safe (whichever worker's
+    // UPDATE lands first wins, so no duplicate reap), but that winning worker
+    // is also the one that publishes turn.reaped — and for a foreign session
+    // it has no subscriber, so the notification is silently lost even in
+    // cases where it would otherwise have been delivered.
+    async listSessionsWithStaleRunningTurns(olderThanMs: number, plugin: string, agent: string): Promise<string[]> {
+      const cutoff = new Date(Date.now() - olderThanMs);
+      const r = await query(
+        `SELECT DISTINCT t.session_id FROM agents.turns t
+           JOIN agents.sessions s ON s.id = t.session_id
+          WHERE t.status = 'running' AND t.started_at < $1 AND s.plugin = $2 AND s.agent = $3`,
+        [cutoff, plugin, agent],
+      );
+      return r.rows.map((row: { session_id: string }) => row.session_id);
     },
 
     // The follow-up queue a busy session's new message folds into instead of
@@ -249,6 +323,20 @@ export function createStore(query: QueryFn) {
     async getApprovalTool(requestId: string): Promise<string | null> {
       const r = await query(`SELECT tool FROM agents.approvals WHERE request_id = $1`, [requestId]);
       return r.rows[0]?.tool ?? null;
+    },
+
+    // Read-only: the current status of the turn an approval belongs to, or null
+    // if the approval doesn't exist. Used by approvals.ts's resolveApprovalDecision
+    // to refuse resolving an approval whose turn is no longer running — a decision
+    // write with no live turn to drive is inert, and (see denyApprovalsForTurns's
+    // comment) a later message matching gate vocabulary would otherwise silently
+    // resolve it and discard that message.
+    async getApprovalTurnStatus(requestId: string): Promise<string | null> {
+      const r = await query(
+        `SELECT t.status FROM agents.approvals a JOIN agents.turns t ON t.id = a.turn_id WHERE a.request_id = $1`,
+        [requestId],
+      );
+      return r.rows[0]?.status ?? null;
     },
 
     // Sticky tool-consent decisions. Checked by toolset.ts's authoredTool

@@ -82,6 +82,22 @@ export async function resolveApprovalDecision(
       return { ok: false, error: "always/never decisions require an authenticated user" };
     }
   }
+  // A decision write with no live turn to drive it is inert — worse, if it
+  // happens to match gate vocabulary on a later plain-text reply, it silently
+  // consumes that reply and starts nothing (see denyApprovalsForTurns's
+  // comment for the incident this closes). Refuse the whole batch rather than
+  // resolve some requests and silently no-op others.
+  for (const d of decisions) {
+    const status = await store.getApprovalTurnStatus(d.requestId!);
+    if (status !== "running") {
+      return {
+        ok: false,
+        error: status === null
+          ? "unknown approval request"
+          : `approval's turn is no longer running (${status}) — cannot resolve`,
+      };
+    }
+  }
   let ok = true;
   for (const d of decisions) {
     const decision = d.decision as ApprovalDecision;

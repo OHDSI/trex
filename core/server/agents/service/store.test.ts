@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert";
-import { createStore } from "./store.ts";
+import { createStore, denyApprovalsForTurns, type QueryFn } from "./store.ts";
 
 function fakeQuery(responses: Array<{ rows: unknown[] }>) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
@@ -131,6 +131,24 @@ Deno.test("getApprovalTool returns null when the request is unknown", async () =
   assertEquals(await store.getApprovalTool("nope"), null);
 });
 
+// Backstop for reapStaleTurns/denyApprovalsForTurns's own failure mode
+// (Fix 1): resolveApprovalDecision refuses to resolve an approval whose turn
+// isn't running, so an approval left un-denied by a failed deny is still safe.
+Deno.test("getApprovalTurnStatus joins through to the owning turn's status", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ status: "running" }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getApprovalTurnStatus("r-1"), "running");
+  assert(calls[0].sql.includes("FROM agents.approvals a"));
+  assert(calls[0].sql.includes("JOIN agents.turns t"));
+  assertEquals(calls[0].params, ["r-1"]);
+});
+
+Deno.test("getApprovalTurnStatus returns null when the approval doesn't exist", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getApprovalTurnStatus("nope"), null);
+});
+
 // Channel HITL resume — MODE A lookup.
 Deno.test("getApprovalSession returns the session for a requestId (null when unknown)", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-9" }] }, { rows: [] }]);
@@ -259,6 +277,28 @@ Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reve
   );
 });
 
+// Fix 2: the sweep query must be scoped to the calling worker's own
+// (plugin, agent) — agents.turns carries no plugin/agent column itself, so
+// this has to join agents.sessions. Without this scoping, a worker for one
+// agent (e.g. claw) would list and reap every OTHER agent's stale sessions
+// too (devx-coder, d2esupport, ...), and — since the reap winner is also the
+// one who publishes turn.reaped — that notification would be silently lost
+// for a foreign session it has no subscriber for.
+Deno.test("listSessionsWithStaleRunningTurns scopes to the given plugin+agent via a join on agents.sessions", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-1" }, { session_id: "s-2" }] }]);
+  const store = createStore(fn as never);
+  const ids = await store.listSessionsWithStaleRunningTurns(2 * 60 * 60 * 1000, "claw-agent", "claw");
+  assertEquals(ids, ["s-1", "s-2"]);
+  assert(calls[0].sql.includes("FROM agents.turns t"));
+  assert(calls[0].sql.includes("JOIN agents.sessions s ON s.id = t.session_id"));
+  assert(calls[0].sql.includes("status = 'running'"));
+  assert(calls[0].sql.includes("s.plugin = $2"));
+  assert(calls[0].sql.includes("s.agent = $3"));
+  assertEquals(calls[0].params[1], "claw-agent");
+  assertEquals(calls[0].params[2], "claw");
+  assert(calls[0].params[0] instanceof Date);
+});
+
 // The follow-up queue a busy session folds a new message into (instead of
 // racing it against the turn already running) — see service/handler.ts's
 // startTurn.
@@ -298,4 +338,57 @@ Deno.test("setToolConsent upserts on the (user, plugin, agent, tool) key", async
   assert(calls[0].sql.includes("INSERT INTO agents.tool_consents"));
   assert(calls[0].sql.includes("ON CONFLICT"));
   assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded", "never"]);
+});
+
+Deno.test("reapStaleTurns also denies every still-pending approval belonging to the turns it reaps", async () => {
+  const calls: Array<{ q: string; p: unknown[] }> = [];
+  const query: QueryFn = async (q, p = []) => {
+    calls.push({ q, p });
+    if (q.includes("UPDATE agents.turns") && q.includes("RETURNING id")) {
+      // Simulate two stale turns reaped.
+      return { rows: [{ id: "t-1" }, { id: "t-2" }] };
+    }
+    if (q.includes("UPDATE agents.approvals") && q.includes("turn_id = ANY")) {
+      return { rows: [{ request_id: "a-1" }] };
+    }
+    return { rows: [] };
+  };
+  const store = createStore(query);
+  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  assertEquals(n, 2);
+  const denyCall = calls.find((c) => c.q.includes("UPDATE agents.approvals"));
+  assertEquals(denyCall !== undefined, true);
+  assertEquals(denyCall!.p[0], ["t-1", "t-2"]);
+});
+
+Deno.test("reapStaleTurns denies nothing and issues no approvals query when it reaps zero turns", async () => {
+  const calls: Array<{ q: string }> = [];
+  const query: QueryFn = async (q) => {
+    calls.push({ q });
+    if (q.includes("UPDATE agents.turns")) return { rows: [] };
+    return { rows: [] };
+  };
+  const store = createStore(query);
+  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  assertEquals(n, 0);
+  assertEquals(calls.some((c) => c.q.includes("UPDATE agents.approvals")), false);
+});
+
+Deno.test("denyApprovalsForTurns: no-ops on an empty list without querying", async () => {
+  let called = false;
+  const query: QueryFn = async () => { called = true; return { rows: [] }; };
+  const n = await denyApprovalsForTurns([], query);
+  assertEquals(n, 0);
+  assertEquals(called, false);
+});
+
+Deno.test("denyApprovalsForTurns: only denies still-undecided approvals, scoped to the given turns", async () => {
+  const query: QueryFn = async (q, p) => {
+    assertEquals(q.includes("turn_id = ANY($1)"), true);
+    assertEquals(q.includes("decision IS NULL"), true);
+    assertEquals(p, [["t-1"]]);
+    return { rows: [{ request_id: "a-1" }, { request_id: "a-2" }] };
+  };
+  const n = await denyApprovalsForTurns(["t-1"], query);
+  assertEquals(n, 2);
 });

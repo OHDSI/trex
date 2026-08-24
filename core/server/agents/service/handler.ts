@@ -141,11 +141,13 @@ function connectionOptsFor(deps: Deps) {
   return deps.oauth ? { oauth: deps.oauth } : undefined;
 }
 
-// Matches the brief's original reapStaleTurns(2 * 60 * 60 * 1000) —
-// re-used here as the lazy-reap cutoff (see startTurn) since no periodic
-// scheduler exists to call it on a timer (checked service/index.ts: no
-// setInterval/cron/periodic hook of any kind — see the report).
-const STALE_TURN_MS = 2 * 60 * 60 * 1000;
+// Matches the brief's original reapStaleTurns(2 * 60 * 60 * 1000) — used
+// both as the lazy-reap cutoff below (startTurn, fired on-message) and,
+// exported, as the periodic sweep's cutoff (service/index.ts wires
+// service/sweep.ts's startStaleTurnSweep with this same constant). A session
+// nobody messages again after it gets stuck would never hit the lazy path
+// below; the sweep is what actually recovers it — see sweep.ts's header.
+export const STALE_TURN_MS = 2 * 60 * 60 * 1000;
 
 // A turn's `message` column (and the follow-up queue) both want a plain
 // string; non-string messages (only possible on the native /eve/v1/session

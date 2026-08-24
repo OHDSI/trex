@@ -8,10 +8,12 @@ import pg from "npm:pg@^8";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { createChannelStore } from "../channels/store.ts";
-import { createHandler, type OAuthBrokerDeps } from "./handler.ts";
+import { createHandler, STALE_TURN_MS, type OAuthBrokerDeps } from "./handler.ts";
 import { createOAuthStore } from "../connections/oauth/store.ts";
 import { decryptWithDek, encryptWithDek, initDek } from "../../auth/dek.ts";
 import { deriveSubkeyBase64, LABELS } from "../../auth/keys.ts";
+import { startStaleTurnSweep } from "./sweep.ts";
+import { publish } from "./stream.ts";
 
 const agentDir = Deno.env.get("TREX_AGENT_DIR");
 if (!agentDir) throw new Error("agents: TREX_AGENT_DIR not set");
@@ -43,15 +45,37 @@ if (Deno.env.get("TREX_ROOT_KEY")) {
   }
 }
 
+const store = createStore(query);
+
 const handler = createHandler({
   agent,
-  store: createStore(query),
+  store,
   channelStore: createChannelStore(query),
   plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
   agentName: Deno.env.get("TREX_AGENT_NAME") || "agent",
   basePath,
   sql: query,
   oauth,
+});
+
+// Periodic sweep for turns stuck `running` past STALE_TURN_MS — the same
+// recovery handler.ts's startTurn performs lazily on-message, but this
+// worker's per-process one-time init, so it also catches a session nobody
+// ever messages again after it gets stuck (that session's lazy path in
+// startTurn never fires — no new message ever lands on it). See sweep.ts's
+// header for the incident this closes.
+startStaleTurnSweep(store, {
+  // Same env vars createHandler above is keyed on, so the sweep only ever
+  // lists/reaps sessions for THIS worker's own agent — see sweep.ts's
+  // SweepOptions comment for why an unscoped sweep is the bug (with multiple
+  // agents deployed, every worker would otherwise sweep every OTHER agent's
+  // sessions too).
+  plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
+  agent: Deno.env.get("TREX_AGENT_NAME") || "agent",
+  staleMs: STALE_TURN_MS,
+  onReap: (sessionId, count) => {
+    publish(sessionId, { type: "turn.reaped", data: { count, reason: "stale" } });
+  },
 });
 
 Deno.serve((req) => handler(req));
