@@ -21,7 +21,7 @@ function ipv4Octets(hostname: string): number[] {
 }
 
 function isNonPublicIPv4(hostname: string): boolean {
-  const [a, b] = ipv4Octets(hostname);
+  const [a, b, c] = ipv4Octets(hostname);
   if (a === 127) return true; // 127.0.0.0/8 loopback
   if (a === 10) return true; // 10.0.0.0/8 private
   if (a === 172 && b >= 16 && b <= 31) return true; // 172.16.0.0/12 private
@@ -31,6 +31,7 @@ function isNonPublicIPv4(hostname: string): boolean {
   if (a === 169 && b === 254) return true; // 169.254.0.0/16 link-local (incl. 169.254.169.254 cloud metadata)
   if (a === 0) return true; // 0.0.0.0/8
   if (a === 100 && b >= 64 && b <= 127) return true; // 100.64.0.0/10 CGNAT
+  if (a === 192 && b === 88 && c === 99) return true; // 192.88.99.0/24 6to4 relay anycast
   if (a >= 224 && a <= 239) return true; // 224.0.0.0/4 multicast
   if (a >= 240) return true; // 240.0.0.0/4 reserved (covers 255.255.255.255)
   return false;
@@ -98,6 +99,7 @@ function isNonPublicIPv6(hostname: string): boolean {
 
   if ((groups[0] & 0xfe00) === 0xfc00) return true; // fc00::/7 unique-local
   if ((groups[0] & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+  if ((groups[0] & 0xffc0) === 0xfec0) return true; // fec0::/10 site-local (deprecated, still routed by some stacks)
 
   // Forms that embed an IPv4 address in the low 32 bits — evaluate that
   // embedded address with the same non-public test applied to plain IPv4.
@@ -111,7 +113,42 @@ function isNonPublicIPv6(hostname: string): boolean {
     if (isNonPublicIPv4(`${a}.${b}.${c}.${d}`)) return true;
   }
 
+  // 2002::/16 6to4 — the embedded IPv4 lives in the next two groups
+  // (groups[1] and groups[2], i.e. bytes 2-5 of the address). Apply the
+  // same non-public test used for the IPv4-mapped/translated tails above,
+  // so e.g. 2002:a9fe:a9fe:: (which encodes 169.254.169.254) is caught.
+  if (groups[0] === 0x2002) {
+    const a = groups[1] >> 8, b = groups[1] & 0xff, c = groups[2] >> 8, d = groups[2] & 0xff;
+    if (isNonPublicIPv4(`${a}.${b}.${c}.${d}`)) return true;
+  }
+
   return false;
+}
+
+// These are PUBLIC hostnames that resolve (today, on the relevant cloud
+// networks) to the link-local metadata address 169.254.169.254 or an
+// equivalent instance-metadata endpoint. The IP-range checks above cannot
+// catch them — the request never carries the IP literal, only a name that
+// DNS (or in some environments a static /etc/hosts-style entry) resolves to
+// it — so they are denied explicitly, by name, here. Matched case
+// insensitively and against the same trailing-dot-stripped hostname the
+// other deny rules see.
+const METADATA_HOSTNAMES = new Set([
+  "metadata.goog", // GCP's public DNS alias for 169.254.169.254
+  "metadata.google.internal", // GCP, also covered by the .internal suffix rule below
+  "metadata", // bare single-label name resolved internally on GCP/AWS/etc.
+  "instance-data", // legacy AWS alias for the metadata endpoint
+  "metadata.azure.com", // Azure instance metadata service
+]);
+// A suffix rule for metadata.goog subdomains, anchored on the label
+// boundary (a leading dot) so it matches "sub.metadata.goog" but not an
+// unrelated, attacker-registrable domain that merely ends in the same
+// letters without that boundary (e.g. "notmetadata.goog" is a different
+// domain and must not be denied).
+const METADATA_HOSTNAME_SUFFIX = ".metadata.goog";
+
+function isMetadataHostname(lowerHostname: string): boolean {
+  return METADATA_HOSTNAMES.has(lowerHostname) || lowerHostname.endsWith(METADATA_HOSTNAME_SUFFIX);
 }
 
 function hostnameLooksIPv6(hostname: string): boolean {
@@ -148,10 +185,14 @@ export function assertSafeAttachmentUrl(
   // allowlist comparison — sees the same normalized name.
   const hostname = url.hostname.replace(/\.$/, "");
 
+  // Lowercase (and trim) each entry: url.hostname is already lowercase (the
+  // WHATWG URL parser lowercases the host), so an un-lowercased allowlist
+  // entry like "CDN.Example.com" would otherwise match nothing — every
+  // attachment fails closed, but silently and hard to diagnose.
   const allowlistRaw = env("DEVX_ATTACHMENT_HOST_ALLOWLIST");
   const allowlist = (allowlistRaw || "")
     .split(",")
-    .map((h) => h.trim())
+    .map((h) => h.trim().toLowerCase())
     .filter(Boolean);
 
   if (allowlist.length > 0) {
@@ -171,6 +212,9 @@ export function assertSafeAttachmentUrl(
   }
   const lower = hostname.toLowerCase();
   if (lower === "localhost" || lower.endsWith(".localhost") || lower.endsWith(".internal")) {
+    throw new Error(`attachment host not allowed: ${hostname}`);
+  }
+  if (isMetadataHostname(lower)) {
     throw new Error(`attachment host not allowed: ${hostname}`);
   }
 

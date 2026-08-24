@@ -156,3 +156,77 @@ Deno.test("expandIPv6 fails closed on malformed input rather than silently repai
   assertEquals(expandIPv6("::ffff:0x7f.0.0.1"), null); // hex octet — Number("0x7f") = 127
   assertEquals(expandIPv6("::ffff:127.0..1"), null); // empty octet — Number("") = 0
 });
+
+// FIX 1: public DNS aliases for the cloud metadata endpoint. The link-local
+// IP deny rule (169.254.169.254) does nothing against a public hostname that
+// resolves to it — these must be denied by name.
+Deno.test("rejects known public aliases for the cloud metadata endpoint", () => {
+  const bad = [
+    "https://metadata.goog/",
+    "https://METADATA.GOOG/", // case-insensitive
+    "https://metadata.google.internal/",
+    "https://metadata/",
+    "https://instance-data/",
+    "https://metadata.azure.com/",
+    "https://sub.metadata.goog/", // covered by the ".metadata.goog" suffix rule
+    "https://metadata.goog./", // trailing dot stripped before the deny check
+  ];
+  for (const u of bad) {
+    assertThrows(() => assertSafeAttachmentUrl(u, noEnv), Error, undefined, u);
+  }
+});
+
+// A different, attacker-registrable domain that merely CONTAINS the deny
+// string must not be caught by a naive suffix match ("metadata.goog" is not
+// a suffix-anchored parent of "metadata.goog.example.com" — the label
+// boundary is wrong, so this is genuinely a different registrable domain).
+// It is allowed through here; it is still subject to every other deny rule
+// (IP literals, .internal, localhost) and, in a locked-down deployment, to
+// the allowlist.
+Deno.test("does not reject an unrelated host that merely contains a metadata alias as a substring", () => {
+  const url = assertSafeAttachmentUrl("https://metadata.goog.example.com/a.png", noEnv);
+  assertEquals(url.hostname, "metadata.goog.example.com");
+  // Also prove the naive substring/suffix trap the other way: a host that
+  // merely ends with the letters "metadata.goog" without a label boundary
+  // must not be denied either.
+  const url2 = assertSafeAttachmentUrl("https://notmetadata.goog/a.png", noEnv);
+  assertEquals(url2.hostname, "notmetadata.goog");
+});
+
+// FIX 2: remaining non-public IPv6/IPv4 ranges.
+Deno.test("rejects 6to4 addresses whose embedded IPv4 is non-public", () => {
+  // 2002:a9fe:a9fe:: encodes 169.254.169.254 in groups[1]/groups[2].
+  assertThrows(() => assertSafeAttachmentUrl("https://[2002:a9fe:a9fe::]/", noEnv));
+});
+
+Deno.test("allows 6to4 addresses whose embedded IPv4 is public", () => {
+  // 2002:0808:0808:: encodes 8.8.8.8.
+  const url = assertSafeAttachmentUrl("https://[2002:808:808::]/a.png", noEnv);
+  assertEquals(url.hostname, "[2002:808:808::]");
+});
+
+Deno.test("rejects deprecated IPv6 site-local addresses", () => {
+  assertThrows(() => assertSafeAttachmentUrl("https://[fec0::1]/", noEnv));
+});
+
+Deno.test("rejects the 6to4 relay anycast IPv4 range", () => {
+  assertThrows(() => assertSafeAttachmentUrl("https://192.88.99.1/a.png", noEnv));
+  assertThrows(() => assertSafeAttachmentUrl("https://192.88.99.255/a.png", noEnv));
+});
+
+// FIX 3: allowlist entries must be lowercased (and trimmed) when parsed —
+// otherwise an operator who writes mixed case silently blocks everything.
+Deno.test("allowlist: a mixed-case entry matches a lowercase hostname", () => {
+  const env = (k: string) => (k === "DEVX_ATTACHMENT_HOST_ALLOWLIST" ? "CDN.Example.com" : undefined);
+  const url = assertSafeAttachmentUrl("https://cdn.example.com/a.png", env);
+  assertEquals(url.hostname, "cdn.example.com");
+});
+
+// FIX 6c: the existing "trailing dot is consistent with the allowlist" test
+// only proves dotted == dotless for an ALLOWED host. Prove the reject side
+// too: a non-allowlisted host with a trailing dot must still be rejected,
+// not smuggled past the allowlist check by the dot.
+Deno.test("trailing dot does not smuggle a non-allowlisted host past the allowlist", () => {
+  const env = (k: string) => (k === "DEVX_ATTACHMENT_HOST_ALLOWLIST" ? "cdn.example.com" : undefined);
+  assertThrows(() => assertSafeAttachmentUrl("https://not-allowed.example.net./a.png", env));
+});
