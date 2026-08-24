@@ -163,6 +163,126 @@ Deno.test("fetchAttachment: a redirect to a loopback address throws", async () =
   await assertRejects(() => fetchAttachment("https://public.example.com/a.png", noEnv, fakeFetch));
 });
 
+// FIX 6a: a protocol-relative Location ("//host/path") must be resolved
+// against the current hop's scheme and re-validated like any other
+// redirect — the metadata host must never actually be fetched.
+Deno.test("fetchAttachment: a protocol-relative redirect to the metadata address is rejected, not followed", async () => {
+  const calls: string[] = [];
+  const fakeFetch = (input: string | URL) => {
+    const u = String(input);
+    calls.push(u);
+    if (u === "https://public.example.com/a.png") {
+      return Promise.resolve(
+        new Response(null, { status: 302, headers: { location: "//169.254.169.254/latest/meta-data/" } }),
+      );
+    }
+    throw new Error(`test fake fetch should never be called with: ${u}`);
+  };
+  await assertRejects(() => fetchAttachment("https://public.example.com/a.png", noEnv, fakeFetch));
+  assertEquals(calls, ["https://public.example.com/a.png"]);
+});
+
+// FIX 6b: with an allowlist configured, a redirect to a host NOT on the
+// allowlist must be rejected at the second hop — the allowlist applies to
+// every hop, not just the first.
+Deno.test("fetchAttachment: with an allowlist set, a redirect to a non-allowlisted host is rejected at hop 2", async () => {
+  const env = (k: string) => (k === "DEVX_ATTACHMENT_HOST_ALLOWLIST" ? "public.example.com" : undefined);
+  const calls: string[] = [];
+  const fakeFetch = (input: string | URL) => {
+    const u = String(input);
+    calls.push(u);
+    if (u === "https://public.example.com/a.png") {
+      return Promise.resolve(
+        new Response(null, { status: 302, headers: { location: "https://not-allowed.example.com/b.png" } }),
+      );
+    }
+    throw new Error(`test fake fetch should never be called with: ${u}`);
+  };
+  await assertRejects(() => fetchAttachment("https://public.example.com/a.png", env, fakeFetch));
+  assertEquals(calls, ["https://public.example.com/a.png"]);
+});
+
+// FIX 4: a redirect response's body must be drained (canceled) before the
+// loop moves on to the next hop — otherwise the connection sits undrained
+// until GC.
+Deno.test("fetchAttachment: a redirect response's body is canceled before following the next hop", async () => {
+  let canceled = false;
+  const redirectBody = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const fakeFetch = (input: string | URL) => {
+    const u = String(input);
+    if (u === "https://public.example.com/a.png") {
+      return Promise.resolve(
+        new Response(redirectBody, { status: 302, headers: { location: "https://other.example.com/b.png" } }),
+      );
+    }
+    if (u === "https://other.example.com/b.png") {
+      return Promise.resolve(new Response(new Uint8Array([9])));
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  const res = await fetchAttachment("https://public.example.com/a.png", noEnv, fakeFetch);
+  assertEquals(res.status, 200);
+  assertEquals(canceled, true);
+});
+
+// FIX 4: a non-ok terminal response's body must be drained before
+// materializeAttachments throws — that path lives in attachments.ts's
+// `if (!res.ok) throw`.
+Deno.test("materializeAttachments: a non-ok response's body is canceled before the fetch is abandoned", async () => {
+  const ws = await Deno.makeTempDir();
+  let canceled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new Uint8Array([1]));
+      controller.close();
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const original = globalThis.fetch;
+  globalThis.fetch = () => Promise.resolve(new Response(body, { status: 404 }));
+  try {
+    const saved = await materializeAttachments(ws, [{ name: "a.png", url: "https://example.invalid/a.png" }]);
+    assertEquals(saved, []);
+    assertEquals(canceled, true);
+  } finally {
+    globalThis.fetch = original;
+    await Deno.remove(ws, { recursive: true });
+  }
+});
+
+// FIX 5: the fetch-timeout signal must be created ONCE before the redirect
+// loop and reused for every hop, so the timeout bounds the whole chain
+// (not a fresh budget per hop).
+Deno.test("fetchAttachment: the same abort signal instance is used across every redirect hop", async () => {
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const fakeFetch = (input: string | URL, init?: RequestInit) => {
+    const u = String(input);
+    signals.push(init?.signal);
+    if (u === "https://public.example.com/a.png") {
+      return Promise.resolve(
+        new Response(null, { status: 302, headers: { location: "https://other.example.com/b.png" } }),
+      );
+    }
+    if (u === "https://other.example.com/b.png") {
+      return Promise.resolve(new Response(new Uint8Array([9])));
+    }
+    throw new Error(`unexpected fetch: ${u}`);
+  };
+  await fetchAttachment("https://public.example.com/a.png", noEnv, fakeFetch);
+  assertEquals(signals.length, 2);
+  assertEquals(signals[0], signals[1]);
+});
+
 Deno.test("readCappedBody: an under-cap body returns intact bytes", async () => {
   const data = new Uint8Array([1, 2, 3, 4, 5]);
   const res = new Response(streamFromChunks([data]));

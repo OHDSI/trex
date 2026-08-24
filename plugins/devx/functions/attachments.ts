@@ -9,8 +9,12 @@ import { assertSafeAttachmentUrl } from "./attachment_url.ts";
 const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
 
 // A slow trickle (or a peer that never finishes) under the byte cap would
-// otherwise stall the turn indefinitely — bound every attachment fetch.
-const ATTACHMENT_FETCH_TIMEOUT_MS = 60_000; // 60s per hop, generous for a small attachment
+// otherwise stall the turn indefinitely — bound every attachment fetch. This
+// single signal is created once and reused across every redirect hop (see
+// fetchAttachment below), so it bounds the ENTIRE chain, not each hop
+// separately — a fresh per-hop budget would let a 5-redirect chain take up
+// to 6x this long for one attachment.
+const ATTACHMENT_FETCH_TIMEOUT_MS = 60_000; // 60s total, generous for a small attachment
 
 // Deno's fetch() defaults to `redirect: "follow"`, which would chase a 3xx
 // anywhere — including back into a private network — after
@@ -26,14 +30,24 @@ export async function fetchAttachment(
   fetchImpl = fetch,
 ) {
   let url = assertSafeAttachmentUrl(rawUrl, env);
+  // One signal for the whole chain, not one per hop — see the constant's
+  // comment above.
+  const signal = AbortSignal.timeout(ATTACHMENT_FETCH_TIMEOUT_MS);
   for (let redirects = 0; ; redirects++) {
-    const res = await fetchImpl(url, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(ATTACHMENT_FETCH_TIMEOUT_MS),
-    });
+    const res = await fetchImpl(url, { redirect: "manual", signal });
 
     const isRedirect = res.status >= 300 && res.status < 400;
     if (!isRedirect) return res;
+
+    // Whatever happens next on this hop (max-redirects, missing Location, or
+    // a validated next hop), a redirect response's body is never returned to
+    // the caller — drain it now so the connection is never left undrained,
+    // regardless of which branch below runs or throws.
+    try {
+      await res.body?.cancel();
+    } catch {
+      // best-effort — moving on regardless.
+    }
 
     if (redirects >= MAX_ATTACHMENT_REDIRECTS) {
       throw new Error(`attachment fetch followed more than ${MAX_ATTACHMENT_REDIRECTS} redirects`);
@@ -126,7 +140,16 @@ export async function materializeAttachments(
       // redirect hop the same way, so a 3xx cannot be used to reach
       // somewhere the original url was not allowed to reach.
       const res = await fetchAttachment(a.url);
-      if (!res.ok) throw new Error(`fetch ${res.status}`);
+      if (!res.ok) {
+        // This response is being abandoned, not read — drain it so the
+        // connection is not left undrained until GC.
+        try {
+          await res.body?.cancel();
+        } catch {
+          // best-effort — the fetch is already being abandoned either way.
+        }
+        throw new Error(`fetch ${res.status}`);
+      }
       const bytes = await readCappedBody(res, ATTACHMENT_MAX_BYTES);
       await Deno.mkdir(dir, { recursive: true });
       // Prefix with an index to keep same-named files from clobbering.
