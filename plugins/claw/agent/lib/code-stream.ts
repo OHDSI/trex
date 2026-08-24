@@ -89,6 +89,7 @@ async function ensureCoderProvider(token: string): Promise<void> {
     body: JSON.stringify({
       provider: intent.provider,
       model: intent.model || cur?.model,
+      base_url: cur?.base_url ?? undefined,
       ai_rules: cur?.ai_rules ?? undefined,
       auto_approve: cur?.auto_approve ?? undefined,
       max_steps: cur?.max_steps ?? undefined,
@@ -268,9 +269,9 @@ export interface CodeTurnArgs {
   onProgress?: (note: string) => void;
 }
 
-// One hand-off to the coder. Opens the chat on first use, forces the
-// claude-code provider, streams the turn, and returns { chatId, replyText } — the
-// chatId is persisted by the caller to continue the same chat across Discord turns.
+// One hand-off to the coder. Opens the chat on first use, asserts the configured
+// provider when this deployment pins one, streams the turn, and returns { chatId, replyText } —
+// the chatId is persisted by the caller to continue the same chat across Discord turns.
 // The turn's intent (brainstorm / plan / implement) is carried by the message the
 // facilitator sends, not by a mode flag.
 export async function runCodeTurn(
