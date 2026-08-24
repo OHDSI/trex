@@ -54,7 +54,7 @@ function inMemoryDb() {
     { id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown; startedAt: Date }
   > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
-  const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string }>();
+  const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string; turnId: string }>();
   // The follow-up queue a busy session's new message folds into (store.ts's
   // queueFollowUp/takeFollowUps), keyed the same order-preserving way
   // agents.turn_followups is (insertion order).
@@ -143,7 +143,9 @@ function inMemoryDb() {
     }
     if (sql.includes("INSERT INTO agents.approvals")) {
       const id = `r-${++n}`;
-      approvals.set(id, { decision: null, sessionId: params[0] as string, tool: params[2] as string });
+      approvals.set(id, {
+        decision: null, sessionId: params[0] as string, turnId: params[1] as string, tool: params[2] as string,
+      });
       return Promise.resolve({ rows: [{ request_id: id }] });
     }
     if (sql.includes("UPDATE agents.approvals")) {
@@ -171,6 +173,16 @@ function inMemoryDb() {
     if (sql.includes("SELECT tool FROM agents.approvals")) {
       const a = approvals.get(params[0] as string);
       return Promise.resolve({ rows: a ? [{ tool: a.tool }] : [] });
+    }
+    if (sql.includes("SELECT t.status FROM agents.approvals")) {
+      // getApprovalTurnStatus — joins the approval to its turn the same way
+      // the real `JOIN agents.turns t ON t.id = a.turn_id` does, so
+      // resolveApprovalDecision's turn-status guard (Task 2 of the
+      // never-stuck plan) sees a genuinely running/finished turn instead of
+      // always missing (which would 404 every approval in this suite).
+      const a = approvals.get(params[0] as string);
+      const t = a ? turns.find((t) => t.id === a.turnId) : undefined;
+      return Promise.resolve({ rows: t ? [{ status: t.status }] : [] });
     }
     if (sql.includes("SELECT consent FROM agents.tool_consents")) {
       const [userId, plugin, agentName, tool] = params as string[];
@@ -1251,7 +1263,7 @@ Deno.test("a qualified reply arriving while a gate is pending resolves the gate 
 
   // A pending gate on this session — direct fake-state mutation, same
   // convention as the stale-turn test above backdating db.turns[0].startedAt.
-  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval", turnId: db.turns[0].id });
 
   const live: AgentEvent[] = [];
   const unsub = subscribe(sid, (e) => live.push(e));
@@ -1343,7 +1355,7 @@ Deno.test("a busy-session reply with RAW text that matches the pending gate's vo
   }));
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => db.turns.length === 1 && db.turns[0].status === "running");
-  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval", turnId: db.turns[0].id });
 
   const live: AgentEvent[] = [];
   const unsub = subscribe(sid, (e) => live.push(e));
@@ -1391,7 +1403,7 @@ Deno.test("a composed Discord message that qualifiedly answers the pending gate 
   }));
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => db.turns.length === 1 && db.turns[0].status === "running");
-  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval", turnId: db.turns[0].id });
 
   const live: AgentEvent[] = [];
   const unsub = subscribe(sid, (e) => live.push(e));
@@ -1431,7 +1443,7 @@ Deno.test("a composed Discord message that is unrelated chatter does NOT deny th
   }));
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => db.turns.length === 1 && db.turns[0].status === "running");
-  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval", turnId: db.turns[0].id });
 
   const live: AgentEvent[] = [];
   const unsub = subscribe(sid, (e) => live.push(e));
@@ -1523,7 +1535,7 @@ Deno.test("a composed mention-in-thread message (three-part shape, stale yes/no/
   }));
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => db.turns.length === 1 && db.turns[0].status === "running");
-  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval", turnId: db.turns[0].id });
 
   const live: AgentEvent[] = [];
   const unsub = subscribe(sid, (e) => live.push(e));
@@ -1570,7 +1582,7 @@ Deno.test("a composed mention-in-thread message whose CURRENT reply qualifiedly 
   }));
   const sid = create.headers.get("x-eve-session-id")!;
   await until(() => db.turns.length === 1 && db.turns[0].status === "running");
-  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval" });
+  db.approvals.set("r-1", { decision: null, sessionId: sid, tool: "awaitApproval", turnId: db.turns[0].id });
 
   const live: AgentEvent[] = [];
   const unsub = subscribe(sid, (e) => live.push(e));

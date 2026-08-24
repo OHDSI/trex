@@ -275,6 +275,20 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.tool ?? null;
     },
 
+    // Read-only: the current status of the turn an approval belongs to, or null
+    // if the approval doesn't exist. Used by approvals.ts's resolveApprovalDecision
+    // to refuse resolving an approval whose turn is no longer running — a decision
+    // write with no live turn to drive is inert, and (see denyApprovalsForTurns's
+    // comment) a later message matching gate vocabulary would otherwise silently
+    // resolve it and discard that message.
+    async getApprovalTurnStatus(requestId: string): Promise<string | null> {
+      const r = await query(
+        `SELECT t.status FROM agents.approvals a JOIN agents.turns t ON t.id = a.turn_id WHERE a.request_id = $1`,
+        [requestId],
+      );
+      return r.rows[0]?.status ?? null;
+    },
+
     // Sticky tool-consent decisions. Checked by toolset.ts's authoredTool
     // BEFORE creating a one-shot approval request — "always" executes
     // immediately, "never" denies immediately, and a miss (null) falls through
