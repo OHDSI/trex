@@ -75,6 +75,28 @@ export function isNoKeyProvider(provider: string | null | undefined): boolean {
   return typeof provider === "string" && NO_KEY_PROVIDERS.has(provider);
 }
 
+export type AgentName = "devx" | "claw" | "d2esupport";
+export const AGENT_NAMES: readonly AgentName[] = Object.freeze(["devx", "claw", "d2esupport"]);
+
+// Providers whose dispatch path only exists for devx's own coder (the
+// claude-code CLI sidecar). ModelSpec.provider (core/server/agents/eve-shim/
+// types.ts) is typed to "anthropic" | "openai" | "google" | "bedrock" only, so
+// claw/d2esupport structurally cannot run a turn on claude-code even if a row
+// slipped through — this gate stops the row from being assignable in the
+// first place, at the one place (POST/PUT agent-model-selection) a user could
+// otherwise create that dead configuration.
+const DEVX_ONLY_PROVIDERS = new Set(["claude-code"]);
+
+export function isDevxOnlyProvider(provider: string | null | undefined): boolean {
+  return typeof provider === "string" && DEVX_ONLY_PROVIDERS.has(provider);
+}
+
+export function assertProviderAllowedForAgent(provider: string | null | undefined, agent: AgentName): void {
+  if (agent !== "devx" && isDevxOnlyProvider(provider)) {
+    throw new Error(`claude-code is only available for devx — choose a different provider for ${agent}.`);
+  }
+}
+
 export function removedProviderMessage(
   provider: string,
   style: RemovalMessageStyle = "plugin",
