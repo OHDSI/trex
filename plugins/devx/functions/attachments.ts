@@ -8,6 +8,48 @@ import { assertSafeAttachmentUrl } from "./attachment_url.ts";
 
 const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
 
+// A slow trickle (or a peer that never finishes) under the byte cap would
+// otherwise stall the turn indefinitely — bound every attachment fetch.
+const ATTACHMENT_FETCH_TIMEOUT_MS = 60_000; // 60s per hop, generous for a small attachment
+
+// Deno's fetch() defaults to `redirect: "follow"`, which would chase a 3xx
+// anywhere — including back into a private network — after
+// assertSafeAttachmentUrl had only ever validated the FIRST url. This walks
+// redirects itself, fetching with `redirect: "manual"` and re-validating
+// every hop through the same guard before following it, so a redirect can
+// never be used to reach somewhere the first hop was not allowed to reach.
+const MAX_ATTACHMENT_REDIRECTS = 5;
+
+export async function fetchAttachment(
+  rawUrl,
+  env = (k) => Deno.env.get(k),
+  fetchImpl = fetch,
+) {
+  let url = assertSafeAttachmentUrl(rawUrl, env);
+  for (let redirects = 0; ; redirects++) {
+    const res = await fetchImpl(url, {
+      redirect: "manual",
+      signal: AbortSignal.timeout(ATTACHMENT_FETCH_TIMEOUT_MS),
+    });
+
+    const isRedirect = res.status >= 300 && res.status < 400;
+    if (!isRedirect) return res;
+
+    if (redirects >= MAX_ATTACHMENT_REDIRECTS) {
+      throw new Error(`attachment fetch followed more than ${MAX_ATTACHMENT_REDIRECTS} redirects`);
+    }
+    const location = res.headers.get("location");
+    if (!location) {
+      throw new Error(`attachment fetch got a ${res.status} redirect with no Location header`);
+    }
+    // Location may be relative — resolve it against the CURRENT url, then
+    // send the resolved absolute url back through the exact same guard the
+    // first hop went through (including the allowlist, if configured).
+    const resolved = new URL(location, url).toString();
+    url = assertSafeAttachmentUrl(resolved, env);
+  }
+}
+
 // Read a fetch Response body without ever buffering more than maxBytes in
 // memory. A naive `await res.arrayBuffer()` pulls the whole response in
 // before any size check runs, so an oversized (or endless) response can
@@ -63,9 +105,10 @@ export async function materializeAttachments(
     try {
       // a.url is remote input (relayed from a chat channel) — validate it
       // before ever fetching, so it cannot be pointed at internal services
-      // or a cloud metadata endpoint.
-      const safeUrl = assertSafeAttachmentUrl(a.url);
-      const res = await fetch(safeUrl);
+      // or a cloud metadata endpoint. fetchAttachment re-validates every
+      // redirect hop the same way, so a 3xx cannot be used to reach
+      // somewhere the original url was not allowed to reach.
+      const res = await fetchAttachment(a.url);
       if (!res.ok) throw new Error(`fetch ${res.status}`);
       const bytes = await readCappedBody(res, ATTACHMENT_MAX_BYTES);
       await Deno.mkdir(dir, { recursive: true });
