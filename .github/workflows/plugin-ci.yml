@@ -382,12 +382,17 @@ jobs:
       # is triggered by `npm pack` -> the plugin's prepack hook, so caches
       # need to be in place before that. Without this the runtime (trexas)
       # build takes ~29 min on every PR which blocks e2e-d2e.
-      # Non-Rust build state (maven/leiningen/CMake). The Rust cache is handled by
-      # rust-cache below, which prunes target/ to just dependency artifacts so it
-      # stays well under GitHub's 10 GB cache limit (the raw target/ cache here was
-      # evicted, forcing the ~29 min trexas rebuild on nearly every run).
+      #
+      # RESTORE on every run, SAVE only on develop/main. GitHub scopes a cache
+      # written on a PR ref to that PR alone, and evicts LRU once the repo passes
+      # its 10 GB quota. The runtime rust-cache entry alone is ~5.7 GB, so every
+      # PR run used to write an entry nobody else could read that evicted all of
+      # develop's entries -- leaving the repo with *zero* reusable caches and
+      # every Rust plugin compiling cold on every run. Branches restore from
+      # develop via restore-keys, which is where the reuse actually comes from.
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        id: build-cache
         with:
           path: |
             ~/.m2/repository
@@ -404,6 +409,8 @@ jobs:
         with:
           workspaces: ${{ matrix.PKGPATH }}
           cache-on-failure: "true"
+          # Same single-writer rule as the build cache above.
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
       - name: Configure @trex publish registry
         uses: actions/setup-node@v4
         with:
@@ -438,6 +445,17 @@ jobs:
         run: |
           cd ${{ matrix.PKGPATH }}
           npm pack
+      # Counterpart to the restore above: only develop/main publish cache entries,
+      # so PR runs can never evict the entries every branch restores from.
+      - name: Save build cache
+        if: ${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && steps.build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.cache/lein
+            ${{ matrix.PKGPATH }}/build
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
       - name: Verify .trex artifact in tarball (extension plugins only)
         run: |
           cd ${{ matrix.PKGPATH }}
@@ -607,6 +625,29 @@ jobs:
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
 
+      # build-arm had no caching at all, so every arm64 plugin compiled cold on
+      # every develop push (runtime ~18 min, db ~10 min). This job only runs on
+      # develop/main/release/dispatch/tags -- never on PRs -- so it is always a
+      # legitimate cache writer and needs no save-if gate.
+      - name: Restore build cache (arm64)
+        uses: actions/cache/restore@v4
+        id: build-cache-arm
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.cache/lein
+            ${{ matrix.PKGPATH }}/build
+          key: plugin-ci-arm64-${{ matrix.PKGPATH }}-${{ hashFiles(format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
+          restore-keys: |
+            plugin-ci-arm64-${{ matrix.PKGPATH }}-
+      - name: Rust build cache (arm64)
+        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ matrix.PKGPATH }}
+          key: arm64
+          cache-on-failure: "true"
+
       - name: Build
         env:
           # Use the git CLI for fetches: libgit2 chokes on the large rusty_v8
@@ -635,6 +676,16 @@ jobs:
             make release
           fi
           mv build/release/extension/*/*.trex . 2>/dev/null || true
+
+      - name: Save build cache (arm64)
+        if: ${{ steps.build-cache-arm.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.cache/lein
+            ${{ matrix.PKGPATH }}/build
+          key: ${{ steps.build-cache-arm.outputs.cache-primary-key }}
 
       - name: Extract extension name
         id: extname
@@ -671,6 +722,9 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
         id: checkout_wn
@@ -722,17 +776,50 @@ jobs:
           sudo swapon /swapfile
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      # Registry-backed layer cache. Without it this job re-downloaded the pinned
+      # 500 MB GraalVM tarball, re-resolved all of Maven (the Dockerfile's
+      # --mount=type=cache,target=/root/.m2 dies with the builder) and re-ran
+      # native-image from scratch on every push -- ~27 min amd64 / ~21 min arm64,
+      # on build-docker's critical path. GHCR rather than BuildKit's type=gha
+      # because gha cache is charged against the same 10 GB Actions cache quota
+      # the Rust caches already contend for.
+      - name: Log in to GHCR (build cache)
+        if: github.repository == 'OHDSI/trex'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build libwebapi-native.so (${{ matrix.arch }})
+        env:
+          CACHE_REF: ghcr.io/ohdsi/trex-buildcache:webapi-native-${{ matrix.arch }}
         run: |
-          DOCKER_BUILDKIT=1 docker build \
+          # cache-from is best-effort: a missing/unauthorized ref just warns and
+          # builds cold. Only develop/main publish, so PR runs cannot poison it.
+          CACHE_ARGS="--cache-from type=registry,ref=${CACHE_REF}"
+          if [ "${{ github.repository }}" = "OHDSI/trex" ] \
+             && { [ "${{ github.ref_name }}" = "develop" ] || [ "${{ github.ref_name }}" = "main" ]; }; then
+            CACHE_ARGS="$CACHE_ARGS --cache-to type=registry,ref=${CACHE_REF},mode=max,ignore-error=true"
+          fi
+          docker buildx build \
             --target export -o type=local,dest=./out \
+            $CACHE_ARGS \
             -f plugins/webapi/Dockerfile.native-lib .
           ls -lh out/out/libwebapi-native.so
       # Boot the native lib end-to-end (ephemeral Postgres + dlopen + webapi_start).
       # smoke.sh prints results but always exits 0, so assert on its output here.
       - name: Boot smoke test (${{ matrix.arch }})
+        env:
+          CACHE_REF: ghcr.io/ohdsi/trex-buildcache:webapi-smoke-${{ matrix.arch }}
         run: |
-          DOCKER_BUILDKIT=1 docker build -f plugins/webapi/smoke/Dockerfile.smoke -t webapi-smoke .
+          # The smoke image compiles its own Rust engine stage; same cache rules.
+          CACHE_ARGS="--cache-from type=registry,ref=${CACHE_REF}"
+          if [ "${{ github.repository }}" = "OHDSI/trex" ] \
+             && { [ "${{ github.ref_name }}" = "develop" ] || [ "${{ github.ref_name }}" = "main" ]; }; then
+            CACHE_ARGS="$CACHE_ARGS --cache-to type=registry,ref=${CACHE_REF},mode=max,ignore-error=true"
+          fi
+          docker buildx build $CACHE_ARGS --load \
+            -f plugins/webapi/smoke/Dockerfile.smoke -t webapi-smoke .
           docker run --rm webapi-smoke | tee smoke.out
           if ! grep -q "status=running" smoke.out; then
             echo "::error::webapi_start did not reach running state"; exit 1
@@ -957,11 +1044,53 @@ jobs:
       - name: List extensions
         run: ls -la extensions/${{ matrix.arch }}/ 2>/dev/null || echo "none"
 
+      # The image builds below plus the buildx layer cache need headroom; the
+      # runner ships with ~14 GB free and the full image alone is multi-GB.
+      - name: Free disk space
+        continue-on-error: true
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+
       # Native build on a matching-arch runner — no QEMU needed.
+      #
+      # docker-container (the default driver) rather than `driver: docker`: the
+      # plain docker driver cannot export a build cache at all, so this job threw
+      # away every layer at the end of the run and rebuilt the whole image cold on
+      # the next one (~27 min amd64 / ~18 min arm64). Layers are cached to GHCR
+      # instead of type=gha to stay off the 10 GB Actions cache quota.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (build cache)
+        if: github.repository == 'OHDSI/trex'
+        uses: docker/login-action@v3
         with:
-          driver: docker
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # cache-to only from develop/main so PR runs read the shared cache but
+      # never write it. mode=max because the expensive work lives in the ten
+      # builder stages (the Rust `builder` stage above all) -- mode=min exports
+      # only the final image's own layers and would cache none of them.
+      - name: Resolve layer cache refs
+        id: dcache
+        run: |
+          REF=ghcr.io/ohdsi/trex-buildcache:image-${{ matrix.arch }}
+          echo "from=type=registry,ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.repository }}" = "OHDSI/trex" ] \
+             && { [ "${{ github.ref_name }}" = "develop" ] || [ "${{ github.ref_name }}" = "main" ]; }; then
+            echo "to=type=registry,ref=$REF,mode=max,ignore-error=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "to=" >> "$GITHUB_OUTPUT"
+          fi
 
       # Non-pushed smoke build: keeps the lean prod target from bit-rotting.
       - name: Build prod image for testing
@@ -973,6 +1102,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           load: true
           tags: trexsql-test:prod
+          cache-from: ${{ steps.dcache.outputs.from }}
 
       - name: Build full image for testing
         uses: docker/build-push-action@v6
@@ -984,6 +1114,8 @@ jobs:
           tags: trexsql-test:full
           build-args: |
             DEVX_EXT_VERSION=${{ github.sha }}
+          cache-from: ${{ steps.dcache.outputs.from }}
+          cache-to: ${{ steps.dcache.outputs.to }}
 
       - name: Test extensions load (${{ matrix.arch }})
         run: |
@@ -1036,15 +1168,6 @@ jobs:
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         run: echo "IMAGE_NS=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
-      - name: Login to GHCR
-        # Push only from canonical repo on develop/main.
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # Each arch pushes an -<arch>-suffixed tag; merge-docker assembles these
       # into the multi-arch manifests (:latest, :sha-<sha>, :dev, ...).
       # Single published image: the full (default) target, with devx gated off
@@ -1060,6 +1183,9 @@ jobs:
           build-args: |
             DEVX_EXT_VERSION=${{ github.sha }}
           tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
+          # Identical to the "full" build above, so this resolves entirely from
+          # the builder's cache instead of recompiling the image a second time.
+          cache-from: ${{ steps.dcache.outputs.from }}
 
       - name: Build and push studio sidecar image (per-arch)
         # The studio sidecar (referenced by docker-compose.yml) ships as its own

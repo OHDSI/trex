@@ -42,7 +42,13 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - uses: actions/cache@v4
+      # Restore on every run, save only from develop/main. A cache written on a
+      # PR ref is readable by that PR alone yet still counts against the repo's
+      # 10 GB quota, so PR runs were evicting the develop entries every branch
+      # restores from -- which is why `Rust unit coverage (runtime)` compiled
+      # cold for ~17 min on every run.
+      - uses: actions/cache/restore@v4
+        id: cargo-cache
         with:
           path: |
             ~/.cargo/registry
@@ -112,6 +118,16 @@ jobs:
           # in trex_core); no effect on plugins that don't link it
           LIBRARY_PATH: /tmp/trexsql
           LD_LIBRARY_PATH: /tmp/trexsql
+
+      - name: Save cargo cache
+        if: ${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            plugins/${{ matrix.plugin }}/target
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - uses: codecov/codecov-action@v4
         with:
