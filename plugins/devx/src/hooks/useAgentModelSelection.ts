@@ -27,5 +27,10 @@ export function useAgentModelSelection() {
     await refresh();
   }, [refresh]);
 
-  return { selections, loading, setSelection, refresh };
+  const clearSelection = useCallback(async (agent: AgentName) => {
+    await api.clearAgentModelSelection(agent);
+    await refresh();
+  }, [refresh]);
+
+  return { selections, loading, setSelection, clearSelection, refresh };
 }

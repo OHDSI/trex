@@ -37,6 +37,12 @@ Deno.test("fetchClawModelOverride: throws when devx resolved a selection but fai
   );
 });
 
+Deno.test("fetchClawModelOverride: returns null without throwing on a non-500 non-ok status (devx not loaded / bad token)", async () => {
+  const fakeFetch = async () => new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+  const result = await fetchClawModelOverride(env({}), "user-1", fakeFetch, async () => "token");
+  assertEquals(result, null);
+});
+
 Deno.test("fetchClawModelOverride: throws on an unrepresentable provider (defense in depth)", async () => {
   const fakeFetch = async () => new Response(
     JSON.stringify({ configured: true, provider: "claude-code", model: "sonnet", apiKey: null, baseUrl: null }),

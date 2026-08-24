@@ -11,13 +11,19 @@ const AGENTS: { id: AgentName; label: string; description: string }[] = [
 
 export function AgentRoutingSection() {
   const { configs, loading: configsLoading } = useProviderConfigs();
-  const { selections, loading: selectionsLoading, setSelection } = useAgentModelSelection();
+  const { selections, loading: selectionsLoading, setSelection, clearSelection } = useAgentModelSelection();
 
   if (configsLoading || selectionsLoading) return <div className="text-sm text-muted-foreground">Loading…</div>;
 
   const handleChange = async (agent: AgentName, providerConfigId: string) => {
-    if (!providerConfigId) return;
     try {
+      // devx always has an active provider (can't be cleared); claw/d2esupport
+      // can be reverted to their env-based fallback by picking the empty option.
+      if (!providerConfigId) {
+        if (agent === "devx") return;
+        await clearSelection(agent);
+        return;
+      }
       await setSelection(agent, providerConfigId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to update assignment");
@@ -45,7 +51,11 @@ export function AgentRoutingSection() {
                 value={current}
                 onChange={(e) => handleChange(id, e.target.value)}
               >
-                <option value="" disabled>Select a provider config…</option>
+                {id === "devx" ? (
+                  <option value="" disabled>Select a provider config…</option>
+                ) : (
+                  <option value="">Use env default (unassigned)</option>
+                )}
                 {options.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.display_name || `${c.provider} / ${c.model}`}

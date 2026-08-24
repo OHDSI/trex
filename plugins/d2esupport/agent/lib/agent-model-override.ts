@@ -30,7 +30,13 @@ export async function fetchSupportModelOverride(
 
   const body = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(body?.error || `devx agent-model lookup failed with status ${res.status}`);
+    if (res.status === 500) {
+      throw new Error(body?.error || `devx agent-model lookup failed with status ${res.status}`);
+    }
+    // Any other non-ok status (404 devx not loaded, 401 bad token, etc.) means
+    // devx can't answer this — a deployment fact, not a credential problem —
+    // so fall back to the legacy env-based config, same as a transport failure.
+    return null;
   }
   if (!body.configured) return null;
 

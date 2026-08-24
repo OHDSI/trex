@@ -229,6 +229,13 @@ export async function setAgentModelSelection(agent: AgentName, providerConfigId:
   });
 }
 
+// Reverts an agent to the legacy env-based fallback. devx can't be cleared
+// this way (it always has an active provider config) — the server rejects
+// that with a 400, which the caller should surface.
+export async function clearAgentModelSelection(agent: AgentName): Promise<void> {
+  await apiFetch(`/agent-model-selection/${agent}`, { method: "DELETE" });
+}
+
 export interface EncryptExistingKeysResult {
   // Totals across BOTH stores below — what the UI reports, so a user never
   // has to know their key can live in two places.

@@ -38,6 +38,12 @@ Deno.test("fetchSupportModelOverride: throws when devx failed to resolve a confi
   );
 });
 
+Deno.test("fetchSupportModelOverride: returns null without throwing on a non-500 non-ok status (devx not loaded / bad token)", async () => {
+  const fakeFetch = async () => new Response(JSON.stringify({ error: "not found" }), { status: 404 });
+  const result = await fetchSupportModelOverride(env({ D2ESUPPORT_USER_ID: "user-1" }), fakeFetch, async () => "token");
+  assertEquals(result, null);
+});
+
 Deno.test("fetchSupportModelOverride: throws on an unrepresentable provider", async () => {
   const fakeFetch = async () => new Response(
     JSON.stringify({ configured: true, provider: "claude-code", model: "sonnet", apiKey: null, baseUrl: null }),
