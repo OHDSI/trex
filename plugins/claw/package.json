@@ -19,6 +19,8 @@
           "DISCORD_GATEWAY": "${DISCORD_GATEWAY:-}",
           "DISCORD_MESSAGES": "${DISCORD_MESSAGES:-}",
           "CLAW_CODE_USER_ID": "${CLAW_CODE_USER_ID:-}",
+          "CLAW_CODER_PROVIDER": "${CLAW_CODER_PROVIDER:-}",
+          "CLAW_CODER_MODEL": "${CLAW_CODER_MODEL:-}",
           "CLAW_DEV_CHANNEL_ID": "${CLAW_DEV_CHANNEL_ID:-}"
         }
       }

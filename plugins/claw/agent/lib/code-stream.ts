@@ -20,6 +20,8 @@
 // the servicePath), so a static import breaks module resolution in the plugin
 // source tree / CI, where `../../auth/keys.ts` does not exist.
 
+import { resolveCoderProviderIntent } from "./coder-provider.ts";
+
 // Loopback base for the control server. Reuse the gateway override so a
 // deployment that moves trexas off 33001 stays consistent with claw's Discord
 // forwarding, falling back to the same default.
@@ -63,28 +65,30 @@ export async function mintToken(userId: string): Promise<string> {
   return `${data}.${b64url(sig)}`;
 }
 
-// Pin the coder user to the claude-code provider so the turn lands on
-// streamClaudeCodeChat (the coder sidecar) rather than the API-key ai-sdk
-// loop. claude-code needs no api_key (noKeyProviders in index.ts). Done through
-// the settings API (with the minted token) rather than direct SQL so it stays
-// user-scoped and avoids assuming claw's sql role can write the devx schema.
-// Reads current settings first and only writes when the provider differs, to
-// avoid clobbering a shared user's other preferences. NOTE: a user with an ACTIVE
-// devx.provider_configs row wins over devx.settings (index.ts resolution order);
-// the dedicated CLAW_CODE_USER_ID has none, so this suffices.
-async function ensureClaudeCodeProvider(token: string): Promise<void> {
+// Assert the configured provider on the coder account, if this deployment
+// pins one. With no CLAW_CODER_PROVIDER set this is a no-op and the account's
+// own devx Settings decide the engine — which is what lets an operator move
+// the coder between engines from the UI, with no redeploy.
+// Reads current settings first and only writes when something actually
+// differs, to avoid clobbering a shared user's other preferences. NOTE: a user
+// with an ACTIVE devx.provider_configs row wins over devx.settings (index.ts
+// resolution order); the dedicated CLAW_CODE_USER_ID has none, so this suffices.
+async function ensureCoderProvider(token: string): Promise<void> {
+  const intent = resolveCoderProviderIntent((k) => Deno.env.get(k));
+  if (!intent) return;
   const base = apiBase();
   const auth = { authorization: `Bearer ${token}` };
   let cur: Record<string, unknown> | null = null;
   const got = await fetch(`${base}/settings`, { headers: auth });
   if (got.ok) { try { cur = await got.json(); } catch { /* treat as unset */ } }
-  if (cur?.provider === "claude-code") return;
+  const modelMatches = !intent.model || cur?.model === intent.model;
+  if (cur?.provider === intent.provider && modelMatches) return;
   const res = await fetch(`${base}/settings`, {
     method: "PUT",
     headers: { "content-type": "application/json", ...auth },
     body: JSON.stringify({
-      provider: "claude-code",
-      model: cur?.model || "claude-sonnet-4-20250514",
+      provider: intent.provider,
+      model: intent.model || cur?.model,
       ai_rules: cur?.ai_rules ?? undefined,
       auto_approve: cur?.auto_approve ?? undefined,
       max_steps: cur?.max_steps ?? undefined,
@@ -273,7 +277,7 @@ export async function runCodeTurn(
   args: CodeTurnArgs,
 ): Promise<{ chatId: string; replyText: string }> {
   const token = await mintToken(args.userId);
-  await ensureClaudeCodeProvider(token);
+  await ensureCoderProvider(token);
   const chatId = await ensureChat(token, args.appId, args.chatId);
   const replyText = await streamTurn(token, chatId, args.message, args.attachments, args.onProgress);
   return { chatId, replyText };
