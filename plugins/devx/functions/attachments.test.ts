@@ -55,7 +55,10 @@ Deno.test("an unsafe attachment url (SSRF target) is skipped without fetching an
   };
   try {
     const saved = await materializeAttachments(ws, [
-      { name: "metadata.json", url: "http://169.254.169.254/latest/meta-data/" },
+      // https, not http: http is already rejected by the scheme check alone,
+      // so using it here would let this test pass even if every IP deny
+      // rule were deleted. https is what actually exercises the IP rules.
+      { name: "metadata.json", url: "https://169.254.169.254/latest/meta-data/" },
     ]);
     assertEquals(saved, []);
     assertEquals(fetchCalled, false);
