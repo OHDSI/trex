@@ -4,6 +4,28 @@
 
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 
+// Denies (WHERE decision IS NULL — never overwrites an already-decided row)
+// every approval belonging to the given turns. Exported standalone so a
+// caller reaping turns any other way (there is only reapStaleTurns today,
+// but the coupling shouldn't be implicit) can reuse it, and so it's
+// independently testable. See reapStaleTurns's own comment for why this
+// exists: a turn reaped without also denying its approval leaves a
+// `decision IS NULL` row that a LATER message matching gate vocabulary
+// (e.g. "continue" — literally in gate-text.ts's APPROVE list) can still
+// resolve, silently discarding that message and starting nothing, because
+// resolveApprovalDecision only writes a decision — it never drives a turn.
+export async function denyApprovalsForTurns(turnIds: string[], query: QueryFn): Promise<number> {
+  if (turnIds.length === 0) return 0;
+  const r = await query(
+    `UPDATE agents.approvals
+        SET decision = 'deny', decided_at = NOW()
+      WHERE turn_id = ANY($1) AND decision IS NULL
+      RETURNING request_id`,
+    [turnIds],
+  );
+  return r.rows.length;
+}
+
 export function createStore(query: QueryFn) {
   return {
     async createSession(plugin: string, agent: string, createdBy?: string): Promise<string> {
@@ -209,6 +231,8 @@ export function createStore(query: QueryFn) {
           RETURNING id`,
         [sessionId, cutoff, `turn abandoned (no completion within ${minutes} minutes)`],
       );
+      const turnIds = r.rows.map((row: { id: string }) => row.id);
+      await denyApprovalsForTurns(turnIds, query);
       return r.rows.length;
     },
 

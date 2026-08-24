@@ -1,5 +1,5 @@
 import { assert, assertEquals } from "jsr:@std/assert";
-import { createStore } from "./store.ts";
+import { createStore, denyApprovalsForTurns, type QueryFn } from "./store.ts";
 
 function fakeQuery(responses: Array<{ rows: unknown[] }>) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
@@ -298,4 +298,57 @@ Deno.test("setToolConsent upserts on the (user, plugin, agent, tool) key", async
   assert(calls[0].sql.includes("INSERT INTO agents.tool_consents"));
   assert(calls[0].sql.includes("ON CONFLICT"));
   assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded", "never"]);
+});
+
+Deno.test("reapStaleTurns also denies every still-pending approval belonging to the turns it reaps", async () => {
+  const calls: Array<{ q: string; p: unknown[] }> = [];
+  const query: QueryFn = async (q, p = []) => {
+    calls.push({ q, p });
+    if (q.includes("UPDATE agents.turns") && q.includes("RETURNING id")) {
+      // Simulate two stale turns reaped.
+      return { rows: [{ id: "t-1" }, { id: "t-2" }] };
+    }
+    if (q.includes("UPDATE agents.approvals") && q.includes("turn_id = ANY")) {
+      return { rows: [{ request_id: "a-1" }] };
+    }
+    return { rows: [] };
+  };
+  const store = createStore(query);
+  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  assertEquals(n, 2);
+  const denyCall = calls.find((c) => c.q.includes("UPDATE agents.approvals"));
+  assertEquals(denyCall !== undefined, true);
+  assertEquals(denyCall!.p[0], ["t-1", "t-2"]);
+});
+
+Deno.test("reapStaleTurns denies nothing and issues no approvals query when it reaps zero turns", async () => {
+  const calls: Array<{ q: string }> = [];
+  const query: QueryFn = async (q) => {
+    calls.push({ q });
+    if (q.includes("UPDATE agents.turns")) return { rows: [] };
+    return { rows: [] };
+  };
+  const store = createStore(query);
+  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  assertEquals(n, 0);
+  assertEquals(calls.some((c) => c.q.includes("UPDATE agents.approvals")), false);
+});
+
+Deno.test("denyApprovalsForTurns: no-ops on an empty list without querying", async () => {
+  let called = false;
+  const query: QueryFn = async () => { called = true; return { rows: [] }; };
+  const n = await denyApprovalsForTurns([], query);
+  assertEquals(n, 0);
+  assertEquals(called, false);
+});
+
+Deno.test("denyApprovalsForTurns: only denies still-undecided approvals, scoped to the given turns", async () => {
+  const query: QueryFn = async (q, p) => {
+    assertEquals(q.includes("turn_id = ANY($1)"), true);
+    assertEquals(q.includes("decision IS NULL"), true);
+    assertEquals(p, [["t-1"]]);
+    return { rows: [{ request_id: "a-1" }, { request_id: "a-2" }] };
+  };
+  const n = await denyApprovalsForTurns(["t-1"], query);
+  assertEquals(n, 2);
 });
