@@ -4,7 +4,7 @@ import { resolveClawModel } from "./lib/model.ts";
 import { readOrchestration, renderStateForPrompt } from "./lib/state.ts";
 
 async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
-  return resolveClawModel(ctx.env);
+  return await resolveClawModel(ctx.env, ctx.userId);
 }
 
 async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {

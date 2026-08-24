@@ -1,3 +1,5 @@
+import { fetchClawModelOverride } from "./agent-model-override.ts";
+
 export type EnvFn = (k: string) => string | undefined;
 
 export interface ModelSpec {
@@ -7,7 +9,17 @@ export interface ModelSpec {
   baseURL?: string;
 }
 
-export function resolveClawModel(env: EnvFn): ModelSpec {
+export async function resolveClawModel(
+  env: EnvFn,
+  ctxUserId?: string,
+  fetchOverride: typeof fetchClawModelOverride = fetchClawModelOverride,
+): Promise<ModelSpec> {
+  // A devx-assigned override always wins when one is configured; its
+  // rejection propagates rather than falling back to env (see this plan's
+  // Global Constraints — wrong-account risk).
+  const override = await fetchOverride(env, ctxUserId);
+  if (override) return override;
+
   const p = env("CLAW_MODEL_PROVIDER") ?? "anthropic";
   const provider = (p === "openai" || p === "google" || p === "bedrock") ? p : "anthropic";
   const modelId = env("CLAW_MODEL_ID") ?? "claude-sonnet-5";
