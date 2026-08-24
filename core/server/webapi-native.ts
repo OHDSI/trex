@@ -17,6 +17,59 @@ declare const Trex: any;
 export const WEBAPI_NATIVE_ENABLED =
   (Deno.env.get("WEBAPI_NATIVE_ENABLED") ?? "true") !== "false";
 
+/** How long to wait for the IdP's discovery document. Bounded so a deployment
+ *  with no IdP still boots; the wait is skipped entirely when OIDC is off. */
+const OIDC_WAIT_MS = Number(Deno.env.get("WEBAPI_OIDC_WAIT_MS") ?? 180_000);
+
+/**
+ * Block until the OIDC discovery document is served, or the budget runs out.
+ *
+ * WebAPI builds its client registration from discovery while the Spring context
+ * starts (OidcAuthConfig.oidcClientRegistrationRepository). If discovery is not
+ * up yet the bean fails, Tomcat never starts and nothing retries — the node then
+ * reports healthy with no WebAPI behind it, and the whole cache pipeline strands
+ * on "Cache not ready".
+ *
+ * The window is real rather than theoretical: the IdP cannot finish starting
+ * until trex has provisioned the database it migrates into, so under d2e the IdP
+ * is necessarily *later* than trex. Provisioning happens long before this call,
+ * so waiting here cannot deadlock.
+ */
+export async function waitForOidcDiscovery(
+  log: (m: string) => void,
+  err: (m: string) => void,
+  env: Record<string, string | undefined> = Deno.env.toObject(),
+  budgetMs: number = OIDC_WAIT_MS,
+): Promise<void> {
+  if (env.SECURITY_AUTH_OIDC_ENABLED !== "true") return;
+  const url = env.SECURITY_AUTH_OIDC_URL;
+  if (!url) return;
+
+  const deadline = Date.now() + budgetMs;
+  let announced = false;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url);
+      // Drain the body so the connection is not left dangling.
+      await res.body?.cancel();
+      if (res.ok) {
+        if (announced) log(`OIDC discovery ready at ${url}`);
+        return;
+      }
+    } catch (_e) {
+      // Not listening yet — same handling as a non-200.
+    }
+    if (!announced) {
+      log(`waiting for OIDC discovery at ${url} ...`);
+      announced = true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  // Starting anyway: a stack with OIDC misconfigured should still get whatever
+  // WebAPI can offer, and the error it logs is more useful than silence here.
+  err(`OIDC discovery not ready after ${budgetMs}ms — starting WebAPI anyway`);
+}
+
 /**
  * Boot the embedded WebAPI on :8080. No-op when WEBAPI_NATIVE_ENABLED=false.
  * Never throws — failures are logged and the caller continues.
@@ -26,6 +79,8 @@ export async function startNativeWebApi(): Promise<void> {
 
   const log = (m: string) => console.log(`[webapi] ${m}`);
   const err = (m: string) => console.error(`[webapi] ${m}`);
+
+  await waitForOidcDiscovery(log, err);
 
   try {
     const conn = new Trex.TrexDB("memory");

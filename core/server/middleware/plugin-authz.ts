@@ -175,6 +175,9 @@ export const d2eAuthn = async (
   (req as any).logtoSubject = (payload["sub"] as string | undefined) ?? null;
 
   const roles = tokenRoles(payload);
+  // Also the fallback for the role resolution further down: when the token
+  // already carries userMgmtGroups there is no need to call usermgmt for them.
+  const tokenGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
 
   // System admins pass (parity with pluginAuthz's admin bypass). The claim shape
   // depends on the IdP — see isSystemAdminClaims. d2eIdp throws on an
