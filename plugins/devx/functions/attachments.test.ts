@@ -30,6 +30,26 @@ Deno.test("a failed download is skipped without failing the turn", async () => {
   }
 });
 
+Deno.test("an unsafe attachment url (SSRF target) is skipped without fetching and without failing the turn", async () => {
+  const ws = await Deno.makeTempDir();
+  const original = globalThis.fetch;
+  let fetchCalled = false;
+  globalThis.fetch = () => {
+    fetchCalled = true;
+    return Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
+  };
+  try {
+    const saved = await materializeAttachments(ws, [
+      { name: "metadata.json", url: "http://169.254.169.254/latest/meta-data/" },
+    ]);
+    assertEquals(saved, []);
+    assertEquals(fetchCalled, false);
+  } finally {
+    globalThis.fetch = original;
+    await Deno.remove(ws, { recursive: true });
+  }
+});
+
 Deno.test("renderAttachmentBlock is empty for no files and lists paths otherwise", () => {
   assertEquals(renderAttachmentBlock([]), "");
   const block = renderAttachmentBlock([{ path: "attachments/0-a.png", contentType: "image/png" }]);

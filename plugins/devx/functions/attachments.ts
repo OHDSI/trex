@@ -4,6 +4,8 @@
 // them — images render multimodally through the Read tool, so nothing is ever
 // inlined into a prompt. Returns the workspace-relative paths written; failures
 // are per-file and non-fatal (the turn still runs, the miss is logged).
+import { assertSafeAttachmentUrl } from "./attachment_url.ts";
+
 const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
 
 export async function materializeAttachments(
@@ -17,7 +19,11 @@ export async function materializeAttachments(
     const base = String(a.name).split(/[\\/]/).pop() || "file";
     const safe = base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
     try {
-      const res = await fetch(a.url);
+      // a.url is remote input (relayed from a chat channel) — validate it
+      // before ever fetching, so it cannot be pointed at internal services
+      // or a cloud metadata endpoint.
+      const safeUrl = assertSafeAttachmentUrl(a.url);
+      const res = await fetch(safeUrl);
       if (!res.ok) throw new Error(`fetch ${res.status}`);
       const bytes = new Uint8Array(await res.arrayBuffer());
       if (bytes.byteLength > ATTACHMENT_MAX_BYTES) throw new Error(`too large (${bytes.byteLength} bytes)`);
