@@ -4,7 +4,7 @@ import { resolveSupportModel } from "./lib/model.ts";
 import { readTask, renderStateForPrompt } from "./lib/state.ts";
 
 async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
-  return resolveSupportModel(ctx.env);
+  return await resolveSupportModel(ctx.env);
 }
 
 async function buildInstructions(base: string, ctx: HookCtx): Promise<string> {

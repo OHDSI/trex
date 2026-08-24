@@ -1,3 +1,5 @@
+import { fetchSupportModelOverride } from "./agent-model-override.ts";
+
 export type EnvFn = (k: string) => string | undefined;
 
 export interface ModelSpec {
@@ -7,7 +9,13 @@ export interface ModelSpec {
   baseURL?: string;
 }
 
-export function resolveSupportModel(env: EnvFn): ModelSpec {
+export async function resolveSupportModel(
+  env: EnvFn,
+  fetchOverride: typeof fetchSupportModelOverride = fetchSupportModelOverride,
+): Promise<ModelSpec> {
+  const override = await fetchOverride(env);
+  if (override) return override;
+
   const p = env("D2ESUPPORT_MODEL_PROVIDER") ?? "anthropic";
   const provider = (p === "openai" || p === "google" || p === "bedrock") ? p : "anthropic";
   const modelId = env("D2ESUPPORT_MODEL_ID") ?? "claude-sonnet-5";
