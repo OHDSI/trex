@@ -236,6 +236,21 @@ export function createStore(query: QueryFn) {
       return r.rows.length;
     },
 
+    // The set of sessions with at least one turn stuck `running` past the
+    // cutoff, for the periodic sweep (service/sweep.ts) to reap individually
+    // through the existing, unchanged, session-scoped reapStaleTurns — kept
+    // session-scoped on purpose (see reapStaleTurns's own header comment: an
+    // earlier unscoped reap caused a worse bug by failing a DIFFERENT session's
+    // genuinely live turn).
+    async listSessionsWithStaleRunningTurns(olderThanMs: number): Promise<string[]> {
+      const cutoff = new Date(Date.now() - olderThanMs);
+      const r = await query(
+        `SELECT DISTINCT session_id FROM agents.turns WHERE status = 'running' AND started_at < $1`,
+        [cutoff],
+      );
+      return r.rows.map((row: { session_id: string }) => row.session_id);
+    },
+
     // The follow-up queue a busy session's new message folds into instead of
     // racing the turn already running (service/handler.ts's startTurn checks
     // getRunningTurn, and queues here rather than starting a second concurrent

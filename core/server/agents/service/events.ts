@@ -101,4 +101,16 @@ export type AgentEvent =
   // when a denied gate puts it back in the human's — the gate is closed and
   // their reply is about to drive the revision. Optional so a publisher that
   // never checks a gate can omit it (absent === false).
-  | { type: "message.queued"; data: { text: string; deniedPendingGate?: boolean } };
+  | { type: "message.queued"; data: { text: string; deniedPendingGate?: boolean } }
+  // Trex extension (not part of eve's documented vocabulary): fired by the
+  // periodic stale-turn sweep (service/sweep.ts) when it reaps one or more
+  // turns stuck `running` on this session — the same recovery handler.ts's
+  // lazy on-message reap performs, just triggered by the sweep's timer
+  // instead of a new message arriving. Turn-agnostic (no single turnId — a
+  // sweep tick can reap more than one stale turn on a session) and
+  // live-only, same posture as message.queued above; a subscriber that
+  // isn't listening when this fires (the whole point of the sweep — no one
+  // is messaging this session right now) simply never sees it, which is
+  // fine: nothing here is required for a later reader to make sense of the
+  // session's history.
+  | { type: "turn.reaped"; data: { count: number; reason: "stale" } };
