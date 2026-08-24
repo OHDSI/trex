@@ -110,6 +110,22 @@ export interface ProviderConfigRecord {
   updated_at: string;
 }
 
+// Agent model assignment — which provider config each LLM-backed agent
+// (devx's own coder, claw, d2esupport) is assigned to. Mirrors
+// functions/agent_model_selection.ts's AgentModelSelection.
+export type AgentName = "devx" | "claw" | "d2esupport";
+
+export interface AgentModelSelectionRecord {
+  agent: AgentName;
+  providerConfigId: string;
+  provider: string;
+  model: string;
+  baseUrl: string | null;
+  displayName: string | null;
+}
+
+export type AgentModelSelections = Record<AgentName, AgentModelSelectionRecord | null>;
+
 // Agent types
 
 export interface AgentTodo {

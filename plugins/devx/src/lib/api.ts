@@ -16,6 +16,9 @@ import type {
   UserMapEntry,
   SlackAllowlistEntry,
   ModelInfo,
+  AgentName,
+  AgentModelSelections,
+  AgentModelSelectionRecord,
 } from "./types";
 
 // task-u1: exported so useAgentsChat.ts can build the Authorization header
@@ -211,6 +214,19 @@ export async function deleteProviderConfig(id: string): Promise<void> {
 
 export async function activateProviderConfig(id: string): Promise<void> {
   await apiFetch(`/provider-configs/${id}/activate`, { method: "PUT" });
+}
+
+// Agent model assignment — which provider config each LLM-backed agent
+// (devx's own coder, claw, d2esupport) runs on. See routes/agent_model_routes.ts.
+export async function getAgentModelSelections(): Promise<AgentModelSelections> {
+  return apiFetch("/agent-model-selection");
+}
+
+export async function setAgentModelSelection(agent: AgentName, providerConfigId: string): Promise<AgentModelSelectionRecord> {
+  return apiFetch(`/agent-model-selection/${agent}`, {
+    method: "PUT",
+    body: JSON.stringify({ provider_config_id: providerConfigId }),
+  });
 }
 
 export interface EncryptExistingKeysResult {
