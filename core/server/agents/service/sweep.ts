@@ -7,6 +7,13 @@
 import type { AgentStore } from "./store.ts";
 
 export interface SweepOptions {
+  // Required, not optional: a sweep with no plugin/agent scoping is the bug
+  // (see store.ts's listSessionsWithStaleRunningTurns comment) — with
+  // multiple agents deployed (claw, devx-coder, d2esupport, ...), every
+  // worker's sweep would otherwise list and reap every OTHER agent's stale
+  // sessions too.
+  plugin: string;
+  agent: string;
   intervalMs?: number;
   staleMs?: number;
   onReap?: (sessionId: string, count: number) => void;
@@ -19,13 +26,13 @@ const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
 // STALE_TURN_MS` index.ts passes.
 const DEFAULT_STALE_MS = 2 * 60 * 60 * 1000;
 
-export function startStaleTurnSweep(store: AgentStore, opts: SweepOptions = {}): { stop: () => void } {
+export function startStaleTurnSweep(store: AgentStore, opts: SweepOptions): { stop: () => void } {
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
   const staleMs = opts.staleMs ?? DEFAULT_STALE_MS; // caller (index.ts) passes the real STALE_TURN_MS explicitly
   const timer = setInterval(async () => {
     let sessionIds: string[];
     try {
-      sessionIds = await store.listSessionsWithStaleRunningTurns(staleMs);
+      sessionIds = await store.listSessionsWithStaleRunningTurns(staleMs, opts.plugin, opts.agent);
     } catch (e) {
       console.error("agents: stale-turn sweep failed to list sessions (will retry next tick):", e);
       return;

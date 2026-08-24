@@ -65,6 +65,13 @@ const handler = createHandler({
 // startTurn never fires — no new message ever lands on it). See sweep.ts's
 // header for the incident this closes.
 startStaleTurnSweep(store, {
+  // Same env vars createHandler above is keyed on, so the sweep only ever
+  // lists/reaps sessions for THIS worker's own agent — see sweep.ts's
+  // SweepOptions comment for why an unscoped sweep is the bug (with multiple
+  // agents deployed, every worker would otherwise sweep every OTHER agent's
+  // sessions too).
+  plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
+  agent: Deno.env.get("TREX_AGENT_NAME") || "agent",
   staleMs: STALE_TURN_MS,
   onReap: (sessionId, count) => {
     publish(sessionId, { type: "turn.reaped", data: { count, reason: "stale" } });

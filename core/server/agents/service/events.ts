@@ -108,9 +108,14 @@ export type AgentEvent =
   // lazy on-message reap performs, just triggered by the sweep's timer
   // instead of a new message arriving. Turn-agnostic (no single turnId — a
   // sweep tick can reap more than one stale turn on a session) and
-  // live-only, same posture as message.queued above; a subscriber that
-  // isn't listening when this fires (the whole point of the sweep — no one
-  // is messaging this session right now) simply never sees it, which is
-  // fine: nothing here is required for a later reader to make sense of the
-  // session's history.
+  // live-only, same wire posture as message.queued above (not
+  // persisted/replayed) — but UNLIKE message.queued, a subscriber missing
+  // this event is a KNOWN LIMITATION, not an acceptable outcome. A reap only
+  // happens ≥2 hours after the turn started, and the dominant cause of a
+  // stuck turn is a worker crash/redeploy — in exactly that case the isolate
+  // that held the subscription is gone, so this publishes into an empty
+  // subscriber set and the human is told nothing. Best-effort delivery is
+  // frequently lost for this event specifically; making it reliable needs a
+  // durable out-of-band delivery path (e.g. via agents.channel_sessions) —
+  // tracked as a follow-up, not fixed here.
   | { type: "turn.reaped"; data: { count: number; reason: "stale" } };

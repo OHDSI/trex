@@ -131,6 +131,24 @@ Deno.test("getApprovalTool returns null when the request is unknown", async () =
   assertEquals(await store.getApprovalTool("nope"), null);
 });
 
+// Backstop for reapStaleTurns/denyApprovalsForTurns's own failure mode
+// (Fix 1): resolveApprovalDecision refuses to resolve an approval whose turn
+// isn't running, so an approval left un-denied by a failed deny is still safe.
+Deno.test("getApprovalTurnStatus joins through to the owning turn's status", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ status: "running" }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getApprovalTurnStatus("r-1"), "running");
+  assert(calls[0].sql.includes("FROM agents.approvals a"));
+  assert(calls[0].sql.includes("JOIN agents.turns t"));
+  assertEquals(calls[0].params, ["r-1"]);
+});
+
+Deno.test("getApprovalTurnStatus returns null when the approval doesn't exist", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getApprovalTurnStatus("nope"), null);
+});
+
 // Channel HITL resume — MODE A lookup.
 Deno.test("getApprovalSession returns the session for a requestId (null when unknown)", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-9" }] }, { rows: [] }]);
@@ -257,6 +275,28 @@ Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reve
     cutoff.getTime() >= before - 2 * 60 * 60 * 1000 && cutoff.getTime() <= after - 2 * 60 * 60 * 1000,
     `cutoff ${cutoff.toISOString()} is not ~2h before call time — sign of the cutoff computation looks reversed`,
   );
+});
+
+// Fix 2: the sweep query must be scoped to the calling worker's own
+// (plugin, agent) — agents.turns carries no plugin/agent column itself, so
+// this has to join agents.sessions. Without this scoping, a worker for one
+// agent (e.g. claw) would list and reap every OTHER agent's stale sessions
+// too (devx-coder, d2esupport, ...), and — since the reap winner is also the
+// one who publishes turn.reaped — that notification would be silently lost
+// for a foreign session it has no subscriber for.
+Deno.test("listSessionsWithStaleRunningTurns scopes to the given plugin+agent via a join on agents.sessions", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ session_id: "s-1" }, { session_id: "s-2" }] }]);
+  const store = createStore(fn as never);
+  const ids = await store.listSessionsWithStaleRunningTurns(2 * 60 * 60 * 1000, "claw-agent", "claw");
+  assertEquals(ids, ["s-1", "s-2"]);
+  assert(calls[0].sql.includes("FROM agents.turns t"));
+  assert(calls[0].sql.includes("JOIN agents.sessions s ON s.id = t.session_id"));
+  assert(calls[0].sql.includes("status = 'running'"));
+  assert(calls[0].sql.includes("s.plugin = $2"));
+  assert(calls[0].sql.includes("s.agent = $3"));
+  assertEquals(calls[0].params[1], "claw-agent");
+  assertEquals(calls[0].params[2], "claw");
+  assert(calls[0].params[0] instanceof Date);
 });
 
 // The follow-up queue a busy session folds a new message into (instead of
