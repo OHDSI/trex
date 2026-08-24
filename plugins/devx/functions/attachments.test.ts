@@ -170,18 +170,23 @@ Deno.test("readCappedBody: an under-cap body returns intact bytes", async () => 
   assertEquals(out, data);
 });
 
-Deno.test("readCappedBody: an over-cap body with an honest Content-Length is rejected without reading", async () => {
+Deno.test("readCappedBody: an over-cap body with an honest Content-Length is rejected without ever reading the stream", async () => {
+  // `res.body.locked === false` alone would only prove this code never
+  // called getReader() on THIS particular stream object — it says nothing
+  // about whether the stream was actually pulled. Prove it for real: make
+  // pulling the stream itself fail with a distinguishable error, so if the
+  // Content-Length check did not short-circuit before any read, the
+  // rejection we observe would be this one, not "too large".
+  let pulled = false;
   const stream = new ReadableStream({
     pull(controller) {
-      controller.enqueue(new Uint8Array([1, 2, 3]));
-      controller.close();
+      pulled = true;
+      controller.error(new Error("stream was pulled — the Content-Length check did not short-circuit"));
     },
   });
   const res = new Response(stream, { headers: { "content-length": "1000" } });
-  await assertRejects(() => readCappedBody(res, 10));
-  // A reader was never obtained from the body — the Content-Length check
-  // short-circuited before any read() call locked the stream.
-  assertEquals(res.body.locked, false);
+  await assertRejects(() => readCappedBody(res, 10), Error, "too large");
+  assertEquals(pulled, false);
 });
 
 Deno.test("readCappedBody: an over-cap body with NO Content-Length is still rejected", async () => {
@@ -195,6 +200,43 @@ Deno.test("readCappedBody: a body exactly at the cap is accepted", async () => {
   const res = new Response(streamFromChunks([data]));
   const out = await readCappedBody(res, 10);
   assertEquals(out.byteLength, 10);
+});
+
+// FIX F: the Content-Length rejection path must cancel the body it never
+// reads from — otherwise the connection is left undrained.
+Deno.test("readCappedBody: an over-cap Content-Length rejection cancels the body", async () => {
+  let canceled = false;
+  const stream = new ReadableStream({
+    pull(controller) {
+      controller.enqueue(new Uint8Array([1, 2, 3]));
+      controller.close();
+    },
+    cancel() {
+      canceled = true;
+    },
+  });
+  const res = new Response(stream, { headers: { "content-length": "1000" } });
+  await assertRejects(() => readCappedBody(res, 10));
+  assertEquals(canceled, true);
+});
+
+// FIX F: if reader.read() itself rejects mid-stream, the reader must still
+// end up released (not left locked with an undrained connection behind it).
+Deno.test("readCappedBody: a mid-stream read() rejection still releases the reader lock", async () => {
+  let reads = 0;
+  const stream = new ReadableStream({
+    pull(controller) {
+      reads++;
+      if (reads === 1) {
+        controller.enqueue(new Uint8Array([1, 2, 3]));
+        return;
+      }
+      controller.error(new Error("simulated mid-stream network failure"));
+    },
+  });
+  const res = new Response(stream, { headers: { "content-length": "3" } });
+  await assertRejects(() => readCappedBody(res, 10), Error, "simulated mid-stream network failure");
+  assertEquals(res.body!.locked, false);
 });
 
 Deno.test("renderAttachmentBlock is empty for no files and lists paths otherwise", () => {

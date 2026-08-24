@@ -63,6 +63,8 @@ export async function readCappedBody(res, maxBytes) {
   if (contentLength !== null) {
     const declared = Number(contentLength);
     if (Number.isFinite(declared) && declared > maxBytes) {
+      // Never read from it, but don't leave it undrained either.
+      await res.body?.cancel();
       throw new Error(`too large (${declared} bytes)`);
     }
   }
@@ -72,15 +74,30 @@ export async function readCappedBody(res, maxBytes) {
   const reader = res.body.getReader();
   const chunks = [];
   let total = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > maxBytes) {
-      await reader.cancel();
-      throw new Error(`too large (${total} bytes)`);
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        throw new Error(`too large (${total} bytes)`);
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    // Whether we broke out normally, hit the size cap, or reader.read()
+    // itself rejected mid-stream (a network failure), the reader must never
+    // be left locked with an undrained connection behind it.
+    try {
+      await reader.cancel();
+    } catch {
+      // already closed/errored — nothing further to release.
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // cancel() above may already have released it.
+    }
   }
 
   const bytes = new Uint8Array(total);
