@@ -17,6 +17,7 @@ import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
 import { buildCoderContext } from "./coder_context.ts";
 import { openaiTransport } from "./openai_transport.ts";
+import { ensureGitConfig } from "./git_identity.ts";
 
 /** Clean up all pending consents for a given chat (called on stream abort) */
 export async function clearPendingConsents(chatId, sqlFn?) {
@@ -135,8 +136,8 @@ export async function streamAgentChat({
   // Optional isolated workspace (e.g. a git worktree for an agent-driven run)
   workspacePathOverride,
   // Channel-driven (claw) fields: per-chat worktree isolation, remote-channel
-  // sandbox prompt, and relayed file attachments. Only the Claude Code agent
-  // consumes them today; dropping them here silently disabled all three for
+  // sandbox prompt, and relayed file attachments. Both coder engines consume
+  // them now; dropping them here would silently disable all three for
   // agent-mode chats (the only mode claw uses).
   useWorktree,
   remoteChannel,
@@ -166,6 +167,17 @@ export async function streamAgentChat({
     : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
+  // Per-user git identity/signing: sync the MAIN repo's devx include file at
+  // the start of every coder turn. Worktrees share the main repo's
+  // .git/config, so this also covers commits made inside the per-chat
+  // worktree below; local repo config beats any global gh-derived identity.
+  if (appId) {
+    try {
+      await ensureGitConfig(workspacePath, userId, sqlFn);
+    } catch (e) {
+      console.warn("[devx-agent] git identity setup failed:", e?.message || e);
+    }
+  }
   // Facilitated (claw) sessions pin to a stable per-chat worktree so feature
   // work stays isolated and survives the cwd reset between turns — the same
   // guarantee claude_code_agent.ts gives, now that this engine also serves

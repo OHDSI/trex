@@ -52,7 +52,7 @@ export async function ensureChatWorktree(userId: string, appId: string, chatId: 
     }
     if ("restore" in decision) {
       console.warn(
-        `[claude_code_agent] chat worktree ${worktree} was left on '${decision.foreignBranch}' ` +
+        `[chat-worktree] chat worktree ${worktree} was left on '${decision.foreignBranch}' ` +
           `(clean tree) — restoring ${branch}`,
       );
       await gitOps.branchSwitch(worktree, branch);
@@ -68,7 +68,7 @@ export async function ensureChatWorktree(userId: string, appId: string, chatId: 
       await gitOps.fetch(repoRoot, "origin", "develop");
       startPoint = "origin/develop";
     } catch (e) {
-      console.warn("[claude_code_agent] fetch origin/develop failed; basing worktree on current HEAD:", e?.message || e);
+      console.warn("[chat-worktree] fetch origin/develop failed; basing worktree on current HEAD:", e?.message || e);
     }
     await gitOps.worktreeAdd(repoRoot, worktree, branch, startPoint);
     return worktree;

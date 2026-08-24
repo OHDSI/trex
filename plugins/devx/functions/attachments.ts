@@ -27,7 +27,7 @@ export async function materializeAttachments(
       await Deno.writeFile(`${workspacePath}/${rel}`, bytes);
       saved.push({ path: rel, contentType: a.contentType });
     } catch (err) {
-      console.warn(`[claude-code] attachment '${safe}' skipped:`, err?.message || err);
+      console.warn(`[attachments] attachment '${safe}' skipped:`, err?.message || err);
     }
   }
   return saved;

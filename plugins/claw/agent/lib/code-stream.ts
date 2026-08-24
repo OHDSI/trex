@@ -83,12 +83,22 @@ async function ensureCoderProvider(token: string): Promise<void> {
   if (got.ok) { try { cur = await got.json(); } catch { /* treat as unset */ } }
   const modelMatches = !intent.model || cur?.model === intent.model;
   if (cur?.provider === intent.provider && modelMatches) return;
+  const model = intent.model || cur?.model;
+  if (!model) {
+    // Pinning a provider with no model anywhere (no CLAW_CODER_MODEL, and no
+    // existing settings row to fall back on) is a misconfiguration — writing
+    // a null model would silently brick the account's coder settings, so
+    // fail loudly instead.
+    throw new Error(
+      "CLAW_CODER_PROVIDER is set but no model is available: set CLAW_CODER_MODEL or configure a model in devx Settings first.",
+    );
+  }
   const res = await fetch(`${base}/settings`, {
     method: "PUT",
     headers: { "content-type": "application/json", ...auth },
     body: JSON.stringify({
       provider: intent.provider,
-      model: intent.model || cur?.model,
+      model,
       base_url: cur?.base_url ?? undefined,
       ai_rules: cur?.ai_rules ?? undefined,
       auto_approve: cur?.auto_approve ?? undefined,
