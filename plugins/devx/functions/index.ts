@@ -3,6 +3,7 @@ import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
+import { runsUnattended } from "./autonomy.ts";
 import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { isNoKeyProvider, removedProviderResponse } from "./provider_support.ts";
@@ -464,7 +465,10 @@ Deno.serve(async (req: Request) => {
           ...providerConfigNoCiphertext,
           api_key: resolvedApiKey,
           ai_rules: userPrefs.ai_rules || null,
-          auto_approve: userPrefs.auto_approve ?? false,
+          auto_approve: runsUnattended({
+            remoteChannel: streamRemoteChannel,
+            userAutoApprove: userPrefs.auto_approve ?? false,
+          }),
           max_steps: userPrefs.max_steps ?? 100,
           max_tool_steps: userPrefs.max_tool_steps ?? 10,
           auto_fix_problems: userPrefs.auto_fix_problems ?? false,
@@ -504,6 +508,17 @@ Deno.serve(async (req: Request) => {
         const { api_key_encrypted: _legacyEnc, api_key_iv: _legacyIv, ...legacyNoCiphertext } = legacyRow;
         settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
       }
+
+      // The legacy devx.settings branch above carries the row's own
+      // auto_approve straight through, so apply the same channel rule to it —
+      // otherwise a deployment still on the legacy row stalls on every consent.
+      settings = {
+        ...settings,
+        auto_approve: runsUnattended({
+          remoteChannel: streamRemoteChannel,
+          userAutoApprove: settings.auto_approve ?? false,
+        }),
+      };
 
       // Rows naming a removed engine are still in the database (the
       // provider_configs/settings tables were deliberately left unmigrated).
