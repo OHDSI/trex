@@ -16,6 +16,7 @@ import { materializeAttachments, renderAttachmentBlock } from "./attachments.ts"
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
 import { buildCoderContext } from "./coder_context.ts";
+import { openaiTransport } from "./openai_transport.ts";
 
 /** Clean up all pending consents for a given chat (called on stream abort) */
 export async function clearPendingConsents(chatId, sqlFn?) {
@@ -115,7 +116,7 @@ function createModel(settings) {
     apiKey: api_key,
     ...(base_url ? { baseURL: base_url } : {}),
   });
-  return openai(model);
+  return openaiTransport(base_url) === "chat" ? openai.chat(model) : openai(model);
 }
 
 export async function streamAgentChat({
