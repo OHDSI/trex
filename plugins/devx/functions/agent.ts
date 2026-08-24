@@ -11,6 +11,7 @@ import { createAmazonBedrock } from "npm:@ai-sdk/amazon-bedrock";
 import { buildToolSet, getToolByName } from "./tools/registry.ts";
 import type { AgentContext } from "./tools/types.ts";
 import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
+import { ensureChatWorktree } from "./chat_worktree.ts";
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
 import { buildCoderContext } from "./coder_context.ts";
@@ -158,11 +159,20 @@ export async function streamAgentChat({
 
   // Ensure workspace exists — app-scoped if chat belongs to an app, or an
   // explicit override (e.g. an isolated git worktree for an agent-driven run).
-  const workspacePath = workspacePathOverride
+  let workspacePath = workspacePathOverride
     ? workspacePathOverride
     : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
+  // Facilitated (claw) sessions pin to a stable per-chat worktree so feature
+  // work stays isolated and survives the cwd reset between turns — the same
+  // guarantee claude_code_agent.ts gives, now that this engine also serves
+  // channel turns. Kept AHEAD of readProjectRules below so the rules come from
+  // the worktree the coder will actually run in.
+  if (!workspacePathOverride && useWorktree && appId && chatId) {
+    const wt = await ensureChatWorktree(userId, appId, chatId);
+    if (wt) workspacePath = wt;
+  }
 
   // Read project rules (TREX.md, legacy AI_RULES.md) from the app workspace,
   // fall back to DB settings.
