@@ -8,6 +8,48 @@ import { assertSafeAttachmentUrl } from "./attachment_url.ts";
 
 const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
 
+// Read a fetch Response body without ever buffering more than maxBytes in
+// memory. A naive `await res.arrayBuffer()` pulls the whole response in
+// before any size check runs, so an oversized (or endless) response can
+// exhaust worker memory even though it is ultimately rejected. Here the
+// Content-Length header (when present and honest) short-circuits before the
+// body is read at all; the body is otherwise read incrementally and the
+// running total is checked after every chunk, so a missing or lying
+// Content-Length cannot defeat the cap.
+export async function readCappedBody(res, maxBytes) {
+  const contentLength = res.headers.get("content-length");
+  if (contentLength !== null) {
+    const declared = Number(contentLength);
+    if (Number.isFinite(declared) && declared > maxBytes) {
+      throw new Error(`too large (${declared} bytes)`);
+    }
+  }
+
+  if (!res.body) return new Uint8Array(0);
+
+  const reader = res.body.getReader();
+  const chunks = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel();
+      throw new Error(`too large (${total} bytes)`);
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 export async function materializeAttachments(
   workspacePath,
   attachments,
@@ -25,8 +67,7 @@ export async function materializeAttachments(
       const safeUrl = assertSafeAttachmentUrl(a.url);
       const res = await fetch(safeUrl);
       if (!res.ok) throw new Error(`fetch ${res.status}`);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (bytes.byteLength > ATTACHMENT_MAX_BYTES) throw new Error(`too large (${bytes.byteLength} bytes)`);
+      const bytes = await readCappedBody(res, ATTACHMENT_MAX_BYTES);
       await Deno.mkdir(dir, { recursive: true });
       // Prefix with an index to keep same-named files from clobbering.
       const rel = `attachments/${saved.length}-${safe}`;
