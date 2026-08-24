@@ -13,10 +13,15 @@ export interface SweepOptions {
 }
 
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
+// Matches handler.ts's STALE_TURN_MS — kept as a self-contained fallback so
+// this module has no import-order dependency on handler.ts for its own
+// default; the real value always comes from the explicit `staleMs:
+// STALE_TURN_MS` index.ts passes.
+const DEFAULT_STALE_MS = 2 * 60 * 60 * 1000;
 
 export function startStaleTurnSweep(store: AgentStore, opts: SweepOptions = {}): { stop: () => void } {
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
-  const staleMs = opts.staleMs ?? DEFAULT_INTERVAL_MS; // caller (handler.ts) passes the real STALE_TURN_MS explicitly
+  const staleMs = opts.staleMs ?? DEFAULT_STALE_MS; // caller (index.ts) passes the real STALE_TURN_MS explicitly
   const timer = setInterval(async () => {
     let sessionIds: string[];
     try {
