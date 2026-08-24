@@ -1532,26 +1532,13 @@ jobs:
                 # before /usr/src/plugins, so the image's baked (unpatched) seed would
                 # win — overwrite it directly so the patch actually takes effect.
                 - ./plugins/functions/mri-pg-config/src/db/seeds/03_Config.ts:/usr/src/bundled-plugins/d2e-functions/mri-pg-config/src/db/seeds/03_Config.ts:ro
-              # d2e's notebook-migrate waits only on Postgres, so it provisions the
-              # `notebook` schema CONCURRENTLY with trex's own core trexdb migration.
-              # The two then write the same system catalog rows and one loses with
-              # "tuple concurrently updated", which fails V1__initial_schema, leaves
-              # trexdb empty, and boot dies 60s later on "kek_wrapped_dek not present".
-              # It also GRANTs to anon/authenticated before pg-mgmt-init has created
-              # those roles. Serialise the three so nothing provisions in parallel:
-              #   pg-mgmt-init -> notebook-migrate -> trex
-              # Remove this once d2e provisions from trex instead (OHDSI/d2e).
-              depends_on: !override
-                alp-minerva-pg-mgmt-init:
-                  condition: service_completed_successfully
-                alp-logto-post-init:
-                  condition: service_completed_successfully
-                notebook-migrate:
-                  condition: service_completed_successfully
-            notebook-migrate:
-              depends_on: !override
-                alp-minerva-pg-mgmt-init:
-                  condition: service_completed_successfully
+              # No depends_on override here: d2e now provisions the database from
+              # trex itself, so trex only needs Postgres healthy — which is exactly
+              # what d2e's own compose already declares. The serialisation this
+              # block used to force (pg-mgmt-init -> notebook-migrate -> trex) named
+              # services d2e has since retired, and re-adding an edge to
+              # alp-logto-post-init would deadlock: logto cannot migrate until trex
+              # has created logto_postgres and the logto schema, so trex must boot first.
           EOF
           cat d2e/docker-compose-ci.yml
 
@@ -1700,30 +1687,6 @@ jobs:
             docker exec d2e-trex ls -la /usr/src/bundled-plugins/ || true
             exit 1
           fi
-
-      - name: Wait for webapi-init to complete
-        if: env.D2E_UNAVAILABLE != 'true'
-        run: |
-          echo "Waiting for webapi-init to complete (ensures logto admin user is created)..."
-          for i in $(seq 1 60); do
-            status=$(docker ps -a --filter "name=webapi-init" --format '{{.Status}}')
-            if echo "$status" | grep -q "(healthy)"; then
-              echo "webapi-init completed successfully"
-              break
-            fi
-            if echo "$status" | grep -qE "Exited \([1-9]"; then
-              echo "webapi-init failed!"
-              docker logs d2e-webapi-init || true
-              exit 1
-            fi
-            echo "Waiting for webapi-init... ($i/60) (status: $status)"
-            sleep 5
-            if [ $i -eq 60 ]; then
-              echo "::error::Timed out waiting for webapi-init to become healthy (final status: $status)"
-              docker logs d2e-webapi-init || true
-              exit 1
-            fi
-          done
 
       - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
         if: env.D2E_UNAVAILABLE != 'true'
