@@ -138,7 +138,7 @@ Deno.test("resolveModel: bedrock with IAM-shaped api_key JSON (accessKeyId/secre
   await assertRejects(
     () => resolveModel(ctx),
     Error,
-    "bedrock IAM credentials are not supported on the agents loop yet",
+    "bedrock IAM (access key/secret key) credentials are not supported",
   );
 });
 

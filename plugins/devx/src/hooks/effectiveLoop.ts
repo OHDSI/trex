@@ -5,27 +5,21 @@
 // (no React, no "@/..." aliases) so both the Vite frontend build and Deno can
 // import it directly.
 //
-// WHY claude-code and IAM-shaped bedrock are forced to legacy regardless of
-// the loop flag: the claude-code provider is the sidecar, a separate
-// execution engine, not a model provider — plugins/devx/agent/agent.ts's
-// resolveModel throws for it ("sidecar providers use the legacy endpoint"),
-// and /chat has no try/catch around that setup-phase call, so an uncaught
-// throw there surfaces as a bare, unparseable 500 (confirmed against
+// WHY claude-code is forced to legacy regardless of the loop flag: the
+// claude-code provider is the sidecar, a separate execution engine, not a
+// model provider — plugins/devx/agent/agent.ts's resolveModel throws for it
+// ("sidecar providers use the legacy endpoint"), and /chat has no try/catch
+// around that setup-phase call, so an uncaught throw there surfaces as a
+// bare, unparseable 500 (confirmed against
 // core/server/agents/service/handler.ts's /chat route) — not something a
-// frontend can gracefully detect and fall back from. resolveModel ALSO
-// throws for a bedrock row whose api_key JSON is IAM-shaped (accessKeyId/
-// secretAccessKey, no bearerToken): the agents loop only implements
-// bearer-token bedrock auth (see agent.ts's resolveModel comment). Same
-// "gate it before /chat ever sees it" posture as claude-code.
+// frontend can gracefully detect and fall back from.
 //
-// IAM detection uses the server-derived `authShape` hint (merge-gate
-// re-review: every GET response MASKS api_key — LEFT(...,8)||'...'||
-// RIGHT(...,4) — so client-side JSON sniffing of it can never match; the
-// server computes the shape from the RAW key before masking, see
-// functions/auth_shape.ts). The server-side resolveModel throw remains the
-// backstop for anything that slips past this gate (e.g. an older server
-// build that doesn't emit auth_shape yet, where this function can't detect
-// IAM and falls through).
+// IAM-shaped bedrock credentials are NOT routed here: that configuration is
+// simply unsupported (the owner decided not to implement IAM/SigV4 auth on
+// the agents loop) rather than something this client-side router steers
+// around. A user on bedrock with IAM-shaped credentials resolves to
+// "agents" like any other provider and hits agent.ts's resolveModel throw,
+// which tells them to switch to a bearer token.
 export type EffectiveLoop = "legacy" | "agents";
 
 // The loop a user gets when their settings/provider could NOT be read at all
@@ -49,18 +43,18 @@ export interface ResolveEffectiveLoopInput {
   // The active provider id (devx.provider_configs row, or the legacy
   // devx.settings row as fallback) — see api.ts's getActiveProviderConfig.
   provider: string | null | undefined;
-  // Server-derived, non-secret credential-shape hint (functions/
-  // auth_shape.ts). Only meaningful for provider === "bedrock".
-  authShape?: string | null;
 }
 
-export function resolveEffectiveLoop({ loop, provider, authShape }: ResolveEffectiveLoopInput): EffectiveLoop {
+export function resolveEffectiveLoop({ loop, provider }: ResolveEffectiveLoopInput): EffectiveLoop {
   // An absent flag is the DEFAULT, not a vote for legacy — without this the
   // cutover misses every user who has no devx.settings row (the fourth
   // hard-coded-default site, expressed as `=== "agents"` rather than the
   // string "legacy"). An explicit value still decides for itself.
   const explicit = typeof loop === "string" && loop.length > 0;
   const wantsAgents = explicit ? loop === "agents" : true;
-  const providerForcesLegacy = provider === "claude-code" || (provider === "bedrock" && authShape === "iam");
+  // claude-code (the sidecar) is the ONLY provider forced to legacy. IAM-shaped
+  // bedrock credentials are an unsupported configuration, not a routing
+  // decision — see the header comment above and agent.ts's resolveModel.
+  const providerForcesLegacy = provider === "claude-code";
   return wantsAgents && !providerForcesLegacy ? "agents" : "legacy";
 }

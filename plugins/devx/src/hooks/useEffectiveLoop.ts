@@ -1,9 +1,9 @@
 // task-u1: resolves the per-user devx.settings.loop flag into the actual
 // loop ChatPanel.tsx should render. Thin data-fetching wrapper — the actual
-// routing decision (and the rationale for forcing claude-code and
-// IAM-shaped bedrock users to legacy) lives in ./effectiveLoop.ts's
-// resolveEffectiveLoop, which is characterization-tested by the Deno suite
-// at plugins/devx/agent/lib/effective_loop.test.ts.
+// routing decision (and the rationale for forcing claude-code users to
+// legacy) lives in ./effectiveLoop.ts's resolveEffectiveLoop, which is
+// characterization-tested by the Deno suite at
+// plugins/devx/agent/lib/effective_loop.test.ts.
 import { useEffect, useState } from "react";
 import * as api from "@/lib/api";
 import { resolveEffectiveLoop, SETTINGS_FETCH_FAILURE_LOOP, type EffectiveLoop } from "./effectiveLoop";
@@ -25,7 +25,6 @@ export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
           loop: resolveEffectiveLoop({
             loop: settings?.loop,
             provider: active.provider,
-            authShape: active.auth_shape,
           }),
           resolved: true,
         });

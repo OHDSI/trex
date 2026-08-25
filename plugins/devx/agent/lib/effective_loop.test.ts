@@ -9,6 +9,13 @@
 //
 // Must pass unmodified against CURRENT logic: if any case here fails, the
 // routing assumption the whole eve-loop cutover rests on is wrong.
+//
+// Only provider === "claude-code" (the sidecar) is forced to legacy.
+// IAM-shaped bedrock credentials used to be a second forced-legacy case; the
+// owner decided that configuration is simply unsupported rather than worth
+// implementing, so it was removed from this gate — an IAM-shaped bedrock
+// user now resolves to "agents" like everyone else and fails loudly at
+// agent.ts's resolveModel instead.
 import { assert, assertEquals } from "jsr:@std/assert";
 import { resolveEffectiveLoop, SETTINGS_FETCH_FAILURE_LOOP } from "../../src/hooks/effectiveLoop.ts";
 
@@ -22,46 +29,24 @@ Deno.test("resolveEffectiveLoop: loop='agents' + claude-code -> 'legacy' (forced
   assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "claude-code" }), "legacy");
 });
 
-Deno.test("resolveEffectiveLoop: loop='agents' + bedrock/iam -> 'legacy' (forced)", () => {
-  assertEquals(
-    resolveEffectiveLoop({ loop: "agents", provider: "bedrock", authShape: "iam" }),
-    "legacy",
-  );
+// Inverted expectation (was 'legacy' (forced) before this decision): the
+// owner ruled IAM-shaped bedrock credentials are simply unsupported rather
+// than worth routing around, so this gate no longer branches on auth shape
+// at all. An IAM-shaped bedrock user now resolves to 'agents' like every
+// other non-claude-code provider and fails loudly at agent.ts's resolveModel
+// instead of being silently routed to the legacy loop.
+Deno.test("resolveEffectiveLoop: loop='agents' + bedrock/iam -> 'agents' (IAM bedrock is unsupported, not routed away)", () => {
+  assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "bedrock" }), "agents");
 });
 
 Deno.test("resolveEffectiveLoop: loop='agents' + bedrock/bearer -> 'agents'", () => {
-  assertEquals(
-    resolveEffectiveLoop({ loop: "agents", provider: "bedrock", authShape: "bearer" }),
-    "agents",
-  );
-});
-
-// Deliberate backstop for an older server build that doesn't emit
-// auth_shape yet: this function can't detect IAM in that case and falls
-// through to 'agents'. Pinned so that behaviour cannot drift silently.
-Deno.test("resolveEffectiveLoop: loop='agents' + bedrock with ABSENT auth_shape -> 'agents' (backstop)", () => {
   assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "bedrock" }), "agents");
-  assertEquals(
-    resolveEffectiveLoop({ loop: "agents", provider: "bedrock", authShape: undefined }),
-    "agents",
-  );
-  assertEquals(
-    resolveEffectiveLoop({ loop: "agents", provider: "bedrock", authShape: null }),
-    "agents",
-  );
 });
 
 Deno.test("resolveEffectiveLoop: loop='legacy' -> 'legacy' regardless of provider", () => {
   assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "anthropic" }), "legacy");
   assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "claude-code" }), "legacy");
-  assertEquals(
-    resolveEffectiveLoop({ loop: "legacy", provider: "bedrock", authShape: "bearer" }),
-    "legacy",
-  );
-  assertEquals(
-    resolveEffectiveLoop({ loop: "legacy", provider: "bedrock", authShape: "iam" }),
-    "legacy",
-  );
+  assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "bedrock" }), "legacy");
 });
 
 // R13: an ABSENT loop value means the user has no devx.settings row at all
@@ -76,15 +61,13 @@ Deno.test("resolveEffectiveLoop: missing/undefined loop -> 'agents' (matches V17
   assertEquals(resolveEffectiveLoop({ loop: "", provider: "anthropic" }), "agents");
 });
 
-// The provider gates still apply to a no-row user — absent does not mean
-// "force agents", it means "take the default", which the sidecar/IAM gates
-// then override exactly as they do for an explicit 'agents'.
+// The claude-code gate still applies to a no-row user — absent does not mean
+// "force agents", it means "take the default", which the sidecar gate then
+// overrides exactly as it does for an explicit 'agents'. bedrock (any auth
+// shape) is not gated, so it takes the default like anthropic/openai/google.
 Deno.test("resolveEffectiveLoop: missing loop + claude-code -> 'legacy' (provider gate still wins)", () => {
   assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "claude-code" }), "legacy");
-  assertEquals(
-    resolveEffectiveLoop({ loop: undefined, provider: "bedrock", authShape: "iam" }),
-    "legacy",
-  );
+  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "bedrock" }), "agents");
 });
 
 // An explicit value that is neither 'legacy' nor 'agents' cannot exist while

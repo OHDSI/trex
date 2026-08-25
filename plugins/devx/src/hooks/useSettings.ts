@@ -30,7 +30,7 @@ export function useSettings() {
       // PUT /settings' RETURNING clause deliberately omits the key columns, so
       // its response carries no api_key/auth_shape/key_status/is_plaintext.
       // Storing it verbatim would drop all four until the next page load —
-      // auth_shape gates the legacy loop (useEffectiveLoop.ts) and
+      // auth_shape is the credential-shape hint this Settings UI displays and
       // is_plaintext gates the encrypt-stored-keys offer, so both would
       // silently read as "not set" after any unrelated save. Refetch instead,
       // so what's in state is always the shape GET returns.

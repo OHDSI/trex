@@ -1,7 +1,7 @@
 // The eve loop and the legacy loop must produce the same prompt for the same
-// mode. Legacy is NOT being retired -- claude-code (sidecar) and IAM-shaped
-// bedrock users live there permanently (see useEffectiveLoop.ts) -- so this is
-// an ongoing invariant, not a migration check.
+// mode. Legacy is NOT being retired -- claude-code (sidecar) users live there
+// permanently (see useEffectiveLoop.ts) -- so this is an ongoing invariant,
+// not a migration check.
 import { assert, assertEquals } from "jsr:@std/assert";
 import { buildInstructions } from "../agent.ts";
 import { buildCoderContext } from "../../functions/coder_context.ts";

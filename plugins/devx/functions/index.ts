@@ -1393,8 +1393,9 @@ Deno.serve(async (req: Request) => {
       // Resolve through the encryption helper before masking/auth_shape —
       // once a row is encrypted the plaintext api_key column alone is NULL,
       // so deriving those straight from SQL would silently show "no key" for
-      // a row that has one (auth_shape "iam" gates the bedrock legacy-loop
-      // fallback in useEffectiveLoop.ts, so this isn't just cosmetic). Unlike
+      // a row that has one. auth_shape is a display-only hint (it does not
+      // gate the loop — see functions/auth_shape.ts), but it's still real
+      // signal for the Settings UI, so this isn't just cosmetic. Unlike
       // the coder-turn read sites above, a row this can't decrypt must not
       // take down the whole Settings page — degrade to "unknown" and log,
       // same posture as GET /provider-configs' resolveForDisplay.
@@ -1426,8 +1427,8 @@ Deno.serve(async (req: Request) => {
       // Mask API key. auth_shape is a derived, NON-SECRET hint (bearer/iam/
       // plain/none) computed from the raw key BEFORE masking — the masked
       // api_key is never valid JSON, so a client cannot derive the shape
-      // itself (useEffectiveLoop.ts gates bedrock-IAM users onto the legacy
-      // loop with it; see functions/auth_shape.ts).
+      // itself. It is a display-only hint for the Settings UI, not a loop
+      // gate (see functions/auth_shape.ts).
       row.auth_shape = deriveAuthShape(resolvedApiKey);
       row.api_key = maskKey(resolvedApiKey);
       row.key_status = keyStatus;

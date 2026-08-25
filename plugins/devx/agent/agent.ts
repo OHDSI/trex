@@ -153,12 +153,16 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   // this bedrock=bearer-only gap). Silently dropping IAM creds would swap in
   // whatever AWS_BEARER_TOKEN_BEDROCK happens to be set (or nothing at all,
   // producing a confusing downstream auth failure) — throw a clear,
-  // actionable error instead; useEffectiveLoop.ts routes IAM-shaped bedrock
-  // users to the legacy loop before this hook is ever reached, so reaching
-  // this throw in production means that client-side gate was bypassed or is
-  // out of sync, and failing loud here is strictly better than a silent
-  // wrong-credential turn (same "a thrown resolveModel fails the turn"
-  // posture as every other error path in this file).
+  // actionable error instead. IAM-shaped bedrock credentials are a decided
+  // unsupported configuration (not implementing SigV4 auth on this loop was
+  // a deliberate call, not an oversight to fix later) — this throw is now
+  // the SINGLE enforcement point for that decision, so reaching it in
+  // production is the NORMAL path for a user on IAM-shaped bedrock creds,
+  // not a sign that some other gate was bypassed. It must stay loud (same
+  // "a thrown resolveModel fails the turn" posture as every other error
+  // path in this file): a clear, actionable error a real user will see is
+  // far better than silently swapping in whatever AWS_BEARER_TOKEN_BEDROCK
+  // happens to be set to.
   let apiKey: string | undefined = resolvedApiKey ?? undefined;
   if (provider === "bedrock" && resolvedApiKey) {
     let parsed: unknown;
@@ -186,7 +190,8 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
         apiKey = creds.bearerToken;
       } else if (creds.accessKeyId || creds.secretAccessKey) {
         throw new Error(
-          "bedrock IAM credentials are not supported on the agents loop yet — use bearer token or the legacy loop",
+          "bedrock IAM (access key/secret key) credentials are not supported — " +
+            "generate a bedrock bearer token and update this provider's credentials to use it",
         );
       } else {
         // Valid JSON object but NEITHER shape (e.g. {"bearerToken": ""} or

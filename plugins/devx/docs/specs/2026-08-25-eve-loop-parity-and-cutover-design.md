@@ -234,9 +234,7 @@ needed — `src/hooks/useEffectiveLoop.ts` already implements the intended split
 
 ```ts
 const wantsAgents = settings?.loop === "agents";
-const providerForcesLegacy =
-  active.provider === "claude-code" ||
-  (active.provider === "bedrock" && active.auth_shape === "iam");
+const providerForcesLegacy = active.provider === "claude-code";
 // effective = wantsAgents && !providerForcesLegacy ? "agents" : "legacy"
 ```
 
@@ -244,13 +242,20 @@ So after V17:
 
 | Provider | Loop | Engine |
 |----------|------|--------|
-| anthropic / openai / google / bedrock (bearer) | `agents` | eve (`core/…/runner.ts`) |
+| anthropic / openai / google / bedrock (any auth shape) | `agents` | eve (`core/…/runner.ts`) |
 | **claude-code** | `legacy` (forced) | **OAuth sidecar** (`fn-claude-code/server.js`) |
-| bedrock (IAM-shaped key) | `legacy` (forced) | legacy AI-SDK loop |
 
-`agent/agent.ts`'s `resolveModel` throws for both forced cases as a server-side
-backstop, so a stale client that bypasses the gate fails loudly rather than
-running a wrong-credential turn.
+IAM-shaped bedrock credentials (accessKeyId/secretAccessKey rather than a
+bearer token) are **not a supported configuration** — the owner decided not
+to implement SigV4 auth on the agents loop. Such a user still routes to
+`agents` like any other bedrock user; `agent/agent.ts`'s `resolveModel` throws
+a clear, actionable error telling them to switch to a bearer token. This is
+the single enforcement point for that decision, not a backstop behind a
+client-side gate.
+
+`agent/agent.ts`'s `resolveModel` also throws for the claude-code case as a
+server-side backstop, so a stale client that bypasses the claude-code gate
+fails loudly rather than running against a sidecar-shaped `ModelSpec`.
 
 **eve cannot host the sidecar, and this design does not attempt it.** eve's
 `ModelSpec` is a model+credentials seam (`provider ∈ {anthropic, openai,
@@ -262,7 +267,7 @@ would mean delegating an entire turn to an external engine: a new execution
 backend in core, not a provider adapter. Out of scope.
 
 **Consequence: the legacy loop is not being retired.** It is the permanent home
-for sidecar and bedrock-IAM users. Prompt equivalence (§5) is therefore an
+for sidecar (claude-code) users. Prompt equivalence (§5) is therefore an
 ongoing invariant, not a transitional concern — which is why the skills listing
 and mode handling are fixed in the shared `buildCoderContext` rather than only
 on the eve side.
@@ -285,10 +290,12 @@ Every existing row moves. The column is `NOT NULL DEFAULT 'legacy'`, so nothing
 distinguishes a deliberate opt-out from an untouched default; this was decided
 explicitly rather than inferred.
 
-Setting a claude-code or bedrock-IAM user's row to `'agents'` is harmless and
-deliberate: §7's gate resolves them to `legacy` regardless, so they keep the
-sidecar. Storing `'agents'` uniformly means that if such a user later switches
-to an API-key provider, they land on eve without a second migration.
+Setting a claude-code user's row to `'agents'` is harmless and deliberate:
+§7's gate resolves them to `legacy` regardless, so they keep the sidecar.
+Storing `'agents'` uniformly means that if such a user later switches to an
+API-key provider, they land on eve without a second migration. A bedrock user
+with IAM-shaped credentials is NOT covered by this gate — they land on
+`agents` and must switch to a bearer token, per §7.
 
 ## Testing
 
@@ -317,10 +324,11 @@ to an API-key provider, they land on eve without a second migration.
 - `agent/lib/attachments.test.ts` — attachments materialize into the resolved
   workspace and only paths reach the prompt.
 - `src/hooks/useEffectiveLoop` — with `settings.loop === 'agents'` (the post-V17
-  state), a `claude-code` provider still resolves to `legacy`, and a
-  bedrock row with `auth_shape === 'iam'` still resolves to `legacy`. This is
+  state), a `claude-code` provider still resolves to `legacy`. This is
   existing behaviour; the test pins it so the cutover cannot silently route
-  sidecar users at eve.
+  sidecar users at eve. A bedrock row with `auth_shape === 'iam'` resolves to
+  `agents` like any other bedrock user — that configuration is unsupported and
+  fails loudly at `agent.ts`'s `resolveModel`, not at this routing layer.
 - Existing `parity.test.ts`, `prompt_divergence.test.ts`, `parity_smoke.test.ts`
   keep passing unchanged.
 
@@ -346,7 +354,7 @@ users, so any commit in 1-5 can ship alone if the cutover slips.
 | Fail-closed tool hooks break someone's fail-open hook | Behaviour change stated in the PR; the `CHECK` constraint lets an affected user return to `'legacy'` |
 | Prompt equivalence test freezes legacy defects into eve | The test asserts *equivalence*, so a legacy defect fixed later must be fixed in both — which is the intent |
 | Core hook surface grows for one consumer | All four are additive and ignored by real eve; each is a seam any future agent plugin needs, not devx-specific |
-| Legacy loop is assumed dead and left to rot | It is not being retired (§7) — sidecar and bedrock-IAM users live there permanently. Prompt work lands in the shared `buildCoderContext`, and `prompt_divergence.test.ts` keeps guarding all four dispatch paths |
+| Legacy loop is assumed dead and left to rot | It is not being retired (§7) — sidecar (claude-code) users live there permanently. Prompt work lands in the shared `buildCoderContext`, and `prompt_divergence.test.ts` keeps guarding all four dispatch paths |
 
 ## Repository constraint
 

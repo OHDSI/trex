@@ -191,10 +191,10 @@ export interface ActiveProviderConfig {
 // surfaces as a bare uncaught 500, not a parseable error. Read-only; never
 // used for anything security-sensitive, same posture as the server-side
 // fallback it mirrors. Also carries `auth_shape` (final-007 review finding
-// #4 + merge-gate re-review) so useEffectiveLoop.ts can detect IAM-shaped
-// bedrock credentials — resolveModel throws for those too (agents loop is
-// bearer-token-only), the exact same "gate it before /chat" reasoning as the
-// claude-code case above.
+// #4 + merge-gate re-review): a non-secret, display-only credential-shape
+// hint, NOT a loop gate — IAM-shaped bedrock credentials are an unsupported
+// configuration that resolveModel throws a clear, actionable error for
+// (agent.ts), not something the client routes around.
 export async function getActiveProviderConfig(): Promise<ActiveProviderConfig> {
   const configs = await getProviderConfigs().catch(() => [] as ProviderConfigRecord[]);
   const active = configs.find((c) => c.is_active);
