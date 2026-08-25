@@ -90,11 +90,20 @@ export function AgentsChatPanel({
         />
       )}
       <ChatInput
-        onSend={(message) => {
-          send(message, {
-            visualEdit: visualEditContext || undefined,
-            selectedComponents: selectedComponents && selectedComponents.length > 0 ? selectedComponents : undefined,
-          });
+        onSend={(message, attachments) => {
+          // ChatInput's SECOND argument used to be dropped here, which is
+          // why nothing ever wrote metadata.attachments and the coder never
+          // saw a dragged-in screenshot. useAgentsChat uploads the files and
+          // folds {url, name} references into the turn metadata that
+          // agent/agent.ts's buildUserMessage materializes.
+          send(
+            message,
+            {
+              visualEdit: visualEditContext || undefined,
+              selectedComponents: selectedComponents && selectedComponents.length > 0 ? selectedComponents : undefined,
+            },
+            attachments?.map((a) => a.file),
+          );
           onClearVisualEditContext?.();
           onClearSelectedComponents?.();
         }}

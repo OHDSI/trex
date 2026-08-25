@@ -17,6 +17,7 @@ import type {
   SlackAllowlistEntry,
   ModelInfo,
 } from "./types";
+import type { UploadedAttachment } from "@/hooks/turnMetadata";
 
 // task-u1: exported so useAgentsChat.ts can build the Authorization header
 // for the eve/agents runtime's /chat endpoint (a different plugin mount than
@@ -48,6 +49,30 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`API error ${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+// Attachments
+// Uploads one picked file to POST /chats/:id/attachments (functions/routes/
+// attachment_routes.ts) and returns the stored row. Deliberately NOT routed
+// through apiFetch: that helper forces `Content-Type: application/json`,
+// which would stop the browser emitting the multipart boundary this route
+// requires. Used by useAgentsChat.ts to turn ChatInput's File objects into
+// the {url, name} metadata agent/agent.ts's buildUserMessage consumes.
+export async function uploadAttachment(chatId: string, file: File): Promise<UploadedAttachment> {
+  const token = getAuthToken();
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/chats/${chatId}/attachments`, {
+    method: "POST",
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: form,
     credentials: "include",
   });
   if (!res.ok) {
