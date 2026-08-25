@@ -64,6 +64,65 @@ Deno.test("a blocking PreToolUse row denies the tool call", async () => {
   }
 });
 
+// Stubs the same globalThis.Trex seam as the test above, but drives
+// executeCommandHook's OWN exit_code branch (hooks.ts:183-196) directly --
+// the command "runs" and exits with the given code, with no stdout at all,
+// isolating that branch from the separate stdout-JSON deny path already
+// covered above.
+function stubTrexExit(exitCode: number, restore: { fn: () => void }) {
+  const originalTrex = (globalThis as any).Trex;
+  (globalThis as any).Trex = {
+    databaseManager: () => ({
+      getConnection: () => ({
+        connection: {
+          execute: async () => [{ column0: JSON.stringify({ exit_code: exitCode, output: "" }) }],
+          close: () => {},
+        },
+      }),
+    }),
+  };
+  restore.fn = () => {
+    (globalThis as any).Trex = originalTrex;
+  };
+}
+
+// Claude Code hook convention: exit code 2 means "block". Before this fix,
+// hooks.ts's exit_code branch collapsed EVERY non-zero exit (2 included)
+// into {action:"approve"} -- a conventional blocking hook script was
+// silently approved. Removing the `result.exit_code === 2` branch (or
+// merging it back into the generic non-zero branch) makes this test fail.
+Deno.test("an exit-2 command hook denies the tool call", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(2, restore);
+  try {
+    const ctx = ctxWithHooks([
+      { id: "h1", event: "PreToolUse", matcher: "Bash", hook_type: "command", command: "bash -c block", enabled: true, sort_order: 0 },
+    ]);
+    const decision = await onToolCall({ name: "Bash", input: { command: "rm -rf /" } }, ctx);
+    assertEquals(decision.allow, false);
+  } finally {
+    restore.fn();
+  }
+});
+
+// Pins the deliberately-UNCHANGED half: any non-zero exit code OTHER than 2
+// is a non-blocking hook failure and still approves -- only exit 2 is a
+// deliberate block signal. Changing the `=== 2` check to `!== 0` (i.e.
+// "any failure denies") makes this test fail.
+Deno.test("a non-zero-but-not-2 exit code command hook still approves (not a block signal)", async () => {
+  const restore = { fn: () => {} };
+  stubTrexExit(1, restore);
+  try {
+    const ctx = ctxWithHooks([
+      { id: "h1", event: "PreToolUse", matcher: "Bash", hook_type: "command", command: "bash -c fails", enabled: true, sort_order: 0 },
+    ]);
+    const decision = await onToolCall({ name: "Bash", input: { command: "ls" } }, ctx);
+    assertEquals(decision.allow, true);
+  } finally {
+    restore.fn();
+  }
+});
+
 Deno.test("a non-matching PreToolUse row leaves the call alone", async () => {
   const ctx = ctxWithHooks([
     { id: "h1", event: "PreToolUse", matcher: "Write", hook_type: "command", command: "exit 2", enabled: true, sort_order: 0 },
