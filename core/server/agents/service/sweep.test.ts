@@ -34,10 +34,14 @@ Deno.test("startStaleTurnSweep: reaps every session the store reports as stale, 
   // the due timer — the interval callback here has multiple sequential
   // awaits (list, then reap-per-session), so an extra flush is needed for
   // the whole async body to settle before asserting.
+  // The startup sweep runs immediately, so settle it before advancing time.
+  await time.runMicrotasks();
+  assertEquals(reaped, ["s-1", "s-2"], "startup sweep should have run once");
   await time.tickAsync(1000);
   await time.runMicrotasks();
-  assertEquals(reaped, ["s-1", "s-2"]);
-  assertEquals(notified, [["s-1", 1], ["s-2", 1]]);
+  // ...then the interval tick sweeps again.
+  assertEquals(reaped, ["s-1", "s-2", "s-1", "s-2"]);
+  assertEquals(notified, [["s-1", 1], ["s-2", 1], ["s-1", 1], ["s-2", 1]]);
   handle.stop();
 });
 
@@ -78,9 +82,8 @@ Deno.test("startStaleTurnSweep: a failure listing sessions on one tick doesn't k
     intervalMs: 1000,
     onReap: (...a) => notified.push(a),
   });
-  await time.tickAsync(1000); // tick 1: throws, swallowed
-  await time.runMicrotasks();
-  await time.tickAsync(1000); // tick 2: recovers
+  await time.runMicrotasks();          // startup sweep: throws, swallowed
+  await time.tickAsync(1000);          // interval tick: recovers
   await time.runMicrotasks();
   assertEquals(notified.length, 1);
   handle.stop();
@@ -93,10 +96,11 @@ Deno.test("stop() clears the interval — no further ticks reap anything", async
     listSessionsWithStaleRunningTurns: async () => { calls++; return []; },
   });
   const handle = startStaleTurnSweep(store, { plugin: "toy-agent", agent: "toy", intervalMs: 1000 });
-  await time.tickAsync(1000);
+  await time.runMicrotasks();          // startup sweep (call 1)
+  await time.tickAsync(1000);          // interval tick (call 2)
   handle.stop();
   await time.tickAsync(5000);
-  assertEquals(calls, 1);
+  assertEquals(calls, 2);
 });
 
 // Fix 5: nothing above asserts the actual staleMs VALUE threaded into
@@ -116,9 +120,13 @@ Deno.test("startStaleTurnSweep: omitting staleMs defaults to the 2-hour threshol
   // default — if staleMs ever fell back to intervalMs (the exact regression
   // commit cfcf5a8 fixed), this would catch it.
   const handle = startStaleTurnSweep(store, { plugin: "toy-agent", agent: "toy", intervalMs: 1000 });
-  await time.tickAsync(1000);
+  await time.runMicrotasks();   // startup sweep
+  await time.tickAsync(1000);   // interval tick
   await time.runMicrotasks();
-  assertEquals(seenStaleMs, [2 * 60 * 60 * 1000]);
+  // Assert the invariant (every call used the 2h default) rather than a call
+  // count, so this stays honest whether or not a startup sweep is in play.
+  assertEquals(seenStaleMs.length > 0, true, "sweep never called the store");
+  assertEquals(seenStaleMs.every((v) => v === 2 * 60 * 60 * 1000), true, `saw ${seenStaleMs}`);
   handle.stop();
 });
 
@@ -137,9 +145,33 @@ Deno.test("startStaleTurnSweep: an explicit staleMs is threaded through to both 
     intervalMs: 1000,
     staleMs: explicitStaleMs,
   });
-  await time.tickAsync(1000);
+  await time.runMicrotasks();   // startup sweep
+  await time.tickAsync(1000);   // interval tick
   await time.runMicrotasks();
-  assertEquals(seenListStaleMs, [explicitStaleMs]);
-  assertEquals(seenReapStaleMs, [explicitStaleMs]);
+  assertEquals(seenListStaleMs.length > 0 && seenReapStaleMs.length > 0, true, "sweep never called the store");
+  assertEquals(seenListStaleMs.every((v) => v === explicitStaleMs), true, `list saw ${seenListStaleMs}`);
+  assertEquals(seenReapStaleMs.every((v) => v === explicitStaleMs), true, `reap saw ${seenReapStaleMs}`);
+  handle.stop();
+});
+
+// The startup sweep exists because a worker crash/redeploy mid-turn is the
+// dominant way turns are orphaned, and a restart is exactly when the previous
+// process's orphans are sitting there — waiting a full interval before the
+// first sweep delays recovery precisely when it matters most.
+Deno.test("startStaleTurnSweep: sweeps once at startup, before any interval has elapsed", async () => {
+  using time = new FakeTime();
+  const reaped: string[] = [];
+  const store = fakeStore({
+    listSessionsWithStaleRunningTurns: async () => ["orphan-from-last-boot"],
+    reapStaleTurns: async (sessionId: string) => { reaped.push(sessionId); return 1; },
+  });
+  const handle = startStaleTurnSweep(store, {
+    plugin: "toy-agent",
+    agent: "toy",
+    intervalMs: 10 * 60 * 1000, // a full interval away — nothing should depend on it
+  });
+  // No tickAsync: time has NOT advanced. Only the startup sweep can have run.
+  await time.runMicrotasks();
+  assertEquals(reaped, ["orphan-from-last-boot"]);
   handle.stop();
 });

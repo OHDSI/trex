@@ -12,6 +12,14 @@ import { createGatewaySigner, DiscordGatewayClient, gatewayModeEnabled } from ".
 import { createSlackGatewaySigner, SlackGatewayClient } from "../agents/gateway/slack.ts";
 import { copyDirRecursive } from "./utils.ts";
 import { packsForAgent, stageSkillPacks, type SkillPackEntry } from "./skill-packs.ts";
+import { STALE_TURN_MS } from "../agents/service/turn-lifetime.ts";
+
+// How long an agent worker may live. Imported from STALE_TURN_MS rather than
+// restated, so raising one without the other is impossible: a worker outliving
+// the stale-turn threshold would only keep alive a turn the sweep has already
+// reaped, and a worker dying before it reintroduces the silent-drop this value
+// exists to prevent. See the call site in addAgentsPlugin.
+export const AGENT_WORKER_TIMEOUT_MS = STALE_TURN_MS;
 
 export interface AgentEntry {
   name: string;
@@ -507,6 +515,20 @@ export async function addAgentsPlugin(
         {
           function: `/agents/${entry.name}`,
           allowHostFsAccess: true,
+          // An agent turn is not a request/response function. A claw coding
+          // turn makes several askCodeAgent hand-offs at 5-12 minutes each, so
+          // it routinely outlives _callWorker's 30-minute default: observed
+          // turns were killed at 29m01s and 23m25s with the runtime logging
+          // `reason: "EarlyDrop"`, while every turn that completed ran under 12
+          // minutes. The drop is silent to the turn — the worker dies before
+          // finishTurn runs, so the turn stays `running` and every later
+          // message on that session queues behind it until the stale sweep.
+          //
+          // Matches service/handler.ts's STALE_TURN_MS: past that the sweep
+          // declares the turn abandoned and reaps it anyway, so a worker living
+          // longer could only keep alive a turn the rest of the system has
+          // already given up on.
+          workerTimeoutMs: AGENT_WORKER_TIMEOUT_MS,
           // Channel subpaths ({basePath}/eve/v1/<channelId>/*) bypass proxy auth;
           // the worker enforces adapter signature verification instead. session/
           // chat/health/info keep authContext+pluginAuthz. See the pattern's doc.
