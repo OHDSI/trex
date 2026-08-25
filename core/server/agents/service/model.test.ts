@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -144,4 +144,82 @@ Deno.test("cacheProviderOptions returns a promptCacheKey only for openai models"
   assertEquals(cacheProviderOptions({ provider: "anthropic.messages" }, "k"), {});
   // No key → nothing to route on, even for openai.
   assertEquals(cacheProviderOptions({ provider: "openai.responses" }, ""), {});
+});
+
+// withToolCachePoint (Task 14): the cache breakpoint moves from the system
+// message (withSystemCachePoint, above) onto the LAST CORE tool, so that
+// appending activated tools after it never shifts what's cached — only the
+// content up to and including the marked tool is hashed for the cache key.
+
+Deno.test("withToolCachePoint marks the last core tool for anthropic", () => {
+  // NOTE: model.provider for the real @ai-sdk/anthropic provider is
+  // "anthropic.messages" (see isAnthropicModel's comment above) — the task
+  // brief's sample test used a bare "anthropic", which isAnthropicModel
+  // never matches. Corrected here.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  const names = Object.keys(out);
+  assertEquals(names, ["Read", "Bash", "KBSearch"]);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { anthropic: { cacheControl: { type: "ephemeral" } } },
+  );
+  // The marker sits ONLY on the last core tool — never on an earlier core
+  // tool and never on an appended activated tool (that would defeat the
+  // whole point: activation must not change what's inside the cached span).
+  assertEquals((out.Read as { providerOptions?: unknown }).providerOptions, undefined);
+  assertEquals((out.KBSearch as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint marks the last core tool for bedrock", () => {
+  const model = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { bedrock: { cachePoint: { type: "default" } } },
+  );
+  assertEquals((out.Read as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint adds no marker for openai/google — stable ordering only", () => {
+  // OpenAI does automatic prefix caching (see cacheProviderOptions' comment)
+  // and Google gets nothing at all; both must see the core tools followed by
+  // activated tools, untouched, with no providerOptions key added anywhere.
+  for (const model of [{ provider: "openai.responses" }, { provider: "google" }, { provider: undefined }]) {
+    const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+    assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch"]);
+    for (const def of Object.values(out)) {
+      assertEquals((def as { providerOptions?: unknown }).providerOptions, undefined);
+    }
+  }
+});
+
+Deno.test("withToolCachePoint appends activated tools after core, unmarked, in given order", () => {
+  const model = { provider: "anthropic.messages" };
+  const out = withToolCachePoint(
+    model,
+    [["Read", {}], ["Bash", {}]] as never,
+    [["KBSearch", {}], ["FigmaPullMockups", {}]] as never,
+  );
+  assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch", "FigmaPullMockups"]);
+  assertEquals((out.KBSearch as { providerOptions?: unknown }).providerOptions, undefined);
+  assertEquals((out.FigmaPullMockups as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint handles an empty core list without crashing", () => {
+  const model = { provider: "anthropic.messages" };
+  const out = withToolCachePoint(model, [] as never, [["KBSearch", {}]] as never);
+  assertEquals(Object.keys(out), ["KBSearch"]);
+});
+
+Deno.test("serialized core prefix is byte-identical across activation", () => {
+  // The point of the whole design: activating a deferred tool mid-session
+  // must never change the bytes of the cached TOOLS+SYSTEM prefix, or every
+  // subsequent request pays a full cache-write instead of a cache-read.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const before = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+  const after = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  const prefix = (o: Record<string, unknown>) =>
+    JSON.stringify(Object.fromEntries(Object.entries(o).filter(([n]) => n !== "KBSearch")));
+  assertEquals(prefix(before), prefix(after));
 });

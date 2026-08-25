@@ -263,3 +263,33 @@ export function withSystemCachePoint(model: any, system: string): SystemPrompt {
   }
   return system;
 }
+
+// Task 13/14: the deferred-tool-loading cache breakpoint. `core` tools
+// (never deferred, or deferred-but-not-yet-activated is impossible by
+// construction — see partitionTools in context/toolsplit.ts) come first and
+// are byte-identical across a session regardless of what gets activated;
+// `activated` tools are appended AFTER the breakpoint. For anthropic/bedrock,
+// the cache marker moves from the system message onto the LAST core tool
+// instead — placing it on `system` (as withSystemCachePoint does today)
+// would hash newly-appended activated tools into the same cached span the
+// moment one is activated, forcing a full cache-write on every subsequent
+// turn. Marking the last core tool instead means the cached span is exactly
+// "tools[0..lastCore]", unaffected by anything appended after it. OpenAI
+// gets no marker (automatic prefix caching, see cacheProviderOptions above);
+// google and any other provider get no marker either — stable ordering is
+// the only requirement for those.
+// deno-lint-ignore no-explicit-any
+export function withToolCachePoint<T>(model: any, core: [string, T][], activated: [string, T][]): Record<string, T> {
+  const out: Record<string, T> = {};
+  const lastIdx = core.length - 1;
+  for (const [i, [name, def]] of core.entries()) {
+    const isLast = i === lastIdx;
+    out[name] = isLast && isAnthropicModel(model)
+      ? { ...def, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } }
+      : isLast && isBedrockModel(model)
+      ? { ...def, providerOptions: { bedrock: { cachePoint: { type: "default" } } } }
+      : def;
+  }
+  for (const [name, def] of activated) out[name] = def;
+  return out;
+}

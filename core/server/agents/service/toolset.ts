@@ -4,7 +4,7 @@
 // endpoints cannot drift. Spec §3 (skills/subagents) + §4 (extensions).
 // deno-lint-ignore-file no-explicit-any
 import { streamText, tool, jsonSchema, stepCountIs } from "ai";
-import { cacheProviderOptions, resolveModel, withSystemCachePoint } from "./model.ts";
+import { cacheProviderOptions, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
@@ -14,6 +14,7 @@ import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
+import { partitionTools } from "./context/toolsplit.ts";
 
 export interface ToolBuildCtx {
   agent: LoadedAgent;
@@ -65,6 +66,13 @@ export interface ToolBuildCtx {
   // deterministic without a live server. Undefined in production → the
   // provider's real SDK-backed connect / global fetch.
   connectionOpts?: ConnectionProviderOpts;
+  // Names of this session's deferred tools (agent.config.context.deferredTools)
+  // that have already been activated (e.g. via ToolSearch — wired by a later
+  // task alongside store.activateTools). Undefined/omitted is the same as
+  // "none activated yet", not an error — callers that never wire session
+  // activation state (or an agent with no deferredTools at all) simply never
+  // see a deferred tool withheld-then-revealed.
+  activatedTools?: string[];
 }
 
 export function buildSystemPrompt(agent: LoadedAgent, metadata?: unknown): string {
@@ -558,6 +566,22 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   // call in runSubagent (depth 1) — no extra plumbing needed.
   for (const name of Object.keys(out)) {
     out[name] = wrapToolWithCap(out[name], agent.config.context);
+  }
+
+  // Step 6: deferred-tool withholding + cache breakpoint (Tasks 13/14).
+  // Gated on deferredTools actually being non-empty: every existing agent
+  // defaults to deferredTools: [] (DEFAULT_CONTEXT_CONFIG), and for that
+  // case this step must be a no-op producing the EXACT SAME `out` as before
+  // — partitionTools/withToolCachePoint are new mechanism, and unconditionally
+  // running them would put a fresh providerOptions.cacheControl/cachePoint
+  // marker on the last tool of every anthropic/bedrock-backed agent, a
+  // behaviour change never requested for agents that defer nothing.
+  const { deferredTools } = agent.config.context;
+  if (deferredTools.length > 0) {
+    const { core, activated } = partitionTools(out, ctx.activatedTools ?? [], deferredTools);
+    const withBreakpoint = withToolCachePoint(ctx.model, core, activated);
+    for (const name of Object.keys(out)) delete out[name];
+    Object.assign(out, withBreakpoint);
   }
 
   return out;
