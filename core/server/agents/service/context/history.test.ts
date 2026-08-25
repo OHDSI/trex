@@ -1,9 +1,11 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert";
 import {
   assembleHistory,
   ensureToolResultsPresent,
   SYNTHETIC_RESULT_TEXT,
+  type AssistantPart,
   type ModelMessage,
+  type ToolResultPart,
   type TurnRow,
 } from "./history.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./budget.ts";
@@ -78,4 +80,30 @@ Deno.test("ensureToolResultsPresent leaves well-formed history untouched", () =>
     { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "A", output: "ok" }] },
   ];
   assertEquals(ensureToolResultsPresent(msgs), msgs);
+});
+
+Deno.test("assembleHistory applies fresh cap to recent turns and stale cap to older", () => {
+  const big = "x".repeat(50_000);
+  const mk = (n: string): TurnRow => turn(n, [
+    { kind: "tool-call", name: "Bash", payload: { toolCallId: `c${n}`, input: {} } },
+    { kind: "tool-result", name: "Bash", payload: { toolCallId: `c${n}`, output: big } },
+  ]);
+  const turns = [mk("1"), mk("2"), mk("3"), mk("4"), mk("5")];
+  const cfg = { ...DEFAULT_CONTEXT_CONFIG, freshTurns: 3, freshToolOutputChars: 20_000, staleToolOutputChars: 2_000 };
+  const msgs = assembleHistory(turns, cfg);
+
+  const outputs = msgs.filter((m) => m.role === "tool")
+    .map((m) => String((m.content as ToolResultPart[])[0].output));
+
+  // turns 1 and 2 are stale, 3-5 are fresh
+  assertEquals(outputs[0].includes("original length: 50000 chars"), true);
+  assert(outputs[0].length < 3_000, "stale output not tightly capped");
+  assert(outputs[4].length > 19_000, "fresh output over-truncated");
+});
+
+Deno.test("assembleHistory does not truncate text parts", () => {
+  const big = "y".repeat(50_000);
+  const turns = [turn("go", [{ kind: "text", name: null, payload: { text: big } }])];
+  const msgs = assembleHistory(turns, DEFAULT_CONTEXT_CONFIG);
+  assertEquals((msgs[1].content as AssistantPart[])[0], { type: "text", text: big });
 });

@@ -4,6 +4,7 @@
 // steps were replayed to the UI but never sent back to the model, so turn 2
 // had no idea what turn 1's tools actually did.
 import type { ContextConfig } from "./budget.ts";
+import { truncateMiddle } from "./truncate.ts";
 
 export interface StepRow {
   kind: string;
@@ -27,9 +28,13 @@ export type ModelMessage =
   | { role: "assistant"; content: AssistantPart[] }
   | { role: "tool"; content: ToolResultPart[] };
 
-export function assembleHistory(turns: TurnRow[], _config: ContextConfig): ModelMessage[] {
+export function assembleHistory(turns: TurnRow[], config: ContextConfig): ModelMessage[] {
   const msgs: ModelMessage[] = [];
-  for (const t of turns) {
+  // Last `freshTurns` turns (inclusive, counting back from the most recent)
+  // keep near-full tool output; everything older is squeezed hard — recent
+  // context matters far more to the model than a stale tool dump.
+  const freshFrom = Math.max(0, turns.length - config.freshTurns);
+  for (const [turnIndex, t] of turns.entries()) {
     msgs.push({ role: "user", content: typeof t.message === "string" ? t.message : JSON.stringify(t.message) });
     for (const s of t.steps) {
       const p = (s.payload ?? {}) as Record<string, unknown>;
@@ -41,9 +46,14 @@ export function assembleHistory(turns: TurnRow[], _config: ContextConfig): Model
           content: [{ type: "tool-call", toolCallId: String(p.toolCallId), toolName: s.name ?? "", input: p.input }],
         });
       } else if (s.kind === "tool-result") {
+        const cap = turnIndex >= freshFrom ? config.freshToolOutputChars : config.staleToolOutputChars;
+        const raw = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
         msgs.push({
           role: "tool",
-          content: [{ type: "tool-result", toolCallId: String(p.toolCallId), toolName: s.name ?? "", output: p.output }],
+          content: [{
+            type: "tool-result", toolCallId: String(p.toolCallId),
+            toolName: s.name ?? "", output: truncateMiddle(raw, cap),
+          }],
         });
       }
     }
