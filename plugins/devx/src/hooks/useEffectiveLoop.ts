@@ -6,7 +6,7 @@
 // at plugins/devx/agent/lib/effective_loop.test.ts.
 import { useEffect, useState } from "react";
 import * as api from "@/lib/api";
-import { resolveEffectiveLoop, type EffectiveLoop } from "./effectiveLoop";
+import { resolveEffectiveLoop, SETTINGS_FETCH_FAILURE_LOOP, type EffectiveLoop } from "./effectiveLoop";
 
 export type { EffectiveLoop };
 
@@ -31,8 +31,14 @@ export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
         });
       })
       .catch((err) => {
+        // A FAILED fetch is not the same as an ABSENT settings row. A user
+        // with no row resolves to "agents" (resolveEffectiveLoop, matching
+        // V17's column default); a user whose settings/provider we could not
+        // read at all falls back to "legacy", because they may be on
+        // `claude-code` — the sidecar, for which eve's resolveModel throws —
+        // and we have no way to tell. See SETTINGS_FETCH_FAILURE_LOOP.
         console.error("useEffectiveLoop: failed to resolve settings/provider, defaulting to legacy:", err);
-        if (!cancelled) setState({ loop: "legacy", resolved: true });
+        if (!cancelled) setState({ loop: SETTINGS_FETCH_FAILURE_LOOP, resolved: true });
       });
     return () => {
       cancelled = true;

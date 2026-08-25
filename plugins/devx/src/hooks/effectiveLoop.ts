@@ -28,9 +28,23 @@
 // IAM and falls through).
 export type EffectiveLoop = "legacy" | "agents";
 
+// The loop a user gets when their settings/provider could NOT be read at all
+// (useEffectiveLoop's `.catch`). Deliberately NOT the same as an ABSENT
+// `loop` value, which resolves to "agents" below: a user whose provider row
+// we failed to fetch may be on `claude-code`, for which eve's resolveModel
+// throws — so an unreadable configuration must degrade to the loop that
+// works for EVERY provider, while a merely-unset flag follows V17's new
+// column default. Exported so the distinction is pinned by a test rather
+// than living only as a literal inside a React `.catch`.
+export const SETTINGS_FETCH_FAILURE_LOOP: EffectiveLoop = "legacy";
+
 export interface ResolveEffectiveLoopInput {
-  // devx.settings.loop, as returned by GET /settings. Absent/anything other
-  // than "agents" is treated as "legacy" (matches the DB column default).
+  // devx.settings.loop, as returned by GET /settings. ABSENT (null/undefined/
+  // empty — the user has no devx.settings row at all, which
+  // provider_config_routes.ts allows: a user can be fully configured through
+  // devx.provider_configs alone) resolves to "agents", matching the column
+  // default V17__loop_default_agents.sql set. Any other explicit value that
+  // isn't "agents" is "legacy".
   loop: string | null | undefined;
   // The active provider id (devx.provider_configs row, or the legacy
   // devx.settings row as fallback) — see api.ts's getActiveProviderConfig.
@@ -41,7 +55,12 @@ export interface ResolveEffectiveLoopInput {
 }
 
 export function resolveEffectiveLoop({ loop, provider, authShape }: ResolveEffectiveLoopInput): EffectiveLoop {
-  const wantsAgents = loop === "agents";
+  // An absent flag is the DEFAULT, not a vote for legacy — without this the
+  // cutover misses every user who has no devx.settings row (the fourth
+  // hard-coded-default site, expressed as `=== "agents"` rather than the
+  // string "legacy"). An explicit value still decides for itself.
+  const explicit = typeof loop === "string" && loop.length > 0;
+  const wantsAgents = explicit ? loop === "agents" : true;
   const providerForcesLegacy = provider === "claude-code" || (provider === "bedrock" && authShape === "iam");
   return wantsAgents && !providerForcesLegacy ? "agents" : "legacy";
 }

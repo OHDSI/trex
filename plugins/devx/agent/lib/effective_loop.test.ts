@@ -9,8 +9,8 @@
 //
 // Must pass unmodified against CURRENT logic: if any case here fails, the
 // routing assumption the whole eve-loop cutover rests on is wrong.
-import { assertEquals } from "jsr:@std/assert";
-import { resolveEffectiveLoop } from "../../src/hooks/effectiveLoop.ts";
+import { assert, assertEquals } from "jsr:@std/assert";
+import { resolveEffectiveLoop, SETTINGS_FETCH_FAILURE_LOOP } from "../../src/hooks/effectiveLoop.ts";
 
 Deno.test("resolveEffectiveLoop: loop='agents' + anthropic -> 'agents'", () => {
   assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "anthropic" }), "agents");
@@ -64,7 +64,45 @@ Deno.test("resolveEffectiveLoop: loop='legacy' -> 'legacy' regardless of provide
   );
 });
 
-Deno.test("resolveEffectiveLoop: missing/undefined loop -> 'legacy' (matches DB column default)", () => {
-  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }), "legacy");
-  assertEquals(resolveEffectiveLoop({ loop: null, provider: "anthropic" }), "legacy");
+// R13: an ABSENT loop value means the user has no devx.settings row at all
+// (provider_config_routes.ts lets a user be fully configured through
+// devx.provider_configs alone), so the DB column default is what applies —
+// and V17__loop_default_agents.sql set that to 'agents'. Treating absent as
+// legacy was the fourth hard-coded-default site and would have left every
+// such user behind at cutover.
+Deno.test("resolveEffectiveLoop: missing/undefined loop -> 'agents' (matches V17's new DB column default)", () => {
+  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }), "agents");
+  assertEquals(resolveEffectiveLoop({ loop: null, provider: "anthropic" }), "agents");
+  assertEquals(resolveEffectiveLoop({ loop: "", provider: "anthropic" }), "agents");
+});
+
+// The provider gates still apply to a no-row user — absent does not mean
+// "force agents", it means "take the default", which the sidecar/IAM gates
+// then override exactly as they do for an explicit 'agents'.
+Deno.test("resolveEffectiveLoop: missing loop + claude-code -> 'legacy' (provider gate still wins)", () => {
+  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "claude-code" }), "legacy");
+  assertEquals(
+    resolveEffectiveLoop({ loop: undefined, provider: "bedrock", authShape: "iam" }),
+    "legacy",
+  );
+});
+
+// An explicit value that is neither 'legacy' nor 'agents' cannot exist while
+// the CHECK constraint stands, but must not be read as "absent" if it ever
+// does — only a genuinely missing value takes the default.
+Deno.test("resolveEffectiveLoop: an explicit unknown loop value -> 'legacy', not the default", () => {
+  assertEquals(resolveEffectiveLoop({ loop: "something-else", provider: "anthropic" }), "legacy");
+});
+
+// The CRITICAL distinction (R13): a failed settings/provider FETCH is not an
+// absent settings row. useEffectiveLoop's `.catch` uses this constant, not
+// resolveEffectiveLoop, because a user whose provider could not be read may
+// be on `claude-code`, for which eve's resolveModel throws.
+Deno.test("a failed settings fetch falls back to 'legacy', unlike an absent settings row", () => {
+  assertEquals(SETTINGS_FETCH_FAILURE_LOOP, "legacy");
+  assertEquals(resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }), "agents");
+  assert(
+    SETTINGS_FETCH_FAILURE_LOOP !== resolveEffectiveLoop({ loop: undefined, provider: "anthropic" }),
+    "the fetch-failure fallback and the no-row default must stay distinct",
+  );
 });
