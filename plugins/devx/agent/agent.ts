@@ -28,7 +28,10 @@ import { DEFERRED_TOOLS } from "./lib/deferred_tools.ts";
 // ported in plugins/devx/agent/tools/ (batch A/B, task-v2-brief.md).
 // NOTE: transcribed, not imported — the legacy const is unexported (declared
 // inline inside buildToolSet), so keep this list in sync manually.
-const PLAN_MODE_TOOLS = new Set([
+// Exported so lib/deferred_tools.test.ts can assert this set and
+// DEFERRED_TOOLS stay disjoint. Deferral runs after filterTools, so a tool in
+// both lists is dropped from plan mode outright — see DEFERRED_TOOLS' comment.
+export const PLAN_MODE_TOOLS = new Set([
   "Read", "Glob", "Grep", "CodeSearch",
   "GitStatus", "GitLog", "GitBranchList",
   "AskUserQuestion", "WritePlan", "ExitPlanMode",
@@ -50,9 +53,15 @@ const PLAN_MODE_TOOLS = new Set([
 // ToolSearch exists to reveal DEFERRED_TOOLS — the whole mechanism would be
 // silently unreachable on this loop. Appended unconditionally: this agent's
 // `context.deferredTools` (below) is never empty.
-const DEFERRED_TOOLS_NOTE =
-  "Your tool list is partial. Less common tools — knowledge base, scheduled tasks, Figma, " +
-  "browser automation, database inspection, image generation — are not listed above. Call " +
+// Exported so lib/prompt_parity.test.ts can assert the REAL returned prompt is
+// exactly legacy's spine plus this note, rather than "starts with the spine
+// and contains the note somewhere", which permitted arbitrary extra content.
+// The categories listed track DEFERRED_TOOLS: knowledge base is deliberately
+// absent, since the KB* tools are no longer deferred (they are plan-mode
+// allowlisted — see deferred_tools.ts).
+export const DEFERRED_TOOLS_NOTE =
+  "Your tool list is partial. Less common tools — scheduled tasks, Figma, browser automation, " +
+  "database inspection, image generation, web crawling — are not listed above. Call " +
   "ToolSearch to find and enable them; they become available from your next message onward.";
 
 interface ProviderRow {

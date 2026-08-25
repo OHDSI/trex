@@ -32,7 +32,7 @@
 // make loadAgent() throw and the whole agent fail to load. lib/ is never
 // scanned. The sibling load_agent_dir.test.ts is the regression guard for
 // that contract.
-import { assert, assertEquals, assertMatch, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertMatch, assertNotMatch, assertRejects } from "jsr:@std/assert";
 import type { ToolContext } from "../../../../core/server/agents/eve-shim/types.ts";
 
 // Wrapped (eve) tools — the thing under test.
@@ -349,16 +349,27 @@ Deno.test("smoke [tool-search family]: ToolSearch.execute matches only DEFERRED_
     .execute({ query: "bash" }, ctx);
   assertEquals(bashResult, 'No tools found matching "bash".');
 
+  // A deferred tool IS a candidate. Uses a browser tool, not a KB one: the
+  // KB* tools are plan-mode allowlisted and therefore no longer deferred
+  // (see lib/deferred_tools.ts), so they are correctly no longer matchable.
+  const browserResult = await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
+    .execute({ query: "browser navigate" }, ctx);
+  assertMatch(String(browserResult), /\*\*BrowserNavigate\*\*/);
+
+  // ...and a plan-mode-allowlisted tool is NOT, precisely because it is no
+  // longer withheld from the request in the first place. (The query still
+  // returns the database tools -- "base" substring-matches "database" -- so
+  // the invariant to assert is the absence of KBSearch, not an empty result.)
   const kbResult = await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
     .execute({ query: "knowledge base search" }, ctx);
-  assertMatch(String(kbResult), /\*\*KBSearch\*\*/);
+  assertNotMatch(String(kbResult), /KBSearch/);
 });
 
 Deno.test("smoke [tool-search family]: ToolSearch.execute activates its matches via ctx.activateTools", async () => {
   const activated: string[][] = [];
   const ctx = fakeToolContext({ activateTools: (names: string[]) => (activated.push(names), Promise.resolve()) });
   await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
-    .execute({ query: "knowledge base search" }, ctx);
+    .execute({ query: "browser navigate" }, ctx);
   assertEquals(activated.length, 1);
-  assert(activated[0].includes("KBSearch"));
+  assert(activated[0].includes("BrowserNavigate"));
 });

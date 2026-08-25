@@ -9,11 +9,12 @@
 // context.deferredTools (agent.ts's DEFERRED_TOOLS_NOTE). Legacy has no
 // deferred-tool concept at all -- every legacy tool is always fully visible
 // -- so its prompt never carries this suffix, and never can. Parity is
-// checked on the SHARED spine (everything legacy also renders, via
-// startsWith) plus a positive check that the loop-specific suffix is really
-// there, rather than plain assertEquals.
-import { assert } from "jsr:@std/assert";
-import { buildInstructions } from "../agent.ts";
+// therefore checked as EXACT equality against legacy's spine plus that one
+// known suffix. An earlier startsWith + includes pair looked equivalent but
+// was not: it permitted arbitrary extra trailing content, so a stray
+// appended block would have passed both assertions unnoticed.
+import { assert, assertEquals } from "jsr:@std/assert";
+import { buildInstructions, DEFERRED_TOOLS_NOTE } from "../agent.ts";
 import { buildCoderContext } from "../../functions/coder_context.ts";
 
 // is_builtin: true on both rows is load-bearing (R12). The eve loop lists
@@ -50,8 +51,7 @@ Deno.test("plan mode gets the plan prompt, not the agent prompt", async () => {
     settings: { max_steps: undefined },
     skills: SKILLS,
   });
-  assert(planPrompt.startsWith(legacy.systemPrompt), "eve's prompt must carry legacy's spine verbatim as its prefix");
-  assert(planPrompt.includes("ToolSearch to find and enable them"), "eve's prompt must append the deferred-tools note legacy has no equivalent of");
+  assertEquals(planPrompt, `${legacy.systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`);
 });
 
 Deno.test("an unset mode still resolves to the agent prompt", async () => {
@@ -63,8 +63,7 @@ Deno.test("an unset mode still resolves to the agent prompt", async () => {
     settings: { max_steps: undefined },
     skills: SKILLS,
   });
-  assert(p.startsWith(legacy.systemPrompt), "eve's prompt must carry legacy's spine verbatim as its prefix");
-  assert(p.includes("ToolSearch to find and enable them"), "eve's prompt must append the deferred-tools note legacy has no equivalent of");
+  assertEquals(p, `${legacy.systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`);
 });
 
 Deno.test("every enabled skill is named in the prompt", async () => {

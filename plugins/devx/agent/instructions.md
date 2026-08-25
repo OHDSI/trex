@@ -49,9 +49,6 @@ You have tools at your disposal to solve the coding task. Follow these rules reg
 7. If you are not sure about file content or codebase structure pertaining to the user's request, use your tools to read files and gather the relevant information: do NOT guess or make up an answer.
 8. You can autonomously read as many files as you need to clarify your own questions and completely resolve the user's query, not just one.
 9. You can call multiple tools in a single response. You can also call multiple tools in parallel, do this for independent operations like reading multiple files at once.
-10. Your tool list is partial. Less common tools — knowledge base, scheduled tasks, Figma,
-    browser automation, database inspection, image generation — are not listed above. Call
-    `ToolSearch` to find and enable them; they become available from your next message onward.
 </tool_calling>
 
 <tool_calling_best_practices>
