@@ -6,7 +6,7 @@ import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
-import { buildSdkTools, resolveInstructions } from "./toolset.ts";
+import { buildSdkTools, buildSystemPrompt, resolveInstructions } from "./toolset.ts";
 import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
@@ -17,8 +17,9 @@ import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/rout
 import type { OAuthProviderDeps } from "../connections/provider.ts";
 import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
 import { assembleHistory, ensureToolResultsPresent, type ModelMessage, type TurnRow } from "./context/history.ts";
-import { estimateTokens, type ContextConfig } from "./context/budget.ts";
+import { estimatePrefixTokens, estimateTokens, type ContextConfig } from "./context/budget.ts";
 import { maybeCompact } from "./context/compact.ts";
+import { partitionTools } from "./context/toolsplit.ts";
 import { SUMMARY_PREFIX } from "./context/prompts.ts";
 
 type EnvFn = (k: string) => string | undefined;
@@ -372,12 +373,40 @@ function startTurn(
           e,
         );
       }
+      // The system-prompt + tool-schema term the estimate fallback was
+      // missing. maybeCompact applies it to the estimate only (the observed
+      // count already includes both); it is computed unconditionally anyway
+      // because the tokensAfter figure below is always an estimate and so
+      // always needs it, and a before/after pair measured two different ways
+      // is not a pair.
+      //
+      // Every input here is already resolved, in memory, and synchronous:
+      // buildSystemPrompt is string concatenation over agent.instructions +
+      // agent.skills + metadata, agent.tools was populated at load time, and
+      // partitionTools is a single pass. NOTHING is awaited, deliberately —
+      // this block sits inside the check-then-act window documented at the
+      // getRunningTurn read above, and that window must not grow again. The
+      // cost of that constraint is a floor rather than an exact figure
+      // (see estimatePrefixTokens): a buildInstructions hook's output and the
+      // dynamic/connection/built-in tools are all behind an await and stay
+      // uncounted. Under-counting by less is the whole improvement here;
+      // under-counting by nothing would cost a wider race.
+      const prefixTokens = estimatePrefixTokens(
+        buildSystemPrompt(deps.agent, metadata),
+        // Deferred tools are withheld from the request unless activated, so
+        // the core partition is what actually ships. `activated` is passed
+        // empty rather than read: getActivatedTools is an awaited round trip
+        // (it happens after addTurn, below) and pulling it up here to sharpen
+        // an estimate is exactly the widening this comment rules out.
+        partitionTools(deps.agent.tools, [], deps.agent.config.context.deferredTools).core,
+      );
       const outcome = await maybeCompact({
         turns: priorTurns,
         msgs: priorMsgs,
         config: deps.agent.config.context,
         modelId,
         observedInputTokens: lastUsage?.inputTokens,
+        prefixTokens,
         // Model resolution happens lazily, INSIDE callModel: a throw here
         // (a rejecting resolveModel hook, no credentials, a provider error)
         // rejects summarize() the exact same way a 502 mid-call would, which
@@ -409,7 +438,11 @@ function startTurn(
         // instead of being discarded along with the replaced range.
         const boundaryTurn = priorTurns.find((t) => t.seq === outcome.replacedTurnSeqTo);
         if (boundaryTurn?.id) {
-          const tokensBefore = lastUsage?.inputTokens ?? estimateTokens(JSON.stringify(priorMsgs));
+          // Both halves of the pair count the fixed prefix: the observed
+          // value includes it already, and each estimate adds it explicitly.
+          // Without that, tokensAfter measured a strictly smaller thing than
+          // tokensBefore and the reported saving was inflated by the prefix.
+          const tokensBefore = lastUsage?.inputTokens ?? (estimateTokens(JSON.stringify(priorMsgs)) + prefixTokens);
           // Local reconstruction of what assembleHistory will produce once
           // the step below is persisted and re-fetched — purely to size
           // tokensAfter for the payload; the actual `history` used to drive
@@ -429,7 +462,7 @@ function startTurn(
               replacedTurnSeqFrom: priorTurns[0].seq,
               replacedTurnSeqTo: outcome.replacedTurnSeqTo,
               tokensBefore,
-              tokensAfter: estimateTokens(JSON.stringify(afterMsgs)),
+              tokensAfter: estimateTokens(JSON.stringify(afterMsgs)) + prefixTokens,
             },
           ).catch((e) =>
             console.error(`agents: failed to persist compaction step for session ${sessionId} (continuing without it):`, e)

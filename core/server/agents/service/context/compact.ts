@@ -82,6 +82,9 @@ export async function maybeCompact(opts: {
   config: ContextConfig;
   modelId: string;
   observedInputTokens?: number;
+  // Token cost of the fixed system-prompt + tool-schema prefix, applied to
+  // the estimate fallback ONLY — see the inputTokens comment below.
+  prefixTokens?: number;
   callModel: (req: { system: string; messages: ModelMessage[] }) => Promise<string>;
   // Session stream publisher. Optional so unit tests and any caller without a
   // stream can omit it; the spec's error table requires a warning event when
@@ -90,14 +93,24 @@ export async function maybeCompact(opts: {
   // the drop fallback just discarded.
   emit?: (e: AgentEvent) => void;
 }): Promise<CompactOutcome> {
-  const { turns, msgs, config, modelId, observedInputTokens, callModel, emit } = opts;
+  const { turns, msgs, config, modelId, observedInputTokens, prefixTokens, callModel, emit } = opts;
   const window = resolveContextWindow(modelId, config.contextWindow);
   // Prefer server-observed usage (runner.ts persists it on every turn's
   // "finish" step) over estimateTokens: the estimate is a char/4 heuristic
   // over the locally-assembled messages, which can drift from what the
-  // provider actually counted (system prompt, tool schemas, provider-side
-  // formatting overhead are not visible to estimateTokens at all).
-  const inputTokens = observedInputTokens ?? estimateTokens(JSON.stringify(msgs));
+  // provider actually counted (provider-side formatting overhead is not
+  // visible to estimateTokens at all).
+  //
+  // `prefixTokens` is added to the ESTIMATE only, never to the observed
+  // count. The observed value is the provider's own figure for the final
+  // request and already includes the system prompt and the tool schemas;
+  // adding the prefix there would double-count it. The estimate, measured
+  // over the assembled messages, includes neither — and that fallback is the
+  // live path for a session's first turn and for every session persisted
+  // before lastStepInputTokens existed, so leaving it out under-counted the
+  // real prefill by a fixed several thousand tokens on exactly the sessions
+  // with no better number available.
+  const inputTokens = observedInputTokens ?? (estimateTokens(JSON.stringify(msgs)) + (prefixTokens ?? 0));
   if (
     turns.length === 0 ||
     // config.compactAtTokens is undefined for every agent that does not set

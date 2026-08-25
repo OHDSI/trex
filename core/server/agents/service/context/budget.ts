@@ -45,7 +45,53 @@ const CONTEXT_WINDOWS: Record<string, number> = {
 // when tokens are measured post-formatting. For cap sizing BEFORE formatting, subtract
 // TRUNCATION_HEADER_OVERHEAD from the budget (see truncate.ts).
 export function estimateTokens(text: string): number {
-  return Math.ceil(text.length / 4);
+  return tokensForChars(text.length);
+}
+
+/** estimateTokens for a length already counted, so a caller summing the sizes
+ * of many strings need not concatenate them just to measure the total. */
+function tokensForChars(chars: number): number {
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * Rough token cost of the request's FIXED prefix — the system prompt plus the
+ * tool schemas — which every request carries and which `estimateTokens` over
+ * the assembled messages cannot see.
+ *
+ * This exists for `maybeCompact`'s estimate fallback. That fallback is the
+ * live path for a session's first turn and for every session whose turns were
+ * persisted before `lastStepInputTokens` existed, and measuring messages alone
+ * under-counted the real prefill by the several thousand tokens this prefix
+ * costs. It is NOT for the observed-usage path: the provider's own count
+ * already includes both, so adding this there would double-count.
+ *
+ * A deliberate FLOOR, not an exact figure. Callers can only pass what is
+ * already resolved without I/O, so the result excludes anything that needs an
+ * await — a `buildInstructions` hook's output (devx replaces the base prompt
+ * with a much larger one), dynamically provided tools, realized connection
+ * tools, and the built-ins `buildSdkTools` adds. Awaiting those here would
+ * widen `handler.ts`'s documented check-then-act window (see its comment at
+ * the `getRunningTurn` read), which is a worse trade than an estimate that
+ * under-counts by less than it used to.
+ */
+export function estimatePrefixTokens(
+  system: string,
+  tools: Iterable<readonly [string, { description?: string; inputSchema?: unknown }]>,
+): number {
+  let chars = system.length;
+  for (const [name, def] of tools) {
+    chars += name.length + (def?.description?.length ?? 0);
+    try {
+      chars += JSON.stringify(def?.inputSchema ?? {})?.length ?? 0;
+    } catch {
+      // A schema that will not serialize (a zod object's cyclic `_def`, say)
+      // contributes its name and description only. An estimate must never be
+      // the thing that throws — this runs in the pre-turn block, which has no
+      // try/catch of its own and whose only backstop produces no turn.failed.
+    }
+  }
+  return tokensForChars(chars);
 }
 
 export function resolveContextWindow(modelId: string, override?: number): number {

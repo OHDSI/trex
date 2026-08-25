@@ -368,7 +368,11 @@ live-tail by event shape.
       on a 1M-token window the fraction alone would not fire until ~750k
       input tokens; `devx` sets it, `claw`/`d2esupport` leave it unset and
       are unaffected) — measured from the provider's own last-turn usage
-      when available, `estimateTokens` as a fallback. Older turns
+      when available, and otherwise estimated as the assembled messages plus
+      `estimatePrefixTokens` for the system prompt and shipped tool schemas
+      (a floor: anything behind an await stays uncounted, since widening
+      `startTurn`'s check-then-act window to sharpen an estimate is the worse
+      trade). Older turns
       are replaced by a model-generated checkpoint summary, persisted as an
       `agents.steps` row of kind `compaction` — a trex-only step kind added
       by migration V7. Pre-turn only (`handler.ts`'s `startTurn`, never

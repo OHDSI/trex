@@ -91,6 +91,47 @@ Deno.test("maybeCompact falls back to dropping turns when summarization fails", 
   assertEquals((out as { via: string }).via, "drop");
 });
 
+// The estimate fallback is the live path for a session's first turn and for
+// every session persisted before lastStepInputTokens existed. It measured the
+// assembled messages alone, so it under-counted the real prefill by the whole
+// system-prompt-plus-tool-schemas prefix. observedInputTokens is the
+// provider's own count for the final request and ALREADY includes that
+// prefix, so the term must apply to the fallback only — adding it to both
+// would double-count.
+Deno.test("maybeCompact adds prefixTokens to the estimate fallback", async () => {
+  const out = await maybeCompact({
+    turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],
+    msgs: [{ role: "user", content: "hi" }], // a few tokens on its own
+    config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID, // 200k window, 0.75 -> 150k
+    prefixTokens: 150_000,
+    callModel: () => Promise.resolve("summary text"),
+  });
+  assertEquals(out.compacted, true);
+});
+
+Deno.test("maybeCompact without prefixTokens is unchanged", async () => {
+  const out = await maybeCompact({
+    turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID,
+    callModel: () => Promise.reject(new Error("must not be called")),
+  });
+  assertEquals(out, { compacted: false });
+});
+
+Deno.test("maybeCompact ignores prefixTokens when the provider reported usage", async () => {
+  const out = await maybeCompact({
+    turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG, modelId: MODEL_ID,
+    // The provider's own count already includes the system prompt and tool
+    // schemas; 1_000 is comfortably under the 150k trigger and must stay so.
+    observedInputTokens: 1_000, prefixTokens: 150_000,
+    callModel: () => Promise.reject(new Error("must not be called")),
+  });
+  assertEquals(out, { compacted: false });
+});
+
 Deno.test("maybeCompact caps an oversized summary", async () => {
   const huge = "s".repeat(4_000_000); // ~1M tokens, larger than any window
   const out = await maybeCompact({

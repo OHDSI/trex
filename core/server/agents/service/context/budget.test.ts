@@ -1,6 +1,6 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import {
-  DEFAULT_CONTEXT_CONFIG, estimateTokens, FALLBACK_CONTEXT_WINDOW,
+  DEFAULT_CONTEXT_CONFIG, estimatePrefixTokens, estimateTokens, FALLBACK_CONTEXT_WINDOW,
   resolveContextWindow, shouldCompact,
 } from "./budget.ts";
 
@@ -59,6 +59,32 @@ Deno.test("shouldCompact: an unset ceiling behaves exactly as the fraction alone
 // must leave the ceiling unset and their trigger unchanged.
 Deno.test("DEFAULT_CONTEXT_CONFIG sets no compaction ceiling", () => {
   assertEquals("compactAtTokens" in DEFAULT_CONTEXT_CONFIG, false);
+});
+
+// The estimate fallback measured the assembled MESSAGES only. Every request
+// also carries the system prompt and the tool schemas — a fixed several
+// thousand tokens — so the fallback under-counted the real prefill on exactly
+// the sessions that have no provider-reported usage to use instead.
+Deno.test("estimatePrefixTokens counts the system prompt and the tool schemas", () => {
+  const system = "x".repeat(400); // 100 tokens
+  const tools: [string, { description: string; inputSchema: unknown }][] = [
+    ["Read", { description: "y".repeat(396), inputSchema: {} }], // 4 + 396 + 2 chars
+  ];
+  assertEquals(estimatePrefixTokens(system, tools), Math.ceil((400 + 4 + 396 + 2) / 4));
+});
+
+Deno.test("estimatePrefixTokens with no tools is just the system prompt", () => {
+  assertEquals(estimatePrefixTokens("x".repeat(400), []), 100);
+  assertEquals(estimatePrefixTokens("", []), 0);
+});
+
+Deno.test("estimatePrefixTokens survives a non-serializable input schema", () => {
+  const cyclic: Record<string, unknown> = {};
+  cyclic.self = cyclic;
+  // Contributes name + description only, rather than throwing and taking the
+  // whole pre-turn block down with it.
+  const out = estimatePrefixTokens("", [["T", { description: "abc", inputSchema: cyclic }]]);
+  assertEquals(out, 1); // ceil((1 + 3) / 4)
 });
 
 Deno.test("defaults are conservative for unconfigured agents", () => {
