@@ -8,6 +8,8 @@ export function truncateMiddle(text: string, maxChars: number): string {
   const head = Math.floor(maxChars / 2);
   const tail = maxChars - head;
   const omitted = text.length - maxChars;
+  // Count actual newlines (not split parts). This matches wc -l and handles
+  // text without trailing newlines correctly (undercounts by 1, which is accurate).
   const lines = (text.match(/\n/g) || []).length;
   return (
     `Warning: truncated output (original length: ${text.length} chars, ${lines} lines)\n\n` +

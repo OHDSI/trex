@@ -33,6 +33,10 @@ const CONTEXT_WINDOWS: Record<string, number> = {
   "claude-haiku-4-5": 200_000,
 };
 
+// Callers estimating tokens over already-assembled messages get TRUNCATION_HEADER_OVERHEAD
+// cost for free — warning headers are literal text in the formatted output. Use this function
+// when tokens are measured post-formatting. For cap sizing BEFORE formatting, subtract
+// TRUNCATION_HEADER_OVERHEAD from the budget (see truncate.ts).
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4);
 }

@@ -18,6 +18,11 @@ Deno.test("resolveContextWindow falls back for unknown model", () => {
   assertEquals(FALLBACK_CONTEXT_WINDOW, 128_000);
 });
 
+Deno.test("resolveContextWindow reads known model ids from the map", () => {
+  assertEquals(resolveContextWindow("claude-opus-5"), 1_000_000);
+  assertEquals(resolveContextWindow("claude-haiku-4-5"), 200_000);
+});
+
 Deno.test("shouldCompact fires at the fraction and not below", () => {
   assertEquals(shouldCompact({ inputTokens: 75_000, window: 100_000, fraction: 0.75 }), true);
   assertEquals(shouldCompact({ inputTokens: 74_000, window: 100_000, fraction: 0.75 }), false);
