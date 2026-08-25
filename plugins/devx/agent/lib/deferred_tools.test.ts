@@ -14,7 +14,8 @@
 // `Partial<ContextConfig>` exactly as authored — `agent.context.deferredTools`,
 // not `agent.config.context.deferredTools`.
 import { assert, assertEquals } from "jsr:@std/assert";
-import agent, { PLAN_MODE_TOOLS } from "../agent.ts";
+import agent, { DEFERRED_TOOLS_NOTE, PLAN_MODE_TOOLS } from "../agent.ts";
+import { DEFERRED_TOOL_CANDIDATES, rankDeferredTools } from "../tools/ToolSearch.ts";
 import { DEFERRED_TOOLS } from "./deferred_tools.ts";
 
 const ALWAYS_ON = [
@@ -70,6 +71,48 @@ Deno.test("agent.ts's deferredTools is exactly lib/deferred_tools.ts's DEFERRED_
 // source of truth nothing consults. lib/prompt_parity.test.ts asserts the
 // note on the REAL returned prompt instead, which is the only place it can
 // actually reach a model.
+// The note is the ONLY thing that tells a model which families were withheld,
+// so a deferred tool no category leads to is unreachable in practice: the
+// model has no phrasing that would make it call ToolSearch for that tool.
+// AddDependency was exactly that -- deferred, but matched by none of the
+// note's categories.
+//
+// Parsed out of the note rather than restated here, so the assertion runs on
+// the same list a model reads. Ranked with the real rankDeferredTools against
+// the real DEFERRED_TOOL_CANDIDATES, so this fails when a tool joins
+// DEFERRED_TOOLS without the note gaining a category that finds it.
+function noteCategories(note: string): string[] {
+  const between = note.match(/—([^—]+)—/);
+  if (!between) return [];
+  return between[1].split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+Deno.test("every deferred tool is discoverable from a category named in DEFERRED_TOOLS_NOTE", () => {
+  const categories = noteCategories(DEFERRED_TOOLS_NOTE);
+  // Guards the parse itself: reshaping the note so the em-dash-delimited list
+  // no longer parses would otherwise leave this test vacuously green.
+  assert(categories.length >= 5, `expected the note to enumerate categories, parsed: ${JSON.stringify(categories)}`);
+
+  const candidateNames = new Set(DEFERRED_TOOL_CANDIDATES.map((c) => c.name));
+  assertEquals(
+    DEFERRED_TOOLS.filter((n) => !candidateNames.has(n)),
+    [],
+    "a deferred tool with no TOOL_DEFINITIONS entry is not a ToolSearch candidate at all",
+  );
+
+  const reachable = new Set<string>();
+  for (const category of categories) {
+    for (const hit of rankDeferredTools(category, DEFERRED_TOOL_CANDIDATES)) reachable.add(hit.name);
+  }
+  assertEquals(
+    DEFERRED_TOOLS.filter((n) => !reachable.has(n)),
+    [],
+    `deferred tools no note category leads to; add a category to DEFERRED_TOOLS_NOTE. Categories parsed: ${
+      JSON.stringify(categories)
+    }`,
+  );
+});
+
 Deno.test("the deferred-tools note is not duplicated into instructions.md", async () => {
   const text = await Deno.readTextFile(new URL("../instructions.md", import.meta.url));
   assert(

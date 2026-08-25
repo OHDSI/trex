@@ -58,11 +58,18 @@ export const PLAN_MODE_TOOLS = new Set([
 // and contains the note somewhere", which permitted arbitrary extra content.
 // The categories listed track DEFERRED_TOOLS: knowledge base is deliberately
 // absent, since the KB* tools are no longer deferred (they are plan-mode
-// allowlisted — see deferred_tools.ts).
+// allowlisted — see deferred_tools.ts). Every OTHER deferred tool must be
+// reachable from one of these categories, or the model has no phrasing that
+// would lead it to ToolSearch for that tool — lib/deferred_tools.test.ts
+// asserts that by ranking each parsed category against the real ToolSearch
+// candidates, so the list here cannot drift from DEFERRED_TOOLS again.
+// Categories are comma-separated between the two em dashes; that shape is
+// what the test parses.
 export const DEFERRED_TOOLS_NOTE =
   "Your tool list is partial. Less common tools — scheduled tasks, Figma, browser automation, " +
-  "database inspection, image generation, web crawling — are not listed above. Call " +
-  "ToolSearch to find and enable them; they become available from your next message onward.";
+  "database inspection, image generation, web crawling, dependency installation — are not " +
+  "listed above. Call ToolSearch to find and enable them; they become available from your " +
+  "next message onward.";
 
 interface ProviderRow {
   provider: string;

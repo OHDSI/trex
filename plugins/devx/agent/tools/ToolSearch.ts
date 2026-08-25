@@ -83,9 +83,17 @@ export function rankDeferredTools<T extends { name: string; description: string 
 }
 
 const DEFERRED_SET = new Set(DEFERRED_TOOLS);
-const CANDIDATES: { name: string; description: string }[] = TOOL_DEFINITIONS
+/**
+ * The corpus this tool actually searches. Exported so
+ * ../lib/deferred_tools.test.ts can assert that agent.ts's
+ * DEFERRED_TOOLS_NOTE still names a category leading to every deferred tool
+ * -- against the real candidates, not a hand-written stand-in that could
+ * drift from the registry.
+ */
+export const DEFERRED_TOOL_CANDIDATES: { name: string; description: string }[] = TOOL_DEFINITIONS
   .filter((t) => DEFERRED_SET.has(t.name))
   .map((t) => ({ name: t.name, description: t.description }));
+const CANDIDATES = DEFERRED_TOOL_CANDIDATES;
 
 export default defineTool({
   description:
