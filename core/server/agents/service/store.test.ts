@@ -374,6 +374,27 @@ Deno.test("reapStaleTurns denies nothing and issues no approvals query when it r
   assertEquals(calls.some((c) => c.q.includes("UPDATE agents.approvals")), false);
 });
 
+Deno.test("getLastTurnUsage returns the most recent finish step's input tokens", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ usage: { inputTokens: 12345, outputTokens: 200 } }] }]);
+  const store = createStore(fn as never);
+  const usage = await store.getLastTurnUsage("s-1");
+  assertEquals(usage, { inputTokens: 12345 });
+  assert(calls[0].sql.includes("kind = 'finish'"));
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
+Deno.test("getLastTurnUsage returns null when no finish step exists yet", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getLastTurnUsage("s-1"), null);
+});
+
+Deno.test("getLastTurnUsage returns null when the finish step recorded no usable inputTokens", async () => {
+  const { fn } = fakeQuery([{ rows: [{ usage: null }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getLastTurnUsage("s-1"), null);
+});
+
 Deno.test("denyApprovalsForTurns: no-ops on an empty list without querying", async () => {
   let called = false;
   const query: QueryFn = async () => { called = true; return { rows: [] }; };

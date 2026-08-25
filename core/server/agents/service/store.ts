@@ -94,7 +94,7 @@ export function createStore(query: QueryFn) {
 
     async getHistory(sessionId: string) {
       const r = await query(
-        `SELECT t.seq, t.message, t.metadata,
+        `SELECT t.id, t.seq, t.message, t.metadata,
                 COALESCE(jsonb_agg(jsonb_build_object('kind', s.kind, 'name', s.name, 'payload', s.payload)
                          ORDER BY s.seq) FILTER (WHERE s.id IS NOT NULL), '[]') AS steps
          FROM agents.turns t LEFT JOIN agents.steps s ON s.turn_id = t.id
@@ -102,6 +102,25 @@ export function createStore(query: QueryFn) {
         [sessionId],
       );
       return r.rows;
+    },
+
+    // The most recently persisted turn's observed input-token count (from
+    // runner.ts's "finish" step usage — see its comment on the `usage`
+    // object shape). Used by compact.ts's maybeCompact to judge context
+    // pressure from what the provider actually counted, rather than the
+    // char/4 estimateTokens heuristic (budget.ts). Null when the session has
+    // no completed turn yet, or that turn's usage didn't carry a usable
+    // inputTokens (e.g. a mocked/partial usage object in a test).
+    async getLastTurnUsage(sessionId: string): Promise<{ inputTokens: number } | null> {
+      const r = await query(
+        `SELECT s.usage FROM agents.steps s
+           JOIN agents.turns t ON t.id = s.turn_id
+          WHERE t.session_id = $1 AND s.kind = 'finish'
+          ORDER BY t.seq DESC, s.seq DESC LIMIT 1`,
+        [sessionId],
+      );
+      const usage = r.rows[0]?.usage as { inputTokens?: unknown } | null | undefined;
+      return usage && typeof usage.inputTokens === "number" ? { inputTokens: usage.inputTokens } : null;
     },
 
     async createApproval(sessionId: string, turnId: string, tool: string, input: unknown): Promise<string> {

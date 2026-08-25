@@ -14,6 +14,11 @@ export interface StepRow {
 }
 
 export interface TurnRow {
+  // Optional: task-11 fixtures and most callers only need `seq` for ordering.
+  // handler.ts's pre-turn compaction wiring (compact.ts's maybeCompact) needs
+  // the row's actual id to attach a "compaction" step to the right turn, so
+  // store.ts's getHistory now selects it too.
+  id?: string;
   seq: number;
   message: unknown;
   metadata: unknown;

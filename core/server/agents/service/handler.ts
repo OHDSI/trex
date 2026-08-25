@@ -1,13 +1,13 @@
 // HTTP surface per spec §6: eve session API (compat) + AI SDK chat endpoint.
 // deno-lint-ignore-file no-explicit-any
-import { convertToModelMessages, streamText, stepCountIs, createUIMessageStream, createUIMessageStreamResponse } from "ai";
+import { convertToModelMessages, generateText, streamText, stepCountIs, createUIMessageStream, createUIMessageStreamResponse } from "ai";
 import type { LoadedAgent } from "../loader.ts";
 import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
 import { buildSdkTools, resolveInstructions } from "./toolset.ts";
-import { cacheProviderOptions, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
+import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
 import { createChannelHandler, type ChannelSessionStarted } from "../channels/layer.ts";
@@ -17,7 +17,9 @@ import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/rout
 import type { OAuthProviderDeps } from "../connections/provider.ts";
 import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
 import { assembleHistory, ensureToolResultsPresent, type ModelMessage, type TurnRow } from "./context/history.ts";
-import type { ContextConfig } from "./context/budget.ts";
+import { estimateTokens, type ContextConfig } from "./context/budget.ts";
+import { maybeCompact } from "./context/compact.ts";
+import { SUMMARY_PREFIX } from "./context/prompts.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -315,6 +317,92 @@ function startTurn(
     const queued = await deps.store.takeFollowUps(sessionId);
     const turnMessage = queued.length > 0 ? [...queued, asText(message)].join("\n\n") : message;
 
+    // Built once, up front, so both the pre-turn compaction call below and
+    // the real turn's runTurn call (further down) share the same per-request
+    // hookCtx — resolveModel/buildInstructions hooks are meant to be called
+    // fresh per REQUEST, not per model resolution within it.
+    const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
+
+    // Pre-turn compaction (task 12; see compact.ts's maybeCompact for the
+    // full rationale). Deliberately PRE-turn only — never mid-stream, since a
+    // mid-turn summary would have to be injected above the last user message
+    // or the model misreads it. Cheap no-op on the common case: an empty or
+    // comfortably-under-budget session short-circuits inside maybeCompact
+    // without ever calling a model.
+    const priorTurns = (await deps.store.getHistory(sessionId)) as TurnRow[];
+    if (priorTurns.length > 0) {
+      const priorMsgs = ensureToolResultsPresent(assembleHistory(priorTurns, deps.agent.config.context));
+      const lastUsage = await deps.store.getLastTurnUsage(sessionId).catch((e) => {
+        console.error(`agents: getLastTurnUsage failed for session ${sessionId} (falling back to an estimate):`, e);
+        return null;
+      });
+      const modelId = deps.agent.config.model ? parseModelString(deps.agent.config.model).modelId : "";
+      const outcome = await maybeCompact({
+        turns: priorTurns,
+        msgs: priorMsgs,
+        config: deps.agent.config.context,
+        modelId,
+        observedInputTokens: lastUsage?.inputTokens,
+        // Model resolution happens lazily, INSIDE callModel: a throw here
+        // (a rejecting resolveModel hook, no credentials, a provider error)
+        // rejects summarize() the exact same way a 502 mid-call would, which
+        // maybeCompact's own catch turns into the drop-oldest-turns
+        // fallback — so a broken model can never prevent that fallback from
+        // still reclaiming budget, and (requirement 5) can never fail the
+        // turn itself either.
+        callModel: async (req) => {
+          const model = deps.model ?? await resolveModelForTurn(deps.agent.config, hookCtx);
+          const { text } = await generateText({ model, system: req.system, messages: req.messages as any });
+          return text;
+        },
+      });
+      if (outcome.compacted) {
+        // The compaction step is attached to the LAST turn being replaced
+        // (replacedTurnSeqTo), not to the new turn about to be created:
+        // history.ts's assembleHistory resumes assembly right after the
+        // newest turn carrying a "compaction" step, so attaching it there is
+        // what makes the verbatimTurnsAfterCompaction window (the turns
+        // AFTER this boundary) survive into the rebuilt history below,
+        // instead of being discarded along with the replaced range.
+        const boundaryTurn = priorTurns.find((t) => t.seq === outcome.replacedTurnSeqTo);
+        if (boundaryTurn?.id) {
+          const tokensBefore = lastUsage?.inputTokens ?? estimateTokens(JSON.stringify(priorMsgs));
+          // Local reconstruction of what assembleHistory will produce once
+          // the step below is persisted and re-fetched — purely to size
+          // tokensAfter for the payload; the actual `history` used to drive
+          // this turn still comes from the real re-fetch further down.
+          const keptTurns = priorTurns.slice(priorTurns.indexOf(boundaryTurn) + 1);
+          const keptMsgs = ensureToolResultsPresent(assembleHistory(keptTurns, deps.agent.config.context));
+          const afterMsgs: ModelMessage[] = outcome.summary
+            ? [{ role: "user", content: SUMMARY_PREFIX + outcome.summary }, ...keptMsgs]
+            : keptMsgs;
+          await deps.store.addStep(
+            boundaryTurn.id,
+            boundaryTurn.steps.length + 1,
+            "compaction",
+            null,
+            {
+              summary: outcome.summary,
+              replacedTurnSeqFrom: priorTurns[0].seq,
+              replacedTurnSeqTo: outcome.replacedTurnSeqTo,
+              tokensBefore,
+              tokensAfter: estimateTokens(JSON.stringify(afterMsgs)),
+            },
+          ).catch((e) =>
+            console.error(`agents: failed to persist compaction step for session ${sessionId} (continuing without it):`, e)
+          );
+        } else {
+          console.error(
+            `agents: compaction outcome had no matching turn for seq ${outcome.replacedTurnSeqTo} on session ${sessionId} — skipping persist`,
+          );
+        }
+      }
+    }
+
+    // Re-fetched fresh (not reused from priorMsgs above): when compaction
+    // just persisted a checkpoint, this is what picks it up — the same
+    // buildHistory path every other call goes through, so checkpoint-resume
+    // logic has exactly one implementation (history.ts's assembleHistory).
     const history = await buildHistory(sessionId, deps.store, deps.agent.config.context);
     const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
     // Surface the freshly-created turn id to the caller (the channel layer uses
@@ -330,7 +418,6 @@ function startTurn(
       console.error(`agents: channel delivery registration failed for turn ${turn.id}:`, e);
     }
     publish(sessionId, { type: "turn.started", data: { turnId: turn.id, sequence: turn.seq } });
-    const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
