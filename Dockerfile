@@ -426,6 +426,29 @@ COPY --from=assembler /opt/ci-libs/ /usr/lib/
 COPY --from=assembler /usr/lib/trexsql/ /usr/lib/trexsql/
 RUN ldconfig
 
+# ONNX Runtime, dlopen()d by the runtime's AI extension: trex-runtime's ext/ai
+# builds `ort` with the load-dynamic feature (ext/ai/Cargo.toml), so the shared
+# library is resolved at call time rather than linked in. Without it the AI
+# extension fails the moment a model is used. MIT (microsoft/onnxruntime).
+#
+# Only libonnxruntime.so* is kept — the release tarball also carries headers and
+# static archives that nothing here links against. Same version the bao plugin
+# image pins.
+ARG ONNXRUNTIME_VERSION=1.20.1
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) ONNX_ARCH=x64 ;; \
+      arm64) ONNX_ARCH=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH for onnxruntime" >&2; exit 1 ;; \
+    esac; \
+    NAME="onnxruntime-linux-${ONNX_ARCH}-${ONNXRUNTIME_VERSION}"; \
+    cd /tmp && curl -fsSL \
+      "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${NAME}.tgz" \
+      | tar xz && \
+    cp -a "${NAME}/lib/libonnxruntime.so"* /usr/lib/ && \
+    rm -rf "$NAME" && ldconfig && \
+    test -s /usr/lib/libonnxruntime.so
+
 # Native driver for the `snowflake` DuckDB extension, which does not bundle it:
 # the extension dlopen()s libadbc_driver_snowflake.so at ATTACH time, so without
 # this LOAD succeeds and ATTACH fails. /usr/local/lib is one of the paths it
