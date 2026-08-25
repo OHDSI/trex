@@ -50,3 +50,34 @@ export function assembleHistory(turns: TurnRow[], _config: ContextConfig): Model
   }
   return msgs;
 }
+
+export const SYNTHETIC_RESULT_TEXT = "[no result recorded — turn was interrupted]";
+
+/**
+ * Every tool-call must have a matching tool-result or the provider rejects the
+ * request. Runs on EVERY assembly, not just on resume: an interrupted turn
+ * would otherwise poison the session permanently.
+ */
+export function ensureToolResultsPresent(msgs: ModelMessage[]): ModelMessage[] {
+  const resolved = new Set<string>();
+  for (const m of msgs) {
+    if (m.role === "tool") for (const p of m.content) resolved.add(p.toolCallId);
+  }
+  const out: ModelMessage[] = [];
+  for (const m of msgs) {
+    out.push(m);
+    if (m.role !== "assistant") continue;
+    for (const part of m.content) {
+      if (part.type !== "tool-call" || resolved.has(part.toolCallId)) continue;
+      out.push({
+        role: "tool",
+        content: [{
+          type: "tool-result", toolCallId: part.toolCallId,
+          toolName: part.toolName, output: SYNTHETIC_RESULT_TEXT,
+        }],
+      });
+      resolved.add(part.toolCallId);
+    }
+  }
+  return out;
+}

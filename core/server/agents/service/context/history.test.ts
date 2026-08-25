@@ -1,5 +1,11 @@
 import { assertEquals } from "jsr:@std/assert";
-import { assembleHistory, type TurnRow } from "./history.ts";
+import {
+  assembleHistory,
+  ensureToolResultsPresent,
+  SYNTHETIC_RESULT_TEXT,
+  type ModelMessage,
+  type TurnRow,
+} from "./history.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./budget.ts";
 
 let seq = 0;
@@ -41,4 +47,35 @@ Deno.test("assembleHistory ignores non-model step kinds", () => {
   ])];
   const msgs = assembleHistory(turns, DEFAULT_CONTEXT_CONFIG);
   assertEquals(msgs.length, 2);
+});
+
+Deno.test("ensureToolResultsPresent synthesizes a result for an orphan call", () => {
+  const msgs: ModelMessage[] = [
+    { role: "user", content: "go" },
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "Bash", input: {} }] },
+  ];
+  const out = ensureToolResultsPresent(msgs);
+  assertEquals(out.length, 3);
+  assertEquals(out[2], {
+    role: "tool",
+    content: [{ type: "tool-result", toolCallId: "c1", toolName: "Bash", output: SYNTHETIC_RESULT_TEXT }],
+  });
+});
+
+Deno.test("ensureToolResultsPresent inserts the result immediately after its call", () => {
+  const msgs: ModelMessage[] = [
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "A", input: {} }] },
+    { role: "assistant", content: [{ type: "text", text: "after" }] },
+  ];
+  const out = ensureToolResultsPresent(msgs);
+  assertEquals(out[1].role, "tool");
+  assertEquals(out[2], { role: "assistant", content: [{ type: "text", text: "after" }] });
+});
+
+Deno.test("ensureToolResultsPresent leaves well-formed history untouched", () => {
+  const msgs: ModelMessage[] = [
+    { role: "assistant", content: [{ type: "tool-call", toolCallId: "c1", toolName: "A", input: {} }] },
+    { role: "tool", content: [{ type: "tool-result", toolCallId: "c1", toolName: "A", output: "ok" }] },
+  ];
+  assertEquals(ensureToolResultsPresent(msgs), msgs);
 });
