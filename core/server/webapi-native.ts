@@ -21,6 +21,9 @@ export const WEBAPI_NATIVE_ENABLED =
  *  with no IdP still boots; the wait is skipped entirely when OIDC is off. */
 const OIDC_WAIT_MS = Number(Deno.env.get("WEBAPI_OIDC_WAIT_MS") ?? 180_000);
 
+/** Per-probe ceiling, so one unanswered request cannot consume the whole wait. */
+const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
+
 /**
  * Block until the OIDC discovery document is served, or the budget runs out.
  *
@@ -32,8 +35,14 @@ const OIDC_WAIT_MS = Number(Deno.env.get("WEBAPI_OIDC_WAIT_MS") ?? 180_000);
  *
  * The window is real rather than theoretical: the IdP cannot finish starting
  * until trex has provisioned the database it migrates into, so under d2e the IdP
- * is necessarily *later* than trex. Provisioning happens long before this call,
- * so waiting here cannot deadlock.
+ * is necessarily *later* than trex.
+ *
+ * The IdP may be this very node — trex can serve its own /oidc — so the caller
+ * must already be accepting connections before this runs, and every probe is
+ * bounded. A bare `await fetch` was not: the listener is bound early by the
+ * trexas extension, so a connect to a not-yet-serving backend is *accepted* and
+ * then hangs, the promise never settles, and the budget below is never consulted
+ * again. That is a hang, not a wait, and no budget can rescue it.
  */
 export async function waitForOidcDiscovery(
   log: (m: string) => void,
@@ -45,11 +54,15 @@ export async function waitForOidcDiscovery(
   const url = env.SECURITY_AUTH_OIDC_URL;
   if (!url) return;
 
+  const probeTimeoutMs = Number(
+    env.WEBAPI_OIDC_PROBE_TIMEOUT_MS ?? DEFAULT_PROBE_TIMEOUT_MS,
+  );
+
   const deadline = Date.now() + budgetMs;
   let announced = false;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(url);
+      const res = await fetch(url, { signal: AbortSignal.timeout(probeTimeoutMs) });
       // Drain the body so the connection is not left dangling.
       await res.body?.cancel();
       if (res.ok) {

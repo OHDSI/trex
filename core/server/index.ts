@@ -1454,16 +1454,21 @@ if (initialKeyName) {
   }
 }
 
-// The embedded WebAPI is part of the base image, not of d2e compatibility, so
-// it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it
-// here rather than from an external init job means a bare `restart` of this
-// container brings WebAPI back with it.
-await startNativeWebApi();
-
 await runD2eBoot();
 
 server.listen(8000, () => {
   console.log("server listening on port 8000");
+
+  // The embedded WebAPI is part of the base image, not of d2e compatibility, so
+  // it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it
+  // here rather than from an external init job means a bare `restart` of this
+  // container brings WebAPI back with it.
+  //
+  // It goes last, and deliberately after listen: WebAPI blocks on the OIDC
+  // discovery document, and when trex is its own IdP that document is served by
+  // this process. Starting it before the listener made the node wait on itself,
+  // so WebAPI never launched and the health endpoint never answered.
+  void startNativeWebApi();
 });
 
 // Start the native realtime replication service without blocking boot — a
