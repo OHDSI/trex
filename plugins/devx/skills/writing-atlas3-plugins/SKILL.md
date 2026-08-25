@@ -1,6 +1,6 @@
 ---
 name: writing-atlas3-plugins
-description: Use when building, scaffolding or changing an Atlas3 / OHDSI ATLAS v3 plugin — "build an atlas plugin that…", "add a plugin to atlas", a new Atlas panel/tab/FAB/menu entry, or an Atlas plugin that has to match a Figma design. Also use when you need an Atlas3 component's real props/events or the host plugin contract: the published package ships no source or types, so this skill covers checking out OHDSI/Atlas3 and reading @ohdsi/atlas-ui's actual signatures. Not for Data2Evidence portal apps.
+description: Use when building, scaffolding or changing an Atlas3 / OHDSI ATLAS v3 plugin — "build an atlas plugin that…", "add a plugin to atlas", a new Atlas panel/tab/FAB/menu entry, or an Atlas plugin that has to match a Figma design. Also use when you need an Atlas3 component's real props/events or the host plugin contract: the published package ships no source or types, so this skill covers checking out OHDSI/Atlas3, reading @ohdsi/atlas-ui's actual signatures, and building the UI from the Atlas* component library rather than hand-rolled markup. Not for Data2Evidence portal apps.
 ---
 
 # Writing Atlas3 plugins
@@ -54,11 +54,42 @@ source out (step 1) and read it.
    `npm run lib:build`. `@ohdsi/atlas-ui`'s `exports` point at the gitignored
    `packages/atlas-ui/dist/`, absent in a fresh checkout; without it the plugin
    build dies on *Failed to resolve entry for package @ohdsi/atlas-ui*.
-7. **Implement.** Leave `main.ts` alone (lifecycles + `buildVuetifyOptions()`);
-   put your UI in `App.vue` and components beside it.
+7. **Implement out of `Atlas*` components** (see *Build the UI from the Atlas
+   component library* — this is the rule, not a preference). Leave `main.ts`
+   alone (lifecycles + `buildVuetifyOptions()`); put your UI in `App.vue` and
+   components beside it.
 8. **Build:** `cd plugins-dev/<plugin-id> && npm install && npm run build`
    → `public/plugins/<plugin-id>/index.system.js`.
 9. **Register** (below), then verify with **`testing-atlas3-locally`**.
+
+## Build the UI from the Atlas component library
+
+**Every piece of UI you render must come from an `Atlas*` component when one
+exists for the job.** The point of a plugin is that it is indistinguishable
+from native Atlas — an `Atlas*` component already carries the theme, the
+spacing scale, the dark-mode palette, the focus/ARIA behaviour and the
+Atlas-specific defaults. Hand-rolled markup gets none of that and drifts the
+moment the design system moves.
+
+The precedence, highest first:
+
+1. **`Atlas*` component** from `@ohdsi/atlas-ui` — always, if one fits.
+   `packages/atlas-ui/index.ts` is the list of what exists; check it before
+   concluding there is nothing.
+2. **Raw Vuetify (`v-*`)** — only for a primitive with no `Atlas*` wrapper.
+   Style it with theme tokens (`--v-theme-*`, `--atlas-*`), never literal
+   colors or pixel values.
+3. **Your own markup** — last resort, for genuinely bespoke layout. Same token
+   rule applies, and it still sits inside `AtlasPageShell`/`AtlasContainer`.
+
+Never introduce a *third-party* UI kit or icon set into a plugin — no Element
+Plus, no Bootstrap, no Tailwind. Vuetify + `@ohdsi/atlas-ui` + `mdi` icons is
+the whole toolkit; a second one ships a duplicate CSS reset and visibly breaks
+the shell.
+
+If you conclude no `Atlas*` component fits, say which one you looked at and why
+it did not, in your reply. That is a design-system gap worth reporting, and it
+is the difference between a considered fallback and a silent one.
 
 ## Finding the exact contract in source
 
