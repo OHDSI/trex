@@ -21,6 +21,7 @@ import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context
 import { loadHooks, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
 import type { Hook } from "../functions/skills/types.ts";
 import { materializeAttachments, renderAttachmentBlock } from "../functions/attachments.ts";
+import { DEFERRED_TOOLS } from "./lib/deferred_tools.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -36,6 +37,23 @@ const PLAN_MODE_TOOLS = new Set([
   "TaskGet", "TaskList",
   "CronList", "ToolSearch",
 ]);
+
+// Task 16, deviation from task-16-brief.md: the brief's sample only adds
+// this note to the static instructions.md file (kept below, for a human
+// reading that file and for lib/deferred_tools.test.ts's literal-text
+// check) — but instructions.md's content is NOT what a turn on this loop
+// actually sends the model. buildInstructions below discards its own
+// `base` argument (the resolved instructions.md text) entirely in favor of
+// buildCoderContext's systemPrompt (see this file's header comment on
+// defineAgent, "2. `base` ... used to be verbatim..."). Without appending
+// this note to the REAL returned prompt too, the model would never learn
+// ToolSearch exists to reveal DEFERRED_TOOLS — the whole mechanism would be
+// silently unreachable on this loop. Appended unconditionally: this agent's
+// `context.deferredTools` (below) is never empty.
+const DEFERRED_TOOLS_NOTE =
+  "Your tool list is partial. Less common tools — knowledge base, scheduled tasks, Figma, " +
+  "browser automation, database inspection, image generation — are not listed above. Call " +
+  "ToolSearch to find and enable them; they become available from your next message onward.";
 
 interface ProviderRow {
   provider: string;
@@ -367,7 +385,7 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
     settings: { max_steps: undefined },
     skills,
   });
-  return systemPrompt;
+  return `${systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`;
 }
 
 // devx.hooks (PreToolUse/PostToolUse/Stop) rows are loaded ONCE PER TURN, not
@@ -527,4 +545,15 @@ export default defineAgent({
   onToolResult,
   onTurnEnd,
   buildUserMessage,
+  // Task 16: the long tail of less-common tools (KB, cron, Figma, browser
+  // automation, DB inspection, image gen, AddDependency — see
+  // lib/deferred_tools.ts's own comment for the full list and the
+  // always-on names that must never be added here) withheld from every
+  // request until ToolSearch reveals them (core's service/context/
+  // toolsplit.ts + toolset.ts's buildSdkTools Step 6). `context` is a
+  // `Partial<ContextConfig>` here, exactly as authored — resolveContextConfig
+  // (loader.ts) fills in the rest (freshTurns, compactAtFraction, ...) at
+  // load time; this raw defineAgent() return value carries only what's
+  // explicitly set.
+  context: { deferredTools: DEFERRED_TOOLS },
 });

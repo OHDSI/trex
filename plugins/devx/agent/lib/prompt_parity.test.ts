@@ -2,7 +2,17 @@
 // mode. Legacy is NOT being retired -- claude-code (sidecar) users live there
 // permanently (see useEffectiveLoop.ts) -- so this is an ongoing invariant,
 // not a migration check.
-import { assert, assertEquals } from "jsr:@std/assert";
+//
+// Task 16 exception (same posture as the is_builtin skill-listing exception
+// below): this loop's buildInstructions appends a fixed note steering the
+// model toward ToolSearch for tools withheld by agent.ts's
+// context.deferredTools (agent.ts's DEFERRED_TOOLS_NOTE). Legacy has no
+// deferred-tool concept at all -- every legacy tool is always fully visible
+// -- so its prompt never carries this suffix, and never can. Parity is
+// checked on the SHARED spine (everything legacy also renders, via
+// startsWith) plus a positive check that the loop-specific suffix is really
+// there, rather than plain assertEquals.
+import { assert } from "jsr:@std/assert";
 import { buildInstructions } from "../agent.ts";
 import { buildCoderContext } from "../../functions/coder_context.ts";
 
@@ -40,7 +50,8 @@ Deno.test("plan mode gets the plan prompt, not the agent prompt", async () => {
     settings: { max_steps: undefined },
     skills: SKILLS,
   });
-  assertEquals(planPrompt, legacy.systemPrompt);
+  assert(planPrompt.startsWith(legacy.systemPrompt), "eve's prompt must carry legacy's spine verbatim as its prefix");
+  assert(planPrompt.includes("ToolSearch to find and enable them"), "eve's prompt must append the deferred-tools note legacy has no equivalent of");
 });
 
 Deno.test("an unset mode still resolves to the agent prompt", async () => {
@@ -52,7 +63,8 @@ Deno.test("an unset mode still resolves to the agent prompt", async () => {
     settings: { max_steps: undefined },
     skills: SKILLS,
   });
-  assertEquals(p, legacy.systemPrompt);
+  assert(p.startsWith(legacy.systemPrompt), "eve's prompt must carry legacy's spine verbatim as its prefix");
+  assert(p.includes("ToolSearch to find and enable them"), "eve's prompt must append the deferred-tools note legacy has no equivalent of");
 });
 
 Deno.test("every enabled skill is named in the prompt", async () => {

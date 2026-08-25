@@ -343,6 +343,65 @@ live-tail by event shape.
     `onToolResult`: a configured `buildUserMessage` with no `hookCtx`
     available throws rather than silently sending the unmodified base
     message.
+18. **Context management (Tasks 4/8-16) is additive/trex-only** — real eve
+    leaves conversation-context management to the caller entirely; it does
+    not truncate, summarize, or withhold anything itself. This runtime
+    performs four things eve does not, all in `service/context/`:
+    - **History includes tool calls and results.** `agents.steps` rows of
+      kind `tool-call`/`tool-result` are folded back into the model's
+      message list (`history.ts`'s `assembleHistory`), not just the final
+      `text` step — fixing a real defect where turn 2 had no idea what turn
+      1's tools actually did. Every tool call is guaranteed a matching
+      result — a synthetic one (`SYNTHETIC_RESULT_TEXT`) is inserted when a
+      turn was interrupted mid-call — because providers reject an orphan
+      `tool_use` block outright.
+    - **Two-tier tool-output truncation.** A tool's raw result is capped at
+      execution time (`toolset.ts`'s `wrapToolWithCap`, Step 5, covering
+      every authored/dynamic/built-in tool and subagents alike); once
+      folded into history, results in the most recent `freshTurns` keep
+      `freshToolOutputChars`, older ones are cut to the smaller
+      `staleToolOutputChars` (`truncate.ts`'s `truncateMiddle`).
+    - **Token-budget compaction.** At `compactAtFraction` of the resolved
+      model's context window (estimated from the provider's own last-turn
+      usage when available, `estimateTokens` as a fallback), older turns
+      are replaced by a model-generated checkpoint summary, persisted as an
+      `agents.steps` row of kind `compaction` — a trex-only step kind added
+      by migration V7. Pre-turn only (`handler.ts`'s `startTurn`, never
+      mid-stream: a mid-turn summary would have to be injected above the
+      last user message or the model misreads it); a summarization failure
+      degrades to dropping the oldest turns outright rather than failing
+      the turn (`compact.ts`'s `maybeCompact`).
+    - **Deferred tool loading.** Tools named in `deferredTools` are withheld
+      from the request entirely — absent from the tool list, not
+      present-but-disabled — until `ToolSearch` activates them for that
+      session (`store.ts`'s `activateTools`/`getActivatedTools`,
+      persisted on `agents.sessions.activated_tools`, also added by V7),
+      and are appended AFTER the prompt-cache breakpoint
+      (`model.ts`'s `withToolCachePoint`) so activating one never
+      invalidates the cached TOOLS+SYSTEM prefix the core tools sit in
+      (`toolsplit.ts`'s `partitionTools`). `ToolContext.activateTools` is
+      itself additive/trex-only, same posture as divergence 16's
+      `ToolContext.sql` — bound to the calling session only
+      (`toolset.ts`'s `authoredTool`: `(names) =>
+      ctx.store.activateTools(ctx.sessionId, names)`), never the raw
+      `AgentStore`, so a tool gets exactly one write capability and cannot
+      touch another session's state.
+
+    All four are configured per agent through the `context` block on
+    `defineAgent` (`context?: Partial<ContextConfig>` — `AgentConfig`,
+    `eve-shim/types.ts`) and default to eve-comparable behaviour
+    (`DEFAULT_CONTEXT_CONFIG`): unbounded-in-practice truncation caps, no
+    compaction until a very large window fraction, and `deferredTools: []`
+    (nothing withheld — `claw`/`d2esupport` run this way, unconfigured).
+    devx is the only agent that sets `deferredTools` (`agent.ts`, ~25 of
+    its 68 tools — the KB, cron, Figma, browser-automation, and DB/image/
+    web-crawl families; the always-on set, including `ToolSearch` itself,
+    is never eligible). devx's `buildInstructions` also appends a fixed
+    note pointing the model at `ToolSearch` for its withheld tools — the
+    ONE place this loop's system prompt deliberately diverges from the
+    legacy AI-SDK loop's (see `lib/prompt_parity.test.ts`'s own exception
+    for it): legacy has no deferred-tool concept at all, so its prompt
+    never carries an equivalent suffix, and never can.
 
 ## Channels
 
