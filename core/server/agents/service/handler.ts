@@ -182,10 +182,15 @@ function startTurn(
     //
     // Not airtight: the window between this getRunningTurn read and the
     // addTurn write below is check-then-act, not a DB-level lock, and it is
-    // NOT millisecond-scale — takeFollowUps and buildHistory are each an
-    // additional awaited round trip in between, so the window spans multiple
-    // network round trips, not one. A webhook redelivery or a genuine
-    // double-submit landing in that window can still both pass the check. A
+    // NOT millisecond-scale. Awaited between the two: takeFollowUps,
+    // getHistory, getLastTurnUsage, and — whenever the session is over the
+    // compaction threshold — a whole generateText summarization call plus
+    // the addStep that persists its checkpoint and a second getHistory to
+    // re-read it. So the window spans several network round trips on an
+    // ordinary turn and a full model call on a compacting one; it has grown
+    // since this comment was first written, not shrunk. A webhook
+    // redelivery or a genuine double-submit landing in that window can still
+    // both pass the check. A
     // DB-level uniqueness guard (e.g. a partial unique index on
     // agents.turns(session_id) WHERE status = 'running') would close this
     // fully but is out of scope for this round — kept as check-then-act on
@@ -330,8 +335,19 @@ function startTurn(
     // comfortably-under-budget session short-circuits inside maybeCompact
     // without ever calling a model.
     const priorTurns = (await deps.store.getHistory(sessionId)) as TurnRow[];
+    // Assembled ONCE and reused as this turn's `history` on the common path.
+    // The compaction check needs the assembled messages anyway (to size the
+    // estimate fallback and the tokensBefore/tokensAfter payload), and the
+    // turn needs exactly the same messages — running getHistory +
+    // assembleHistory + ensureToolResultsPresent twice per turn bought
+    // nothing. Only a compaction that actually persisted a checkpoint makes
+    // this stale, and that path re-fetches below.
+    let history: ModelMessage[] = ensureToolResultsPresent(
+      assembleHistory(priorTurns, deps.agent.config.context),
+    );
+    let compacted = false;
     if (priorTurns.length > 0) {
-      const priorMsgs = ensureToolResultsPresent(assembleHistory(priorTurns, deps.agent.config.context));
+      const priorMsgs = history;
       const lastUsage = await deps.store.getLastTurnUsage(sessionId).catch((e) => {
         console.error(`agents: getLastTurnUsage failed for session ${sessionId} (falling back to an estimate):`, e);
         return null;
@@ -374,8 +390,16 @@ function startTurn(
           const { text } = await generateText({ model, system: req.system, messages: req.messages as any });
           return text;
         },
+        // The spec's error table requires a warning EVENT when summarization
+        // fails, not just a log line: the drop fallback silently discards
+        // turns the summary would have preserved, and the user is the only
+        // one who can supply that context again. Published on the session
+        // stream even though no turn exists yet (compaction is pre-turn) —
+        // context.compacted is turn-agnostic for exactly this reason.
+        emit: (e) => publish(sessionId, e),
       });
       if (outcome.compacted) {
+        compacted = true;
         // The compaction step is attached to the LAST turn being replaced
         // (replacedTurnSeqTo), not to the new turn about to be created:
         // history.ts's assembleHistory resumes assembly right after the
@@ -418,11 +442,13 @@ function startTurn(
       }
     }
 
-    // Re-fetched fresh (not reused from priorMsgs above): when compaction
-    // just persisted a checkpoint, this is what picks it up — the same
-    // buildHistory path every other call goes through, so checkpoint-resume
-    // logic has exactly one implementation (history.ts's assembleHistory).
-    const history = await buildHistory(sessionId, deps.store, deps.agent.config.context);
+    // Re-fetched ONLY when compaction just persisted a checkpoint — that is
+    // the single thing that can have invalidated the assembly done above,
+    // and it goes through the same buildHistory path every other call uses,
+    // so checkpoint-resume logic keeps exactly one implementation
+    // (history.ts's assembleHistory). On every other turn the messages
+    // assembled above are already exactly right.
+    if (compacted) history = await buildHistory(sessionId, deps.store, deps.agent.config.context);
     const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
     // Surface the freshly-created turn id to the caller (the channel layer uses
     // it to scope its background delivery to THIS turn) BEFORE publishing any
@@ -812,10 +838,21 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // an "use the session API" error instead of hanging a stateless request.
       // Async (dynamic-tools.ts provider); hookCtx is the same one just used
       // for resolveModelForTurn/resolveInstructions above.
+      // activatedTools matches what startTurn threads in. Without it
+      // ToolSearch could WRITE agents.sessions.activated_tools on this path
+      // but nothing ever read it back, so a deferred tool activated here
+      // stayed permanently unreachable on /chat. Same degrade-to-none
+      // posture as startTurn's read: a bookkeeping-read failure must not
+      // fail the request.
+      const activatedTools = await store.getActivatedTools(sessionId).catch((e) => {
+        console.error(`agents: getActivatedTools failed for session ${sessionId} (continuing with none activated):`, e);
+        return [];
+      });
       const tools = await buildSdkTools({
         agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
+        activatedTools,
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has somewhere
