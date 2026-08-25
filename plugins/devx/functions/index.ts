@@ -53,6 +53,7 @@ import {
   resolveCommand,
   buildCommandOverride,
   loadSkillMetadata,
+  loadSkillsForPrompt,
   matchSkillBySlug,
   matchSkillsByIntent,
   loadSkillBody,
@@ -792,6 +793,12 @@ Deno.serve(async (req: Request) => {
         if (rules !== undefined) aiRules = rules;
       }
 
+      // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+      // invocable") — loadSkillsForPrompt is the one shared resolver every
+      // dispatch path (including the eve loop) uses, so this loop's listing
+      // is identical to the others.
+      const skills = await loadSkillsForPrompt(userId, sql);
+
       const { systemPrompt } = await buildCoderContext({
         mode: chatMode,
         aiRules,
@@ -803,6 +810,7 @@ Deno.serve(async (req: Request) => {
         // below with a single fetch, not through the tool-calling registries —
         // none of them register mcp__ask__ask_question.
         askToolAvailable: false,
+        skills,
       });
       const maxHistory = getMaxHistoryTurns(chatMode);
 

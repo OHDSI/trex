@@ -92,6 +92,30 @@ export async function loadSkillMetadata(
 }
 
 /**
+ * Load the {name, description} listing every coder-prompt dispatch path
+ * (the ai-sdk loop's streamAgentChat, the claude-code sidecar's
+ * streamClaudeCodeChat, the raw-provider dispatch in index.ts, and the eve
+ * loop's buildInstructions) feeds into functions/coder_context.ts's
+ * buildCoderContext as CoderContextInput.skills, rendered as the
+ * <available-skills> listing immediately before SKILL_USAGE_RULE ("The
+ * skills above are real and invocable"). A single shared wrapper around
+ * loadSkillMetadata — not a second loader — so all four sites resolve and
+ * map skills identically instead of each hand-rolling the same
+ * `rows.map((s) => ({ name: s.name, description: s.description }))`, which
+ * is exactly how this listing went missing from three of the four dispatch
+ * paths in the first place. No userId (anonymous/misconfigured caller)
+ * returns an empty listing rather than throwing.
+ */
+export async function loadSkillsForPrompt(
+  userId: string | undefined,
+  sqlFn: SqlFn,
+): Promise<Array<{ name: string; description: string }>> {
+  if (!userId) return [];
+  const rows = await loadSkillMetadata(userId, sqlFn);
+  return rows.map((s) => ({ name: s.name, description: s.description }));
+}
+
+/**
  * Find a skill by exact slug match, including aliases defined in skill metadata.
  */
 export function matchSkillBySlug(

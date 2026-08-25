@@ -12,7 +12,7 @@ import type { HookCtx, ModelSpec } from "eve";
 // header comment for why this doesn't create a real dependency on core).
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
-import { loadSkillMetadata } from "../functions/skills/resolver.ts";
+import { loadSkillsForPrompt } from "../functions/skills/resolver.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { assertProviderSupported } from "../functions/provider_support.ts";
@@ -321,13 +321,11 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
     if (projectRules !== undefined) rules = projectRules;
   }
 
-  // Skills listing: read from devx.skills, the same source the legacy loop
-  // uses, so both loops render an identical block (see coder_context.ts).
-  let skills: Array<{ name: string; description: string }> = [];
-  if (userId) {
-    const rows = await loadSkillMetadata(userId, ctx.sql);
-    skills = rows.map((s: any) => ({ name: s.name, description: s.description }));
-  }
+  // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+  // invocable") — loadSkillsForPrompt is the one shared resolver every
+  // dispatch path uses (functions/agent.ts, claude_code_agent.ts, index.ts,
+  // and this loop), so this listing is identical to the legacy loops'.
+  const skills = await loadSkillsForPrompt(userId, ctx.sql);
 
   const { systemPrompt } = await buildCoderContext({
     // Share filterTools' own helper so the prompt and the tool set can never
