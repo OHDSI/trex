@@ -9,6 +9,7 @@ import {
   type TurnRow,
 } from "./history.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./budget.ts";
+import { SUMMARY_PREFIX } from "./prompts.ts";
 
 let seq = 0;
 const turn = (message: string, steps: TurnRow["steps"]): TurnRow => ({ seq: ++seq, message, metadata: null, steps });
@@ -106,4 +107,20 @@ Deno.test("assembleHistory does not truncate text parts", () => {
   const turns = [turn("go", [{ kind: "text", name: null, payload: { text: big } }])];
   const msgs = assembleHistory(turns, DEFAULT_CONTEXT_CONFIG);
   assertEquals((msgs[1].content as AssistantPart[])[0], { type: "text", text: big });
+});
+
+Deno.test("assembleHistory resumes from the newest compaction step", () => {
+  const turns: TurnRow[] = [
+    { seq: 1, message: "old", metadata: null, steps: [{ kind: "text", name: null, payload: { text: "old reply" } }] },
+    { seq: 2, message: "checkpoint", metadata: null, steps: [
+      { kind: "compaction", name: null, payload: { summary: "did X, next Y", replacedTurnSeqFrom: 1, replacedTurnSeqTo: 1 } },
+    ] },
+    { seq: 3, message: "new", metadata: null, steps: [{ kind: "text", name: null, payload: { text: "new reply" } }] },
+  ];
+  const msgs = assembleHistory(turns, DEFAULT_CONTEXT_CONFIG);
+  const joined = JSON.stringify(msgs);
+  assert(!joined.includes("old reply"), "compacted turn still present");
+  assert(joined.includes("did X, next Y"), "summary missing");
+  assert(joined.includes(SUMMARY_PREFIX.slice(0, 40)), "framing prefix missing");
+  assert(joined.includes("new reply"), "post-compaction turn missing");
 });

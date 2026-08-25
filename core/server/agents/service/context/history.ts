@@ -5,6 +5,7 @@
 // had no idea what turn 1's tools actually did.
 import type { ContextConfig } from "./budget.ts";
 import { truncateMiddle } from "./truncate.ts";
+import { SUMMARY_PREFIX } from "./prompts.ts";
 
 export interface StepRow {
   kind: string;
@@ -30,11 +31,30 @@ export type ModelMessage =
 
 export function assembleHistory(turns: TurnRow[], config: ContextConfig): ModelMessage[] {
   const msgs: ModelMessage[] = [];
+
+  // Resume from the newest compaction checkpoint, if one exists: everything
+  // up to and including the turn that carries the "compaction" step was
+  // folded into that step's summary by compact.ts's maybeCompact and is
+  // never replayed again. Only the LATEST checkpoint matters — an earlier
+  // one is itself inside the range this one already replaced.
+  let scopeStart = 0;
+  let summary: string | null = null;
+  for (const [i, t] of turns.entries()) {
+    const step = t.steps.find((s) => s.kind === "compaction");
+    if (!step) continue;
+    const p = step.payload as { summary?: string; replacedTurnSeqTo: number };
+    summary = p.summary ?? null;
+    scopeStart = i + 1;
+  }
+  const scoped = turns.slice(scopeStart);
+  if (summary) msgs.push({ role: "user", content: SUMMARY_PREFIX + summary });
+
   // Last `freshTurns` turns (inclusive, counting back from the most recent)
   // keep near-full tool output; everything older is squeezed hard — recent
-  // context matters far more to the model than a stale tool dump.
-  const freshFrom = Math.max(0, turns.length - config.freshTurns);
-  for (const [turnIndex, t] of turns.entries()) {
+  // context matters far more to the model than a stale tool dump. Counted
+  // within the post-checkpoint scope, not the raw turn list.
+  const freshFrom = Math.max(0, scoped.length - config.freshTurns);
+  for (const [turnIndex, t] of scoped.entries()) {
     msgs.push({ role: "user", content: typeof t.message === "string" ? t.message : JSON.stringify(t.message) });
     for (const s of t.steps) {
       const p = (s.payload ?? {}) as Record<string, unknown>;
