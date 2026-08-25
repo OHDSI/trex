@@ -7,6 +7,7 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { wrapToolWithCap, buildSdkTools } from "./toolset.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
+import { assembleHistory } from "./context/history.ts";
 import { loadAgent } from "../loader.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
 import { createStore } from "./store.ts";
@@ -245,4 +246,124 @@ Deno.test("buildSdkTools: activateTools is undefined on ToolContext when no stor
   });
   await (tools.probe as { execute: (i: unknown) => Promise<unknown> }).execute({});
   assertEquals(captured.ctx?.activateTools, undefined);
+});
+
+// --- Cap arithmetic: no double truncation ----------------------------------
+// truncateMiddle's maxChars bounds RETAINED content; the warning header and
+// omission marker are additional (truncate.ts). Capping at exactly
+// freshToolOutputChars therefore stored a value OVER the cap, which
+// assembleHistory's fresh tier — capped at the same number — truncated a
+// second time. The inner header then reported the length of the
+// already-truncated text (e.g. "original length: 20102") instead of the true
+// original (412839), defeating the header's whole purpose: telling the model
+// how much it is missing so it can re-run with `| tail -50`.
+Deno.test("wrapToolWithCap: a capped result is NOT re-truncated by assembleHistory's fresh tier", async () => {
+  const config = { ...DEFAULT_CONTEXT_CONFIG, freshToolOutputChars: 20_000 };
+  const original = "y".repeat(412_839);
+  // deno-lint-ignore no-explicit-any
+  const tool = { execute: () => Promise.resolve(original) } as any;
+  // deno-lint-ignore no-explicit-any
+  const stored = await wrapToolWithCap(tool, config).execute({}, {} as any) as string;
+
+  // Storage-time cap already fits inside the assembly-time cap.
+  assert(
+    stored.length <= config.freshToolOutputChars,
+    `stored value (${stored.length}) exceeds the cap (${config.freshToolOutputChars}) and will be truncated again`,
+  );
+
+  const msgs = assembleHistory([{
+    seq: 1,
+    message: "dump it",
+    metadata: null,
+    steps: [
+      { kind: "tool-call", name: "Bash", payload: { toolCallId: "c1", input: {} } },
+      { kind: "tool-result", name: "Bash", payload: { toolCallId: "c1", output: stored } },
+    ],
+  }], config);
+
+  const result = msgs.find((m) => m.role === "tool") as { content: Array<{ output: unknown }> };
+  const assembled = result.content[0].output as string;
+  assertEquals(assembled, stored, "assembleHistory truncated an already-capped value a second time");
+
+  // Exactly one header, and it reports the TRUE original length.
+  const headers = assembled.match(/Warning: truncated output \(original length: (\d+) chars/g) ?? [];
+  assertEquals(headers.length, 1, `expected one truncation header, got ${headers.length}: ${headers.join(" | ")}`);
+  assert(
+    assembled.includes(`original length: ${original.length} chars`),
+    `header does not report the true original length ${original.length}`,
+  );
+});
+
+// The cap must still be respected as an upper bound on the stored string, not
+// just on its retained content — that is the difference the subtraction buys.
+Deno.test("wrapToolWithCap: the RETURNED string stays within freshToolOutputChars", async () => {
+  const config = { ...DEFAULT_CONTEXT_CONFIG, freshToolOutputChars: 1_000 };
+  // deno-lint-ignore no-explicit-any
+  const tool = { execute: () => Promise.resolve("z".repeat(500_000)) } as any;
+  // deno-lint-ignore no-explicit-any
+  const out = await wrapToolWithCap(tool, config).execute({}, {} as any) as string;
+  assert(out.length <= config.freshToolOutputChars, `returned ${out.length} chars for a ${config.freshToolOutputChars} cap`);
+  assert(out.includes("original length: 500000 chars"));
+});
+
+// JSON.stringify throws on a circular structure or a BigInt. Such a tool
+// worked before the cap wrapper existed; failing to MEASURE its result must
+// not turn it into a turn-killing throw.
+Deno.test("wrapToolWithCap: an unserializable result passes through instead of throwing", async () => {
+  // deno-lint-ignore no-explicit-any
+  const circular: any = { name: "loop" };
+  circular.self = circular;
+  // deno-lint-ignore no-explicit-any
+  const wrapped = wrapToolWithCap({ execute: () => Promise.resolve(circular) } as any, DEFAULT_CONTEXT_CONFIG);
+  // deno-lint-ignore no-explicit-any
+  const out = await wrapped.execute({}, {} as any);
+  assertEquals(out, circular);
+});
+
+Deno.test("wrapToolWithCap: a BigInt-bearing result passes through instead of throwing", async () => {
+  const value = { id: 10n };
+  // deno-lint-ignore no-explicit-any
+  const wrapped = wrapToolWithCap({ execute: () => Promise.resolve(value) } as any, DEFAULT_CONTEXT_CONFIG);
+  // deno-lint-ignore no-explicit-any
+  const out = await wrapped.execute({}, {} as any);
+  assertEquals(out, value);
+});
+
+// Spec success criterion 4: the tool-payload reduction must be "logged as a
+// byte count before and after". Nothing measured bytes before this.
+Deno.test("buildSdkTools: the deferral logs the serialized tool payload before and after", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.context.deferredTools = ["propose_card", "connection_search"];
+  const origLog = console.log;
+  const logged: string[] = [];
+  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  } finally {
+    console.log = origLog;
+  }
+  const line = logged.find((l) => l.includes("tool payload"));
+  assert(line, `no tool-payload byte log emitted; got: ${logged.join(" | ")}`);
+  const m = line.match(/tool payload (\d+) -> (\d+) bytes, (\d+) -> (\d+) tools/);
+  assert(m, `byte log is not in the expected before/after shape: ${line}`);
+  const [, before, after, countBefore, countAfter] = m.map(Number);
+  assert(before > after, `payload did not shrink: ${before} -> ${after}`);
+  assert(after > 0, "after-size measured as zero — the measurement is not reading real schemas");
+  assertEquals(countBefore - countAfter, 2, "both deferred tools should have been withheld");
+});
+
+// An agent that defers nothing (every agent but devx) must not pay for this
+// log on every single request — the branch it lives in never runs.
+Deno.test("buildSdkTools: no tool-payload log when the agent defers nothing", async () => {
+  const agent = await loadAgent(TOY);
+  assertEquals(agent.config.context.deferredTools, []);
+  const origLog = console.log;
+  const logged: string[] = [];
+  console.log = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  } finally {
+    console.log = origLog;
+  }
+  assertEquals(logged.filter((l) => l.includes("tool payload")), []);
 });

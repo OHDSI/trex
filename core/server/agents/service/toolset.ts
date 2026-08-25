@@ -12,7 +12,7 @@ import { buildConnectionProvider, type ConnectionProviderOpts } from "../connect
 import { type ConnectionToolMeta, searchConnectionTools } from "../connections/search.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
-import { truncateMiddle } from "./context/truncate.ts";
+import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { partitionTools } from "./context/toolsplit.ts";
 
@@ -427,15 +427,55 @@ export function wrapToolWithCap<T extends { execute?: (...args: any[]) => Promis
 ): T {
   const inner = toolDef.execute;
   if (!inner) return toolDef; // clientOnly tools have no execute to wrap
+  // truncateMiddle's maxChars bounds RETAINED CONTENT — its warning header
+  // and omission marker are additional (truncate.ts). Passing the raw cap
+  // therefore returns a string ~100 chars OVER it, which history.ts's fresh
+  // tier (capped at the same number) then truncates a SECOND time: stacked
+  // headers whose inner one reports the length of the already-truncated
+  // text rather than the true original. That number is the header's whole
+  // purpose — it is how the model decides to re-run with `| tail -50` — so a
+  // wrong one defeats it. Subtract the overhead, as compact.ts already does.
+  const cap = Math.max(0, config.freshToolOutputChars - TRUNCATION_HEADER_OVERHEAD);
   return {
     ...toolDef,
     execute: async (...args: any[]) => {
       const raw = await inner(...args);
-      const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+      // JSON.stringify throws on a circular structure or a BigInt-bearing
+      // result. Such a tool succeeded before this wrapper existed and must
+      // keep succeeding: failing to MEASURE a result is not the tool
+      // failing. Pass it through uncapped rather than turning a working tool
+      // into a turn-killing throw over a size check.
+      let text: string | undefined;
+      try {
+        text = typeof raw === "string" ? raw : JSON.stringify(raw);
+      } catch (e) {
+        console.warn("agents: tool result could not be serialized for capping, passing it through uncapped:", e);
+        return raw;
+      }
       if (text === undefined || text.length <= config.freshToolOutputChars) return raw;
-      return truncateMiddle(text, config.freshToolOutputChars);
+      return truncateMiddle(text, cap);
     },
   };
+}
+
+// Approximate wire size of a built tool map, for the deferral before/after
+// log (spec success criterion 4). Measures only what a provider actually
+// serializes into the request — name, description, input schema — since the
+// SDK tool object also carries an `execute` closure and provider-option
+// markers that never reach the wire. A schema that cannot be stringified
+// (a zod object with internal cycles) contributes its name+description only
+// rather than throwing: this is a diagnostic, and must never be able to fail
+// a turn.
+function serializedToolBytes(tools: Record<string, any>): number {
+  let bytes = 0;
+  for (const [name, def] of Object.entries(tools)) {
+    bytes += name.length + String(def?.description ?? "").length;
+    const schema = def?.inputSchema?.jsonSchema ?? def?.inputSchema;
+    try {
+      bytes += JSON.stringify(schema)?.length ?? 0;
+    } catch { /* unserializable schema — name+description only */ }
+  }
+  return bytes;
 }
 
 // Builds the AI SDK tool set for one buildSdkTools call. Order:
@@ -585,10 +625,23 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   // behaviour change never requested for agents that defer nothing.
   const { deferredTools } = agent.config.context;
   if (deferredTools.length > 0) {
+    // Spec success criterion 4: the payload reduction must be "logged as a
+    // byte count before and after". Measured on the serialized tool map,
+    // which is what actually goes on the wire. console.log to match the
+    // rest of this file's logging convention, and only inside this branch —
+    // an agent that defers nothing (every agent but devx) never reaches it,
+    // so this adds no per-request noise to the default configuration.
+    const bytesBefore = serializedToolBytes(out);
+    const countBefore = Object.keys(out).length;
     const { core, activated } = partitionTools(out, ctx.activatedTools ?? [], deferredTools);
     const withBreakpoint = withToolCachePoint(ctx.model, core, activated);
     for (const name of Object.keys(out)) delete out[name];
     Object.assign(out, withBreakpoint);
+    const bytesAfter = serializedToolBytes(out);
+    console.log(
+      `agents: ${agent.dir} tool payload ${bytesBefore} -> ${bytesAfter} bytes, ` +
+        `${countBefore} -> ${Object.keys(out).length} tools (${activated.length} activated)`,
+    );
   }
 
   return out;
