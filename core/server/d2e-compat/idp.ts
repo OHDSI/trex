@@ -90,9 +90,15 @@ export function resolveIdpConfig(
       env.D2E_IDP_AUDIENCES ?? env.LOGTO__AUDIENCES ?? env.LOGTO__RESOURCE_API,
     ),
     clientId: env.LOGTO__CLIENT_ID ?? "",
-    // d2e env.ts maps env.LOGTO_CLIENT_SECRET <- SECURITY_AUTH_OIDC_APISECRET;
-    // accept either name in case only one reaches the worker env.
-    clientSecret: env.SECURITY_AUTH_OIDC_APISECRET || env.LOGTO__CLIENT_SECRET || "",
+    // LOGTO__* first. SECURITY_AUTH_OIDC_APISECRET is only an alias, kept
+    // because d2e env.ts maps env.LOGTO_CLIENT_SECRET <- SECURITY_AUTH_OIDC_APISECRET
+    // and some deployments set nothing else. It is WebAPI's variable, and WebAPI
+    // may now be pointed at a different issuer than the portal is: a stack whose
+    // WebAPI authenticates against trex while d2e-compat still verifies Logto
+    // tokens has trex's client secret in there. Preferring the alias then sends
+    // that secret to Logto, which answers 401 on the code exchange, and the only
+    // visible symptom is an undefined access_token failing much later.
+    clientSecret: env.LOGTO__CLIENT_SECRET || env.SECURITY_AUTH_OIDC_APISECRET || "",
     scope: env.LOGTO__SCOPE ?? "",
     tokenUrl: env.LOGTO__TOKEN_URL ?? "",
     resource: env.LOGTO__RESOURCE_API ?? "",
