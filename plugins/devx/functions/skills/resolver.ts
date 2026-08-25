@@ -105,14 +105,31 @@ export async function loadSkillMetadata(
  * is exactly how this listing went missing from three of the four dispatch
  * paths in the first place. No userId (anonymous/misconfigured caller)
  * returns an empty listing rather than throwing.
+ *
+ * `builtinOnly` (eve loop only — R12): a DELIBERATE divergence from the
+ * legacy loops' full listing. The two loops load skills through different
+ * machinery. Legacy's `Skill` tool is a no-op stub, so its listing is
+ * advisory either way and a user-created row costs nothing there. eve's
+ * loader is core's real `skillTool` (core/server/agents/service/toolset.ts),
+ * which resolves ONLY against `agent.skills` — the filesystem symlink
+ * `plugins/devx/agent/skills -> ../skills`, i.e. exactly the directories
+ * skills/sync.ts scans and upserts with `is_builtin = true`, under the same
+ * names (each SKILL.md's frontmatter `name` matches its directory). A
+ * user-created `devx.skills` row has no file behind it, so naming one in
+ * the eve prompt makes the model call `skill` and get back
+ * `unknown skill "..."`. Advertising a skill the agent cannot load is worse
+ * than a listing that diverges between loops, so the eve listing is filtered
+ * to what `skillTool` can actually resolve.
  */
 export async function loadSkillsForPrompt(
   userId: string | undefined,
   sqlFn: SqlFn,
+  opts?: { builtinOnly?: boolean },
 ): Promise<Array<{ name: string; description: string }>> {
   if (!userId) return [];
   const rows = await loadSkillMetadata(userId, sqlFn);
-  return rows.map((s) => ({ name: s.name, description: s.description }));
+  const visible = opts?.builtinOnly ? rows.filter((s) => s.is_builtin === true) : rows;
+  return visible.map((s) => ({ name: s.name, description: s.description }));
 }
 
 /**

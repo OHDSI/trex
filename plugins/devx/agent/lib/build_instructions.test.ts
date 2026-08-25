@@ -19,6 +19,7 @@ import type { HookCtx } from "../../../../core/server/agents/eve-shim/types.ts";
 import agentConfig from "../agent.ts";
 import { ensureAppWorkspace, ensureWorkspace } from "../../functions/tools/workspace.ts";
 import { DEFAULT_AI_RULES } from "../../functions/prompts.ts";
+import { loadSkillsForPrompt } from "../../functions/skills/resolver.ts";
 
 const buildInstructions = agentConfig.buildInstructions!;
 
@@ -153,4 +154,68 @@ Deno.test("agents-loop instructions keep the legacy ai_rules precedence", async 
   const out = await buildInstructions("BASE PROMPT", ctx);
   assertStringIncludes(out, "<user_defined_ai_rules>");
   assertStringIncludes(out, "USER RULES");
+});
+
+// R12: the eve prompt must only advertise skills eve can actually LOAD.
+// This loop's loader is core's `skillTool`, which resolves against the
+// `agent/skills -> ../skills` symlink — i.e. the filesystem-synced built-ins
+// (skills/sync.ts upserts exactly those with is_builtin = true, under the
+// same names). A user-created devx.skills row has no file behind it, so
+// naming it here would have the model call `skill` and get `unknown skill`.
+const SKILL_ROWS = [
+  {
+    id: "s1",
+    name: "brainstorming",
+    slug: "brainstorming",
+    description: "Explore an idea before building it",
+    allowed_tools: null,
+    mode: "agent",
+    aliases: [],
+    is_builtin: true,
+  },
+  {
+    id: "s2",
+    name: "my-custom-skill",
+    slug: "my-custom-skill",
+    description: "A skill the user created in the UI",
+    allowed_tools: null,
+    mode: "agent",
+    aliases: [],
+    is_builtin: false,
+  },
+];
+
+function ctxWithSkills(): HookCtx {
+  return {
+    sessionId: "s-1",
+    env: () => undefined,
+    userId: "u-skills",
+    metadata: { chatId: "c-1" },
+    sql: (query: string) => {
+      if (query.includes("FROM devx.settings")) return Promise.resolve({ rows: [] });
+      if (query.includes("FROM devx.skills")) return Promise.resolve({ rows: SKILL_ROWS });
+      throw new Error(`unexpected query: ${query}`);
+    },
+  };
+}
+
+Deno.test("eve listing excludes a non-builtin skill skillTool could never resolve", async () => {
+  const out = await buildInstructions("BASE PROMPT", ctxWithSkills());
+  assertStringIncludes(out, "<available-skills>");
+  assertStringIncludes(out, "- brainstorming: Explore an idea before building it");
+  assert(
+    !out.includes("my-custom-skill"),
+    "a user-created skill has no file behind the agent/skills symlink — advertising it makes `skill` return `unknown skill`",
+  );
+});
+
+Deno.test("the legacy listing still carries the same non-builtin skill (deliberate divergence)", async () => {
+  const sqlFn = (_q: string, _p?: unknown[]) => Promise.resolve({ rows: SKILL_ROWS });
+  // No opts = exactly what functions/agent.ts, claude_code_agent.ts and
+  // index.ts pass, so this is the legacy listing, unchanged.
+  const legacy = await loadSkillsForPrompt("u-skills", sqlFn);
+  assertEquals(legacy.map((s) => s.name), ["brainstorming", "my-custom-skill"]);
+  // ...and the eve flavour of the same call drops it.
+  const eve = await loadSkillsForPrompt("u-skills", sqlFn, { builtinOnly: true });
+  assertEquals(eve.map((s) => s.name), ["brainstorming"]);
 });

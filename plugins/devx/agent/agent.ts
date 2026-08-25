@@ -317,7 +317,7 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
 
   // Project rules override user rules, but ONLY for app-scoped chats —
   // legacy gates the readProjectRules call on appId (functions/agent.ts:174).
-  const { appId, skillContext } = readMetadata(ctx.metadata);
+  const { appId } = readMetadata(ctx.metadata);
   if (userId && appId) {
     const workspacePath = await ensureAppWorkspace(userId, appId);
     const projectRules = await readProjectRules(workspacePath);
@@ -327,8 +327,17 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
   // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
   // invocable") — loadSkillsForPrompt is the one shared resolver every
   // dispatch path uses (functions/agent.ts, claude_code_agent.ts, index.ts,
-  // and this loop), so this listing is identical to the legacy loops'.
-  const skills = await loadSkillsForPrompt(userId, ctx.sql);
+  // and this loop).
+  //
+  // builtinOnly is a DELIBERATE divergence from the legacy loops (R12), NOT
+  // an oversight: this loop's actual skill loader is core's `skillTool`,
+  // which resolves against the `agent/skills -> ../skills` symlink, i.e.
+  // built-in (filesystem-synced) skills only. Listing a user-created
+  // devx.skills row here would have the model call `skill` and get back
+  // `unknown skill`. Advertising a skill the agent cannot load is worse than
+  // a listing that differs between loops — see loadSkillsForPrompt's own
+  // comment for the full rationale.
+  const skills = await loadSkillsForPrompt(userId, ctx.sql, { builtinOnly: true });
 
   const { systemPrompt } = await buildCoderContext({
     // Share filterTools' own helper so the prompt and the tool set can never
@@ -337,7 +346,17 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
     // that send no mode.
     mode: readMode(ctx.metadata) ?? "agent",
     aiRules: rules,
-    skillContext,
+    // skillContext is deliberately NOT passed on this loop (R11). Legacy
+    // PRE-INJECTS a resolved skill body into the system prompt because its
+    // own `Skill` tool is a no-op stub returning a canned string — without
+    // the injection the model could never see a skill's content. eve has
+    // core's REAL `skill` built-in (core/server/agents/service/toolset.ts's
+    // skillTool), which loads a skill body on demand mid-turn, so gap 2 is
+    // closed here by a different mechanism, not left open. Accepting a
+    // client-supplied skillContext instead would be a posture regression:
+    // on legacy the value is SERVER-derived (functions/index.ts:756-775
+    // resolves the slash command / skill intent and loads the body), and
+    // nothing in the eve request path resolves it server-side.
     remoteChannel: false,
     askToolAvailable: false,
     settings: { max_steps: undefined },

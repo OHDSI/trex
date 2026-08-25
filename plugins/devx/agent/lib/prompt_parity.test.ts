@@ -6,10 +6,17 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { buildInstructions } from "../agent.ts";
 import { buildCoderContext } from "../../functions/coder_context.ts";
 
-const SKILLS = [
-  { name: "brainstorming", description: "Explore an idea before building it" },
-  { name: "writing-plans", description: "Turn a spec into an implementation plan" },
+// is_builtin: true on both rows is load-bearing (R12). The eve loop lists
+// only skills core's `skillTool` can actually resolve — the filesystem-synced
+// built-ins — so prompt PARITY holds for built-in skills and deliberately
+// does NOT for user-created ones. That divergence has its own coverage in
+// build_instructions.test.ts; this file's job is the shared spine, which is
+// only comparable on rows both loops render.
+const SKILL_ROWS = [
+  { name: "brainstorming", description: "Explore an idea before building it", is_builtin: true },
+  { name: "writing-plans", description: "Turn a spec into an implementation plan", is_builtin: true },
 ];
+const SKILLS = SKILL_ROWS.map((s) => ({ name: s.name, description: s.description }));
 
 function fakeCtx(metadata: unknown) {
   return {
@@ -18,7 +25,7 @@ function fakeCtx(metadata: unknown) {
     metadata,
     env: () => undefined,
     sql: (q: string) => {
-      if (q.includes("devx.skills")) return Promise.resolve({ rows: SKILLS });
+      if (q.includes("devx.skills")) return Promise.resolve({ rows: SKILL_ROWS });
       return Promise.resolve({ rows: [] });
     },
   } as any;
