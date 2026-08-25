@@ -12,6 +12,7 @@ import type { HookCtx, ModelSpec } from "eve";
 // header comment for why this doesn't create a real dependency on core).
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
+import { loadSkillMetadata } from "../functions/skills/resolver.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { assertProviderSupported } from "../functions/provider_support.ts";
@@ -207,7 +208,7 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 // workspace routing, which always needs SOME concrete choice) whereas this
 // hook's contract requires "no mode / unknown mode" to mean "allow
 // everything", not "treat it as build".
-function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
+export function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
   const mode = (metadata as { mode?: unknown } | null | undefined)?.mode;
   return mode === "ask" || mode === "plan" || mode === "build" ? mode : undefined;
 }
@@ -313,19 +314,33 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
 
   // Project rules override user rules, but ONLY for app-scoped chats —
   // legacy gates the readProjectRules call on appId (functions/agent.ts:174).
-  const { appId } = readMetadata(ctx.metadata);
+  const { appId, skillContext } = readMetadata(ctx.metadata);
   if (userId && appId) {
     const workspacePath = await ensureAppWorkspace(userId, appId);
     const projectRules = await readProjectRules(workspacePath);
     if (projectRules !== undefined) rules = projectRules;
   }
 
+  // Skills listing: read from devx.skills, the same source the legacy loop
+  // uses, so both loops render an identical block (see coder_context.ts).
+  let skills: Array<{ name: string; description: string }> = [];
+  if (userId) {
+    const rows = await loadSkillMetadata(userId, ctx.sql);
+    skills = rows.map((s: any) => ({ name: s.name, description: s.description }));
+  }
+
   const { systemPrompt } = await buildCoderContext({
-    mode: "agent",
+    // Share filterTools' own helper so the prompt and the tool set can never
+    // disagree about the mode. readMode returns undefined for unset/unknown,
+    // which maps to "agent" -- preserving the previous behaviour for callers
+    // that send no mode.
+    mode: readMode(ctx.metadata) ?? "agent",
     aiRules: rules,
+    skillContext,
     remoteChannel: false,
     askToolAvailable: false,
     settings: { max_steps: undefined },
+    skills,
   });
   return systemPrompt;
 }

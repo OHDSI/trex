@@ -45,6 +45,12 @@ export interface DevxMetadata {
   mode: "ask" | "plan" | "build";
   chatId: string;
   appId?: string;
+  // Untrusted client-supplied passthrough (same posture as mode/chatId/appId
+  // above) -- forwarded to buildCoderContext's skillContext so an activated
+  // skill's context reaches the eve prompt, restoring the injection at
+  // prompts.ts:1084 (constructSystemPrompt's <active_skill> block). Never
+  // used for authorization.
+  skillContext?: string;
 }
 
 // Exported for agent.ts's buildInstructions hook (V3), which needs the same
@@ -60,6 +66,7 @@ export function readMetadata(metadata: unknown): DevxMetadata {
     mode: m.mode === "ask" || m.mode === "plan" ? m.mode : "build",
     chatId: typeof m.chatId === "string" ? m.chatId : "",
     appId: typeof m.appId === "string" ? m.appId : undefined,
+    skillContext: typeof m.skillContext === "string" ? m.skillContext : undefined,
   };
 }
 

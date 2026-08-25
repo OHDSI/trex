@@ -348,6 +348,11 @@ function fakeInstructionsCtx(overrides: Partial<HookCtx> & { aiRules?: string } 
       if (query.includes("FROM devx.settings")) {
         return Promise.resolve({ rows: aiRules !== undefined ? [{ ai_rules: aiRules }] : [] });
       }
+      // buildInstructions now also loads the skills listing (loadSkillMetadata,
+      // resolver.ts) via devx.skills; no skills configured in these fixtures.
+      if (query.includes("FROM devx.skills")) {
+        return Promise.resolve({ rows: [] });
+      }
       throw new Error(`unexpected query: ${query}`);
     },
     ...rest,

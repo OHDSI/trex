@@ -65,6 +65,12 @@ export interface CoderContextInput {
   remoteChannel?: boolean;
   hasComponentSelection?: boolean;
   settings: { max_steps?: number };
+  // Enabled skills for this user, rendered as a listing immediately before
+  // SKILL_USAGE_RULE -- which tells the model "The skills above are real and
+  // invocable", a sentence that previously referred to nothing on either loop.
+  // Sourced from devx.skills via loadSkillMetadata so both loops render the
+  // identical block from one place.
+  skills?: Array<{ name: string; description: string }>;
   // Whether THIS engine actually registers the mcp__ask__ask_question tool
   // that buildAskQuestionRule's <asking-questions> block instructs the model
   // to call. Today that tool exists only in the claude-code sidecar
@@ -94,8 +100,11 @@ export async function buildCoderContext(input: CoderContextInput): Promise<Coder
     // channel — buildAskQuestionRule already enforces this), AND the calling
     // engine actually providing the tool the rule tells the model to call.
     const askQuestionRule = input.askToolAvailable ? buildAskQuestionRule(profile) : "";
+    const skillsListing = (input.skills ?? []).length > 0
+      ? `<available-skills>\n${(input.skills ?? []).map((s) => `- ${s.name}: ${s.description}`).join("\n")}\n</available-skills>\n\n`
+      : "";
     systemPrompt =
-      `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${SKILL_USAGE_RULE}\n\n` +
+      `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${skillsListing}${SKILL_USAGE_RULE}\n\n` +
       `${askQuestionRule ? askQuestionRule + "\n\n" : ""}${COMMIT_HYGIENE_RULE}\n\n${systemPrompt}`;
   }
 
