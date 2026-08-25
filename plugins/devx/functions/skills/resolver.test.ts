@@ -52,3 +52,26 @@ Deno.test("loadSkillsForPrompt: no rows returns an empty listing, not a throw", 
   const result = await loadSkillsForPrompt("u1", sqlFn);
   assertEquals(result, []);
 });
+
+// loadSkillsForPrompt itself does NOT swallow a query failure — it propagates
+// (task-5-report.md Finding 3, fix round 2). Graceful degradation is a
+// CALLER concern: functions/agent.ts and claude_code_agent.ts have no
+// try/catch at all (any DB error already kills those turns, by existing
+// design), agent/agent.ts's buildInstructions is documented to fail the turn
+// on a throw, and index.ts is the one caller with an established
+// graceful-degradation contract for devx.skills reads, so it is the one
+// caller required to catch this. This pins that loadSkillsForPrompt would
+// indeed break an unguarded caller if a devx.skills query failed — the
+// reason index.ts's placement inside its try/catch (asserted positionally
+// in prompt_divergence.test.ts) matters.
+Deno.test("loadSkillsForPrompt: propagates a sql failure rather than swallowing it (degradation is the caller's job)", async () => {
+  const sqlFn = (_q: string, _p?: unknown[]) => Promise.reject(new Error("devx.skills unavailable"));
+  let threw = false;
+  try {
+    await loadSkillsForPrompt("u1", sqlFn);
+  } catch (e) {
+    threw = true;
+    assert((e as Error).message.includes("devx.skills unavailable"));
+  }
+  assert(threw, "expected loadSkillsForPrompt to propagate the sql failure");
+});

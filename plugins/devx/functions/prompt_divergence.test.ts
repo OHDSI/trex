@@ -95,6 +95,40 @@ Deno.test("every dispatch path threads its skills listing into buildCoderContext
   }
 });
 
+// task-5-report.md Finding 3 (fix round 2, follows from Finding 1): unlike
+// functions/agent.ts and claude_code_agent.ts (which have no try/catch at
+// all -- any DB error already kills those turns) and agent/agent.ts (whose
+// buildInstructions is documented to fail the turn by design on a throw),
+// index.ts's raw-provider dispatch already has an established
+// graceful-degradation contract for devx.skills reads: the "Skill/Command
+// resolution" try/catch (logs "[index] Skill/command resolution error" and
+// proceeds without it). loadSkillsForPrompt's call was first added AFTER
+// that block, so a devx.skills failure would have hard-failed a turn that
+// previously degraded gracefully. index.ts's whole request handler lives
+// inside one `Deno.serve(async (req) => {...})` callback with no function
+// boundary around this code, so it cannot be invoked in isolation the way
+// the other two engines' exported stream functions can (see
+// prompt_divergence.test.ts's header comment on why this file already
+// prefers source-position checks over invoking index.ts directly). This
+// asserts the call sits STRICTLY BETWEEN the guarding `try {` and its
+// `catch` — i.e. actually inside the block that degrades gracefully — not
+// merely present somewhere in the file.
+Deno.test("index.ts resolves its skills listing inside the skill/command resolution try/catch, not after it", async () => {
+  const src = await Deno.readTextFile("plugins/devx/functions/index.ts");
+  const sectionIdx = src.indexOf("// --- Skill/Command resolution ---");
+  assert(sectionIdx >= 0, "could not find the Skill/Command resolution section marker in index.ts");
+  const openTryIdx = src.indexOf("try {", sectionIdx);
+  assert(openTryIdx >= 0, "could not find the try { opening the skill/command resolution block");
+  const catchIdx = src.indexOf('console.error("[index] Skill/command resolution error:"', openTryIdx);
+  assert(catchIdx >= 0, "could not find the skill/command resolution catch block");
+  const loadIdx = src.indexOf("loadSkillsForPrompt(", openTryIdx);
+  assert(loadIdx >= 0, "index.ts never calls loadSkillsForPrompt");
+  assert(
+    loadIdx > openTryIdx && loadIdx < catchIdx,
+    "loadSkillsForPrompt must be called INSIDE the skill/command resolution try block so a devx.skills failure degrades gracefully (logs + empty list) instead of hard-failing the raw-provider turn",
+  );
+});
+
 Deno.test("no dispatch path constructs the base prompt directly", async () => {
   for (const path of ENGINES) {
     const src = await Deno.readTextFile(path);

@@ -603,9 +603,20 @@ Deno.serve(async (req: Request) => {
       // --- Skill/Command resolution ---
       let skillContext = undefined;
       let commandOverride = undefined;
+      // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+      // invocable") — resolved inside the try below so a devx.skills failure
+      // degrades the same way every other skill/command read here does
+      // (logged, request proceeds without it) rather than hard-failing the
+      // turn.
+      let skills = [];
       const streamAppId = chatCheck.rows[0].app_id;
 
       try {
+        // Independent of slash-command/intent matching below; resolved
+        // first so every branch (including the early-return meta-commands)
+        // still has a best-effort listing if reached later.
+        skills = await loadSkillsForPrompt(userId, sql);
+
         // --- Meta-commands: respond inline without AI ---
         const slashInput = parseSlashInput(prompt);
 
@@ -793,12 +804,9 @@ Deno.serve(async (req: Request) => {
         if (rules !== undefined) aiRules = rules;
       }
 
-      // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
-      // invocable") — loadSkillsForPrompt is the one shared resolver every
-      // dispatch path (including the eve loop) uses, so this loop's listing
-      // is identical to the others.
-      const skills = await loadSkillsForPrompt(userId, sql);
-
+      // `skills` was already resolved above, inside the Skill/Command
+      // resolution try/catch — degrades to [] on a devx.skills failure
+      // rather than failing the turn.
       const { systemPrompt } = await buildCoderContext({
         mode: chatMode,
         aiRules,
