@@ -258,12 +258,21 @@ function model(text: string) {
   return sequencedModel(textChunks(text));
 }
 
-async function makeHandler(opts: { model?: unknown; mutate?: (agent: LoadedAgent) => void } = {}) {
+async function makeHandler(
+  opts: {
+    model?: unknown;
+    mutate?: (agent: LoadedAgent) => void;
+    // Lets a test observe or override individual store calls without
+    // reimplementing createStore — used to assert a round trip is NOT made.
+    wrapStore?: (s: ReturnType<typeof createStore>) => ReturnType<typeof createStore>;
+  } = {},
+) {
   const agent = await loadAgent(TOY);
   opts.mutate?.(agent);
   const db = inMemoryDb();
+  const base = createStore(db.query as never);
   const handler = createHandler({
-    agent, store: createStore(db.query as never),
+    agent, store: opts.wrapStore ? opts.wrapStore(base) : base,
     plugin: "toy-agent", agentName: "toy",
     basePath: "/plugins/trex/toy", model: opts.model ?? model("hello from toy"),
   });
@@ -1955,6 +1964,32 @@ Deno.test("POST /chat rejects a missing or empty messages array with 400", async
     assertEquals(res.status, 400);
     assertEquals(await res.json(), { error: "messages[] required" });
   }
+});
+
+// /chat creates a FRESH session per request (it is the stateless endpoint —
+// history comes from the client, not from replay), so its activated-tools
+// read could only ever return []. It was a guaranteed-empty round trip per
+// request. Making it meaningful needs a session id the caller supplies and
+// reuses across requests, which is the thing /chat is defined not to have —
+// see COMPAT.md's deferred-tool-loading entry.
+Deno.test("POST /chat does not read activated tools (its session is new, so there are none)", async () => {
+  let reads = 0;
+  const { handler } = await makeHandler({
+    wrapStore: (s) => ({
+      ...s,
+      getActivatedTools: (id: string) => {
+        reads++;
+        return s.getActivatedTools(id);
+      },
+    }),
+  });
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+  }));
+  assertEquals(res.status, 200);
+  await res.text(); // drain the stream so the request fully settles
+  assertEquals(reads, 0, "/chat made an activated-tools read that can only return []");
 });
 
 // The proxy (plugin/function.ts) injects x-user-id from auth-context

@@ -408,6 +408,22 @@ live-tail by event shape.
       `AgentStore`, so a tool gets exactly one write capability and cannot
       touch another session's state.
 
+      **Deferred tools are unreachable on `POST /chat`.** That endpoint is
+      the stateless one — history comes from the client and it creates a
+      fresh session per request purely for observability — so an
+      activated-tools read there can only ever return `[]`, and one is no
+      longer made. `ToolSearch` still writes `activated_tools`, to a session
+      nothing will read again. Activation deliberately takes effect only
+      from the NEXT request (`toolset.ts`'s cache-breakpoint ordering), so
+      reaching a deferred tool on `/chat` needs a caller-supplied session id
+      that the caller then reuses — i.e. giving up the statelessness that
+      defines the endpoint, plus an ownership check on that id. Deferred as
+      a product decision, not an oversight: the only in-repo `/chat` client
+      (devx's `AGENTS_CHAT_URL`) moved to the session API and is now
+      unreferenced, so there is no caller to thread an id through today.
+      The session API (`/eve/v1/session`) is unaffected — it is where
+      deferred tools work.
+
     All four are configured per agent through the `context` block on
     `defineAgent` (`context?: Partial<ContextConfig>` — `AgentConfig`,
     `eve-shim/types.ts`) and default to eve-comparable behaviour

@@ -871,21 +871,29 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // an "use the session API" error instead of hanging a stateless request.
       // Async (dynamic-tools.ts provider); hookCtx is the same one just used
       // for resolveModelForTurn/resolveInstructions above.
-      // activatedTools matches what startTurn threads in. Without it
-      // ToolSearch could WRITE agents.sessions.activated_tools on this path
-      // but nothing ever read it back, so a deferred tool activated here
-      // stayed permanently unreachable on /chat. Same degrade-to-none
-      // posture as startTurn's read: a bookkeeping-read failure must not
-      // fail the request.
-      const activatedTools = await store.getActivatedTools(sessionId).catch((e) => {
-        console.error(`agents: getActivatedTools failed for session ${sessionId} (continuing with none activated):`, e);
-        return [];
-      });
+      //
+      // No activatedTools read here, deliberately — unlike startTurn, which
+      // reads what earlier turns of the SAME session activated. `sessionId`
+      // above was created moments ago by this very request, so
+      // getActivatedTools could only ever answer [] : a guaranteed-empty
+      // round trip on every /chat call. buildSdkTools defaults to the same
+      // [], so omitting it is behaviour-identical.
+      //
+      // The consequence is a real limitation, recorded in COMPAT.md:
+      // ToolSearch on /chat still WRITES activated_tools, and nothing will
+      // ever read it back, so a deferred tool cannot be reached on this
+      // endpoint at all. Fixing that needs a session id the caller supplies
+      // and reuses across requests — which is exactly the statelessness
+      // /chat is defined by ("history comes from the client"), plus an
+      // ownership check on a client-supplied id. Activation only takes
+      // effect from the NEXT request, so nothing short of a client that
+      // persists the id would help. There is no such client: the one
+      // in-repo caller (devx's AGENTS_CHAT_URL) moved to the session API
+      // and is now unreferenced.
       const tools = await buildSdkTools({
         agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
-        activatedTools,
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has somewhere
