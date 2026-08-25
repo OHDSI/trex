@@ -303,6 +303,92 @@ Deno.test("POST /eve/v1/session creates a session and returns the id header", as
   assertEquals(db.turns[0].status, "completed");
 });
 
+// Review fix (task 10-12, round 1): a malformed static config.model used to
+// throw straight out of the pre-turn compaction block's
+// parseModelString(deps.agent.config.model) call. That call sits between
+// takeFollowUps and addTurn, with no try/catch of its own — only the outer
+// fire-and-forget IIFE's `.catch(... "turn crashed" ...)`, which (per its own
+// comment in handler.ts) never emits turn.failed/session.failed, so the
+// throw would have silently hung every /stream reader on the session
+// instead of failing the turn gracefully. The guard must degrade to "" (the
+// same value the config.model-ABSENT branch already produces) and let the
+// turn proceed.
+//
+// Requires a session with a PRIOR (completed) turn — the pre-turn compaction
+// block only runs when priorTurns.length > 0 — and this file's inMemoryDb()
+// fake has no matcher for getHistory's SQL shape (it always returns `[]`
+// there, same gap noted in the task 10-12 report's "concerns" section), so
+// that guard can never actually be reached against the usual db/makeHandler
+// fixture. This needs a real store against Postgres, same as the sibling
+// e2e test below.
+Deno.test({
+  name: "a malformed static config.model does not throw out of the pre-turn compaction path and the turn still completes",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    try {
+      const sessionId = await store.createSession("toy-agent", "toy", "model-guard-e2e-user");
+      const t1 = await store.addTurn(sessionId, "first");
+      await store.addStep(t1.id, 1, "text", null, { text: "hello from toy" });
+      await store.addStep(t1.id, 2, "finish", null, { finishReason: "stop" }, { inputTokens: 10, outputTokens: 5 });
+      await store.finishTurn(t1.id, "completed");
+
+      // deps.model below always wins over config.model for the actual turn
+      // (see resolveModelForTurn's precedence), so corrupting config.model
+      // here isolates the parseModelString guard itself rather than also
+      // requiring a working model resolution.
+      const agent = await loadAgent(TOY);
+      agent.config.model = "not-a-valid-provider-model-id-string";
+      const handler = createHandler({
+        agent, store, plugin: "toy-agent", agentName: "toy",
+        basePath: "/plugins/trex/toy", model: model("hello again"),
+      });
+
+      const origError = console.error;
+      const logged: string[] = [];
+      console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+      try {
+        const res = await handler(new Request(`${BASE}/eve/v1/session/${sessionId}`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "second" }),
+        }));
+        assertEquals(res.status, 202);
+
+        // Poll for BOTH the row count and its status: an unguarded throw
+        // happens before addTurn, so turn 2 never gets created at all — a
+        // naive "status of the latest turn" check would then just keep
+        // re-reading turn 1's already-"completed" row and pass regardless of
+        // the bug. Asserting the count is what actually catches that.
+        const deadline = Date.now() + 10_000;
+        let rows: Array<{ status: string }> = [];
+        while (Date.now() < deadline) {
+          const r = await pool.query(
+            `SELECT status FROM agents.turns WHERE session_id = $1 ORDER BY seq`,
+            [sessionId],
+          );
+          rows = r.rows;
+          if (rows.length >= 2 && rows[1].status !== "running") break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        assertEquals(rows.length, 2, "turn 2 was never created — the pre-turn compaction path likely threw before addTurn");
+        // The turn ran to completion — it was never silently hung by the throw.
+        assertEquals(rows[1].status, "completed");
+      } finally {
+        console.error = origError;
+      }
+      assert(
+        logged.some((l) => l.includes("could not parse agent model") && l.includes("not-a-valid-provider-model-id-string")),
+        "malformed model value was not logged for diagnosis",
+      );
+    } finally {
+      await pool.end();
+    }
+  },
+});
+
 Deno.test("GET /stream replays persisted events as NDJSON after the turn ran", async () => {
   const { handler, db } = await makeHandler();
   const create = await handler(new Request(`${BASE}/eve/v1/session`, {

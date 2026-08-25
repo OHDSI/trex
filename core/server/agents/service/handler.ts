@@ -336,7 +336,26 @@ function startTurn(
         console.error(`agents: getLastTurnUsage failed for session ${sessionId} (falling back to an estimate):`, e);
         return null;
       });
-      const modelId = deps.agent.config.model ? parseModelString(deps.agent.config.model).modelId : "";
+      // parseModelString throws on anything not "provider/model-id" shaped.
+      // This whole pre-turn block runs before addTurn, with no enclosing
+      // try/catch of its own — it's covered only by the outer fire-and-forget
+      // IIFE's `.catch(... "turn crashed" ...)`, which produces no
+      // turn.failed/session.failed (see that catch's own comment below), so
+      // a malformed static config.model would silently hang every /stream
+      // reader on this session instead of failing the turn gracefully the
+      // way it used to inside runTurn. Degrade to "" (same as the
+      // config.model-absent case) — resolveContextWindow("") falls back to
+      // the conservative FALLBACK_CONTEXT_WINDOW — and log it so it's
+      // diagnosable.
+      let modelId = "";
+      try {
+        if (deps.agent.config.model) modelId = parseModelString(deps.agent.config.model).modelId;
+      } catch (e) {
+        console.error(
+          `agents: could not parse agent model "${deps.agent.config.model}" for session ${sessionId} (using the conservative fallback context window):`,
+          e,
+        );
+      }
       const outcome = await maybeCompact({
         turns: priorTurns,
         msgs: priorMsgs,
