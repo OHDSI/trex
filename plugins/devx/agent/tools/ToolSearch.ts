@@ -32,24 +32,46 @@ const DESC_WEIGHT = 1;
 const MAX_RESULTS = 10;
 
 /**
+ * Splits text into lowercase whole words. Tool names are PascalCase
+ * (`DatabaseSchema`, `ExecuteSQL`, `KBSearch`), so case boundaries are word
+ * boundaries here just as much as spaces and punctuation are: an acronym run
+ * followed by a capitalized word splits between the two (`KBSearch` ->
+ * `kb`,`search`), and a letter/digit boundary splits as well.
+ */
+function tokenize(text: string): Set<string> {
+  const spaced = text
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replace(/([a-zA-Z])([0-9])/g, "$1 $2");
+  return new Set(spaced.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+}
+
+/**
  * Ranks candidates by query-term match count, weighting a name match above a
  * description match, and returns the top MAX_RESULTS. Pure -- no I/O, no
  * agent/session state -- so it's directly testable (../lib/tool_search.test.ts)
  * without a loaded agent or store. The previous implementation (a substring
  * filter, delegated wholesale to the legacy toolSearchTool) could not rank
  * at all -- every match was equally relevant, in registry order.
+ *
+ * Terms match WHOLE TOKENS, not substrings. Substring containment made every
+ * short term a wildcard over longer unrelated words: "knowledge base" scored
+ * the DB tools highest, because "base" is inside "database" and a name hit
+ * outweighs a description hit -- so the query that should surface the
+ * knowledge-base tools surfaced ExecuteSQL/DatabaseSchema/TableData instead.
  */
 export function rankDeferredTools<T extends { name: string; description: string }>(
   query: string,
   candidates: T[],
 ): T[] {
-  const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const terms = [...tokenize(query)];
+  if (terms.length === 0) return [];
   return candidates
     .map((c) => {
-      const name = c.name.toLowerCase();
-      const desc = c.description.toLowerCase();
+      const name = tokenize(c.name);
+      const desc = tokenize(c.description);
       const score = terms.reduce(
-        (s, t) => s + (name.includes(t) ? NAME_WEIGHT : 0) + (desc.includes(t) ? DESC_WEIGHT : 0),
+        (s, t) => s + (name.has(t) ? NAME_WEIGHT : 0) + (desc.has(t) ? DESC_WEIGHT : 0),
         0,
       );
       return { c, score };
