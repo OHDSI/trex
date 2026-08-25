@@ -1169,9 +1169,12 @@ jobs:
         run: echo "IMAGE_NS=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
       # Each arch pushes an -<arch>-suffixed tag; merge-docker assembles these
-      # into the multi-arch manifests (:latest, :sha-<sha>, :dev, ...).
-      # Single published image: the full (default) target, with devx gated off
-      # by default. The prod target is intentionally NOT published.
+      # into the multi-arch manifests (:latest, :sha-<sha>, :dev, :prod, ...).
+      # Two published images off the same Dockerfile: the full (default) target,
+      # with devx gated off by default, and the lean prod target. They differ by
+      # ~2.5GB of dev tooling — playwright + chromium, the Claude Code CLI, gh,
+      # bun/uv/prefect and the devx payload — which a deployed stack never runs.
+      # Consumers that want it (docker-compose-local.yml) take the full tag.
       - name: Build and push image (per-arch)
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         uses: docker/build-push-action@v6
@@ -1185,6 +1188,21 @@ jobs:
           tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
           # Identical to the "full" build above, so this resolves entirely from
           # the builder's cache instead of recompiling the image a second time.
+          cache-from: ${{ steps.dcache.outputs.from }}
+
+      - name: Build and push prod image (per-arch)
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: prod
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:prod-sha-${{ github.sha }}-${{ matrix.arch }}
+          # Same target and inputs as the "prod image for testing" build above,
+          # so this is a cache resolve, not a second compile. No
+          # DEVX_EXT_VERSION: the devx payload is a full-only stage.
           cache-from: ${{ steps.dcache.outputs.from }}
 
       - name: Build and push studio sidecar image (per-arch)
@@ -1238,11 +1256,17 @@ jobs:
           docker buildx imagetools create \
             -t "${NS}/trexsql:dev" -t "${NS}/trexsql:dev-sha-${SHA}" \
             $(srcs "${NS}/trexsql:sha-${SHA}")
+          # The lean prod target, under its own tags. Deployed stacks pin
+          # :prod-sha-<sha>; :prod is the moving alias.
+          docker buildx imagetools create \
+            -t "${NS}/trexsql:prod" -t "${NS}/trexsql:prod-sha-${SHA}" \
+            $(srcs "${NS}/trexsql:prod-sha-${SHA}")
           docker buildx imagetools create \
             -t "${NS}/trex-studio:latest" -t "${NS}/trex-studio:sha-${SHA}" \
             $(srcs "${NS}/trex-studio:sha-${SHA}")
           echo "=== resulting manifests ==="
           docker buildx imagetools inspect "${NS}/trexsql:sha-${SHA}" | grep -A2 -i platform || true
+          docker buildx imagetools inspect "${NS}/trexsql:prod-sha-${SHA}" | grep -A2 -i platform || true
 
   e2e-d2e:
     name: "E2E (D2E)"
