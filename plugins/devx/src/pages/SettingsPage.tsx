@@ -87,7 +87,7 @@ export default function SettingsPage() {
 
   // General fields
   const [defaultChatMode, setDefaultChatMode] = useState<ChatMode>("agent");
-  const [loop, setLoop] = useState<"legacy" | "agents">("legacy");
+  const [loop, setLoop] = useState<"legacy" | "agents">("agents");
   const [language, setLang] = useState(getLanguage());
 
   // Add provider form
@@ -125,7 +125,7 @@ export default function SettingsPage() {
       setMaxSteps(settings.max_steps ?? 100);
       setMaxToolSteps(settings.max_tool_steps ?? 10);
       setAutoFixProblems(settings.auto_fix_problems ?? false);
-      setLoop(settings.loop ?? "legacy");
+      setLoop(settings.loop ?? "agents");
       setGitAuthorName(settings.git_author_name || "");
       setGitAuthorEmail(settings.git_author_email || "");
     }

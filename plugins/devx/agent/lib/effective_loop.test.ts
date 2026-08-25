@@ -36,6 +36,21 @@ Deno.test("resolveEffectiveLoop: loop='agents' + bedrock/bearer -> 'agents'", ()
   );
 });
 
+// Deliberate backstop for an older server build that doesn't emit
+// auth_shape yet: this function can't detect IAM in that case and falls
+// through to 'agents'. Pinned so that behaviour cannot drift silently.
+Deno.test("resolveEffectiveLoop: loop='agents' + bedrock with ABSENT auth_shape -> 'agents' (backstop)", () => {
+  assertEquals(resolveEffectiveLoop({ loop: "agents", provider: "bedrock" }), "agents");
+  assertEquals(
+    resolveEffectiveLoop({ loop: "agents", provider: "bedrock", authShape: undefined }),
+    "agents",
+  );
+  assertEquals(
+    resolveEffectiveLoop({ loop: "agents", provider: "bedrock", authShape: null }),
+    "agents",
+  );
+});
+
 Deno.test("resolveEffectiveLoop: loop='legacy' -> 'legacy' regardless of provider", () => {
   assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "anthropic" }), "legacy");
   assertEquals(resolveEffectiveLoop({ loop: "legacy", provider: "claude-code" }), "legacy");
