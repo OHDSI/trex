@@ -89,6 +89,14 @@ Deno.test({
     assertEquals(agent.config.maxSteps, DEFAULT_MAX_STEPS);
     assert(agent.instructions.length > 0);
 
+    // Asserted through the REAL loader, not on agent.ts's raw export: the
+    // ceiling only takes effect if resolveContextConfig's explicit key
+    // allowlist carries it (an omitted key is dropped silently — the exact
+    // bug contextWindow and summarizationPrompt hit). On a 1M window the
+    // fraction alone would first compact around 750k tokens.
+    assertEquals(agent.config.context.compactAtTokens, 200_000);
+    assertEquals(agent.config.context.compactAtFraction, 0.75);
+
     // Part 4 (task-v3-brief.md): plugins/devx/agent/skills is a relative
     // symlink (`skills -> ../skills`) to the canonical plugins/devx/skills
     // directory — the two pre-existing consumers (functions/skills/sync.ts,

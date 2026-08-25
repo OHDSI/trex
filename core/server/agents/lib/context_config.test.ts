@@ -62,6 +62,22 @@ Deno.test("resolveContextConfig honours the optional summarizationPrompt (edn ke
   assertEquals(cfg.summarizationPrompt, "SUMMARIZE TERSELY");
 });
 
+// compactAtTokens is the third OPTIONAL key, and the same allowlist omission
+// would silently drop it — leaving devx's cost ceiling unset with no error.
+Deno.test("resolveContextConfig honours the optional compactAtTokens (camelCase)", () => {
+  const cfg = resolveContextConfig({ compactAtTokens: 200_000 });
+  assertEquals(cfg.compactAtTokens, 200_000);
+});
+
+Deno.test("resolveContextConfig honours the optional compactAtTokens (edn kebab-case)", () => {
+  const cfg = resolveContextConfig({ "compact-at-tokens": 200_000 } as never);
+  assertEquals(cfg.compactAtTokens, 200_000);
+});
+
+Deno.test("resolveContextConfig leaves compactAtTokens unset when not configured", () => {
+  assertEquals("compactAtTokens" in resolveContextConfig({ freshTurns: 2 }), false);
+});
+
 // Both optional keys stay ABSENT (not present-and-undefined) when unset, so
 // budget.ts's `override !== undefined` check in resolveContextWindow and
 // compact.ts's `config.summarizationPrompt ?? SUMMARIZATION_PROMPT` fall

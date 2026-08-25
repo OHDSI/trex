@@ -3,6 +3,13 @@ export interface ContextConfig {
   staleToolOutputChars: number;
   freshTurns: number;
   compactAtFraction: number;
+  // Optional absolute ceiling on the compaction trigger, in input tokens.
+  // The trigger becomes min(compactAtFraction * window, compactAtTokens).
+  // Unset (the default) means the fraction alone decides, exactly as before.
+  // It exists because the fraction does not bound COST: on a 1M-token window
+  // 0.75 first compacts around 750k input tokens, which is correct but is a
+  // very expensive single request.
+  compactAtTokens?: number;
   verbatimTurnsAfterCompaction: number;
   contextWindow?: number;
   summarizationPrompt?: string;
@@ -46,8 +53,18 @@ export function resolveContextWindow(modelId: string, override?: number): number
   return CONTEXT_WINDOWS[modelId] ?? FALLBACK_CONTEXT_WINDOW;
 }
 
+/**
+ * Whether the next request should compact first.
+ *
+ * `ceiling` is optional and, when given, only ever LOWERS the trigger:
+ * min(window * fraction, ceiling). Omitting it (or passing undefined) must
+ * stay bit-for-bit identical to the fraction alone — `claw` and
+ * `d2esupport` configure no ceiling and their behaviour is unchanged.
+ */
 export function shouldCompact(
-  opts: { inputTokens: number; window: number; fraction: number },
+  opts: { inputTokens: number; window: number; fraction: number; ceiling?: number },
 ): boolean {
-  return opts.inputTokens >= opts.window * opts.fraction;
+  const byFraction = opts.window * opts.fraction;
+  const threshold = opts.ceiling === undefined ? byFraction : Math.min(byFraction, opts.ceiling);
+  return opts.inputTokens >= threshold;
 }

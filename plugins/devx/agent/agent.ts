@@ -571,5 +571,15 @@ export default defineAgent({
   // (loader.ts) fills in the rest (freshTurns, compactAtFraction, ...) at
   // load time; this raw defineAgent() return value carries only what's
   // explicitly set.
-  context: { deferredTools: DEFERRED_TOOLS },
+  context: {
+    deferredTools: DEFERRED_TOOLS,
+    // A COST ceiling, not a correctness limit. compactAtFraction (0.75) is
+    // the correctness bound and stays in force; on the 1M-token windows this
+    // agent's models have, it would first compact around 750k input tokens —
+    // correct, but an enormously expensive single request. The trigger is
+    // min(fraction * window, this). Expected to be tuned once there is real
+    // data on where devx turns actually land; it is deliberately devx-only,
+    // since claw and d2esupport set no context block at all.
+    compactAtTokens: 200_000,
+  },
 });

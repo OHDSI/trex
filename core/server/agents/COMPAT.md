@@ -363,8 +363,12 @@ live-tail by event shape.
       `freshToolOutputChars`, older ones are cut to the smaller
       `staleToolOutputChars` (`truncate.ts`'s `truncateMiddle`).
     - **Token-budget compaction.** At `compactAtFraction` of the resolved
-      model's context window (estimated from the provider's own last-turn
-      usage when available, `estimateTokens` as a fallback), older turns
+      model's context window — or at the optional absolute `compactAtTokens`
+      ceiling, whichever is lower (the ceiling bounds cost, not correctness:
+      on a 1M-token window the fraction alone would not fire until ~750k
+      input tokens; `devx` sets it, `claw`/`d2esupport` leave it unset and
+      are unaffected) — measured from the provider's own last-turn usage
+      when available, `estimateTokens` as a fallback. Older turns
       are replaced by a model-generated checkpoint summary, persisted as an
       `agents.steps` row of kind `compaction` — a trex-only step kind added
       by migration V7. Pre-turn only (`handler.ts`'s `startTurn`, never

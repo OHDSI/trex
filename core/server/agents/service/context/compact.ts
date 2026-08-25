@@ -98,7 +98,12 @@ export async function maybeCompact(opts: {
   // provider actually counted (system prompt, tool schemas, provider-side
   // formatting overhead are not visible to estimateTokens at all).
   const inputTokens = observedInputTokens ?? estimateTokens(JSON.stringify(msgs));
-  if (turns.length === 0 || !shouldCompact({ inputTokens, window, fraction: config.compactAtFraction })) {
+  if (
+    turns.length === 0 ||
+    // config.compactAtTokens is undefined for every agent that does not set
+    // it, which shouldCompact treats as "fraction alone" — unchanged.
+    !shouldCompact({ inputTokens, window, fraction: config.compactAtFraction, ceiling: config.compactAtTokens })
+  ) {
     return { compacted: false };
   }
   // Compact the oldest turns, keeping the most recent `keep` verbatim. When

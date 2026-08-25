@@ -53,6 +53,33 @@ Deno.test("maybeCompact summarizes above the threshold", async () => {
   assertEquals((out as { via: string }).via, "summary");
 });
 
+// The ContextConfig.compactAtTokens ceiling has to reach shouldCompact through
+// maybeCompact, not just be honoured by shouldCompact in isolation. On the 1M
+// window below, 0.75 alone would not fire until 750k input tokens.
+const BIG_WINDOW_MODEL_ID = "claude-sonnet-5";
+
+Deno.test("maybeCompact honours a compactAtTokens ceiling below the fraction", async () => {
+  const out = await maybeCompact({
+    turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],
+    msgs: [{ role: "user", content: "hi" }],
+    config: { ...DEFAULT_CONTEXT_CONFIG, compactAtTokens: 200_000 },
+    modelId: BIG_WINDOW_MODEL_ID,
+    observedInputTokens: 200_000, callModel: () => Promise.resolve("summary text"),
+  });
+  assertEquals(out.compacted, true);
+});
+
+Deno.test("maybeCompact without a ceiling still waits for the fraction", async () => {
+  const out = await maybeCompact({
+    turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG,
+    modelId: BIG_WINDOW_MODEL_ID,
+    observedInputTokens: 200_000, callModel: () => Promise.reject(new Error("must not be called")),
+  });
+  assertEquals(out, { compacted: false });
+});
+
 Deno.test("maybeCompact falls back to dropping turns when summarization fails", async () => {
   const out = await maybeCompact({
     turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],

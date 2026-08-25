@@ -106,6 +106,7 @@ const EDN_KEY_MAP: Record<string, keyof ContextConfig> = {
   "stale-tool-output-chars": "staleToolOutputChars",
   "fresh-turns": "freshTurns",
   "compact-at-fraction": "compactAtFraction",
+  "compact-at-tokens": "compactAtTokens",
   "verbatim-turns-after-compaction": "verbatimTurnsAfterCompaction",
   "context-window": "contextWindow",
   "summarization-prompt": "summarizationPrompt",
@@ -113,9 +114,9 @@ const EDN_KEY_MAP: Record<string, keyof ContextConfig> = {
 };
 
 // Explicit allowlist, NOT `key in out`. `out` starts as a spread of
-// DEFAULT_CONTEXT_CONFIG, which deliberately omits the two OPTIONAL keys
-// (`contextWindow` and `summarizationPrompt` have no default) — so an
-// `in`-based guard silently DROPPED both, in camelCase and EDN kebab-case
+// DEFAULT_CONTEXT_CONFIG, which deliberately omits the three OPTIONAL keys
+// (`contextWindow`, `summarizationPrompt` and `compactAtTokens` have no
+// default) — so an `in`-based guard silently DROPPED them, in camelCase and EDN kebab-case
 // alike. That made `contextWindow` unsettable, and it is the spec's only
 // escape hatch for budget.ts's CONTEXT_WINDOWS map lagging a model release.
 // Any new ContextConfig field must be added here as well as to the type.
@@ -124,6 +125,7 @@ const CONTEXT_CONFIG_KEYS: ReadonlySet<keyof ContextConfig> = new Set([
   "staleToolOutputChars",
   "freshTurns",
   "compactAtFraction",
+  "compactAtTokens",
   "verbatimTurnsAfterCompaction",
   "contextWindow",
   "summarizationPrompt",
