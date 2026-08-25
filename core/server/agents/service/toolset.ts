@@ -236,8 +236,9 @@ function skillTool(ctx: ToolBuildCtx): any {
 }
 
 // Runs a subagent (or a copy of the current agent) as a nested loop with
-// fresh history. Nested activity is not streamed step-by-step in v1 — the
-// outer agent tool-call/tool-result events carry prompt and result.
+// fresh history. Nested activity is streamed step-by-step via toolEmit
+// (subagent.start/tool/end, one runId per invocation) so a delegated turn
+// is not opaque until it finishes; no UI consumes these events yet.
 async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCtx): Promise<{ text: string }> {
   // A subagent's own declared model wins; otherwise inherit the caller's
   // (already-resolved) model, resolving the parent's string as last resort.
@@ -268,7 +269,35 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
     // Same openai prompt-cache routing as runner.ts, keyed by the subagent's dir.
     providerOptions: cacheProviderOptions(model, target.dir),
   });
-  return { text: await result.text };
+  // Consume fullStream rather than awaiting result.text so the nested turn's
+  // steps reach the UI via toolEmit (already threaded in via the {...ctx}
+  // spread above — no new plumbing). Part shapes match runner.ts's own
+  // switch over this same ai@6 stream (toolCallId/toolName/input/output).
+  // runId keeps concurrent subagent runs apart on the shared channel.
+  // LoadedAgent has no `name` field (see loader.ts) — derive it from the
+  // agent's directory, the same way handler.ts's subagents.local listing
+  // does for depth-0 subagents (Object.entries key there; here we only have
+  // `target`, so its dir's basename is the closest equivalent).
+  const runId = crypto.randomUUID();
+  const agentName = target.dir.split("/").filter(Boolean).pop() ?? target.dir;
+  ctx.toolEmit?.("subagent.start", { runId, agent: agentName });
+  let text = "";
+  for await (const part of result.fullStream) {
+    const p = part as any;
+    switch (p.type) {
+      case "text-delta":
+        text += p.text ?? p.delta ?? "";
+        break;
+      case "tool-call":
+        ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, input: p.input });
+        break;
+      case "tool-result":
+        ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, result: p.output });
+        break;
+    }
+  }
+  ctx.toolEmit?.("subagent.end", { runId, text });
+  return { text };
 }
 
 function agentTool(ctx: ToolBuildCtx): any {

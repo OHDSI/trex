@@ -341,6 +341,49 @@ Deno.test("agent tool: a target subagent's buildInstructions hook without a hook
 });
 
 // ---------------------------------------------------------------------------
+// runSubagent (toolset.ts): Task 4 — stream subagent progress via toolEmit
+// instead of discarding the nested turn's steps until it finishes. See
+// task-4-brief.md. No `makeAgent`/`makeToolBuildCtx`/`subagentScript`
+// fixtures exist in this file — reuses the same loadAgent(TOY) + sequencedModel
+// stub as the "agent tool" tests just above, driving the nested model through
+// a tool-call step (shouter's own `shout` tool) then a final text step.
+// ---------------------------------------------------------------------------
+
+Deno.test("runSubagent emits subagent.start/tool/end progress under one runId, via toolEmit", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  const model = sequencedModel(toolCallChunks("shout", { text: "hi" }), textChunks("found it"));
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx(),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+
+  assertEquals(result.text, "found it");
+  const names = events.map((e) => e.name);
+  assertEquals(names[0], "subagent.start");
+  assertEquals(names[names.length - 1], "subagent.end");
+  assert(names.includes("subagent.tool"));
+
+  // One runId for the whole nested run.
+  const runIds = new Set(events.map((e) => e.data.runId));
+  assertEquals(runIds.size, 1);
+  assertEquals(events[0].data.agent, "shouter");
+  assertEquals(events[events.length - 1].data.text, "found it");
+});
+
+Deno.test("runSubagent's return value is unchanged ({ text }) when no toolEmit is wired", async () => {
+  const agent = await loadAgent(TOY);
+  const model = sequencedModel(toolCallChunks("shout", { text: "hi" }), textChunks("found it"));
+  // No toolEmit in ctx at all — must not throw, must return the same shape.
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx() });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+  assertEquals(result, { text: "found it" });
+});
+
+// ---------------------------------------------------------------------------
 // buildSdkTools (toolset.ts): H2 — filterTools hook + dynamic-tools.ts
 // provider. See .superpowers/sdd/task-h2-brief.md.
 // ---------------------------------------------------------------------------
