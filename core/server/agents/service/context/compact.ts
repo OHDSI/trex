@@ -1,31 +1,67 @@
 // Context-checkpoint summarization: builds the request that asks a model for
 // a handoff summary of the turns being compacted away, and runs it. See
 // prompts.ts for why SUMMARIZATION_PROMPT/SUMMARY_PREFIX live outside this
-// file (avoiding a circular import with history.ts).
-import type { ModelMessage, TurnRow } from "./history.ts";
+// file (avoiding a circular import with history.ts) — import them from there
+// directly; this module deliberately re-exports neither.
+import { assembleHistory, type ModelMessage, type TurnRow } from "./history.ts";
 import { type ContextConfig, estimateTokens, resolveContextWindow, shouldCompact } from "./budget.ts";
-import { SUMMARIZATION_PROMPT, SUMMARY_PREFIX } from "./prompts.ts";
+import { SUMMARIZATION_PROMPT } from "./prompts.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./truncate.ts";
+import type { AgentEvent } from "../events.ts";
 
-// Re-exported so this module's own public surface still carries both
-// constants, matching what callers of a "summarization module" expect to
-// find here — the split into prompts.ts is an internal-import-cycle
-// concern, not a change to compact.ts's API.
-export { SUMMARIZATION_PROMPT, SUMMARY_PREFIX };
+/**
+ * Renders assembled messages as a plain-text transcript for the summarizer.
+ *
+ * The summarization call declares NO `tools`, so handing it the structured
+ * messages — which carry `tool-call` and `tool-result` parts — asks a provider
+ * to accept tool blocks for tools it was never told about. Anthropic rejects
+ * that outright, and the rejection was swallowed by maybeCompact's
+ * drop-fallback, so the summarizer would in practice have NEVER run: every
+ * compaction would silently degrade to dropping turns.
+ *
+ * Flattening also loses nothing that matters. A summarizer is asked for a
+ * handoff narrative, not a replayable transcript; it has no use for a
+ * toolCallId or a structured input envelope, only for what was called and
+ * what came back.
+ */
+export function flattenForSummary(msgs: ModelMessage[]): string {
+  const lines: string[] = [];
+  for (const m of msgs) {
+    if (m.role === "user") {
+      lines.push(`User: ${m.content}`);
+      continue;
+    }
+    if (m.role === "assistant") {
+      for (const p of m.content) {
+        if (p.type === "text") lines.push(`Assistant: ${p.text}`);
+        else lines.push(`Assistant called ${p.toolName}(${JSON.stringify(p.input ?? {})})`);
+      }
+      continue;
+    }
+    for (const p of m.content) {
+      const output = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
+      lines.push(`Result of ${p.toolName}: ${output}`);
+    }
+  }
+  return lines.join("\n");
+}
 
 export function buildSummarizationRequest(
-  msgs: ModelMessage[],
+  transcript: string,
   config: ContextConfig,
 ): { system: string; messages: ModelMessage[] } {
-  return { system: config.summarizationPrompt ?? SUMMARIZATION_PROMPT, messages: msgs };
+  return {
+    system: config.summarizationPrompt ?? SUMMARIZATION_PROMPT,
+    messages: [{ role: "user", content: transcript }],
+  };
 }
 
 export async function summarize(
-  msgs: ModelMessage[],
+  transcript: string,
   config: ContextConfig,
   callModel: (req: { system: string; messages: ModelMessage[] }) => Promise<string>,
 ): Promise<string> {
-  return await callModel(buildSummarizationRequest(msgs, config));
+  return await callModel(buildSummarizationRequest(transcript, config));
 }
 
 /** Fraction of the context window a compaction summary may occupy. */
@@ -47,8 +83,14 @@ export async function maybeCompact(opts: {
   modelId: string;
   observedInputTokens?: number;
   callModel: (req: { system: string; messages: ModelMessage[] }) => Promise<string>;
+  // Session stream publisher. Optional so unit tests and any caller without a
+  // stream can omit it; the spec's error table requires a warning event when
+  // summarization fails, and a console.warn is not one — nobody watching the
+  // session sees it, and the user is the only party who can supply again what
+  // the drop fallback just discarded.
+  emit?: (e: AgentEvent) => void;
 }): Promise<CompactOutcome> {
-  const { turns, msgs, config, modelId, observedInputTokens, callModel } = opts;
+  const { turns, msgs, config, modelId, observedInputTokens, callModel, emit } = opts;
   const window = resolveContextWindow(modelId, config.contextWindow);
   // Prefer server-observed usage (runner.ts persists it on every turn's
   // "finish" step) over estimateTokens: the estimate is a char/4 heuristic
@@ -70,7 +112,21 @@ export async function maybeCompact(opts: {
   const cutoff = Math.max(1, turns.length - keep);
   const replacedTurnSeqTo = turns[cutoff - 1].seq;
   try {
-    const raw = await summarize(msgs, config, callModel);
+    // Summarize ONLY the turns being compacted away. Passing the whole
+    // history also summarized the `keep` most recent turns, which survive
+    // verbatim right below the summary — so the model was handed the same
+    // content twice, once condensed and once in full, contradicting this
+    // module's own header and wasting the budget compaction is reclaiming.
+    // Re-assembled from the compacted slice rather than sliced out of
+    // `msgs`: message count and turn count do not correspond (one turn emits
+    // a user message plus one message per step), so there is no honest index
+    // to cut `msgs` at.
+    //
+    // ensureToolResultsPresent is deliberately NOT applied — it exists to
+    // satisfy a provider's tool_use/tool_result pairing rule, and
+    // flattenForSummary emits no tool blocks for a provider to reject.
+    const transcript = flattenForSummary(assembleHistory(turns.slice(0, cutoff), config));
+    const raw = await summarize(transcript, config, callModel);
     // A summary that itself exceeds the window defeats the purpose. Allow it
     // a quarter of the window and truncate the rest away. truncateMiddle's
     // maxChars bounds RETAINED content only — its warning header and
@@ -79,12 +135,31 @@ export async function maybeCompact(opts: {
     // back slightly OVER the intended budget.
     const cap = Math.max(0, Math.floor(window * SUMMARY_WINDOW_SHARE * 4) - TRUNCATION_HEADER_OVERHEAD);
     const summary = truncateMiddle(raw, cap);
+    // Isolated for the same reason as the failure path below, and for one
+    // more: a throwing subscriber here would otherwise fall into the catch
+    // and report `via: "drop"` for a summarization that actually SUCCEEDED,
+    // discarding the summary it just paid a model call for.
+    try {
+      emit?.({ type: "context.compacted", data: { via: "summary", replacedTurnSeqTo } });
+    } catch (e) {
+      console.error("[agents] failed to publish the compaction event:", e);
+    }
     return { compacted: true, via: "summary", summary, replacedTurnSeqTo };
   } catch (err) {
     // Never fail the turn because the summarizer did. Drop oldest whole
     // turns instead — never mid-turn, which would orphan a tool call and get
     // the request rejected by the provider.
+    const warning = err instanceof Error ? err.message : String(err);
     console.warn("[agents] summarization failed, dropping oldest turns:", err);
+    // Isolated: emit publishes to live subscribers, and a throwing subscriber
+    // must not convert a successful drop-fallback into a failed compaction —
+    // reclaiming the budget is the point, telling someone about it is a
+    // courtesy.
+    try {
+      emit?.({ type: "context.compacted", data: { via: "drop", replacedTurnSeqTo, warning } });
+    } catch (e) {
+      console.error("[agents] failed to publish the compaction warning event:", e);
+    }
     return { compacted: true, via: "drop", replacedTurnSeqTo };
   }
 }

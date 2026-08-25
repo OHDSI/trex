@@ -118,4 +118,21 @@ export type AgentEvent =
   // frequently lost for this event specifically; making it reliable needs a
   // durable out-of-band delivery path (e.g. via agents.channel_sessions) —
   // tracked as a follow-up, not fixed here.
-  | { type: "turn.reaped"; data: { count: number; reason: "stale" } };
+  | { type: "turn.reaped"; data: { count: number; reason: "stale" } }
+  // Trex extension (not part of eve's documented vocabulary): pre-turn
+  // context compaction replaced the oldest turns of this session (see
+  // context/compact.ts). Emitted so a user watching the stream can see WHY
+  // the agent's memory of early turns just changed shape, rather than
+  // silently discovering it mid-answer.
+  //
+  // `warning` carries the reason the summarizer could not run, and is
+  // present exactly when `via` is "drop" — the spec's error table requires a
+  // warning event on that path, because dropping turns loses information a
+  // summary would have kept and the user is the only one who can supply it
+  // again. Turn-agnostic (compaction runs BEFORE the turn is created, so
+  // there is no turnId yet) and live-only, same wire posture as
+  // message.queued/turn.reaped above.
+  | {
+    type: "context.compacted";
+    data: { via: "summary" | "drop"; replacedTurnSeqTo: number; warning?: string };
+  };
