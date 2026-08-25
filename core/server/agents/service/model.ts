@@ -290,9 +290,28 @@ export function withToolCachePoint<T>(model: any, core: [string, T][], activated
     // so this is currently inert, but a silent overwrite would fail a
     // future tool that does.
     const existing = (def as { providerOptions?: Record<string, unknown> }).providerOptions;
+    // bedrockSupportsPromptCaching, NOT isBedrockModel. See that predicate's
+    // comment: a non-Anthropic Bedrock model rejects ANY request carrying a
+    // cachePoint with AccessDeniedException, which on a streaming turn kills
+    // the turn silently — typing indicator, no reply. withSystemCachePoint
+    // has always used the narrow gate; this function reintroduced the broad
+    // one, which is the same defect the narrow gate exists to prevent.
+    //
+    // The bedrock branch is KEPT despite being inert on the wire today:
+    // @ai-sdk/amazon-bedrock@4's prepareTools builds each toolSpec from name,
+    // description, strict and inputSchema only — it never reads
+    // tool.providerOptions (verified in the installed dist/index.js), so no
+    // cachePoint reaches Converse from here. Only the SYSTEM-block marker
+    // (withSystemCachePoint) is live on bedrock. It stays because it costs
+    // nothing, because it is the correct placement the moment the provider
+    // starts honouring it, and because deleting it would leave the bedrock
+    // half of the deferred-tool cache design undocumented in code. The
+    // anthropic branch above is NOT inert: @ai-sdk/anthropic@4 reads
+    // tool.providerOptions for cacheControl and emits cache_control on the
+    // wire tool definition.
     out[name] = isLast && isAnthropicModel(model)
       ? { ...def, providerOptions: { ...existing, anthropic: { cacheControl: { type: "ephemeral" } } } }
-      : isLast && isBedrockModel(model)
+      : isLast && bedrockSupportsPromptCaching(model)
       ? { ...def, providerOptions: { ...existing, bedrock: { cachePoint: { type: "default" } } } }
       : def;
   }

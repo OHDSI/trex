@@ -236,3 +236,38 @@ Deno.test("withToolCachePoint merges the cache marker into an existing providerO
     { openai: { reasoningEffort: "low" }, anthropic: { cacheControl: { type: "ephemeral" } } },
   );
 });
+
+// The case this branch was gated wrongly for, and the one that was never
+// tested. A non-Anthropic Bedrock model (e.g. Z.AI's zai.glm-*) rejects ANY
+// request carrying a cachePoint with AccessDeniedException — on a streaming
+// turn that kills the turn silently: typing indicator, no reply.
+// withSystemCachePoint has always used the narrow bedrockSupportsPromptCaching
+// gate for exactly this; withToolCachePoint shipped with the broad
+// isBedrockModel gate, reintroducing the defect.
+Deno.test("withToolCachePoint adds NO marker for a non-Anthropic bedrock model", () => {
+  const model = { provider: "amazon-bedrock", modelId: "zai.glm-4-6" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch"]);
+  for (const [name, def] of Object.entries(out)) {
+    assertEquals(
+      (def as { providerOptions?: unknown }).providerOptions,
+      undefined,
+      `${name} must not carry a cachePoint — a non-Anthropic bedrock model rejects the whole request`,
+    );
+  }
+});
+
+// The narrow gate and the tool-level marker must agree: whatever
+// withSystemCachePoint decides to mark, withToolCachePoint decides the same
+// way. A divergence here is how the broad gate crept back in.
+Deno.test("withToolCachePoint and withSystemCachePoint agree on which bedrock models get a marker", () => {
+  for (const modelId of ["us.anthropic.claude-sonnet-4-6", "anthropic.claude-haiku-4-5", "zai.glm-4-6", "meta.llama3-70b"]) {
+    const model = { provider: "amazon-bedrock", modelId };
+    const system = withSystemCachePoint(model, "SYSTEM");
+    const systemMarked = typeof system !== "string";
+    const tools = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+    const toolMarked = (tools.Bash as { providerOptions?: unknown }).providerOptions !== undefined;
+    assertEquals(toolMarked, systemMarked, `disagreement on ${modelId}`);
+    assertEquals(toolMarked, bedrockSupportsPromptCaching(model), `neither matches the narrow gate on ${modelId}`);
+  }
+});
