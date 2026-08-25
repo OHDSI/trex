@@ -60,16 +60,18 @@ export function resolveIdpConfig(
     // than restated, so the two cannot drift apart.
     // The issuer carries the mount's base path, because every endpoint the
     // provider advertises is built from it (see registerOidcRoutes/buildReturnTo).
-    const issuer = issuerUrl(env.TREX_OIDC_ISSUER, basePath);
+    // Includes the `/oidc` mount, matching what registerOidcRoutes advertises
+    // and where the discovery document actually lives.
+    const issuer = issuerUrl(env.TREX_OIDC_ISSUER, `${basePath}/oidc`);
     return {
       idp,
       issuer,
-      jwksUri: `${issuer}/oidc/.well-known/jwks.json`,
+      jwksUri: `${issuer}/.well-known/jwks.json`,
       audiences: splitList(env.D2E_IDP_AUDIENCES ?? env.TREX_OIDC_CLIENT_ID),
       clientId: env.TREX_OIDC_CLIENT_ID ?? "",
       clientSecret: env.TREX_OIDC_CLIENT_SECRET ?? "",
       scope: env.D2E_IDP_SCOPE ?? "openid profile email",
-      tokenUrl: `${issuer}/oidc/token`,
+      tokenUrl: `${issuer}/token`,
       resource: env.D2E_IDP_RESOURCE ?? "",
       // The provider is mounted at `${BASE_PATH}/oidc` (see index.ts), and the
       // d2e front door strips its own base prefix before proxying, so the

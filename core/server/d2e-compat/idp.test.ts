@@ -84,7 +84,7 @@ Deno.test("trex: issuer, jwks and token endpoint come from the provider's own co
     TREX_OIDC_CLIENT_SECRET: "t-secret",
   }, "");
   assertEquals(c.idp, "trex");
-  assertEquals(c.issuer, "https://trex.example");
+  assertEquals(c.issuer, "https://trex.example/oidc");
   assertEquals(c.jwksUri, "https://trex.example/oidc/.well-known/jwks.json");
   assertEquals(c.tokenUrl, "https://trex.example/oidc/token");
   assertEquals(c.clientId, "d2e-portal");
@@ -96,10 +96,12 @@ Deno.test("trex: issuer, jwks and token endpoint come from the provider's own co
   assertEquals(c.issuer.includes("logto"), false);
 });
 
-Deno.test("trex: the issuer carries the mount base path, as the provider stamps it", () => {
+Deno.test("trex: the issuer carries the base path AND the /oidc mount", () => {
   // Must match registerOidcRoutes/buildReturnTo, or token `iss` validation fails.
+  // The /oidc segment used to be missing here, which left the issuer naming a
+  // path one level above its own discovery document -- see the spec test below.
   const c = resolveIdpConfig({ D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://trex.example" }, "/trex");
-  assertEquals(c.issuer, "https://trex.example/trex");
+  assertEquals(c.issuer, "https://trex.example/trex/oidc");
   assertEquals(c.jwksUri, "https://trex.example/trex/oidc/.well-known/jwks.json");
 });
 
@@ -134,4 +136,25 @@ Deno.test("trex's own admin flag counts only under the trex IdP", () => {
 
 Deno.test("named app roles authorize under either IdP", () => {
   assertEquals(isSystemAdminClaims({ roles: ["role.systemadmin"] }, "trex"), true);
+});
+
+Deno.test("trex: the issuer names the /oidc mount, so discovery sits under it", () => {
+  // OIDC Discovery requires the document at <issuer>/.well-known/openid-configuration.
+  // The provider mounts at `${BASE_PATH}/oidc`, so an issuer of just `${BASE_PATH}`
+  // puts the document one segment below where the issuer says it should be. Spring's
+  // fromOidcIssuerLocation compares the two and fails its ClientRegistration bean
+  // with "Unable to resolve Configuration with the provided Issuer", taking WebAPI
+  // down with it -- the whole cache pipeline then strands on "Cache not ready".
+  const c = resolveIdpConfig(
+    { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example:41100" },
+    "/trex",
+  );
+  assertEquals(c.issuer, "https://d2e.example:41100/trex/oidc");
+  assertEquals(
+    c.jwksUri,
+    "https://d2e.example:41100/trex/oidc/.well-known/jwks.json",
+  );
+  assertEquals(c.tokenUrl, "https://d2e.example:41100/trex/oidc/token");
+  // The invariant that actually matters, stated directly.
+  assertEquals(c.jwksUri.startsWith(c.issuer + "/"), true);
 });
