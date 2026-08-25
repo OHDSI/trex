@@ -18,7 +18,7 @@
 import { parseEDNString } from "edn-data";
 import type { ChannelDef } from "./channels/types.ts";
 import type { ConnectionDef } from "./connections/types.ts";
-import type { AgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
+import type { AgentConfig, ResolvedAgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
 import { type ContextConfig, DEFAULT_CONTEXT_CONFIG } from "./service/context/budget.ts";
 
 export interface SkillMeta {
@@ -54,7 +54,7 @@ async function readEdn(path: string): Promise<any | null> {
 export interface LoadedAgent {
   dir: string;
   instructions: string;
-  config: AgentConfig;
+  config: ResolvedAgentConfig;
   tools: Record<string, ToolDef>;
   skills: SkillMeta[];
   subagents: Record<string, LoadedAgent>;
@@ -143,14 +143,14 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     throw new Error(`agents: ${dir}/instructions.md is required but missing (or instructions.edn)`);
   }
 
-  let config: AgentConfig = { maxSteps: 25, context: DEFAULT_CONTEXT_CONFIG };
+  let config: AgentConfig = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG } };
   let configLoaded = false;
   for (const f of ["agent.ts", "agent.js"]) {
     try {
       await Deno.stat(`${dir}/${f}`);
       const mod = await import(`file://${dir}/${f}`);
       if (mod.default) {
-        config = { maxSteps: 25, context: DEFAULT_CONTEXT_CONFIG, ...mod.default };
+        config = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG }, ...mod.default };
         // Ensure context is always fully resolved, never partial
         config.context = resolveContextConfig(config.context);
       }

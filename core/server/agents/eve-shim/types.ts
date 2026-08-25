@@ -121,6 +121,11 @@ export interface AgentConfig {
   buildUserMessage?: (base: string, ctx: HookCtx) => Promise<string>;
 }
 
+// Resolved agent config: guaranteed to have all fields fully populated.
+// The loader always returns this type from loadAgent, never the raw AgentConfig.
+// Used internally by the runtime; not exposed to agent authors.
+export type ResolvedAgentConfig = AgentConfig & { context: ContextConfig };
+
 // A dynamic tool source, authored as an agent-dir-root `dynamic-tools.ts`
 // default export (via eve-shim/tools.ts's defineToolProvider) and loaded by
 // loader.ts into LoadedAgent.toolProvider. Called fresh per top-level

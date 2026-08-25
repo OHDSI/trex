@@ -17,3 +17,20 @@ Deno.test("resolveContextConfig accepts edn kebab-case keys", () => {
   const cfg = resolveContextConfig({ "fresh-turns": 7 } as never);
   assertEquals(cfg.freshTurns, 7);
 });
+
+Deno.test("resolveContextConfig ignores unknown keys", () => {
+  const cfg = resolveContextConfig({ bogus: 1, freshTurns: 4 } as never);
+  assertEquals(cfg.freshTurns, 4);
+  assertEquals("bogus" in cfg, false);
+});
+
+Deno.test("resolveContextConfig ensures all ContextConfig keys are present", () => {
+  const cfg = resolveContextConfig(undefined);
+  // Verify every key from DEFAULT_CONTEXT_CONFIG is present
+  assertEquals(typeof cfg.freshToolOutputChars, "number");
+  assertEquals(typeof cfg.staleToolOutputChars, "number");
+  assertEquals(typeof cfg.freshTurns, "number");
+  assertEquals(typeof cfg.compactAtFraction, "number");
+  assertEquals(typeof cfg.verbatimTurnsAfterCompaction, "number");
+  assertEquals(Array.isArray(cfg.deferredTools), true);
+});
