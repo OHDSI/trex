@@ -3,6 +3,8 @@
 // Keep this file dependency-free: agent tool files import it transitively
 // and must stay portable to real eve.
 
+import type { ContextConfig } from "../service/context/budget.ts";
+
 // The worker's pg pool query fn, threaded through to hooks as `HookCtx.sql`
 // (matches store.ts's `QueryFn` — redeclared here, not imported, to keep
 // this file dependency-free per the header comment).
@@ -44,6 +46,7 @@ export interface ModelSpec {
 export interface AgentConfig {
   model?: string; // eve/AI-Gateway format: "provider/model-id"
   maxSteps?: number;
+  context?: Partial<ContextConfig>;
   // Additive hooks (eve ignores unknown defineAgent fields): called on EVERY
   // turn/chat request, never cached at agent-load time. A thrown/rejected
   // hook must fail the request rather than silently falling back to
