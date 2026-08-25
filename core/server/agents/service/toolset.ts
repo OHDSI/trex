@@ -12,6 +12,8 @@ import { buildConnectionProvider, type ConnectionProviderOpts } from "../connect
 import { type ConnectionToolMeta, searchConnectionTools } from "../connections/search.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
+import { truncateMiddle } from "./context/truncate.ts";
+import type { ContextConfig } from "./context/budget.ts";
 
 export interface ToolBuildCtx {
   agent: LoadedAgent;
@@ -398,6 +400,29 @@ const BUILTIN_SKILL_DEF: ToolDef = { description: "Load an on-demand skill by na
 const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection-backed tools by keyword (built-in).", inputSchema: { type: "object" } };
 
+// Caps a tool's output so no single call can push an unbounded blob into
+// agents.steps or the model's context. Applied in buildSdkTools (core
+// boundary), covering every agent — a plugin's own tool can no longer opt
+// out. Result is left untouched (original shape) when it already fits;
+// only an oversized result is stringified once and truncated, so a small
+// object result never gets coerced to a string.
+export function wrapToolWithCap<T extends { execute?: (...args: any[]) => Promise<unknown> }>(
+  toolDef: T,
+  config: ContextConfig,
+): T {
+  const inner = toolDef.execute;
+  if (!inner) return toolDef; // clientOnly tools have no execute to wrap
+  return {
+    ...toolDef,
+    execute: async (...args: any[]) => {
+      const raw = await inner(...args);
+      const text = typeof raw === "string" ? raw : JSON.stringify(raw);
+      if (text === undefined || text.length <= config.freshToolOutputChars) return raw;
+      return truncateMiddle(text, config.freshToolOutputChars);
+    },
+  };
+}
+
 // Builds the AI SDK tool set for one buildSdkTools call. Order:
 //  1. authored tools/*.ts (static, from the loader)
 //  2. merge in agent.toolProvider's (dynamic-tools.ts) output — TOP LEVEL
@@ -526,6 +551,13 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
     for (const name of Object.keys(out)) {
       if (!agent.config.filterTools(name, filterDefs[name], hookCtx)) delete out[name];
     }
+  }
+
+  // Step 5: cap every surviving tool's output (authored, dynamic, built-in
+  // alike). Subagents go through this too, via the recursive buildSdkTools
+  // call in runSubagent (depth 1) — no extra plumbing needed.
+  for (const name of Object.keys(out)) {
+    out[name] = wrapToolWithCap(out[name], agent.config.context);
   }
 
   return out;
