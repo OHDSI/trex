@@ -29,7 +29,8 @@ const DEFAULT_STALE_MS = 2 * 60 * 60 * 1000;
 export function startStaleTurnSweep(store: AgentStore, opts: SweepOptions): { stop: () => void } {
   const intervalMs = opts.intervalMs ?? DEFAULT_INTERVAL_MS;
   const staleMs = opts.staleMs ?? DEFAULT_STALE_MS; // caller (index.ts) passes the real STALE_TURN_MS explicitly
-  const timer = setInterval(async () => {
+
+  const tick = async () => {
     let sessionIds: string[];
     try {
       sessionIds = await store.listSessionsWithStaleRunningTurns(staleMs, opts.plugin, opts.agent);
@@ -45,6 +46,18 @@ export function startStaleTurnSweep(store: AgentStore, opts: SweepOptions): { st
         console.error(`agents: stale-turn sweep failed to reap session ${sessionId} (will retry next tick):`, e);
       }
     }
-  }, intervalMs);
+  };
+
+  const timer = setInterval(tick, intervalMs);
+
+  // Sweep once at startup rather than waiting a full interval. A worker
+  // crash/redeploy mid-turn is the dominant way turns are orphaned (see
+  // store.ts's reapStaleTurns), and a restart is exactly when the orphans from
+  // the previous process are sitting there — making the first tick the most
+  // valuable one, not the one to delay by 10 minutes. Fire-and-forget: tick()
+  // already swallows its own failures, and the caller (service/index.ts) starts
+  // this at module scope where it cannot await.
+  void tick();
+
   return { stop: () => clearInterval(timer) };
 }

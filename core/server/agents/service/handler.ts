@@ -141,13 +141,17 @@ function connectionOptsFor(deps: Deps) {
   return deps.oauth ? { oauth: deps.oauth } : undefined;
 }
 
-// Matches the brief's original reapStaleTurns(2 * 60 * 60 * 1000) — used
-// both as the lazy-reap cutoff below (startTurn, fired on-message) and,
-// exported, as the periodic sweep's cutoff (service/index.ts wires
+// Used both as the lazy-reap cutoff below (startTurn, fired on-message) and,
+// re-exported, as the periodic sweep's cutoff (service/index.ts wires
 // service/sweep.ts's startStaleTurnSweep with this same constant). A session
 // nobody messages again after it gets stuck would never hit the lazy path
 // below; the sweep is what actually recovers it — see sweep.ts's header.
-export const STALE_TURN_MS = 2 * 60 * 60 * 1000;
+//
+// Defined in ./turn-lifetime.ts so plugin/agents.ts can size the worker's
+// lifetime to it without importing this module's graph (`ai`, loader, runner).
+// Re-exported here because existing callers import it from handler.ts.
+export { STALE_TURN_MS } from "./turn-lifetime.ts";
+import { STALE_TURN_MS } from "./turn-lifetime.ts";
 
 // A turn's `message` column (and the follow-up queue) both want a plain
 // string; non-string messages (only possible on the native /eve/v1/session
