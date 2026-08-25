@@ -18,6 +18,9 @@ import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readP
 import { assertProviderSupported } from "../functions/provider_support.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
+import { loadHooks, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
+import type { Hook } from "../functions/skills/types.ts";
+import { materializeAttachments, renderAttachmentBlock } from "../functions/attachments.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -343,6 +346,97 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
   return systemPrompt;
 }
 
+// devx.hooks (PreToolUse/PostToolUse/Stop) rows are loaded ONCE PER TURN, not
+// once per tool call — legacy loads them once at functions/agent.ts:235, and
+// a per-call load would issue one query per tool. Cached on a WeakMap keyed
+// by the request's HookCtx object itself, not a string session/user id: core
+// builds exactly one HookCtx per request (toolset.ts's ToolBuildCtx.hookCtx,
+// threaded through every authoredTool call for that turn via the `...ctx`
+// spread — see toolset.ts:196/205), and that same object reaches every
+// onToolCall/onToolResult/onTurnEnd call for the turn. Keying on the object
+// itself, rather than a `${sessionId}:${userId}:${event}` string in a
+// module-level Map, means the cache entry is garbage-collected along with
+// the HookCtx when the turn ends — no unbounded growth in a long-lived
+// worker, unlike a string-keyed Map that never evicts. The inner Map (event
+// -> Promise<Hook[]>) covers the up-to-three events one turn can request.
+const hookRowCache = new WeakMap<object, Map<string, Promise<Hook[]>>>();
+function turnHooks(ctx: HookCtx, event: string): Promise<Hook[]> {
+  let byEvent = hookRowCache.get(ctx);
+  if (!byEvent) {
+    byEvent = new Map();
+    hookRowCache.set(ctx, byEvent);
+  }
+  let p = byEvent.get(event);
+  if (!p) {
+    // userId is the trusted identity (x-user-id via HookCtx), never read
+    // from ctx.metadata.
+    p = loadHooks(ctx.userId ?? "", event, ctx.sql);
+    byEvent.set(event, p);
+  }
+  return p;
+}
+
+// H2: PreToolUse hooks. Runs inside toolset.ts's authoredTool AFTER the
+// approval gate (see AgentConfig.onToolCall's doc comment in eve-shim/
+// types.ts) and fails CLOSED — a throw here denies this one tool call and
+// the turn continues, so genuine errors are left to propagate rather than
+// being swallowed into a permissive `{ allow: true }`.
+export async function onToolCall(
+  call: { name: string; input: unknown },
+  ctx: HookCtx,
+): Promise<{ allow: boolean; input?: unknown; reason?: string }> {
+  const hooks = await turnHooks(ctx, "PreToolUse");
+  if (hooks.length === 0) return { allow: true };
+  const result = await runPreToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, hooks);
+  if (!result.allow) return { allow: false, reason: "blocked by a PreToolUse hook" };
+  return result.modifiedArgs ? { allow: true, input: result.modifiedArgs } : { allow: true };
+}
+
+// H2: PostToolUse hooks.
+export async function onToolResult(
+  call: { name: string; input: unknown; result: unknown },
+  ctx: HookCtx,
+): Promise<unknown> {
+  const hooks = await turnHooks(ctx, "PostToolUse");
+  if (hooks.length === 0) return call.result;
+  // runPostToolHooks (functions/skills/hooks.ts:75-80) is string-in/
+  // string-out. A non-string tool result must pass through UNTOUCHED rather
+  // than being JSON-stringified into a shape the model has never seen from
+  // that tool before.
+  if (typeof call.result !== "string") return call.result;
+  return await runPostToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, call.result, hooks);
+}
+
+// H3: Stop hooks. Only reached after a successful turn (core never calls
+// onTurnEnd for a failed one) and its errors are logged and swallowed by
+// core, not propagated here.
+export async function onTurnEnd(turn: { text: string; finishReason: string }, ctx: HookCtx): Promise<void> {
+  const hooks = await turnHooks(ctx, "Stop");
+  const { chatId } = readMetadata(ctx.metadata);
+  if (!chatId) return;
+  await runStopHooks(hooks, { chatId, content: turn.text });
+}
+
+// H3: attachment materialization, folded into buildUserMessage (per-turn
+// content, not the cache-pointed system prompt — see AgentConfig.
+// buildUserMessage's doc comment). Attachments are UI-reachable, not just
+// channel-only (ChatInput.tsx), so ordinary browser turns need this too.
+export async function buildUserMessage(base: string, ctx: HookCtx): Promise<string> {
+  const { appId, attachments } = readMetadata(ctx.metadata);
+  if (!ctx.userId || !appId || !attachments?.length) return base;
+  // Same defensive shape filter and cap-of-10 the legacy path applies at
+  // functions/index.ts:405-408 -- these urls are remote/untrusted input.
+  const safe = attachments
+    .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+    .slice(0, 10);
+  if (safe.length === 0) return base;
+  const workspacePath = await ensureAppWorkspace(ctx.userId, appId);
+  const saved = await materializeAttachments(workspacePath, safe);
+  // Only paths ever enter the prompt, never file content -- the coder Reads
+  // them itself (images render multimodally through Read).
+  return base + renderAttachmentBlock(saved);
+}
+
 // CLOSED: a self-delegated subagent turn now gets the shared contract
 // above. `agent` (toolset.ts's agentTool, registered unconditionally at
 // depth 0) resolves `target = ctx.agent` — a copy of THIS agent — whenever
@@ -405,4 +499,8 @@ export default defineAgent({
   resolveModel,
   filterTools,
   buildInstructions,
+  onToolCall,
+  onToolResult,
+  onTurnEnd,
+  buildUserMessage,
 });
