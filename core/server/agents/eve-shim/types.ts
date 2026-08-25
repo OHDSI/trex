@@ -84,6 +84,26 @@ export interface AgentConfig {
     call: { name: string; input: unknown; result: unknown },
     ctx: HookCtx,
   ) => Promise<unknown>;
+  // Turn lifecycle. Called once, after the turn's text has been persisted and
+  // the stream has closed, immediately before runTurn returns. Errors are
+  // logged and swallowed: the turn already succeeded, and a Stop-hook bug must
+  // not retro-fail completed work. NOT called for a failed turn — the "error"
+  // stream case throws before this point, matching devx legacy, which runs
+  // Stop hooks only after a successful turn.
+  onTurnEnd?: (
+    turn: { text: string; finishReason: string },
+    ctx: HookCtx,
+  ) => Promise<void>;
+  // Per-turn user-message rewrite. Signature deliberately mirrors
+  // buildInstructions(base, ctx) — but applies to the USER message, not the
+  // system prompt, because the system prompt is cache-pointed
+  // (withSystemCachePoint) on the strength of being stable across turns.
+  // Per-turn content (e.g. attachment paths) folded into it would invalidate
+  // the prompt cache on every request.
+  //
+  // Fails the turn on throw, same posture as buildInstructions: a turn built
+  // on a half-resolved prompt is worse than no turn.
+  buildUserMessage?: (base: string, ctx: HookCtx) => Promise<string>;
 }
 
 // A dynamic tool source, authored as an agent-dir-root `dynamic-tools.ts`

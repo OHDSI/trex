@@ -91,6 +91,22 @@ export async function resolveInstructions(agent: LoadedAgent, metadata: unknown,
   return await agent.config.buildInstructions(base, hookCtx);
 }
 
+// Per-request user-message resolution, the buildUserMessage counterpart to
+// resolveInstructions above. A configured hook with no hookCtx available
+// fails loudly rather than silently skipping the hook — same
+// never-fall-back-silently posture as resolveInstructions/resolveModelForTurn.
+export async function resolveUserMessage(
+  agent: LoadedAgent,
+  base: string,
+  hookCtx?: HookCtx,
+): Promise<string> {
+  if (!agent.config.buildUserMessage) return base;
+  if (!hookCtx) {
+    throw new Error("agents: buildUserMessage hook configured but no request context (hookCtx) available");
+  }
+  return await agent.config.buildUserMessage(base, hookCtx);
+}
+
 function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boolean): any {
   const schema = isZodSchema(def.inputSchema) ? def.inputSchema : jsonSchema(def.inputSchema);
   if (def.clientOnly) {

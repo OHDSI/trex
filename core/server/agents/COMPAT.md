@@ -291,6 +291,35 @@ live-tail by event shape.
     (`plugins/devx/functions/auth_shape.ts`) and `useEffectiveLoop.ts` forces
     `bedrock` + `auth_shape === "iam"` users onto the legacy loop before
     `/chat` is ever called; the `resolveModel` throw is the backstop.
+17. **`onTurnEnd`/`buildUserMessage` turn-lifecycle hooks (Task 3)** are also
+    additive `AgentConfig` fields real eve's `defineAgent` doesn't define —
+    eve silently ignores unknown fields, so an agent directory using them
+    still loads on real eve, just without the hook running. `onTurnEnd`
+    fires once per turn, called from `runner.ts` AFTER `persistText()` has
+    run and OUTSIDE the stream's `try/finally`, immediately before `runTurn`
+    returns — a failed turn (the `"error"` stream case, which throws) never
+    reaches it, matching devx legacy's posture of running Stop hooks only
+    after a successful turn. Its errors are logged and swallowed, never
+    rethrown: the turn already succeeded, and a Stop-hook bug must not
+    retro-fail completed work — the opposite failure posture from
+    `buildInstructions`/`resolveModel`/`onToolCall`/`onToolResult` above,
+    which all fail the turn on throw. A configured `onTurnEnd` with no
+    `ctx.hookCtx` available is neither thrown (retro-failing a completed
+    turn) nor silently skipped (a caller wiring bug worth surfacing) — it's
+    a third posture unique to this hook: `console.warn`s that the hook was
+    configured but couldn't run for lack of a request context, then skips
+    it. `buildUserMessage` is the per-turn counterpart to `buildInstructions`,
+    resolved by `toolset.ts`'s `resolveUserMessage` (mirroring
+    `resolveInstructions`) and applied to the USER message before it's added
+    to `messages`, deliberately NOT to the system prompt: the system prompt
+    is cache-pointed (`withSystemCachePoint`) on the strength of being
+    stable across turns and across requests for the same agent+metadata, so
+    folding per-turn content (e.g. attachment paths) into it would
+    invalidate that cache on every request. Same never-fall-back-silently
+    posture as `buildInstructions`/`resolveModel`/`onToolCall`/
+    `onToolResult`: a configured `buildUserMessage` with no `hookCtx`
+    available throws rather than silently sending the unmodified base
+    message.
 
 ## Channels
 
