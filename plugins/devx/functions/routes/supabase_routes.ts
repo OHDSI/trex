@@ -1,5 +1,6 @@
 // @ts-nocheck - Deno edge function
 import { encryptToken, decryptToken } from "../crypto.ts";
+import { createSseWriter } from "../sse.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
 import { duckdb, escapeSql } from "../duckdb.ts";
 import { join } from "https://deno.land/std@0.224.0/path/mod.ts";
@@ -157,9 +158,11 @@ export async function handleSupabaseRoutes(path, method, req, userId, sql, corsH
     // Return SSE stream
     const stream = new ReadableStream({
       async start(controller) {
-        const send = (data: any) => {
-          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
-        };
+        // See ../sse.ts: enqueue on a closed controller throws, and this send is
+        // called from the catch below whose controller.close() would then be
+        // skipped, leaving the caller on a stream that never terminates.
+        const writer = createSseWriter(controller, "devx deploy");
+        const send = (data: any) => writer.send(data);
 
         const steps: any[] = [];
         const updateStep = (name: string, status: string, message?: string) => {
@@ -309,7 +312,7 @@ export async function handleSupabaseRoutes(path, method, req, userId, sql, corsH
           send({ type: "deploy_done", status: "failed", error: err.message, deployment_id: deploymentId, steps });
         }
 
-        controller.close();
+        writer.close();
       },
     });
 
