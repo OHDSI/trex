@@ -161,7 +161,13 @@ Deno.test("onToolResult is a no-op when no PostToolUse hooks are configured", as
 // attachments.test.ts stubs the network at globalThis.fetch (not a second
 // mocking layer) -- reused verbatim here, restored in `finally`.
 Deno.test("buildUserMessage appends materialized attachment paths, never content", async () => {
+  // buildUserMessage materializes into ensureAppWorkspace("u1", "a1") — the
+  // REAL workspace base dir, not this temp dir. Point workspace.ts's base at
+  // the temp dir for the duration so the test cleans up what it actually
+  // writes instead of leaving a stray u1/a1/attachments/ behind.
   const workspacePath = await Deno.makeTempDir();
+  const prevWorkspaceDir = Deno.env.get("DEVX_WORKSPACE_DIR");
+  Deno.env.set("DEVX_WORKSPACE_DIR", workspacePath);
   const originalFetch = globalThis.fetch;
   globalThis.fetch = () => Promise.resolve(new Response(new Uint8Array([1, 2, 3])));
   try {
@@ -183,6 +189,8 @@ Deno.test("buildUserMessage appends materialized attachment paths, never content
     assert(!out.includes("\x01\x02\x03"), "only the path may enter the prompt, never file bytes/content");
   } finally {
     globalThis.fetch = originalFetch;
+    if (prevWorkspaceDir === undefined) Deno.env.delete("DEVX_WORKSPACE_DIR");
+    else Deno.env.set("DEVX_WORKSPACE_DIR", prevWorkspaceDir);
     await Deno.remove(workspacePath, { recursive: true }).catch(() => {});
   }
 });

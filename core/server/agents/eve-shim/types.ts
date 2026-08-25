@@ -67,15 +67,27 @@ export interface AgentConfig {
   // it, so withholding them from the least trusted tools would invert the
   // intent. NOT applied to the `skill`/`agent`/`connection_search` built-ins
   // (skillTool/agentTool/connectionSearchTool) — they bypass authoredTool
-  // entirely, so a hook cannot police subagent delegation via `agent`.
+  // entirely, so a hook cannot police subagent delegation via `agent`, nor
+  // which procedure a turn loads via `skill`. Read from ctx.agent.config, so
+  // a depth-1 subagent runs the SUBAGENT's hooks: devx's .edn subagents
+  // carry no TS config, i.e. a devx subagent turn runs with NO hooks (a
+  // legacy PreToolUse matcher of `Agent|Skill` loses enforcement at the eve
+  // cutover).
   //
-  // Fail CLOSED: a throwing/rejecting hook denies THAT CALL (the tool returns
-  // an {error} payload) and the turn continues. This deliberately differs from
-  // devx's legacy loop, which caught and proceeded — a hook whose job is to
-  // stop something must not be defeated by its own bug. A hook configured
-  // with no ctx.hookCtx available is a caller wiring bug, not a hook failure,
-  // and throws rather than silently skipping — same posture as
-  // buildInstructions/filterTools above.
+  // CORE fails closed: a throwing/rejecting hook denies THAT CALL (the tool
+  // returns an {error} payload) and the turn continues. This deliberately
+  // differs from devx's legacy loop, which caught and proceeded — a hook
+  // whose job is to stop something must not be defeated by its own bug. A
+  // hook configured with no ctx.hookCtx available is a caller wiring bug,
+  // not a hook failure, and throws rather than silently skipping — same
+  // posture as buildInstructions/filterTools above.
+  //
+  // That guarantee covers the hook FUNCTION only; it does NOT make the whole
+  // chain fail-closed. devx's implementation behind this hook
+  // (plugins/devx/functions/skills/hooks.ts) denies only on exit code 2 or
+  // an explicit stdout deny — executeHook throwing (:61), a non-allowlisted
+  // executable (:166), and an unavailable Trex/DuckDB runtime (:216) all
+  // still return "approve". See COMPAT.md divergence 15.
   onToolCall?: (
     call: { name: string; input: unknown },
     ctx: HookCtx,

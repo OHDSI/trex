@@ -194,11 +194,11 @@ cannot read arbitrary host env vars.
 ## Runtime hooks
 
 All of the hooks below are trex-only `AgentConfig`/`ToolContext` extensions, built and reconciled
-across tasks H1-H4 (`.superpowers/sdd/task-h{1,2,3,4}-brief.md`). Every one is called fresh
-per-request/per-turn — never cached at agent-load time — and every one is additive: real eve's
-`defineAgent`/tool-authoring API silently ignores fields it doesn't know about, so an agent
-directory that uses these still loads on real eve, just without the hook's behavior. See COMPAT.md
-divergences 11-14 for the full reconciliation.
+across tasks H1-H4 (`.superpowers/sdd/task-h{1,2,3,4}-brief.md`) plus the four tool/turn hooks added
+for the devx eve-loop cutover. Every one is called fresh per-request/per-turn — never cached at
+agent-load time — and every one is additive: real eve's `defineAgent`/tool-authoring API silently
+ignores fields it doesn't know about, so an agent directory that uses these still loads on real eve,
+just without the hook's behavior. See COMPAT.md divergences 11-17 for the full reconciliation.
 
 **`resolveModel`** — per-request model/credential resolution (e.g. per-tenant API keys), called
 before every turn/chat request in place of the static `model` string:
@@ -246,6 +246,54 @@ export default defineAgent({
 
 *Eve portability*: ignored field on real eve — every tool this would have dropped stays present
 there, so don't rely on `filterTools` alone to keep a tool out of a real-eve deployment.
+
+**`onToolCall` / `onToolResult`** — tool-call interception, invoked by `toolset.ts`'s `authoredTool`
+INSIDE `execute` and AFTER the `needsApproval` gate (a hook that ran first could approve on the
+user's behalf). `onToolCall` may deny the call or rewrite its input; `onToolResult` may rewrite the
+return value:
+
+```ts
+export default defineAgent({
+  onToolCall: async (call, ctx) => {
+    if (call.name === "run_command") return { allow: false, reason: "shell disabled for this tenant" };
+    return { allow: true };
+  },
+  onToolResult: async (call, _ctx) => redact(call.result),
+});
+```
+
+They apply to every tool routed through `authoredTool` (static, `dynamic-tools.ts` output, MCP) but
+NOT to the `skill`/`agent`/`connection_search` built-ins, which bypass it entirely — so a hook cannot
+police subagent delegation or skill loading. Read from `ctx.agent.config`, so a depth-1 subagent runs
+the SUBAGENT's hooks (an `.edn` subagent carries no TS config, hence no hooks). Both fail CLOSED **in
+core**: a throwing hook denies that call. That covers the hook function only — a plugin's own hook
+implementation may still fail open internally (devx's command hooks deny only on exit code 2; see
+COMPAT.md divergence 15).
+
+**`onTurnEnd`** — fires once per turn from `runner.ts`, after `persistText()` and outside the
+stream's `try/finally`, immediately before `runTurn` returns. NOT called for a failed turn. Errors
+are logged and swallowed: the turn already succeeded, and a Stop-hook bug must not retro-fail
+completed work:
+
+```ts
+export default defineAgent({
+  onTurnEnd: async (turn, ctx) => { await audit(ctx.sessionId, turn.text, turn.finishReason); },
+});
+```
+
+**`buildUserMessage`** — the per-turn twin of `buildInstructions`, applied to the USER message rather
+than the system prompt (which is cache-pointed on the strength of being stable across turns, so
+per-turn content folded into it would invalidate the prompt cache every request). Fails the turn on
+throw, same posture as `buildInstructions`:
+
+```ts
+export default defineAgent({
+  buildUserMessage: async (base, ctx) => `${base}${await renderAttachments(ctx)}`,
+});
+```
+
+*Eve portability (all four)*: ignored fields on real eve — every tool call executes, every result
+passes through unmodified, and the turn-lifecycle hooks never run there.
 
 **`dynamic-tools.ts`** — an agent-dir-ROOT file (sibling of `instructions.md`, NOT inside `tools/`)
 default-exporting `defineToolProvider(...)`; its output is merged into the static tool set on every

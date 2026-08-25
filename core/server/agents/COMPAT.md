@@ -250,18 +250,41 @@ live-tail by event shape.
     `authoredTool` — static, dynamic-tools.ts provider output, and MCP —
     regardless of origin, since these INTERCEPT rather than grant, so
     withholding them from the least-trusted tools would invert the intent.
-    They do NOT apply to the `skill`/`agent`/`connection_search` built-ins
-    (`skillTool`/`agentTool`/`connectionSearchTool`), which are constructed
-    directly and never pass through `authoredTool` — notably `agent`, so a
-    policy hook cannot police subagent delegation. `onToolCall` may deny the
+    **Not intercepted (know this before relying on a hook as a control):**
+    the `skill`, `agent` and `connection_search` built-ins
+    (`skillTool`/`agentTool`/`connectionSearchTool`) are constructed directly
+    and never pass through `authoredTool`, so no hook sees them — notably
+    `agent`, so a policy hook cannot police subagent delegation, and `skill`,
+    so it cannot police which procedure a turn loads. And because the hooks
+    are read from `ctx.agent.config`, a depth-1 subagent runs with the
+    SUBAGENT's config, not the caller's: devx's `.edn` subagents carry no TS
+    config at all, so a subagent turn runs with NO hooks. Concretely, a devx
+    user whose legacy PreToolUse matcher was `Agent|Skill` loses that
+    enforcement entirely at the eve cutover. `onToolCall` may deny the
     call (`{allow: false, reason?}` → the tool returns `{error: reason}`) or
     rewrite its input (`{allow: true, input}`) before `def.execute` runs;
-    `onToolResult` may rewrite the tool's return value after it runs. Both
-    fail CLOSED: a throwing/rejecting hook denies THAT CALL (`{error:
+    `onToolResult` may rewrite the tool's return value after it runs. **CORE
+    fails closed**: a throwing/rejecting hook denies THAT CALL (`{error:
     "on{ToolCall,ToolResult} hook failed: <message>"}`) and the turn
     continues — the opposite of devx's legacy loop, which caught hook errors
     and proceeded; a hook whose job is to stop something must not be
-    defeated by its own bug. A hook configured with no `ctx.hookCtx`
+    defeated by its own bug.
+
+    **That core guarantee does NOT make the whole chain fail-closed**, and
+    this must not be read as though it did. It covers only the hook
+    FUNCTION throwing. devx's `plugins/devx/functions/skills/hooks.ts` — the
+    implementation behind devx's `onToolCall` — denies only on **exit code
+    2** (the Claude Code blocking convention) or an explicit stdout deny;
+    every other internal failure still returns "approve", i.e. FAILS OPEN:
+    `executeHook` throwing (`hooks.ts:61`), a hook command whose executable
+    is not on the allowlist (`:166`), and the Trex/DuckDB runtime being
+    unavailable so the command cannot run at all (`:216`). Those three sites
+    are byte-identical on both devx loops, so the eve cutover regresses
+    nobody — but a devx user whose hook exits non-zero for a reason other
+    than 2, or whose runtime hiccups, gets the tool call APPROVED. Making
+    those deny would mean a DuckDB blip denies every tool call on both
+    loops; that is a product trade, not a core one, and has deliberately not
+    been made. A hook configured with no `ctx.hookCtx`
     available throws (`"agents: on{ToolCall,ToolResult} hook configured but
     no request context (hookCtx) available"`) rather than silently skipping
     — that gap is a caller wiring bug, not a hook failure, and fail-open

@@ -127,6 +127,25 @@ throwing PreToolUse hook, logs it, and proceeds — hooks fail open. A hook whos
 job is to stop something must not be defeated by its own bug. Behaviour change,
 called out in the PR description.
 
+**Caveat — the inversion is core-only; the chain as a whole is NOT
+fail-closed.** The table above governs a hook FUNCTION that throws. devx's
+actual `onToolCall` implementation delegates to
+`functions/skills/hooks.ts`, which denies only on **exit code 2** (the Claude
+Code blocking convention) or an explicit stdout deny. Three internal failures
+still resolve to "approve": `executeHook` throwing (`hooks.ts:61`), a hook
+command whose executable is not on the allowlist (`:166`), and the
+Trex/DuckDB runtime being unavailable so the command never runs (`:216`).
+These are byte-identical on both loops, so the cutover regresses nobody — but
+nothing here should be read as "a devx PreToolUse hook cannot be bypassed".
+Making those three deny would mean a DuckDB hiccup denies every tool call on
+both loops; that is a deliberate non-goal of this work.
+
+**Also not intercepted:** the `skill`, `agent` and `connection_search`
+built-ins bypass `authoredTool` entirely, and a depth-1 subagent runs with the
+SUBAGENT's config — devx's `.edn` subagents carry no TS config, so a devx
+subagent turn runs with no hooks at all. A user whose legacy PreToolUse
+matcher was `Agent|Skill` loses that enforcement at cutover.
+
 ### 3. Core: subagent streaming
 
 `runSubagent` (`core/…/service/toolset.ts:187-218`) currently ends with
