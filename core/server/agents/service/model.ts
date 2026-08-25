@@ -284,10 +284,16 @@ export function withToolCachePoint<T>(model: any, core: [string, T][], activated
   const lastIdx = core.length - 1;
   for (const [i, [name, def]] of core.entries()) {
     const isLast = i === lastIdx;
+    // Merge into any providerOptions the tool already carries (e.g. a
+    // connection-backed tool with its own provider hints) rather than
+    // clobbering it — no tool in the codebase sets providerOptions today,
+    // so this is currently inert, but a silent overwrite would fail a
+    // future tool that does.
+    const existing = (def as { providerOptions?: Record<string, unknown> }).providerOptions;
     out[name] = isLast && isAnthropicModel(model)
-      ? { ...def, providerOptions: { anthropic: { cacheControl: { type: "ephemeral" } } } }
+      ? { ...def, providerOptions: { ...existing, anthropic: { cacheControl: { type: "ephemeral" } } } }
       : isLast && isBedrockModel(model)
-      ? { ...def, providerOptions: { bedrock: { cachePoint: { type: "default" } } } }
+      ? { ...def, providerOptions: { ...existing, bedrock: { cachePoint: { type: "default" } } } }
       : def;
   }
   for (const [name, def] of activated) out[name] = def;

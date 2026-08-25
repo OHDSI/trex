@@ -223,3 +223,16 @@ Deno.test("serialized core prefix is byte-identical across activation", () => {
     JSON.stringify(Object.fromEntries(Object.entries(o).filter(([n]) => n !== "KBSearch")));
   assertEquals(prefix(before), prefix(after));
 });
+
+Deno.test("withToolCachePoint merges the cache marker into an existing providerOptions, not replacing it", () => {
+  // Fix round 1, Finding 2: a tool that already sets its own providerOptions
+  // (e.g. a future connection-backed tool with provider-specific hints) must
+  // keep them — the cache marker is added alongside, never in place of.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const bashWithHints = { providerOptions: { openai: { reasoningEffort: "low" } } };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", bashWithHints]] as never, [] as never);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { openai: { reasoningEffort: "low" }, anthropic: { cacheControl: { type: "ephemeral" } } },
+  );
+});
