@@ -179,10 +179,12 @@ In `agent/agent.ts`'s `buildInstructions`:
   Adding `skills` to `HookCtx` is rejected for the same second reason: legacy
   has no `HookCtx` at all, so it would need a second implementation.
 
-  Instead both paths read the skills directory they already share via the
-  `agent/skills -> ../skills` symlink, using the existing `loadSkillMetadata`
-  in `functions/skills/resolver.ts:80`. One implementation, one source, both
-  paths — and no core surface added for this gap. `<context>` metadata and the
+  Instead both paths read the `devx.skills` table through the existing
+  `loadSkillMetadata(userId, sqlFn)` at `functions/skills/resolver.ts:80`,
+  which already returns `{ name, description, ... }` per enabled skill and is
+  reachable from eve via `ctx.sql` and from legacy via its `sqlFn`. One
+  implementation, one source, both paths — and no core surface added for this
+  gap. `<context>` metadata and the
   raw `instructions.md` spine remain intentionally superseded by
   `buildCoderContext`, as documented at `agent/agent.ts:260-284`.
 - **Legacy parity** — teach `buildCoderContext` to accept the same skills list and
@@ -206,7 +208,47 @@ where the coder actually runs. Attachment URLs stay remote input: the existing
 cap of 10 and the filter at `functions/index.ts:405-408` are reused, not
 reimplemented. Only paths enter the prompt, never content.
 
-### 7. Migration
+### 7. Routing: which engine each provider gets
+
+The cutover does **not** move everyone to eve, and no new routing code is
+needed — `src/hooks/useEffectiveLoop.ts` already implements the intended split:
+
+```ts
+const wantsAgents = settings?.loop === "agents";
+const providerForcesLegacy =
+  active.provider === "claude-code" ||
+  (active.provider === "bedrock" && active.auth_shape === "iam");
+// effective = wantsAgents && !providerForcesLegacy ? "agents" : "legacy"
+```
+
+So after V17:
+
+| Provider | Loop | Engine |
+|----------|------|--------|
+| anthropic / openai / google / bedrock (bearer) | `agents` | eve (`core/…/runner.ts`) |
+| **claude-code** | `legacy` (forced) | **OAuth sidecar** (`fn-claude-code/server.js`) |
+| bedrock (IAM-shaped key) | `legacy` (forced) | legacy AI-SDK loop |
+
+`agent/agent.ts`'s `resolveModel` throws for both forced cases as a server-side
+backstop, so a stale client that bypasses the gate fails loudly rather than
+running a wrong-credential turn.
+
+**eve cannot host the sidecar, and this design does not attempt it.** eve's
+`ModelSpec` is a model+credentials seam (`provider ∈ {anthropic, openai,
+google, bedrock}`, `apiKey`, `baseURL`) and `runner.ts` drives its own
+`streamText` loop with its own tool set. The sidecar is the Claude Agent SDK
+running its *own* agentic loop — own tools, own skills from `~/.claude/skills`,
+`permissionMode: "bypassPermissions"`, own `kb`/`ask` MCP servers. Hosting it
+would mean delegating an entire turn to an external engine: a new execution
+backend in core, not a provider adapter. Out of scope.
+
+**Consequence: the legacy loop is not being retired.** It is the permanent home
+for sidecar and bedrock-IAM users. Prompt equivalence (§5) is therefore an
+ongoing invariant, not a transitional concern — which is why the skills listing
+and mode handling are fixed in the shared `buildCoderContext` rather than only
+on the eve side.
+
+### 8. Migration
 
 `plugins/devx/migrations/V17__loop_default_agents.sql` — a forward migration.
 `V11` is never edited: the checksum verifier hard-fails existing deployments.
@@ -223,6 +265,11 @@ default back is a one-line V18.
 Every existing row moves. The column is `NOT NULL DEFAULT 'legacy'`, so nothing
 distinguishes a deliberate opt-out from an untouched default; this was decided
 explicitly rather than inferred.
+
+Setting a claude-code or bedrock-IAM user's row to `'agents'` is harmless and
+deliberate: §7's gate resolves them to `legacy` regardless, so they keep the
+sidecar. Storing `'agents'` uniformly means that if such a user later switches
+to an API-key provider, they land on eve without a second migration.
 
 ## Testing
 
@@ -250,6 +297,11 @@ explicitly rather than inferred.
   Stop hooks fire once per turn; rows load once per turn, not per call.
 - `agent/lib/attachments.test.ts` — attachments materialize into the resolved
   workspace and only paths reach the prompt.
+- `src/hooks/useEffectiveLoop` — with `settings.loop === 'agents'` (the post-V17
+  state), a `claude-code` provider still resolves to `legacy`, and a
+  bedrock row with `auth_shape === 'iam'` still resolves to `legacy`. This is
+  existing behaviour; the test pins it so the cutover cannot silently route
+  sidecar users at eve.
 - Existing `parity.test.ts`, `prompt_divergence.test.ts`, `parity_smoke.test.ts`
   keep passing unchanged.
 
@@ -275,6 +327,7 @@ users, so any commit in 1-5 can ship alone if the cutover slips.
 | Fail-closed tool hooks break someone's fail-open hook | Behaviour change stated in the PR; the `CHECK` constraint lets an affected user return to `'legacy'` |
 | Prompt equivalence test freezes legacy defects into eve | The test asserts *equivalence*, so a legacy defect fixed later must be fixed in both — which is the intent |
 | Core hook surface grows for one consumer | All four are additive and ignored by real eve; each is a seam any future agent plugin needs, not devx-specific |
+| Legacy loop is assumed dead and left to rot | It is not being retired (§7) — sidecar and bedrock-IAM users live there permanently. Prompt work lands in the shared `buildCoderContext`, and `prompt_divergence.test.ts` keeps guarding all four dispatch paths |
 
 ## Repository constraint
 
