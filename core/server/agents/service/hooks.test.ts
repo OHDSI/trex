@@ -628,6 +628,48 @@ Deno.test("the approval gate runs BEFORE onToolCall", async () => {
   assertEquals(order, []);
 });
 
+// Review fix (round 1, Finding 2): a configured onToolCall/onToolResult hook
+// with no hookCtx wired must THROW, not silently skip the hook — that gap is
+// a caller wiring bug, not a hook failure, and fail-open would defeat a
+// control whose entire purpose is to deny. Same posture as buildInstructions'
+// existing hookCtx check (resolveInstructions above).
+Deno.test("a configured onToolCall hook with no hookCtx available throws instead of silently skipping", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.resolve({ allow: true });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 }); // no hookCtx
+  await assertRejects(
+    () => (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({}),
+    Error,
+    "onToolCall hook configured but no request context (hookCtx) available",
+  );
+  assertEquals(ran, false);
+});
+
+Deno.test("a configured onToolResult hook with no hookCtx available throws instead of silently skipping", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("raw"),
+  };
+  agent.config.onToolResult = (call) => Promise.resolve(`wrapped(${call.result})`);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 }); // no hookCtx
+  await assertRejects(
+    () => (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({}),
+    Error,
+    "onToolResult hook configured but no request context (hookCtx) available",
+  );
+});
+
 // ---------------------------------------------------------------------------
 // createHandler (handler.ts): end-to-end wiring for both the session API and
 // /chat — x-user-id header sourcing, and a throwing resolveModel hook

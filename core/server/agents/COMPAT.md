@@ -246,19 +246,30 @@ live-tail by event shape.
     runs (pinned by a dedicated ordering test in `hooks.test.ts`). Unlike
     divergence 16's `ToolContext.sql` below (withheld from provider-sourced
     dynamic-tools.ts/MCP/connection tools because it GRANTS power to a less
-    trusted tool), both hooks apply to EVERY tool regardless of origin — they
-    INTERCEPT rather than grant, so withholding them from the least-trusted
-    tools would invert the intent. `onToolCall` may deny the call (`{allow:
-    false, reason?}` → the tool returns `{error: reason}`) or rewrite its
-    input (`{allow: true, input}`) before `def.execute` runs; `onToolResult`
-    may rewrite the tool's return value after it runs. Both fail CLOSED: a
-    throwing/rejecting hook denies THAT CALL (`{error: "on{ToolCall,
-    ToolResult} hook failed: <message>"}`) and the turn continues — the
-    opposite of devx's legacy loop, which caught hook errors and proceeded;
-    a hook whose job is to stop something must not be defeated by its own
-    bug. This is also the opposite failure posture from divergence 12's
-    `dynamic-tools.ts` provider (log-and-continue): these hooks are a
-    trust-boundary control on tool calls, not an operational integration.
+    trusted tool), both hooks apply to every tool routed through
+    `authoredTool` — static, dynamic-tools.ts provider output, and MCP —
+    regardless of origin, since these INTERCEPT rather than grant, so
+    withholding them from the least-trusted tools would invert the intent.
+    They do NOT apply to the `skill`/`agent`/`connection_search` built-ins
+    (`skillTool`/`agentTool`/`connectionSearchTool`), which are constructed
+    directly and never pass through `authoredTool` — notably `agent`, so a
+    policy hook cannot police subagent delegation. `onToolCall` may deny the
+    call (`{allow: false, reason?}` → the tool returns `{error: reason}`) or
+    rewrite its input (`{allow: true, input}`) before `def.execute` runs;
+    `onToolResult` may rewrite the tool's return value after it runs. Both
+    fail CLOSED: a throwing/rejecting hook denies THAT CALL (`{error:
+    "on{ToolCall,ToolResult} hook failed: <message>"}`) and the turn
+    continues — the opposite of devx's legacy loop, which caught hook errors
+    and proceeded; a hook whose job is to stop something must not be
+    defeated by its own bug. A hook configured with no `ctx.hookCtx`
+    available throws (`"agents: on{ToolCall,ToolResult} hook configured but
+    no request context (hookCtx) available"`) rather than silently skipping
+    — that gap is a caller wiring bug, not a hook failure, and fail-open
+    would defeat a control whose entire purpose is to deny; same posture as
+    divergence 11's `buildInstructions`. This is also the opposite failure
+    posture from divergence 12's `dynamic-tools.ts` provider
+    (log-and-continue): these hooks are a trust-boundary control on tool
+    calls, not an operational integration.
 16. **`ToolContext.sql` is additive/trex-only** (`eve-shim/types.ts`) — real
     eve's `ToolContext` has no `sql` field at all. It's the worker's pg pool
     query fn, threaded straight from `HookCtx.sql` (`toolset.ts`'s

@@ -144,7 +144,14 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
       // SUBAGENT's hooks — same posture as filterTools at depth 1.
       const cfg = ctx.agent?.config;
       let effectiveInput = input;
-      if (cfg?.onToolCall && ctx.hookCtx) {
+      if (cfg?.onToolCall) {
+        // A configured hook with no hookCtx available is a caller wiring
+        // bug, not a hook failure — throw loudly (same posture as
+        // resolveInstructions' buildInstructions check) rather than
+        // silently skipping a control whose entire purpose is to deny.
+        if (!ctx.hookCtx) {
+          throw new Error("agents: onToolCall hook configured but no request context (hookCtx) available");
+        }
         let decision: { allow: boolean; input?: unknown; reason?: string };
         try {
           decision = await cfg.onToolCall({ name, input: effectiveInput }, ctx.hookCtx);
@@ -173,7 +180,11 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
         sql: isAuthored ? ctx.hookCtx?.sql : undefined,
       });
 
-      if (cfg?.onToolResult && ctx.hookCtx) {
+      if (cfg?.onToolResult) {
+        // Same wiring-bug-must-throw posture as onToolCall above.
+        if (!ctx.hookCtx) {
+          throw new Error("agents: onToolResult hook configured but no request context (hookCtx) available");
+        }
         try {
           return await cfg.onToolResult({ name, input: effectiveInput, result }, ctx.hookCtx);
         } catch (err) {

@@ -61,15 +61,21 @@ export interface AgentConfig {
   // Tool-call interception. Invoked by toolset.ts's authoredTool INSIDE
   // execute, AFTER the approval gate — ordering is load-bearing: a hook that
   // ran first could approve on the user's behalf. Applies to every tool
-  // (authored, dynamic-tools.ts provider output, MCP), unlike ToolContext.sql
-  // which is withheld from provider-sourced tools: sql GRANTS power to a less
-  // trusted tool, whereas these INTERCEPT it, so withholding them from the
-  // least trusted tools would invert the intent.
+  // routed through authoredTool (static, dynamic-tools.ts provider output,
+  // MCP), unlike ToolContext.sql which is withheld from provider-sourced
+  // tools: sql GRANTS power to a less trusted tool, whereas these INTERCEPT
+  // it, so withholding them from the least trusted tools would invert the
+  // intent. NOT applied to the `skill`/`agent`/`connection_search` built-ins
+  // (skillTool/agentTool/connectionSearchTool) — they bypass authoredTool
+  // entirely, so a hook cannot police subagent delegation via `agent`.
   //
   // Fail CLOSED: a throwing/rejecting hook denies THAT CALL (the tool returns
   // an {error} payload) and the turn continues. This deliberately differs from
   // devx's legacy loop, which caught and proceeded — a hook whose job is to
-  // stop something must not be defeated by its own bug.
+  // stop something must not be defeated by its own bug. A hook configured
+  // with no ctx.hookCtx available is a caller wiring bug, not a hook failure,
+  // and throws rather than silently skipping — same posture as
+  // buildInstructions/filterTools above.
   onToolCall?: (
     call: { name: string; input: unknown },
     ctx: HookCtx,
