@@ -2,6 +2,7 @@
 import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
+import { createSseWriter } from "./sse.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
 import { runsUnattended } from "./autonomy.ts";
 import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
@@ -847,15 +848,16 @@ Deno.serve(async (req: Request) => {
       // Stream the AI response
       const stream = new ReadableStream({
         async start(controller) {
-          const encoder = new TextEncoder();
-          const send = (data: unknown) => {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          };
+          // See functions/sse.ts: writing to a dead stream must never throw, and
+          // close() must be idempotent — an unguarded send() in the catch below
+          // once skipped its own close() and stranded claw's runCodeTurn on the
+          // fetch for 65 minutes after a recoverable rate limit.
+          const writer = createSseWriter(controller);
+          const { send, sendRaw } = writer;
+          const closeStream = () => writer.close();
 
           // SSE heartbeat keeps the connection alive during long waits (e.g. questionnaires)
-          const heartbeat = setInterval(() => {
-            try { controller.enqueue(encoder.encode(": heartbeat\n\n")); } catch { /* stream closed */ }
-          }, 15000);
+          const heartbeat = setInterval(() => { sendRaw(": heartbeat\n\n"); }, 15000);
 
           try {
             let fullContent = "";
@@ -932,9 +934,9 @@ Deno.serve(async (req: Request) => {
             );
 
             send({ type: "done", message: saveResult.rows[0], content: saveResult.rows[0]?.content ?? "" });
-            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            sendRaw("data: [DONE]\n\n");
             clearInterval(heartbeat);
-            controller.close();
+            closeStream();
           } catch (err) {
             clearInterval(heartbeat);
             console.error("Stream error:", err);
@@ -948,7 +950,10 @@ Deno.serve(async (req: Request) => {
               // message so the channel gets something actionable instead of "unknown".
               ...(streamRemoteChannel ? { raw: msg } : {}),
             });
-            controller.close();
+            // Unconditional: whether or not the error frame made it onto the
+            // wire, the response MUST terminate or the caller blocks on a
+            // stream that will never produce another byte.
+            closeStream();
           }
         },
         cancel() {
