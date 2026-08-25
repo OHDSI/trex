@@ -41,8 +41,22 @@ Deno.test("with no D2E_IDP every value matches the pre-switch Logto behaviour", 
   assertEquals(c.endSessionPath, "oidc/session/end");
 });
 
-Deno.test("logto: SECURITY_AUTH_OIDC_APISECRET still wins over LOGTO__CLIENT_SECRET", () => {
-  const c = resolveIdpConfig({ ...LOGTO_ENV, SECURITY_AUTH_OIDC_APISECRET: "from-webapi" });
+Deno.test("logto: LOGTO__CLIENT_SECRET wins over the WebAPI alias", () => {
+  // This precedence used to be the other way round. SECURITY_AUTH_OIDC_APISECRET
+  // belongs to WebAPI, and WebAPI can now be pointed at a different issuer than
+  // the portal: with WebAPI on trex and d2e-compat still on Logto, that variable
+  // holds trex's secret. Preferring it sent trex's secret to Logto, which 401s
+  // the code exchange, and the failure only surfaced later as an undefined
+  // access_token.
+  const c = resolveIdpConfig({ ...LOGTO_ENV, SECURITY_AUTH_OIDC_APISECRET: "trex-secret" });
+  assertEquals(c.clientSecret, "shh");
+});
+
+Deno.test("logto: the WebAPI alias is still used when no LOGTO__CLIENT_SECRET is set", () => {
+  // Kept for deployments that only ever set the alias; dropping it outright
+  // would silently unauthenticate them.
+  const { LOGTO__CLIENT_SECRET: _drop, ...noSecret } = LOGTO_ENV;
+  const c = resolveIdpConfig({ ...noSecret, SECURITY_AUTH_OIDC_APISECRET: "from-webapi" });
   assertEquals(c.clientSecret, "from-webapi");
 });
 
