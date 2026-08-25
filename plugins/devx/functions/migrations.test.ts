@@ -32,7 +32,7 @@ async function versionsIn(dir: string): Promise<Map<number, string[]>> {
   const path = new URL(dir + "/", REPO_ROOT);
   for await (const entry of Deno.readDir(path)) {
     if (!entry.isFile) continue;
-    const m = entry.name.match(/^V(\d+)__/);
+    const m = entry.name.match(/^V(\d+)__.*\.sql$/);
     if (!m) continue;
     const version = Number(m[1]);
     const names = byVersion.get(version) ?? [];
@@ -75,5 +75,20 @@ Deno.test("every grandfathered collision still exists and is still a collision",
         `${dir} V${v} is grandfathered but no longer collides — remove it from GRANDFATHERED`,
       );
     }
+  }
+});
+
+Deno.test("migration with adjacent test file is not reported as collision", async () => {
+  // Regression test: a migration .sql file may have an adjacent .test.ts file
+  // (e.g., V7__context.sql and V7__context.test.ts). Only .sql files are
+  // migrations; .test.ts files must not be matched as duplicates.
+  const byVersion = await versionsIn("core/server/agents/migrations");
+  for (const [_version, names] of byVersion) {
+    const sqlCount = names.filter((n) => n.endsWith(".sql")).length;
+    assertEquals(
+      sqlCount <= 1,
+      true,
+      `Multiple .sql files with same version in core/server/agents/migrations: ${names.join(", ")}`,
+    );
   }
 });
