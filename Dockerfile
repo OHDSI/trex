@@ -9,7 +9,20 @@ ARG DUCKDB_VERSION=1.4.4
 ARG DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite_scanner vss"
 # NOTE: `bigquery` is not fetched from community-extensions.duckdb.org — see
 # DUCKDB_BIGQUERY_* below.
-ARG DUCKDB_COMMUNITY_EXTENSIONS=""
+#
+# `snowflake` is redistributable: the extension is MIT (duckdb/community-
+# extensions extensions/snowflake/description.yml, upstream iqea-ai/duckdb-
+# snowflake), unlike the SAP HANA and Simba BigQuery JDBC drivers that have to
+# be fetched at container start. It is published for v1.4.4 on both linux_amd64
+# and linux_arm64, so it belongs in the fail-loud list rather than the optional
+# one. ~11MB compressed.
+#
+# It is a thin wrapper that dlopen()s the Apache Arrow ADBC Snowflake driver
+# (Apache-2.0) at ATTACH time, and that driver is NOT bundled with it. This
+# image does not ship the driver yet — d2e installs it into /usr/local/lib in
+# its own layer — so `LOAD snowflake` works here but `ATTACH` needs the driver
+# present.
+ARG DUCKDB_COMMUNITY_EXTENSIONS="snowflake"
 ARG DUCKDB_OPTIONAL_EXTENSIONS=""
 # DuckDB extensions taken from a prebuilt release rather than extensions.duckdb.org.
 # Recorded as ENV in the final image so `docker inspect` still shows which
