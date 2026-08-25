@@ -91,6 +91,22 @@ export async function resolveInstructions(agent: LoadedAgent, metadata: unknown,
   return await agent.config.buildInstructions(base, hookCtx);
 }
 
+// Per-request user-message resolution, the buildUserMessage counterpart to
+// resolveInstructions above. A configured hook with no hookCtx available
+// fails loudly rather than silently skipping the hook — same
+// never-fall-back-silently posture as resolveInstructions/resolveModelForTurn.
+export async function resolveUserMessage(
+  agent: LoadedAgent,
+  base: string,
+  hookCtx?: HookCtx,
+): Promise<string> {
+  if (!agent.config.buildUserMessage) return base;
+  if (!hookCtx) {
+    throw new Error("agents: buildUserMessage hook configured but no request context (hookCtx) available");
+  }
+  return await agent.config.buildUserMessage(base, hookCtx);
+}
+
 function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boolean): any {
   const schema = isZodSchema(def.inputSchema) ? def.inputSchema : jsonSchema(def.inputSchema);
   if (def.clientOnly) {
@@ -140,7 +156,29 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
           }
         }
       }
-      return await def.execute!(input, {
+      // Hooks come from ctx.agent.config, so a subagent turn runs the
+      // SUBAGENT's hooks — same posture as filterTools at depth 1.
+      const cfg = ctx.agent?.config;
+      let effectiveInput = input;
+      if (cfg?.onToolCall) {
+        // A configured hook with no hookCtx available is a caller wiring
+        // bug, not a hook failure — throw loudly (same posture as
+        // resolveInstructions' buildInstructions check) rather than
+        // silently skipping a control whose entire purpose is to deny.
+        if (!ctx.hookCtx) {
+          throw new Error("agents: onToolCall hook configured but no request context (hookCtx) available");
+        }
+        let decision: { allow: boolean; input?: unknown; reason?: string };
+        try {
+          decision = await cfg.onToolCall({ name, input: effectiveInput }, ctx.hookCtx);
+        } catch (err) {
+          return { error: `onToolCall hook failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+        if (!decision?.allow) return { error: decision?.reason ?? "blocked by onToolCall hook" };
+        if (decision.input !== undefined) effectiveInput = decision.input;
+      }
+
+      const result = await def.execute!(effectiveInput, {
         bearerToken: ctx.bearerToken,
         sessionId: ctx.sessionId,
         metadata: ctx.metadata,
@@ -157,6 +195,22 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
         // to them since those are lower-privilege by design.
         sql: isAuthored ? ctx.hookCtx?.sql : undefined,
       });
+
+      if (cfg?.onToolResult) {
+        // Same wiring-bug-must-throw posture as onToolCall above.
+        if (!ctx.hookCtx) {
+          throw new Error("agents: onToolResult hook configured but no request context (hookCtx) available");
+        }
+        try {
+          return await cfg.onToolResult({ name, input: effectiveInput, result }, ctx.hookCtx);
+        } catch (err) {
+          // Fail closed for the same reason as onToolCall: a result rewriter
+          // that failed must not pass the raw result through as if it had
+          // been inspected.
+          return { error: `onToolResult hook failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return result;
     },
   });
 }
@@ -182,8 +236,9 @@ function skillTool(ctx: ToolBuildCtx): any {
 }
 
 // Runs a subagent (or a copy of the current agent) as a nested loop with
-// fresh history. Nested activity is not streamed step-by-step in v1 — the
-// outer agent tool-call/tool-result events carry prompt and result.
+// fresh history. Nested activity is streamed step-by-step via toolEmit
+// (subagent.start/tool/end, one runId per invocation) so a delegated turn
+// is not opaque until it finishes; no UI consumes these events yet.
 async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCtx): Promise<{ text: string }> {
   // A subagent's own declared model wins; otherwise inherit the caller's
   // (already-resolved) model, resolving the parent's string as last resort.
@@ -214,7 +269,57 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
     // Same openai prompt-cache routing as runner.ts, keyed by the subagent's dir.
     providerOptions: cacheProviderOptions(model, target.dir),
   });
-  return { text: await result.text };
+  // Consume fullStream for progress events (subagent.tool) so the nested
+  // turn's steps reach the UI via toolEmit (already threaded in via the
+  // {...ctx} spread above — no new plumbing). Part shapes match runner.ts's
+  // own switch over this same ai@6 stream (toolCallId/toolName/input/output).
+  // runId keeps concurrent subagent runs apart on the shared channel.
+  // LoadedAgent has no `name` field (see loader.ts) — derive it from the
+  // agent's directory, the same way handler.ts's subagents.local listing
+  // does for depth-0 subagents (Object.entries key there; here we only have
+  // `target`, so its dir's basename is the closest equivalent).
+  const runId = crypto.randomUUID();
+  const agentName = target.dir.split("/").filter(Boolean).pop() ?? target.dir;
+  ctx.toolEmit?.("subagent.start", { runId, agent: agentName });
+  let text = "";
+  let error: string | undefined;
+  try {
+    for await (const part of result.fullStream) {
+      const p = part as any;
+      switch (p.type) {
+        case "tool-call":
+          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, input: p.input });
+          break;
+        case "tool-result":
+          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, result: p.output });
+          break;
+        case "error":
+          // fullStream surfaces a model/stream error as an "error" part
+          // WITHOUT throwing out of the for-await loop, and result.text
+          // below still resolves (to whatever text preceded the error)
+          // rather than rejecting — verified empirically (task-4-report.md).
+          // So this must be captured explicitly or it is silently dropped.
+          error = p.error instanceof Error ? p.error.message : String(p.error ?? "unknown model error");
+          break;
+      }
+    }
+    // Preserve the OLD (pre-Task-4) semantics exactly: `await result.text`
+    // resolves to only the FINAL step's text, not a sum of every step's
+    // text-delta (ai's recordedContent resets at each step boundary) —
+    // verified empirically that draining fullStream first neither hangs nor
+    // starves this promise (task-4-report.md). A preamble-then-tool-call
+    // step's text must NOT leak into the returned answer.
+    text = await result.text;
+    if (error) throw new Error(error);
+  } catch (e) {
+    error = error ?? (e instanceof Error ? e.message : String(e));
+    throw e;
+  } finally {
+    // Always fires, success or failure, so a subagent.start never goes
+    // without a matching subagent.end (observability: no dangling runs).
+    ctx.toolEmit?.("subagent.end", { runId, text, ...(error ? { error } : {}) });
+  }
+  return { text };
 }
 
 function agentTool(ctx: ToolBuildCtx): any {

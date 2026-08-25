@@ -58,6 +58,64 @@ export interface AgentConfig {
   // same posture as buildInstructions/resolveModel (fail the turn rather
   // than silently keep a tool that should have been dropped).
   filterTools?: (toolName: string, def: ToolDef, ctx: HookCtx) => boolean;
+  // Tool-call interception. Invoked by toolset.ts's authoredTool INSIDE
+  // execute, AFTER the approval gate — ordering is load-bearing: a hook that
+  // ran first could approve on the user's behalf. Applies to every tool
+  // routed through authoredTool (static, dynamic-tools.ts provider output,
+  // MCP), unlike ToolContext.sql which is withheld from provider-sourced
+  // tools: sql GRANTS power to a less trusted tool, whereas these INTERCEPT
+  // it, so withholding them from the least trusted tools would invert the
+  // intent. NOT applied to the `skill`/`agent`/`connection_search` built-ins
+  // (skillTool/agentTool/connectionSearchTool) — they bypass authoredTool
+  // entirely, so a hook cannot police subagent delegation via `agent`, nor
+  // which procedure a turn loads via `skill`. Read from ctx.agent.config, so
+  // a depth-1 subagent runs the SUBAGENT's hooks: devx's .edn subagents
+  // carry no TS config, i.e. a devx subagent turn runs with NO hooks (a
+  // legacy PreToolUse matcher of `Agent|Skill` loses enforcement at the eve
+  // cutover).
+  //
+  // CORE fails closed: a throwing/rejecting hook denies THAT CALL (the tool
+  // returns an {error} payload) and the turn continues. This deliberately
+  // differs from devx's legacy loop, which caught and proceeded — a hook
+  // whose job is to stop something must not be defeated by its own bug. A
+  // hook configured with no ctx.hookCtx available is a caller wiring bug,
+  // not a hook failure, and throws rather than silently skipping — same
+  // posture as buildInstructions/filterTools above.
+  //
+  // That guarantee covers the hook FUNCTION only; it does NOT make the whole
+  // chain fail-closed. devx's implementation behind this hook
+  // (plugins/devx/functions/skills/hooks.ts) denies only on exit code 2 or
+  // an explicit stdout deny — executeHook throwing (:61), a non-allowlisted
+  // executable (:166), and an unavailable Trex/DuckDB runtime (:216) all
+  // still return "approve". See COMPAT.md divergence 15.
+  onToolCall?: (
+    call: { name: string; input: unknown },
+    ctx: HookCtx,
+  ) => Promise<{ allow: boolean; input?: unknown; reason?: string }>;
+  onToolResult?: (
+    call: { name: string; input: unknown; result: unknown },
+    ctx: HookCtx,
+  ) => Promise<unknown>;
+  // Turn lifecycle. Called once, after the turn's text has been persisted and
+  // the stream has closed, immediately before runTurn returns. Errors are
+  // logged and swallowed: the turn already succeeded, and a Stop-hook bug must
+  // not retro-fail completed work. NOT called for a failed turn — the "error"
+  // stream case throws before this point, matching devx legacy, which runs
+  // Stop hooks only after a successful turn.
+  onTurnEnd?: (
+    turn: { text: string; finishReason: string },
+    ctx: HookCtx,
+  ) => Promise<void>;
+  // Per-turn user-message rewrite. Signature deliberately mirrors
+  // buildInstructions(base, ctx) — but applies to the USER message, not the
+  // system prompt, because the system prompt is cache-pointed
+  // (withSystemCachePoint) on the strength of being stable across turns.
+  // Per-turn content (e.g. attachment paths) folded into it would invalidate
+  // the prompt cache on every request.
+  //
+  // Fails the turn on throw, same posture as buildInstructions: a turn built
+  // on a half-resolved prompt is worse than no turn.
+  buildUserMessage?: (base: string, ctx: HookCtx) => Promise<string>;
 }
 
 // A dynamic tool source, authored as an agent-dir-root `dynamic-tools.ts`

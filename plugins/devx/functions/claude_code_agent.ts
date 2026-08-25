@@ -15,6 +15,7 @@ import { ensureGitConfig } from "./git_identity.ts";
 import { ensureChatWorktree } from "./chat_worktree.ts";
 import { materializeAttachments, renderAttachmentBlock } from "./attachments.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
+import { loadSkillsForPrompt } from "./skills/resolver.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 import { getFigmaToken } from "./routes/figma_routes.ts";
 
@@ -100,12 +101,19 @@ export async function streamClaudeCodeChat({
     if (rules !== undefined) aiRules = rules;
   }
 
+  // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+  // invocable") — loadSkillsForPrompt is the one shared resolver every
+  // dispatch path (including the eve loop) uses, so this loop's listing is
+  // identical to the others.
+  const skills = await loadSkillsForPrompt(userId, sqlFn);
+
   const { systemPrompt, maxSteps } = await buildCoderContext({
     mode, aiRules, skillContext, remoteChannel,
     hasComponentSelection, settings: effectiveSettings,
     // Only this sidecar registers mcp__ask__ask_question (see server.js) —
     // the rule that instructs the model to use it is safe to enable here.
     askToolAvailable: true,
+    skills,
   });
   // Remote-channel context is no longer appended here: for a channel turn,
   // buildCoderContext's resolveCoderProfile() already selected

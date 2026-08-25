@@ -12,11 +12,15 @@ import type { HookCtx, ModelSpec } from "eve";
 // header comment for why this doesn't create a real dependency on core).
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
+import { loadSkillsForPrompt } from "../functions/skills/resolver.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { assertProviderSupported } from "../functions/provider_support.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
+import { loadHooks, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
+import type { Hook } from "../functions/skills/types.ts";
+import { materializeAttachments, renderAttachmentBlock } from "../functions/attachments.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
@@ -149,12 +153,16 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   // this bedrock=bearer-only gap). Silently dropping IAM creds would swap in
   // whatever AWS_BEARER_TOKEN_BEDROCK happens to be set (or nothing at all,
   // producing a confusing downstream auth failure) — throw a clear,
-  // actionable error instead; useEffectiveLoop.ts routes IAM-shaped bedrock
-  // users to the legacy loop before this hook is ever reached, so reaching
-  // this throw in production means that client-side gate was bypassed or is
-  // out of sync, and failing loud here is strictly better than a silent
-  // wrong-credential turn (same "a thrown resolveModel fails the turn"
-  // posture as every other error path in this file).
+  // actionable error instead. IAM-shaped bedrock credentials are a decided
+  // unsupported configuration (not implementing SigV4 auth on this loop was
+  // a deliberate call, not an oversight to fix later) — this throw is now
+  // the SINGLE enforcement point for that decision, so reaching it in
+  // production is the NORMAL path for a user on IAM-shaped bedrock creds,
+  // not a sign that some other gate was bypassed. It must stay loud (same
+  // "a thrown resolveModel fails the turn" posture as every other error
+  // path in this file): a clear, actionable error a real user will see is
+  // far better than silently swapping in whatever AWS_BEARER_TOKEN_BEDROCK
+  // happens to be set to.
   let apiKey: string | undefined = resolvedApiKey ?? undefined;
   if (provider === "bedrock" && resolvedApiKey) {
     let parsed: unknown;
@@ -182,7 +190,8 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
         apiKey = creds.bearerToken;
       } else if (creds.accessKeyId || creds.secretAccessKey) {
         throw new Error(
-          "bedrock IAM credentials are not supported on the agents loop yet — use bearer token or the legacy loop",
+          "bedrock IAM (access key/secret key) credentials are not supported — " +
+            "generate a bedrock bearer token and update this provider's credentials to use it",
         );
       } else {
         // Valid JSON object but NEITHER shape (e.g. {"bearerToken": ""} or
@@ -207,7 +216,7 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 // workspace routing, which always needs SOME concrete choice) whereas this
 // hook's contract requires "no mode / unknown mode" to mean "allow
 // everything", not "treat it as build".
-function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
+export function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
   const mode = (metadata as { mode?: unknown } | null | undefined)?.mode;
   return mode === "ask" || mode === "plan" || mode === "build" ? mode : undefined;
 }
@@ -320,14 +329,136 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
     if (projectRules !== undefined) rules = projectRules;
   }
 
+  // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+  // invocable") — loadSkillsForPrompt is the one shared resolver every
+  // dispatch path uses (functions/agent.ts, claude_code_agent.ts, index.ts,
+  // and this loop).
+  //
+  // builtinOnly is a DELIBERATE divergence from the legacy loops (R12), NOT
+  // an oversight: this loop's actual skill loader is core's `skillTool`,
+  // which resolves against the `agent/skills -> ../skills` symlink, i.e.
+  // built-in (filesystem-synced) skills only. Listing a user-created
+  // devx.skills row here would have the model call `skill` and get back
+  // `unknown skill`. Advertising a skill the agent cannot load is worse than
+  // a listing that differs between loops — see loadSkillsForPrompt's own
+  // comment for the full rationale.
+  const skills = await loadSkillsForPrompt(userId, ctx.sql, { builtinOnly: true });
+
   const { systemPrompt } = await buildCoderContext({
-    mode: "agent",
+    // Share filterTools' own helper so the prompt and the tool set can never
+    // disagree about the mode. readMode returns undefined for unset/unknown,
+    // which maps to "agent" -- preserving the previous behaviour for callers
+    // that send no mode.
+    mode: readMode(ctx.metadata) ?? "agent",
     aiRules: rules,
+    // skillContext is deliberately NOT passed on this loop (R11). Legacy
+    // PRE-INJECTS a resolved skill body into the system prompt because its
+    // own `Skill` tool is a no-op stub returning a canned string — without
+    // the injection the model could never see a skill's content. eve has
+    // core's REAL `skill` built-in (core/server/agents/service/toolset.ts's
+    // skillTool), which loads a skill body on demand mid-turn, so gap 2 is
+    // closed here by a different mechanism, not left open. Accepting a
+    // client-supplied skillContext instead would be a posture regression:
+    // on legacy the value is SERVER-derived (functions/index.ts:756-775
+    // resolves the slash command / skill intent and loads the body), and
+    // nothing in the eve request path resolves it server-side.
     remoteChannel: false,
     askToolAvailable: false,
     settings: { max_steps: undefined },
+    skills,
   });
   return systemPrompt;
+}
+
+// devx.hooks (PreToolUse/PostToolUse/Stop) rows are loaded ONCE PER TURN, not
+// once per tool call — legacy loads them once at functions/agent.ts:235, and
+// a per-call load would issue one query per tool. Cached on a WeakMap keyed
+// by the request's HookCtx object itself, not a string session/user id: core
+// builds exactly one HookCtx per request (toolset.ts's ToolBuildCtx.hookCtx,
+// threaded through every authoredTool call for that turn via the `...ctx`
+// spread — see toolset.ts:196/205), and that same object reaches every
+// onToolCall/onToolResult/onTurnEnd call for the turn. Keying on the object
+// itself, rather than a `${sessionId}:${userId}:${event}` string in a
+// module-level Map, means the cache entry is garbage-collected along with
+// the HookCtx when the turn ends — no unbounded growth in a long-lived
+// worker, unlike a string-keyed Map that never evicts. The inner Map (event
+// -> Promise<Hook[]>) covers the up-to-three events one turn can request.
+const hookRowCache = new WeakMap<object, Map<string, Promise<Hook[]>>>();
+function turnHooks(ctx: HookCtx, event: string): Promise<Hook[]> {
+  let byEvent = hookRowCache.get(ctx);
+  if (!byEvent) {
+    byEvent = new Map();
+    hookRowCache.set(ctx, byEvent);
+  }
+  let p = byEvent.get(event);
+  if (!p) {
+    // userId is the trusted identity (x-user-id via HookCtx), never read
+    // from ctx.metadata.
+    p = loadHooks(ctx.userId ?? "", event, ctx.sql);
+    byEvent.set(event, p);
+  }
+  return p;
+}
+
+// H2: PreToolUse hooks. Runs inside toolset.ts's authoredTool AFTER the
+// approval gate (see AgentConfig.onToolCall's doc comment in eve-shim/
+// types.ts) and fails CLOSED — a throw here denies this one tool call and
+// the turn continues, so genuine errors are left to propagate rather than
+// being swallowed into a permissive `{ allow: true }`.
+export async function onToolCall(
+  call: { name: string; input: unknown },
+  ctx: HookCtx,
+): Promise<{ allow: boolean; input?: unknown; reason?: string }> {
+  const hooks = await turnHooks(ctx, "PreToolUse");
+  if (hooks.length === 0) return { allow: true };
+  const result = await runPreToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, hooks);
+  if (!result.allow) return { allow: false, reason: "blocked by a PreToolUse hook" };
+  return result.modifiedArgs ? { allow: true, input: result.modifiedArgs } : { allow: true };
+}
+
+// H2: PostToolUse hooks.
+export async function onToolResult(
+  call: { name: string; input: unknown; result: unknown },
+  ctx: HookCtx,
+): Promise<unknown> {
+  const hooks = await turnHooks(ctx, "PostToolUse");
+  if (hooks.length === 0) return call.result;
+  // runPostToolHooks (functions/skills/hooks.ts:75-80) is string-in/
+  // string-out. A non-string tool result must pass through UNTOUCHED rather
+  // than being JSON-stringified into a shape the model has never seen from
+  // that tool before.
+  if (typeof call.result !== "string") return call.result;
+  return await runPostToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, call.result, hooks);
+}
+
+// H3: Stop hooks. Only reached after a successful turn (core never calls
+// onTurnEnd for a failed one) and its errors are logged and swallowed by
+// core, not propagated here.
+export async function onTurnEnd(turn: { text: string; finishReason: string }, ctx: HookCtx): Promise<void> {
+  const hooks = await turnHooks(ctx, "Stop");
+  const { chatId } = readMetadata(ctx.metadata);
+  if (!chatId) return;
+  await runStopHooks(hooks, { chatId, content: turn.text });
+}
+
+// H3: attachment materialization, folded into buildUserMessage (per-turn
+// content, not the cache-pointed system prompt — see AgentConfig.
+// buildUserMessage's doc comment). Attachments are UI-reachable, not just
+// channel-only (ChatInput.tsx), so ordinary browser turns need this too.
+export async function buildUserMessage(base: string, ctx: HookCtx): Promise<string> {
+  const { appId, attachments } = readMetadata(ctx.metadata);
+  if (!ctx.userId || !appId || !attachments?.length) return base;
+  // Same defensive shape filter and cap-of-10 the legacy path applies at
+  // functions/index.ts:405-408 -- these urls are remote/untrusted input.
+  const safe = attachments
+    .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+    .slice(0, 10);
+  if (safe.length === 0) return base;
+  const workspacePath = await ensureAppWorkspace(ctx.userId, appId);
+  const saved = await materializeAttachments(workspacePath, safe);
+  // Only paths ever enter the prompt, never file content -- the coder Reads
+  // them itself (images render multimodally through Read).
+  return base + renderAttachmentBlock(saved);
 }
 
 // CLOSED: a self-delegated subagent turn now gets the shared contract
@@ -392,4 +523,8 @@ export default defineAgent({
   resolveModel,
   filterTools,
   buildInstructions,
+  onToolCall,
+  onToolResult,
+  onTurnEnd,
+  buildUserMessage,
 });

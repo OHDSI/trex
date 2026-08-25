@@ -15,6 +15,7 @@ import { ensureChatWorktree } from "./chat_worktree.ts";
 import { materializeAttachments, renderAttachmentBlock } from "./attachments.ts";
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
+import { loadSkillsForPrompt } from "./skills/resolver.ts";
 import { buildCoderContext } from "./coder_context.ts";
 import { openaiTransport } from "./openai_transport.ts";
 import { ensureGitConfig } from "./git_identity.ts";
@@ -196,6 +197,12 @@ export async function streamAgentChat({
     if (rules !== undefined) aiRules = rules;
   }
 
+  // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+  // invocable") — loadSkillsForPrompt is the one shared resolver every
+  // dispatch path (including the eve loop) uses, so this loop's listing is
+  // identical to the others.
+  const skills = await loadSkillsForPrompt(userId, sqlFn);
+
   const { systemPrompt, maxSteps } = await buildCoderContext({
     mode, aiRules, skillContext, remoteChannel,
     // effectiveSettings, not settings — matches claude_code_agent.ts.
@@ -210,6 +217,7 @@ export async function streamAgentChat({
     // mcp__ask__ask_question — telling the model to MUST use it (and to
     // NEVER ask in plain text) would take away its only real way to ask.
     askToolAvailable: false,
+    skills,
   });
 
   // Load user consent preferences

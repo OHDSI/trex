@@ -19,7 +19,7 @@
 // `systemPrompt` (e.g. inside comments or unrelated string building)
 // without a real parser, and a false-positive-prone assertion here would
 // be worse than the documented gap.
-import { assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert";
 
 const ENGINES = [
   "plugins/devx/functions/agent.ts",
@@ -43,6 +43,90 @@ Deno.test("every dispatch path builds its context through the shared builder", a
     const src = await Deno.readTextFile(path);
     assertEquals(src.includes("buildCoderContext("), true, `${path} does not call buildCoderContext`);
   }
+});
+
+// Extracts the argument list text between the matching parens of the FIRST
+// `${fnName}(` call in `src`, via brace counting rather than a greedy regex —
+// tractable here because each call site passes a single object-literal
+// argument, unlike the open-ended "systemPrompt + extra" interpolation this
+// file's header comment declines to police with a regex.
+function extractCallArgs(src: string, fnName: string): string {
+  const marker = `${fnName}(`;
+  const start = src.indexOf(marker);
+  if (start === -1) return "";
+  let depth = 1;
+  let i = start + marker.length;
+  for (; i < src.length && depth > 0; i++) {
+    if (src[i] === "(") depth++;
+    else if (src[i] === ")") depth--;
+  }
+  return src.slice(start + marker.length, i - 1);
+}
+
+// task-5-report.md Finding 1 (critical, fix round 1): buildCoderContext's
+// `skills` input renders the <available-skills> listing SKILL_USAGE_RULE
+// ("The skills above are real and invocable") refers to. Three of the four
+// dispatch paths built their buildCoderContext call without it, so their
+// prompts kept the dangling reference. loadSkillsForPrompt (functions/
+// skills/resolver.ts) is the one shared resolver+mapper every path must
+// call and thread through as `skills` — this guards both halves: the load
+// AND the wiring into the call, so dropping either fails loudly here
+// instead of only being caught by a live prompt diff.
+Deno.test("every dispatch path resolves a skills listing via loadSkillsForPrompt", async () => {
+  for (const path of ENGINES) {
+    const src = await Deno.readTextFile(path);
+    assertEquals(
+      src.includes("loadSkillsForPrompt("),
+      true,
+      `${path} does not resolve a skills listing via loadSkillsForPrompt — SKILL_USAGE_RULE would have nothing to refer to`,
+    );
+  }
+});
+
+Deno.test("every dispatch path threads its skills listing into buildCoderContext", async () => {
+  for (const path of ENGINES) {
+    const src = await Deno.readTextFile(path);
+    const args = extractCallArgs(src, "buildCoderContext");
+    assert(args.length > 0, `${path}: could not locate a buildCoderContext( call to inspect`);
+    assert(
+      /\bskills\s*[:,]/.test(args),
+      `${path} calls buildCoderContext without passing \`skills\` — the resolved listing never reaches the prompt`,
+    );
+  }
+});
+
+// task-5-report.md Finding 3 (fix round 2, follows from Finding 1): unlike
+// functions/agent.ts and claude_code_agent.ts (which have no try/catch at
+// all -- any DB error already kills those turns) and agent/agent.ts (whose
+// buildInstructions is documented to fail the turn by design on a throw),
+// index.ts's raw-provider dispatch already has an established
+// graceful-degradation contract for devx.skills reads: the "Skill/Command
+// resolution" try/catch (logs "[index] Skill/command resolution error" and
+// proceeds without it). loadSkillsForPrompt's call was first added AFTER
+// that block, so a devx.skills failure would have hard-failed a turn that
+// previously degraded gracefully. index.ts's whole request handler lives
+// inside one `Deno.serve(async (req) => {...})` callback with no function
+// boundary around this code, so it cannot be invoked in isolation the way
+// the other two engines' exported stream functions can (see
+// prompt_divergence.test.ts's header comment on why this file already
+// prefers source-position checks over invoking index.ts directly). This
+// asserts the call sits STRICTLY BETWEEN the guarding `try {` and its
+// `catch` — i.e. actually inside the block that degrades gracefully — not
+// merely present somewhere in the file.
+Deno.test("index.ts resolves its skills listing inside the skill/command resolution try/catch, not after it", async () => {
+  const src = await Deno.readTextFile("plugins/devx/functions/index.ts");
+  const sectionIdx = src.indexOf("// --- Skill/Command resolution ---");
+  assert(sectionIdx >= 0, "could not find the Skill/Command resolution section marker in index.ts");
+  const openTryIdx = src.indexOf("try {", sectionIdx);
+  assert(openTryIdx >= 0, "could not find the try { opening the skill/command resolution block");
+  const catchIdx = src.indexOf('console.error("[index] Skill/command resolution error:"', openTryIdx);
+  assert(catchIdx >= 0, "could not find the skill/command resolution catch block");
+  const loadIdx = src.indexOf("loadSkillsForPrompt(", openTryIdx);
+  assert(loadIdx >= 0, "index.ts never calls loadSkillsForPrompt");
+  assert(
+    loadIdx > openTryIdx && loadIdx < catchIdx,
+    "loadSkillsForPrompt must be called INSIDE the skill/command resolution try block so a devx.skills failure degrades gracefully (logs + empty list) instead of hard-failing the raw-provider turn",
+  );
 });
 
 Deno.test("no dispatch path constructs the base prompt directly", async () => {

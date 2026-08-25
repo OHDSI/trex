@@ -180,9 +180,19 @@ async function executeCommandHook(
     );
     const result = JSON.parse(raw);
 
+    // Claude Code hook convention: exit code 2 means "block" -- a
+    // conventional blocking hook script relies on this, so it must produce
+    // the same deny shape the stdout {"action":"deny"} path below does (same
+    // downstream handling, one deny shape). Any OTHER non-zero exit code is
+    // treated as a non-blocking hook failure (bad script, transient error,
+    // etc.) and still approves -- only exit 2 is a deliberate block signal.
+    if (result.exit_code === 2) {
+      console.error(`[hooks] Command hook blocked the call (exit 2):`, result.output);
+      return { action: "deny" };
+    }
     if (result.exit_code && result.exit_code !== 0) {
       console.error(`[hooks] Command hook failed:`, result.output);
-      return { action: "approve" }; // Don't block on hook failures
+      return { action: "approve" }; // non-blocking failure -- log and continue
     }
 
     const stdout = (result.output || "").trim();

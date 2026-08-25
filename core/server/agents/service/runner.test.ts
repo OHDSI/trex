@@ -1,9 +1,10 @@
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { runTurn } from "./runner.ts";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
+import type { HookCtx } from "../eve-shim/types.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 
@@ -23,6 +24,35 @@ function sequencedModel(...responses: any[][]) {
       return Promise.resolve({ stream: simulateReadableStream({ chunks }) });
     },
   });
+}
+
+// Captures every doStream() call's options (notably `prompt`, which carries
+// the system message as one entry and the user/history messages as the
+// rest) so a test can assert on what the model actually received, not just
+// what runTurn intended to send. Mirrors hooks.test.ts's capturingModel.
+// deno-lint-ignore no-explicit-any
+function capturingModel(...responses: any[][]) {
+  let call = 0;
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  const model = new MockLanguageModelV3({
+    // deno-lint-ignore no-explicit-any
+    doStream: (options: any) => {
+      calls.push(options);
+      const chunks = responses[Math.min(call++, responses.length - 1)];
+      return Promise.resolve({ stream: simulateReadableStream({ chunks }) });
+    },
+  });
+  return { model, calls };
+}
+
+function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
+  return {
+    sessionId: "s-1",
+    env: () => undefined,
+    sql: () => Promise.resolve({ rows: [] }),
+    ...overrides,
+  };
 }
 
 // ai@6 / @ai-sdk/provider@3 (LanguageModelV3) changed the raw doStream
@@ -581,4 +611,139 @@ Deno.test("authored tools get ToolContext.sql; provider-sourced (dynamic-tools) 
 
   const dynamicResult = await (tools.dynamicEcho as { execute: (input: unknown) => Promise<unknown> }).execute({});
   assertEquals(dynamicResult, { hasSql: false });
+});
+
+// ---------------------------------------------------------------------------
+// Task 3: onTurnEnd + buildUserMessage.
+// ---------------------------------------------------------------------------
+
+Deno.test("runTurn: onTurnEnd receives the final text and finishReason", async () => {
+  const agent = await loadAgent(TOY);
+  let seen: { text: string; finishReason: string } | null = null;
+  agent.config.onTurnEnd = (turn: { text: string; finishReason: string }) => {
+    seen = turn;
+    return Promise.resolve();
+  };
+  const { store } = memoryStoreCalls();
+  const out = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hello", store, emit: () => {},
+    model: sequencedModel(textChunks("all done")),
+    hookCtx: fakeHookCtx(),
+  });
+  assertEquals(out.text, "all done");
+  assertEquals(seen?.text, "all done");
+  assertEquals(seen?.finishReason, "stop");
+});
+
+Deno.test("runTurn: a throwing onTurnEnd does not fail the turn", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.onTurnEnd = () => Promise.reject(new Error("stop hook exploded"));
+  const { store } = memoryStoreCalls();
+  const out = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hello", store, emit: () => {},
+    model: sequencedModel(textChunks("done")),
+    hookCtx: fakeHookCtx(),
+  });
+  assertEquals(out.text, "done");
+});
+
+// Controller ruling (task-3): onTurnEnd runs AFTER persistText() and the turn
+// has already succeeded, so a missing hookCtx must neither throw (that would
+// retro-fail completed work) nor silently no-op (a configured-but-unrunnable
+// hook is a caller wiring bug worth surfacing) — it warns and skips.
+Deno.test("runTurn: a configured onTurnEnd hook with no hookCtx warns and is skipped, without failing the turn", async () => {
+  const agent = await loadAgent(TOY);
+  let called = false;
+  agent.config.onTurnEnd = () => {
+    called = true;
+    return Promise.resolve();
+  };
+  const { store } = memoryStoreCalls();
+  const warnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args);
+  };
+  let out: { text: string; finishReason: string };
+  try {
+    out = await runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: () => {},
+      model: sequencedModel(textChunks("done")),
+      // no hookCtx
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assertEquals(out.text, "done");
+  assert(!called, "onTurnEnd must not run without a hookCtx");
+  assert(
+    warnings.some((args) => String(args[0]).includes("onTurnEnd") && String(args[0]).includes("hookCtx")),
+    `expected a console.warn mentioning onTurnEnd/hookCtx, got: ${JSON.stringify(warnings)}`,
+  );
+});
+
+Deno.test("runTurn: buildUserMessage rewrites the user message reaching the model", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.buildUserMessage = (base: string) => Promise.resolve(`${base}\n\n<extra>attached</extra>`);
+  const { store } = memoryStoreCalls();
+  const { model, calls } = capturingModel(textChunks("ok"));
+  const out = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "build it", store, emit: () => {}, model,
+    hookCtx: fakeHookCtx(),
+  });
+  assertEquals(out.text, "ok");
+  assertEquals(calls.length, 1);
+  const userMsg = calls[0].prompt.find((m: { role: string }) => m.role === "user");
+  assert(userMsg, "expected a user message in the model's prompt");
+  // ai@6 normalizes a string `content` into a text-part array at the
+  // LanguageModelV3Prompt level (verified via a scratch probe of
+  // streamText's doStream options) — reassemble it back to plain text.
+  // deno-lint-ignore no-explicit-any
+  const userText = Array.isArray(userMsg.content)
+    ? userMsg.content.map((p: { text?: string }) => p.text ?? "").join("")
+    : userMsg.content;
+  assertEquals(userText, "build it\n\n<extra>attached</extra>");
+});
+
+// The system prompt is cache-pointed (withSystemCachePoint) precisely because
+// it is stable across turns. Attachments folded into it by buildUserMessage
+// would invalidate the prompt cache on every request — genuinely constrain
+// this by reading the model's actual system message, not just runTurn's
+// return value.
+Deno.test("runTurn: buildUserMessage leaves the (cache-pointed) system prompt untouched", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.buildUserMessage = (base: string) => Promise.resolve(`${base} EXTRA`);
+  const { store } = memoryStoreCalls();
+  const { model, calls } = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hi", store, emit: () => {}, model,
+    hookCtx: fakeHookCtx(),
+  });
+  const systemMsg = calls[0].prompt.find((m: { role: string }) => m.role === "system");
+  assert(systemMsg, "expected a system message in the model's prompt");
+  assert(
+    !String(systemMsg.content).includes("EXTRA"),
+    "buildUserMessage must not leak into the cache-pointed system prompt",
+  );
+});
+
+Deno.test("runTurn: a configured buildUserMessage hook without a hookCtx fails loudly instead of silently skipping the hook", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.buildUserMessage = (base: string) => Promise.resolve(base);
+  const { store } = memoryStoreCalls();
+  await assertRejects(
+    () =>
+      runTurn({
+        agent, sessionId: "s-1", turnId: "t-1", history: [],
+        message: "hello", store, emit: () => {},
+        model: sequencedModel(textChunks("hi")), // no hookCtx
+      }),
+    Error,
+    "hookCtx",
+  );
 });

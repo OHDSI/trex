@@ -231,7 +231,69 @@ live-tail by event shape.
     (`created_by IS NULL`) keep the pre-existing behavior: anyone who has the
     ids can resolve. This has no eve equivalent to diverge from — eve
     documents no approval-resolution authorization model at all.
-15. **`ToolContext.sql` is additive/trex-only** (`eve-shim/types.ts`) — real
+15. **`onToolCall`/`onToolResult` tool-call interception hooks (Task 2)** are
+    also additive `AgentConfig` fields real eve's `defineAgent` doesn't
+    define — eve silently ignores unknown fields, so an agent directory using
+    them still loads on real eve, just without interception (every tool call
+    executes and every result passes through unmodified). Read fresh from
+    `ctx.agent.config` on every call (no agent-load-time caching, same as
+    divergences 11/12), so a subagent turn runs the SUBAGENT's own hooks —
+    same posture as divergence 12's `filterTools` at depth 1. Invoked by
+    `toolset.ts`'s `authoredTool`, INSIDE `execute`, and — load-bearing —
+    AFTER the existing `needsApproval` gate: a hook that ran before the gate
+    could approve a tool call on the user's behalf, so an approval-required
+    call that has no pending decision short-circuits before `onToolCall` ever
+    runs (pinned by a dedicated ordering test in `hooks.test.ts`). Unlike
+    divergence 16's `ToolContext.sql` below (withheld from provider-sourced
+    dynamic-tools.ts/MCP/connection tools because it GRANTS power to a less
+    trusted tool), both hooks apply to every tool routed through
+    `authoredTool` — static, dynamic-tools.ts provider output, and MCP —
+    regardless of origin, since these INTERCEPT rather than grant, so
+    withholding them from the least-trusted tools would invert the intent.
+    **Not intercepted (know this before relying on a hook as a control):**
+    the `skill`, `agent` and `connection_search` built-ins
+    (`skillTool`/`agentTool`/`connectionSearchTool`) are constructed directly
+    and never pass through `authoredTool`, so no hook sees them — notably
+    `agent`, so a policy hook cannot police subagent delegation, and `skill`,
+    so it cannot police which procedure a turn loads. And because the hooks
+    are read from `ctx.agent.config`, a depth-1 subagent runs with the
+    SUBAGENT's config, not the caller's: devx's `.edn` subagents carry no TS
+    config at all, so a subagent turn runs with NO hooks. Concretely, a devx
+    user whose legacy PreToolUse matcher was `Agent|Skill` loses that
+    enforcement entirely at the eve cutover. `onToolCall` may deny the
+    call (`{allow: false, reason?}` → the tool returns `{error: reason}`) or
+    rewrite its input (`{allow: true, input}`) before `def.execute` runs;
+    `onToolResult` may rewrite the tool's return value after it runs. **CORE
+    fails closed**: a throwing/rejecting hook denies THAT CALL (`{error:
+    "on{ToolCall,ToolResult} hook failed: <message>"}`) and the turn
+    continues — the opposite of devx's legacy loop, which caught hook errors
+    and proceeded; a hook whose job is to stop something must not be
+    defeated by its own bug.
+
+    **That core guarantee does NOT make the whole chain fail-closed**, and
+    this must not be read as though it did. It covers only the hook
+    FUNCTION throwing. devx's `plugins/devx/functions/skills/hooks.ts` — the
+    implementation behind devx's `onToolCall` — denies only on **exit code
+    2** (the Claude Code blocking convention) or an explicit stdout deny;
+    every other internal failure still returns "approve", i.e. FAILS OPEN:
+    `executeHook` throwing (`hooks.ts:61`), a hook command whose executable
+    is not on the allowlist (`:166`), and the Trex/DuckDB runtime being
+    unavailable so the command cannot run at all (`:216`). Those three sites
+    are byte-identical on both devx loops, so the eve cutover regresses
+    nobody — but a devx user whose hook exits non-zero for a reason other
+    than 2, or whose runtime hiccups, gets the tool call APPROVED. Making
+    those deny would mean a DuckDB blip denies every tool call on both
+    loops; that is a product trade, not a core one, and has deliberately not
+    been made. A hook configured with no `ctx.hookCtx`
+    available throws (`"agents: on{ToolCall,ToolResult} hook configured but
+    no request context (hookCtx) available"`) rather than silently skipping
+    — that gap is a caller wiring bug, not a hook failure, and fail-open
+    would defeat a control whose entire purpose is to deny; same posture as
+    divergence 11's `buildInstructions`. This is also the opposite failure
+    posture from divergence 12's `dynamic-tools.ts` provider
+    (log-and-continue): these hooks are a trust-boundary control on tool
+    calls, not an operational integration.
+16. **`ToolContext.sql` is additive/trex-only** (`eve-shim/types.ts`) — real
     eve's `ToolContext` has no `sql` field at all. It's the worker's pg pool
     query fn, threaded straight from `HookCtx.sql` (`toolset.ts`'s
     `authoredTool`) so a tool's `execute()` can run SQL without reaching for
@@ -252,6 +314,35 @@ live-tail by event shape.
     (`plugins/devx/functions/auth_shape.ts`) and `useEffectiveLoop.ts` forces
     `bedrock` + `auth_shape === "iam"` users onto the legacy loop before
     `/chat` is ever called; the `resolveModel` throw is the backstop.
+17. **`onTurnEnd`/`buildUserMessage` turn-lifecycle hooks (Task 3)** are also
+    additive `AgentConfig` fields real eve's `defineAgent` doesn't define —
+    eve silently ignores unknown fields, so an agent directory using them
+    still loads on real eve, just without the hook running. `onTurnEnd`
+    fires once per turn, called from `runner.ts` AFTER `persistText()` has
+    run and OUTSIDE the stream's `try/finally`, immediately before `runTurn`
+    returns — a failed turn (the `"error"` stream case, which throws) never
+    reaches it, matching devx legacy's posture of running Stop hooks only
+    after a successful turn. Its errors are logged and swallowed, never
+    rethrown: the turn already succeeded, and a Stop-hook bug must not
+    retro-fail completed work — the opposite failure posture from
+    `buildInstructions`/`resolveModel`/`onToolCall`/`onToolResult` above,
+    which all fail the turn on throw. A configured `onTurnEnd` with no
+    `ctx.hookCtx` available is neither thrown (retro-failing a completed
+    turn) nor silently skipped (a caller wiring bug worth surfacing) — it's
+    a third posture unique to this hook: `console.warn`s that the hook was
+    configured but couldn't run for lack of a request context, then skips
+    it. `buildUserMessage` is the per-turn counterpart to `buildInstructions`,
+    resolved by `toolset.ts`'s `resolveUserMessage` (mirroring
+    `resolveInstructions`) and applied to the USER message before it's added
+    to `messages`, deliberately NOT to the system prompt: the system prompt
+    is cache-pointed (`withSystemCachePoint`) on the strength of being
+    stable across turns and across requests for the same agent+metadata, so
+    folding per-turn content (e.g. attachment paths) into it would
+    invalidate that cache on every request. Same never-fall-back-silently
+    posture as `buildInstructions`/`resolveModel`/`onToolCall`/
+    `onToolResult`: a configured `buildUserMessage` with no `hookCtx`
+    available throws rather than silently sending the unmodified base
+    message.
 
 ## Channels
 

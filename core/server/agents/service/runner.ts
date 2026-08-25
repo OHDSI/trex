@@ -9,7 +9,7 @@ import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
-import { buildSdkTools, resolveInstructions } from "./toolset.ts";
+import { buildSdkTools, resolveInstructions, resolveUserMessage } from "./toolset.ts";
 import type { ConnectionProviderOpts } from "../connections/provider.ts";
 
 interface RunTurnOpts {
@@ -53,7 +53,8 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // turn.failed/session.failed pair, same as any other pre-stream failure.
   const model = opts.model ?? await resolveModelForTurn(agent.config, opts.hookCtx);
   const system = await resolveInstructions(agent, opts.metadata, opts.hookCtx);
-  const userContent = typeof opts.message === "string" ? opts.message : JSON.stringify(opts.message);
+  const rawUserContent = typeof opts.message === "string" ? opts.message : JSON.stringify(opts.message);
+  const userContent = await resolveUserMessage(agent, rawUserContent, opts.hookCtx);
   const messages = [...opts.history, { role: "user" as const, content: userContent }];
 
   let stepSeq = 0;
@@ -284,6 +285,24 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     // Error/early-exit fallback only — a normal turn already persisted its
     // text in the "finish" case above (persistText is idempotent).
     await persistText();
+  }
+  // After the finally block, so persistText() has already run — and outside
+  // it, so a thrown turn (the "error" case) never reaches here. Errors are
+  // logged, never rethrown: the turn already succeeded.
+  if (agent.config.onTurnEnd) {
+    if (opts.hookCtx) {
+      try {
+        await agent.config.onTurnEnd({ text, finishReason }, opts.hookCtx);
+      } catch (err) {
+        console.error("agents: onTurnEnd hook failed:", err);
+      }
+    } else {
+      // Neither throw (the turn already succeeded — retro-failing it here
+      // would defeat the point of running this hook after persistText) nor
+      // silent skip (a configured-but-unrunnable hook is a caller wiring
+      // bug worth surfacing) — warn and move on.
+      console.warn("agents: onTurnEnd hook configured but no request context (hookCtx) available — skipping");
+    }
   }
   return { text, finishReason };
 }

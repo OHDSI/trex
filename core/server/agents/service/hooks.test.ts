@@ -341,6 +341,118 @@ Deno.test("agent tool: a target subagent's buildInstructions hook without a hook
 });
 
 // ---------------------------------------------------------------------------
+// runSubagent (toolset.ts): Task 4 — stream subagent progress via toolEmit
+// instead of discarding the nested turn's steps until it finishes. See
+// task-4-brief.md. No `makeAgent`/`makeToolBuildCtx`/`subagentScript`
+// fixtures exist in this file — reuses the same loadAgent(TOY) + sequencedModel
+// stub as the "agent tool" tests just above, driving the nested model through
+// a tool-call step (shouter's own `shout` tool) then a final text step.
+//
+// Round-1 review fixes (task-4-report.md "Fix round 1"):
+//  - Finding 1: result.text (ai's own step-boundary reset) must be what's
+//    returned, not a manual sum of every step's text-delta — a preamble step
+//    before a tool call must not leak into the returned answer.
+//  - Finding 2: subagent.end must always fire (try/finally), and an in-stream
+//    "error" fullStream part must not be silently dropped.
+// ---------------------------------------------------------------------------
+
+Deno.test("runSubagent emits subagent.start/tool/end progress under one runId, via toolEmit", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  const model = sequencedModel(toolCallChunks("shout", { text: "hi" }), textChunks("found it"));
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx(),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+
+  assertEquals(result.text, "found it");
+  const names = events.map((e) => e.name);
+  assertEquals(names[0], "subagent.start");
+  assertEquals(names[names.length - 1], "subagent.end");
+  assert(names.includes("subagent.tool"));
+
+  // One runId for the whole nested run.
+  const runIds = new Set(events.map((e) => e.data.runId));
+  assertEquals(runIds.size, 1);
+  assertEquals(events[0].data.agent, "shouter");
+  assertEquals(events[events.length - 1].data.text, "found it");
+});
+
+Deno.test("runSubagent's return value is unchanged ({ text }) when no toolEmit is wired", async () => {
+  const agent = await loadAgent(TOY);
+  const model = sequencedModel(toolCallChunks("shout", { text: "hi" }), textChunks("found it"));
+  // No toolEmit in ctx at all — must not throw, must return the same shape.
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx() });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+  assertEquals(result, { text: "found it" });
+});
+
+Deno.test("runSubagent returns only the FINAL step's text — a preamble before a tool call must not leak into the answer", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  // Step 1: the model narrates BEFORE calling the tool (a common pattern),
+  // then calls shouter's own `shout` tool. Step 2: the final text only.
+  // deno-lint-ignore no-explicit-any
+  const preambleThenToolCall: any[] = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "Let me check... " },
+    { type: "text-end", id: "1" },
+    { type: "tool-call", toolCallId: "c-1", toolName: "shout", input: JSON.stringify({ text: "hi" }) },
+    {
+      type: "finish",
+      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
+    },
+  ];
+  const model = sequencedModel(preambleThenToolCall, textChunks("final answer"));
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx(),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+
+  // NOT "Let me check... final answer" — that would be every step's
+  // text-delta summed, which is the bug round 1 fixed.
+  assertEquals(result.text, "final answer");
+  const endEvent = events.find((e) => e.name === "subagent.end");
+  assertEquals(endEvent?.data.text, "final answer");
+});
+
+Deno.test("runSubagent always fires a matching subagent.end (with the error) when the nested stream errors mid-run", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  // deno-lint-ignore no-explicit-any
+  const errorMidStream: any[] = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "partial..." },
+    { type: "text-end", id: "1" },
+    { type: "error", error: new Error("boom") },
+  ];
+  const model = sequencedModel(errorMidStream);
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx(),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  await assertRejects(
+    () =>
+      (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+        .execute({ agent: "shouter", prompt: "go" }),
+    Error,
+    "boom",
+  );
+  const names = events.map((e) => e.name);
+  assertEquals(names[0], "subagent.start");
+  assertEquals(names[names.length - 1], "subagent.end", "subagent.end must fire even though the nested run errored");
+  const endEvent = events[events.length - 1];
+  assertEquals(endEvent.data.runId, events[0].data.runId);
+  assertEquals(endEvent.data.error, "boom", "the in-stream error must not be silently dropped");
+});
+
+// ---------------------------------------------------------------------------
 // buildSdkTools (toolset.ts): H2 — filterTools hook + dynamic-tools.ts
 // provider. See .superpowers/sdd/task-h2-brief.md.
 // ---------------------------------------------------------------------------
@@ -528,6 +640,145 @@ Deno.test("buildSdkTools: an authored tools/connection_search wins over the buil
   assert(
     logged.some((l) => l.includes("overrides the built-in connection_search")),
     "the override must be logged, not silently dropped",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// buildSdkTools / authoredTool (toolset.ts): Task 2 — onToolCall/onToolResult
+// interception hooks. See task-2-brief.md. `makeAgent`/`makeToolBuildCtx`
+// helpers named in the brief don't exist in this file — adapted to the
+// loadAgent(TOY) + ad-hoc agent.tools/agent.config mutation + plain ctx
+// object literal style every other test above already uses.
+// ---------------------------------------------------------------------------
+
+Deno.test("onToolCall can rewrite a tool's input before execute", async () => {
+  const agent = await loadAgent(TOY);
+  let seen: unknown = null;
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object", properties: { v: { type: "string" } } },
+    execute: (input: unknown) => {
+      seen = input;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = (call) =>
+    Promise.resolve({ allow: true, input: { v: `${(call.input as { v: string }).v}!` } });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  await (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({ v: "hi" });
+  assertEquals(seen, { v: "hi!" });
+});
+
+Deno.test("onToolCall returning allow:false blocks execute and surfaces reason", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.resolve({ allow: false, reason: "blocked by policy" });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(ran, false);
+  assertEquals(out, { error: "blocked by policy" });
+});
+
+Deno.test("a throwing onToolCall denies the call without failing the turn", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.reject(new Error("hook exploded"));
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(ran, false);
+  assert(String((out as { error: string }).error).includes("hook exploded"));
+});
+
+Deno.test("onToolResult rewrites the tool result", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("raw"),
+  };
+  agent.config.onToolResult = (call) => Promise.resolve(`wrapped(${call.result})`);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  assertEquals(await (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({}), "wrapped(raw)");
+});
+
+// Ordering is a security property, not a preference: a hook that ran before
+// the approval gate could approve on the user's behalf.
+Deno.test("the approval gate runs BEFORE onToolCall", async () => {
+  const agent = await loadAgent(TOY);
+  const order: string[] = [];
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    needsApproval: true,
+    execute: () => Promise.resolve("ok"),
+  };
+  agent.config.onToolCall = () => {
+    order.push("hook");
+    return Promise.resolve({ allow: true });
+  };
+  // No store/turnId/emit wired -> the approval gate short-circuits with
+  // "approval required", which must happen without the hook ever running.
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(out, { error: "approval required — use the session API" });
+  assertEquals(order, []);
+});
+
+// Review fix (round 1, Finding 2): a configured onToolCall/onToolResult hook
+// with no hookCtx wired must THROW, not silently skip the hook — that gap is
+// a caller wiring bug, not a hook failure, and fail-open would defeat a
+// control whose entire purpose is to deny. Same posture as buildInstructions'
+// existing hookCtx check (resolveInstructions above).
+Deno.test("a configured onToolCall hook with no hookCtx available throws instead of silently skipping", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.resolve({ allow: true });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 }); // no hookCtx
+  await assertRejects(
+    () => (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({}),
+    Error,
+    "onToolCall hook configured but no request context (hookCtx) available",
+  );
+  assertEquals(ran, false);
+});
+
+Deno.test("a configured onToolResult hook with no hookCtx available throws instead of silently skipping", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("raw"),
+  };
+  agent.config.onToolResult = (call) => Promise.resolve(`wrapped(${call.result})`);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 }); // no hookCtx
+  await assertRejects(
+    () => (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({}),
+    Error,
+    "onToolResult hook configured but no request context (hookCtx) available",
   );
 });
 

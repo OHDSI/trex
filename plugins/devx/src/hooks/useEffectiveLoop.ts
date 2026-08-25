@@ -1,30 +1,14 @@
 // task-u1: resolves the per-user devx.settings.loop flag into the actual
-// loop ChatPanel.tsx should render, applying the overrides the brief calls
-// out: the claude-code provider forces legacy regardless of the flag,
-// because plugins/devx/agent/agent.ts's resolveModel throws for it
-// ("sidecar providers use the legacy endpoint") and /chat has no try/catch
-// around that setup-phase call — an uncaught throw there surfaces as a bare
-// 500 with no parseable error shape (confirmed against
-// core/server/agents/service/handler.ts's /chat route), not something a
-// frontend can gracefully detect and fall back from. So: never send those
-// users down this path in the first place.
-//
-// final-007 review finding #4 (bedrock IAM parity): resolveModel ALSO throws
-// for a bedrock row whose api_key JSON is IAM-shaped (accessKeyId/
-// secretAccessKey, no bearerToken) — the agents loop only implements
-// bearer-token bedrock auth (see agent.ts's resolveModel comment). Same
-// "gate it before /chat ever sees it" posture as claude-code.
-// Detection uses the server-derived `auth_shape` hint (merge-gate re-review:
-// every GET response MASKS api_key — LEFT(...,8)||'...'||RIGHT(...,4) — so
-// client-side JSON sniffing of it can never match; the server computes the
-// shape from the RAW key before masking, see functions/auth_shape.ts). The
-// server-side resolveModel throw remains the backstop for anything that
-// slips past this gate (e.g. an older server build that doesn't emit
-// auth_shape yet, where this hook can't detect IAM and falls through).
+// loop ChatPanel.tsx should render. Thin data-fetching wrapper — the actual
+// routing decision (and the rationale for forcing claude-code users to
+// legacy) lives in ./effectiveLoop.ts's resolveEffectiveLoop, which is
+// characterization-tested by the Deno suite at
+// plugins/devx/agent/lib/effective_loop.test.ts.
 import { useEffect, useState } from "react";
 import * as api from "@/lib/api";
+import { resolveEffectiveLoop, SETTINGS_FETCH_FAILURE_LOOP, type EffectiveLoop } from "./effectiveLoop";
 
-export type EffectiveLoop = "legacy" | "agents";
+export type { EffectiveLoop };
 
 export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
   const [state, setState] = useState<{ loop: EffectiveLoop; resolved: boolean }>({
@@ -37,15 +21,23 @@ export function useEffectiveLoop(): { loop: EffectiveLoop; resolved: boolean } {
     Promise.all([api.getSettings(), api.getActiveProviderConfig()])
       .then(([settings, active]) => {
         if (cancelled) return;
-        const wantsAgents = settings?.loop === "agents";
-        const providerForcesLegacy =
-          active.provider === "claude-code" ||
-          (active.provider === "bedrock" && active.auth_shape === "iam");
-        setState({ loop: wantsAgents && !providerForcesLegacy ? "agents" : "legacy", resolved: true });
+        setState({
+          loop: resolveEffectiveLoop({
+            loop: settings?.loop,
+            provider: active.provider,
+          }),
+          resolved: true,
+        });
       })
       .catch((err) => {
+        // A FAILED fetch is not the same as an ABSENT settings row. A user
+        // with no row resolves to "agents" (resolveEffectiveLoop, matching
+        // V17's column default); a user whose settings/provider we could not
+        // read at all falls back to "legacy", because they may be on
+        // `claude-code` — the sidecar, for which eve's resolveModel throws —
+        // and we have no way to tell. See SETTINGS_FETCH_FAILURE_LOOP.
         console.error("useEffectiveLoop: failed to resolve settings/provider, defaulting to legacy:", err);
-        if (!cancelled) setState({ loop: "legacy", resolved: true });
+        if (!cancelled) setState({ loop: SETTINGS_FETCH_FAILURE_LOOP, resolved: true });
       });
     return () => {
       cancelled = true;
