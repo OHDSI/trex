@@ -199,6 +199,33 @@ unsafe fn cstr_to_string(p: *mut c_char) -> String {
     }
 }
 
+/// Dispatch a command to the isolate thread WITHOUT waiting for its reply.
+///
+/// `Cmd::Start` runs the embedded WebAPI's whole boot synchronously on the
+/// isolate thread, so `call` holds its caller for that entire time. Under trex
+/// that caller is the host's JavaScript event loop, which is also what serves
+/// the OIDC discovery document WebAPI fetches while it boots — so waiting here
+/// deadlocks the two against each other: WebAPI blocks on a request the host
+/// cannot answer until WebAPI returns. Dispatching without waiting leaves the
+/// host free to serve it.
+///
+/// The reply receiver is dropped immediately; the isolate thread already
+/// tolerates a closed reply channel (`let _ = reply.send(..)`). Readiness is
+/// observable through `trex_webapi_status()` — but note that status queues
+/// behind the in-flight start on this same channel, so a caller that wants to
+/// stay responsive should poll WebAPI's own port instead.
+fn call_nowait(make_cmd: impl FnOnce(Sender<String>) -> Cmd) -> String {
+    let tx = match ensure_thread() {
+        Ok(tx) => tx,
+        Err(e) => return format!("error: {e}"),
+    };
+    let (reply_tx, _drop_reply) = channel::<String>();
+    if tx.send(make_cmd(reply_tx)).is_err() {
+        return "error: webapi isolate thread is not running".to_string();
+    }
+    "starting".to_string()
+}
+
 /// Send a command to the dedicated isolate thread and block for its reply.
 fn call(make_cmd: impl FnOnce(Sender<String>) -> Cmd) -> String {
     let tx = match ensure_thread() {
@@ -230,6 +257,26 @@ impl VScalar for WebApiStart {
         output: &mut dyn WritableVector,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let msg = call(Cmd::Start);
+        let n = input.len().max(1);
+        for _ in 0..n {
+            emit(output, &msg);
+        }
+        Ok(())
+    }
+    fn signatures() -> Vec<ScalarFunctionSignature> {
+        vec![ScalarFunctionSignature::exact(vec![], LogicalTypeId::Varchar.into())]
+    }
+}
+
+struct WebApiStartNoWait;
+impl VScalar for WebApiStartNoWait {
+    type State = ();
+    unsafe fn invoke(
+        _: &Self::State,
+        input: &mut DataChunkHandle,
+        output: &mut dyn WritableVector,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let msg = call_nowait(Cmd::Start);
         let n = input.len().max(1);
         for _ in 0..n {
             emit(output, &msg);
@@ -287,6 +334,8 @@ pub unsafe fn extension_entrypoint(con: Connection) -> Result<(), Box<dyn Error>
     // separate and intentionally unchanged.
     con.register_scalar_function::<WebApiStart>("trex_webapi_start")
         .expect("register trex_webapi_start");
+    con.register_scalar_function::<WebApiStartNoWait>("trex_webapi_start_nowait")
+        .expect("register trex_webapi_start_nowait");
     con.register_scalar_function::<WebApiStop>("trex_webapi_stop")
         .expect("register trex_webapi_stop");
     con.register_scalar_function::<WebApiStatus>("trex_webapi_status")
