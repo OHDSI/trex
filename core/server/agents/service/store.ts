@@ -104,13 +104,23 @@ export function createStore(query: QueryFn) {
       return r.rows;
     },
 
-    // The most recently persisted turn's observed input-token count (from
-    // runner.ts's "finish" step usage — see its comment on the `usage`
-    // object shape). Used by compact.ts's maybeCompact to judge context
-    // pressure from what the provider actually counted, rather than the
-    // char/4 estimateTokens heuristic (budget.ts). Null when the session has
-    // no completed turn yet, or that turn's usage didn't carry a usable
-    // inputTokens (e.g. a mocked/partial usage object in a test).
+    // The most recently persisted turn's observed context size, used by
+    // compact.ts's maybeCompact to judge context pressure from what the
+    // provider actually counted rather than the char/4 estimateTokens
+    // heuristic (budget.ts).
+    //
+    // Reads `lastStepInputTokens` — the FINAL step's prefill — and never
+    // `inputTokens`, which runner.ts persists as ai@6's `totalUsage`: the SUM
+    // of every step's usage. A summed counter is not a context size (a
+    // 20-step turn over a 30k context sums to ~600k), and using it tripped
+    // the compaction threshold on almost every turn, replacing history with
+    // a fresh summary each time without ever converging.
+    //
+    // Null when the session has no completed turn yet, or when the finish
+    // step carries no usable lastStepInputTokens — a turn persisted before
+    // this field existed, or a mocked/partial usage object in a test. The
+    // caller then falls back to estimateTokens, which is conservative and
+    // correct; silently substituting the summed total would not be.
     async getLastTurnUsage(sessionId: string): Promise<{ inputTokens: number } | null> {
       const r = await query(
         `SELECT s.usage FROM agents.steps s
@@ -119,8 +129,10 @@ export function createStore(query: QueryFn) {
           ORDER BY t.seq DESC, s.seq DESC LIMIT 1`,
         [sessionId],
       );
-      const usage = r.rows[0]?.usage as { inputTokens?: unknown } | null | undefined;
-      return usage && typeof usage.inputTokens === "number" ? { inputTokens: usage.inputTokens } : null;
+      const usage = r.rows[0]?.usage as { lastStepInputTokens?: unknown } | null | undefined;
+      return usage && typeof usage.lastStepInputTokens === "number"
+        ? { inputTokens: usage.lastStepInputTokens }
+        : null;
     },
 
     async createApproval(sessionId: string, turnId: string, tool: string, input: unknown): Promise<string> {

@@ -112,13 +112,31 @@ const EDN_KEY_MAP: Record<string, keyof ContextConfig> = {
   "deferred-tools": "deferredTools",
 };
 
+// Explicit allowlist, NOT `key in out`. `out` starts as a spread of
+// DEFAULT_CONTEXT_CONFIG, which deliberately omits the two OPTIONAL keys
+// (`contextWindow` and `summarizationPrompt` have no default) — so an
+// `in`-based guard silently DROPPED both, in camelCase and EDN kebab-case
+// alike. That made `contextWindow` unsettable, and it is the spec's only
+// escape hatch for budget.ts's CONTEXT_WINDOWS map lagging a model release.
+// Any new ContextConfig field must be added here as well as to the type.
+const CONTEXT_CONFIG_KEYS: ReadonlySet<keyof ContextConfig> = new Set([
+  "freshToolOutputChars",
+  "staleToolOutputChars",
+  "freshTurns",
+  "compactAtFraction",
+  "verbatimTurnsAfterCompaction",
+  "contextWindow",
+  "summarizationPrompt",
+  "deferredTools",
+]);
+
 /** Merge an agent's partial `context` block over the conservative defaults. */
 export function resolveContextConfig(raw: unknown): ContextConfig {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_CONTEXT_CONFIG };
   const out: ContextConfig = { ...DEFAULT_CONTEXT_CONFIG };
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     const key = (EDN_KEY_MAP[k] ?? k) as keyof ContextConfig;
-    if (key in out) (out as Record<string, unknown>)[key] = v;
+    if (CONTEXT_CONFIG_KEYS.has(key)) (out as Record<string, unknown>)[key] = v;
   }
   return out;
 }
