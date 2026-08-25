@@ -58,6 +58,26 @@ export interface AgentConfig {
   // same posture as buildInstructions/resolveModel (fail the turn rather
   // than silently keep a tool that should have been dropped).
   filterTools?: (toolName: string, def: ToolDef, ctx: HookCtx) => boolean;
+  // Tool-call interception. Invoked by toolset.ts's authoredTool INSIDE
+  // execute, AFTER the approval gate — ordering is load-bearing: a hook that
+  // ran first could approve on the user's behalf. Applies to every tool
+  // (authored, dynamic-tools.ts provider output, MCP), unlike ToolContext.sql
+  // which is withheld from provider-sourced tools: sql GRANTS power to a less
+  // trusted tool, whereas these INTERCEPT it, so withholding them from the
+  // least trusted tools would invert the intent.
+  //
+  // Fail CLOSED: a throwing/rejecting hook denies THAT CALL (the tool returns
+  // an {error} payload) and the turn continues. This deliberately differs from
+  // devx's legacy loop, which caught and proceeded — a hook whose job is to
+  // stop something must not be defeated by its own bug.
+  onToolCall?: (
+    call: { name: string; input: unknown },
+    ctx: HookCtx,
+  ) => Promise<{ allow: boolean; input?: unknown; reason?: string }>;
+  onToolResult?: (
+    call: { name: string; input: unknown; result: unknown },
+    ctx: HookCtx,
+  ) => Promise<unknown>;
 }
 
 // A dynamic tool source, authored as an agent-dir-root `dynamic-tools.ts`

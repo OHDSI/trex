@@ -140,7 +140,22 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
           }
         }
       }
-      return await def.execute!(input, {
+      // Hooks come from ctx.agent.config, so a subagent turn runs the
+      // SUBAGENT's hooks — same posture as filterTools at depth 1.
+      const cfg = ctx.agent?.config;
+      let effectiveInput = input;
+      if (cfg?.onToolCall && ctx.hookCtx) {
+        let decision: { allow: boolean; input?: unknown; reason?: string };
+        try {
+          decision = await cfg.onToolCall({ name, input: effectiveInput }, ctx.hookCtx);
+        } catch (err) {
+          return { error: `onToolCall hook failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+        if (!decision?.allow) return { error: decision?.reason ?? "blocked by onToolCall hook" };
+        if (decision.input !== undefined) effectiveInput = decision.input;
+      }
+
+      const result = await def.execute!(effectiveInput, {
         bearerToken: ctx.bearerToken,
         sessionId: ctx.sessionId,
         metadata: ctx.metadata,
@@ -157,6 +172,18 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
         // to them since those are lower-privilege by design.
         sql: isAuthored ? ctx.hookCtx?.sql : undefined,
       });
+
+      if (cfg?.onToolResult && ctx.hookCtx) {
+        try {
+          return await cfg.onToolResult({ name, input: effectiveInput, result }, ctx.hookCtx);
+        } catch (err) {
+          // Fail closed for the same reason as onToolCall: a result rewriter
+          // that failed must not pass the raw result through as if it had
+          // been inspected.
+          return { error: `onToolResult hook failed: ${err instanceof Error ? err.message : String(err)}` };
+        }
+      }
+      return result;
     },
   });
 }

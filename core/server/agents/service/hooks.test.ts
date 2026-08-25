@@ -532,6 +532,103 @@ Deno.test("buildSdkTools: an authored tools/connection_search wins over the buil
 });
 
 // ---------------------------------------------------------------------------
+// buildSdkTools / authoredTool (toolset.ts): Task 2 — onToolCall/onToolResult
+// interception hooks. See task-2-brief.md. `makeAgent`/`makeToolBuildCtx`
+// helpers named in the brief don't exist in this file — adapted to the
+// loadAgent(TOY) + ad-hoc agent.tools/agent.config mutation + plain ctx
+// object literal style every other test above already uses.
+// ---------------------------------------------------------------------------
+
+Deno.test("onToolCall can rewrite a tool's input before execute", async () => {
+  const agent = await loadAgent(TOY);
+  let seen: unknown = null;
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object", properties: { v: { type: "string" } } },
+    execute: (input: unknown) => {
+      seen = input;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = (call) =>
+    Promise.resolve({ allow: true, input: { v: `${(call.input as { v: string }).v}!` } });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  await (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({ v: "hi" });
+  assertEquals(seen, { v: "hi!" });
+});
+
+Deno.test("onToolCall returning allow:false blocks execute and surfaces reason", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.resolve({ allow: false, reason: "blocked by policy" });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(ran, false);
+  assertEquals(out, { error: "blocked by policy" });
+});
+
+Deno.test("a throwing onToolCall denies the call without failing the turn", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.reject(new Error("hook exploded"));
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(ran, false);
+  assert(String((out as { error: string }).error).includes("hook exploded"));
+});
+
+Deno.test("onToolResult rewrites the tool result", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("raw"),
+  };
+  agent.config.onToolResult = (call) => Promise.resolve(`wrapped(${call.result})`);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  assertEquals(await (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({}), "wrapped(raw)");
+});
+
+// Ordering is a security property, not a preference: a hook that ran before
+// the approval gate could approve on the user's behalf.
+Deno.test("the approval gate runs BEFORE onToolCall", async () => {
+  const agent = await loadAgent(TOY);
+  const order: string[] = [];
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    needsApproval: true,
+    execute: () => Promise.resolve("ok"),
+  };
+  agent.config.onToolCall = () => {
+    order.push("hook");
+    return Promise.resolve({ allow: true });
+  };
+  // No store/turnId/emit wired -> the approval gate short-circuits with
+  // "approval required", which must happen without the hook ever running.
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(out, { error: "approval required — use the session API" });
+  assertEquals(order, []);
+});
+
+// ---------------------------------------------------------------------------
 // createHandler (handler.ts): end-to-end wiring for both the session API and
 // /chat — x-user-id header sourcing, and a throwing resolveModel hook
 // failing the turn instead of silently using env-configured credentials.
