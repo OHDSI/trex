@@ -59,6 +59,17 @@ concurrency:
   group: plugin-ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+# GitHub Actions cache budget (hard 10 GB per repository, LRU-evicted).
+# Measured entry sizes: runtime amd64 5.62 GB, runtime arm64 5.59 GB, every
+# other Rust plugin 0.85-1.13 GB. Caching all of them across plugin-ci,
+# coverage and integration-tests demanded ~16 GB, so the quota stayed
+# permanently overcommitted and the largest -- and most valuable -- entry never
+# survived. Only two caches are funded now, both chosen for wall-clock:
+#   plugin-ci build runtime (amd64)  ~5.6 GB  gates e2e-d2e
+#   integration-tests trexas         ~2.5 GB  39 -> 22 min on that workflow
+# leaving ~1.9 GB of headroom. Adding another Rust target cache means taking
+# the room from one of these two, not from thin air.
+
 env:
   GIT_BRANCH_NAME: ${{ github.event.inputs.GIT_BRANCH_NAME || github.head_ref || github.ref_name }} # workflow_dispatch || pull_request || push
   GIT_REPO_FULL_NAME: ${{ github.event.inputs.GIT_REPO_FULL_NAME || github.event.pull_request.head.repo.full_name || github.event.repository.full_name }} # workflow_dispatch || pull_request || push
@@ -263,6 +274,9 @@ jobs:
             NODE_VERSION: "22.x"
           - PKGPATH: ./plugins/runtime
             RUNNER: ubuntu-24.04
+            # The only plugin with a Rust target cache: 26 min cold, and it
+            # gates e2e-d2e, so it is the one entry that buys pipeline time.
+            RUST_CACHE: true
           - PKGPATH: ./plugins/devx
             RUNNER: ubuntu-24.04
           - PKGPATH: ./plugins/devx-ext
@@ -401,10 +415,12 @@ jobs:
           key: plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-${{ hashFiles(format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
           restore-keys: |
             plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-
-      # Compact, eviction-resilient Rust cache (~/.cargo + pruned target/) for the
-      # plugins that have a Cargo.lock (runtime/trexas, bao, etl, chdb, …).
+      # Rust target cache, for RUST_CACHE plugins only -- see the cache budget
+      # note at the top of this workflow. Caching every Cargo.lock plugin
+      # overcommitted the 10 GB quota by ~6 GB, so nothing survived and the one
+      # entry that pays for itself (runtime, ~5.6 GB) was evicted every run.
       - name: Rust build cache
-        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
+        if: ${{ matrix.RUST_CACHE == true }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.PKGPATH }}
@@ -640,13 +656,12 @@ jobs:
           key: plugin-ci-arm64-${{ matrix.PKGPATH }}-${{ hashFiles(format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
           restore-keys: |
             plugin-ci-arm64-${{ matrix.PKGPATH }}-
-      - name: Rust build cache (arm64)
-        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: ${{ matrix.PKGPATH }}
-          key: arm64
-          cache-on-failure: "true"
+      # No Rust target cache on arm64 on purpose. The arm runtime entry was
+      # 5.59 GB -- on its own as large as the amd64 one -- and the two together
+      # (11.21 GB) exceeded the entire 10 GB quota, so each run evicted the
+      # other and every plugin still built cold. build-arm feeds build-docker
+      # (~42 min combined) and never gates e2e-d2e, so it is off the critical
+      # path and the quota is better spent on amd64 runtime.
 
       - name: Build
         env:

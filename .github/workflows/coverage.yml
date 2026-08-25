@@ -42,20 +42,13 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      # Restore on every run, save only from develop/main. A cache written on a
-      # PR ref is readable by that PR alone yet still counts against the repo's
-      # 10 GB quota, so PR runs were evicting the develop entries every branch
-      # restores from -- which is why `Rust unit coverage (runtime)` compiled
-      # cold for ~17 min on every run.
-      - uses: actions/cache/restore@v4
-        id: cargo-cache
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/${{ matrix.plugin }}/target
-          key: coverage-${{ matrix.plugin }}-${{ runner.os }}-${{ hashFiles(format('plugins/{0}/Cargo.lock', matrix.plugin)) }}
-          restore-keys: coverage-${{ matrix.plugin }}-${{ runner.os }}-
+      # No build cache here on purpose. Thirteen plugins x ~1 GB is more than
+      # the repo's entire 10 GB Actions quota, and this workflow is fully
+      # parallel to plugin-ci and informational-only (the gate never fails), so
+      # a hit here buys runner minutes but zero pipeline wall-clock. The quota
+      # is spent where it shortens the critical path instead -- see the cache
+      # budget note in plugin-ci.yml. Coverage measured the same ~20 min with
+      # these caches configured as without, because they were being evicted.
 
       - name: Install PostgreSQL 17 dev headers (pg_trex only)
         if: matrix.plugin == 'pg_trex'
@@ -118,16 +111,6 @@ jobs:
           # in trex_core); no effect on plugins that don't link it
           LIBRARY_PATH: /tmp/trexsql
           LD_LIBRARY_PATH: /tmp/trexsql
-
-      - name: Save cargo cache
-        if: ${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && steps.cargo-cache.outputs.cache-hit != 'true' }}
-        uses: actions/cache/save@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/${{ matrix.plugin }}/target
-          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
       - uses: codecov/codecov-action@v4
         with:

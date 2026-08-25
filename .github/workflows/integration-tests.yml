@@ -170,12 +170,14 @@ jobs:
         working-directory: ${{ matrix.pre-build-dir }}
         run: ${{ matrix.pre-build }}
 
-      # Restore always, save only from develop/main -- see the note in
-      # coverage.yml. PR-scoped cache writes were evicting the develop entries
-      # every branch restores from, leaving `Build trexas` to compile cold for
-      # ~21 min on every run.
+      # Restore always, save only from develop/main -- and only for trexas.
+      # trexas is the sole build here worth quota (19 min; caching it took this
+      # workflow 39 -> 22 min). The other legs are 1-6 min builds whose ~1 GB
+      # entries together overcommitted the 10 GB repo quota, which evicted the
+      # entries that actually pay. See the cache budget note in plugin-ci.yml.
       - uses: actions/cache/restore@v4
         id: cargo-cache
+        if: matrix.plugin == 'trexas'
         with:
           path: |
             ~/.cargo/registry
@@ -190,7 +192,7 @@ jobs:
         run: ${{ matrix.build-cmd || format('make configure && make {0}', matrix.target || 'debug_coverage') }}
 
       - name: Save cargo cache
-        if: ${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && steps.cargo-cache.outputs.cache-hit != 'true' }}
+        if: ${{ matrix.plugin == 'trexas' && (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && steps.cargo-cache.outputs.cache-hit != 'true' }}
         uses: actions/cache/save@v4
         with:
           path: |
