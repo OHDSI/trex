@@ -16,6 +16,8 @@ import { resolveApprovalDecision } from "./approvals.ts";
 import { handleOAuthCallback, handleOAuthStart } from "../connections/oauth/routes.ts";
 import type { OAuthProviderDeps } from "../connections/provider.ts";
 import { looksLikeGateResponse, matchGateText } from "../channels/gate-text.ts";
+import { assembleHistory, ensureToolResultsPresent, type ModelMessage, type TurnRow } from "./context/history.ts";
+import type { ContextConfig } from "./context/budget.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -62,19 +64,15 @@ const unconfiguredSql: QueryFn = () =>
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
-async function historyForModel(store: AgentStore, sessionId: string): Promise<any[]> {
-  // Rebuild prior turns as user/assistant text pairs. Tool traffic is
-  // persisted in steps but replayed to the model as part of assistant text
-  // context only in v1 (matches Pythia's stateless-chat semantics).
+// Rebuilds prior turns into the ai@6 ModelMessage[] shape streamText
+// consumes. Fixes the defect where the model never saw what its own tool
+// calls actually did: tool-call/tool-result steps are now replayed back into
+// the request messages (assembleHistory), not just the turn's final text,
+// and any tool-call left unresolved by an interrupted turn gets a synthetic
+// result so the provider never rejects the request (ensureToolResultsPresent).
+export async function buildHistory(sessionId: string, store: AgentStore, config: ContextConfig): Promise<ModelMessage[]> {
   const turns = await store.getHistory(sessionId);
-  const msgs: any[] = [];
-  for (const t of turns) {
-    const m = t.message as any;
-    msgs.push({ role: "user", content: typeof m === "string" ? m : JSON.stringify(m) });
-    const textStep = (t.steps as any[]).find((s) => s.kind === "text");
-    if (textStep?.payload?.text) msgs.push({ role: "assistant", content: textStep.payload.text });
-  }
-  return msgs;
+  return ensureToolResultsPresent(assembleHistory(turns as TurnRow[], config));
 }
 
 // Maps a persisted `agents.steps` row back to the same wire vocabulary
@@ -182,7 +180,7 @@ function startTurn(
     //
     // Not airtight: the window between this getRunningTurn read and the
     // addTurn write below is check-then-act, not a DB-level lock, and it is
-    // NOT millisecond-scale — takeFollowUps and historyForModel are each an
+    // NOT millisecond-scale — takeFollowUps and buildHistory are each an
     // additional awaited round trip in between, so the window spans multiple
     // network round trips, not one. A webhook redelivery or a genuine
     // double-submit landing in that window can still both pass the check. A
@@ -317,7 +315,7 @@ function startTurn(
     const queued = await deps.store.takeFollowUps(sessionId);
     const turnMessage = queued.length > 0 ? [...queued, asText(message)].join("\n\n") : message;
 
-    const history = await historyForModel(deps.store, sessionId);
+    const history = await buildHistory(sessionId, deps.store, deps.agent.config.context);
     const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
     // Surface the freshly-created turn id to the caller (the channel layer uses
     // it to scope its background delivery to THIS turn) BEFORE publishing any

@@ -1,12 +1,13 @@
 import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { createHandler } from "./handler.ts";
+import { createHandler, buildHistory } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
 import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMessage } from "../channels/adapters/discord-messages.ts";
+import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -2107,4 +2108,55 @@ Deno.test("oauth callback route rejects a tampered state with 400 (no token writ
   const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/callback?code=X&state=forged.sig`));
   assertEquals(res.status, 400);
   assertEquals(puts.length, 0);
+});
+
+Deno.test("buildHistory feeds tool calls and results back to the model", async () => {
+  const store = {
+    getHistory: () => Promise.resolve([{
+      seq: 1,
+      message: "read config.ts", metadata: null,
+      steps: [
+        { kind: "tool-call", name: "Read", payload: { toolCallId: "c1", input: { path: "config.ts" } } },
+        { kind: "tool-result", name: "Read", payload: { toolCallId: "c1", output: "export const x = 1;" } },
+        { kind: "text", name: null, payload: { text: "It exports x." } },
+      ],
+    }]),
+  };
+  const msgs = await buildHistory("s-1", store as never, DEFAULT_CONTEXT_CONFIG);
+  const kinds = msgs.map((m) => m.role);
+  assertEquals(kinds, ["user", "assistant", "tool", "assistant"]);
+});
+
+Deno.test({
+  name: "e2e: turn 2 sees turn 1's tool result in its request messages",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    try {
+      const sessionId = await store.createSession("toy-agent", "toy", "e2e-user");
+
+      // Turn 1: a Read tool call and its result.
+      const t1 = await store.addTurn(sessionId, "read config.ts");
+      await store.addStep(t1.id, 1, "tool-call", "Read", { toolCallId: "c1", input: { path: "config.ts" } });
+      await store.addStep(t1.id, 2, "tool-result", "Read", { toolCallId: "c1", output: "export const PORT = 8080;" });
+      await store.addStep(t1.id, 3, "text", null, { text: "It sets PORT to 8080." });
+
+      // Turn 2: what the model would actually be sent.
+      await store.addTurn(sessionId, "what port was that?");
+      const msgs = await buildHistory(sessionId, store, DEFAULT_CONTEXT_CONFIG);
+
+      const serialized = JSON.stringify(msgs);
+      assert(
+        serialized.includes("export const PORT = 8080;"),
+        "turn 1 tool result missing from turn 2 context — the original defect",
+      );
+      assert(serialized.includes("c1"), "tool call id missing");
+      assertEquals(msgs.filter((m) => m.role === "tool").length, 1);
+    } finally {
+      await pool.end();
+    }
+  },
 });
