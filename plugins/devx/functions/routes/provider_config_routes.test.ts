@@ -35,11 +35,52 @@ function makeFakeDb(
 ) {
   const rows = seedRows.map((r) => ({ ...r }));
   const settingsRows = seedSettings.map((r) => ({ ...r }));
+  const agentModelSelections: Record<string, unknown>[] = [];
   let nextId = rows.length + 1;
   const calls: Array<{ q: string; p: unknown[] }> = [];
 
   const sql = async (q: string, p: unknown[] = []) => {
     calls.push({ q, p });
+    const nq = q.replace(/\s+/g, " ").trim();
+
+    // --- activateDevxProviderConfig (IMPORTANT 3: PUT /activate now
+    // delegates here so it stays in sync with agent_model_selection) ---
+
+    if (nq.includes("SELECT id, provider, model FROM devx.provider_configs WHERE id = $1 AND user_id = $2")) {
+      const [id, userId] = p;
+      const row = rows.find((r) => r.id === id && r.user_id === userId);
+      return { rows: row ? [{ id: row.id, provider: row.provider, model: row.model }] : [] };
+    }
+    if (nq.includes("UPDATE devx.provider_configs SET is_active = false WHERE user_id = $1")) {
+      const [userId] = p;
+      rows.forEach((r) => { if (r.user_id === userId) r.is_active = false; });
+      return { rows: [] };
+    }
+    if (nq.includes("UPDATE devx.provider_configs SET is_active = true, updated_at = NOW() WHERE id = $1 AND user_id = $2")) {
+      const [id, userId] = p;
+      const row = rows.find((r) => r.id === id && r.user_id === userId);
+      if (row) row.is_active = true;
+      return { rows: [] };
+    }
+    if (nq.includes("UPDATE devx.settings SET provider = $1, model = $2, updated_at = NOW() WHERE user_id = $3")) {
+      const [provider, model, userId] = p;
+      let row = settingsRows.find((r) => r.user_id === userId);
+      if (!row) { row = { user_id: userId }; settingsRows.push(row); }
+      row.provider = provider;
+      row.model = model;
+      return { rows: [] };
+    }
+    if (nq.startsWith("INSERT INTO devx.agent_model_selection")) {
+      // activateDevxProviderConfig's INSERT hardcodes agent='devx' as a SQL
+      // literal (not a bound param), so it carries only 2 params
+      // ([userId, providerConfigId]).
+      const isDevxLiteral = nq.includes("'devx'");
+      const [userId, agent, providerConfigId] = isDevxLiteral ? [p[0], "devx", p[1]] : p;
+      const existing = agentModelSelections.find((s) => s.user_id === userId && s.agent === agent);
+      if (existing) existing.provider_config_id = providerConfigId;
+      else agentModelSelections.push({ user_id: userId, agent, provider_config_id: providerConfigId });
+      return { rows: [] };
+    }
 
     // Migration-applied probe (assertEncryptionMigrated) — simulate V15/V16
     // applied so every test below exercises real route behaviour, same as a
@@ -142,7 +183,7 @@ function makeFakeDb(
     throw new Error("unstubbed query in test fake: " + q);
   };
 
-  return { sql, calls, rows, settingsRows };
+  return { sql, calls, rows, settingsRows, agentModelSelections };
 }
 
 Deno.test("POST /provider-configs: no key configured writes plaintext, never touches the encrypted columns", async () => {
@@ -221,6 +262,36 @@ Deno.test("PUT /provider-configs/:id: providing api_key rewrites all three colum
   assertEquals(typeof row.api_key_encrypted, "string");
   assertEquals(typeof row.api_key_iv, "string");
   assertEquals(!!row.api_key && !!row.api_key_encrypted, false);
+});
+
+// IMPORTANT 3: the legacy "AI Providers" activate route now delegates to
+// activateDevxProviderConfig (agent_model_selection.ts) so it also upserts
+// the unified agent_model_selection table's agent='devx' row — otherwise the
+// new "Agent model assignment" UI would show a stale devx row after
+// activating a config from this older panel.
+Deno.test("PUT /provider-configs/:id/activate: flips is_active, mirrors devx.settings, and upserts agent_model_selection(devx)", async () => {
+  const db = makeFakeDb([
+    { id: "1", user_id: "u1", provider: "anthropic", model: "claude", api_key: null, api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: null, is_active: true, created_at: "t0", updated_at: "t0" },
+    { id: "2", user_id: "u1", provider: "openai", model: "gpt-5", api_key: null, api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: null, is_active: false, created_at: "t0", updated_at: "t0" },
+  ], [{ user_id: "u1", provider: "anthropic", model: "claude" }]);
+
+  const res = await handleProviderConfigRoutes("/x/provider-configs/2/activate", "PUT", req("PUT"), "u1", db.sql, CORS);
+  assertEquals(res!.status, 200);
+  const body = await res!.json();
+  assertEquals(body.ok, true);
+  assertEquals(body.active.provider, "openai");
+  assertEquals(db.rows.find((r) => r.id === "1")!.is_active, false);
+  assertEquals(db.rows.find((r) => r.id === "2")!.is_active, true);
+  assertEquals(db.settingsRows[0], { user_id: "u1", provider: "openai", model: "gpt-5" });
+  assertEquals(db.agentModelSelections, [{ user_id: "u1", agent: "devx", provider_config_id: "2" }]);
+});
+
+Deno.test("PUT /provider-configs/:id/activate: 404 for a config that does not belong to the user", async () => {
+  const db = makeFakeDb([
+    { id: "1", user_id: "someone-else", provider: "anthropic", model: "claude", api_key: null, api_key_encrypted: null, api_key_iv: null, base_url: null, display_name: null, is_active: false, created_at: "t0", updated_at: "t0" },
+  ]);
+  const res = await handleProviderConfigRoutes("/x/provider-configs/1/activate", "PUT", req("PUT"), "u1", db.sql, CORS);
+  assertEquals(res!.status, 404);
 });
 
 Deno.test("GET /provider-configs: key_status distinguishes an undecryptable row from a genuinely keyless one", async () => {

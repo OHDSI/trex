@@ -24,6 +24,7 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { SupportSection } from "@/components/settings/SupportSection";
 import { FigmaSection } from "@/components/settings/FigmaSection";
+import { AgentRoutingSection } from "@/components/settings/AgentRoutingSection";
 import { useSettings } from "@/hooks/useSettings";
 import { useGitHub } from "@/hooks/useGitHub";
 import { useGitSigning } from "@/hooks/useGitSigning";
@@ -654,6 +655,10 @@ export default function SettingsPage() {
                   Leave empty to use defaults (React + TypeScript + Tailwind + shadcn/ui)
                 </p>
               </div>
+
+              <Separator />
+
+              <AgentRoutingSection />
             </div>
           )}
 

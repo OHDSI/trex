@@ -46,6 +46,7 @@ import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
 import { handleClaudeCodeModelsRoutes } from "./routes/claude_code_models_routes.ts";
 import { handleFigmaRoutes } from "./routes/figma_routes.ts";
 import { handleProviderConfigRoutes } from "./routes/provider_config_routes.ts";
+import { handleAgentModelRoutes } from "./routes/agent_model_routes.ts";
 import { handleSupportRoutes } from "./routes/support_routes.ts";
 import { syncBuiltins } from "./skills/sync.ts";
 import {
@@ -220,6 +221,7 @@ Deno.serve(async (req: Request) => {
       await handleClaudeCodeModelsRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleFigmaRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleAgentModelRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSupabaseRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleTrexRoutes(path, method, req, userId, sql, corsHeaders) ||

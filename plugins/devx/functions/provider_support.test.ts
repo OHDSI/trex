@@ -152,3 +152,36 @@ Deno.test("assertProviderSupported: throws the same sentence the response wrappe
     assertProviderSupported(ok);
   }
 });
+
+import { assertProviderAllowedForAgent, isDevxOnlyProvider } from "./provider_support.ts";
+
+Deno.test("isDevxOnlyProvider: only claude-code is devx-exclusive", () => {
+  assertEquals(isDevxOnlyProvider("claude-code"), true);
+  for (const ok of ["anthropic", "openai", "google", "bedrock", "", "CLAUDE-CODE"]) {
+    assertEquals(isDevxOnlyProvider(ok), false, `expected ${JSON.stringify(ok)} to not be devx-only`);
+  }
+  assertEquals(isDevxOnlyProvider(null), false);
+  assertEquals(isDevxOnlyProvider(undefined), false);
+});
+
+Deno.test("assertProviderAllowedForAgent: claude-code is rejected for claw and d2esupport, allowed for devx", () => {
+  assertProviderAllowedForAgent("claude-code", "devx");
+  assertThrows(
+    () => assertProviderAllowedForAgent("claude-code", "claw"),
+    Error,
+    "claude-code is only available for devx — choose a different provider for claw.",
+  );
+  assertThrows(
+    () => assertProviderAllowedForAgent("claude-code", "d2esupport"),
+    Error,
+    "claude-code is only available for devx — choose a different provider for d2esupport.",
+  );
+});
+
+Deno.test("assertProviderAllowedForAgent: every other provider is allowed for every agent", () => {
+  for (const agent of ["devx", "claw", "d2esupport"] as const) {
+    for (const provider of ["anthropic", "openai", "google", "bedrock", null, undefined]) {
+      assertProviderAllowedForAgent(provider, agent);
+    }
+  }
+});

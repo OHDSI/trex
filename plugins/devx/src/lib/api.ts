@@ -16,6 +16,9 @@ import type {
   UserMapEntry,
   SlackAllowlistEntry,
   ModelInfo,
+  AgentName,
+  AgentModelSelections,
+  AgentModelSelectionRecord,
 } from "./types";
 import type { UploadedAttachment } from "@/hooks/turnMetadata";
 
@@ -236,6 +239,26 @@ export async function deleteProviderConfig(id: string): Promise<void> {
 
 export async function activateProviderConfig(id: string): Promise<void> {
   await apiFetch(`/provider-configs/${id}/activate`, { method: "PUT" });
+}
+
+// Agent model assignment — which provider config each LLM-backed agent
+// (devx's own coder, claw, d2esupport) runs on. See routes/agent_model_routes.ts.
+export async function getAgentModelSelections(): Promise<AgentModelSelections> {
+  return apiFetch("/agent-model-selection");
+}
+
+export async function setAgentModelSelection(agent: AgentName, providerConfigId: string): Promise<AgentModelSelectionRecord> {
+  return apiFetch(`/agent-model-selection/${agent}`, {
+    method: "PUT",
+    body: JSON.stringify({ provider_config_id: providerConfigId }),
+  });
+}
+
+// Reverts an agent to the legacy env-based fallback. devx can't be cleared
+// this way (it always has an active provider config) — the server rejects
+// that with a 400, which the caller should surface.
+export async function clearAgentModelSelection(agent: AgentName): Promise<void> {
+  await apiFetch(`/agent-model-selection/${agent}`, { method: "DELETE" });
 }
 
 export interface EncryptExistingKeysResult {
