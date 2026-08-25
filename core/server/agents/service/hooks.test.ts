@@ -347,6 +347,13 @@ Deno.test("agent tool: a target subagent's buildInstructions hook without a hook
 // fixtures exist in this file — reuses the same loadAgent(TOY) + sequencedModel
 // stub as the "agent tool" tests just above, driving the nested model through
 // a tool-call step (shouter's own `shout` tool) then a final text step.
+//
+// Round-1 review fixes (task-4-report.md "Fix round 1"):
+//  - Finding 1: result.text (ai's own step-boundary reset) must be what's
+//    returned, not a manual sum of every step's text-delta — a preamble step
+//    before a tool call must not leak into the returned answer.
+//  - Finding 2: subagent.end must always fire (try/finally), and an in-stream
+//    "error" fullStream part must not be silently dropped.
 // ---------------------------------------------------------------------------
 
 Deno.test("runSubagent emits subagent.start/tool/end progress under one runId, via toolEmit", async () => {
@@ -381,6 +388,68 @@ Deno.test("runSubagent's return value is unchanged ({ text }) when no toolEmit i
   const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
     .execute({ agent: "shouter", prompt: "shout hi" });
   assertEquals(result, { text: "found it" });
+});
+
+Deno.test("runSubagent returns only the FINAL step's text — a preamble before a tool call must not leak into the answer", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  // Step 1: the model narrates BEFORE calling the tool (a common pattern),
+  // then calls shouter's own `shout` tool. Step 2: the final text only.
+  // deno-lint-ignore no-explicit-any
+  const preambleThenToolCall: any[] = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "Let me check... " },
+    { type: "text-end", id: "1" },
+    { type: "tool-call", toolCallId: "c-1", toolName: "shout", input: JSON.stringify({ text: "hi" }) },
+    {
+      type: "finish",
+      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
+    },
+  ];
+  const model = sequencedModel(preambleThenToolCall, textChunks("final answer"));
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx(),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+
+  // NOT "Let me check... final answer" — that would be every step's
+  // text-delta summed, which is the bug round 1 fixed.
+  assertEquals(result.text, "final answer");
+  const endEvent = events.find((e) => e.name === "subagent.end");
+  assertEquals(endEvent?.data.text, "final answer");
+});
+
+Deno.test("runSubagent always fires a matching subagent.end (with the error) when the nested stream errors mid-run", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  // deno-lint-ignore no-explicit-any
+  const errorMidStream: any[] = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "partial..." },
+    { type: "text-end", id: "1" },
+    { type: "error", error: new Error("boom") },
+  ];
+  const model = sequencedModel(errorMidStream);
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx(),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  await assertRejects(
+    () =>
+      (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+        .execute({ agent: "shouter", prompt: "go" }),
+    Error,
+    "boom",
+  );
+  const names = events.map((e) => e.name);
+  assertEquals(names[0], "subagent.start");
+  assertEquals(names[names.length - 1], "subagent.end", "subagent.end must fire even though the nested run errored");
+  const endEvent = events[events.length - 1];
+  assertEquals(endEvent.data.runId, events[0].data.runId);
+  assertEquals(endEvent.data.error, "boom", "the in-stream error must not be silently dropped");
 });
 
 // ---------------------------------------------------------------------------

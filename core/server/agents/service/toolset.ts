@@ -269,10 +269,10 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
     // Same openai prompt-cache routing as runner.ts, keyed by the subagent's dir.
     providerOptions: cacheProviderOptions(model, target.dir),
   });
-  // Consume fullStream rather than awaiting result.text so the nested turn's
-  // steps reach the UI via toolEmit (already threaded in via the {...ctx}
-  // spread above — no new plumbing). Part shapes match runner.ts's own
-  // switch over this same ai@6 stream (toolCallId/toolName/input/output).
+  // Consume fullStream for progress events (subagent.tool) so the nested
+  // turn's steps reach the UI via toolEmit (already threaded in via the
+  // {...ctx} spread above — no new plumbing). Part shapes match runner.ts's
+  // own switch over this same ai@6 stream (toolCallId/toolName/input/output).
   // runId keeps concurrent subagent runs apart on the shared channel.
   // LoadedAgent has no `name` field (see loader.ts) — derive it from the
   // agent's directory, the same way handler.ts's subagents.local listing
@@ -282,21 +282,43 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
   const agentName = target.dir.split("/").filter(Boolean).pop() ?? target.dir;
   ctx.toolEmit?.("subagent.start", { runId, agent: agentName });
   let text = "";
-  for await (const part of result.fullStream) {
-    const p = part as any;
-    switch (p.type) {
-      case "text-delta":
-        text += p.text ?? p.delta ?? "";
-        break;
-      case "tool-call":
-        ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, input: p.input });
-        break;
-      case "tool-result":
-        ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, result: p.output });
-        break;
+  let error: string | undefined;
+  try {
+    for await (const part of result.fullStream) {
+      const p = part as any;
+      switch (p.type) {
+        case "tool-call":
+          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, input: p.input });
+          break;
+        case "tool-result":
+          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, result: p.output });
+          break;
+        case "error":
+          // fullStream surfaces a model/stream error as an "error" part
+          // WITHOUT throwing out of the for-await loop, and result.text
+          // below still resolves (to whatever text preceded the error)
+          // rather than rejecting — verified empirically (task-4-report.md).
+          // So this must be captured explicitly or it is silently dropped.
+          error = p.error instanceof Error ? p.error.message : String(p.error ?? "unknown model error");
+          break;
+      }
     }
+    // Preserve the OLD (pre-Task-4) semantics exactly: `await result.text`
+    // resolves to only the FINAL step's text, not a sum of every step's
+    // text-delta (ai's recordedContent resets at each step boundary) —
+    // verified empirically that draining fullStream first neither hangs nor
+    // starves this promise (task-4-report.md). A preamble-then-tool-call
+    // step's text must NOT leak into the returned answer.
+    text = await result.text;
+    if (error) throw new Error(error);
+  } catch (e) {
+    error = error ?? (e instanceof Error ? e.message : String(e));
+    throw e;
+  } finally {
+    // Always fires, success or failure, so a subagent.start never goes
+    // without a matching subagent.end (observability: no dangling runs).
+    ctx.toolEmit?.("subagent.end", { runId, text, ...(error ? { error } : {}) });
   }
-  ctx.toolEmit?.("subagent.end", { runId, text });
   return { text };
 }
 
