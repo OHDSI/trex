@@ -104,3 +104,48 @@ Deno.test("gives up within the budget and lets WebAPI start anyway", async () =>
   assertEquals(Date.now() - started < 15000, true);
   assertStringIncludes(r.errs[0], "starting WebAPI anyway");
 });
+
+Deno.test("a connection that is accepted but never answered still respects the budget", async () => {
+  // The real failure, not a hypothetical: the trexas extension binds the port
+  // before this process serves anything, so the probe CONNECTS and then waits
+  // forever for a backend that cannot exist until this function returns. With a
+  // bare `await fetch` the promise never settled, the loop never re-checked its
+  // deadline, and boot hung indefinitely rather than for the budget.
+  const listener = Deno.listen({ port: 0 });
+  const port = (listener.addr as Deno.NetAddr).port;
+  const accepted: Deno.Conn[] = [];
+  // Accept the connection and then say nothing at all.
+  const accepting = (async () => {
+    try {
+      for await (const conn of listener) {
+        accepted.push(conn);
+      }
+    } catch {
+      // Listener closed; expected on teardown.
+    }
+  })();
+
+  try {
+    const r = recorder();
+    const started = Date.now();
+    await waitForOidcDiscovery(r.log, r.err, {
+      SECURITY_AUTH_OIDC_ENABLED: "true",
+      SECURITY_AUTH_OIDC_URL: `http://127.0.0.1:${port}/.well-known/openid-configuration`,
+      WEBAPI_OIDC_PROBE_TIMEOUT_MS: "200",
+    }, 1000);
+    const elapsed = Date.now() - started;
+    // Bounded by the budget, not by the hung request.
+    assertEquals(elapsed < 15000, true);
+    assertStringIncludes(r.errs[0], "starting WebAPI anyway");
+  } finally {
+    listener.close();
+    await accepting;
+    for (const conn of accepted) {
+      try {
+        conn.close();
+      } catch {
+        // Already torn down by the aborted request.
+      }
+    }
+  }
+});
