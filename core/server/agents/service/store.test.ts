@@ -413,3 +413,38 @@ Deno.test("denyApprovalsForTurns: only denies still-undecided approvals, scoped 
   const n = await denyApprovalsForTurns(["t-1"], query);
   assertEquals(n, 2);
 });
+
+Deno.test("activateTools: no-ops on an empty list without querying", async () => {
+  const { fn, calls } = fakeQuery([]);
+  const store = createStore(fn as never);
+  await store.activateTools("s-1", []);
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("activateTools: appends the given names onto agents.sessions.activated_tools", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.activateTools("s-1", ["KBSearch", "ExecuteSQL"]);
+  assert(calls[0].sql.includes("UPDATE agents.sessions"));
+  assert(calls[0].sql.includes("activated_tools"));
+  assertEquals(calls[0].params, ["s-1", ["KBSearch", "ExecuteSQL"]]);
+});
+
+Deno.test("getActivatedTools: returns the persisted array", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ activated_tools: ["KBSearch"] }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getActivatedTools("s-1"), ["KBSearch"]);
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
+Deno.test("getActivatedTools: returns [] when the session has never activated anything (NULL column)", async () => {
+  const { fn } = fakeQuery([{ rows: [{ activated_tools: null }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getActivatedTools("s-1"), []);
+});
+
+Deno.test("getActivatedTools: returns [] when the session row doesn't exist", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getActivatedTools("missing"), []);
+});

@@ -9,6 +9,7 @@ import { wrapToolWithCap, buildSdkTools } from "./toolset.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { loadAgent } from "../loader.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
+import { createStore } from "./store.ts";
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {
@@ -175,4 +176,73 @@ Deno.test("buildSdkTools: a deferredTools entry naming no real tool is ignored, 
   agent.config.context.deferredTools = ["NoSuchTool"];
   const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
   assertEquals(Object.keys(tools), ["echo", "propose_card", "skill", "agent", "connection_search"]);
+});
+
+// ---------------------------------------------------------------------------
+// Task 15: the narrow ToolContext.activateTools capability threaded through
+// authoredTool — a tool gets exactly ITS OWN session's write, never the raw
+// AgentStore. Exercised through a minimal fake agent (not the TOY fixture)
+// so the probe tool's execute() can capture the ToolContext it's actually
+// handed, which none of TOY's real tools (echo/propose_card) do.
+// ---------------------------------------------------------------------------
+
+// deno-lint-ignore no-explicit-any
+function fakeProbeAgent(captured: { ctx?: any }): any {
+  return {
+    dir: "fake-probe-agent",
+    tools: {
+      probe: {
+        description: "probe",
+        inputSchema: { type: "object", properties: {} },
+        execute: (_input: unknown, ctx?: unknown) => {
+          captured.ctx = ctx;
+          return Promise.resolve({});
+        },
+      },
+    },
+    skills: [],
+    subagents: {},
+    connections: {},
+    config: { context: DEFAULT_CONTEXT_CONFIG, maxSteps: 25 },
+  };
+}
+
+Deno.test("buildSdkTools: an authored tool's ToolContext exposes sessionId and an activateTools bound to store.activateTools", async () => {
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  const query = (sql: string, params?: unknown[]) => {
+    calls.push({ sql, params });
+    return Promise.resolve({ rows: [] });
+  };
+  const store = createStore(query as never);
+  // deno-lint-ignore no-explicit-any
+  const captured: { ctx?: any } = {};
+  const tools = await buildSdkTools({
+    agent: fakeProbeAgent(captured),
+    sessionId: "s-42",
+    depth: 0,
+    hookCtx: fakeHookCtx(),
+    store,
+  });
+  await (tools.probe as { execute: (i: unknown) => Promise<unknown> }).execute({});
+
+  assertEquals(captured.ctx?.sessionId, "s-42");
+  assert(typeof captured.ctx?.activateTools === "function");
+
+  await captured.ctx.activateTools(["KBSearch"]);
+  assert(calls[0].sql.includes("UPDATE agents.sessions"));
+  assert(calls[0].sql.includes("activated_tools"));
+  assertEquals(calls[0].params, ["s-42", ["KBSearch"]]);
+});
+
+Deno.test("buildSdkTools: activateTools is undefined on ToolContext when no store is wired (never a throwing stub)", async () => {
+  // deno-lint-ignore no-explicit-any
+  const captured: { ctx?: any } = {};
+  const tools = await buildSdkTools({
+    agent: fakeProbeAgent(captured),
+    sessionId: "s-1",
+    depth: 0,
+    hookCtx: fakeHookCtx(),
+  });
+  await (tools.probe as { execute: (i: unknown) => Promise<unknown> }).execute({});
+  assertEquals(captured.ctx?.activateTools, undefined);
 });

@@ -380,6 +380,37 @@ export function createStore(query: QueryFn) {
         [userId, plugin, agent, tool, consent],
       );
     },
+
+    // Task 15: persists a ToolSearch match onto agents.sessions.activated_tools
+    // (TEXT[], migration V7) so it stays visible for every later turn of
+    // this session, not just the one it was found in — toolset.ts's
+    // buildSdkTools reads it back via handler.ts's getActivatedTools call in
+    // startTurn. Deduplicating with a DISTINCT unnest rather than a plain
+    // array_cat: a session re-searching the same tool must not grow the
+    // column unboundedly. A no-op (no query) on an empty `names` — nothing to
+    // add, and an empty $2::text[] would otherwise turn a NULL column into an
+    // empty (but non-null) array for no reason.
+    async activateTools(sessionId: string, names: string[]): Promise<void> {
+      if (names.length === 0) return;
+      await query(
+        `UPDATE agents.sessions
+            SET activated_tools = (
+              SELECT ARRAY(
+                SELECT DISTINCT unnest(COALESCE(activated_tools, ARRAY[]::text[]) || $2::text[])
+              )
+            )
+          WHERE id = $1`,
+        [sessionId, names],
+      );
+    },
+
+    // The session's activated deferred-tool names so far (possibly empty) —
+    // read fresh per turn (never cached) and threaded into buildSdkTools as
+    // ToolBuildCtx.activatedTools, see handler.ts's startTurn.
+    async getActivatedTools(sessionId: string): Promise<string[]> {
+      const r = await query(`SELECT activated_tools FROM agents.sessions WHERE id = $1`, [sessionId]);
+      return (r.rows[0]?.activated_tools as string[] | null | undefined) ?? [];
+    },
   };
 }
 

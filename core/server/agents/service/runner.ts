@@ -42,6 +42,11 @@ interface RunTurnOpts {
   // buildSdkTools via the `{ ...opts }` spread below so kind:"oauth"
   // connections resolve/park tokens. Undefined when no broker is wired.
   connectionOpts?: ConnectionProviderOpts;
+  // Task 15: this session's already-activated deferred-tool names, read
+  // fresh by handler.ts's startTurn (store.getActivatedTools) before every
+  // turn. Threaded straight through to buildSdkTools via the `{ ...opts }`
+  // spread below — see toolset.ts's ToolBuildCtx.activatedTools.
+  activatedTools?: string[];
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {

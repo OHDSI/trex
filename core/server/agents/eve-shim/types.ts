@@ -159,6 +159,18 @@ export interface ToolContext {
   // buildSdkTools called with no toolEmit) simply omits this field, so a
   // tool must guard with `ctx?.emit?.(...)` — never assume it's present.
   emit?: (name: string, data: unknown) => void;
+  // Task 15: activates one or more of THIS session's deferred tools
+  // (agent.config.context.deferredTools — see context/toolsplit.ts's
+  // partitionTools) so they're included in the SDK tool set from the next
+  // buildSdkTools call onward. Bound to the calling session by
+  // toolset.ts's authoredTool (`(names) => ctx.store.activateTools(ctx.
+  // sessionId, names)`) — deliberately narrower than handing a tool the
+  // whole AgentStore: a tool gets exactly one write capability (its own
+  // session's activated-tools list), not arbitrary store access. Optional
+  // and safe to skip, same posture as emit/sql: undefined when no store was
+  // wired (e.g. /chat's stateless buildSdkTools call, or a test that never
+  // sets ToolBuildCtx.store).
+  activateTools?: (names: string[]) => Promise<void>;
 }
 
 // deno-lint-ignore no-explicit-any

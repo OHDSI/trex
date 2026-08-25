@@ -204,6 +204,13 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
         // Postgres access is withheld; emit/userId/bearerToken stay available
         // to them since those are lower-privilege by design.
         sql: isAuthored ? ctx.hookCtx?.sql : undefined,
+        // Task 15: the narrow "activate a deferred tool" capability (see
+        // ToolContext.activateTools' own comment) -- bound to THIS session
+        // only, never the raw store. undefined when no store was wired,
+        // same "safe to omit" posture as sql above.
+        activateTools: ctx.store
+          ? (names: string[]) => ctx.store!.activateTools(ctx.sessionId, names)
+          : undefined,
       });
 
       if (cfg?.onToolResult) {

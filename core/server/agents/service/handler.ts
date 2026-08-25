@@ -437,6 +437,15 @@ function startTurn(
       console.error(`agents: channel delivery registration failed for turn ${turn.id}:`, e);
     }
     publish(sessionId, { type: "turn.started", data: { turnId: turn.id, sequence: turn.seq } });
+    // Task 15: whatever ToolSearch has activated on earlier turns of THIS
+    // session, read fresh (never cached) so a tool activated last turn is
+    // still visible this turn. Degrades to "none activated" on a read
+    // failure — same posture as the getLastTurnUsage fallback above — rather
+    // than failing a turn over a withheld-tool bookkeeping read.
+    const activatedTools = await deps.store.getActivatedTools(sessionId).catch((e) => {
+      console.error(`agents: getActivatedTools failed for session ${sessionId} (continuing with none activated):`, e);
+      return [];
+    });
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -444,6 +453,7 @@ function startTurn(
         model: deps.model, bearerToken, userId, hookCtx,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
+        activatedTools,
       });
       await deps.store.finishTurn(turn.id, "completed");
       // A follow-up may have been queued WHILE this turn ran (the
