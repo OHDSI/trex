@@ -329,8 +329,11 @@ Deno.test({
     const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
     const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
     const store = createStore(query as never);
+    // Hoisted so the finally block can clean up even when an assertion fails
+    // — a failed run must not be the one that leaves rows behind.
+    let sessionId: string | undefined;
     try {
-      const sessionId = await store.createSession("toy-agent", "toy", "model-guard-e2e-user");
+      sessionId = await store.createSession("toy-agent", "toy", "model-guard-e2e-user");
       const t1 = await store.addTurn(sessionId, "first");
       await store.addStep(t1.id, 1, "text", null, { text: "hello from toy" });
       await store.addStep(t1.id, 2, "finish", null, { finishReason: "stop" }, { inputTokens: 10, outputTokens: 5 });
@@ -384,6 +387,10 @@ Deno.test({
         "malformed model value was not logged for diagnosis",
       );
     } finally {
+      // Deleting the session cascades to its turns, steps and approvals
+      // (V1__agents_init.sql's ON DELETE CASCADE), so the shared test
+      // database does not accumulate a session per run of this file.
+      if (sessionId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [sessionId]);
       await pool.end();
     }
   },
@@ -2221,8 +2228,10 @@ Deno.test({
     const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
     const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
     const store = createStore(query as never);
+    // Hoisted for the finally-block cleanup — see the sibling e2e test above.
+    let sessionId: string | undefined;
     try {
-      const sessionId = await store.createSession("toy-agent", "toy", "e2e-user");
+      sessionId = await store.createSession("toy-agent", "toy", "e2e-user");
 
       // Turn 1: a Read tool call and its result.
       const t1 = await store.addTurn(sessionId, "read config.ts");
@@ -2242,6 +2251,8 @@ Deno.test({
       assert(serialized.includes("c1"), "tool call id missing");
       assertEquals(msgs.filter((m) => m.role === "tool").length, 1);
     } finally {
+      // Cascades to turns and steps — see the sibling e2e test above.
+      if (sessionId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [sessionId]);
       await pool.end();
     }
   },

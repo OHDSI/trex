@@ -32,8 +32,9 @@ Stream event vocabulary (subset of eve's documented set — see
 `docs/concepts/sessions-runs-and-streaming.md` in the packed eve tarball):
 `turn.started`, `message.appended`, `message.completed`, `actions.requested`,
 `action.result`, `input.requested`, `turn.completed`, `turn.failed`,
-`session.waiting`, `session.failed`, plus one additive trex extension not in
-eve's vocabulary at all: `tool.event` (see divergence 10 below).
+`session.waiting`, `session.failed`, plus additive trex extensions not in
+eve's vocabulary at all: `tool.event` (see divergence 10 below),
+`message.queued`, `turn.reaped`, and `context.compacted` (divergence 18).
 `session.waiting`/`session.failed`
 matter more than they look: eve's own client (`eve/client`'s
 `MessageResponse.result()`) ends its per-turn read on
@@ -370,7 +371,19 @@ live-tail by event shape.
       mid-stream: a mid-turn summary would have to be injected above the
       last user message or the model misreads it); a summarization failure
       degrades to dropping the oldest turns outright rather than failing
-      the turn (`compact.ts`'s `maybeCompact`).
+      the turn (`compact.ts`'s `maybeCompact`). That degradation publishes a
+      second additive trex-only event, `context.compacted`, carrying `via`
+      and — on the drop path — the reason summarization could not run. Like
+      `tool.event` (divergence 10) it is absent from eve's vocabulary
+      entirely; unlike it, it is turn-agnostic and live-only, since
+      compaction happens before the turn exists.
+      The summarizer is sent a flattened plain-text transcript of only the
+      turns being replaced. Both halves of that are load-bearing: the
+      summarization call declares no `tools`, so structured
+      tool-call/tool-result parts would be rejected by the provider (and the
+      rejection swallowed into the drop fallback, meaning the summarizer
+      would never run at all), and summarizing turns that also survive
+      verbatim would hand the model the same content twice.
     - **Deferred tool loading.** Tools named in `deferredTools` are withheld
       from the request entirely — absent from the tool list, not
       present-but-disabled — until `ToolSearch` activates them for that

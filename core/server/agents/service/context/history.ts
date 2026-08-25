@@ -47,7 +47,12 @@ export function assembleHistory(turns: TurnRow[], config: ContextConfig): ModelM
   for (const [i, t] of turns.entries()) {
     const step = t.steps.find((s) => s.kind === "compaction");
     if (!step) continue;
-    const p = step.payload as { summary?: string; replacedTurnSeqTo: number };
+    // Only `summary` is read. The payload also carries replacedTurnSeqTo /
+    // replacedTurnSeqFrom / tokensBefore / tokensAfter (see handler.ts's
+    // persist), but resumption here is by ARRAY POSITION — the checkpoint
+    // step hangs off the last replaced turn, so `i + 1` is the resume point —
+    // and naming a field this function never consults implied otherwise.
+    const p = step.payload as { summary?: string };
     summary = p.summary ?? null;
     scopeStart = i + 1;
   }

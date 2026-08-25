@@ -78,17 +78,26 @@ Deno.test("every grandfathered collision still exists and is still a collision",
   }
 });
 
-Deno.test("migration with adjacent test file is not reported as collision", async () => {
-  // Regression test: a migration .sql file may have an adjacent .test.ts file
-  // (e.g., V7__context.sql and V7__context.test.ts). Only .sql files are
-  // migrations; .test.ts files must not be matched as duplicates.
+Deno.test("a migration's adjacent .test.ts file is not counted as a second migration", async () => {
+  // versionsIn's regex requires a .sql suffix, so re-filtering its output on
+  // .endsWith(".sql") could never fail — the earlier version of this test
+  // asserted a tautology and would have stayed green even if the regex
+  // started matching .test.ts files.
+  //
+  // What actually needs pinning is that the regex EXCLUDES a real adjacent
+  // test file. V7__context.sql ships with V7__context.test.ts beside it, so
+  // assert that pairing exists on disk and that V7 still resolves to exactly
+  // one name.
+  const dir = new URL("core/server/agents/migrations/", REPO_ROOT);
+  const onDisk = new Set<string>();
+  for await (const entry of Deno.readDir(dir)) if (entry.isFile) onDisk.add(entry.name);
+  assertEquals(onDisk.has("V7__context.sql"), true, "fixture moved: V7__context.sql no longer exists");
+  assertEquals(
+    onDisk.has("V7__context.test.ts"),
+    true,
+    "fixture moved: this test needs a migration with an adjacent .test.ts to be meaningful",
+  );
+
   const byVersion = await versionsIn("core/server/agents/migrations");
-  for (const [_version, names] of byVersion) {
-    const sqlCount = names.filter((n) => n.endsWith(".sql")).length;
-    assertEquals(
-      sqlCount <= 1,
-      true,
-      `Multiple .sql files with same version in core/server/agents/migrations: ${names.join(", ")}`,
-    );
-  }
+  assertEquals(byVersion.get(7), ["V7__context.sql"], "the adjacent .test.ts was matched as a migration");
 });

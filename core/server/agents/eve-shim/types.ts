@@ -2,6 +2,14 @@
 // plus trex-only extensions (clientOnly, idempotent, JSON Schema inputs).
 // Keep this file dependency-free: agent tool files import it transitively
 // and must stay portable to real eve.
+//
+// ONE exception, deliberate: the `import type` of ContextConfig below. A
+// type-only import erases entirely at runtime, so it adds no module edge and
+// nothing for a port to real eve to carry — the alternative was redeclaring
+// an eight-field interface that must then be kept in lockstep with
+// budget.ts's, which is the failure mode this file's rule exists to avoid,
+// not an instance of it. Every VALUE import stays forbidden; QueryFn below
+// is redeclared rather than imported for exactly that reason.
 
 import type { ContextConfig } from "../service/context/budget.ts";
 
