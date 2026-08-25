@@ -94,11 +94,11 @@ export function createStore(query: QueryFn) {
 
     async getHistory(sessionId: string) {
       const r = await query(
-        `SELECT t.message, t.metadata,
+        `SELECT t.seq, t.message, t.metadata,
                 COALESCE(jsonb_agg(jsonb_build_object('kind', s.kind, 'name', s.name, 'payload', s.payload)
                          ORDER BY s.seq) FILTER (WHERE s.id IS NOT NULL), '[]') AS steps
          FROM agents.turns t LEFT JOIN agents.steps s ON s.turn_id = t.id
-         WHERE t.session_id = $1 GROUP BY t.id ORDER BY t.seq`,
+         WHERE t.session_id = $1 GROUP BY t.id, t.seq ORDER BY t.seq`,
         [sessionId],
       );
       return r.rows;
