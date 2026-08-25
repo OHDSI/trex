@@ -1,42 +1,159 @@
 ---
 name: writing-atlas3-plugins
-description: Use when building, scaffolding or changing an Atlas3 / OHDSI ATLAS v3 plugin — "build an atlas plugin that…", "add a plugin to atlas", a new Atlas panel/tab/FAB/menu entry, or an Atlas plugin that has to match a Figma design. Not for Data2Evidence portal apps.
+description: Use when building, scaffolding or changing an Atlas3 / OHDSI ATLAS v3 plugin — "build an atlas plugin that…", "add a plugin to atlas", a new Atlas panel/tab/FAB/menu entry, or an Atlas plugin that has to match a Figma design. Also use when you need an Atlas3 component's real props/events or the host plugin contract: the published package ships no source or types, so this skill covers checking out OHDSI/Atlas3, reading @ohdsi/atlas-ui's actual signatures, and building the UI from the Atlas* component library rather than hand-rolled markup. Not for Data2Evidence portal apps.
 ---
 
 # Writing Atlas3 plugins
 
 An Atlas3 plugin is a **single-spa parcel** built in **`system` module format**,
 dropped into the host's `public/plugins/<id>/` and declared in a JSON manifest.
-`/home/ph/code/Atlas3/docs/plugin-development-with-atlas-ui.md` is the reference
-for the contract, `PluginProps`, the `Atlas*` component library and theming —
-**read it before implementing**. This skill is the operational wrapper: how to
-scaffold, name, build, register and verify. Run the app with
-**`testing-atlas3-locally`**.
+`docs/plugin-development-with-atlas-ui.md` **inside the Atlas3 checkout** is the
+reference for the contract, `PluginProps`, the `Atlas*` component library and
+theming — **read it before implementing**. This skill is the operational
+wrapper: how to check out the source, find the real contracts, scaffold, name,
+build, register and verify. Run the app with **`testing-atlas3-locally`**.
+
+**You cannot do this job from `node_modules` alone.** The published
+`@ohdsi/atlas3` package sets `"files": ["dist"]` and ships **no `.d.ts` and no
+source** — just a built bundle. Every component signature, prop, event and type
+below exists *only* in the Atlas3 git repository. Guessing a prop name because
+it sounds right is the single most common way these plugins fail. Check the
+source out (step 1) and read it.
 
 ## Workflow
 
-1. **Design first, if there is one.** A Figma link (or "match this design") →
+1. **Check out Atlas3 — always, before anything else.** Clone it if it isn't
+   already present, then work *inside* it under `plugins-dev/`: the reference
+   plugin's `@ohdsi/atlas-ui` and `outDir` paths are relative to that location.
+
+   ```bash
+   ATLAS3_DIR="${ATLAS3_DIR:-$HOME/code/Atlas3}"
+   [ -d "$ATLAS3_DIR/.git" ] || git clone git@github.com:OHDSI/Atlas3.git "$ATLAS3_DIR"
+   git -C "$ATLAS3_DIR" fetch origin --quiet
+   ```
+
+   A pre-existing checkout may be stale or on someone's feature branch — check
+   `git -C "$ATLAS3_DIR" log --oneline -1` and `git status` before trusting it;
+   `git pull` on `develop` if it is behind. If the SSH remote is unavailable,
+   fall back to `https://github.com/OHDSI/Atlas3.git`.
+2. **Read the real contracts out of that checkout** before writing a component —
+   see *Finding the exact contract in source* below. For worked examples beyond
+   the hello-world starter, read the shipped plugins in `OHDSI/trex-notebook`
+   (see *Reference implementations*).
+3. **Design first, if there is one.** A Figma link (or "match this design") →
    use **`pulling-figma-mockups`** BEFORE writing any component, then implement
    against the `.spec.json` (see *Figma → Atlas tokens* below).
-2. **Locate Atlas3.** `/home/ph/code/Atlas3` locally, otherwise clone
-   `OHDSI/Atlas3`. Work *inside* it, under `plugins-dev/` — the reference
-   plugin's `@ohdsi/atlas-ui` and `outDir` paths are relative to that location.
-3. **Scaffold by copying**, never from scratch:
+4. **Scaffold by copying**, never from scratch:
    `cp -r plugins-dev/hello-world-plugin plugins-dev/<plugin-id>`, then delete
    its `package-lock.json`. You get a complete working parcel: `package.json`,
    `vite.config.mjs`, `tsconfig.json`, `tsconfig.node.json`, `src/main.ts`,
    `src/App.vue`.
-4. **Rename the id consistently** (table below). A mismatch fails silently —
+5. **Rename the id consistently** (table below). A mismatch fails silently —
    the app boots, the plugin just never appears.
-5. **Build the component library once**, from the Atlas3 root:
+6. **Build the component library once**, from the Atlas3 root:
    `npm run lib:build`. `@ohdsi/atlas-ui`'s `exports` point at the gitignored
    `packages/atlas-ui/dist/`, absent in a fresh checkout; without it the plugin
    build dies on *Failed to resolve entry for package @ohdsi/atlas-ui*.
-6. **Implement.** Leave `main.ts` alone (lifecycles + `buildVuetifyOptions()`);
-   put your UI in `App.vue` and components beside it.
-7. **Build:** `cd plugins-dev/<plugin-id> && npm install && npm run build`
+7. **Implement out of `Atlas*` components** (see *Build the UI from the Atlas
+   component library* — this is the rule, not a preference). Leave `main.ts`
+   alone (lifecycles + `buildVuetifyOptions()`); put your UI in `App.vue` and
+   components beside it.
+8. **Build:** `cd plugins-dev/<plugin-id> && npm install && npm run build`
    → `public/plugins/<plugin-id>/index.system.js`.
-8. **Register** (below), then verify with **`testing-atlas3-locally`**.
+9. **Register** (below), then verify with **`testing-atlas3-locally`**.
+
+## Build the UI from the Atlas component library
+
+**Every piece of UI you render must come from an `Atlas*` component when one
+exists for the job.** The point of a plugin is that it is indistinguishable
+from native Atlas — an `Atlas*` component already carries the theme, the
+spacing scale, the dark-mode palette, the focus/ARIA behaviour and the
+Atlas-specific defaults. Hand-rolled markup gets none of that and drifts the
+moment the design system moves.
+
+The precedence, highest first:
+
+1. **`Atlas*` component** from `@ohdsi/atlas-ui` — always, if one fits.
+   `packages/atlas-ui/index.ts` is the list of what exists; check it before
+   concluding there is nothing.
+2. **Raw Vuetify (`v-*`)** — only for a primitive with no `Atlas*` wrapper.
+   Style it with theme tokens (`--v-theme-*`, `--atlas-*`), never literal
+   colors or pixel values.
+3. **Your own markup** — last resort, for genuinely bespoke layout. Same token
+   rule applies, and it still sits inside `AtlasPageShell`/`AtlasContainer`.
+
+Never introduce a *third-party* UI kit or icon set into a plugin — no Element
+Plus, no Bootstrap, no Tailwind. Vuetify + `@ohdsi/atlas-ui` + `mdi` icons is
+the whole toolkit; a second one ships a duplicate CSS reset and visibly breaks
+the shell.
+
+If you conclude no `Atlas*` component fits, say which one you looked at and why
+it did not, in your reply. That is a design-system gap worth reporting, and it
+is the difference between a considered fallback and a silent one.
+
+## Finding the exact contract in source
+
+Read these files in the Atlas3 checkout — do not infer any of it, and do not
+reach for a raw Vuetify component when an `Atlas*` wrapper exists.
+
+| What you need | Read (paths relative to the Atlas3 checkout) |
+|---|---|
+| **Which components exist** — the authoritative inventory | `packages/atlas-ui/index.ts` (every export in one file) |
+| **A component's exact props, events, slots, defaults** | `src/components/ui/<Name>.vue` — read its `defineProps`/`defineEmits`; charts live under `src/components/ui/charts/` |
+| **Host → plugin contract** (`PluginProps`, `AuthContext`, `PluginMessageBus`) | `src/models/PluginModels.ts` — also the zod schema the manifest is validated against |
+| **Theme tokens and the Vuetify options builder** | `src/ui/tokens.ts`, `src/ui/theme.ts` (`buildVuetifyOptions`), generated `src/ui/tokens.css` |
+| **Chart data types and option builders** | `src/ui/chart-types.ts`, `src/ui/chart-config.ts` (`CHART_COLORS`, `multiLineChartOptions`, …) |
+| **A complete working parcel** | `plugins-dev/hello-world-plugin/` |
+| **The narrative guide** | `docs/plugin-development-with-atlas-ui.md` |
+
+Fast ways to answer a concrete question, run from the checkout root:
+
+```bash
+# Is there an Atlas component for this, and what is it called?
+grep -n 'export { default as Atlas' packages/atlas-ui/index.ts
+
+# What props/events does one actually take?
+sed -n '1,80p' src/components/ui/AtlasDataTable.vue
+
+# What non-component values are exported (tokens, builders, types)?
+grep -nE '^export (\{|type|const)' packages/atlas-ui/index.ts | grep -v 'default as'
+```
+
+The inventory currently spans form controls (`AtlasTextField`, `AtlasSelect`,
+`AtlasAutocomplete`, `AtlasCheckbox`, `AtlasRadioGroup`, `AtlasSwitch`), layout
+(`AtlasPageShell`, `AtlasContainer`, `AtlasRow`, `AtlasCol`, `AtlasCard`,
+`AtlasDivider`, `AtlasSpacer`), feedback (`AtlasAlert`, `AtlasBanner`,
+`AtlasSnackbar`, `AtlasDialog`, `AtlasProgressLinear`, `AtlasProgressCircular`,
+`AtlasSkeleton`), navigation (`AtlasTabs`/`AtlasTab`, `AtlasMenu`, `AtlasList`/
+`AtlasListItem`, `AtlasPagination`), data display (`AtlasDataTable`,
+`AtlasChip`, `AtlasBadge`, `AtlasAvatar`, `AtlasTooltip`, `AtlasIcon`) and
+charts (`AtlasBarChart`, `AtlasLineChart`, `AtlasPieChart`, `AtlasBoxPlotChart`,
+`AtlasTreemapChart`, `AtlasSunburstChart`, `AtlasTrellisChart`,
+`AtlasChartExport`). Treat that list as a hint about *where to look*, not as
+truth — `packages/atlas-ui/index.ts` in the checkout you just pulled is truth.
+
+## Reference implementations
+
+`OHDSI/trex-notebook` ships the production Atlas3 plugins and is the best
+source of worked patterns beyond the hello-world starter. Check it out the same
+way (`git clone git@github.com:OHDSI/trex-notebook.git`); in a Data2Evidence
+checkout it is already vendored at `plugins/atlas/trex-notebook/`.
+
+Its **UI** plugins — `network`, `notebook-plugin`, `results-viewer`, `sibyl`,
+`strategus`, `studies` (each under `plugins/`) — all depend on
+`@ohdsi/atlas-ui`, build `formats: ['system']`, and are worth reading for how a
+real plugin structures views, state (Pinia) and API calls. The `*-api` siblings
+(`hades-api`, `metadata-api`, `network-api`) are backend plugins with no UI —
+not templates for this task.
+
+Note they depend on a **published** `"@ohdsi/atlas-ui": "^0.1.0-…"` version,
+whereas a plugin developed inside the Atlas3 monorepo uses
+`file:../../packages/atlas-ui`. Match whichever tree you are working in.
+
+**Do not use `plugins/ui/apps/vue-mri-ui-lib` (the D2E patient-analytics app)
+as a template.** It is a large standalone SAPUI5-era Vue app that predates this
+contract: it is not a single-spa parcel, does not use `@ohdsi/atlas-ui`, and
+copying it produces a plugin that neither themes nor mounts correctly.
 
 ## The id appears in five places — all must agree
 
