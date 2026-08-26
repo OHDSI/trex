@@ -25,6 +25,20 @@ const OIDC_WAIT_MS = Number(Deno.env.get("WEBAPI_OIDC_WAIT_MS") ?? 180_000);
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 
 /**
+ * Consecutive successful probes required before WebAPI is started.
+ *
+ * One success is not enough. This process serves discovery on a single event
+ * loop, and boot work continues after the listener is up, so it can answer a
+ * probe and then be unavailable moments later. WebAPI builds its client
+ * registration from discovery during Spring's context refresh, seconds after
+ * launch, with a fixed read timeout it does not expose — if that request lands
+ * in a stall it fails with "Read timed out", the bean dies, Tomcat never starts
+ * and nothing retries. Requiring a streak means the loop has been answering
+ * steadily, not merely once.
+ */
+const DEFAULT_READY_STREAK = 3;
+
+/**
  * Block until the OIDC discovery document is served, or the budget runs out.
  *
  * WebAPI builds its client registration from discovery while the Spring context
@@ -57,24 +71,36 @@ export async function waitForOidcDiscovery(
   const probeTimeoutMs = Number(
     env.WEBAPI_OIDC_PROBE_TIMEOUT_MS ?? DEFAULT_PROBE_TIMEOUT_MS,
   );
+  const readyStreak = Number(env.WEBAPI_OIDC_READY_STREAK ?? DEFAULT_READY_STREAK);
 
   const deadline = Date.now() + budgetMs;
   let announced = false;
+  let streak = 0;
   while (Date.now() < deadline) {
+    let ok = false;
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(probeTimeoutMs) });
       // Drain the body so the connection is not left dangling.
       await res.body?.cancel();
-      if (res.ok) {
+      ok = res.ok;
+    } catch (_e) {
+      // Not listening yet, or too busy to answer — same handling as a non-200.
+    }
+
+    if (ok) {
+      streak += 1;
+      if (streak >= readyStreak) {
         if (announced) log(`OIDC discovery ready at ${url}`);
         return;
       }
-    } catch (_e) {
-      // Not listening yet — same handling as a non-200.
-    }
-    if (!announced) {
-      log(`waiting for OIDC discovery at ${url} ...`);
-      announced = true;
+    } else {
+      // A stall in the middle of the streak means the node is not steadily
+      // available yet; start counting again rather than accepting it.
+      streak = 0;
+      if (!announced) {
+        log(`waiting for OIDC discovery at ${url} ...`);
+        announced = true;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
