@@ -116,8 +116,32 @@ Deno.test("worktreeReuseDecision: own branch ok; clean foreign branch restores; 
     worktreeReuseDecision([], wt, branch, 0),
     { error: `directory exists but git does not list it as a worktree` },
   );
+  // A detached head with a CLEAN tree is recoverable — and treating it as a
+  // hard error wedged a chat permanently: a coder that rebased onto a wrong
+  // base left its worktree detached, and nothing in the system ever puts a
+  // worktree back on its branch, so every later turn failed the same way.
   assertEquals(
     worktreeReuseDecision([{ path: wt, branch: null, detached: true }], wt, branch, 0),
-    { error: `worktree is detached (expected branch ${branch})` },
+    { restore: true, foreignBranch: "a detached HEAD" },
+  );
+  // Detached AND dirty stays an error, for the same reason a dirty foreign
+  // branch does: those edits belong to some other state.
+  assertEquals(
+    worktreeReuseDecision([{ path: wt, branch: null, detached: true }], wt, branch, 3995),
+    {
+      error: `worktree is detached (expected branch ${branch}) with 3995 ` +
+        `uncommitted change(s) — cannot restore the chat branch without risking them`,
+    },
+  );
+});
+
+// worktreeReuseError is the older, stricter helper and is deliberately NOT
+// changed: it has no dirtiness input, so it cannot tell a recoverable detached
+// head from a dangerous one. Consumers use worktreeReuseDecision.
+Deno.test("worktreeReuseError still rejects a detached worktree outright", () => {
+  const wt = "/ws/u1/app1/.worktrees/chat-1";
+  assertEquals(
+    worktreeReuseError([{ path: wt, branch: null, detached: true }], wt, "owner/topic"),
+    "worktree is detached (expected branch owner/topic)",
   );
 });

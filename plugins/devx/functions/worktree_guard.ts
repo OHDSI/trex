@@ -115,7 +115,21 @@ export function worktreeReuseDecision(
 ): WorktreeReuseDecision {
   const entry = entries.find((e) => e.path === worktreePath);
   if (!entry) return { error: `directory exists but git does not list it as a worktree` };
-  if (entry.detached) return { error: `worktree is detached (expected branch ${expectedBranch})` };
+  if (entry.detached) {
+    // A detached head with a CLEAN tree is recoverable, and treating it as a
+    // hard error wedged a chat permanently: a coder that ran `git rebase` on a
+    // wrong base left its worktree detached, so the guard refused it on that
+    // turn AND on every turn after — nothing in the system ever puts a
+    // worktree back on its branch, so the chat could not recover on its own.
+    // Clean means there is nothing to lose by checking the chat branch out
+    // again. Dirty stays an error for the same reason a dirty foreign branch
+    // does: those edits belong to some other state.
+    if (dirtyFileCount === 0) return { restore: true, foreignBranch: "a detached HEAD" };
+    return {
+      error: `worktree is detached (expected branch ${expectedBranch}) with ${dirtyFileCount} ` +
+        `uncommitted change(s) — cannot restore the chat branch without risking them`,
+    };
+  }
   if (entry.branch === expectedBranch) return { ok: true };
   if (legacyBranch && entry.branch === legacyBranch && legacyBranch !== expectedBranch) {
     return { rename: true, from: legacyBranch };

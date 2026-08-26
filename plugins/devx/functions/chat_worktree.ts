@@ -20,8 +20,18 @@ import { resolveChatBranch } from "./chat_branch.ts";
 // on the chat id; the branch is `<github username>/<topic>`, pinned on
 // devx.chats.worktree_branch the first time it is computed (see chat_branch.ts).
 
-/** The branch new worktrees are based on. */
-const BASE_BRANCH = "develop";
+/**
+ * The branch this repo's work is based on and PRs target.
+ *
+ * Resolved from the remote rather than assumed. Data2Evidence has BOTH `main`
+ * and `develop`, and they share no history at all (`git merge-base
+ * origin/main origin/develop` is empty) — a coder that guessed `main` got
+ * "no history in common" from `gh pr create` and a rebase reporting 2137
+ * unrelated commits, and left its worktree detached mid-rebase.
+ */
+export async function resolveBaseBranch(repoRoot: string): Promise<string> {
+  return await gitOps.defaultBranch(repoRoot);
+}
 
 export async function ensureChatWorktree(
   userId: string,
@@ -54,6 +64,22 @@ export async function ensureChatWorktree(
     // mid-turn and leaves it checked out) — restore the chat branch instead of
     // failing the turn. A status failure counts as dirty: when we cannot PROVE
     // the tree is clean, keep refusing.
+    //
+    // Clear a half-finished rebase/merge/cherry-pick FIRST. One left in flight
+    // detaches the head and checks the other side's tree out, so the worktree
+    // reads as detached with thousands of uncommitted changes — which the
+    // decision below can only refuse, on this turn and on every turn after,
+    // because nothing else in the system ever puts a worktree back on its
+    // branch. Aborting restores the branch and tree the operation started from,
+    // which is exactly the state the turn should resume in.
+    const inProgress = await gitOps.inProgressOperation(worktree).catch(() => null);
+    if (inProgress) {
+      const aborted = await gitOps.abortOperation(worktree, inProgress);
+      console.warn(
+        `[chat-worktree] ${worktree} had a ${inProgress} in progress — ` +
+          (aborted ? "aborted it to resume on the chat branch" : "could not abort it"),
+      );
+    }
     const entries = await gitOps.worktreeList(repoRoot);
     const dirtyCount = await gitOps.status(worktree)
       .then((s) => s.files.length)
@@ -82,28 +108,30 @@ export async function ensureChatWorktree(
   }
   try {
     await ensureWorktreeParent(userId, appId);
-    // Base the feature worktree on origin/develop so work always starts from an
-    // up-to-date tree, not whatever the app workspace was left at.
+    // Base the feature worktree on the remote's own default branch so work
+    // always starts from an up-to-date tree, not whatever the app workspace was
+    // left at — and not a branch we guessed (see resolveBaseBranch).
     //
     // A failed fetch used to warn and silently fall through to the repo's
     // current HEAD. That HEAD is the SHARED app workspace's — some other task's
     // branch, or a stale checkout weeks behind — so the chat then built its
     // whole feature on the wrong base and only found out at review or push
     // time, which is how branches ended up carrying commits they never
-    // authored. There is no safe silent fallback here: use a previously
-    // fetched origin/develop if one exists (stale, but a real base, and said
-    // so loudly), otherwise fail the turn.
-    const startPoint = `origin/${BASE_BRANCH}`;
+    // authored. There is no safe silent fallback here: use the previously
+    // fetched base if one exists (stale, but a real base, and said so loudly),
+    // otherwise fail the turn.
+    const baseBranch = await resolveBaseBranch(repoRoot);
+    const startPoint = `origin/${baseBranch}`;
     try {
-      await gitOps.fetch(repoRoot, "origin", BASE_BRANCH);
+      await gitOps.fetch(repoRoot, "origin", baseBranch);
     } catch (e) {
       if (!(await gitOps.refExists(repoRoot, startPoint))) {
         throw new Error(
-          `cannot fetch origin/${BASE_BRANCH} (${e?.message || e}) and no local copy exists to branch from`,
+          `cannot fetch origin/${baseBranch} (${e?.message || e}) and no local copy exists to branch from`,
         );
       }
       console.warn(
-        `[chat-worktree] fetch origin/${BASE_BRANCH} failed (${e?.message || e}); ` +
+        `[chat-worktree] fetch origin/${baseBranch} failed (${e?.message || e}); ` +
           `basing ${branch} on the last fetched ${startPoint} ` +
           `(${await gitOps.revParse(repoRoot, startPoint)}) — it may be behind the remote`,
       );
