@@ -91,7 +91,7 @@ export async function streamClaudeCodeChat({
   // Facilitated (claw) sessions pin to a stable per-chat worktree so feature
   // work stays isolated and survives the cwd reset between turns.
   if (!workspacePathOverride && useWorktree && appId && chatId) {
-    const wt = await ensureChatWorktree(userId, appId, chatId);
+    const wt = await ensureChatWorktree(userId, appId, chatId, sqlFn);
     if (wt) workspacePath = wt;
   }
 
