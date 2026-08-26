@@ -5,7 +5,8 @@ import {
   getRunWorktreePath,
 } from "./tools/workspace.ts";
 import { gitOps } from "./git.ts";
-import { chatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
+import { legacyChatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
+import { resolveChatBranch } from "./chat_branch.ts";
 
 // Pin a chat to a stable, isolated git worktree so a feature's work persists
 // across turns — each /stream turn otherwise resets the coder's cwd to the app
@@ -15,10 +16,19 @@ import { chatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
 // silently continuing on the shared app workspace put an isolated task's edits
 // into whatever branch/state the shared tree happened to hold (cross-task
 // contamination), and a reused worktree is trusted only after verifying its
-// checked-out branch is this chat's own branch. The branch/worktree are keyed
-// deterministically on the chat id, created once and reused thereafter.
+// checked-out branch is this chat's own branch. The worktree directory is keyed
+// on the chat id; the branch is `<github username>/<topic>`, pinned on
+// devx.chats.worktree_branch the first time it is computed (see chat_branch.ts).
 
-export async function ensureChatWorktree(userId: string, appId: string, chatId: string): Promise<string | null> {
+/** The branch new worktrees are based on. */
+const BASE_BRANCH = "develop";
+
+export async function ensureChatWorktree(
+  userId: string,
+  appId: string,
+  chatId: string,
+  sqlFn?,
+): Promise<string | null> {
   const repoRoot = getAppWorkspacePath(userId, appId);
   try {
     await Deno.stat(`${repoRoot}/.git`);
@@ -26,7 +36,11 @@ export async function ensureChatWorktree(userId: string, appId: string, chatId: 
     return null; // not a git repo — nothing to branch from
   }
   const worktree = getRunWorktreePath(userId, appId, chatId);
-  const branch = chatWorktreeBranch(chatId);
+  const legacyBranch = legacyChatWorktreeBranch(chatId);
+  const existingBranches = await gitOps.branchList(repoRoot)
+    .then((b) => b.branches)
+    .catch(() => []);
+  const branch = await resolveChatBranch(userId, chatId, repoRoot, existingBranches, sqlFn);
   let exists = false;
   try {
     await Deno.stat(worktree);
@@ -34,21 +48,28 @@ export async function ensureChatWorktree(userId: string, appId: string, chatId: 
   } catch { /* create below */ }
   if (exists) {
     // Never trust bare directory existence: verify the worktree is registered
-    // and has THIS chat's branch checked out before reusing it. A foreign
-    // branch with a CLEAN tree is the coder's own doing (it checks out e.g. an
-    // existing PR branch mid-turn and leaves it checked out) — restore the
-    // chat branch instead of failing the turn. A status failure counts as
-    // dirty: when we cannot PROVE the tree is clean, keep refusing.
+    // and has THIS chat's branch checked out before reusing it. Its own LEGACY
+    // branch name is renamed onto the new scheme; a foreign branch with a CLEAN
+    // tree is the coder's own doing (it checks out e.g. an existing PR branch
+    // mid-turn and leaves it checked out) — restore the chat branch instead of
+    // failing the turn. A status failure counts as dirty: when we cannot PROVE
+    // the tree is clean, keep refusing.
     const entries = await gitOps.worktreeList(repoRoot);
     const dirtyCount = await gitOps.status(worktree)
       .then((s) => s.files.length)
       .catch(() => Number.MAX_SAFE_INTEGER);
-    const decision = worktreeReuseDecision(entries, worktree, branch, dirtyCount);
+    const decision = worktreeReuseDecision(entries, worktree, branch, dirtyCount, legacyBranch);
     if ("error" in decision) {
       throw new Error(
         `chat worktree ${worktree} is unusable: ${decision.error}. ` +
           `Refusing to run the coder outside its isolated branch.`,
       );
+    }
+    if ("rename" in decision) {
+      console.warn(
+        `[chat-worktree] migrating chat worktree ${worktree} from '${decision.from}' to '${branch}'`,
+      );
+      await gitOps.branchRename(worktree, decision.from, branch);
     }
     if ("restore" in decision) {
       console.warn(
@@ -61,14 +82,31 @@ export async function ensureChatWorktree(userId: string, appId: string, chatId: 
   }
   try {
     await ensureWorktreeParent(userId, appId);
-    // Base the feature worktree on the latest origin/develop so work always
-    // starts from an up-to-date tree, not whatever the app workspace was left at.
-    let startPoint: string | undefined;
+    // Base the feature worktree on origin/develop so work always starts from an
+    // up-to-date tree, not whatever the app workspace was left at.
+    //
+    // A failed fetch used to warn and silently fall through to the repo's
+    // current HEAD. That HEAD is the SHARED app workspace's — some other task's
+    // branch, or a stale checkout weeks behind — so the chat then built its
+    // whole feature on the wrong base and only found out at review or push
+    // time, which is how branches ended up carrying commits they never
+    // authored. There is no safe silent fallback here: use a previously
+    // fetched origin/develop if one exists (stale, but a real base, and said
+    // so loudly), otherwise fail the turn.
+    const startPoint = `origin/${BASE_BRANCH}`;
     try {
-      await gitOps.fetch(repoRoot, "origin", "develop");
-      startPoint = "origin/develop";
+      await gitOps.fetch(repoRoot, "origin", BASE_BRANCH);
     } catch (e) {
-      console.warn("[chat-worktree] fetch origin/develop failed; basing worktree on current HEAD:", e?.message || e);
+      if (!(await gitOps.refExists(repoRoot, startPoint))) {
+        throw new Error(
+          `cannot fetch origin/${BASE_BRANCH} (${e?.message || e}) and no local copy exists to branch from`,
+        );
+      }
+      console.warn(
+        `[chat-worktree] fetch origin/${BASE_BRANCH} failed (${e?.message || e}); ` +
+          `basing ${branch} on the last fetched ${startPoint} ` +
+          `(${await gitOps.revParse(repoRoot, startPoint)}) — it may be behind the remote`,
+      );
     }
     await gitOps.worktreeAdd(repoRoot, worktree, branch, startPoint);
     return worktree;

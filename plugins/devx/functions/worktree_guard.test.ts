@@ -1,11 +1,38 @@
 import { assertEquals } from "jsr:@std/assert";
-import { chatWorktreeBranch, worktreeReuseDecision, worktreeReuseError } from "./worktree_guard.ts";
+import {
+  branchSlug,
+  chatWorktreeBranch,
+  legacyChatWorktreeBranch,
+  worktreeReuseDecision,
+  worktreeReuseError,
+} from "./worktree_guard.ts";
 
-Deno.test("chatWorktreeBranch: deterministic, sanitized, capped", () => {
-  assertEquals(chatWorktreeBranch("abc-123"), "claw/abc-123");
-  assertEquals(chatWorktreeBranch("a b/c"), "claw/a_b_c");
-  // 40-char cap on the sanitized id
-  assertEquals(chatWorktreeBranch("x".repeat(60)), `claw/${"x".repeat(40)}`);
+Deno.test("branchSlug: lowercases, collapses separators, caps, never returns empty", () => {
+  assertEquals(branchSlug("Add Dataflow Trigger", "work"), "add-dataflow-trigger");
+  assertEquals(branchSlug("  --Fix:: the/thing!! ", "work"), "fix-the-thing");
+  // 40-char cap, and the cap must not leave a trailing separator behind.
+  assertEquals(branchSlug("x".repeat(60), "work"), "x".repeat(40));
+  assertEquals(branchSlug(`${"y".repeat(39)} tail`, "work"), "y".repeat(39));
+  // Nothing usable left → fallback, so the segment is never empty (an empty
+  // segment makes an invalid ref like "owner/").
+  assertEquals(branchSlug("🎉🎉", "work"), "work");
+  assertEquals(branchSlug(null, "work"), "work");
+});
+
+Deno.test("chatWorktreeBranch: <github username>/<topic>", () => {
+  assertEquals(chatWorktreeBranch("ohdsi-trex", "Add data source UI plugin"), "ohdsi-trex/add-data-source-ui-plugin");
+  // Owner is slugified too — a display name must not smuggle a second slash
+  // into the ref and turn one segment into two.
+  assertEquals(chatWorktreeBranch("OHDSI/Trex Bot", "topic"), "ohdsi-trex-bot/topic");
+  // No account resolved → the legacy owner, so the name is still valid.
+  assertEquals(chatWorktreeBranch(null, "topic"), "claw/topic");
+  assertEquals(chatWorktreeBranch("owner", null), "owner/work");
+});
+
+Deno.test("legacyChatWorktreeBranch: reproduces the pre-rename names exactly", () => {
+  assertEquals(legacyChatWorktreeBranch("abc-123"), "claw/abc-123");
+  assertEquals(legacyChatWorktreeBranch("a b/c"), "claw/a_b_c");
+  assertEquals(legacyChatWorktreeBranch("x".repeat(60)), `claw/${"x".repeat(40)}`);
 });
 
 // Regression (cross-branch contamination): a worktree directory must only be
@@ -61,6 +88,29 @@ Deno.test("worktreeReuseDecision: own branch ok; clean foreign branch restores; 
         `with 2 uncommitted change(s) — cannot restore the chat branch without risking them`,
     },
   );
+  // This chat's own LEGACY name → rename, not "foreign branch". Dirtiness is
+  // irrelevant: `git branch -m` leaves the working tree and index alone, and
+  // those commits/edits are this chat's own work either way.
+  const legacy = "claw/chat-1";
+  const onLegacy = [{ path: wt, branch: legacy, detached: false }];
+  const newName = "ohdsi-trex/add-thing";
+  assertEquals(
+    worktreeReuseDecision(onLegacy, wt, newName, 0, legacy),
+    { rename: true, from: legacy },
+  );
+  assertEquals(
+    worktreeReuseDecision(onLegacy, wt, newName, 7, legacy),
+    { rename: true, from: legacy },
+  );
+  // Already on the pinned name and the legacy name happens to equal it: `ok`,
+  // never a rename onto itself (git rejects that).
+  assertEquals(worktreeReuseDecision(onLegacy, wt, legacy, 0, legacy), { ok: true });
+  // Without a legacy name supplied, the old name is just another foreign branch.
+  assertEquals(
+    worktreeReuseDecision(onLegacy, wt, newName, 0),
+    { restore: true, foreignBranch: legacy },
+  );
+
   // Unregistered and detached stay hard errors regardless of cleanliness.
   assertEquals(
     worktreeReuseDecision([], wt, branch, 0),

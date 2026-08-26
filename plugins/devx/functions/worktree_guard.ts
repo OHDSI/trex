@@ -1,12 +1,61 @@
 // Deterministic identity checks for per-chat git worktrees. A chat's coder must
-// only ever run on its own isolated branch: these helpers derive the branch
-// name from the chat id and validate a to-be-reused worktree against
-// `git worktree list` output. Kept dependency-free so they unit-test in
-// isolation (claude_code_agent.ts is the consumer).
+// only ever run on its own isolated branch: these helpers build the branch name
+// and validate a to-be-reused worktree against `git worktree list` output. Kept
+// dependency-free so they unit-test in isolation (chat_worktree.ts is the
+// consumer).
 
-/** The isolated feature branch a chat's worktree must have checked out. */
-export function chatWorktreeBranch(chatId: string): string {
-  return `claw/${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 40)}`;
+/**
+ * Owner segment used before a chat's branch got a real name. Every worktree
+ * created prior to the `<github username>/<topic>` scheme is on
+ * `claw/<chat id>`; `legacyChatWorktreeBranch` reproduces those names so
+ * existing worktrees can be renamed onto the new scheme instead of being
+ * rejected as foreign branches.
+ */
+export const LEGACY_BRANCH_OWNER = "claw";
+
+/** Longest a single branch segment may get. Git has no hard limit; this keeps
+ * names readable and well under the 255-byte ref filename limit once the
+ * owner, the slash and any dedupe suffix are added. */
+const MAX_SEGMENT = 40;
+
+/**
+ * Reduce arbitrary text to one safe branch path segment: lowercase, only
+ * `[a-z0-9-]`, no leading/trailing/repeated separators, capped. Git also
+ * rejects segments that start with `.`, end with `.lock`, or contain `..` —
+ * none survive this filter. Returns `fallback` when nothing usable remains
+ * (an all-emoji chat title, say), so the result is never empty.
+ */
+export function branchSlug(input: string | null | undefined, fallback: string): string {
+  const slug = String(input ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, MAX_SEGMENT)
+    .replace(/-+$/g, "");
+  return slug || fallback;
+}
+
+/**
+ * The isolated feature branch a chat's worktree must have checked out:
+ * `<github username>/<topic>`.
+ *
+ * The owner is the GitHub account the push will actually be made as (from the
+ * gh integration, or `gh auth status`) — pushing `claw/...` while authenticated
+ * as `ohdsi-trex` produced branches nobody could attribute. The topic comes
+ * from the chat's title.
+ *
+ * NOTE: this is NOT derivable from the chat id alone, which is why
+ * chat_worktree.ts persists the result on `devx.chats.worktree_branch`: the
+ * reuse guard has to compare a later turn's worktree against the SAME name,
+ * and a chat title can be renamed between turns.
+ */
+export function chatWorktreeBranch(owner: string | null | undefined, topic: string | null | undefined): string {
+  return `${branchSlug(owner, LEGACY_BRANCH_OWNER)}/${branchSlug(topic, "work")}`;
+}
+
+/** The `claw/<chat id>` name used before branches carried an owner and topic. */
+export function legacyChatWorktreeBranch(chatId: string): string {
+  return `${LEGACY_BRANCH_OWNER}/${String(chatId).replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, MAX_SEGMENT)}`;
 }
 
 /**
@@ -33,31 +82,44 @@ export function worktreeReuseError(
 
 export type WorktreeReuseDecision =
   | { ok: true }
+  | { rename: true; from: string }
   | { restore: true; foreignBranch: string }
   | { error: string };
 
 /**
- * Like `worktreeReuseError`, but classifies the foreign-branch case by the
- * tree's dirtiness. The coder itself legitimately checks out other branches
- * inside its own worktree (e.g. an existing PR branch it iterates on) and
- * leaves them checked out at turn end — refusing the NEXT turn for that made
- * every second turn of a work-on-existing-PR task fail. With a CLEAN tree
- * nothing can leak across tasks, so that case is `restore` (the caller
- * switches back to the chat's own branch). A DIRTY tree on a foreign branch
- * stays a hard error: those uncommitted changes belong to *some* branch, and
- * silently carrying them onto the chat branch (or discarding them) would be
- * the exact contamination this guard exists to stop.
+ * Like `worktreeReuseError`, but classifies the non-matching cases instead of
+ * failing all of them.
+ *
+ * `rename`: the worktree is on this chat's own LEGACY branch name. Its commits
+ * are the chat's own work, so `git branch -m` moves the branch onto the new
+ * name with the working tree and index untouched — dirtiness is irrelevant and
+ * deliberately not consulted here.
+ *
+ * `restore`: some other branch with a CLEAN tree. The coder itself legitimately
+ * checks out other branches inside its own worktree (e.g. an existing PR branch
+ * it iterates on) and leaves them checked out at turn end — refusing the NEXT
+ * turn for that made every second turn of a work-on-existing-PR task fail. With
+ * a clean tree nothing can leak across tasks, so the caller just switches back.
+ *
+ * A DIRTY tree on a foreign branch stays a hard error: those uncommitted
+ * changes belong to *some* branch, and silently carrying them onto the chat
+ * branch (or discarding them) would be the exact contamination this guard
+ * exists to stop.
  */
 export function worktreeReuseDecision(
   entries: Array<{ path: string; branch: string | null; detached: boolean }>,
   worktreePath: string,
   expectedBranch: string,
   dirtyFileCount: number,
+  legacyBranch?: string,
 ): WorktreeReuseDecision {
   const entry = entries.find((e) => e.path === worktreePath);
   if (!entry) return { error: `directory exists but git does not list it as a worktree` };
   if (entry.detached) return { error: `worktree is detached (expected branch ${expectedBranch})` };
   if (entry.branch === expectedBranch) return { ok: true };
+  if (legacyBranch && entry.branch === legacyBranch && legacyBranch !== expectedBranch) {
+    return { rename: true, from: legacyBranch };
+  }
   if (dirtyFileCount === 0) {
     return { restore: true, foreignBranch: entry.branch ?? "no branch" };
   }

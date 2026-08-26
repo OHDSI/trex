@@ -52,8 +52,13 @@ export function createStore(query: QueryFn) {
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
           const r = await query(
-            `INSERT INTO agents.turns (session_id, seq, message, metadata)
-             SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3 FROM agents.turns WHERE session_id = $1
+            // heartbeat_at is stamped at insert, not left NULL for the first
+            // ticker beat to fill in: a worker that dies inside the first
+            // interval would otherwise leave a NULL-heartbeat row, which falls
+            // back to the two-hour started_at cutoff — the exact wait this
+            // column exists to remove.
+            `INSERT INTO agents.turns (session_id, seq, message, metadata, heartbeat_at)
+             SELECT $1, COALESCE(MAX(seq), 0) + 1, $2, $3, NOW() FROM agents.turns WHERE session_id = $1
              RETURNING id, seq`,
             [sessionId, JSON.stringify(message), metadata == null ? null : JSON.stringify(metadata)],
           );
@@ -71,6 +76,17 @@ export function createStore(query: QueryFn) {
       await query(
         `UPDATE agents.turns SET status = $2, error = $3, finished_at = NOW() WHERE id = $1`,
         [turnId, status, error ?? null],
+      );
+    },
+
+    // Liveness stamp for a running turn (service/heartbeat.ts drives the
+    // ticker). Scoped to `status = 'running'` so a beat that races finishTurn
+    // cannot re-stamp a turn that already ended, and so a turn the sweep just
+    // reaped is not marked alive again by its own dying worker.
+    async heartbeatTurn(turnId: string): Promise<void> {
+      await query(
+        `UPDATE agents.turns SET heartbeat_at = NOW() WHERE id = $1 AND status = 'running'`,
+        [turnId],
       );
     },
 
@@ -219,17 +235,52 @@ export function createStore(query: QueryFn) {
     // JS-side sign is right) and a fake that evaluates `started_at < cutoff`
     // against seeded rows can prove the query's comparison direction against
     // that same real value — both directions, without a live Postgres.
-    async reapStaleTurns(sessionId: string, olderThanMs: number): Promise<number> {
+    //
+    // Two independent cutoffs, because they answer different questions.
+    // `heartbeat_at` says when the turn's worker was last demonstrably alive,
+    // so a lapsed heartbeat is positive evidence the worker is gone and can be
+    // acted on in minutes. `started_at` only says how long the turn has been
+    // running, which for a live turn is not evidence of anything — long turns
+    // are legitimate — so it stays the slow two-hour fallback, used only for
+    // rows with no heartbeat at all (written before V7__turn_heartbeat.sql).
+    // A NULL-heartbeat row is never reaped on the heartbeat cutoff: absence of
+    // a stamp is not absence of a worker.
+    //
+    // Returns the reaped rows (not just a count) so the caller can notify the
+    // channel the turn came from — service/reap-notify.ts needs each turn's
+    // metadata to find the channel, and by reap time the row is the only place
+    // that still holds it.
+    async reapStaleTurns(
+      sessionId: string,
+      olderThanMs: number,
+      heartbeatStaleMs?: number,
+    ): Promise<Array<{ id: string; metadata: unknown }>> {
       const cutoff = new Date(Date.now() - olderThanMs);
       const minutes = Math.round(olderThanMs / 60000);
+      // Off (never matches) when the caller passes no heartbeat cutoff, so a
+      // caller that has not opted in keeps exactly the old started_at behaviour.
+      const beatCutoff = heartbeatStaleMs == null ? null : new Date(Date.now() - heartbeatStaleMs);
+      const beatMinutes = heartbeatStaleMs == null ? 0 : Math.round(heartbeatStaleMs / 60000);
       const r = await query(
         `UPDATE agents.turns
             SET status = 'failed',
-                error = $3,
+                error = CASE
+                  WHEN $4::timestamptz IS NOT NULL AND heartbeat_at IS NOT NULL AND heartbeat_at < $4
+                  THEN $5 ELSE $3 END,
                 finished_at = NOW()
-          WHERE status = 'running' AND session_id = $1 AND started_at < $2
-          RETURNING id`,
-        [sessionId, cutoff, `turn abandoned (no completion within ${minutes} minutes)`],
+          WHERE status = 'running' AND session_id = $1
+            AND (
+              ($4::timestamptz IS NOT NULL AND heartbeat_at IS NOT NULL AND heartbeat_at < $4)
+              OR (heartbeat_at IS NULL AND started_at < $2)
+            )
+          RETURNING id, metadata`,
+        [
+          sessionId,
+          cutoff,
+          `turn abandoned (no completion within ${minutes} minutes)`,
+          beatCutoff,
+          `turn abandoned (its worker stopped responding — no heartbeat for over ${beatMinutes} minutes)`,
+        ],
       );
       const turnIds = r.rows.map((row: { id: string }) => row.id);
       // Deliberately isolated from the turns UPDATE above, which has already
@@ -256,7 +307,7 @@ export function createStore(query: QueryFn) {
           e,
         );
       }
-      return r.rows.length;
+      return r.rows.map((row: { id: string; metadata: unknown }) => ({ id: row.id, metadata: row.metadata }));
     },
 
     // The set of sessions with at least one turn stuck `running` past the
@@ -275,13 +326,27 @@ export function createStore(query: QueryFn) {
     // is also the one that publishes turn.reaped — and for a foreign session
     // it has no subscriber, so the notification is silently lost even in
     // cases where it would otherwise have been delivered.
-    async listSessionsWithStaleRunningTurns(olderThanMs: number, plugin: string, agent: string): Promise<string[]> {
+    //
+    // The two cutoffs mirror reapStaleTurns's exactly — they must, or the sweep
+    // would list sessions the reap then declines to touch (a busy no-op every
+    // tick) or, worse, skip sessions the reap would have cleared.
+    async listSessionsWithStaleRunningTurns(
+      olderThanMs: number,
+      plugin: string,
+      agent: string,
+      heartbeatStaleMs?: number,
+    ): Promise<string[]> {
       const cutoff = new Date(Date.now() - olderThanMs);
+      const beatCutoff = heartbeatStaleMs == null ? null : new Date(Date.now() - heartbeatStaleMs);
       const r = await query(
         `SELECT DISTINCT t.session_id FROM agents.turns t
            JOIN agents.sessions s ON s.id = t.session_id
-          WHERE t.status = 'running' AND t.started_at < $1 AND s.plugin = $2 AND s.agent = $3`,
-        [cutoff, plugin, agent],
+          WHERE t.status = 'running' AND s.plugin = $2 AND s.agent = $3
+            AND (
+              ($4::timestamptz IS NOT NULL AND t.heartbeat_at IS NOT NULL AND t.heartbeat_at < $4)
+              OR (t.heartbeat_at IS NULL AND t.started_at < $1)
+            )`,
+        [cutoff, plugin, agent, beatCutoff],
       );
       return r.rows.map((row: { session_id: string }) => row.session_id);
     },

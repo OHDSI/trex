@@ -243,8 +243,8 @@ Deno.test("getRunningTurn returns the sole running turn (or null)", async () => 
 Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error string, scoped to the given session", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1" }, { id: "t-2" }] }]);
   const store = createStore(fn as never);
-  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
-  assertEquals(n, 2);
+  const reaped = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  assertEquals(reaped, [{ id: "t-1", metadata: undefined }, { id: "t-2", metadata: undefined }]);
   assert(calls[0].sql.includes("UPDATE agents.turns"));
   assert(calls[0].sql.includes("status = 'running'"));
   // session_id = $1 scopes the reap to the calling session — an unscoped
@@ -252,7 +252,10 @@ Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error st
   // message could fail another session's genuinely live turn.
   assert(calls[0].sql.includes("session_id = $1"));
   assert(calls[0].sql.includes("started_at < $2")); // trivial parameter comparison, no in-SQL date arithmetic
-  assert(calls[0].sql.includes("RETURNING id"));
+  // metadata comes back with the ids because the reap notifier (reap-notify.ts)
+  // reads the delivery channel off it, and by reap time the row is the only
+  // place still holding it.
+  assert(calls[0].sql.includes("RETURNING id, metadata"));
   assertEquals(calls[0].params[0], "s-1");
   assert(
     calls[0].params.includes("turn abandoned (no completion within 120 minutes)"),
@@ -354,8 +357,8 @@ Deno.test("reapStaleTurns also denies every still-pending approval belonging to 
     return { rows: [] };
   };
   const store = createStore(query);
-  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
-  assertEquals(n, 2);
+  const reaped = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  assertEquals(reaped.length, 2);
   const denyCall = calls.find((c) => c.q.includes("UPDATE agents.approvals"));
   assertEquals(denyCall !== undefined, true);
   assertEquals(denyCall!.p[0], ["t-1", "t-2"]);
@@ -369,8 +372,8 @@ Deno.test("reapStaleTurns denies nothing and issues no approvals query when it r
     return { rows: [] };
   };
   const store = createStore(query);
-  const n = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
-  assertEquals(n, 0);
+  const reaped = await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  assertEquals(reaped, []);
   assertEquals(calls.some((c) => c.q.includes("UPDATE agents.approvals")), false);
 });
 
@@ -391,4 +394,79 @@ Deno.test("denyApprovalsForTurns: only denies still-undecided approvals, scoped 
   };
   const n = await denyApprovalsForTurns(["t-1"], query);
   assertEquals(n, 2);
+});
+
+// --- heartbeat clock (V7__turn_heartbeat.sql) ------------------------------
+// `started_at` says how long a turn has been RUNNING, which for a live turn is
+// evidence of nothing — long turns are legitimate. `heartbeat_at` says when the
+// turn's worker was last demonstrably alive, so a lapsed stamp is positive
+// evidence the worker is gone and can be acted on in minutes instead of hours.
+
+Deno.test("heartbeatTurn stamps only while the turn is still running", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.heartbeatTurn("t-1");
+  assert(calls[0].sql.includes("UPDATE agents.turns"));
+  assert(calls[0].sql.includes("heartbeat_at = NOW()"));
+  // Without this guard a beat racing finishTurn could re-stamp a turn that
+  // already ended, or resurrect one the sweep had just reaped.
+  assert(calls[0].sql.includes("status = 'running'"));
+  assertEquals(calls[0].params, ["t-1"]);
+});
+
+Deno.test("addTurn stamps heartbeat_at at insert, so a worker dying in the first interval is still covered", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1", seq: 1 }] }]);
+  const store = createStore(fn as never);
+  await store.addTurn("s-1", "hi");
+  assert(calls[0].sql.includes("heartbeat_at"));
+  assert(calls[0].sql.includes("NOW()"));
+});
+
+Deno.test("reapStaleTurns: both cutoffs are passed, and the heartbeat one is the fast clock", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  const before = Date.now();
+  await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000, 3 * 60 * 1000);
+  const after = Date.now();
+
+  const startedCutoff = calls[0].params![1] as Date;
+  const beatCutoff = calls[0].params![3] as Date;
+  assert(beatCutoff instanceof Date);
+  assert(
+    beatCutoff.getTime() >= before - 3 * 60 * 1000 && beatCutoff.getTime() <= after - 3 * 60 * 1000,
+    `heartbeat cutoff ${beatCutoff.toISOString()} is not ~3 minutes ago`,
+  );
+  // The heartbeat cutoff must be the MORE RECENT of the two — that is the
+  // whole point: it catches a dead worker long before started_at would.
+  assert(beatCutoff.getTime() > startedCutoff.getTime());
+  // A NULL-heartbeat row is never reaped on the heartbeat clock: absence of a
+  // stamp is not absence of a worker.
+  assert(calls[0].sql.includes("heartbeat_at IS NULL AND started_at < $2"));
+  assert(calls[0].params!.some((p) => typeof p === "string" && p.includes("no heartbeat for over 3 minutes")));
+});
+
+Deno.test("reapStaleTurns: omitting the heartbeat cutoff keeps the pure started_at behaviour", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000);
+  // NULL disables the heartbeat arm of the predicate entirely ($4 IS NOT NULL
+  // guards every use of it), so a caller that has not opted in reaps exactly
+  // what it reaped before.
+  assertEquals(calls[0].params![3], null);
+});
+
+Deno.test("listSessionsWithStaleRunningTurns: mirrors reapStaleTurns's two cutoffs", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.listSessionsWithStaleRunningTurns(2 * 60 * 60 * 1000, "claw-agent", "claw", 3 * 60 * 1000);
+  // If the list and the reap disagreed, the sweep would either churn on
+  // sessions the reap declines to touch, or skip ones it would have cleared.
+  assert(calls[0].sql.includes("t.heartbeat_at IS NOT NULL AND t.heartbeat_at < $4"));
+  assert(calls[0].sql.includes("t.heartbeat_at IS NULL AND t.started_at < $1"));
+  assert(calls[0].params![3] instanceof Date);
+});
+
+Deno.test("channelForSession is not part of the turn store (it lives on the channel store)", () => {
+  const store = createStore((() => Promise.resolve({ rows: [] })) as never);
+  assertEquals("channelForSession" in store, false);
 });

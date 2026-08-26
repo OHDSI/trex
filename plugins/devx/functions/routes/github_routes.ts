@@ -3,6 +3,10 @@ import { encryptToken, decryptToken } from "../crypto.ts";
 import { gitOps } from "../git.ts";
 import { runShell, type ShellResult } from "../shell.ts";
 import { getAppWorkspacePath } from "../tools/workspace.ts";
+// Re-exported (not redefined) so this module stays the single import site for
+// GitHub route consumers while chat_branch.ts can take the leaf parser alone.
+export { parseGhAccount, parseGhScopes } from "../gh_status.ts";
+import { parseGhAccount, parseGhScopes } from "../gh_status.ts";
 
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -117,38 +121,6 @@ export function parseLoginUrl(text: string): string | null {
 export function parseUserCode(text: string): string | null {
   const codeMatch = text.match(/\b[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/);
   return codeMatch ? codeMatch[0] : null;
-}
-
-/**
- * Narrow `gh auth status` output to the active account's block.
- *
- * `gh` can hold several accounts for one host and prints a
- * "Logged in to <host> account <name>" block for each, distinguished only by a
- * following "Active account: true|false" line. The active one is the
- * credential every other `gh` invocation will actually use, and it is not
- * necessarily printed first — so reporting the first block would name an
- * account whose token nothing uses. Falls back to the whole text for
- * single-account output, which carries no "Active account" line at all.
- */
-function activeAccountBlock(text: string): string {
-  const blocks = text.split(/(?=Logged in to )/);
-  return blocks.find((b) => /Active account:\s*true/i.test(b)) || text;
-}
-
-/** Parse the active account from `gh auth status` output. */
-export function parseGhAccount(text: string): string | null {
-  const source = activeAccountBlock(text);
-  const match = source.match(/Logged in to \S+ account (\S+)/i) ||
-    source.match(/Logged in to \S+ as (\S+)/i) ||
-    source.match(/\baccount\s+(\S+)/i);
-  return match ? match[1] : null;
-}
-
-/** Parse the active account's `Token scopes: 'a', 'b'` line. */
-export function parseGhScopes(text: string): string | null {
-  const match = activeAccountBlock(text).match(/Token scopes:\s*(.+)/i);
-  if (!match) return null;
-  return match[1].trim().replace(/['"]/g, "") || null;
 }
 
 /**
