@@ -16,7 +16,15 @@ export interface SweepOptions {
   agent: string;
   intervalMs?: number;
   staleMs?: number;
-  onReap?: (sessionId: string, count: number) => void;
+  /**
+   * Cutoff for the heartbeat clock (turn-lifetime.ts's HEARTBEAT_STALE_MS).
+   * Optional so a caller that has not opted in keeps the pure started_at
+   * behaviour, but index.ts always passes it: without it a dropped worker's
+   * turn is only noticed after `staleMs` (two hours), which is the wait the
+   * heartbeat exists to remove.
+   */
+  heartbeatStaleMs?: number;
+  onReap?: (sessionId: string, reaped: Array<{ id: string; metadata: unknown }>) => void;
 }
 
 const DEFAULT_INTERVAL_MS = 10 * 60 * 1000;
@@ -33,15 +41,20 @@ export function startStaleTurnSweep(store: AgentStore, opts: SweepOptions): { st
   const tick = async () => {
     let sessionIds: string[];
     try {
-      sessionIds = await store.listSessionsWithStaleRunningTurns(staleMs, opts.plugin, opts.agent);
+      sessionIds = await store.listSessionsWithStaleRunningTurns(
+        staleMs,
+        opts.plugin,
+        opts.agent,
+        opts.heartbeatStaleMs,
+      );
     } catch (e) {
       console.error("agents: stale-turn sweep failed to list sessions (will retry next tick):", e);
       return;
     }
     for (const sessionId of sessionIds) {
       try {
-        const n = await store.reapStaleTurns(sessionId, staleMs);
-        if (n > 0) opts.onReap?.(sessionId, n);
+        const reaped = await store.reapStaleTurns(sessionId, staleMs, opts.heartbeatStaleMs);
+        if (reaped.length > 0) opts.onReap?.(sessionId, reaped);
       } catch (e) {
         console.error(`agents: stale-turn sweep failed to reap session ${sessionId} (will retry next tick):`, e);
       }
