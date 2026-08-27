@@ -31,12 +31,33 @@ export const MAX_RETRY_DELAY_MS = 60_000;
 export const MAX_BUFFERED_PREFIX_PARTS = 64;
 
 /**
+ * The compaction summarizer's budget, deliberately SMALLER than the turn
+ * loop's on both axes.
+ *
+ * The two calls differ in what a slow retry costs. The turn loop has no
+ * fallback — if the model call cannot be made the turn fails — so spending the
+ * full 75s to save it is straightforwardly right. The compaction summarizer
+ * runs BEFORE addTurn and HAS a fallback: maybeCompact drops the oldest turns
+ * and the turn proceeds. So every second of backoff there is a second the user
+ * waits for their turn to even start, in exchange for an outcome we can
+ * already reach immediately.
+ *
+ * Two attempts capped at 5s therefore buys the one thing worth buying — a blip
+ * that clears in a few seconds no longer costs the user history a summary
+ * would have kept — while bounding the added turn-start latency at ~5s instead
+ * of ~75s. A rate limit that outlives that is better answered by the drop
+ * fallback than by making someone wait for it.
+ */
+export const COMPACTION_MAX_ATTEMPTS = 2;
+export const COMPACTION_MAX_RETRY_DELAY_MS = 5_000;
+
+/**
  * Delay to wait AFTER the given (1-based) attempt failed.
  * 5s -> 10s -> 20s -> 40s, capped at MAX_RETRY_DELAY_MS.
  */
-export function retryDelayMs(attempt: number): number {
+export function retryDelayMs(attempt: number, maxDelayMs: number = MAX_RETRY_DELAY_MS): number {
   const raw = INITIAL_RETRY_DELAY_MS * Math.pow(RETRY_BACKOFF_FACTOR, attempt - 1);
-  return Math.min(raw, MAX_RETRY_DELAY_MS);
+  return Math.min(raw, maxDelayMs);
 }
 
 export interface ModelErrorClassification {
@@ -145,11 +166,43 @@ export interface ModelRetryOpts {
    */
   sleep?: (ms: number) => Promise<void>;
   maxAttempts?: number;
+  /** Ceiling on a single wait. Defaults to MAX_RETRY_DELAY_MS. */
+  maxDelayMs?: number;
   /** Abandons the retry loop when the turn is cancelled mid-wait. */
   signal?: AbortSignal;
+  /**
+   * streamWithModelRetry only: fired once an attempt is SEALED — a committing
+   * part arrived, the prefix cap was reached, or the stream ended — meaning it
+   * can no longer be abandoned. Anything the caller did destructively while
+   * preparing the request (runner.ts's prepareStep drains a DELETE ...
+   * RETURNING queue) can safely be considered delivered at that point, and
+   * must be carried across attempts until then.
+   */
+  onCommit?: () => void;
 }
 
 const realSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/**
+ * Waits `ms`, or resolves as soon as `signal` aborts — whichever comes first.
+ *
+ * Checking `signal.aborted` only on either SIDE of the wait is not enough:
+ * agent_stop landing one second into a 40s backoff would otherwise leave the
+ * child sleeping the remaining 39 for a request it is never going to make.
+ * The losing sleep is left to settle on its own; it resolves into nothing.
+ */
+function sleepOrAbort(ms: number, sleep: (ms: number) => Promise<void>, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms);
+  if (signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const done = () => {
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    signal.addEventListener("abort", done, { once: true });
+    sleep(ms).then(done, done);
+  });
+}
 
 /**
  * Runs `fn`, retrying a 429/5xx/connection failure on the schedule above.
@@ -164,8 +217,18 @@ export async function withModelRetry<T>(fn: () => Promise<T>, opts: ModelRetryOp
       return await fn();
     } catch (err) {
       const { retryable, reason } = classifyModelError(err);
-      if (!retryable || attempt >= maxAttempts || opts.signal?.aborted) throw err;
-      const delayMs = retryDelayMs(attempt);
+      if (!retryable || attempt >= maxAttempts || opts.signal?.aborted) {
+        // A spent budget is the one terminal case nothing else logs: runner.ts
+        // deliberately suppresses the SDK's per-attempt diagnostic for
+        // retryable errors (they are not failures), so without this line an
+        // exhausted 429 would reach the user as a failed turn with no trace of
+        // the four attempts behind it.
+        if (retryable && attempt >= maxAttempts) {
+          console.error(`[agents] model call gave up after ${attempt} attempts (${reason})`);
+        }
+        throw err;
+      }
+      const delayMs = retryDelayMs(attempt, opts.maxDelayMs);
       try {
         opts.onRetry?.({ attempt, maxAttempts, delayMs, reason });
       } catch (e) {
@@ -173,7 +236,10 @@ export async function withModelRetry<T>(fn: () => Promise<T>, opts: ModelRetryOp
         // terminal one — telling someone is a courtesy, retrying is the point.
         console.error("[agents] failed to publish the model-retry event:", e);
       }
-      await sleep(delayMs);
+      await sleepOrAbort(delayMs, sleep, opts.signal);
+      // Re-checked AFTER the wait, not just before it: a stop that landed
+      // mid-backoff must end the turn here rather than open another request.
+      if (opts.signal?.aborted) throw err;
     }
   }
 }
@@ -246,17 +312,33 @@ export async function streamWithModelRetry<P extends { type: string }>(
       await iterator.return?.().catch(() => {});
       throw err;
     }
+    // Sealed: every path out of the loop above (a committing part, the prefix
+    // cap, or the stream ending) means this attempt will not be abandoned.
+    try {
+      opts.onCommit?.();
+    } catch (e) {
+      console.error("[agents] a model-retry commit hook threw:", e);
+    }
     return replay(prefix, iterator);
   }, opts);
 }
 
 /** Yields the buffered prefix, then hands the rest of the stream straight through. */
 async function* replay<P>(prefix: P[], iterator: AsyncIterator<P>): AsyncIterable<P> {
-  for (const p of prefix) yield p;
-  while (true) {
-    const next = await iterator.next();
-    if (next.done) return;
-    yield next.value;
+  try {
+    for (const p of prefix) yield p;
+    while (true) {
+      const next = await iterator.next();
+      if (next.done) return;
+      yield next.value;
+    }
+  } finally {
+    // Propagates consumer termination to the real stream. runner.ts's loop
+    // THROWS out of its `for await` on an `error`/`abort` part; that runs this
+    // generator's return(), but without forwarding it the underlying
+    // fullStream is never closed and keeps its reader lock — which the plain
+    // `for await` this wrapper replaced used to do for us.
+    await iterator.return?.().catch(() => {});
   }
 }
 

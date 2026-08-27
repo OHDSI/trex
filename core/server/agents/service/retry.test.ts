@@ -3,6 +3,8 @@ import { APICallError, RetryError } from "ai";
 import {
   classifyModelError,
   INITIAL_RETRY_DELAY_MS,
+  COMPACTION_MAX_ATTEMPTS,
+  COMPACTION_MAX_RETRY_DELAY_MS,
   MAX_MODEL_ATTEMPTS,
   MAX_RETRY_DELAY_MS,
   retryDelayMs,
@@ -314,4 +316,140 @@ Deno.test("an abandoned attempt's stream is closed before the next one opens", a
 
   await drain(stream);
   assertEquals(returned, 1);
+});
+
+Deno.test("replay closes the underlying stream when the consumer throws out of its loop", async () => {
+  const clock = fakeClock();
+  let returned = 0;
+  const parts: Part[] = [
+    { type: "text-delta", text: "partial" },
+    { type: "error", error: apiError(429) },
+  ];
+  let i = 0;
+
+  const stream = await streamWithModelRetry<Part>(() => ({
+    fullStream: {
+      [Symbol.asyncIterator]: () => ({
+        next: () =>
+          Promise.resolve(
+            i < parts.length
+              ? { done: false, value: parts[i++] as Part }
+              : { done: true, value: undefined as unknown as Part },
+          ),
+        return: () => (returned++, Promise.resolve({ done: true as const, value: undefined as unknown as Part })),
+      }),
+    },
+  }), { sleep: clock.sleep });
+
+  // Mirrors runner.ts: its loop THROWS on the error part rather than
+  // returning, which is the path that used to leave the reader lock held.
+  await assertRejects(async () => {
+    for await (const p of stream) {
+      if (p.type === "error") throw new Error("turn failed");
+    }
+  });
+  assertEquals(returned, 1, "the underlying fullStream must be closed");
+});
+
+// --- abort during backoff ---------------------------------------------------
+
+Deno.test("an abort landing DURING the backoff ends the wait instead of sleeping it out", async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  let entered = false;
+
+  // A sleep that never settles on its own: only the abort can end this wait,
+  // so the test hangs if withModelRetry merely checks the flag either side.
+  const neverSleep = () =>
+    new Promise<void>(() => {
+      entered = true;
+    });
+
+  const pending = assertRejects(() =>
+    withModelRetry(() => {
+      attempts++;
+      return Promise.reject(apiError(429));
+    }, { sleep: neverSleep, signal: controller.signal })
+  );
+
+  // Let the first attempt fail and enter the wait, then stop the turn.
+  await new Promise((r) => setTimeout(r, 0));
+  controller.abort();
+  await pending;
+
+  assertEquals(attempts, 1, "a stopped turn must not open a second request");
+  assertEquals(entered, true, "sanity: the wait really was entered");
+});
+
+Deno.test("an already-aborted signal skips the wait entirely", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const waits: number[] = [];
+  let attempts = 0;
+  await assertRejects(() =>
+    withModelRetry(() => {
+      attempts++;
+      return Promise.reject(apiError(429));
+    }, { sleep: (ms) => (waits.push(ms), Promise.resolve()), signal: controller.signal })
+  );
+  assertEquals(attempts, 1);
+  assertEquals(waits, []);
+});
+
+// --- budgets and commit -----------------------------------------------------
+
+Deno.test("the compaction budget is smaller than the turn loop's on both axes", async () => {
+  // The numbers themselves, so a change to either has to be deliberate.
+  assertEquals(COMPACTION_MAX_ATTEMPTS, 2);
+  assertEquals(COMPACTION_MAX_RETRY_DELAY_MS, 5_000);
+  assert(COMPACTION_MAX_ATTEMPTS < MAX_MODEL_ATTEMPTS);
+  assert(COMPACTION_MAX_RETRY_DELAY_MS < MAX_RETRY_DELAY_MS);
+
+  // And that the cap is applied, not merely declared.
+  assertEquals(retryDelayMs(4), 40_000);
+  assertEquals(retryDelayMs(4, COMPACTION_MAX_RETRY_DELAY_MS), 5_000);
+
+  const waits: number[] = [];
+  let attempts = 0;
+  await assertRejects(() =>
+    withModelRetry(() => {
+      attempts++;
+      return Promise.reject(apiError(429));
+    }, {
+      sleep: (ms) => (waits.push(ms), Promise.resolve()),
+      maxAttempts: COMPACTION_MAX_ATTEMPTS,
+      maxDelayMs: COMPACTION_MAX_RETRY_DELAY_MS,
+    })
+  );
+  // One retry, one 5s wait — about 5s of added turn-start latency, not 75s.
+  assertEquals(attempts, 2);
+  assertEquals(waits, [5_000]);
+});
+
+Deno.test("onCommit fires exactly once when an attempt is sealed, never for an abandoned one", async () => {
+  const clock = fakeClock();
+  let commits = 0;
+  let starts = 0;
+
+  const stream = await streamWithModelRetry<Part>(() => {
+    starts++;
+    if (starts === 1) return streamOf([{ type: "start" }, { type: "error", error: apiError(429) }]);
+    return streamOf([{ type: "start" }, { type: "text-delta", text: "hi" }, { type: "finish" }]);
+  }, { sleep: clock.sleep, onCommit: () => commits++ });
+
+  assertEquals(commits, 1, "only the surviving attempt commits");
+  await drain(stream);
+  assertEquals(commits, 1, "draining must not commit again");
+});
+
+Deno.test("onCommit does not fire when the whole retry budget is spent", async () => {
+  const clock = fakeClock();
+  let commits = 0;
+  await assertRejects(() =>
+    streamWithModelRetry<Part>(
+      () => streamOf([{ type: "error", error: apiError(429) }]),
+      { sleep: clock.sleep, onCommit: () => commits++ },
+    )
+  );
+  assertEquals(commits, 0);
 });

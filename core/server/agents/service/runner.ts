@@ -10,7 +10,7 @@ import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { buildSdkTools, resolveInstructions, resolveUserMessage } from "./toolset.ts";
-import { type ModelRetryOpts, retryEmitter, streamWithModelRetry } from "./retry.ts";
+import { classifyModelError, type ModelRetryOpts, retryEmitter, streamWithModelRetry } from "./retry.ts";
 import type { ConnectionProviderOpts } from "../connections/provider.ts";
 import type { SpawnCapabilities } from "./spawn.ts";
 
@@ -93,21 +93,56 @@ interface RunTurnOpts {
 // is executing lands only once that call returns and the next step's
 // prepareStep runs; a message sent after the turn's FINAL step has already
 // started is never read at all.
+//
+// Returns the callback together with a `commit()`, because the drain is
+// DESTRUCTIVE and the turn's model call can now be RETRIED (retry.ts).
+// takeFollowUps is a DELETE ... RETURNING: once a row is drained the queue no
+// longer holds it. A retry builds a FRESH streamText, so this callback runs
+// again — against a queue the abandoned attempt already emptied — while the
+// `messages` array the retried request closes over never had the row either.
+// Without the buffer below the message is gone from the database AND absent
+// from the replayed prompt, after spawn.ts's sendToChild already told the
+// sender it was queued: silently destroyed, in precisely the
+// fan-out-hits-a-429 scenario the retry layer exists for. Note the retry
+// contract itself is defined over stream PARTS and this side effect happens
+// before the first part exists, which is why it needs handling of its own.
 export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStore, "takeFollowUps"> }) {
-  return async ({ messages }: { messages: any[] }) => {
+  // Rows taken OUT of the database but not yet known to have reached the
+  // model. Held until commit() reports the carrying attempt can no longer be
+  // abandoned.
+  let carried: string[] = [];
+
+  const prepareStep = async ({ messages }: { messages: any[] }) => {
     const pending = await deps.store.takeFollowUps(deps.sessionId);
-    if (pending.length === 0) return {}; // no override: leave the step untouched
     // Only the text matters here. A row's origin (V10) answers "did a CHILD
     // cause the next turn?", and mid-turn delivery creates no turn at all —
     // nor could a child's own queue carry one: agent_send is the only thing
     // that writes to it, and it never names an origin.
+    if (pending.length > 0) carried = [...carried, ...pending.map((p) => p.message)];
+    if (carried.length === 0) return {}; // no override: leave the step untouched
     return {
       messages: [
         ...messages,
-        ...pending.map((p) => ({ role: "user" as const, content: p.message })),
+        ...carried.map((content) => ({ role: "user" as const, content })),
       ],
     };
   };
+
+  /**
+   * The stream produced something the turn acted on, so the attempt carrying
+   * these messages can no longer be abandoned — they really did reach the
+   * model. Called by runTurn once streamWithModelRetry seals an attempt.
+   *
+   * Clearing here is also what keeps the common multi-step case unchanged: by
+   * the time step 2's prepareStep runs, step 1 has necessarily emitted a
+   * committing part, so the buffer is empty again and only genuinely NEW
+   * arrivals are injected — never a second copy of step 1's.
+   */
+  const commit = () => {
+    carried = [];
+  };
+
+  return { prepareStep, commit };
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {
@@ -177,6 +212,12 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // withSystemCachePoint) the high-value cache target the brief calls for;
   // per-turn `messages` are deliberately left uncached since they change
   // every turn.
+  // Built ONCE and hoisted out of startStream, unlike everything else in the
+  // request: it owns a buffer of follow-ups drained from the database but not
+  // yet delivered, and rebuilding it per attempt would reset that buffer to
+  // empty and destroy them. See makePrepareStep.
+  const prep = opts.depth === 1 ? makePrepareStep({ sessionId: opts.sessionId, store: opts.store }) : undefined;
+
   // A factory, not a value: streamWithModelRetry calls it again for each
   // retry, and a streamText result is single-use. Every argument it closes
   // over is already resolved above and identical across attempts, so a retried
@@ -210,7 +251,18 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
       // own no-op path to be cheap enough. `opts.depth` is already derived once
       // per turn by handler.ts's startTurn (store.isChildSession) — reusing it
       // here costs nothing extra.
-      ...(opts.depth === 1 ? { prepareStep: makePrepareStep({ sessionId: opts.sessionId, store: opts.store }) } : {}),
+      ...(prep ? { prepareStep: prep.prepareStep } : {}),
+      // ai's default onError console.errors EVERY stream failure, including
+      // the attempts retry.ts is about to abandon — so a 429 that recovered on
+      // attempt 2 still printed a stack trace that reads like a failed turn.
+      // Retryable ones are therefore left to the model.retrying event (and, if
+      // the budget runs out, to withModelRetry's own giving-up log); a
+      // TERMINAL error keeps its diagnostic, because the turn really is ending
+      // and the persisted error step alone is not something an operator sees.
+      onError: ({ error }: { error: unknown }) => {
+        if (classifyModelError(error).retryable) return;
+        console.error("agents: model stream error:", error);
+      },
     });
 
   // Retry a 429/5xx/connection refusal on the way IN — see retry.ts for the
@@ -229,6 +281,8 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   try {
     fullStream = await streamWithModelRetry(startStream, {
       onRetry: retryEmitter(emit, { turnId, phase: "turn" }),
+      // Tells the follow-up buffer its messages really did reach the model.
+      onCommit: prep?.commit,
       sleep: opts.retrySleep,
       signal: opts.abortSignal,
     });

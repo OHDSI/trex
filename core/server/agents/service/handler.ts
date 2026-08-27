@@ -5,7 +5,13 @@ import type { LoadedAgent } from "../loader.ts";
 import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
-import { type ModelRetryOpts, retryEmitter, withModelRetry } from "./retry.ts";
+import {
+  COMPACTION_MAX_ATTEMPTS,
+  COMPACTION_MAX_RETRY_DELAY_MS,
+  type ModelRetryOpts,
+  retryEmitter,
+  withModelRetry,
+} from "./retry.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
 import { buildSdkTools, buildSystemPrompt, resolveInstructions, restrictChildSkills, restrictChildTools } from "./toolset.ts";
 import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
@@ -627,6 +633,13 @@ function startTurn(
               // Turn-agnostic: compaction runs before addTurn, so there is no
               // turnId to attach yet (see events.ts's model.retrying).
               onRetry: retryEmitter((e) => publish(sessionId, e), { phase: "compaction" }),
+              // A SMALLER budget than the turn loop's, on purpose: this call
+              // sits before addTurn, so its backoff is turn-start latency the
+              // user waits through — and unlike the turn loop it has a
+              // fallback that reaches a usable outcome immediately. See the
+              // constants' own comment in retry.ts.
+              maxAttempts: COMPACTION_MAX_ATTEMPTS,
+              maxDelayMs: COMPACTION_MAX_RETRY_DELAY_MS,
               sleep: deps.retrySleep,
             }),
           // The spec's error table requires a warning EVENT when summarization
@@ -1630,12 +1643,20 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           // straightforwardly right.
           //
           // /chat is the opposite on both counts. It is a synchronous
-          // browser-facing stream, and it is stateless BY DEFINITION (history
-          // comes from the client — see this route's own header comment), so
-          // a client retry is immediate, cheap, and loses nothing: the caller
+          // browser-facing stream, and the CONVERSATION it sends the model
+          // comes from the client, not from the database (this route does
+          // create a session and turn row, and persists a final text step, but
+          // purely for observability — it never reads either back). So a
+          // client retry is immediate, cheap, and loses nothing: the caller
           // still holds every message it would re-post. Retrying here would
           // trade a fast failure for a browser connection that hangs through
           // the whole backoff schedule and may still fail at the end of it.
+          //
+          // What a 429 here DOES leave behind is the turn row above, stuck
+          // `running` — onFinish never fires, so finishTurn is never called.
+          // That is pre-existing and already handled: the stale-turn sweep
+          // (service/sweep.ts) reaps it after STALE_TURN_MS. Retrying would
+          // only hold that row open longer.
           //
           // One caveat worth knowing before "improving" this: the failure IS
           // surfaced to the client (as a UIMessage error part, which is what

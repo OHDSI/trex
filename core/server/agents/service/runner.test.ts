@@ -980,7 +980,7 @@ Deno.test("a single-step turn's lastStepInputTokens equals its only step's prefi
 
 Deno.test("makePrepareStep injects a pending follow-up before the next step", async () => {
   const drained: string[] = [];
-  const prepare = makePrepareStep({
+  const { prepareStep: prepare } = makePrepareStep({
     sessionId: "c-1",
     store: {
       takeFollowUps: (sid: string) => {
@@ -997,7 +997,7 @@ Deno.test("makePrepareStep injects a pending follow-up before the next step", as
 });
 
 Deno.test("makePrepareStep leaves messages untouched when nothing is pending", async () => {
-  const prepare = makePrepareStep({
+  const { prepareStep: prepare } = makePrepareStep({
     sessionId: "c-1",
     store: { takeFollowUps: () => Promise.resolve([]) },
   });
@@ -1241,4 +1241,89 @@ Deno.test("runTurn does NOT retry a 429 that arrives after text was already emit
   assertEquals(starts, 1);
   assertEquals(waits, []);
   assertEquals(events.filter((e) => e.type === "message.appended").length, 1);
+});
+
+// The retry contract is defined over stream PARTS, but prepareStep fires
+// BEFORE any part exists — and for a child turn it is DESTRUCTIVE
+// (takeFollowUps is a DELETE ... RETURNING). An abandoned attempt therefore
+// takes the row out of the queue and then throws away the prompt it was
+// injected into. Without makePrepareStep's carry-across buffer the message is
+// gone from both the database and the retried request, while sendToChild has
+// already told the sender it was queued.
+Deno.test("a retried child turn still delivers a follow-up the abandoned attempt drained", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      // DELETE ... RETURNING: only the FIRST drain ever sees the row.
+      return Promise.resolve(
+        drains === 1 ? [{ message: "stop and summarize", originChildSessionId: null }] : [],
+      );
+    },
+  };
+
+  // capturingModel records each doStream call's options, so the assertions
+  // below read the prompt the model was ACTUALLY handed on each attempt.
+  const { model, calls } = capturingModel([{ type: "error", error: rateLimited() }], textChunks("ok"));
+  const waits: number[] = [];
+  const res = await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+    retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+  });
+
+  assertEquals(res.text, "ok");
+  assertEquals(waits, [5_000], "the 429 must have been retried");
+  assertEquals(calls.length, 2, "the model must have been called twice");
+  assertEquals(drains, 2, "the retried attempt runs prepareStep again");
+  assert(
+    JSON.stringify(calls[0]?.prompt).includes("stop and summarize"),
+    "sanity: the first attempt did receive the follow-up",
+  );
+  // The queue is empty by now, so ONLY the carry-across buffer can put the
+  // message in front of the model on the second attempt.
+  assert(
+    JSON.stringify(calls[1]?.prompt).includes("stop and summarize"),
+    "the drained follow-up never reached the model on the retry: " + JSON.stringify(calls[1]?.prompt),
+  );
+});
+
+// The buffer must not turn "delivered once" into "delivered every step".
+// Worth pinning because the two facts that make it safe are both non-obvious:
+// a committing part from step 1 clears the buffer before step 2 prepareStep
+// runs, AND ai@6 per-step "messages" override does NOT persist into later
+// steps (verified here - step 2 prompt is the SDK own accumulated
+// conversation, with no trace of step 1 override). So the message reaches the
+// model exactly once, which is the pre-existing semantic the carry-across
+// buffer had to preserve rather than change.
+Deno.test("a follow-up delivered to one step is not re-injected into the next", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      return Promise.resolve(
+        drains === 1 ? [{ message: "wrap up now", originChildSessionId: null }] : [],
+      );
+    },
+  };
+  const { model, calls } = capturingModel(toolCallChunks("echo", { text: "hi" }), textChunks("done"));
+
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+
+  assert(drains >= 2, "prepareStep runs before each step");
+  const per = calls.map((c) => JSON.stringify(c?.prompt ?? c).split("wrap up now").length - 1);
+  const total = per.reduce((a: number, b: number) => a + b, 0);
+  assertEquals(total, 1, "the follow-up must reach the model exactly once across the turn, got " + per);
+  assertEquals(per[0], 1, "and it must be the step it was injected into that carried it");
 });
