@@ -696,3 +696,34 @@ Deno.test("agent_stop is not registered when the session disallows detached chil
   const tools = await buildSdkTools(ctx as never);
   assertEquals(tools.agent_stop, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Task 12 (2026-08-27-agent-orchestration): agent_send. Delivers a message
+// into an already-running child's turn — there is no "next turn" to queue it
+// for (see runner.ts's makePrepareStep). See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-12-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_send reports delivered:true for a running child", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, sendToChild: (_id: string, _msg: string) => Promise.resolve({ delivered: true }) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_send.execute({ agent_id: "c-1", message: "hi" }, {} as never);
+  assertEquals(out, { delivered: true });
+});
+
+Deno.test("agent_send reports delivered:false for a finished child", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, sendToChild: (_id: string, _msg: string) => Promise.resolve({ delivered: false }) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_send.execute({ agent_id: "c-1", message: "hi" }, {} as never);
+  assertEquals(out, { delivered: false });
+});
+
+Deno.test("agent_send is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_send, undefined);
+});

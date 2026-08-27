@@ -121,9 +121,6 @@ export interface SpawnDeps {
   ): void | Promise<void>;
 }
 
-const NOT_IMPLEMENTED = (name: string) => (): Promise<never> =>
-  Promise.reject(new Error(`agents: SpawnCapabilities.${name} is not implemented yet`));
-
 export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
   const { store, sessionId: parentSessionId, turnId: parentTurnId, plugin, agent, config } = deps;
 
@@ -258,6 +255,21 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
       }
       return child.status;
     },
-    sendToChild: NOT_IMPLEMENTED("sendToChild"),
+    // Ownership resolved through the parent-scoped store.getChild, same as
+    // awaitChild/stopChild — a foreign or unknown agent id comes back null
+    // and is indistinguishable from "not delivered", never a thrown error.
+    // A child has exactly one turn (see runner.ts's makePrepareStep), so
+    // `running` is the only status a message can still reach — anything
+    // else means the turn already ended and there is no later turn for a
+    // queued message to ride into.
+    async sendToChild(agentId: string, message: string): Promise<{ delivered: boolean }> {
+      const child = await store.getChild(agentId, parentSessionId);
+      // Not an error: a finished (or foreign) child simply cannot receive
+      // anything, and the model needs to learn that from the return value
+      // rather than assume delivery landed.
+      if (!child || child.status !== "running") return { delivered: false };
+      await store.queueFollowUp(agentId, message);
+      return { delivered: true };
+    },
   };
 }

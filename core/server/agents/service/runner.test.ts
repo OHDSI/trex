@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { runTurn } from "./runner.ts";
+import { runTurn, makePrepareStep } from "./runner.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
@@ -962,4 +962,82 @@ Deno.test("a single-step turn's lastStepInputTokens equals its only step's prefi
   assert(finish, "no finish step was persisted");
   assertEquals(finish.usage.lastStepInputTokens, 4_242);
   assertEquals(finish.usage.inputTokens, 4_242);
+});
+
+// ---------------------------------------------------------------------------
+// Task 12 (2026-08-27-agent-orchestration): agent_send / prepareStep. A child
+// has exactly ONE turn, so a message queued for it (spawn.ts's sendToChild)
+// is only meaningful DURING that turn — prepareStep is the only hook that
+// runs BETWEEN steps of an already-streaming turn. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-12-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("makePrepareStep injects a pending follow-up before the next step", async () => {
+  const drained: string[] = [];
+  const prepare = makePrepareStep({
+    sessionId: "c-1",
+    store: {
+      takeFollowUps: (sid: string) => {
+        drained.push(sid);
+        return Promise.resolve(["stop and summarize"]);
+      },
+    },
+  });
+  const out = await prepare({ messages: [{ role: "user", content: "go" }] } as never);
+  assertEquals(drained, ["c-1"]);
+  const msgs = (out as { messages: unknown[] }).messages;
+  assertEquals(msgs.length, 2);
+  assert(JSON.stringify(msgs[1]).includes("stop and summarize"));
+});
+
+Deno.test("makePrepareStep leaves messages untouched when nothing is pending", async () => {
+  const prepare = makePrepareStep({
+    sessionId: "c-1",
+    store: { takeFollowUps: () => Promise.resolve([]) },
+  });
+  const out = await prepare({ messages: [{ role: "user", content: "go" }] } as never);
+  assertEquals(out, {});
+});
+
+Deno.test("runTurn wires prepareStep to drain a child session's pending follow-ups between steps", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const drainCalls: number[] = [];
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drainCalls.push(drainCalls.length);
+      // Nothing pending before step 1; a message lands before step 2.
+      return Promise.resolve(drainCalls.length === 1 ? [] : ["please wrap up now"]);
+    },
+  };
+  const { model, calls } = capturingModel(toolCallChunks("echo", { text: "hi" }), textChunks("done"));
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+  assert(drainCalls.length >= 2, "prepareStep should run before each step of a child's turn");
+  const secondCallPrompt = JSON.stringify(calls[1]?.prompt ?? calls[1]);
+  assert(secondCallPrompt.includes("please wrap up now"), "the pending follow-up should reach the model's next step");
+});
+
+Deno.test("runTurn never calls takeFollowUps for a top-level (non-child) turn — the hot-path cost note", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let called = false;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      called = true;
+      return Promise.resolve([]);
+    },
+  };
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hi", store: wrapped as never, emit: () => {},
+    model: sequencedModel(textChunks("ok")),
+    // depth omitted entirely — the overwhelmingly common (top-level) case.
+  });
+  assertEquals(called, false, "a top-level turn must not query the follow-up queue at all");
 });

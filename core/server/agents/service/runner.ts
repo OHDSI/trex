@@ -65,6 +65,35 @@ interface RunTurnOpts {
   depth?: number;
 }
 
+// A child has exactly ONE turn, so a message queued for it (spawn.ts's
+// sendToChild / the agent_send tool) is only meaningful DURING that turn —
+// there is no "next turn" for it to ride into the way an ordinary session's
+// queueFollowUp does (handler.ts's startTurn drains that queue at the START
+// of a turn). prepareStep is the only AI SDK hook that runs BETWEEN steps of
+// an already-streaming turn, and PrepareStepResult permits a per-step
+// `messages` override (verified against the installed ai's index.d.ts:
+// PrepareStepFunction/PrepareStepResult) — returning one here is what makes
+// mid-turn delivery possible at all.
+//
+// Two consequences, both accepted (see spawn.ts's sendToChild, which reports
+// whether the child was still `running` when it queued the message, not
+// whether it was ever actually read): a message sent while a long tool call
+// is executing lands only once that call returns and the next step's
+// prepareStep runs; a message sent after the turn's FINAL step has already
+// started is never read at all.
+export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStore, "takeFollowUps"> }) {
+  return async ({ messages }: { messages: any[] }) => {
+    const pending = await deps.store.takeFollowUps(deps.sessionId);
+    if (pending.length === 0) return {}; // no override: leave the step untouched
+    return {
+      messages: [
+        ...messages,
+        ...pending.map((content) => ({ role: "user" as const, content })),
+      ],
+    };
+  };
+}
+
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {
   const { agent, store, emit, turnId } = opts;
   // opts.model is a test/deps override and always wins; otherwise resolution
@@ -142,6 +171,14 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     // TOOLS+SYSTEM prefix routed to the same cache across turns. No-op ({}) for
     // bedrock/anthropic (they cache via withSystemCachePoint's markers above).
     providerOptions: cacheProviderOptions(model, agent.dir),
+    // Only wired for a CHILD turn (depth===1). prepareStep runs on every
+    // step of every turn if it's set at all — leaving it undefined for the
+    // overwhelming majority (top-level) case means zero DB round trips for
+    // a feature only children use, rather than relying on makePrepareStep's
+    // own no-op path to be cheap enough. `opts.depth` is already derived once
+    // per turn by handler.ts's startTurn (store.isChildSession) — reusing it
+    // here costs nothing extra.
+    ...(opts.depth === 1 ? { prepareStep: makePrepareStep({ sessionId: opts.sessionId, store: opts.store }) } : {}),
   });
 
   let text = "";

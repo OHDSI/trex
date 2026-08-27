@@ -433,6 +433,7 @@ const BUILTIN_AGENT_SPAWN_DEF: ToolDef = { description: "Start a subagent and re
 const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List subagents you have started (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_WAIT_DEF: ToolDef = { description: "Wait for a subagent to finish (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_STOP_DEF: ToolDef = { description: "Stop a subagent you started (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_SEND_DEF: ToolDef = { description: "Send a message to a running subagent (built-in).", inputSchema: { type: "object" } };
 
 // Caps a tool's output so no single call can push an unbounded blob into
 // agents.steps or the model's context. Applied in buildSdkTools (core
@@ -711,6 +712,28 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
         filterDefs.agent_stop = BUILTIN_AGENT_STOP_DEF;
       } else {
         console.log("agents: a tool named \"agent_stop\" overrides the built-in agent_stop tool");
+      }
+
+      if (!out.agent_send) {
+        out.agent_send = tool({
+          description: "Send a message to a subagent you started, while it is still running. There is no " +
+            "\"next turn\" to queue it for — a message sent after the subagent finishes is never read.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              agent_id: { type: "string" },
+              message: { type: "string" },
+            },
+            required: ["agent_id", "message"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_id, message } = input as { agent_id: string; message: string };
+            return await ctx.spawn!.sendToChild(agent_id, message);
+          },
+        });
+        filterDefs.agent_send = BUILTIN_AGENT_SEND_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_send\" overrides the built-in agent_send tool");
       }
     }
   }

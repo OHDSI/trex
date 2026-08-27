@@ -153,22 +153,53 @@ Deno.test("listChildren delegates to the parent-scoped store method", async () =
 });
 
 // ---------------------------------------------------------------------------
-// Stubs for capabilities filled in by later tasks — must fail loudly, never
-// silently no-op, so a mis-wired caller (e.g. a tool reaching for stopChild
-// before Task 11 lands) cannot mistake a throw-away no-op for a real result.
-// waitForChildren is implemented as of Task 10 — see its own tests below.
+// Task 12 (2026-08-27-agent-orchestration): agent_send / sendToChild. A
+// child has exactly ONE turn, so delivery is only meaningful while it is
+// still `running` — see runner.ts's makePrepareStep, which is what actually
+// drains what this queues. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-12-brief.md.
 // ---------------------------------------------------------------------------
 
-Deno.test("sendToChild throws a clear not-implemented error", async () => {
-  const { deps } = fakeDeps();
+Deno.test("sendToChild queues a follow-up and reports delivered for a running child", async () => {
+  const queued: unknown[] = [];
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "running" }),
+      queueFollowUp: (sessionId: string, text: string) => {
+        queued.push({ sessionId, text });
+        return Promise.resolve();
+      },
+    },
+  });
   // deno-lint-ignore no-explicit-any
   const caps = createSpawnCapabilities(deps as any);
-  await caps.sendToChild("c-1", "hi").then(
-    () => {
-      throw new Error("expected a throw");
+  const out = await caps.sendToChild("c-1", "wrap it up");
+  assertEquals(out, { delivered: true });
+  assertEquals(queued, [{ sessionId: "c-1", text: "wrap it up" }]);
+});
+
+Deno.test("sendToChild reports not-delivered for a finished child, without queueing anything", async () => {
+  const queued: unknown[] = [];
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "completed" }),
+      queueFollowUp: () => {
+        queued.push(true);
+        return Promise.resolve();
+      },
     },
-    (e: Error) => assert(e.message.toLowerCase().includes("not implemented"), e.message),
-  );
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.sendToChild("c-1", "hi"), { delivered: false });
+  assertEquals(queued.length, 0, "a finished child must not have anything queued for it");
+});
+
+Deno.test("sendToChild reports not-delivered for an unknown/foreign child id", async () => {
+  const { deps } = fakeDeps({ store: { getChild: () => Promise.resolve(null) } });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.sendToChild("someone-elses-child", "hi"), { delivered: false });
 });
 
 // ---------------------------------------------------------------------------
