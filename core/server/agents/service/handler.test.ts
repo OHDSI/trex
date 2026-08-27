@@ -4031,13 +4031,13 @@ Deno.test("a running child registers an abort controller, and an aborted child's
   // as the woken turn that already drained it — both are "notified"; what
   // must never happen is neither.
   //
-  // The woken turn itself logs an AI_InvalidPromptError here. That is NOT
-  // this test's subject and not a fault in the abort path: context/history.ts
-  // (from #275, already on develop) replays a tool-result's `output` as a
-  // bare string, while ai@6's ToolResultPart requires
-  // `{type:"text"|"json", value}` — so ANY turn that follows a turn which
-  // called a tool is rejected by standardizePrompt before the model is
-  // reached. This test is simply the first to drive that shape.
+  // This test used to log an AI_InvalidPromptError from the woken turn:
+  // context/history.ts (from #275) replayed a tool-result's `output` as a
+  // bare string, while ai@6's ToolResultPart requires the tagged
+  // `{type:"text"|"json", value}` union, so ANY turn following one that
+  // called a tool was rejected by standardizePrompt before the model was
+  // reached. history.ts now tags it (see context/history.test.ts's
+  // model-acceptance tests, which fail if that regresses).
   const notified = db.followUps.some((f) => f.session_id === parentId && f.message.includes("aborted")) ||
     db.turns.some((t) => t.session_id === parentId && JSON.stringify(t.message).includes("aborted"));
   assert(

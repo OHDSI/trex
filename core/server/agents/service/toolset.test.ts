@@ -282,8 +282,9 @@ Deno.test("wrapToolWithCap: a capped result is NOT re-truncated by assembleHisto
     ],
   }], config);
 
-  const result = msgs.find((m) => m.role === "tool") as { content: Array<{ output: unknown }> };
-  const assembled = result.content[0].output as string;
+  const result = msgs.find((m) => m.role === "tool") as { content: Array<{ output: { type: string; value: unknown } }> };
+  assertEquals(result.content[0].output.type, "text", "a string tool result must replay as tagged text");
+  const assembled = result.content[0].output.value as string;
   assertEquals(assembled, stored, "assembleHistory truncated an already-capped value a second time");
 
   // Exactly one header, and it reports the TRUE original length.
