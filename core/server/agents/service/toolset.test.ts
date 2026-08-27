@@ -661,12 +661,19 @@ Deno.test("agent_spawn/agent_list are not registered when the session disallows 
 });
 
 // ---------------------------------------------------------------------------
-// Task 10 (2026-08-27-agent-orchestration): agent_wait. A mailbox wait, not a
-// join — reports WHICH children finished, never their content. See
-// .superpowers/sdd/2026-08-27-agent-orchestration/task-10-brief.md.
+// Task 10 (2026-08-27-agent-orchestration): agent_wait.
+//
+// It USED to be a pure mailbox wait, reporting which children finished and
+// never their content — which left no tool anywhere in the runtime that could
+// return a child's output. agent_list carries metadata only, and
+// deliverChildResult's queued followup can only ever land on a LATER parent
+// turn, whereas a parent sitting inside agent_wait always has a running turn.
+// A parent could learn WHICH child finished and never WHAT it produced.
+// agent_wait now carries the result, and agent_result reads one back on
+// demand.
 // ---------------------------------------------------------------------------
 
-Deno.test("agent_wait reports a finished child's status without its content", async () => {
+Deno.test("agent_wait returns a finished child's OUTPUT, not just its status", async () => {
   const ctx = fakeToolCtx({
     spawn: {
       allowDetached: true,
@@ -674,12 +681,55 @@ Deno.test("agent_wait reports a finished child's status without its content", as
         Promise.resolve([
           { agentId: "c-1", nickname: "Kepler", status: "completed", subagent: null, startedAt: new Date(), detached: true },
         ]),
+      readChildResult: (id: string) => Promise.resolve(id === "c-1" ? { text: "found three bugs" } : null),
     },
   });
   const tools = await buildSdkTools(ctx as never);
   const out = await tools.agent_wait.execute({}, {} as never) as { updated: unknown[]; timedOut: boolean };
-  assertEquals(out.updated, [{ agentId: "c-1", nickname: "Kepler", status: "completed" }]);
+  assertEquals(out.updated, [{
+    agentId: "c-1",
+    nickname: "Kepler",
+    status: "completed",
+    result: "found three bugs",
+  }]);
   assertEquals(out.timedOut, false);
+});
+
+Deno.test("agent_wait reports a failed child's error rather than a result", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      waitForChildren: () =>
+        Promise.resolve([
+          { agentId: "c-2", nickname: "Faraday", status: "failed", subagent: null, startedAt: new Date(), detached: true },
+        ]),
+      readChildResult: () => Promise.resolve({ error: "model refused" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_wait.execute({}, {} as never) as { updated: Array<Record<string, unknown>> };
+  assertEquals(out.updated[0].error, "model refused");
+  assertEquals(out.updated[0].result, undefined);
+});
+
+Deno.test("agent_result returns a finished child's text, and { running: true } while it is not done", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      readChildResult: (id: string) => Promise.resolve(id === "done" ? { text: "the answer" } : null),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(await tools.agent_result.execute({ agent_id: "done" }, {} as never), { text: "the answer" });
+  // null covers "still running" AND "not yours / unknown", deliberately
+  // indistinguishable — same posture as every other id-taking spawn path.
+  assertEquals(await tools.agent_result.execute({ agent_id: "other" }, {} as never), { running: true });
+});
+
+Deno.test("agent_result is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_result, undefined);
 });
 
 Deno.test("agent_wait reports an empty list (not an error) on timeout", async () => {

@@ -505,6 +505,7 @@ const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection
 const BUILTIN_AGENT_SPAWN_DEF: ToolDef = { description: "Start a subagent and return immediately (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List subagents you have started (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_WAIT_DEF: ToolDef = { description: "Wait for a subagent to finish (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_RESULT_DEF: ToolDef = { description: "Read a finished subagent's output (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_STOP_DEF: ToolDef = { description: "Stop a subagent you started (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_SEND_DEF: ToolDef = { description: "Send a message to a running subagent (built-in).", inputSchema: { type: "object" } };
 
@@ -741,9 +742,9 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
 
       if (!out.agent_wait) {
         out.agent_wait = tool({
-          description: "Wait until one of your subagents finishes. Returns WHICH agents have " +
-            "finished, not their output — read a result with agent_list or wait for it to be " +
-            "delivered. Returns an empty list on timeout; that is not an error.",
+          description: "Wait until one of your subagents finishes. Returns each finished agent " +
+            "together with its OUTPUT (`result`, or `error` if it failed or was stopped). " +
+            "Returns an empty list on timeout; that is not an error.",
           inputSchema: jsonSchema({
             type: "object",
             properties: {
@@ -754,8 +755,22 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
           execute: async (input: unknown): Promise<unknown> => {
             const { agent_ids, timeout_ms } = input as { agent_ids?: string[]; timeout_ms?: number };
             const updated = await ctx.spawn!.waitForChildren(agent_ids ?? null, timeout_ms ?? WAIT_DEFAULT_MS);
+            // The output, not just the notification. deliverChildResult's
+            // queued followup only ever lands on a LATER parent turn, and a
+            // parent sitting inside agent_wait always has a running turn —
+            // so without reading the result here a parent could learn WHICH
+            // child finished but never WHAT it produced within its own turn.
             return {
-              updated: updated.map((c) => ({ agentId: c.agentId, nickname: c.nickname, status: c.status })),
+              updated: await Promise.all(updated.map(async (c) => {
+                const outcome = await ctx.spawn!.readChildResult(c.agentId);
+                return {
+                  agentId: c.agentId,
+                  nickname: c.nickname,
+                  status: c.status,
+                  ...(outcome && "text" in outcome ? { result: outcome.text } : {}),
+                  ...(outcome && "error" in outcome ? { error: outcome.error } : {}),
+                };
+              })),
               timedOut: updated.length === 0,
             };
           },
@@ -765,9 +780,37 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
         console.log("agents: a tool named \"agent_wait\" overrides the built-in agent_wait tool");
       }
 
+      if (!out.agent_result) {
+        out.agent_result = tool({
+          description: "Read what one of your subagents produced. Only a FINISHED subagent has a " +
+            "result; one that is still running returns { running: true }. Use agent_list to see " +
+            "which of your subagents have finished.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: { agent_id: { type: "string" } },
+            required: ["agent_id"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_id } = input as { agent_id: string };
+            const outcome = await ctx.spawn!.readChildResult(agent_id);
+            // null covers both "still running" and "not yours / unknown" —
+            // the same deliberate indistinguishability every other id-taking
+            // spawn path has (see spawn.ts's ownership comments).
+            if (!outcome) return { running: true };
+            return outcome;
+          },
+        });
+        filterDefs.agent_result = BUILTIN_AGENT_RESULT_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_result\" overrides the built-in agent_result tool");
+      }
+
       if (!out.agent_stop) {
         out.agent_stop = tool({
-          description: "Stop a subagent you started. Returns the status it had when stopped.",
+          description: "Abandon a subagent you started: its turn is marked failed and you will " +
+            "never receive its result. This does NOT interrupt the subagent's worker — it keeps " +
+            "running (and billing) until it finishes on its own, and whatever it produces is then " +
+            "discarded. Returns the status it had when stopped.",
           inputSchema: jsonSchema({
             type: "object",
             properties: { agent_id: { type: "string" } },

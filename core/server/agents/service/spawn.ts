@@ -56,6 +56,19 @@ export interface SpawnCapabilities {
   spawnChild(opts: SpawnChildOpts): Promise<{ agentId: string; nickname: string }>;
   /** Polls until the child's turn reaches a terminal state (see AWAIT_CHILD_*). */
   awaitChild(agentId: string): Promise<{ text: string } | { error: string }>;
+  /**
+   * The OUTPUT of a child that has already finished — the one thing
+   * listChildren (metadata only) and waitForChildren (which agents finished)
+   * deliberately do not carry. Without this there is no way at all for a
+   * parent to see what a detached child produced from inside its own turn:
+   * deliverChildResult's queued followup only lands on a LATER turn, and a
+   * parent sitting in agent_wait always has a running turn, so that followup
+   * is never the thing it is waiting on. Same read-back as awaitChild (which
+   * now goes through this), so blocking and detached delegation report a
+   * given turn identically. `null` for a child that is still running, or one
+   * that is not this parent's.
+   */
+  readChildResult(agentId: string): Promise<{ text: string } | { error: string } | null>;
   listChildren(): Promise<ChildAgent[]>;
   // Whether spawnChild will accept detached: true for THIS parent session.
   // False for an ephemeral, never-revisited session (/chat — see
@@ -128,6 +141,45 @@ export interface SpawnDeps {
   ): void | Promise<void>;
 }
 
+// The outcome of a child whose turn has already reached a terminal state.
+// ChildAgent carries only a display status, not the turn's actual
+// text/error — read those back from the child's own history, which is
+// parent-agnostic (a child never needs an ownership check on its own session
+// id; the CALLER has already resolved ownership through the parent-scoped
+// store.getChild). Shared by awaitChild (blocking delegation) and
+// readChildResult (the detached path) so both report an identical turn
+// identically.
+async function readTerminalOutcome(
+  store: SpawnStore,
+  agentId: string,
+  child: ChildAgent,
+): Promise<{ text: string } | { error: string }> {
+  if (child.status === "stopped") {
+    return { error: `agent "${child.nickname}" was stopped before it finished` };
+  }
+  const turns = await store.getHistory(agentId);
+  const lastTurn = turns[turns.length - 1];
+  const steps = lastTurn?.steps ?? [];
+  const textStep = [...steps].reverse().find((s) => s.kind === "text");
+  const errorStep = [...steps].reverse().find((s) => s.kind === "error");
+
+  if (child.status === "failed") {
+    const message = (errorStep?.payload as { message?: string } | undefined)?.message;
+    return { error: message ?? `agent "${child.nickname}" failed` };
+  }
+  // lastStepText (runner.ts) is step-scoped, matching what a nested
+  // in-process call's own `result.text` always gave — a preamble step
+  // ("Let me check the config...") before a tool call must not leak into a
+  // delegated answer, even if the FINAL step itself produced no text at all
+  // (then this is correctly ""; see runner.ts). `??`, not `||`: an
+  // intentional empty final step must not fall back to the (stale,
+  // earlier-step) `text` field — that fallback is only for a turn persisted
+  // before lastStepText existed at all (field genuinely absent), or a test
+  // fixture that fabricates only `text`.
+  const payload = textStep?.payload as { text?: string; lastStepText?: string } | undefined;
+  return { text: payload?.lastStepText ?? payload?.text ?? "" };
+}
+
 export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
   const { store, sessionId: parentSessionId, turnId: parentTurnId, plugin, agent, config } = deps;
 
@@ -186,36 +238,13 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
         await new Promise((r) => setTimeout(r, AWAIT_CHILD_POLL_MS));
       }
 
-      if (child.status === "stopped") {
-        return { error: `agent "${child.nickname}" was stopped before it finished` };
-      }
+      return await readTerminalOutcome(store, agentId, child);
+    },
 
-      // ChildAgent carries only a display status, not the turn's actual
-      // text/error — read those back from the child's own history, which is
-      // parent-agnostic (a child never needs an ownership check on its own
-      // session id).
-      const turns = await store.getHistory(agentId);
-      const lastTurn = turns[turns.length - 1];
-      const steps = lastTurn?.steps ?? [];
-      const textStep = [...steps].reverse().find((s) => s.kind === "text");
-      const errorStep = [...steps].reverse().find((s) => s.kind === "error");
-
-      if (child.status === "failed") {
-        const message = (errorStep?.payload as { message?: string } | undefined)?.message;
-        return { error: message ?? `agent "${child.nickname}" failed` };
-      }
-      // lastStepText (runner.ts) is step-scoped, matching what a nested
-      // in-process call's own `result.text` always gave — a preamble step
-      // ("Let me check the config...") before a tool call must not leak
-      // into a delegated answer, even if the FINAL step itself produced no
-      // text at all (then this is correctly ""; see runner.ts). `??`, not
-      // `||`: an intentional empty final step must not fall back to the
-      // (stale, earlier-step) `text` field — that fallback is only for a
-      // turn persisted before lastStepText existed at all (field genuinely
-      // absent), or a test fixture that fabricates only `text`.
-      const payload = textStep?.payload as { text?: string; lastStepText?: string } | undefined;
-      const text = payload?.lastStepText ?? payload?.text ?? "";
-      return { text };
+    async readChildResult(agentId: string) {
+      const child = await store.getChild(agentId, parentSessionId);
+      if (!child || child.status === "running") return null;
+      return await readTerminalOutcome(store, agentId, child);
     },
 
     listChildren(): Promise<ChildAgent[]> {
