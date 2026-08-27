@@ -597,3 +597,70 @@ Deno.test("agent_list reports live children with nicknames", async () => {
   assertEquals(out.agents.length, 2);
   assert(JSON.stringify(out.agents).includes("Faraday"));
 });
+
+Deno.test("agent_spawn/agent_list are not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: false,
+      spawnChild: () => Promise.reject(new Error("must not be reachable")),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_spawn, undefined);
+  assertEquals(tools.agent_list, undefined);
+  assert(tools.agent, "the blocking agent tool must still be registered");
+});
+
+// ---------------------------------------------------------------------------
+// Task 10 (2026-08-27-agent-orchestration): agent_wait. A mailbox wait, not a
+// join — reports WHICH children finished, never their content. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-10-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_wait reports a finished child's status without its content", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      waitForChildren: (_ids: unknown, _ms: unknown) =>
+        Promise.resolve([
+          { agentId: "c-1", nickname: "Kepler", status: "completed", subagent: null, startedAt: new Date(), detached: true },
+        ]),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_wait.execute({}, {} as never) as { updated: unknown[]; timedOut: boolean };
+  assertEquals(out.updated, [{ agentId: "c-1", nickname: "Kepler", status: "completed" }]);
+  assertEquals(out.timedOut, false);
+});
+
+Deno.test("agent_wait reports an empty list (not an error) on timeout", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, waitForChildren: () => Promise.resolve([]) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_wait.execute({}, {} as never) as { updated: unknown[]; timedOut: boolean };
+  assertEquals(out.updated, []);
+  assertEquals(out.timedOut, true);
+});
+
+Deno.test("agent_wait passes agent_ids/timeout_ms through to waitForChildren", async () => {
+  const calls: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      waitForChildren: (ids: unknown, ms: unknown) => {
+        calls.push([ids, ms]);
+        return Promise.resolve([]);
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  await tools.agent_wait.execute({ agent_ids: ["c-1"], timeout_ms: 5_000 }, {} as never);
+  assertEquals(calls[0], [["c-1"], 5_000]);
+});
+
+Deno.test("agent_wait is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_wait, undefined);
+});

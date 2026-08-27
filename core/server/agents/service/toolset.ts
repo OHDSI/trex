@@ -16,7 +16,7 @@ import { subscribe } from "./stream.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { partitionTools } from "./context/toolsplit.ts";
-import type { SpawnCapabilities } from "./spawn.ts";
+import { type SpawnCapabilities, WAIT_DEFAULT_MS, WAIT_MAX_MS } from "./spawn.ts";
 
 export interface ToolBuildCtx {
   agent: LoadedAgent;
@@ -431,6 +431,7 @@ const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built
 const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection-backed tools by keyword (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_SPAWN_DEF: ToolDef = { description: "Start a subagent and return immediately (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List subagents you have started (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_WAIT_DEF: ToolDef = { description: "Wait for a subagent to finish (built-in).", inputSchema: { type: "object" } };
 
 // Caps a tool's output so no single call can push an unbounded blob into
 // agents.steps or the model's context. Applied in buildSdkTools (core
@@ -661,6 +662,32 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
         filterDefs.agent_list = BUILTIN_AGENT_LIST_DEF;
       } else {
         console.log("agents: a tool named \"agent_list\" overrides the built-in agent_list tool");
+      }
+
+      if (!out.agent_wait) {
+        out.agent_wait = tool({
+          description: "Wait until one of your subagents finishes. Returns WHICH agents have " +
+            "finished, not their output — read a result with agent_list or wait for it to be " +
+            "delivered. Returns an empty list on timeout; that is not an error.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              agent_ids: { type: "array", items: { type: "string" }, description: "omit to wait on all" },
+              timeout_ms: { type: "number", description: `default ${WAIT_DEFAULT_MS}, max ${WAIT_MAX_MS}` },
+            },
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_ids, timeout_ms } = input as { agent_ids?: string[]; timeout_ms?: number };
+            const updated = await ctx.spawn!.waitForChildren(agent_ids ?? null, timeout_ms ?? WAIT_DEFAULT_MS);
+            return {
+              updated: updated.map((c) => ({ agentId: c.agentId, nickname: c.nickname, status: c.status })),
+              timedOut: updated.length === 0,
+            };
+          },
+        });
+        filterDefs.agent_wait = BUILTIN_AGENT_WAIT_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_wait\" overrides the built-in agent_wait tool");
       }
     }
   }

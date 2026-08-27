@@ -1,7 +1,7 @@
 // Task 6: thread child-spawn capabilities onto ToolBuildCtx. See
 // .superpowers/sdd/2026-08-27-agent-orchestration/task-6-brief.md.
 import { assert, assertEquals } from "jsr:@std/assert";
-import { createSpawnCapabilities } from "./spawn.ts";
+import { createSpawnCapabilities, WAIT_DEFAULT_MS, WAIT_MAX_MS } from "./spawn.ts";
 
 // deno-lint-ignore no-explicit-any
 function fakeDeps(over: Record<string, unknown> = {}) {
@@ -153,18 +153,17 @@ Deno.test("listChildren delegates to the parent-scoped store method", async () =
 
 // ---------------------------------------------------------------------------
 // Stubs for capabilities filled in by later tasks — must fail loudly, never
-// silently no-op, so a mis-wired caller (e.g. a tool reaching for
-// waitForChildren before Task 10 lands) cannot mistake a throw-away no-op
-// for a real result.
+// silently no-op, so a mis-wired caller (e.g. a tool reaching for stopChild
+// before Task 11 lands) cannot mistake a throw-away no-op for a real result.
+// waitForChildren is implemented as of Task 10 — see its own tests below.
 // ---------------------------------------------------------------------------
 
-Deno.test("waitForChildren, stopChild and sendToChild throw a clear not-implemented error", async () => {
+Deno.test("stopChild and sendToChild throw a clear not-implemented error", async () => {
   const { deps } = fakeDeps();
   // deno-lint-ignore no-explicit-any
   const caps = createSpawnCapabilities(deps as any);
   for (
     const call of [
-      () => caps.waitForChildren(null, 1000),
       () => caps.stopChild("c-1"),
       () => caps.sendToChild("c-1", "hi"),
     ]
@@ -283,4 +282,79 @@ Deno.test("awaitChild returns an intentionally-empty lastStepText as-is, not the
   // deno-lint-ignore no-explicit-any
   const caps = createSpawnCapabilities(deps as any);
   assertEquals(await caps.awaitChild("c-1"), { text: "" });
+});
+
+// ---------------------------------------------------------------------------
+// Task 10 (2026-08-27-agent-orchestration): agent_wait / waitForChildren. A
+// mailbox wait, NOT a join — it reports WHICH children reached a terminal
+// state, never their content. See task-10-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_wait returns as soon as one child finishes", async () => {
+  let calls = 0;
+  const { deps } = fakeDeps({
+    store: {
+      listChildren: () => {
+        calls++;
+        return Promise.resolve([
+          { agentId: "c-1", nickname: "Kepler", status: calls > 1 ? "completed" : "running" },
+          { agentId: "c-2", nickname: "Faraday", status: "running" },
+        ]);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  const out = await caps.waitForChildren(null, 5_000);
+  assertEquals(out.length, 1);
+  assertEquals(out[0].nickname, "Kepler");
+});
+
+Deno.test("agent_wait times out without failing the turn", async () => {
+  const { deps } = fakeDeps({
+    store: { listChildren: () => Promise.resolve([{ agentId: "c-1", nickname: "K", status: "running" }]) },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.waitForChildren(null, 150), []);
+});
+
+Deno.test("agent_wait ignores an agent_id from another session (never fetch-then-filter)", async () => {
+  const { deps } = fakeDeps({
+    store: {
+      listChildren: () => Promise.resolve([]),
+      // Parent-scoped getChild returns null for a foreign child — the
+      // ownership check IS the query, never a JS filter over a wider result.
+      getChild: () => Promise.resolve(null),
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.waitForChildren(["someone-elses-child"], 150), []);
+});
+
+Deno.test("agent_wait resolves explicit agent_ids through the parent-scoped store, not listChildren", async () => {
+  const { deps } = fakeDeps({
+    store: {
+      listChildren: () => {
+        throw new Error("must not list all children when specific agent_ids were given");
+      },
+      getChild: (id: string) =>
+        Promise.resolve(id === "c-1" ? { agentId: "c-1", nickname: "Kepler", status: "completed" } : null),
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  const out = await caps.waitForChildren(["c-1"], 5_000);
+  assertEquals(out.length, 1);
+  assertEquals(out[0].agentId, "c-1");
+});
+
+// Not exercised end-to-end (WAIT_MAX_MS is 10 minutes — far too slow for a
+// unit test to actually wait out); this pins the constants' values instead,
+// since Math.min(timeoutMs, WAIT_MAX_MS) in the implementation is what
+// bounds a wedged child from blocking a parent turn forever.
+Deno.test("WAIT_DEFAULT_MS and WAIT_MAX_MS have the specified values", () => {
+  assertEquals(WAIT_DEFAULT_MS, 60_000);
+  assertEquals(WAIT_MAX_MS, 600_000);
 });

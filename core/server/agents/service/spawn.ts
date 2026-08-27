@@ -32,6 +32,19 @@ const FORK_TOKEN_BUDGET = Math.floor(FALLBACK_CONTEXT_WINDOW / 4);
 const AWAIT_CHILD_POLL_MS = 200;
 const AWAIT_CHILD_TIMEOUT_MS = STALE_TURN_MS;
 
+// agent_wait is a MAILBOX WAIT over the store's plain QueryFn, not a
+// LISTEN/NOTIFY push — the store exposes no notification channel, and adding
+// one is its own change (noted in COMPAT.md). WAIT_POLL_MS trades latency for
+// query load; WAIT_MAX_MS is the hard ceiling so a wedged/slow child can
+// never block a parent's turn indefinitely — a caller wanting longer just
+// calls agent_wait again. WAIT_DEFAULT_MS is what a caller gets when it
+// doesn't specify (the `agent_wait` tool itself defaults to this).
+export const WAIT_DEFAULT_MS = 60_000;
+export const WAIT_MAX_MS = 600_000;
+const WAIT_POLL_MS = 500;
+
+const TERMINAL_STATUSES = new Set<ChildAgent["status"]>(["completed", "failed", "stopped"]);
+
 export interface SpawnChildOpts {
   subagent: string | null;
   prompt: string;
@@ -204,7 +217,28 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
       return store.listChildren(parentSessionId);
     },
 
-    waitForChildren: NOT_IMPLEMENTED("waitForChildren"),
+    // Reports WHICH children reached a terminal state, never their content —
+    // a mailbox wait, not a join. `agentIds` given: resolved ONE AT A TIME
+    // through the parent-scoped store.getChild, exactly like awaitChild —
+    // never listChildren-then-filter — so a foreign id simply comes back
+    // null and is dropped, indistinguishable from one that never existed.
+    // `agentIds` omitted: waits on every child via listChildren, which is
+    // already parent-scoped by construction.
+    async waitForChildren(agentIds: string[] | null, timeoutMs: number): Promise<ChildAgent[]> {
+      const deadline = Date.now() + Math.min(Math.max(timeoutMs, 0), WAIT_MAX_MS);
+      for (;;) {
+        const children = agentIds
+          ? (await Promise.all(agentIds.map((id) => store.getChild(id, parentSessionId))))
+            .filter((c): c is ChildAgent => c !== null)
+          : await store.listChildren(parentSessionId);
+
+        const done = children.filter((c) => TERMINAL_STATUSES.has(c.status));
+        if (done.length > 0) return done;
+        if (Date.now() >= deadline) return [];
+        await new Promise((r) => setTimeout(r, WAIT_POLL_MS));
+      }
+    },
+
     stopChild: NOT_IMPLEMENTED("stopChild"),
     sendToChild: NOT_IMPLEMENTED("sendToChild"),
   };
