@@ -17,6 +17,14 @@ export interface ChildAgent {
   detached: boolean;
 }
 
+// agents.turns' CHECK constraint only permits 'running' | 'completed' |
+// 'failed' — there is no DB-level 'stopped'. agent_stop (Task 11) records a
+// stop as an ordinary `failed` turn carrying this exact error string, and
+// store.ts's status-deriving queries recognize that string to display
+// 'stopped' instead of 'failed'. Both sides must use this constant, never a
+// duplicated literal, or the derivation silently stops matching.
+export const STOPPED_BY_PARENT_ERROR = "stopped by the agent that started it";
+
 export function checkSpawnAllowed(
   opts: { live: number; total: number },
 ): { allowed: true } | { allowed: false; reason: string } {

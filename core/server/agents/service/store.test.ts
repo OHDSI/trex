@@ -1,5 +1,6 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { createStore, denyApprovalsForTurns, type QueryFn } from "./store.ts";
+import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 
 function fakeQuery(responses: Array<{ rows: unknown[] }>) {
   const calls: Array<{ sql: string; params?: unknown[] }> = [];
@@ -536,4 +537,190 @@ Deno.test("listSessionsWithStaleRunningTurns: mirrors reapStaleTurns's two cutof
 Deno.test("channelForSession is not part of the turn store (it lives on the channel store)", () => {
   const store = createStore((() => Promise.resolve({ rows: [] })) as never);
   assertEquals("channelForSession" in store, false);
+});
+
+// --- child sessions (V9__orchestration.sql) --------------------------------
+// Ownership is a security boundary, not a convenience: agent_id reaches these
+// queries straight from the model (via agent_wait/agent_send/agent_stop), so
+// a child belonging to another session must be indistinguishable from one
+// that never existed — the WHERE clause must do the scoping, never a
+// fetch-then-filter in JS.
+
+Deno.test("getChild scopes by parent — a foreign child is not returned", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  const got = await store.getChild("child-1", "parent-A");
+  assertEquals(got, null);
+  assert(calls[0].sql.includes("parent_session_id"), "ownership must be enforced in SQL, not in JS");
+  assertEquals(calls[0].params, ["child-1", "parent-A"]);
+});
+
+Deno.test("createChildSession writes parent pointers and nickname", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ id: "c-1" }] }]);
+  const store = createStore(fn as never);
+  const id = await store.createChildSession({
+    plugin: "devx",
+    agent: "devx",
+    parentSessionId: "p-1",
+    parentTurnId: "t-1",
+    subagent: "code-reviewer",
+    nickname: "Kepler",
+    detached: true,
+  });
+  assertEquals(id, "c-1");
+  assert(calls[0].sql.includes("parent_session_id"));
+  assert(calls[0].params?.includes("Kepler"));
+});
+
+Deno.test("countChildren returns live and total separately", async () => {
+  const { fn } = fakeQuery([{ rows: [{ live: 2, total: 7 }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.countChildren("p-1"), { live: 2, total: 7 });
+});
+
+Deno.test("bumpConsecutiveWakes returns the new value", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ consecutive_wakes: 3 }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.bumpConsecutiveWakes("p-1"), 3);
+  assert(calls[0].sql.includes("consecutive_wakes"));
+});
+
+Deno.test("resetConsecutiveWakes zeroes the counter", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.resetConsecutiveWakes("p-1");
+  assert(calls[0].sql.includes("consecutive_wakes = 0"));
+  assertEquals(calls[0].params, ["p-1"]);
+});
+
+// `status` is a DISPLAY value derived from the child's latest turn — it is
+// never written to a DB column, and 'stopped' in particular does not exist
+// in agents.turns' CHECK constraint (only running/completed/failed do).
+
+Deno.test("getChild derives status 'running' for a child with no turns yet", async () => {
+  const { fn } = fakeQuery([{
+    rows: [{
+      id: "c-1",
+      nickname: "Kepler",
+      subagent: null,
+      detached: false,
+      created_at: new Date("2026-08-27T00:00:00Z"),
+      turn_status: null,
+      turn_error: null,
+    }],
+  }]);
+  const store = createStore(fn as never);
+  const child = await store.getChild("c-1", "p-1");
+  assertEquals(child?.status, "running");
+});
+
+Deno.test("getChild derives status 'stopped' from a failed turn carrying the stop marker", async () => {
+  const { fn } = fakeQuery([{
+    rows: [{
+      id: "c-1",
+      nickname: "Kepler",
+      subagent: null,
+      detached: false,
+      created_at: new Date("2026-08-27T00:00:00Z"),
+      turn_status: "failed",
+      turn_error: STOPPED_BY_PARENT_ERROR,
+    }],
+  }]);
+  const store = createStore(fn as never);
+  const child = await store.getChild("c-1", "p-1");
+  assertEquals(child?.status, "stopped");
+});
+
+Deno.test("getChild derives status 'failed' as-is for an ordinary failure (not the stop marker)", async () => {
+  const { fn } = fakeQuery([{
+    rows: [{
+      id: "c-1",
+      nickname: "Kepler",
+      subagent: null,
+      detached: false,
+      created_at: new Date("2026-08-27T00:00:00Z"),
+      turn_status: "failed",
+      turn_error: "the model refused",
+    }],
+  }]);
+  const store = createStore(fn as never);
+  const child = await store.getChild("c-1", "p-1");
+  assertEquals(child?.status, "failed");
+});
+
+Deno.test("listChildren is scoped to the parent and orders by created_at", async () => {
+  const rows = [
+    {
+      id: "c-1",
+      nickname: "Kepler",
+      subagent: "code-reviewer",
+      detached: true,
+      created_at: new Date("2026-08-27T00:00:00Z"),
+      turn_status: "completed",
+      turn_error: null,
+    },
+    {
+      id: "c-2",
+      nickname: "Faraday",
+      subagent: null,
+      detached: false,
+      created_at: new Date("2026-08-27T00:01:00Z"),
+      turn_status: null,
+      turn_error: null,
+    },
+  ];
+  const { fn, calls } = fakeQuery([{ rows }]);
+  const store = createStore(fn as never);
+  const children = await store.listChildren("p-1");
+  assertEquals(children.map((c) => c.agentId), ["c-1", "c-2"]);
+  assertEquals(children[0].status, "completed");
+  assertEquals(children[1].status, "running");
+  assert(calls[0].sql.includes("parent_session_id = $1"));
+  assert(calls[0].sql.includes("ORDER BY"));
+  assertEquals(calls[0].params, ["p-1"]);
+});
+
+Deno.test("failTurnsForSession marks the session's running turns failed and returns the count", async () => {
+  const calls: Array<{ q: string; p: unknown[] }> = [];
+  const query: QueryFn = async (q, p = []) => {
+    calls.push({ q, p });
+    if (q.includes("UPDATE agents.turns")) return { rows: [{ id: "t-1" }, { id: "t-2" }] };
+    return { rows: [] };
+  };
+  const store = createStore(query);
+  const n = await store.failTurnsForSession("c-1", STOPPED_BY_PARENT_ERROR);
+  assertEquals(n, 2);
+  const turnsCall = calls.find((c) => c.q.includes("UPDATE agents.turns"));
+  assert(turnsCall);
+  assert(turnsCall!.q.includes("status = 'running'"));
+  assertEquals(turnsCall!.p, ["c-1", STOPPED_BY_PARENT_ERROR]);
+});
+
+Deno.test("failTurnsForSession also denies still-pending approvals for the turns it fails", async () => {
+  const calls: Array<{ q: string; p: unknown[] }> = [];
+  const query: QueryFn = async (q, p = []) => {
+    calls.push({ q, p });
+    if (q.includes("UPDATE agents.turns")) return { rows: [{ id: "t-1" }] };
+    if (q.includes("UPDATE agents.approvals") && q.includes("turn_id = ANY")) {
+      return { rows: [{ request_id: "a-1" }] };
+    }
+    return { rows: [] };
+  };
+  const store = createStore(query);
+  await store.failTurnsForSession("c-1", STOPPED_BY_PARENT_ERROR);
+  const denyCall = calls.find((c) => c.q.includes("UPDATE agents.approvals"));
+  assert(denyCall, "must deny approvals for the turns it just failed");
+  assertEquals(denyCall!.p[0], ["t-1"]);
+});
+
+Deno.test("failTurnsForSession returns 0 and denies nothing when the session has no running turns", async () => {
+  const calls: Array<{ q: string }> = [];
+  const query: QueryFn = async (q) => {
+    calls.push({ q });
+    return { rows: [] };
+  };
+  const store = createStore(query);
+  const n = await store.failTurnsForSession("c-1", STOPPED_BY_PARENT_ERROR);
+  assertEquals(n, 0);
+  assertEquals(calls.some((c) => c.q.includes("UPDATE agents.approvals")), false);
 });

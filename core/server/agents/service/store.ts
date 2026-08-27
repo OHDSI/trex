@@ -2,7 +2,43 @@
 // function (pg Pool.query-compatible) so unit tests run without Postgres.
 // deno-lint-ignore-file no-explicit-any
 
+import type { ChildAgent } from "./orchestration.ts";
+import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
+
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
+
+// ChildAgent.status is a DISPLAY value derived from the child's latest turn —
+// it is never a value written to a DB column (agents.turns' CHECK constraint
+// only permits running/completed/failed; there is no 'stopped'). A child with
+// no turns yet (turn_status null, e.g. between createChildSession and its
+// first startChildTurn) derives to 'running'; a failed turn carrying the
+// agent_stop marker derives to 'stopped'; anything else passes through as-is.
+function deriveChildStatus(turnStatus: unknown, turnError: unknown): ChildAgent["status"] {
+  if (turnStatus == null) return "running";
+  if (turnStatus === "failed" && turnError === STOPPED_BY_PARENT_ERROR) return "stopped";
+  return turnStatus as ChildAgent["status"];
+}
+
+function toChildAgent(row: Record<string, unknown>): ChildAgent {
+  return {
+    agentId: String(row.id),
+    nickname: String(row.nickname ?? ""),
+    subagent: (row.subagent as string | null) ?? null,
+    status: deriveChildStatus(row.turn_status, row.turn_error),
+    startedAt: row.created_at as Date,
+    detached: Boolean(row.detached),
+  };
+}
+
+// Latest turn (by seq) for a session, joined via LATERAL so a session with no
+// turns yet still produces one row (turn_status/turn_error both NULL) rather
+// than disappearing from the outer query — a plain JOIN would drop it.
+const LATEST_TURN_JOIN = `
+  LEFT JOIN LATERAL (
+    SELECT t.status, t.error FROM agents.turns t
+     WHERE t.session_id = s.id
+     ORDER BY t.seq DESC LIMIT 1
+  ) lt ON true`;
 
 // Denies (WHERE decision IS NULL — never overwrites an already-decided row)
 // every approval belonging to the given turns. Exported standalone so a
@@ -487,6 +523,119 @@ export function createStore(query: QueryFn) {
     async getActivatedTools(sessionId: string): Promise<string[]> {
       const r = await query(`SELECT activated_tools FROM agents.sessions WHERE id = $1`, [sessionId]);
       return (r.rows[0]?.activated_tools as string[] | null | undefined) ?? [];
+    },
+
+    // --- child sessions (V9__orchestration.sql / 2026-08-27 orchestration) --
+
+    async createChildSession(opts: {
+      plugin: string;
+      agent: string;
+      createdBy?: string;
+      parentSessionId: string;
+      parentTurnId: string | null;
+      subagent: string | null;
+      nickname: string;
+      detached: boolean;
+    }): Promise<string> {
+      const r = await query(
+        `INSERT INTO agents.sessions
+           (plugin, agent, created_by, parent_session_id, parent_turn_id, subagent, nickname, detached)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+        [
+          opts.plugin,
+          opts.agent,
+          opts.createdBy ?? null,
+          opts.parentSessionId,
+          opts.parentTurnId,
+          opts.subagent,
+          opts.nickname,
+          opts.detached,
+        ],
+      );
+      return r.rows[0].id as string;
+    },
+
+    // Ownership is enforced in the WHERE clause, never by filtering in JS: an
+    // agent_id reaches this straight from the model (agent_wait/agent_send/
+    // agent_stop), and a child of another session must be invisible, not
+    // merely rejected downstream.
+    async getChild(agentId: string, parentSessionId: string): Promise<ChildAgent | null> {
+      const r = await query(
+        `SELECT s.id, s.nickname, s.subagent, s.detached, s.created_at,
+                lt.status AS turn_status, lt.error AS turn_error
+           FROM agents.sessions s
+           ${LATEST_TURN_JOIN}
+          WHERE s.id = $1 AND s.parent_session_id = $2`,
+        [agentId, parentSessionId],
+      );
+      const row = r.rows[0];
+      return row ? toChildAgent(row) : null;
+    },
+
+    async listChildren(parentSessionId: string): Promise<ChildAgent[]> {
+      const r = await query(
+        `SELECT s.id, s.nickname, s.subagent, s.detached, s.created_at,
+                lt.status AS turn_status, lt.error AS turn_error
+           FROM agents.sessions s
+           ${LATEST_TURN_JOIN}
+          WHERE s.parent_session_id = $1
+          ORDER BY s.created_at`,
+        [parentSessionId],
+      );
+      return r.rows.map(toChildAgent);
+    },
+
+    async countChildren(parentSessionId: string): Promise<{ live: number; total: number }> {
+      const r = await query(
+        `SELECT
+           count(*) FILTER (WHERE EXISTS (
+             SELECT 1 FROM agents.turns t WHERE t.session_id = s.id AND t.status = 'running'
+           ))::int AS live,
+           count(*)::int AS total
+         FROM agents.sessions s WHERE s.parent_session_id = $1`,
+        [parentSessionId],
+      );
+      return { live: r.rows[0]?.live ?? 0, total: r.rows[0]?.total ?? 0 };
+    },
+
+    async bumpConsecutiveWakes(sessionId: string): Promise<number> {
+      const r = await query(
+        `UPDATE agents.sessions SET consecutive_wakes = consecutive_wakes + 1
+         WHERE id = $1 RETURNING consecutive_wakes`,
+        [sessionId],
+      );
+      return r.rows[0]?.consecutive_wakes ?? 0;
+    },
+
+    async resetConsecutiveWakes(sessionId: string): Promise<void> {
+      await query(`UPDATE agents.sessions SET consecutive_wakes = 0 WHERE id = $1`, [sessionId]);
+    },
+
+    // Marks a session's still-`running` turns `failed` with the given error —
+    // used by agent_stop (an intentional stop) and by the sweep (a parent
+    // being torn down should not leave its children's turns running forever).
+    // Mirrors reapStaleTurns: also denies any still-pending approval on the
+    // turns it fails, for the same reason denyApprovalsForTurns exists there
+    // — an approval left un-denied is an orphaned `decision IS NULL` row a
+    // later message could still resolve, against a turn that no longer runs.
+    async failTurnsForSession(sessionId: string, error: string): Promise<number> {
+      const r = await query(
+        `UPDATE agents.turns SET status = 'failed', error = $2, finished_at = NOW()
+          WHERE session_id = $1 AND status = 'running'
+          RETURNING id`,
+        [sessionId, error],
+      );
+      const turnIds = r.rows.map((row: { id: string }) => row.id);
+      try {
+        await denyApprovalsForTurns(turnIds, query);
+      } catch (e) {
+        console.error(
+          `agents: failTurnsForSession failed session ${sessionId}'s turns but could not deny their approvals ` +
+            `(will remain orphaned until resolveApprovalDecision's turn-status guard catches them):`,
+          e,
+        );
+      }
+      return r.rows.length;
     },
   };
 }
