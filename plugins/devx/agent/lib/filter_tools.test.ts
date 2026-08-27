@@ -4,7 +4,7 @@
 // consent store, see toolset.ts's authoredTool).
 import { assert, assertEquals } from "jsr:@std/assert";
 import type { HookCtx, ToolDef } from "../../../../core/server/agents/eve-shim/types.ts";
-import agentConfig from "../agent.ts";
+import agentConfig, { AGENT_TOOLS } from "../agent.ts";
 
 const filterTools = agentConfig.filterTools!;
 
@@ -31,6 +31,26 @@ Deno.test("filterTools: ask mode drops the built-in 'agent' tool (legacy-parity:
   // skill carries no modifiesState and isn't name-excluded — legacy's own
   // Skill tool isn't modifiesState either, so no asymmetry to close there.
   assertEquals(filterTools("skill", READ_ONLY_DEF, ctx), true);
+});
+
+// Final review, Critical 2(a): ask mode was escapable in ONE tool call. Only
+// the name "agent" was excluded; the five newer delegation built-ins
+// (agent_spawn/agent_wait/agent_result/agent_stop/agent_send) carry no
+// modifiesState field either — they are generic eve built-ins, not
+// devx-authored ToolDefs — so they survived ask mode, and a read-only session
+// could simply agent_spawn a fully write-capable child to do the writing.
+Deno.test("filterTools: ask mode drops EVERY delegation built-in, not just 'agent'", () => {
+  const ctx = fakeHookCtx({ mode: "ask" });
+  for (const name of AGENT_TOOLS) {
+    assert(!filterTools(name, READ_ONLY_DEF, ctx), `${name} must not survive ask mode`);
+  }
+  // The set must actually cover what core registers, or this test proves
+  // nothing about the tools that exist.
+  for (
+    const name of ["agent", "agent_spawn", "agent_list", "agent_wait", "agent_result", "agent_stop", "agent_send"]
+  ) {
+    assert(AGENT_TOOLS.has(name), `${name} is a core delegation built-in and must be in AGENT_TOOLS`);
+  }
 });
 
 Deno.test("filterTools: plan mode only allows PLAN_MODE_TOOLS", () => {

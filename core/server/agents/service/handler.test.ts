@@ -2,6 +2,9 @@ import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/asse
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { createHandler, buildHistory, deliverChildResult, buildDeliverDeps } from "./handler.ts";
 import { createSpawnCapabilities } from "./spawn.ts";
+import { restrictChildTools } from "./toolset.ts";
+import { resolveModelForTurn } from "./model.ts";
+import type { HookCtx } from "../eve-shim/types.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
@@ -65,6 +68,9 @@ function inMemoryDb() {
     // Task 8 (deliverChildResult's wake budget) — undefined reads as 0, same
     // as the real column's NOT NULL DEFAULT 0.
     consecutive_wakes?: number;
+    // The wake budget's other half: which child's queued result the parent's
+    // NEXT (chained) turn was caused by. Nullable, same as the real column.
+    pending_wake_child_id?: string | null;
     createdAt: Date;
   }>();
   const turns: Array<
@@ -170,6 +176,22 @@ function inMemoryDb() {
     if (sql.includes("SELECT parent_session_id FROM agents.sessions")) {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: [{ parent_session_id: s?.parent_session_id ?? null }] });
+    }
+    // markPendingWake / takePendingWake — the stamp a busy parent gets so the
+    // turn it chains next is recognised as child-caused (and so does not reset
+    // the wake budget). Checked BEFORE the consecutive_wakes branches: both
+    // statements target agents.sessions and only the column name tells them
+    // apart.
+    if (sql.includes("pending_wake_child_id = NULL")) {
+      const s = sessions.get(params[0] as string);
+      const was = s?.pending_wake_child_id ?? null;
+      if (s) s.pending_wake_child_id = null;
+      return Promise.resolve({ rows: was ? [{ pending_wake_child_id: was }] : [] });
+    }
+    if (sql.includes("pending_wake_child_id = $2")) {
+      const s = sessions.get(params[0] as string);
+      if (s) s.pending_wake_child_id = params[1] as string;
+      return Promise.resolve({ rows: [] });
     }
     // bumpConsecutiveWakes / resetConsecutiveWakes (Task 8).
     if (sql.includes("consecutive_wakes = consecutive_wakes + 1")) {
@@ -2757,9 +2779,13 @@ function fakeDeliverDeps(opts: {
   child?: { detached?: boolean };
   runningTurn?: { id: string } | null;
   wakes?: number;
+  // Records markPendingWake calls — the stamp deliverChildResult leaves on a
+  // BUSY parent so the turn it chains next does not reset the wake budget.
+  pendingWakes?: unknown[];
 } = {}) {
   const followUps = opts.followUps ?? [];
   const started = opts.started ?? [];
+  const pendingWakes = opts.pendingWakes ?? [];
   const pending: string[] = [];
   return {
     store: {
@@ -2773,6 +2799,10 @@ function fakeDeliverDeps(opts: {
       getRunningTurn: (_sessionId: string) => Promise.resolve(opts.runningTurn ?? null),
       bumpConsecutiveWakes: (_sessionId: string) => Promise.resolve(opts.wakes ?? 1),
       takeFollowUps: (_sessionId: string) => Promise.resolve(pending.splice(0)),
+      markPendingWake: (sessionId: string, childSessionId: string) => {
+        pendingWakes.push({ sessionId, childSessionId });
+        return Promise.resolve();
+      },
     },
     wake: (sessionId: string, message: string, childSessionId: string) => {
       started.push({ sessionId, message, childSessionId });
@@ -2810,13 +2840,19 @@ Deno.test("a failed child still reaches its parent", async () => {
 Deno.test("a busy parent gets the followup but no second turn", async () => {
   const followUps: unknown[] = [];
   const started: unknown[] = [];
+  const pendingWakes: unknown[] = [];
   await deliverChildResult(
-    fakeDeliverDeps({ followUps, started, runningTurn: { id: "t-9" } }) as never,
+    fakeDeliverDeps({ followUps, started, pendingWakes, runningTurn: { id: "t-9" } }) as never,
     "c-1",
     { text: "x" },
   );
   assertEquals(followUps.length, 1);
   assertEquals(started.length, 0, "one turn at a time — the running turn will drain it");
+  // The turn that IS running will drain that followup and chain a further
+  // turn for it. That chained turn is a wake in all but name, so it must be
+  // stamped — otherwise it resets consecutive_wakes and the runaway guard can
+  // never fire for this exact loop shape.
+  assertEquals(pendingWakes, [{ sessionId: "p-1", childSessionId: "c-1" }]);
 });
 
 Deno.test("the wake budget stops a runaway loop", async () => {
@@ -3266,4 +3302,424 @@ Deno.test("fix round 1: a turn a reap already claimed is not resurrected by a la
     turnsBeforeWake,
     "the parent must gain NO real wake turn from the stale, losing finishTurn(completed) — only the reap's delivery (recorded above, not a real turn) may have happened",
   );
+});
+
+// --- Final review, Critical 1 + Critical 2(b) ------------------------------
+//
+// A delegated child's turn used to be started with `undefined` for metadata,
+// bearerToken AND userId — the child call site simply stopped supplying
+// positional arguments. Two consequences, both shipped:
+//
+//   * buildHookCtx copies userId onto HookCtx, and runner.ts resolves the
+//     model with resolveModelForTurn(agent.config, hookCtx). devx's
+//     resolveModel opens with `if (!ctx.userId) throw new Error("devx agent
+//     requires an authenticated user")` — so EVERY delegated turn on the one
+//     agent that ships subagents died at model resolution. Blocking
+//     delegation returned that error to the parent; detached delegation woke
+//     the parent with it.
+//   * filterTools is handed ctx.metadata. A child built with `metadata:
+//     undefined` is filtered under "no mode", which for devx means ALLOW
+//     EVERYTHING — so an ask-mode (read-only) session could delegate the
+//     writing to a child that had no such restriction.
+//
+// Nothing caught either one: every core test injects deps.model (which wins
+// over resolveModelForTurn outright — see runner.ts) or fakes
+// startChildTurn, and devx's own suite never drives a real child turn.
+//
+// This drives a REAL delegation (parent -> `agent` tool -> child session ->
+// the child's own turn) and asserts on the HookCtx the child's turn actually
+// built, then runs a devx-shaped resolveModel hook against that very ctx.
+// Constructing the model is deliberate and network-free: resolveModelSpec
+// only builds a provider client, it does not call anything.
+Deno.test("a delegated child's turn runs under its PARENT's identity (userId, bearer token, metadata)", async () => {
+  const seen: Array<{ sessionId: string; userId?: string; bearerToken?: string; metadata: unknown }> = [];
+  const ctxBySession = new Map<string, HookCtx>();
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(
+      toolCallChunks("agent", { prompt: "say hi" }), // parent step 1: delegate
+      textChunks("child says hi"), // the child's own (only) turn
+      textChunks("parent says done"), // parent step 2: after the child returns
+    ),
+    mutate: (agent) => {
+      // buildInstructions is handed the SAME per-request HookCtx object
+      // resolveModelForTurn gets (handler.ts builds exactly one per turn and
+      // threads it to both), so capturing it here captures precisely what a
+      // resolveModel hook would have been called with.
+      agent.config.buildInstructions = (base: string, ctx: HookCtx) => {
+        seen.push({
+          sessionId: ctx.sessionId,
+          userId: ctx.userId,
+          bearerToken: ctx.bearerToken,
+          metadata: ctx.metadata,
+        });
+        ctxBySession.set(ctx.sessionId, ctx);
+        return Promise.resolve(base);
+      };
+    },
+  });
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-user-id": "user-42",
+      "authorization": "Bearer parent-token",
+    },
+    body: JSON.stringify({ message: "delegate this", metadata: { ticket: "T-42" } }),
+  }));
+  const parentId = res.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+
+  const childEntries = [...db.sessions.entries()].filter(([, s]) => s.parent_session_id === parentId);
+  assertEquals(childEntries.length, 1, "expected exactly one child session created by the agent tool");
+  const [childId, childSession] = childEntries[0];
+
+  const childTurn = db.turns.find((t) => t.session_id === childId);
+  assertExists(childTurn, "expected the child session to have its own turn row");
+  assertEquals(childTurn.status, "completed", "the child's own turn must have run to completion");
+
+  const childCtx = seen.find((s) => s.sessionId === childId);
+  assertExists(childCtx, "expected the child's own turn to have built a hookCtx");
+  assertEquals(childCtx.userId, "user-42", "the child's turn must run under its parent's user");
+  assertEquals(childCtx.bearerToken, "parent-token", "the child's turn must carry its parent's bearer token");
+  assertEquals(
+    childCtx.metadata,
+    { ticket: "T-42" },
+    "the child's turn must see the SAME metadata its parent was filtered under — " +
+      "an undefined mode is 'allow everything' for devx's filterTools",
+  );
+
+  // The child session is owned by the human who caused it. store's
+  // createChildSession has always accepted createdBy; spawnChild never
+  // supplied it, so every child row in the database was anonymous.
+  assertEquals(childSession.created_by, "user-42", "a child session must not be created anonymous");
+
+  // The literal devx guard, run against the ctx the child's turn really
+  // built. Before the fix this threw; after it, the child resolves a model.
+  const devxShapedResolveModel = (ctx: HookCtx) => {
+    if (!ctx.userId) throw new Error("devx agent requires an authenticated user");
+    return Promise.resolve({ provider: "openai", modelId: "gpt-4o-mini", apiKey: "test-key" });
+  };
+  const resolved = await resolveModelForTurn(
+    { resolveModel: devxShapedResolveModel } as never,
+    ctxBySession.get(childId)!,
+  );
+  assertExists(resolved, "a child turn must be able to resolve a model through a userId-requiring hook");
+});
+
+// --- Final review, Critical 2(c): tools intersect, never union -------------
+Deno.test("restrictChildTools: a subagent cannot be handed a tool its parent does not have", async () => {
+  const parent = await loadAgent(TOY);
+  const child: LoadedAgent = {
+    ...parent,
+    dir: "subagents/rogue",
+    tools: {
+      ...parent.tools,
+      Write: { description: "writes files", inputSchema: { type: "object" } },
+    },
+  };
+  const restricted = restrictChildTools(parent, child);
+  assertEquals(
+    Object.hasOwn(restricted.tools, "Write"),
+    false,
+    "a subagent declaring a tool its parent lacks must not keep it",
+  );
+  for (const name of Object.keys(parent.tools)) {
+    assertEquals(Object.hasOwn(restricted.tools, name), true, `${name} is shared and must survive`);
+  }
+});
+
+Deno.test("restrictChildTools: a self-delegation is returned unchanged", async () => {
+  const parent = await loadAgent(TOY);
+  assertEquals(restrictChildTools(parent, parent), parent);
+});
+
+// --- Final review, Important 5: the spec's headline scenario ---------------
+//
+// "Three children spawned, the parent's turn ENDS, all three complete, and
+// the parent wakes and sees all three results." Nothing tested that: one test
+// completed a SINGLE detached child, and one spawned three children whose
+// turns were left running forever. This is also the direct verification for
+// two other findings:
+//
+//   * Critical 3 — three deliveries racing one parent. The first waker drains
+//     the queue and starts a turn; a loser can still pass the running-turn
+//     check and then be rejected by the V9 unique index at addTurn. It must
+//     REQUEUE the text it had already drained, never take it down with it —
+//     the spec's promise is "the unique index serializes; the loser queues
+//     its followup".
+//   * Important 1 — the wake budget must actually count. A delivery that
+//     lands while the parent is mid-turn bumps consecutive_wakes and stamps
+//     the session, so the turn the parent chains for it does not reset the
+//     counter back to zero (without which MAX_CONSECUTIVE_WAKES can never
+//     fire for the one loop shape it exists to bound).
+//
+// Against the real database on purpose: the in-memory fake has no unique
+// index, so it cannot reproduce the race this exists to check.
+Deno.test({
+  name: "e2e: three detached children all complete after the parent's turn ends — every result reaches the parent",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-fanout-user");
+
+      // The parent's own turn ENDS FIRST — every child completes strictly
+      // after it, which is the scenario's whole point.
+      const parentTurn = await store.addTurn(parentId, "fan out three explorations");
+      await store.addStep(parentTurn.id, 1, "text", null, { text: "delegating to three agents" });
+      await store.finishTurn(parentTurn.id, "completed");
+
+      const nicknames = ["Kepler", "Faraday", "Curie"];
+      const results = ["found three bugs", "the config is stale", "no regressions at all"];
+      const childIds: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const childId = await store.createChildSession({
+          plugin: "toy-agent",
+          agent: "toy",
+          createdBy: "e2e-fanout-user",
+          parentSessionId: parentId,
+          parentTurnId: parentTurn.id,
+          subagent: null,
+          nickname: nicknames[i],
+          detached: true,
+        });
+        childIds.push(childId);
+        const childTurn = await store.addTurn(childId, `explore area ${i}`);
+        await store.addStep(childTurn.id, 1, "text", null, { text: results[i] });
+        await store.finishTurn(childTurn.id, "completed");
+      }
+
+      const agent = await loadAgent(TOY);
+      const deps = {
+        agent,
+        store,
+        plugin: "toy-agent",
+        agentName: "toy",
+        basePath: "/plugins/trex/toy",
+        model: model("acknowledged all three"),
+      };
+      const handler = createHandler(deps as never);
+      const deliverDeps = buildDeliverDeps(deps as never);
+
+      // All three deliveries fired AT ONCE, exactly as three children
+      // finishing within milliseconds of each other would. One wins the wake;
+      // the losers must preserve what they drained.
+      await Promise.all(childIds.map((id, i) => deliverChildResult(deliverDeps, id, { text: results[i] })));
+
+      const parentTurns = async () => {
+        const r = await pool.query(
+          `SELECT status, message FROM agents.turns WHERE session_id = $1 ORDER BY seq`,
+          [parentId],
+        );
+        return r.rows as Array<{ status: string; message: unknown }>;
+      };
+      const queuedTexts = async () => {
+        const r = await pool.query(
+          `SELECT message FROM agents.turn_followups WHERE session_id = $1 ORDER BY created_at`,
+          [parentId],
+        );
+        return (r.rows as Array<{ message: string }>).map((x) => x.message);
+      };
+      const idle = async () => (await parentTurns()).every((t) => t.status !== "running");
+
+      const waitFor = async (cond: () => Promise<boolean>, ms = 20_000) => {
+        const deadline = Date.now() + ms;
+        while (!(await cond())) {
+          if (Date.now() >= deadline) return false;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        return true;
+      };
+      // Settled = no parent turn still running AND every result accounted
+      // for somewhere. `idle` alone is true the instant this test starts (the
+      // parent's own turn is already finished), so it would snapshot before
+      // the wake turn even exists.
+      const settledOut = await waitFor(async () => {
+        const t = await parentTurns();
+        if (!t.every((x) => x.status !== "running")) return false;
+        const all = JSON.stringify([...t.map((x) => x.message), ...(await queuedTexts())]);
+        return results.every((r) => all.includes(r));
+      });
+      void settledOut; // the per-result assertions below report far better
+
+      // NOTHING WAS DESTROYED. Every child's result is either already folded
+      // into one of the parent's turns or still sitting in its followup queue
+      // — the two legitimate places for it. A losing waker used to drain the
+      // queue, throw at addTurn on the unique index, and take the drained
+      // text down with it: no turn, no turn.failed, no requeue, result gone.
+      let turns = await parentTurns();
+      let queued = await queuedTexts();
+      const everywhere = () => JSON.stringify([...turns.map((t) => t.message), ...queued]);
+      for (let i = 0; i < 3; i++) {
+        assert(
+          everywhere().includes(results[i]),
+          `child ${nicknames[i]}'s result was LOST — neither in a parent turn nor in the queue: ${everywhere()}`,
+        );
+      }
+      assert(turns.length >= 2, "the parent should have gained at least one turn after its own");
+
+      // THE WAKE BUDGET. Three children delivered => three bumps, and no
+      // chained turn may have zeroed it on the way. Read BEFORE the ordinary
+      // message below, which legitimately resets it.
+      const sess = await pool.query(`SELECT consecutive_wakes FROM agents.sessions WHERE id = $1`, [parentId]);
+      assertEquals(
+        sess.rows[0].consecutive_wakes,
+        3,
+        "each of the three deliveries must count against the wake budget, and a turn chained from a " +
+          "queued child result must NOT reset it — otherwise MAX_CONSECUTIVE_WAKES can never fire",
+      );
+
+      // ... AND THE PARENT SEES ALL THREE. Anything still queued rides the
+      // next real message, which is exactly what the queue promises. Driven
+      // through the real HTTP surface, not a direct store call.
+      if (queued.length > 0) {
+        const res = await handler(new Request(`http://local/plugins/trex/toy/eve/v1/session/${parentId}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "what did they all find?" }),
+        }));
+        assertEquals(res.status, 202);
+        assert(await waitFor(async () => (await idle()) && (await queuedTexts()).length === 0));
+        turns = await parentTurns();
+        queued = await queuedTexts();
+      }
+      const inTurns = JSON.stringify(turns.map((t) => t.message));
+      for (let i = 0; i < 3; i++) {
+        assert(
+          inTurns.includes(results[i]),
+          `child ${nicknames[i]}'s result never reached a parent turn: ${inTurns}`,
+        );
+        assert(inTurns.includes(nicknames[i]), `the followup naming ${nicknames[i]} never reached a parent turn`);
+      }
+      assertEquals(
+        turns.filter((t) => t.status === "running").length,
+        0,
+        "no parent turn may be left running",
+      );
+
+      // An ordinary, externally-driven turn resets the budget, so a
+      // long-lived session woken legitimately many times never creeps toward
+      // the cap. (Only meaningful if such a turn actually ran above.)
+      if (turns.length > 2) {
+        const after = await pool.query(`SELECT consecutive_wakes FROM agents.sessions WHERE id = $1`, [parentId]);
+        assertEquals(after.rows[0].consecutive_wakes, 0, "a human-driven turn must reset the wake budget");
+      }
+    } finally {
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
+      await pool.end();
+    }
+  },
+});
+
+// --- Final review, Critical 3: a losing waker must not destroy a result ----
+//
+// deliverChildResult DRAINS the parent's followup queue and hands the text
+// straight to `wake` -> startTurn, deliberately bypassing startTurn's own
+// takeFollowUps. startTurn then awaits several things (and, on a compacting
+// session, a whole generateText call) between its getRunningTurn check and
+// addTurn. With V9's unique index, a second waker that passed that check
+// inside the window is rejected AT addTurn — and the drained text existed
+// nowhere else: no turn, no queue row, no turn.failed. The result was simply
+// gone, which is the exact opposite of the spec's "the unique index
+// serializes; the loser queues its followup".
+//
+// The race is simulated at its one true seam rather than by timing: the store
+// handed to Deps reports "no turn running" for the first two checks (the
+// waker's own, and startTurn's), while the DATABASE really does hold a
+// running turn — so addTurn reaches the index and is rejected for real.
+Deno.test({
+  name: "e2e: a waker rejected by the one-running-turn index requeues its drained result instead of destroying it",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-race-user");
+      // The WINNER's turn: left running for the whole test, so the index has
+      // something to reject against.
+      const winner = await store.addTurn(parentId, "the winner's turn");
+
+      let blindChecks = 0;
+      const racingStore = {
+        ...store,
+        getRunningTurn: (sid: string) => {
+          if (sid === parentId && blindChecks < 2) {
+            blindChecks++;
+            return Promise.resolve(null); // inside the check-then-act window
+          }
+          return store.getRunningTurn(sid);
+        },
+      };
+      const deps = {
+        agent: await loadAgent(TOY),
+        store: racingStore,
+        plugin: "toy-agent",
+        agentName: "toy",
+        basePath: "/plugins/trex/toy",
+        model: model("this turn must never happen"),
+      };
+
+      const childId = await store.createChildSession({
+        plugin: "toy-agent",
+        agent: "toy",
+        createdBy: "e2e-race-user",
+        parentSessionId: parentId,
+        parentTurnId: winner.id,
+        subagent: null,
+        nickname: "Hypatia",
+        detached: true,
+      });
+      const childTurn = await store.addTurn(childId, "explore");
+      await store.addStep(childTurn.id, 1, "text", null, { text: "the losing result" });
+      await store.finishTurn(childTurn.id, "completed");
+
+      await deliverChildResult(buildDeliverDeps(deps as never), childId, { text: "the losing result" });
+
+      const deadline = Date.now() + 15_000;
+      let queued: string[] = [];
+      while (Date.now() < deadline) {
+        const r = await pool.query(
+          `SELECT message FROM agents.turn_followups WHERE session_id = $1`,
+          [parentId],
+        );
+        queued = (r.rows as Array<{ message: string }>).map((x) => x.message);
+        if (queued.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assertEquals(blindChecks, 2, "the simulated race window must actually have been entered twice");
+      assert(
+        queued.some((m) => m.includes("the losing result")),
+        `the loser's already-drained result must be back in the queue, got: ${JSON.stringify(queued)}`,
+      );
+      assert(queued.some((m) => m.includes("Hypatia")), "the requeued followup must be the original, unaltered text");
+
+      const turns = await pool.query(`SELECT id, status FROM agents.turns WHERE session_id = $1`, [parentId]);
+      assertEquals(turns.rows.length, 1, "the loser must not have created a second turn");
+      assertEquals(turns.rows[0].id, winner.id);
+
+      // The loser also hands over its wake marker, so the winner's own
+      // drain-and-chain turn is still recognised as child-caused and does not
+      // reset the wake budget.
+      const sess = await pool.query(
+        `SELECT pending_wake_child_id FROM agents.sessions WHERE id = $1`,
+        [parentId],
+      );
+      assertEquals(
+        sess.rows[0].pending_wake_child_id,
+        childId,
+        "a requeueing loser must stamp the session so the chained turn is not counted as an external one",
+      );
+    } finally {
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
+      await pool.end();
+    }
+  },
 });

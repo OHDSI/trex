@@ -1,5 +1,5 @@
-import { assert, assertEquals } from "jsr:@std/assert";
-import { createStore, denyApprovalsForTurns, type QueryFn } from "./store.ts";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { createStore, denyApprovalsForTurns, RUNNING_TURN_INDEX, type QueryFn } from "./store.ts";
 import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 
 function fakeQuery(responses: Array<{ rows: unknown[] }>) {
@@ -45,6 +45,29 @@ Deno.test("addTurn retries on unique violation", async () => {
   const t = await store.addTurn("s-1", { role: "user", content: "hi" });
   assertEquals(t, { id: "t-2", seq: 2 });
   assertEquals(calls.length, 2);
+});
+
+// Final review, Critical 3: two DIFFERENT unique constraints can reject this
+// INSERT since V9, and they mean opposite things. (session_id, seq) is a race
+// worth retrying — recomputing MAX(seq) resolves it. The one-running-turn
+// index is a durable state: another turn IS running, and retrying only burns
+// two more round trips before rethrowing the identical error, while the
+// caller's already-drained message sits in hand with nowhere to go.
+Deno.test("addTurn does NOT retry the one-running-turn index — it rethrows at once", async () => {
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  const fn = (sql: string, params?: unknown[]) => {
+    calls.push({ sql, params });
+    return Promise.reject(
+      new Error(`duplicate key value violates unique constraint "${RUNNING_TURN_INDEX}"`),
+    );
+  };
+  const store = createStore(fn as never);
+  await assertRejects(
+    () => store.addTurn("s-1", "hi"),
+    Error,
+    RUNNING_TURN_INDEX,
+  );
+  assertEquals(calls.length, 1, "a running-turn rejection must not be retried");
 });
 
 Deno.test("getSession returns row when found", async () => {

@@ -331,6 +331,45 @@ export function restrictChildSkills(parentAgent: LoadedAgent, childAgent: Loaded
   return { ...childAgent, skills: childAgent.skills.filter((s) => allowed.has(s.name)) };
 }
 
+// The other half of the spec's "tools and skills intersect the parent's,
+// never union". Skills were intersected from the start; TOOLS were not
+// intersected at all, so a subagent directory declaring tools/ entries its
+// parent does not have handed the child strictly MORE capability than the
+// session that delegated to it — the exact direction the reducing-only rule
+// exists to forbid.
+//
+// This is a static intersection over the two LoadedAgents' authored tool
+// maps, applied by handler.ts's buildSpawnCapabilities at the one point that
+// decides which LoadedAgent runs the child's turn (the same place
+// restrictChildSkills is applied, and for the same reason: the child's real
+// turn re-resolves the subagent independently, so nothing decided in
+// resolveTarget takes effect). It intentionally does NOT try to intersect
+// the built-in/dynamic/connection tools buildSdkTools adds later: those are
+// all gated on `depth === 0` and a child always runs at depth 1, so a child's
+// built map is exactly its (now-intersected) authored tools, filtered by the
+// filterTools hook under the PARENT's metadata (threaded in the same commit).
+//
+// Self-delegation (`childAgent === parentAgent`, "delegate to a copy of
+// yourself") is returned unchanged — there is nothing to reduce against, and
+// re-filtering would be a costly no-op on the common path.
+export function restrictChildTools(parentAgent: LoadedAgent, childAgent: LoadedAgent): LoadedAgent {
+  if (childAgent === parentAgent) return childAgent;
+  const tools: Record<string, ToolDef> = {};
+  for (const [name, def] of Object.entries(childAgent.tools)) {
+    // The PARENT's definition never replaces the child's: a subagent is
+    // allowed to narrow a tool it shares (its own needsApproval/description),
+    // just never to introduce one the parent lacks.
+    if (Object.hasOwn(parentAgent.tools, name)) tools[name] = def;
+    else {
+      console.log(
+        `agents: subagent ${childAgent.dir} declares tool "${name}", which ${parentAgent.dir} does not have — ` +
+          "dropped (a child's tools intersect its parent's, never union)",
+      );
+    }
+  }
+  return { ...childAgent, tools };
+}
+
 // Runs a delegated subtask as a real child session (see spawn.ts) and blocks
 // for its result — the `agent` tool's contract (blocking, `{text}`) is
 // unchanged; only the mechanism underneath it is now a durable session

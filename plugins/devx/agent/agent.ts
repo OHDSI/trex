@@ -250,6 +250,21 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 // workspace routing, which always needs SOME concrete choice) whereas this
 // hook's contract requires "no mode / unknown mode" to mean "allow
 // everything", not "treat it as build".
+// Every eve built-in that can start, steer or read a subagent. Kept as one
+// set so a built-in added to core cannot quietly bypass ask mode by not being
+// on a hand-written name list — a new agent_* built-in belongs here.
+// Exported so lib/filter_tools.test.ts can assert the set covers every
+// delegation built-in core actually registers.
+export const AGENT_TOOLS = new Set([
+  "agent",
+  "agent_spawn",
+  "agent_list",
+  "agent_wait",
+  "agent_result",
+  "agent_stop",
+  "agent_send",
+]);
+
 export function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
   const mode = (metadata as { mode?: unknown } | null | undefined)?.mode;
   return mode === "ask" || mode === "plan" || mode === "build" ? mode : undefined;
@@ -270,12 +285,19 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 
   // Ask mode drops state-mutating tools — modifiesState is a devx-only
   // passthrough field carried by lib/context.ts's wrap(), not part of eve's
-  // ToolDef shape, hence the cast. The built-in "agent" tool carries no
-  // modifiesState field (it's a generic eve built-in, not a devx-authored
-  // ToolDef) but legacy's own Agent tool IS modifiesState:true and gets
-  // dropped in ask mode (spawn_agent.ts:33) — name-check it explicitly here
+  // ToolDef shape, hence the cast. The eve built-in delegation tools carry no
+  // modifiesState field (they're generic eve built-ins, not devx-authored
+  // ToolDefs) but legacy's own Agent tool IS modifiesState:true and gets
+  // dropped in ask mode (spawn_agent.ts:33) — name-check them explicitly here
   // to close that asymmetry (documented in task-v4-report.md).
-  if (mode === "ask" && (name === "agent" || (def as { modifiesState?: boolean } | undefined)?.modifiesState)) return false;
+  //
+  // ALL of them, not just "agent". A subagent is a fully capable session: the
+  // point of ask mode is that this session cannot change anything, and a
+  // read-only session able to call agent_spawn could simply delegate the
+  // writing. That made ask mode escapable in one tool call.
+  if (mode === "ask" && (AGENT_TOOLS.has(name) || (def as { modifiesState?: boolean } | undefined)?.modifiesState)) {
+    return false;
+  }
 
   if (mode === "plan" && !PLAN_MODE_TOOLS.has(name)) return false;
 

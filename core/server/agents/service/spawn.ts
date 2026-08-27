@@ -109,6 +109,13 @@ export interface SpawnDeps {
   config: ContextConfig;
   // See SpawnCapabilities.allowDetached — passed straight through.
   allowDetached: boolean;
+  // The trex user id of whoever caused the PARENT turn, written to the child
+  // session's created_by. store.createChildSession has always accepted this;
+  // nothing ever supplied it, so every child session in the database was
+  // anonymous — invisible to any created_by-scoped ownership check, and
+  // unattributable in billing/audit. Optional because a channel session has
+  // no trex user at all (see handler.ts's channel wiring).
+  createdBy?: string;
   // Kicks off the child's first turn. Fire-and-forget (same posture as
   // handler.ts's own startTurn) — this resolves once the turn has been
   // asked to start, not once it finishes. `history`, when given, seeds the
@@ -149,6 +156,7 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
       const agentId = await store.createChildSession({
         plugin,
         agent,
+        createdBy: deps.createdBy,
         parentSessionId,
         parentTurnId,
         subagent,

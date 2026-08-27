@@ -62,6 +62,14 @@ export async function denyApprovalsForTurns(turnIds: string[], query: QueryFn): 
   return r.rows.length;
 }
 
+// The partial unique index V9 adds on agents.turns(session_id) WHERE
+// status = 'running'. Named here (rather than matched on generic
+// "duplicate key" wording) so addTurn can tell "another turn is already
+// running on this session" — a durable state — apart from the seq race its
+// retry loop was written for. Exported so handler.ts can recognise the same
+// rejection.
+export const RUNNING_TURN_INDEX = "idx_agents_turns_one_running_per_session";
+
 export function createStore(query: QueryFn) {
   return {
     async createSession(plugin: string, agent: string, createdBy?: string): Promise<string> {
@@ -94,6 +102,18 @@ export function createStore(query: QueryFn) {
       // Next seq is computed in SQL; the UNIQUE (session_id, seq) constraint
       // plus a small retry loop provides the no-duplicate-seq guarantee under
       // concurrent turns on the same session.
+      //
+      // The retry is deliberately NOT "retry any unique violation". Since V9
+      // there are TWO unique constraints an INSERT here can hit, and they
+      // mean opposite things:
+      //   - (session_id, seq): two turns raced for the same sequence number.
+      //     Recomputing MAX(seq) on the next attempt genuinely resolves it.
+      //   - idx_agents_turns_one_running_per_session: another turn on this
+      //     session IS ALREADY RUNNING. That is a durable state, not a race
+      //     to lose — retrying burns two more round trips and then rethrows
+      //     the identical error. Rethrow immediately so the caller (see
+      //     handler.ts's addTurn guard, which requeues the drained message)
+      //     can act on it while the drained text is still in hand.
       let lastError: unknown;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
@@ -112,6 +132,7 @@ export function createStore(query: QueryFn) {
         } catch (e) {
           lastError = e;
           const msg = e instanceof Error ? e.message : String(e);
+          if (msg.includes(RUNNING_TURN_INDEX)) throw e;
           if (!msg.includes("duplicate key") && !msg.includes("unique")) throw e;
         }
       }
@@ -649,6 +670,39 @@ export function createStore(query: QueryFn) {
 
     async resetConsecutiveWakes(sessionId: string): Promise<void> {
       await query(`UPDATE agents.sessions SET consecutive_wakes = 0 WHERE id = $1`, [sessionId]);
+    },
+
+    // The wake budget's missing half. deliverChildResult bumps the counter
+    // and then, if the parent already has a running turn, returns — the
+    // parent's own turn will drain the queued result and CHAIN a further
+    // turn when it ends (handler.ts's drain-and-chain tail). That chained
+    // turn is a wake in all but name, but it used to look like an ordinary
+    // turn to startTurn, which therefore reset consecutive_wakes to 0 — so
+    // MAX_CONSECUTIVE_WAKES could never fire for the one loop shape it
+    // exists to bound (parent wakes, spawns, child finishes DURING the
+    // parent's turn, repeat).
+    //
+    // Recorded on the session row rather than passed in memory because the
+    // child's turn and the parent's next turn are not guaranteed to run in
+    // the same worker: a reap (the periodic sweep, or another worker's lazy
+    // on-message reap) can be what delivers a child's outcome.
+    async markPendingWake(sessionId: string, childSessionId: string): Promise<void> {
+      await query(
+        `UPDATE agents.sessions SET pending_wake_child_id = $2 WHERE id = $1`,
+        [sessionId, childSessionId],
+      );
+    },
+
+    // Read-and-clear in ONE statement: two turns draining the same session
+    // must not both come away believing they were the wake-caused one.
+    async takePendingWake(sessionId: string): Promise<string | null> {
+      const r = await query(
+        `UPDATE agents.sessions SET pending_wake_child_id = NULL
+         WHERE id = $1 AND pending_wake_child_id IS NOT NULL
+         RETURNING pending_wake_child_id`,
+        [sessionId],
+      );
+      return r.rows[0]?.pending_wake_child_id ?? null;
     },
 
     // Marks a session's still-`running` turns `failed` with the given error —

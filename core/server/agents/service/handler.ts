@@ -6,7 +6,7 @@ import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
-import { buildSdkTools, buildSystemPrompt, resolveInstructions, restrictChildSkills } from "./toolset.ts";
+import { buildSdkTools, buildSystemPrompt, resolveInstructions, restrictChildSkills, restrictChildTools } from "./toolset.ts";
 import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
@@ -171,36 +171,53 @@ import { notifyReaped } from "./reap-notify.ts";
 // runner.ts's own userContent conversion does.
 const asText = (m: unknown): string => typeof m === "string" ? m : JSON.stringify(m);
 
-function startTurn(
-  deps: Deps,
-  sessionId: string,
-  message: unknown,
-  metadata: unknown,
-  bearerToken?: string,
-  userId?: string,
-  onTurnCreated?: (turnId: string) => void,
+// Everything a turn needs beyond (deps, sessionId, message), as a NAMED
+// object rather than a positional tail. It used to be nine positional
+// parameters, and the cost of that was a real, shipped defect: the child
+// call site passed `undefined` for metadata/bearerToken/userId simply by
+// stopping early, so every delegated turn on an agent whose resolveModel
+// requires an authenticated user died at model resolution. A caller can no
+// longer under-supply by accident — it has to name what it is omitting.
+export interface StartTurnOpts {
+  // Caller-supplied JSON on the session routes (`body.metadata`); the
+  // filterTools/buildInstructions hooks read it, so a CHILD turn must be
+  // given the parent's or the child is filtered under a different (empty)
+  // mode than the session it belongs to.
+  metadata?: unknown;
+  bearerToken?: string;
+  userId?: string;
+  onTurnCreated?: (turnId: string) => void;
   // Set only by a child session's very first turn (see spawn.ts's
   // spawnChild / createSpawnCapabilities' startChildTurn below) — the
   // parent's forked history slice, seeded directly since a brand-new child
   // session has no persisted turns of its own for buildHistory to assemble
   // from.
-  seedHistory?: ModelMessage[],
-  // Set ONLY by deliverChildResult's own `wake` call, below — the id of the
-  // child whose completion is starting this turn. Deliberately a dedicated
-  // parameter, never smuggled inside `metadata`: on the session routes,
-  // `metadata` is `body.metadata`, caller-supplied JSON. A wake marker keyed
-  // off metadata would let any external caller send
-  // `{"metadata":{"wokenBy":"x"}}` and have their own, human-started turn
-  // silently treated as wake-started — skipping resetConsecutiveWakes and
-  // walking a session toward MAX_CONSECUTIVE_WAKES with nothing in the logs
-  // to explain why its fan-outs went quiet. Keying the reset decision off a
-  // parameter no route ever forwards from request input makes that
-  // structurally impossible regardless of how many ingress points exist now
-  // or are added later — stripping a reserved key from client metadata at
-  // each route would need every current AND future ingress point to
-  // remember to do it; this doesn't.
-  wokenByChildId?: string,
+  seedHistory?: ModelMessage[];
+  // Set ONLY by deliverChildResult's own `wake` call and by the
+  // drain-and-chain tail below — the id of the child whose completion is
+  // starting this turn. Deliberately a dedicated field, never smuggled
+  // inside `metadata`: on the session routes, `metadata` is `body.metadata`,
+  // caller-supplied JSON. A wake marker keyed off metadata would let any
+  // external caller send `{"metadata":{"wokenBy":"x"}}` and have their own,
+  // human-started turn silently treated as wake-started — skipping
+  // resetConsecutiveWakes and walking a session toward
+  // MAX_CONSECUTIVE_WAKES with nothing in the logs to explain why its
+  // fan-outs went quiet. Keying the reset decision off a field no route
+  // ever forwards from request input makes that structurally impossible
+  // regardless of how many ingress points exist now or are added later —
+  // stripping a reserved key from client metadata at each route would need
+  // every current AND future ingress point to remember to do it; this
+  // doesn't.
+  wokenByChildId?: string;
+}
+
+function startTurn(
+  deps: Deps,
+  sessionId: string,
+  message: unknown,
+  opts: StartTurnOpts = {},
 ) {
+  const { metadata, bearerToken, userId, onTurnCreated, seedHistory, wokenByChildId } = opts;
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
   (async () => {
@@ -223,11 +240,14 @@ function startTurn(
     // ordinary turn and a full model call on a compacting one; it has grown
     // since this comment was first written, not shrunk. A webhook
     // redelivery or a genuine double-submit landing in that window can still
-    // both pass the check. A
-    // DB-level uniqueness guard (e.g. a partial unique index on
-    // agents.turns(session_id) WHERE status = 'running') would close this
-    // fully but is out of scope for this round — kept as check-then-act on
-    // purpose (see the report).
+    // both pass the check — which is why this is no longer the only defense:
+    // idx_agents_turns_one_running_per_session (V9__orchestration.sql) is a
+    // partial unique index on agents.turns(session_id) WHERE status =
+    // 'running', so a loser of that race is rejected at the database. This
+    // check stays as the primary, cheap path (it QUEUES the message, which is
+    // the behaviour we actually want) and the index is the backstop; the
+    // addTurn call further down requeues whatever it was handed if the index
+    // rejects it, so a loser never drops its message.
     let running = await deps.store.getRunningTurn(sessionId);
     if (running) {
       // Lazy reaping, not a scheduler — this repo has none to invent into.
@@ -557,7 +577,44 @@ function startTurn(
     // (history.ts's assembleHistory). On every other turn the messages
     // assembled above are already exactly right.
     if (compacted) history = await buildHistory(sessionId, deps.store, deps.agent.config.context);
-    const turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
+    // By the time we get here `turnMessage` has ALREADY been drained out of
+    // the follow-up queue (takeFollowUps, above; deliverChildResult drains it
+    // even earlier and hands the text straight in). If addTurn now throws,
+    // that text exists nowhere else — no turn, no queue row, no turn.failed
+    // event — and the outer IIFE catch would simply log "turn crashed" while
+    // a child's entire result vanished.
+    //
+    // The realistic thrower since V9 is
+    // idx_agents_turns_one_running_per_session: a second waker that passed
+    // the getRunningTurn check at the top of this function, then lost the
+    // race over the several round trips (and, on a compacting session, a
+    // whole generateText call) between there and here. The spec's promise for
+    // exactly that case is "the unique index serializes; the loser queues its
+    // followup" — so put it back, in the same order it came out. The winner's
+    // own turn drains it when it ends (the drain-and-chain tail below).
+    let turn: { id: string; seq: number };
+    try {
+      turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
+    } catch (e) {
+      console.error(
+        `agents: could not create a turn for session ${sessionId} (requeueing the message rather than dropping it):`,
+        e,
+      );
+      await deps.store.queueFollowUp(sessionId, asText(turnMessage)).catch((e2) =>
+        console.error(`agents: requeue after a failed addTurn ALSO failed for session ${sessionId} (message lost):`, e2)
+      );
+      // A LOSING WAKER also hands over its wake marker with the text. The
+      // turn that beat it will drain this followup and chain a turn for it,
+      // and that chained turn must still be recognised as child-caused —
+      // otherwise it resets the wake budget and the runaway guard goes back
+      // to being unreachable by exactly the race this branch exists for.
+      if (wokenByChildId) {
+        await deps.store.markPendingWake(sessionId, wokenByChildId).catch((e2) =>
+          console.error(`agents: markPendingWake after a failed addTurn failed for session ${sessionId}:`, e2)
+        );
+      }
+      return;
+    }
     // Surface the freshly-created turn id to the caller (the channel layer uses
     // it to scope its background delivery to THIS turn) BEFORE publishing any
     // event, so a subscriber registered here can't miss the turn's events.
@@ -592,7 +649,7 @@ function startTurn(
     // session is durable and gets revisited, so a detached child (Task 9+)
     // can be woken later — see buildSpawnCapabilities' own comment for why
     // /chat passes false here instead.
-    const spawn = buildSpawnCapabilities(deps, sessionId, turn.id, true);
+    const spawn = buildSpawnCapabilities(deps, sessionId, turn.id, true, { metadata, bearerToken, userId });
     // Depth, from DURABLE STATE (store.isChildSession), not a value threaded
     // down from spawn time — see toolset.ts's ToolBuildCtx.depth and
     // store.ts's isChildSession for why: a passed parameter would be
@@ -660,7 +717,28 @@ function startTurn(
         if (depth === 0) {
           const followUps = await deps.store.takeFollowUps(sessionId);
           if (followUps.length > 0) {
-            startTurn(deps, sessionId, followUps.join("\n\n"), metadata, bearerToken, userId, onTurnCreated);
+            // Was this chain CAUSED by a child completing during this turn?
+            // deliverChildResult stamps the session when it queues a result
+            // for a parent that already has a turn running (it cannot wake
+            // one), and this read clears the stamp. Threading it into the
+            // chained turn's wokenByChildId is what stops that turn from
+            // zeroing consecutive_wakes — without it the runaway guard could
+            // never fire at all for the loop it exists to bound: parent
+            // wakes, spawns, the child finishes fast, its result is queued
+            // rather than woken, the chain resets the counter, forever.
+            // Best-effort, like the other bookkeeping reads: a blip here
+            // must not fail a turn.
+            const wokenBy = await deps.store.takePendingWake(sessionId).catch((e) => {
+              console.error(`agents: takePendingWake failed for session ${sessionId} (continuing):`, e);
+              return null;
+            });
+            startTurn(deps, sessionId, followUps.join("\n\n"), {
+              metadata,
+              bearerToken,
+              userId,
+              onTurnCreated,
+              ...(wokenBy ? { wokenByChildId: wokenBy } : {}),
+            });
             return;
           }
         }
@@ -749,7 +827,12 @@ export type ChildOutcome = { text: string } | { error: string };
 export interface DeliverDeps {
   store: Pick<
     AgentStore,
-    "getSession" | "queueFollowUp" | "getRunningTurn" | "bumpConsecutiveWakes" | "takeFollowUps"
+    | "getSession"
+    | "queueFollowUp"
+    | "getRunningTurn"
+    | "bumpConsecutiveWakes"
+    | "takeFollowUps"
+    | "markPendingWake"
   >;
   /**
    * Starts (or resumes) the parent session's next turn. Fire-and-forget,
@@ -778,7 +861,7 @@ export function buildDeliverDeps(deps: Deps): DeliverDeps {
     // comment), never in `metadata` — metadata here is `undefined`: this
     // synthetic turn has no client-supplied context of its own, the same
     // as a brand-new child session's first turn.
-    wake: (sid, msg, childId) => startTurn(deps, sid, msg, undefined, undefined, undefined, undefined, undefined, childId),
+    wake: (sid, msg, childId) => startTurn(deps, sid, msg, { wokenByChildId: childId }),
   };
 }
 
@@ -800,19 +883,30 @@ export function buildDeliverDeps(deps: Deps): DeliverDeps {
  * Invariant 3: one turn at a time. A parent already running a turn will
  * drain this followup itself once it finishes (see startTurn's own
  * takeFollowUps call) — starting a second turn here is exactly the bug
- * idx_agents_turns_one_running_per_session (V9) exists to make impossible;
- * this check is the primary defense, not a reliance on catching that index's
- * rejection.
+ * idx_agents_turns_one_running_per_session (V9) exists to make impossible.
+ * This check is the primary defense, but it is check-then-act: a waker can
+ * pass it and still lose to the index by the time startTurn reaches addTurn.
+ * That loss is handled, not merely tolerated — startTurn requeues whatever
+ * it was handed (and hands back the wake marker with it), so the spec's
+ * "the unique index serializes; the loser queues its followup" holds even
+ * though the text has already been drained out of the queue by then.
  *
- * Invariant 4: the wake budget. `wake` is only ever invoked from here, so
- * MAX_CONSECUTIVE_WAKES bounds a parent that spawns a child on every wake
- * into an unbroken chain that would otherwise run forever, one real model
- * call per link, billed to the caller's own API key. resetConsecutiveWakes
- * (called from startTurn on any turn NOT started by a wake) is what keeps
- * this counter measuring "how far this run has gone with nobody asking"
- * rather than "how many wakes this session has ever had" — without that
- * reset, a long-lived session woken legitimately many times would eventually
- * hit this cap for no good reason.
+ * Invariant 4: the wake budget. MAX_CONSECUTIVE_WAKES bounds a parent that
+ * spawns a child on every wake into an unbroken chain that would otherwise
+ * run forever, one real model call per link, billed to the caller's own API
+ * key. The counter is bumped for every DELIVERY, before the running-turn
+ * check below — not only for the deliveries that literally call `wake`. A
+ * child finishing while the parent is mid-turn produces no wake here, yet
+ * the parent's own drain-and-chain tail starts a turn for it anyway;
+ * counting only the wake call left that entire loop shape unbudgeted, which
+ * is precisely the shape a fast-failing child produces. Such a delivery
+ * instead stamps the session (markPendingWake) so the chained turn is
+ * recognised as child-caused and skips resetConsecutiveWakes.
+ * resetConsecutiveWakes (called from startTurn on any turn NOT caused by a
+ * child) is what keeps this counter measuring "how far this run has gone
+ * with nobody asking" rather than "how many child results this session has
+ * ever had" — without that reset, a long-lived session woken legitimately
+ * many times would eventually hit this cap for no good reason.
  *
  * Invariant 5 (2026-08-27 orchestration task 13, closed at the root in fix
  * round 1): delivers AT MOST ONCE per child. Before task 13 there were
@@ -867,14 +961,32 @@ export async function deliverChildResult(
     : `Agent ${who} finished with no output (its final step produced no text).`;
   await deps.store.queueFollowUp(parentSessionId, text);
 
-  if (await deps.store.getRunningTurn(parentSessionId)) return;
-
+  // Bumped BEFORE the running-turn check, not after it. The budget counts
+  // "child results delivered to this parent with nobody having asked for
+  // anything", which is the quantity that actually needs bounding — not
+  // "turns literally started by the wake call below". A child that finishes
+  // while the parent's turn is still running produces no wake here, but the
+  // parent's own drain-and-chain tail starts a further turn for it anyway;
+  // counting only the wake call left that entire loop shape unbudgeted.
   const wakes = await deps.store.bumpConsecutiveWakes(parentSessionId);
   if (wakes >= MAX_CONSECUTIVE_WAKES) {
     console.warn(
       `agents: not waking session ${parentSessionId} after child ${childSessionId} (${who}) completed — ` +
         `${wakes} consecutive wakes reached MAX_CONSECUTIVE_WAKES (${MAX_CONSECUTIVE_WAKES}). The result is ` +
         `queued and will be delivered the next time something else (a human, a channel) messages this session.`,
+    );
+    return;
+  }
+
+  // The parent is mid-turn: it will drain the followup queued above when it
+  // finishes and chain a turn for it. Stamp the session so that chained turn
+  // knows it was caused by a child, and therefore does NOT reset the budget
+  // just bumped (see startTurn's drain-and-chain tail, and store.ts's
+  // markPendingWake). Best-effort — losing the stamp costs accounting
+  // accuracy, never the result itself, which is already queued.
+  if (await deps.store.getRunningTurn(parentSessionId)) {
+    await deps.store.markPendingWake(parentSessionId, childSessionId).catch((e) =>
+      console.error(`agents: markPendingWake failed for parent ${parentSessionId} (continuing):`, e)
     );
     return;
   }
@@ -907,11 +1019,30 @@ export async function deliverChildResult(
 // enforced (spawnChild itself refuses a detached request when this is
 // false — not just a "don't register the tool" convention a future built-in
 // could get wrong).
+//
+// `parent` carries the request identity of the turn doing the spawning —
+// the metadata, bearer token and user id startTurn was called with. All
+// three must reach the child's own turn:
+//   - userId, because buildHookCtx copies it onto HookCtx and runner.ts
+//     resolves the model through resolveModelForTurn(config, hookCtx). An
+//     agent whose resolveModel requires an authenticated user (devx: "devx
+//     agent requires an authenticated user") kills EVERY child at model
+//     resolution without it — the deleted in-process runSubagent spread the
+//     parent's ctx and so never had this problem.
+//   - bearerToken, for the same reason, plus every hook/tool that
+//     authenticates downstream on the caller's behalf.
+//   - metadata, because filterTools is handed it: a child built with
+//     `metadata: undefined` is filtered under "no mode", i.e. ALLOW
+//     EVERYTHING, which is how a read-only (ask-mode) session could spawn a
+//     fully write-capable child.
+// It is also what `created_by` on the child session is taken from, so a
+// child is owned by the human who caused it rather than being anonymous.
 function buildSpawnCapabilities(
   deps: Deps,
   sessionId: string,
   turnId: string,
   allowDetached: boolean,
+  parent: { metadata: unknown; bearerToken?: string; userId?: string },
 ): SpawnCapabilities {
   return createSpawnCapabilities({
     sessionId,
@@ -921,6 +1052,7 @@ function buildSpawnCapabilities(
     store: deps.store,
     config: deps.agent.config.context,
     allowDetached,
+    createdBy: parent.userId,
     startChildTurn: (o) => {
       // A named subagent's child turn must run under ITS OWN
       // instructions/tools/model, not the parent's — mirrors the
@@ -935,19 +1067,28 @@ function buildSpawnCapabilities(
           `agents: spawnChild resolved an unknown subagent "${o.subagent}" on session ${sessionId} — running the child as a copy of the parent instead`,
         );
       }
-      // Task 14: reducing only — a named subagent's skills are intersected
-      // against the PARENT session's own, never a superset of them. No-op
-      // for self-delegation (rawChildAgent === deps.agent).
-      const childAgent = restrictChildSkills(deps.agent, rawChildAgent);
+      // Task 14: reducing only — a named subagent's skills AND tools are
+      // intersected against the PARENT session's own, never a superset of
+      // them (the spec's "tools and skills intersect the parent's, never
+      // union"). No-op for self-delegation (rawChildAgent === deps.agent).
+      // The tool intersection is the durable half of the ask-mode fix: even
+      // if a future ingress point forgets to thread `metadata` down (so
+      // filterTools would run the child under a different mode than its
+      // parent), a subagent still cannot be handed a tool its parent's own
+      // agent definition does not carry.
+      const childAgent = restrictChildTools(deps.agent, restrictChildSkills(deps.agent, rawChildAgent));
       startTurn(
         { ...deps, agent: childAgent },
         o.sessionId,
         o.message,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        o.history,
+        {
+          // The parent's request identity, in full — see this function's
+          // own `parent` comment for why each of the three matters.
+          metadata: parent.metadata,
+          bearerToken: parent.bearerToken,
+          userId: parent.userId,
+          seedHistory: o.history,
+        },
       );
     },
   });
@@ -984,7 +1125,7 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
         basePath,
         // Channel sessions have no trex user, so no bearerToken/userId here.
         startTurn: (sessionId, message, metadata, onTurnCreated) =>
-          startTurn(deps, sessionId, message, metadata, undefined, undefined, onTurnCreated),
+          startTurn(deps, sessionId, message, { metadata, onTurnCreated }),
         subscribe,
         env: deps.env,
         onSessionStarted: deps.onSessionStarted,
@@ -1105,7 +1246,9 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
     if (req.method === "POST" && path === "/eve/v1/session") {
       const body = await req.json().catch(() => ({}));
       const sessionId = await store.createSession(deps.plugin, deps.agentName, createdBy);
-      if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken, createdBy);
+      if (body.message != null) {
+        startTurn(deps, sessionId, body.message, { metadata: body.metadata, bearerToken, userId: createdBy });
+      }
       // eve returns separate sessionId/continuationToken handles (one owned by
       // the channel, one by the runtime — see COMPAT.md). We have no channel
       // layer, so continuationToken is the sessionId.
@@ -1153,7 +1296,9 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           );
         }
       }
-      if (body.message != null) startTurn(deps, sessionId, body.message, body.metadata, bearerToken, createdBy);
+      if (body.message != null) {
+        startTurn(deps, sessionId, body.message, { metadata: body.metadata, bearerToken, userId: createdBy });
+      }
       else if (!Array.isArray(body.inputResponses)) return json({ error: "message or inputResponses required" }, 400);
       return json({ accepted: true }, 202);
     }
@@ -1322,7 +1467,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // resolve inside THIS request, same as the session path), but a
       // detached child (Task 9's agent_spawn onward) would be orphaned, so
       // spawnChild refuses one outright.
-      const spawn = buildSpawnCapabilities(deps, sessionId, turn.id, false);
+      const spawn = buildSpawnCapabilities(deps, sessionId, turn.id, false, {
+        metadata: body.metadata,
+        bearerToken,
+        userId: createdBy,
+      });
       const tools = await buildSdkTools({
         agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
         plugin: deps.plugin, agentName: deps.agentName,
