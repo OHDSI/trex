@@ -2,12 +2,16 @@
 //
 // The runner keys applied migrations on version, so a collision means one file
 // is silently skipped on a fresh deployment while both appear to be "in the
-// repo". That is how V17 shipped twice; V18__v17_collision_repair.sql repairs
-// it, and this test stops the next one.
+// repo". This test has already caught two real collisions: V17 in
+// plugins/devx/migrations, and the V7/V18 pairs that #275 and #278 landed
+// within hours of each other without any textual conflict for git to catch.
 //
-// Applied migrations can never be renumbered (the checksum verifier hard-fails
-// deployments that already ran them), so the historical collision is
-// grandfathered by version number rather than fixed in place.
+// Two ways out of a collision, and which one is legal depends on deployment:
+// renumber the newer file (only safe while NOTHING has applied it — the
+// checksum verifier hard-fails a deployment whose recorded version changes
+// underneath it), or leave both and add a forward migration that re-applies
+// the skipped body idempotently. GRANDFATHERED exists for the case where
+// neither is possible; it is empty, and adding to it should feel wrong.
 import { assertEquals } from "jsr:@std/assert";
 
 const REPO_ROOT = new URL("../../../", import.meta.url);
@@ -19,13 +23,14 @@ const MIGRATION_DIRS = [
 ];
 
 /**
- * Collisions that already shipped and cannot be renumbered. Never add to this
- * list to make a new failure go away — add a forward repair migration instead,
- * the way V18__v17_collision_repair.sql does.
+ * Collisions that already shipped and can be neither renumbered nor repaired
+ * forward. Never add to this list to make a new failure go away — renumber the
+ * unapplied file, or add a forward repair migration.
+ *
+ * Empty by design. The original V17 entry was removed once #278 renumbered
+ * V17__agent_model_selection.sql to V19, which left version 17 unambiguous.
  */
-const GRANDFATHERED: Record<string, number[]> = {
-  "plugins/devx/migrations": [17],
-};
+const GRANDFATHERED: Record<string, number[]> = {};
 
 async function versionsIn(dir: string): Promise<Map<number, string[]>> {
   const byVersion = new Map<number, string[]>();
@@ -85,19 +90,19 @@ Deno.test("a migration's adjacent .test.ts file is not counted as a second migra
   // started matching .test.ts files.
   //
   // What actually needs pinning is that the regex EXCLUDES a real adjacent
-  // test file. V7__context.sql ships with V7__context.test.ts beside it, so
-  // assert that pairing exists on disk and that V7 still resolves to exactly
+  // test file. V8__context.sql ships with V8__context.test.ts beside it, so
+  // assert that pairing exists on disk and that V8 still resolves to exactly
   // one name.
   const dir = new URL("core/server/agents/migrations/", REPO_ROOT);
   const onDisk = new Set<string>();
   for await (const entry of Deno.readDir(dir)) if (entry.isFile) onDisk.add(entry.name);
-  assertEquals(onDisk.has("V7__context.sql"), true, "fixture moved: V7__context.sql no longer exists");
+  assertEquals(onDisk.has("V8__context.sql"), true, "fixture moved: V8__context.sql no longer exists");
   assertEquals(
-    onDisk.has("V7__context.test.ts"),
+    onDisk.has("V8__context.test.ts"),
     true,
     "fixture moved: this test needs a migration with an adjacent .test.ts to be meaningful",
   );
 
   const byVersion = await versionsIn("core/server/agents/migrations");
-  assertEquals(byVersion.get(7), ["V7__context.sql"], "the adjacent .test.ts was matched as a migration");
+  assertEquals(byVersion.get(8), ["V8__context.sql"], "the adjacent .test.ts was matched as a migration");
 });
