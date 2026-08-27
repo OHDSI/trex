@@ -92,10 +92,14 @@ export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStor
   return async ({ messages }: { messages: any[] }) => {
     const pending = await deps.store.takeFollowUps(deps.sessionId);
     if (pending.length === 0) return {}; // no override: leave the step untouched
+    // Only the text matters here. A row's origin (V10) answers "did a CHILD
+    // cause the next turn?", and mid-turn delivery creates no turn at all —
+    // nor could a child's own queue carry one: agent_send is the only thing
+    // that writes to it, and it never names an origin.
     return {
       messages: [
         ...messages,
-        ...pending.map((content) => ({ role: "user" as const, content })),
+        ...pending.map((p) => ({ role: "user" as const, content: p.message })),
       ],
     };
   };

@@ -979,7 +979,7 @@ Deno.test("makePrepareStep injects a pending follow-up before the next step", as
     store: {
       takeFollowUps: (sid: string) => {
         drained.push(sid);
-        return Promise.resolve(["stop and summarize"]);
+        return Promise.resolve([{ message: "stop and summarize", originChildSessionId: null }]);
       },
     },
   });
@@ -1008,7 +1008,9 @@ Deno.test("runTurn wires prepareStep to drain a child session's pending follow-u
     takeFollowUps: (_sid: string) => {
       drainCalls.push(drainCalls.length);
       // Nothing pending before step 1; a message lands before step 2.
-      return Promise.resolve(drainCalls.length === 1 ? [] : ["please wrap up now"]);
+      return Promise.resolve(
+        drainCalls.length === 1 ? [] : [{ message: "please wrap up now", originChildSessionId: null }],
+      );
     },
   };
   const { model, calls } = capturingModel(toolCallChunks("echo", { text: "hi" }), textChunks("done"));

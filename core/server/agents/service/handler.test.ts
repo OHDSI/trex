@@ -69,9 +69,6 @@ function inMemoryDb() {
     // Task 8 (deliverChildResult's wake budget) — undefined reads as 0, same
     // as the real column's NOT NULL DEFAULT 0.
     consecutive_wakes?: number;
-    // The wake budget's other half: which child's queued result the parent's
-    // NEXT (chained) turn was caused by. Nullable, same as the real column.
-    pending_wake_child_id?: string | null;
     createdAt: Date;
   }>();
   const turns: Array<
@@ -82,7 +79,7 @@ function inMemoryDb() {
   // The follow-up queue a busy session's new message folds into (store.ts's
   // queueFollowUp/takeFollowUps), keyed the same order-preserving way
   // agents.turn_followups is (insertion order).
-  const followUps: Array<{ session_id: string; message: string }> = [];
+  const followUps: Array<{ session_id: string; message: string; origin_child_session_id: string | null }> = [];
   // (userId, plugin, agent, tool) -> consent, keyed the same way as the
   // real table's primary key.
   const toolConsents = new Map<string, "always" | "never">();
@@ -186,21 +183,10 @@ function inMemoryDb() {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: [{ parent_session_id: s?.parent_session_id ?? null }] });
     }
-    // markPendingWake / readPendingWake — the stamp a parent gets so the turn
-    // it chains next is recognised as child-caused (and so does not reset the
-    // wake budget). Checked BEFORE the consecutive_wakes branches: these
-    // statements target agents.sessions too and only the column name tells
-    // them apart.
-    if (sql.includes("SELECT pending_wake_child_id")) {
-      const s = sessions.get(params[0] as string);
-      return Promise.resolve({ rows: [{ pending_wake_child_id: s?.pending_wake_child_id ?? null }] });
-    }
-    if (sql.includes("pending_wake_child_id = $2")) {
-      const s = sessions.get(params[0] as string);
-      if (s) s.pending_wake_child_id = params[1] as string;
-      return Promise.resolve({ rows: [] });
-    }
-    // bumpConsecutiveWakes / resetConsecutiveWakes (Task 8).
+    // bumpConsecutiveWakes / resetConsecutiveWakes (Task 8). The
+    // pending_wake_child_id branches that used to sit here are gone with the
+    // stamp itself: V10 records the originating child on each followup ROW
+    // instead (see the turn_followups branches below).
     if (sql.includes("consecutive_wakes = consecutive_wakes + 1")) {
       const s = sessions.get(params[0] as string);
       if (!s) return Promise.resolve({ rows: [] });
@@ -209,10 +195,7 @@ function inMemoryDb() {
     }
     if (sql.includes("SET consecutive_wakes = 0")) {
       const s = sessions.get(params[0] as string);
-      if (s) {
-        s.consecutive_wakes = 0;
-        s.pending_wake_child_id = null; // an external turn retires the stamp too
-      }
+      if (s) s.consecutive_wakes = 0;
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
@@ -274,8 +257,13 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("INSERT INTO agents.turn_followups")) {
-      // queueFollowUp.
-      followUps.push({ session_id: params[0] as string, message: params[1] as string });
+      // queueFollowUp — the third parameter is V10's origin_child_session_id,
+      // null for anything nobody asked for on a child's behalf.
+      followUps.push({
+        session_id: params[0] as string,
+        message: params[1] as string,
+        origin_child_session_id: (params[2] as string | null) ?? null,
+      });
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("DELETE FROM agents.turn_followups")) {
@@ -285,7 +273,9 @@ function inMemoryDb() {
       const sid = params[0] as string;
       const mine = followUps.filter((f) => f.session_id === sid);
       for (const f of mine) followUps.splice(followUps.indexOf(f), 1);
-      return Promise.resolve({ rows: mine.map((f) => ({ message: f.message })) });
+      return Promise.resolve({
+        rows: mine.map((f) => ({ message: f.message, origin_child_session_id: f.origin_child_session_id })),
+      });
     }
     if (sql.includes("INSERT INTO agents.steps")) {
       steps.push({
@@ -1259,7 +1249,7 @@ Deno.test("a message arriving while a turn is running is queued, not started as 
   // No second, concurrent turn — the message was folded into the queue instead.
   assertEquals(db.turns.length, 1);
   assertEquals(db.turns[0].status, "running");
-  assertEquals(db.followUps, [{ session_id: sid, message: "second, urgent" }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: "second, urgent", origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
   assertEquals((ack.data as { text: string }).text, "second, urgent");
@@ -1312,7 +1302,7 @@ Deno.test("a follow-up queued during a turn that fails is folded into the next e
   }
   assertEquals(db.turns[0].status, "failed");
   // Not lost: still queued, waiting for the next real message.
-  assertEquals(db.followUps, [{ session_id: sid, message: "queued while busy" }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: "queued while busy", origin_child_session_id: null }]);
   assert(logged.some((l) => l.includes("model exploded")));
 
   // Model recovers; a genuinely new message arrives and drains the queue,
@@ -1450,7 +1440,7 @@ Deno.test("a reap failure during the busy-check still queues and acknowledges th
   }
 
   assertEquals(db.turns.length, 1); // no second, concurrent turn
-  assertEquals(db.followUps, [{ session_id: sid, message: "second" }]); // still queued despite the reap failure
+  assertEquals(db.followUps, [{ session_id: sid, message: "second", origin_child_session_id: null }]); // still queued despite the reap failure
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
   assertEquals((ack.data as { text: string }).text, "second");
@@ -1559,7 +1549,7 @@ Deno.test("a qualified reply arriving while a gate is pending resolves the gate 
   // instead of sitting there for the rest of the 30-minute window.
   assertEquals(db.approvals.get("r-1")?.decision, "deny");
   // The reply itself is NOT stranded — it is queued to drive the revision.
-  assertEquals(db.followUps, [{ session_id: sid, message: reply }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: reply, origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack, `expected a message.queued event, got: [${live.map((e) => e.type).join(", ")}]`);
   assertEquals((ack.data as { text: string; deniedPendingGate: boolean }).text, reply);
@@ -1600,7 +1590,7 @@ Deno.test("a reply arriving on a busy session with NO pending gate still queues 
   unsub();
   releaseGate();
 
-  assertEquals(db.followUps, [{ session_id: sid, message: "also rename the tests to .test.ts" }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: "also rename the tests to .test.ts", origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
@@ -1696,7 +1686,7 @@ Deno.test("a composed Discord message that qualifiedly answers the pending gate 
   releaseGate();
 
   assertEquals(db.approvals.get("r-1")?.decision, "deny");
-  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: composed, origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
@@ -1736,7 +1726,7 @@ Deno.test("a composed Discord message that is unrelated chatter does NOT deny th
   releaseGate();
 
   assertEquals(db.approvals.get("r-1")?.decision, null); // gate left pending, not denied
-  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: composed, origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
@@ -1778,7 +1768,7 @@ Deno.test("a composed Discord message on a busy session with NO pending gate sti
   unsub();
   releaseGate();
 
-  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: composed, origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
@@ -1833,7 +1823,7 @@ Deno.test("a composed mention-in-thread message (three-part shape, stale yes/no/
   releaseGate();
 
   assertEquals(db.approvals.get("r-1")?.decision, null); // gate left pending, not denied
-  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: composed, origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, false);
@@ -1882,7 +1872,7 @@ Deno.test("a composed mention-in-thread message whose CURRENT reply qualifiedly 
   releaseGate();
 
   assertEquals(db.approvals.get("r-1")?.decision, "deny");
-  assertEquals(db.followUps, [{ session_id: sid, message: composed }]);
+  assertEquals(db.followUps, [{ session_id: sid, message: composed, origin_child_session_id: null }]);
   const ack = live.find((e) => e.type === "message.queued");
   assertExists(ack);
   assertEquals((ack.data as { deniedPendingGate: boolean }).deniedPendingGate, true);
@@ -2866,29 +2856,24 @@ function fakeDeliverDeps(opts: {
   started?: unknown[];
   child?: { detached?: boolean };
   runningTurn?: { id: string } | null;
-  // Records markPendingWake calls — the stamp deliverChildResult leaves so
-  // whichever turn drains the result does not reset the wake budget.
-  pendingWakes?: unknown[];
 } = {}) {
   const followUps = opts.followUps ?? [];
   const started = opts.started ?? [];
-  const pendingWakes = opts.pendingWakes ?? [];
-  const pending: string[] = [];
+  const pending: Array<{ message: string; originChildSessionId: string | null }> = [];
   return {
     store: {
       getSession: (_id: string) =>
         Promise.resolve({ parent_session_id: "p-1", detached: true, nickname: "wisp", ...opts.child }),
-      queueFollowUp: (sessionId: string, text: string) => {
-        followUps.push({ sessionId, text });
-        pending.push(text);
+      // The third argument is V10's origin: which child this row exists
+      // because of. Recorded here so the tests can assert it lands on the ROW
+      // rather than on a session-wide stamp.
+      queueFollowUp: (sessionId: string, text: string, originChildSessionId?: string) => {
+        followUps.push({ sessionId, text, originChildSessionId: originChildSessionId ?? null });
+        pending.push({ message: text, originChildSessionId: originChildSessionId ?? null });
         return Promise.resolve();
       },
       getRunningTurn: (_sessionId: string) => Promise.resolve(opts.runningTurn ?? null),
       takeFollowUps: (_sessionId: string) => Promise.resolve(pending.splice(0)),
-      markPendingWake: (sessionId: string, childSessionId: string) => {
-        pendingWakes.push({ sessionId, childSessionId });
-        return Promise.resolve();
-      },
     },
     wake: (sessionId: string, message: string, childSessionId: string) => {
       started.push({ sessionId, message, childSessionId });
@@ -2924,21 +2909,34 @@ Deno.test("a failed child still reaches its parent", async () => {
 });
 
 Deno.test("a busy parent gets the followup but no second turn", async () => {
-  const followUps: unknown[] = [];
+  const followUps: Array<{ sessionId: string; text: string; originChildSessionId: string | null }> = [];
   const started: unknown[] = [];
-  const pendingWakes: unknown[] = [];
   await deliverChildResult(
-    fakeDeliverDeps({ followUps, started, pendingWakes, runningTurn: { id: "t-9" } }) as never,
+    fakeDeliverDeps({ followUps, started, runningTurn: { id: "t-9" } }) as never,
     "c-1",
     { text: "x" },
   );
   assertEquals(followUps.length, 1);
   assertEquals(started.length, 0, "one turn at a time — the running turn will drain it");
   // The turn that IS running will drain that followup and chain a further
-  // turn for it. That chained turn is a wake in all but name, so it must be
-  // stamped — otherwise it resets consecutive_wakes and the runaway guard can
-  // never fire for this exact loop shape.
-  assertEquals(pendingWakes, [{ sessionId: "p-1", childSessionId: "c-1" }]);
+  // turn for it. That chained turn is a wake in all but name, so the ROW must
+  // say which child put it there — otherwise the chain resets
+  // consecutive_wakes and the runaway guard can never fire for this exact
+  // loop shape. On the ROW (V10), not on the session: a fan-out queues several
+  // results at once and one slot per session cannot hold them all.
+  assertEquals(followUps[0].originChildSessionId, "c-1");
+});
+
+// ...and the same origin is recorded on the IDLE-parent path, which queues and
+// then immediately drains its own row. The wake carries the child id
+// separately, but the row must be self-describing regardless: another waker
+// can win that drain, and then the row is all that is left to explain itself.
+Deno.test("an idle parent's queued result also records which child caused it", async () => {
+  const followUps: Array<{ sessionId: string; text: string; originChildSessionId: string | null }> = [];
+  const started: Array<{ childSessionId: string }> = [];
+  await deliverChildResult(fakeDeliverDeps({ followUps, started }) as never, "c-7", { text: "found it" });
+  assertEquals(followUps[0].originChildSessionId, "c-7");
+  assertEquals(started[0].childSessionId, "c-7");
 });
 
 // The budget is charged per child-caused TURN, in startTurn — not per
@@ -3285,6 +3283,85 @@ Deno.test("a client-forged metadata.wokenBy does not suppress the wake-budget re
     "a client-supplied metadata.wokenBy must not be able to suppress the wake-budget reset",
   );
   assertEquals(db.sessions.get(sessionId)?.consecutive_wakes, 0);
+});
+
+// --- V10: the chain decides from what it DRAINED, not from a session stamp --
+//
+// The unbounded deferral this replaced: V9 marked "a child result has landed
+// here" on the SESSION, and only an external turn that STARTED a turn of its
+// own retired it. A session taking steady mid-turn traffic never gets such a
+// turn — every message folds into a chain instead — so each chain saw the
+// standing stamp, skipped the reset, and the wake budget kept climbing for
+// turns a human had actually asked for.
+//
+// Two chains, back to back: the first drains a child's result (child-caused,
+// must NOT reset), the second drains a plain human message queued while that
+// first chain ran (external, MUST reset). The second is the one the old stamp
+// got wrong.
+Deno.test("a chain that drained only human messages resets the wake budget, even right after a child-caused one", async () => {
+  const gates = [
+    Promise.withResolvers<void>(), // parent turn 1
+    Promise.withResolvers<void>(), // the child-caused chain
+  ];
+  let call = 0;
+  const model = new MockLanguageModelV3({
+    doStream: async () => {
+      const gate = gates[call++];
+      if (gate) await gate.promise;
+      return { stream: simulateReadableStream({ chunks: textChunks("ok") }) };
+    },
+  });
+  const { handler, db } = await makeHandler({ model });
+  const store = createStore(db.query as never);
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "fan out" }),
+  }));
+  const sid = res.headers.get("x-eve-session-id")!;
+  await until(() => db.turns.length === 1 && db.turns[0].status === "running");
+
+  // A child finishes while the parent is mid-turn: its result is queued with
+  // its origin on the row, exactly as deliverChildResult does.
+  await store.queueFollowUp(sid, "Agent Kepler finished:\n\nfound it", "c-1");
+  gates[0].resolve();
+
+  // Chain #1 drained a child-caused row, so it is a child-caused turn: the
+  // budget is charged and NOT reset.
+  await until(() => db.turns.length === 2 && db.turns[1].status === "running");
+  assertEquals(
+    db.sessions.get(sid)?.consecutive_wakes,
+    1,
+    "a chain that drained a child's result must be charged, not reset",
+  );
+
+  // A human speaks while that chain is running. No origin — nobody asked for
+  // this on a child's behalf.
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "actually, stop and summarise" }),
+  }));
+  await until(() => db.followUps.some((f) => f.session_id === sid));
+  assertEquals(
+    db.followUps.filter((f) => f.session_id === sid).map((f) => f.origin_child_session_id),
+    [null],
+    "a human message queued behind a busy turn has no originating child",
+  );
+
+  gates[1].resolve();
+  await until(() => db.turns.length === 3 && settled(db));
+  assertEquals(db.turns[2].message, "actually, stop and summarise");
+  // THE POINT. Chain #2 drained nothing but a human message, so it is an
+  // external turn and the budget resets — immediately, not once some future
+  // message happens to land on an idle session. Under the session-level stamp
+  // this read 2.
+  assertEquals(
+    db.sessions.get(sid)?.consecutive_wakes,
+    0,
+    "a chain carrying only human text must reset the wake budget — this is the deferral V10 removes",
+  );
 });
 
 // Minor (review): a child whose final step produced no text must not
@@ -3853,17 +3930,17 @@ Deno.test({
       assertEquals(turns.rows.length, 1, "the loser must not have created a second turn");
       assertEquals(turns.rows[0].id, winner.id);
 
-      // The loser also hands over its wake marker, so the winner's own
-      // drain-and-chain turn is still recognised as child-caused and does not
-      // reset the wake budget.
-      const sess = await pool.query(
-        `SELECT pending_wake_child_id FROM agents.sessions WHERE id = $1`,
+      // The loser also hands back the ORIGIN with the text, in the same row
+      // (V10), so the winner's own drain-and-chain turn is still recognised as
+      // child-caused and does not reset the wake budget.
+      const origins = await pool.query(
+        `SELECT origin_child_session_id FROM agents.turn_followups WHERE session_id = $1`,
         [parentId],
       );
       assertEquals(
-        sess.rows[0].pending_wake_child_id,
-        childId,
-        "a requeueing loser must stamp the session so the chained turn is not counted as an external one",
+        (origins.rows as Array<{ origin_child_session_id: string | null }>).map((r) => r.origin_child_session_id),
+        [childId],
+        "a requeueing loser must put the origin back on the row, or the chained turn counts as an external one",
       );
     } finally {
       if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
@@ -4068,14 +4145,17 @@ Deno.test({
       );
       assertEquals(turns.rows.length, 0, "a failed turn start must not leave a turn row behind");
 
-      // And the wake marker is re-stamped, exactly as the addTurn case does,
-      // so whatever eventually drains this followup is still charged as a
-      // child-caused turn rather than resetting the wake budget.
-      const sess = await pool.query(
-        `SELECT pending_wake_child_id FROM agents.sessions WHERE id = $1`,
+      // And the origin rides back on the requeued row, exactly as the addTurn
+      // case does, so whatever eventually drains this followup is still
+      // charged as a child-caused turn rather than resetting the wake budget.
+      const origins = await pool.query(
+        `SELECT origin_child_session_id FROM agents.turn_followups WHERE session_id = $1`,
         [parentId],
       );
-      assertEquals(sess.rows[0].pending_wake_child_id, childId);
+      assertEquals(
+        (origins.rows as Array<{ origin_child_session_id: string | null }>).map((r) => r.origin_child_session_id),
+        [childId],
+      );
     } finally {
       if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
       await pool.end();

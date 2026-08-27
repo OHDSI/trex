@@ -352,16 +352,58 @@ Deno.test("listSessionsWithStaleRunningTurns scopes to the given plugin+agent vi
 Deno.test("queueFollowUp inserts and takeFollowUps drains oldest-first, removing what it returns", async () => {
   const { fn, calls } = fakeQuery([
     { rows: [] }, // queueFollowUp
-    { rows: [{ message: "also rename the tests" }, { message: "and update the docs" }] }, // takeFollowUps
+    {
+      rows: [
+        { message: "also rename the tests", origin_child_session_id: null },
+        { message: "and update the docs", origin_child_session_id: null },
+      ],
+    }, // takeFollowUps
   ]);
   const store = createStore(fn as never);
   await store.queueFollowUp("s-1", "also rename the tests");
   assert(calls[0].sql.includes("INSERT INTO agents.turn_followups"));
-  assertEquals(calls[0].params, ["s-1", "also rename the tests"]);
+  // A message nobody asked for on a child's behalf has no origin — explicit
+  // NULL, not an absent column, so the INSERT's shape never varies.
+  assertEquals(calls[0].params, ["s-1", "also rename the tests", null]);
   const taken = await store.takeFollowUps("s-1");
-  assertEquals(taken, ["also rename the tests", "and update the docs"]);
+  assertEquals(taken, [
+    { message: "also rename the tests", originChildSessionId: null },
+    { message: "and update the docs", originChildSessionId: null },
+  ]);
   assert(calls[1].sql.includes("DELETE FROM agents.turn_followups"));
   assertEquals(calls[1].params, ["s-1"]);
+});
+
+// V10__followup_origin.sql: the row records WHICH child it exists because of,
+// so the turn that drains it can tell a child-caused chain from one carrying
+// only human messages — without consulting a session-wide stamp that belongs
+// to whichever sibling wrote it last.
+Deno.test("queueFollowUp records the originating child, and takeFollowUps reads it back", async () => {
+  const { fn, calls } = fakeQuery([
+    { rows: [] },
+    { rows: [{ message: "Agent Kepler finished:\n\nfound it", origin_child_session_id: "c-9" }] },
+  ]);
+  const store = createStore(fn as never);
+  await store.queueFollowUp("p-1", "Agent Kepler finished:\n\nfound it", "c-9");
+  assert(calls[0].sql.includes("origin_child_session_id"));
+  assertEquals(calls[0].params, ["p-1", "Agent Kepler finished:\n\nfound it", "c-9"]);
+  assertEquals(await store.takeFollowUps("p-1"), [{
+    message: "Agent Kepler finished:\n\nfound it",
+    originChildSessionId: "c-9",
+  }]);
+  assert(calls[1].sql.includes("origin_child_session_id"), "the drain must return the origin, not just the text");
+});
+
+// The stamp V10 replaces is gone from the store entirely — a superseded
+// approximation left beside its own fix only invites the two to drift.
+Deno.test("resetConsecutiveWakes zeroes the counter and no longer touches the retired session stamp", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.resetConsecutiveWakes("s-1");
+  assert(calls[0].sql.includes("consecutive_wakes = 0"));
+  assert(!calls[0].sql.includes("pending_wake_child_id"), calls[0].sql);
+  assertEquals("markPendingWake" in store, false);
+  assertEquals("readPendingWake" in store, false);
 });
 
 Deno.test("getToolConsent returns the stored consent verb", async () => {

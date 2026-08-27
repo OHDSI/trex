@@ -532,22 +532,27 @@ live-tail by event shape.
         instead would let a canonical eight-way `dispatching-parallel-agents`
         fan-out consume 80% of the budget inside a single human-requested
         turn.
-      - **How a chained turn knows.** Every delivery stamps
-        `agents.sessions.pending_wake_child_id` BEFORE it queues its followup
-        row, so a turn that can see a child's result can always see why it is
-        there. A chained turn READS the stamp (it never clears it — one slot
-        cannot be handed out to several simultaneous deliveries) and both
-        charges itself and skips the reset while it stands. Only an external
-        turn retires it, in the same `UPDATE` that zeroes the counter.
-      - **Consequence, deliberate.** A message that lands while a turn is
-        running is folded into that turn's chain rather than starting its
-        own, and a chained turn does not reset. So under sustained mid-turn
-        traffic the reset is deferred for as many turns as that traffic keeps
-        up — unbounded in turn count, not merely one turn. It is never
-        permanent: any message that arrives on an idle session starts a turn
-        of its own, which retires the stamp and zeroes the counter.
-        Under-resetting is the safe direction here; over-resetting is what
-        made the cap unreachable in the first place.
+      - **How a chained turn knows.** Every delivery records the originating
+        child on the followup ROW it queues
+        (`agents.turn_followups.origin_child_session_id`,
+        `V10__followup_origin.sql`), in the same `INSERT` as the text. A
+        chained turn asks only what it actually drained: any row with an
+        origin makes that turn child-caused, so it charges itself and skips
+        the reset; a chain that drained nothing but human or channel messages
+        is an ordinary turn and resets. Draining a row takes its origin with
+        it, so nothing has to be retired later and a fan-out's N deliveries
+        record N origins rather than competing for one slot.
+      - **Superseded: the session-level stamp.** V9 answered the same
+        question with one slot per session
+        (`agents.sessions.pending_wake_child_id`), written before each
+        followup row and retired only by an external turn that STARTED a turn
+        of its own. Under sustained mid-turn traffic no such turn ever comes —
+        every message folds into a chain instead — so each chain saw the
+        standing stamp and skipped the reset, deferring a legitimate reset for
+        an unbounded number of turns. Per-row origins remove that deferral
+        outright. The column is left in the schema (dropping one mid rolling
+        deploy breaks whichever side has not swapped yet) but is neither read
+        nor written.
       - **At the cap** the turn is refused rather than the result dropped:
         `startTurn` requeues the text it had already drained and logs, and
         everything rides the next message that is genuinely someone asking.

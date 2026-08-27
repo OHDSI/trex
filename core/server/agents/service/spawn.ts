@@ -12,6 +12,7 @@ import { abortChildTurn } from "./aborts.ts";
 import { forkParentHistory, parseForkTurns } from "./context/fork.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { FALLBACK_CONTEXT_WINDOW } from "./context/budget.ts";
+import type { FollowUp } from "./store.ts";
 import type { ModelMessage, TurnRow } from "./context/history.ts";
 import { STALE_TURN_MS } from "./turn-lifetime.ts";
 
@@ -119,7 +120,7 @@ export interface SpawnStore {
   getChild(agentId: string, parentSessionId: string): Promise<ChildAgent | null>;
   failTurnsForSession(sessionId: string, error: string): Promise<number>;
   queueFollowUp(sessionId: string, text: string): Promise<void>;
-  takeFollowUps(sessionId: string): Promise<string[]>;
+  takeFollowUps(sessionId: string): Promise<FollowUp[]>;
 }
 
 export interface SpawnDeps {

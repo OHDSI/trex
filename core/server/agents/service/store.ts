@@ -7,6 +7,17 @@ import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 
 export type QueryFn = (sql: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 
+/**
+ * One drained row of agents.turn_followups. `originChildSessionId` names the
+ * child whose completion caused this followup to be queued, or null for a
+ * message nobody asked for on a child's behalf (a human or channel message
+ * that arrived while a turn was running). See V10__followup_origin.sql.
+ */
+export interface FollowUp {
+  message: string;
+  originChildSessionId: string | null;
+}
+
 // ChildAgent.status is a DISPLAY value derived from the child's latest turn —
 // it is never a value written to a DB column (agents.turns' CHECK constraint
 // only permits running/completed/failed; there is no 'stopped'). A child with
@@ -482,10 +493,17 @@ export function createStore(query: QueryFn) {
     // tool_consents/channel_sessions/oauth_* — none fit), so this is a new
     // table (migrations/V6__turn_followups.sql), following the same pattern as
     // agents.approvals/agents.tool_consents.
-    async queueFollowUp(sessionId: string, text: string): Promise<void> {
+    // `originChildSessionId` names the child this followup exists BECAUSE of
+    // (V10__followup_origin.sql). Omitted — the common case — means nobody
+    // asked for it on a child's behalf: a human or channel message that
+    // arrived while a turn was running. Whatever eventually drains this row
+    // reads the origin back off it and decides from that, rather than from a
+    // session-wide stamp that could belong to any of several siblings.
+    async queueFollowUp(sessionId: string, text: string, originChildSessionId?: string): Promise<void> {
       await query(
-        `INSERT INTO agents.turn_followups (session_id, message) VALUES ($1, $2)`,
-        [sessionId, text],
+        `INSERT INTO agents.turn_followups (session_id, message, origin_child_session_id)
+         VALUES ($1, $2, $3)`,
+        [sessionId, text, originChildSessionId ?? null],
       );
     },
 
@@ -493,15 +511,25 @@ export function createStore(query: QueryFn) {
     // oldest-first, so startTurn can fold them into the next turn's message
     // in the order they arrived. The DELETE...RETURNING is wrapped in a CTE
     // because Postgres does not support ORDER BY directly on a DELETE.
-    async takeFollowUps(sessionId: string): Promise<string[]> {
+    //
+    // Returns rows, not bare strings, because the caller has to answer two
+    // separate questions from one drain: what text drives the next turn, and
+    // whether that turn is child-caused (and so must not reset the wake
+    // budget). Collapsing them to strings is what forced the session-level
+    // approximation V10 replaces.
+    async takeFollowUps(sessionId: string): Promise<FollowUp[]> {
       const r = await query(
         `WITH taken AS (
-           DELETE FROM agents.turn_followups WHERE session_id = $1 RETURNING message, created_at
+           DELETE FROM agents.turn_followups WHERE session_id = $1
+           RETURNING message, origin_child_session_id, created_at
          )
-         SELECT message FROM taken ORDER BY created_at`,
+         SELECT message, origin_child_session_id FROM taken ORDER BY created_at`,
         [sessionId],
       );
-      return r.rows.map((row: { message: string }) => row.message);
+      return r.rows.map((row: { message: string; origin_child_session_id: string | null }) => ({
+        message: row.message,
+        originChildSessionId: row.origin_child_session_id ?? null,
+      }));
     },
 
     // Looks up the tool an approval request was raised for, so a sticky
@@ -711,54 +739,18 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.consecutive_wakes ?? 0;
     },
 
-    // Clears the pending-wake stamp too. An EXTERNAL turn is the only thing
-    // that should retire it: the stamp means "a child result has landed on
-    // this session since anyone last asked for anything", and only somebody
-    // actually asking makes that false again. See readPendingWake.
-    async resetConsecutiveWakes(sessionId: string): Promise<void> {
-      await query(
-        `UPDATE agents.sessions SET consecutive_wakes = 0, pending_wake_child_id = NULL WHERE id = $1`,
-        [sessionId],
-      );
-    },
-
-    // The wake budget's missing half. deliverChildResult bumps the counter
-    // and then, if the parent already has a running turn, returns — the
-    // parent's own turn will drain the queued result and CHAIN a further
-    // turn when it ends (handler.ts's drain-and-chain tail). That chained
-    // turn is a wake in all but name, but it used to look like an ordinary
-    // turn to startTurn, which therefore reset consecutive_wakes to 0 — so
-    // MAX_CONSECUTIVE_WAKES could never fire for the one loop shape it
-    // exists to bound (parent wakes, spawns, child finishes DURING the
-    // parent's turn, repeat).
+    // Zeroes the wake budget on any turn NOT caused by a child, so a session
+    // legitimately woken many times over a long life — with real messages in
+    // between — never creeps toward MAX_CONSECUTIVE_WAKES.
     //
-    // Recorded on the session row rather than passed in memory because the
-    // child's turn and the parent's next turn are not guaranteed to run in
-    // the same worker: a reap (the periodic sweep, or another worker's lazy
-    // on-message reap) can be what delivers a child's outcome.
-    async markPendingWake(sessionId: string, childSessionId: string): Promise<void> {
-      await query(
-        `UPDATE agents.sessions SET pending_wake_child_id = $2 WHERE id = $1`,
-        [sessionId, childSessionId],
-      );
-    },
-
-    // READ ONLY — deliberately not read-and-clear. The stamp is a single
-    // slot and a fan-out produces several deliveries at once, so a drainer
-    // that cleared it would just as often be clearing a SIBLING's stamp as
-    // its own; that sibling's result would then be drained later by a chained
-    // turn with no marker, which resets the very budget the sibling had
-    // bumped. Since every delivery re-stamps before it queues, a standing
-    // stamp means "at least one child result has landed here since the last
-    // time anyone asked for anything" — which is exactly the question a
-    // chained turn needs answered, and it stays true for all of them.
-    // resetConsecutiveWakes (an external turn) is what retires it.
-    async readPendingWake(sessionId: string): Promise<string | null> {
-      const r = await query(
-        `SELECT pending_wake_child_id FROM agents.sessions WHERE id = $1`,
-        [sessionId],
-      );
-      return r.rows[0]?.pending_wake_child_id ?? null;
+    // No longer touches agents.sessions.pending_wake_child_id: that stamp was
+    // a session-level approximation of "was this chained turn caused by a
+    // child?", and V10__followup_origin.sql replaced it with the origin
+    // recorded on each queued followup ROW, which the chaining turn reads back
+    // off exactly what it drained. The column is left in the schema (see V10)
+    // but is neither read nor written any more.
+    async resetConsecutiveWakes(sessionId: string): Promise<void> {
+      await query(`UPDATE agents.sessions SET consecutive_wakes = 0 WHERE id = $1`, [sessionId]);
     },
 
     // Marks a session's still-`running` turns `failed` with the given error —
