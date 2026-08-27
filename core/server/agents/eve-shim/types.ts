@@ -2,6 +2,16 @@
 // plus trex-only extensions (clientOnly, idempotent, JSON Schema inputs).
 // Keep this file dependency-free: agent tool files import it transitively
 // and must stay portable to real eve.
+//
+// ONE exception, deliberate: the `import type` of ContextConfig below. A
+// type-only import erases entirely at runtime, so it adds no module edge and
+// nothing for a port to real eve to carry — the alternative was redeclaring
+// an eight-field interface that must then be kept in lockstep with
+// budget.ts's, which is the failure mode this file's rule exists to avoid,
+// not an instance of it. Every VALUE import stays forbidden; QueryFn below
+// is redeclared rather than imported for exactly that reason.
+
+import type { ContextConfig } from "../service/context/budget.ts";
 
 // The worker's pg pool query fn, threaded through to hooks as `HookCtx.sql`
 // (matches store.ts's `QueryFn` — redeclared here, not imported, to keep
@@ -44,6 +54,7 @@ export interface ModelSpec {
 export interface AgentConfig {
   model?: string; // eve/AI-Gateway format: "provider/model-id"
   maxSteps?: number;
+  context?: Partial<ContextConfig>;
   // Additive hooks (eve ignores unknown defineAgent fields): called on EVERY
   // turn/chat request, never cached at agent-load time. A thrown/rejected
   // hook must fail the request rather than silently falling back to
@@ -118,6 +129,11 @@ export interface AgentConfig {
   buildUserMessage?: (base: string, ctx: HookCtx) => Promise<string>;
 }
 
+// Resolved agent config: guaranteed to have all fields fully populated.
+// The loader always returns this type from loadAgent, never the raw AgentConfig.
+// Used internally by the runtime; not exposed to agent authors.
+export type ResolvedAgentConfig = AgentConfig & { context: ContextConfig };
+
 // A dynamic tool source, authored as an agent-dir-root `dynamic-tools.ts`
 // default export (via eve-shim/tools.ts's defineToolProvider) and loaded by
 // loader.ts into LoadedAgent.toolProvider. Called fresh per top-level
@@ -151,6 +167,18 @@ export interface ToolContext {
   // buildSdkTools called with no toolEmit) simply omits this field, so a
   // tool must guard with `ctx?.emit?.(...)` — never assume it's present.
   emit?: (name: string, data: unknown) => void;
+  // Task 15: activates one or more of THIS session's deferred tools
+  // (agent.config.context.deferredTools — see context/toolsplit.ts's
+  // partitionTools) so they're included in the SDK tool set from the next
+  // buildSdkTools call onward. Bound to the calling session by
+  // toolset.ts's authoredTool (`(names) => ctx.store.activateTools(ctx.
+  // sessionId, names)`) — deliberately narrower than handing a tool the
+  // whole AgentStore: a tool gets exactly one write capability (its own
+  // session's activated-tools list), not arbitrary store access. Optional
+  // and safe to skip, same posture as emit/sql: undefined when no store was
+  // wired (e.g. /chat's stateless buildSdkTools call, or a test that never
+  // sets ToolBuildCtx.store).
+  activateTools?: (names: string[]) => Promise<void>;
 }
 
 // deno-lint-ignore no-explicit-any

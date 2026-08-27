@@ -1,12 +1,13 @@
 import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { createHandler } from "./handler.ts";
+import { createHandler, buildHistory } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
 import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMessage } from "../channels/adapters/discord-messages.ts";
+import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -257,12 +258,21 @@ function model(text: string) {
   return sequencedModel(textChunks(text));
 }
 
-async function makeHandler(opts: { model?: unknown; mutate?: (agent: LoadedAgent) => void } = {}) {
+async function makeHandler(
+  opts: {
+    model?: unknown;
+    mutate?: (agent: LoadedAgent) => void;
+    // Lets a test observe or override individual store calls without
+    // reimplementing createStore — used to assert a round trip is NOT made.
+    wrapStore?: (s: ReturnType<typeof createStore>) => ReturnType<typeof createStore>;
+  } = {},
+) {
   const agent = await loadAgent(TOY);
   opts.mutate?.(agent);
   const db = inMemoryDb();
+  const base = createStore(db.query as never);
   const handler = createHandler({
-    agent, store: createStore(db.query as never),
+    agent, store: opts.wrapStore ? opts.wrapStore(base) : base,
     plugin: "toy-agent", agentName: "toy",
     basePath: "/plugins/trex/toy", model: opts.model ?? model("hello from toy"),
   });
@@ -300,6 +310,99 @@ Deno.test("POST /eve/v1/session creates a session and returns the id header", as
   assertEquals(body.sessionId, sid);
   await until(() => settled(db)); // drain the fire-and-forget turn (see until())
   assertEquals(db.turns[0].status, "completed");
+});
+
+// Review fix (task 10-12, round 1): a malformed static config.model used to
+// throw straight out of the pre-turn compaction block's
+// parseModelString(deps.agent.config.model) call. That call sits between
+// takeFollowUps and addTurn, with no try/catch of its own — only the outer
+// fire-and-forget IIFE's `.catch(... "turn crashed" ...)`, which (per its own
+// comment in handler.ts) never emits turn.failed/session.failed, so the
+// throw would have silently hung every /stream reader on the session
+// instead of failing the turn gracefully. The guard must degrade to "" (the
+// same value the config.model-ABSENT branch already produces) and let the
+// turn proceed.
+//
+// Requires a session with a PRIOR (completed) turn — the pre-turn compaction
+// block only runs when priorTurns.length > 0 — and this file's inMemoryDb()
+// fake has no matcher for getHistory's SQL shape (it always returns `[]`
+// there, same gap noted in the task 10-12 report's "concerns" section), so
+// that guard can never actually be reached against the usual db/makeHandler
+// fixture. This needs a real store against Postgres, same as the sibling
+// e2e test below.
+Deno.test({
+  name: "a malformed static config.model does not throw out of the pre-turn compaction path and the turn still completes",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    // Hoisted so the finally block can clean up even when an assertion fails
+    // — a failed run must not be the one that leaves rows behind.
+    let sessionId: string | undefined;
+    try {
+      sessionId = await store.createSession("toy-agent", "toy", "model-guard-e2e-user");
+      const t1 = await store.addTurn(sessionId, "first");
+      await store.addStep(t1.id, 1, "text", null, { text: "hello from toy" });
+      await store.addStep(t1.id, 2, "finish", null, { finishReason: "stop" }, { inputTokens: 10, outputTokens: 5 });
+      await store.finishTurn(t1.id, "completed");
+
+      // deps.model below always wins over config.model for the actual turn
+      // (see resolveModelForTurn's precedence), so corrupting config.model
+      // here isolates the parseModelString guard itself rather than also
+      // requiring a working model resolution.
+      const agent = await loadAgent(TOY);
+      agent.config.model = "not-a-valid-provider-model-id-string";
+      const handler = createHandler({
+        agent, store, plugin: "toy-agent", agentName: "toy",
+        basePath: "/plugins/trex/toy", model: model("hello again"),
+      });
+
+      const origError = console.error;
+      const logged: string[] = [];
+      console.error = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+      try {
+        const res = await handler(new Request(`${BASE}/eve/v1/session/${sessionId}`, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: "second" }),
+        }));
+        assertEquals(res.status, 202);
+
+        // Poll for BOTH the row count and its status: an unguarded throw
+        // happens before addTurn, so turn 2 never gets created at all — a
+        // naive "status of the latest turn" check would then just keep
+        // re-reading turn 1's already-"completed" row and pass regardless of
+        // the bug. Asserting the count is what actually catches that.
+        const deadline = Date.now() + 10_000;
+        let rows: Array<{ status: string }> = [];
+        while (Date.now() < deadline) {
+          const r = await pool.query(
+            `SELECT status FROM agents.turns WHERE session_id = $1 ORDER BY seq`,
+            [sessionId],
+          );
+          rows = r.rows;
+          if (rows.length >= 2 && rows[1].status !== "running") break;
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+        assertEquals(rows.length, 2, "turn 2 was never created — the pre-turn compaction path likely threw before addTurn");
+        // The turn ran to completion — it was never silently hung by the throw.
+        assertEquals(rows[1].status, "completed");
+      } finally {
+        console.error = origError;
+      }
+      assert(
+        logged.some((l) => l.includes("could not parse agent model") && l.includes("not-a-valid-provider-model-id-string")),
+        "malformed model value was not logged for diagnosis",
+      );
+    } finally {
+      // Deleting the session cascades to its turns, steps and approvals
+      // (V1__agents_init.sql's ON DELETE CASCADE), so the shared test
+      // database does not accumulate a session per run of this file.
+      if (sessionId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [sessionId]);
+      await pool.end();
+    }
+  },
 });
 
 Deno.test("GET /stream replays persisted events as NDJSON after the turn ran", async () => {
@@ -1863,6 +1966,32 @@ Deno.test("POST /chat rejects a missing or empty messages array with 400", async
   }
 });
 
+// /chat creates a FRESH session per request (it is the stateless endpoint —
+// history comes from the client, not from replay), so its activated-tools
+// read could only ever return []. It was a guaranteed-empty round trip per
+// request. Making it meaningful needs a session id the caller supplies and
+// reuses across requests, which is the thing /chat is defined not to have —
+// see COMPAT.md's deferred-tool-loading entry.
+Deno.test("POST /chat does not read activated tools (its session is new, so there are none)", async () => {
+  let reads = 0;
+  const { handler } = await makeHandler({
+    wrapStore: (s) => ({
+      ...s,
+      getActivatedTools: (id: string) => {
+        reads++;
+        return s.getActivatedTools(id);
+      },
+    }),
+  });
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }),
+  }));
+  assertEquals(res.status, 200);
+  await res.text(); // drain the stream so the request fully settles
+  assertEquals(reads, 0, "/chat made an activated-tools read that can only return []");
+});
+
 // The proxy (plugin/function.ts) injects x-user-id from auth-context
 // middleware into the worker request headers; handler.ts must read it back
 // off and pass it through as created_by so a session's owner is
@@ -2107,4 +2236,59 @@ Deno.test("oauth callback route rejects a tampered state with 400 (no token writ
   const res = await handler(new Request(`${BASE}/eve/v1/oauth/github/callback?code=X&state=forged.sig`));
   assertEquals(res.status, 400);
   assertEquals(puts.length, 0);
+});
+
+Deno.test("buildHistory feeds tool calls and results back to the model", async () => {
+  const store = {
+    getHistory: () => Promise.resolve([{
+      seq: 1,
+      message: "read config.ts", metadata: null,
+      steps: [
+        { kind: "tool-call", name: "Read", payload: { toolCallId: "c1", input: { path: "config.ts" } } },
+        { kind: "tool-result", name: "Read", payload: { toolCallId: "c1", output: "export const x = 1;" } },
+        { kind: "text", name: null, payload: { text: "It exports x." } },
+      ],
+    }]),
+  };
+  const msgs = await buildHistory("s-1", store as never, DEFAULT_CONTEXT_CONFIG);
+  const kinds = msgs.map((m) => m.role);
+  assertEquals(kinds, ["user", "assistant", "tool", "assistant"]);
+});
+
+Deno.test({
+  name: "e2e: turn 2 sees turn 1's tool result in its request messages",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    // Hoisted for the finally-block cleanup — see the sibling e2e test above.
+    let sessionId: string | undefined;
+    try {
+      sessionId = await store.createSession("toy-agent", "toy", "e2e-user");
+
+      // Turn 1: a Read tool call and its result.
+      const t1 = await store.addTurn(sessionId, "read config.ts");
+      await store.addStep(t1.id, 1, "tool-call", "Read", { toolCallId: "c1", input: { path: "config.ts" } });
+      await store.addStep(t1.id, 2, "tool-result", "Read", { toolCallId: "c1", output: "export const PORT = 8080;" });
+      await store.addStep(t1.id, 3, "text", null, { text: "It sets PORT to 8080." });
+
+      // Turn 2: what the model would actually be sent.
+      await store.addTurn(sessionId, "what port was that?");
+      const msgs = await buildHistory(sessionId, store, DEFAULT_CONTEXT_CONFIG);
+
+      const serialized = JSON.stringify(msgs);
+      assert(
+        serialized.includes("export const PORT = 8080;"),
+        "turn 1 tool result missing from turn 2 context — the original defect",
+      );
+      assert(serialized.includes("c1"), "tool call id missing");
+      assertEquals(msgs.filter((m) => m.role === "tool").length, 1);
+    } finally {
+      // Cascades to turns and steps — see the sibling e2e test above.
+      if (sessionId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [sessionId]);
+      await pool.end();
+    }
+  },
 });

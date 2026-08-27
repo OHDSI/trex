@@ -263,3 +263,58 @@ export function withSystemCachePoint(model: any, system: string): SystemPrompt {
   }
   return system;
 }
+
+// Task 13/14: the deferred-tool-loading cache breakpoint. `core` tools
+// (never deferred, or deferred-but-not-yet-activated is impossible by
+// construction — see partitionTools in context/toolsplit.ts) come first and
+// are byte-identical across a session regardless of what gets activated;
+// `activated` tools are appended AFTER the breakpoint. For anthropic/bedrock,
+// the cache marker moves from the system message onto the LAST core tool
+// instead — placing it on `system` (as withSystemCachePoint does today)
+// would hash newly-appended activated tools into the same cached span the
+// moment one is activated, forcing a full cache-write on every subsequent
+// turn. Marking the last core tool instead means the cached span is exactly
+// "tools[0..lastCore]", unaffected by anything appended after it. OpenAI
+// gets no marker (automatic prefix caching, see cacheProviderOptions above);
+// google and any other provider get no marker either — stable ordering is
+// the only requirement for those.
+// deno-lint-ignore no-explicit-any
+export function withToolCachePoint<T>(model: any, core: [string, T][], activated: [string, T][]): Record<string, T> {
+  const out: Record<string, T> = {};
+  const lastIdx = core.length - 1;
+  for (const [i, [name, def]] of core.entries()) {
+    const isLast = i === lastIdx;
+    // Merge into any providerOptions the tool already carries (e.g. a
+    // connection-backed tool with its own provider hints) rather than
+    // clobbering it — no tool in the codebase sets providerOptions today,
+    // so this is currently inert, but a silent overwrite would fail a
+    // future tool that does.
+    const existing = (def as { providerOptions?: Record<string, unknown> }).providerOptions;
+    // bedrockSupportsPromptCaching, NOT isBedrockModel. See that predicate's
+    // comment: a non-Anthropic Bedrock model rejects ANY request carrying a
+    // cachePoint with AccessDeniedException, which on a streaming turn kills
+    // the turn silently — typing indicator, no reply. withSystemCachePoint
+    // has always used the narrow gate; this function reintroduced the broad
+    // one, which is the same defect the narrow gate exists to prevent.
+    //
+    // The bedrock branch is KEPT despite being inert on the wire today:
+    // @ai-sdk/amazon-bedrock@4's prepareTools builds each toolSpec from name,
+    // description, strict and inputSchema only — it never reads
+    // tool.providerOptions (verified in the installed dist/index.js), so no
+    // cachePoint reaches Converse from here. Only the SYSTEM-block marker
+    // (withSystemCachePoint) is live on bedrock. It stays because it costs
+    // nothing, because it is the correct placement the moment the provider
+    // starts honouring it, and because deleting it would leave the bedrock
+    // half of the deferred-tool cache design undocumented in code. The
+    // anthropic branch above is NOT inert: @ai-sdk/anthropic@4 reads
+    // tool.providerOptions for cacheControl and emits cache_control on the
+    // wire tool definition.
+    out[name] = isLast && isAnthropicModel(model)
+      ? { ...def, providerOptions: { ...existing, anthropic: { cacheControl: { type: "ephemeral" } } } }
+      : isLast && bedrockSupportsPromptCaching(model)
+      ? { ...def, providerOptions: { ...existing, bedrock: { cachePoint: { type: "default" } } } }
+      : def;
+  }
+  for (const [name, def] of activated) out[name] = def;
+  return out;
+}

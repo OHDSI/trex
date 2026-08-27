@@ -18,7 +18,8 @@
 import { parseEDNString } from "edn-data";
 import type { ChannelDef } from "./channels/types.ts";
 import type { ConnectionDef } from "./connections/types.ts";
-import type { AgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
+import type { AgentConfig, ResolvedAgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
+import { type ContextConfig, DEFAULT_CONTEXT_CONFIG } from "./service/context/budget.ts";
 
 export interface SkillMeta {
   name: string;
@@ -53,7 +54,7 @@ async function readEdn(path: string): Promise<any | null> {
 export interface LoadedAgent {
   dir: string;
   instructions: string;
-  config: AgentConfig;
+  config: ResolvedAgentConfig;
   tools: Record<string, ToolDef>;
   skills: SkillMeta[];
   subagents: Record<string, LoadedAgent>;
@@ -100,6 +101,48 @@ export function packOfSkillName(name: string): string | null {
   return i > 0 ? name.slice(0, i) : null;
 }
 
+const EDN_KEY_MAP: Record<string, keyof ContextConfig> = {
+  "fresh-tool-output-chars": "freshToolOutputChars",
+  "stale-tool-output-chars": "staleToolOutputChars",
+  "fresh-turns": "freshTurns",
+  "compact-at-fraction": "compactAtFraction",
+  "compact-at-tokens": "compactAtTokens",
+  "verbatim-turns-after-compaction": "verbatimTurnsAfterCompaction",
+  "context-window": "contextWindow",
+  "summarization-prompt": "summarizationPrompt",
+  "deferred-tools": "deferredTools",
+};
+
+// Explicit allowlist, NOT `key in out`. `out` starts as a spread of
+// DEFAULT_CONTEXT_CONFIG, which deliberately omits the three OPTIONAL keys
+// (`contextWindow`, `summarizationPrompt` and `compactAtTokens` have no
+// default) — so an `in`-based guard silently DROPPED them, in camelCase and EDN kebab-case
+// alike. That made `contextWindow` unsettable, and it is the spec's only
+// escape hatch for budget.ts's CONTEXT_WINDOWS map lagging a model release.
+// Any new ContextConfig field must be added here as well as to the type.
+const CONTEXT_CONFIG_KEYS: ReadonlySet<keyof ContextConfig> = new Set([
+  "freshToolOutputChars",
+  "staleToolOutputChars",
+  "freshTurns",
+  "compactAtFraction",
+  "compactAtTokens",
+  "verbatimTurnsAfterCompaction",
+  "contextWindow",
+  "summarizationPrompt",
+  "deferredTools",
+]);
+
+/** Merge an agent's partial `context` block over the conservative defaults. */
+export function resolveContextConfig(raw: unknown): ContextConfig {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_CONTEXT_CONFIG };
+  const out: ContextConfig = { ...DEFAULT_CONTEXT_CONFIG };
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = (EDN_KEY_MAP[k] ?? k) as keyof ContextConfig;
+    if (CONTEXT_CONFIG_KEYS.has(key)) (out as Record<string, unknown>)[key] = v;
+  }
+  return out;
+}
+
 export async function loadAgent(dir: string, opts: { depth?: number } = {}): Promise<LoadedAgent> {
   const depth = opts.depth ?? 0;
   let instructions: string | null = null;
@@ -120,13 +163,17 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     throw new Error(`agents: ${dir}/instructions.md is required but missing (or instructions.edn)`);
   }
 
-  let config: AgentConfig = { maxSteps: 25 };
+  let config: AgentConfig = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG } };
   let configLoaded = false;
   for (const f of ["agent.ts", "agent.js"]) {
     try {
       await Deno.stat(`${dir}/${f}`);
       const mod = await import(`file://${dir}/${f}`);
-      if (mod.default) config = { maxSteps: 25, ...mod.default };
+      if (mod.default) {
+        config = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG }, ...mod.default };
+        // Ensure context is always fully resolved, never partial
+        config.context = resolveContextConfig(config.context);
+      }
       configLoaded = true;
       break;
     } catch (e) {
@@ -140,6 +187,7 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
       config = {
         maxSteps: typeof edn["max-steps"] === "number" ? edn["max-steps"] : 25,
         ...(typeof edn.model === "string" ? { model: edn.model } : {}),
+        context: resolveContextConfig(edn.context),
       };
     }
   }

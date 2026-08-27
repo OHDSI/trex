@@ -17,13 +17,22 @@
 // no execute() smoke, since a real network call is neither deterministic
 // nor appropriate for this test run (no --allow-net egress assumed).
 //
+// Task 15 note: ToolSearch is EXCLUDED from the generic ENTRIES
+// parity table below (and from "one wrapper file per entry"'s count, now
+// 40) — it no longer wraps the legacy toolSearchTool via wrap()/toDevxCtx
+// at all (ranking + session-scoped activation have no legacy equivalent to
+// stay in parity with). Its own coverage lives in
+// ../lib/tool_search.test.ts (rankDeferredTools) and this file's own
+// updated tool-search smoke below (execute() end-to-end, real ToolContext,
+// no toDevxCtx).
+//
 // This file lives in lib/, NOT tools/: loader.ts scans EVERY tools/*.ts
 // entry under a strict one-file-one-tool contract (default export must be a
 // __trexTool-branded defineTool result), so a test file inside tools/ would
 // make loadAgent() throw and the whole agent fail to load. lib/ is never
 // scanned. The sibling load_agent_dir.test.ts is the regression guard for
 // that contract.
-import { assert, assertEquals, assertMatch, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertMatch, assertNotMatch, assertRejects } from "jsr:@std/assert";
 import type { ToolContext } from "../../../../core/server/agents/eve-shim/types.ts";
 
 // Wrapped (eve) tools — the thing under test.
@@ -112,7 +121,6 @@ import {
 } from "../../functions/tools/playwright.ts";
 import { cronCreateTool, cronDeleteTool, cronListTool } from "../../functions/tools/cron.ts";
 import { sendMessageTool } from "../../functions/tools/send_message.ts";
-import { toolSearchTool } from "../../functions/tools/tool_search.ts";
 
 // Redirect workspace.ts's DEFAULT_WORKSPACE_DIR to a scratch dir, same as
 // lib/context.test.ts and tools_batch_a.test.ts, so this file never touches
@@ -186,11 +194,11 @@ const ENTRIES: Array<{ name: string; wrapped: unknown; legacy: LegacyLike }> = [
   { name: "CronDelete", wrapped: CronDeleteTool, legacy: cronDeleteTool },
   { name: "CronList", wrapped: CronListTool, legacy: cronListTool },
   { name: "SendMessage", wrapped: SendMessageTool, legacy: sendMessageTool },
-  { name: "ToolSearch", wrapped: ToolSearchTool, legacy: toolSearchTool },
+  // ToolSearch deliberately excluded — see this file's header comment.
 ];
 
-Deno.test("batch B: exactly 41 registry entries ported, one wrapper file per entry", () => {
-  assertEquals(ENTRIES.length, 41);
+Deno.test("batch B: exactly 40 registry entries in generic legacy-parity comparison (41 wrapper files exist; ToolSearch opts out — see header comment)", () => {
+  assertEquals(ENTRIES.length, 40);
 });
 
 for (const { name, wrapped, legacy } of ENTRIES) {
@@ -331,9 +339,37 @@ Deno.test("smoke [messaging family]: SendMessage.execute is a deterministic no-o
   assertEquals(result, "Message sent to teammate: hi");
 });
 
-Deno.test("smoke [tool-search family]: ToolSearch.execute matches against the real (full, unfiltered) legacy TOOL_DEFINITIONS list", async () => {
+Deno.test("smoke [tool-search family]: ToolSearch.execute matches only DEFERRED_TOOLS, not the full registry", async () => {
   const ctx = fakeToolContext();
-  const result = await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
+  // "Bash" is always-on (never deferred, see lib/deferred_tools.ts) — it must
+  // NOT be a ToolSearch candidate at all, unlike the pre-Task-15 behavior
+  // (delegated wholesale to the legacy toolSearchTool over the full,
+  // unfiltered TOOL_DEFINITIONS list).
+  const bashResult = await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
     .execute({ query: "bash" }, ctx);
-  assertMatch(String(result), /\*\*Bash\*\*/);
+  assertEquals(bashResult, 'No tools found matching "bash".');
+
+  // A deferred tool IS a candidate. Uses a browser tool, not a KB one: the
+  // KB* tools are plan-mode allowlisted and therefore no longer deferred
+  // (see lib/deferred_tools.ts), so they are correctly no longer matchable.
+  const browserResult = await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
+    .execute({ query: "browser navigate" }, ctx);
+  assertMatch(String(browserResult), /\*\*BrowserNavigate\*\*/);
+
+  // ...and a plan-mode-allowlisted tool is NOT, precisely because it is no
+  // longer withheld from the request in the first place. (The query still
+  // returns the database tools -- "base" substring-matches "database" -- so
+  // the invariant to assert is the absence of KBSearch, not an empty result.)
+  const kbResult = await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
+    .execute({ query: "knowledge base search" }, ctx);
+  assertNotMatch(String(kbResult), /KBSearch/);
+});
+
+Deno.test("smoke [tool-search family]: ToolSearch.execute activates its matches via ctx.activateTools", async () => {
+  const activated: string[][] = [];
+  const ctx = fakeToolContext({ activateTools: (names: string[]) => (activated.push(names), Promise.resolve()) });
+  await (ToolSearchTool as { execute: (i: unknown, c: FakeCtx) => Promise<unknown> })
+    .execute({ query: "browser navigate" }, ctx);
+  assertEquals(activated.length, 1);
+  assert(activated[0].includes("BrowserNavigate"));
 });

@@ -51,3 +51,21 @@ Deno.test("classifyCoderError: an existing PR points at lookup rather than anoth
   assertEquals(code, "pr_already_exists");
   assertStringIncludes(safe, "gh pr list --head");
 });
+
+Deno.test("classifies GitHub's workflow-scope push rejection and names the files", () => {
+  const got = classifyCoderError(
+    "refusing to allow an OAuth App to create or update workflow\n.github/workflows/cleanup-stale-pr-tags.yml\nwithout workflow scope",
+  );
+  assertEquals(got.code, "git_workflow_scope");
+  assertEquals(got.safe.includes("cleanup-stale-pr-tags.yml"), true);
+  assertEquals(got.safe.includes("stale branch"), true);
+});
+
+Deno.test("the workflow-scope rejection is not mistaken for an auth/credential failure", () => {
+  // It must NOT fall through to auth_expired/invalid_key: the coder previously
+  // read it as broken auth and re-ran `gh auth status` for whole turns.
+  const got = classifyCoderError(
+    "! [remote rejected] feat -> feat (refusing to allow an OAuth App to create or update workflow .github/workflows/ci.yml without workflow scope)",
+  );
+  assertEquals(got.code, "git_workflow_scope");
+});

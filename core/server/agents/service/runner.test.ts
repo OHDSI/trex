@@ -747,3 +747,89 @@ Deno.test("runTurn: a configured buildUserMessage hook without a hookCtx fails l
     "hookCtx",
   );
 });
+
+// --- Compaction-trigger usage accounting -----------------------------------
+// ai@6's fullStream carries per-step usage ONLY on `finish-step`; the terminal
+// `finish` part carries `totalUsage`, which its own types document as "the sum
+// of all step usages". runner.ts must persist the LAST step's inputTokens as a
+// separate `lastStepInputTokens` field, because that — not the sum — is what
+// approximates how full the context window is. store.ts's getLastTurnUsage
+// feeds it straight into compact.ts's compaction threshold.
+// deno-lint-ignore no-explicit-any
+function usageCapturingStore(): { store: ReturnType<typeof createStore>; inserted: Array<{ kind: string; usage: any }> } {
+  // deno-lint-ignore no-explicit-any
+  const inserted: Array<{ kind: string; usage: any }> = [];
+  const fn = (sql: string, params: unknown[]) => {
+    if (sql.includes("INSERT INTO agents.steps")) {
+      inserted.push({
+        kind: params[2] as string,
+        usage: params[5] == null ? null : JSON.parse(params[5] as string),
+      });
+    }
+    if (sql.includes("RETURNING id, seq")) return Promise.resolve({ rows: [{ id: "t-1", seq: 1 }] });
+    return Promise.resolve({ rows: [] });
+  };
+  return { store: createStore(fn as never), inserted };
+}
+
+Deno.test("a multi-step turn persists the LAST step's input tokens, not the summed total", async () => {
+  const agent = await loadAgent(TOY);
+  const { store, inserted } = usageCapturingStore();
+
+  // Step 1 prefills 30_000 tokens and calls a tool; step 2 prefills 30_400
+  // (the tool result appended to the same context). totalUsage sums those to
+  // 60_400 — a number describing no context that ever existed.
+  const step1 = [
+    { type: "tool-call", toolCallId: "c-1", toolName: "shout", input: JSON.stringify({ text: "hi" }) },
+    {
+      type: "finish",
+      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      usage: { inputTokens: { total: 30_000 }, outputTokens: { total: 10 } },
+    },
+  ];
+  const step2 = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "done" },
+    { type: "text-end", id: "1" },
+    {
+      type: "finish",
+      finishReason: { unified: "stop", raw: "stop" },
+      usage: { inputTokens: { total: 30_400 }, outputTokens: { total: 4 } },
+    },
+  ];
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "shout", store, emit: () => {},
+    model: sequencedModel(step1, step2),
+  });
+
+  const finish = inserted.find((s) => s.kind === "finish");
+  assert(finish, "no finish step was persisted");
+  assertEquals(finish.usage.lastStepInputTokens, 30_400);
+  // The summed total is still persisted under its billing name — it is just
+  // no longer what the compaction threshold reads.
+  assertEquals(finish.usage.inputTokens, 60_400);
+});
+
+Deno.test("a single-step turn's lastStepInputTokens equals its only step's prefill", async () => {
+  const agent = await loadAgent(TOY);
+  const { store, inserted } = usageCapturingStore();
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hi", store, emit: () => {},
+    model: sequencedModel([
+      { type: "text-start", id: "1" },
+      { type: "text-delta", id: "1", delta: "yo" },
+      { type: "text-end", id: "1" },
+      {
+        type: "finish",
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: { inputTokens: { total: 4_242 }, outputTokens: { total: 2 } },
+      },
+    ]),
+  });
+  const finish = inserted.find((s) => s.kind === "finish");
+  assert(finish, "no finish step was persisted");
+  assertEquals(finish.usage.lastStepInputTokens, 4_242);
+  assertEquals(finish.usage.inputTokens, 4_242);
+});

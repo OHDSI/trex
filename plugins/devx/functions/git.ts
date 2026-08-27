@@ -228,7 +228,6 @@ class GitOps {
       return false;
     }
   }
-
   // Rename a branch in place. The working tree, index and reflog are untouched,
   // which is what lets a chat's worktree move from its legacy branch name onto
   // the `<github username>/<topic>` scheme mid-flight without disturbing work.
