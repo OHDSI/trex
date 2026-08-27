@@ -484,10 +484,11 @@ live-tail by event shape.
       stops waiting and the child's result is discarded on arrival. The
       child's WORKER keeps running to completion and keeps billing; there is
       no `AbortSignal` threaded to a child's turn. The tool description says
-      exactly this, so a model does not treat it as a kill switch. All are depth-0 only
-      (`ToolBuildCtx.depth`, derived per turn from durable state —
-      `store.isChildSession` — never threaded from spawn time, so a child
-      cannot spawn a grandchild even if a worker restarts mid-turn) and
+      exactly this, so a model does not treat it as a kill switch.
+    - **All seven are depth-0 only** (`ToolBuildCtx.depth`, derived per turn
+      from durable state — `store.isChildSession` — never threaded from spawn
+      time, so a child cannot spawn a grandchild even if a worker restarts
+      mid-turn), and
       none is deferrable by default: `deferredTools` activation only takes
       effect from the NEXT request (divergence 18), and a model mid-fan-out
       needs these tools now, not next turn.
@@ -564,9 +565,11 @@ live-tail by event shape.
       its parent's. A child also runs its parent's `filterTools` hook under
       the PARENT's own `metadata` — its turn is started with the spawning
       turn's metadata, bearer token and user id — so a mode-restricted
-      session (devx's `ask`) cannot delegate its way out of that restriction. **What this actually caps
-      today is the child's advertised system-prompt text, not a live
-      privilege**: `buildSdkTools` gates the built-in `skill` tool behind
+      session (devx's `ask`) cannot delegate its way out of that restriction.
+
+      **What `skills` actually caps today is the child's advertised
+      system-prompt text, not a live privilege**: `buildSdkTools` gates the
+      built-in `skill` tool behind
       `depth === 0`, and every child runs at depth 1 (this divergence's own
       depth cap, above), so no child can invoke a skill at all regardless of
       this field. The reduction exists for when that changes — a future

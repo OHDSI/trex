@@ -70,6 +70,13 @@ Deno.test({
 // Reproduces the wedge exactly: drop the index, create the violating rows,
 // re-run V9, and require it to succeed with the newest running turn kept and
 // the older ones marked failed for a stated reason.
+//
+// The remediation's `ORDER BY started_at DESC, seq DESC` needs no NULLS LAST:
+// agents.turns.started_at is `TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+// (V1__agents_init.sql) and no migration has ever dropped that constraint, so
+// the NULLS-FIRST-under-DESC case — a NULL sorting ahead of every real
+// timestamp and being kept as the "newest" running turn — is unreachable.
+// `seq DESC` remains as the tiebreak for turns sharing a timestamp.
 Deno.test({
   name: "V9 applies to a database that already violates the one-running-turn rule",
   ignore: !url,
@@ -131,7 +138,31 @@ Deno.test({
       );
       assertEquals(again.rows.map((r: { status: string }) => r.status), ["failed", "failed", "running"]);
     } finally {
+      // Order matters: the scratch rows go FIRST. This test deliberately
+      // creates three simultaneously-running turns, and if any of them is
+      // still `running` when the unique index is rebuilt, the rebuild throws
+      // and the index stays missing.
       if (sid) await pool.query(`DELETE FROM agents.sessions WHERE id=$1`, [sid]);
+      // The index is DROPPED at the top of this test to stage the violation,
+      // and V9 itself is what normally puts it back — so any failure between
+      // the drop and the re-run (an assertion, a connection blip) used to
+      // leave the scratch database permanently without the one-running-turn
+      // constraint. Nothing recreates it on a later run (V9 is already
+      // recorded as applied), so the next end-to-end test that relies on it
+      // fails for a reason that has nothing to do with itself. Restore it
+      // unconditionally, here, where an early exit still runs.
+      try {
+        await pool.query(
+          `CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_turns_one_running_per_session
+             ON agents.turns (session_id) WHERE status = 'running'`,
+        );
+      } catch (e) {
+        console.error(
+          "V9 test: could not restore idx_agents_turns_one_running_per_session — " +
+            "the scratch database is now missing it and later tests will fail spuriously:",
+          e,
+        );
+      }
       await pool.end();
     }
   },

@@ -8,6 +8,12 @@
  * that were queued while it was busy. Never per delivered result: several
  * children draining into one chained turn are one turn, one model call, and
  * therefore one unit.
+ *
+ * NINE such turns actually run, not ten: startTurn bumps the counter first and
+ * then refuses at `wakes >= MAX_CONSECUTIVE_WAKES`, so the tenth wake is the
+ * one that trips the guard rather than the one after it. Left as-is (a bound
+ * of "about ten", off by one in the safe direction) rather than renamed —
+ * every log line and the operator-facing message quote this same number.
  */
 export const MAX_CONSECUTIVE_WAKES = 10;
 /** Children running at once under one parent. */
