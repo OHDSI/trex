@@ -355,7 +355,8 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
    result — push back and ask it to actually click the thing it changed.
    Then have it screenshot the relevant views into `trex/screenshots/`, list the
    paths, and call `postScreenshots` with the current `channelId` and those paths so
-   the images land in the channel. Screenshots are for what a human should eyeball
+   the images land in the channel. Those PNGs are for the CHANNEL, not for the
+   repository — they must never be committed (see step 13). Screenshots are for what a human should eyeball
    (new/changed visuals, empty or error states, before/after on a fix); for a change
    with no visual delta the assertion is the evidence and a screenshot adds nothing.
    Only skip this step entirely for genuinely non-visual work (scripts, APIs, config,
@@ -427,6 +428,9 @@ aligned monospace) — use one when tabular data reads better, kept to a few col
     Approve → `askCodeAgent`: "Use your finishing-a-development-branch skill to
     commit the feature worktree, push, and open a PR. Make sure the plan/spec file
     is committed on the branch and summarized (or linked) in the PR description.
+    Do NOT commit `trex/screenshots/` — those PNGs were posted to the channel and
+    have no business in the diff; if any are already staged or committed on the
+    branch, remove them before pushing.
     Do not mention Claude, AI, or generated/assisted anywhere in the commit
     messages, branch name, or PR text — write them as the human author would.
     Report the PR link (or say why it couldn't — e.g. no git remote configured)."

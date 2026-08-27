@@ -5,7 +5,7 @@ import {
   getRunWorktreePath,
 } from "./tools/workspace.ts";
 import { gitOps } from "./git.ts";
-import { legacyChatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
+import { foreignDirtCount, legacyChatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
 import { resolveChatBranch } from "./chat_branch.ts";
 
 // Pin a chat to a stable, isolated git worktree so a feature's work persists
@@ -81,8 +81,11 @@ export async function ensureChatWorktree(
       );
     }
     const entries = await gitOps.worktreeList(repoRoot);
+    // devx's own scratch (attachments/, .devServer/) does not count — see
+    // foreignDirtCount. A status failure counts as maximally dirty: when we
+    // cannot PROVE the tree is clean, keep refusing.
     const dirtyCount = await gitOps.status(worktree)
-      .then((s) => s.files.length)
+      .then((st) => foreignDirtCount(st.files ?? []))
       .catch(() => Number.MAX_SAFE_INTEGER);
     const decision = worktreeReuseDecision(entries, worktree, branch, dirtyCount, legacyBranch);
     if ("error" in decision) {
@@ -102,6 +105,15 @@ export async function ensureChatWorktree(
         `[chat-worktree] chat worktree ${worktree} was left on '${decision.foreignBranch}' ` +
           `(clean tree) — restoring ${branch}`,
       );
+      // The chat's branch can be GONE: a coder that renames its worktree's
+      // branch to something it likes better (`git branch -m`) leaves nothing to
+      // switch back to, and the switch below then fails for a second, far more
+      // confusing reason. Recreate it at the current commit — that is this
+      // chat's own work lineage, which is exactly where the branch belongs.
+      if (!(await gitOps.refExists(worktree, `refs/heads/${branch}`))) {
+        console.warn(`[chat-worktree] ${branch} no longer exists — recreating it at the worktree's HEAD`);
+        await gitOps.branchCreate(worktree, branch);
+      }
       await gitOps.branchSwitch(worktree, branch);
     }
     return worktree;

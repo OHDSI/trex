@@ -1,5 +1,6 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  foreignDirtCount,
   branchSlug,
   chatWorktreeBranch,
   legacyChatWorktreeBranch,
@@ -144,4 +145,38 @@ Deno.test("worktreeReuseError still rejects a detached worktree outright", () =>
     worktreeReuseError([{ path: wt, branch: null, detached: true }], wt, "owner/topic"),
     "worktree is detached (expected branch owner/topic)",
   );
+});
+
+// Regression (chat wedged permanently): a worktree left on the coder's own
+// feature branch with nothing dirty but devx's OWN scratch was refused as
+// "2 uncommitted change(s)" on that turn and every turn after — and the coder
+// could not repair it, because ensureChatWorktree throws before the coder runs.
+Deno.test("foreignDirtCount: devx's own untracked scratch is not someone's work", () => {
+  assertEquals(
+    foreignDirtCount([
+      { path: "attachments/", status: "??" },
+      { path: "plugins/ui/apps/flow/.devServer/", status: "??" },
+      { path: "trex/screenshots/mockup-sidebar.png", status: "??" },
+      { path: ".worktrees/abc/", status: "??" },
+    ]),
+    0,
+  );
+});
+
+Deno.test("foreignDirtCount: real edits still count, including inside a repo that tracks those paths", () => {
+  // Only UNTRACKED artifacts are discounted. A repo that genuinely tracks a
+  // path of that name has real content there, and a modification to it is real.
+  assertEquals(foreignDirtCount([{ path: "attachments/logo.png", status: "M" }]), 1);
+  assertEquals(foreignDirtCount([{ path: "src/index.ts", status: "??" }]), 1);
+  assertEquals(
+    foreignDirtCount([
+      { path: "attachments/", status: "??" },
+      { path: "src/index.ts", status: " M" },
+    ]),
+    1,
+  );
+});
+
+Deno.test("foreignDirtCount: an empty status is clean", () => {
+  assertEquals(foreignDirtCount([]), 0);
 });

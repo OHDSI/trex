@@ -59,6 +59,51 @@ export function legacyChatWorktreeBranch(chatId: string): string {
 }
 
 /**
+ * Paths devx itself writes INTO the user's repo. None of them are in that
+ * repo's .gitignore — they are our runtime scratch, not its source — so
+ * `git status` reports them as untracked and they used to count as
+ * "uncommitted changes".
+ *
+ * That wedged real chats permanently: a worktree left on the coder's own
+ * feature branch with nothing but `attachments/` and `.devServer/` present was
+ * refused as "2 uncommitted change(s) — cannot restore the chat branch without
+ * risking them", on that turn and every turn after. The coder could not repair
+ * it either, because ensureChatWorktree throws BEFORE the coder starts.
+ *
+ *  - `attachments/`  — materializeAttachments (attachments.ts) drops chat
+ *                      uploads here so the coder can Read them.
+ *  - `.devServer/`   — the dev server's generated TLS cert dir.
+ *  - `.worktrees/`   — where we put the per-chat worktrees themselves.
+ */
+export const DEVX_ARTIFACT_PATHS: readonly string[] = Object.freeze([
+  "attachments/",
+  ".devServer/",
+  ".worktrees/",
+  // Mockup/verification PNGs on their way to a channel (postScreenshots). They
+  // are deliberately never committed — see the screenshotting-mockups skill —
+  // so they would otherwise sit untracked forever and block every later turn.
+  "trex/screenshots/",
+]);
+
+/** Is this path one of devx's own artifacts (at the root or nested)? */
+function isDevxArtifact(path: string): boolean {
+  const p = String(path).replace(/^"|"$/g, "");
+  return DEVX_ARTIFACT_PATHS.some((a) => p === a || p.startsWith(a) || p.includes(`/${a}`));
+}
+
+/**
+ * How many changed files in a worktree could plausibly be someone's work.
+ *
+ * Only UNTRACKED (`??`) devx artifacts are discounted. If a repo actually
+ * tracks a path of that name, a modification to it is real content and is
+ * counted — the point is to ignore scratch we created, not to ignore a whole
+ * directory name.
+ */
+export function foreignDirtCount(files: Array<{ path: string; status: string }>): number {
+  return files.filter((f) => !(f.status === "??" && isDevxArtifact(f.path))).length;
+}
+
+/**
  * Validate a to-be-reused worktree: the `git worktree list` entry for this
  * path must exist, not be detached, and have this chat's own branch checked
  * out. Returns an error string (reason) or null when valid.
