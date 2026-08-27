@@ -503,7 +503,7 @@ const BUILTIN_SKILL_DEF: ToolDef = { description: "Load an on-demand skill by na
 const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection-backed tools by keyword (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_SPAWN_DEF: ToolDef = { description: "Start a subagent and return immediately (built-in).", inputSchema: { type: "object" } };
-const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List subagents you have started (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List the subagents you have started that are still running (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_WAIT_DEF: ToolDef = { description: "Wait for a subagent to finish (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_RESULT_DEF: ToolDef = { description: "Read a finished subagent's output (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_STOP_DEF: ToolDef = { description: "Stop a subagent you started (built-in).", inputSchema: { type: "object" } };
@@ -731,9 +731,29 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
 
       if (!out.agent_list) {
         out.agent_list = tool({
-          description: "List the subagents you have started, with their nicknames and status.",
-          inputSchema: jsonSchema({ type: "object", properties: {} }),
-          execute: async (): Promise<unknown> => ({ agents: await ctx.spawn!.listChildren() }),
+          description: "List the subagents you have started that are still RUNNING, with their " +
+            "nicknames and status. Finished ones are left out unless you pass " +
+            "include_finished: true — use agent_result to read what a finished subagent produced.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              include_finished: {
+                type: "boolean",
+                description: "also list subagents that have already finished, failed or been stopped " +
+                  "(default false)",
+              },
+            },
+          }),
+          // Live-only by DEFAULT (the spec's tool table says "live children").
+          // A session may spawn up to MAX_CHILDREN_PER_SESSION children over
+          // its life, and an unfiltered listing puts every one of them —
+          // overwhelmingly finished ones — into the model's context every
+          // time it asks what is still running. The filter is applied in SQL
+          // (store.listChildren's liveOnly), not by discarding rows here.
+          execute: async (input: unknown): Promise<unknown> => {
+            const { include_finished } = (input ?? {}) as { include_finished?: boolean };
+            return { agents: await ctx.spawn!.listChildren({ liveOnly: include_finished !== true }) };
+          },
         });
         filterDefs.agent_list = BUILTIN_AGENT_LIST_DEF;
       } else {

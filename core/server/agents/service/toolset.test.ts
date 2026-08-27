@@ -66,9 +66,9 @@ Deno.test("wrapToolWithCap: an oversized non-string result is stringified, not d
 
 // ---------------------------------------------------------------------------
 // Integration: the cap is applied inside buildSdkTools (the core boundary),
-// so it covers every authored tool AND the subagent path (runSubagent calls
-// buildSdkTools again at depth 1) without devx (or any other plugin) opting
-// in.
+// so it covers every authored tool AND the subagent path (a child's own turn
+// calls buildSdkTools again at depth 1 — a child is a real nested session
+// now, not an in-process call) without devx (or any other plugin) opting in.
 // ---------------------------------------------------------------------------
 
 Deno.test("buildSdkTools: an authored tool's oversized output is capped on the way out", async () => {
@@ -634,17 +634,46 @@ Deno.test("agent_list reports live children with nicknames", async () => {
   const ctx = fakeToolCtx({
     spawn: {
       allowDetached: true,
-      listChildren: () =>
-        Promise.resolve([
-          { agentId: "c-1", nickname: "Kepler", status: "completed", subagent: "explorer" },
-          { agentId: "c-2", nickname: "Faraday", status: "running", subagent: "explorer" },
-        ]),
+      listChildren: (opts?: { liveOnly?: boolean }) =>
+        Promise.resolve(
+          opts?.liveOnly
+            ? [{ agentId: "c-2", nickname: "Faraday", status: "running", subagent: "explorer" }]
+            : [
+              { agentId: "c-1", nickname: "Kepler", status: "completed", subagent: "explorer" },
+              { agentId: "c-2", nickname: "Faraday", status: "running", subagent: "explorer" },
+            ],
+        ),
     },
   });
   const tools = await buildSdkTools(ctx as never);
   const out = await tools.agent_list.execute({}, {} as never) as { agents: unknown[] };
-  assertEquals(out.agents.length, 2);
+  assertEquals(out.agents.length, 1, "the default listing is live children only");
   assert(JSON.stringify(out.agents).includes("Faraday"));
+});
+
+// The default must be live-only (the spec's tool table says "live children"),
+// and asking for the full history must still be possible — a model that
+// spawned children earlier in the session needs their ids to call
+// agent_result.
+Deno.test("agent_list asks the store for live children by default and for all of them on include_finished", async () => {
+  const asked: Array<{ liveOnly?: boolean } | undefined> = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      listChildren: (opts?: { liveOnly?: boolean }) => {
+        asked.push(opts);
+        return Promise.resolve([]);
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  await tools.agent_list.execute({}, {} as never);
+  await tools.agent_list.execute({ include_finished: true }, {} as never);
+  await tools.agent_list.execute({ include_finished: false }, {} as never);
+  // A model that calls the tool with no arguments at all (the AI SDK can
+  // pass undefined for an all-optional schema) must still get the default.
+  await tools.agent_list.execute(undefined, {} as never);
+  assertEquals(asked.map((o) => o?.liveOnly), [true, false, true, true]);
 });
 
 Deno.test("agent_spawn/agent_list are not registered when the session disallows detached children (/chat)", async () => {

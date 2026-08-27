@@ -8,7 +8,7 @@
 import type { ChildAgent } from "./orchestration.ts";
 import { checkSpawnAllowed, STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 import { pickNickname } from "./nicknames.ts";
-import { forkParentHistory } from "./context/fork.ts";
+import { forkParentHistory, parseForkTurns } from "./context/fork.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { FALLBACK_CONTEXT_WINDOW } from "./context/budget.ts";
 import type { ModelMessage, TurnRow } from "./context/history.ts";
@@ -69,7 +69,15 @@ export interface SpawnCapabilities {
    * that is not this parent's.
    */
   readChildResult(agentId: string): Promise<{ text: string } | { error: string } | null>;
-  listChildren(): Promise<ChildAgent[]>;
+  /**
+   * This parent's children. `liveOnly` (the `agent_list` tool's default)
+   * drops the ones that have already finished — with
+   * MAX_CHILDREN_PER_SESSION at 50, an unfiltered listing on a long session
+   * is mostly finished rows, and putting 50 of them into a model's context
+   * to answer "what is running?" is the thing the tool is asked least often
+   * to do. Filtered in SQL by the store, not here.
+   */
+  listChildren(opts?: { liveOnly?: boolean }): Promise<ChildAgent[]>;
   // Whether spawnChild will accept detached: true for THIS parent session.
   // False for an ephemeral, never-revisited session (/chat — see
   // handler.ts's wiring) where a detached child's completion would have
@@ -95,7 +103,7 @@ export interface SpawnCapabilities {
 // has to implement what spawn.ts uses.
 export interface SpawnStore {
   countChildren(parentSessionId: string): Promise<{ live: number; total: number }>;
-  listChildren(parentSessionId: string): Promise<ChildAgent[]>;
+  listChildren(parentSessionId: string, opts?: { liveOnly?: boolean }): Promise<ChildAgent[]>;
   createChildSession(opts: {
     plugin: string;
     agent: string;
@@ -202,8 +210,17 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
 
       // Resolved from the PARENT's history, which carries real tool calls
       // since #275 — the whole reason fork_turns was gated on it.
-      const parentTurns = await store.getHistory(parentSessionId);
-      const inherited = forkParentHistory(parentTurns, forkTurns, config, FORK_TOKEN_BUDGET);
+      //
+      // Fetched ONLY when the fork spec actually asks for turns. "none" is
+      // the default and the overwhelming majority of delegations, and
+      // forkParentHistory returns [] for it without reading a single turn —
+      // so an unconditional getHistory was a full history read (every turn,
+      // every step, of a session that may have run for hours) thrown away on
+      // every spawn. parseForkTurns is the same classifier forkParentHistory
+      // itself uses, so the two can never disagree about what "none" means.
+      const inherited = parseForkTurns(forkTurns) === "none"
+        ? []
+        : forkParentHistory(await store.getHistory(parentSessionId), forkTurns, config, FORK_TOKEN_BUDGET);
 
       const agentId = await store.createChildSession({
         plugin,
@@ -247,8 +264,8 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
       return await readTerminalOutcome(store, agentId, child);
     },
 
-    listChildren(): Promise<ChildAgent[]> {
-      return store.listChildren(parentSessionId);
+    listChildren(opts?: { liveOnly?: boolean }): Promise<ChildAgent[]> {
+      return store.listChildren(parentSessionId, opts);
     },
 
     // Reports WHICH children reached a terminal state, never their content —

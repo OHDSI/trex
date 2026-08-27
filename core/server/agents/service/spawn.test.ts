@@ -64,6 +64,81 @@ Deno.test("spawnChild refuses once the live cap is reached", async () => {
   assertEquals(started.length, 0, "no turn may start when the spawn is refused");
 });
 
+// The parent's history is a full turns+steps read of a session that may have
+// been running for hours. fork_turns "none" (the DEFAULT, and the
+// overwhelming majority of delegations) discards it entirely, so it must
+// never be fetched at all.
+Deno.test("spawnChild does not read the parent's history when fork_turns is \"none\"", async () => {
+  let historyReads = 0;
+  const { deps, started } = fakeDeps({
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: 0 }),
+      listChildren: () => Promise.resolve([]),
+      createChildSession: () => Promise.resolve("c-1"),
+      getHistory: () => {
+        historyReads++;
+        return Promise.resolve([]);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  await caps.spawnChild({ subagent: null, prompt: "x", forkTurns: "none", detached: true });
+  assertEquals(historyReads, 0, "fork_turns \"none\" must not read the parent's history");
+  assertEquals(started.length, 1);
+  assertEquals((started[0] as { history?: unknown }).history, undefined);
+});
+
+// ...and an unparseable spec degrades to "none" through the same
+// parseForkTurns classifier forkParentHistory uses, so it must not read
+// either.
+Deno.test("spawnChild does not read the parent's history for a fork_turns value that parses to \"none\"", async () => {
+  let historyReads = 0;
+  const { deps } = fakeDeps({
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: 0 }),
+      listChildren: () => Promise.resolve([]),
+      createChildSession: () => Promise.resolve("c-1"),
+      getHistory: () => {
+        historyReads++;
+        return Promise.resolve([]);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  await caps.spawnChild({ subagent: null, prompt: "x", forkTurns: "not-a-number", detached: true });
+  assertEquals(historyReads, 0);
+});
+
+Deno.test("spawnChild DOES read the parent's history when fork_turns asks for turns", async () => {
+  let historyReads = 0;
+  const { deps, started } = fakeDeps({
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: 0 }),
+      listChildren: () => Promise.resolve([]),
+      createChildSession: () => Promise.resolve("c-1"),
+      getHistory: () => {
+        historyReads++;
+        return Promise.resolve([
+          {
+            seq: 1,
+            message: "earlier work",
+            metadata: null,
+            steps: [{ kind: "text", name: null, payload: { text: "ok" } }],
+          },
+        ]);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  await caps.spawnChild({ subagent: null, prompt: "x", forkTurns: "all", detached: true });
+  assertEquals(historyReads, 1, "fork_turns \"all\" must read the parent's history exactly once");
+  const seeded = (started[0] as { history?: unknown[] }).history;
+  assert(seeded && seeded.length > 0, "the forked slice must reach the child's first turn");
+});
+
 Deno.test("a nickname is not reused among live siblings", async () => {
   const { deps } = fakeDeps({
     store: {

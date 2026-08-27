@@ -720,7 +720,30 @@ Deno.test("listChildren is scoped to the parent and orders by created_at", async
   assertEquals(children[1].status, "running");
   assert(calls[0].sql.includes("parent_session_id = $1"));
   assert(calls[0].sql.includes("ORDER BY"));
-  assertEquals(calls[0].params, ["p-1"]);
+  // The second parameter is listChildren's liveOnly flag, false by default.
+  assertEquals(calls[0].params, ["p-1", false]);
+});
+
+Deno.test("listChildren defaults to the unfiltered listing and passes liveOnly to SQL when asked", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }, { rows: [] }]);
+  const store = createStore(fn as never);
+  await store.listChildren("p-1");
+  assertEquals(calls[0].params, ["p-1", false], "the default listing must not filter");
+  await store.listChildren("p-1", { liveOnly: true });
+  assertEquals(calls[1].params, ["p-1", true]);
+  // The filter must happen in the database, not by discarding rows in JS.
+  assert(calls[1].sql.includes("$2::boolean"), calls[1].sql);
+});
+
+Deno.test("countChildren's live filter is the same predicate the child status derives from", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ live: 2, total: 7 }] }]);
+  const store = createStore(fn as never);
+  await store.countChildren("p-1");
+  // A child between createChildSession and its first addTurn has no turn row,
+  // so lt.status is NULL — deriveChildStatus calls that "running" and the cap
+  // must agree, or a burst of spawns admits more than MAX_LIVE_CHILDREN.
+  assert(calls[0].sql.includes("lt.status IS NULL"), calls[0].sql);
+  assert(calls[0].sql.includes("LATERAL"), "must count off the LATEST turn, not an independent EXISTS probe");
 });
 
 Deno.test("failTurnsForSession marks the session's running turns failed and returns the count", async () => {

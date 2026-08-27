@@ -40,6 +40,17 @@ const LATEST_TURN_JOIN = `
      ORDER BY t.seq DESC LIMIT 1
   ) lt ON true`;
 
+// The SQL half of deriveChildStatus's `"running"` case, over LATEST_TURN_JOIN's
+// `lt`. Kept as one shared fragment because two callers depend on agreeing
+// with it exactly: countChildren (whose `live` figure enforces
+// MAX_LIVE_CHILDREN) and listChildren's liveOnly filter (what agent_list
+// shows). NULL is included on purpose — that is a child between
+// createChildSession and its first addTurn, which deriveChildStatus reports as
+// "running" and which the cap must therefore also count. `stopped` needs no
+// case of its own: it derives from a `failed` turn, which this excludes
+// already.
+const LIVE_CHILD_PREDICATE = `(lt.status IS NULL OR lt.status = 'running')`;
+
 // Denies (WHERE decision IS NULL — never overwrites an already-decided row)
 // every approval belonging to the given turns. Exported standalone so a
 // caller reaping turns any other way (there is only reapStaleTurns today,
@@ -633,27 +644,59 @@ export function createStore(query: QueryFn) {
       return row ? toChildAgent(row) : null;
     },
 
-    async listChildren(parentSessionId: string): Promise<ChildAgent[]> {
+    // `liveOnly` filters in SQL, not in JS, so a session that has spawned its
+    // full MAX_CHILDREN_PER_SESSION allowance never ships 50 mostly-finished
+    // rows across the wire just to drop them. It defaults to FALSE: this is
+    // the store's general-purpose child listing, and its two internal callers
+    // both need every child — spawn.ts's nickname picker (a finished
+    // sibling's nickname still appears in the parent's transcript, so reusing
+    // it would make two different children indistinguishable there) and
+    // waitForChildren's no-ids path (which exists precisely to notice
+    // children that have already reached a TERMINAL state). Only the
+    // `agent_list` tool opts in — see toolset.ts.
+    //
+    // "Live" is defined by the same latest-turn derivation deriveChildStatus
+    // uses, not by an independent EXISTS probe, so the two can never disagree
+    // about which children are running.
+    async listChildren(
+      parentSessionId: string,
+      opts: { liveOnly?: boolean } = {},
+    ): Promise<ChildAgent[]> {
       const r = await query(
         `SELECT s.id, s.nickname, s.subagent, s.detached, s.created_at,
                 lt.status AS turn_status, lt.error AS turn_error
            FROM agents.sessions s
            ${LATEST_TURN_JOIN}
           WHERE s.parent_session_id = $1
+            AND ($2::boolean IS NOT TRUE OR ${LIVE_CHILD_PREDICATE})
           ORDER BY s.created_at`,
-        [parentSessionId],
+        [parentSessionId, opts.liveOnly === true],
       );
       return r.rows.map(toChildAgent);
     },
 
+    // `live` counts exactly the children deriveChildStatus would report as
+    // "running", via the shared LIVE_CHILD_PREDICATE — including a child
+    // between createChildSession and its first addTurn, which has no turn row
+    // at all. An earlier version probed `EXISTS (... status='running')`
+    // instead, which reported such a child as NOT live while agent_list
+    // showed it running; a burst of spawns could then admit more than
+    // MAX_LIVE_CHILDREN, because each spawn's own admission check could not
+    // yet see the children spawned microseconds before it. Counting a
+    // turnless child as live can only admit FEWER children than the cap, and
+    // for a resource limit that is the safe direction to be wrong in.
+    //
+    // `total` is unchanged and deliberately counts every child ever spawned:
+    // MAX_CHILDREN_PER_SESSION bounds the session's whole lifetime, not what
+    // is running right now.
     async countChildren(parentSessionId: string): Promise<{ live: number; total: number }> {
       const r = await query(
         `SELECT
-           count(*) FILTER (WHERE EXISTS (
-             SELECT 1 FROM agents.turns t WHERE t.session_id = s.id AND t.status = 'running'
-           ))::int AS live,
+           count(*) FILTER (WHERE ${LIVE_CHILD_PREDICATE})::int AS live,
            count(*)::int AS total
-         FROM agents.sessions s WHERE s.parent_session_id = $1`,
+         FROM agents.sessions s
+         ${LATEST_TURN_JOIN}
+         WHERE s.parent_session_id = $1`,
         [parentSessionId],
       );
       return { live: r.rows[0]?.live ?? 0, total: r.rows[0]?.total ?? 0 };

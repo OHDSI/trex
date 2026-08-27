@@ -2694,6 +2694,83 @@ Deno.test({
   },
 });
 
+// countChildren's `live` figure enforces MAX_LIVE_CHILDREN; deriveChildStatus
+// (via listChildren/getChild) is what agent_list shows. They used to be
+// computed two different ways — an EXISTS probe for the count, the LATEST turn
+// for the status — and disagreed for exactly one state: a child created but
+// not yet given its first turn. Against a real Postgres, both must now call it
+// live, and liveOnly must actually filter.
+Deno.test({
+  name: "e2e: countChildren.live and the derived child status agree, including for a child with no turn yet",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-live-count-user");
+      await store.addTurn(parentId, "delegate");
+
+      const mkChild = (nickname: string) =>
+        store.createChildSession({
+          plugin: "toy-agent",
+          agent: "toy",
+          parentSessionId: parentId!,
+          parentTurnId: null,
+          subagent: null,
+          nickname,
+          detached: true,
+        });
+
+      // (a) created, no turn at all — the disputed state.
+      const turnless = await mkChild("Turnless");
+      // (b) a running turn.
+      const running = await mkChild("Running");
+      await store.addTurn(running, "work");
+      // (c) a finished turn.
+      const done = await mkChild("Done");
+      const doneTurn = await store.addTurn(done, "work");
+      await store.finishTurn(doneTurn.id, "completed");
+
+      const listed = await store.listChildren(parentId);
+      const byId = new Map(listed.map((c) => [c.agentId, c]));
+      assertEquals(byId.get(turnless)?.status, "running", "a turnless child derives to running");
+      assertEquals(byId.get(running)?.status, "running");
+      assertEquals(byId.get(done)?.status, "completed");
+
+      const counts = await store.countChildren(parentId);
+      // The whole point: the count must match the derivation, turnless child
+      // included — two live, not one.
+      assertEquals(counts.live, 2, "countChildren.live must count exactly the children derived as running");
+      assertEquals(
+        counts.live,
+        listed.filter((c) => c.status === "running").length,
+        "countChildren.live and deriveChildStatus must never disagree",
+      );
+      // total is deliberately untouched by any of this: MAX_CHILDREN_PER_SESSION
+      // bounds the session's lifetime, not what is running now.
+      assertEquals(counts.total, 3);
+
+      const live = await store.listChildren(parentId, { liveOnly: true });
+      assertEquals(
+        live.map((c) => c.agentId).sort(),
+        [turnless, running].sort(),
+        "liveOnly must drop the finished child in SQL",
+      );
+      assertEquals(
+        (await store.listChildren(parentId, { liveOnly: false })).length,
+        3,
+        "liveOnly:false is the unfiltered listing the nickname picker and waitForChildren still need",
+      );
+    } finally {
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
+      await pool.end();
+    }
+  },
+});
+
 Deno.test({
   name: "e2e: a child spawned with fork_turns=\"1\" inherits the parent's tool RESULT text, not just the prompt",
   ignore: !Deno.env.get("DATABASE_URL"),
