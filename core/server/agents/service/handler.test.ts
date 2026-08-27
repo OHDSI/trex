@@ -1,6 +1,7 @@
 import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { createHandler, buildHistory, deliverChildResult } from "./handler.ts";
+import { createHandler, buildHistory, deliverChildResult, buildDeliverDeps } from "./handler.ts";
+import { createSpawnCapabilities } from "./spawn.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
@@ -2517,6 +2518,227 @@ Deno.test({
     } finally {
       // Cascades to turns and steps — see the sibling e2e test above.
       if (sessionId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [sessionId]);
+      await pool.end();
+    }
+  },
+});
+
+// --- Task 15 (2026-08-27 orchestration): end-to-end integration against a --
+// --- live database. These are the tests the whole plan was gated on: they --
+// --- prove the parallel-agent skills devx already ships are executable.  --
+Deno.test({
+  name: "e2e: a detached child completes after its parent's turn ends and wakes it exactly once",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-detached-user");
+
+      // The parent's own turn ENDS FIRST — the detached child completes
+      // strictly after, which is the whole point of this test.
+      const parentTurn = await store.addTurn(parentId, "kick off some background exploration");
+      await store.addStep(parentTurn.id, 1, "text", null, { text: "sure, I'll delegate that" });
+      await store.finishTurn(parentTurn.id, "completed");
+
+      const childId = await store.createChildSession({
+        plugin: "toy-agent",
+        agent: "toy",
+        parentSessionId: parentId,
+        parentTurnId: parentTurn.id,
+        subagent: null,
+        nickname: "Kepler",
+        detached: true,
+      });
+      const childTurn = await store.addTurn(childId, "explore the repo");
+      await store.addStep(childTurn.id, 1, "text", null, { text: "found three bugs" });
+      await store.finishTurn(childTurn.id, "completed");
+
+      const agent = await loadAgent(TOY);
+      const deps = {
+        agent,
+        store,
+        plugin: "toy-agent",
+        agentName: "toy",
+        basePath: "/plugins/trex/toy",
+        model: model("acknowledged, thanks Kepler"),
+      };
+      await deliverChildResult(buildDeliverDeps(deps as never), childId, { text: "found three bugs" });
+
+      // deliverChildResult's own `wake` kicks off startTurn fire-and-forget —
+      // poll the DB for the parent's SECOND turn to actually finish running.
+      const deadline = Date.now() + 10_000;
+      let rows: Array<{ status: string; message: unknown }> = [];
+      while (Date.now() < deadline) {
+        const r = await pool.query(
+          `SELECT status, message FROM agents.turns WHERE session_id = $1 ORDER BY seq`,
+          [parentId],
+        );
+        rows = r.rows;
+        if (rows.length >= 2 && rows[1].status !== "running") break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assertEquals(rows.length, 2, "expected exactly ONE new parent turn to have been started by the wake");
+      assertEquals(rows[1].status, "completed");
+      assert(
+        String(rows[1].message).includes("found three bugs"),
+        "the parent's new turn should carry the child's actual result text",
+      );
+      assert(String(rows[1].message).includes("Kepler"), "the followup should name the child by nickname");
+
+      // "Woken exactly once": bumpConsecutiveWakes ran exactly once (this
+      // was the parent's first-ever wake), which is only possible if
+      // deliverChildResult reached the wake call exactly one time.
+      const sess = await pool.query(`SELECT consecutive_wakes FROM agents.sessions WHERE id = $1`, [parentId]);
+      assertEquals(sess.rows[0].consecutive_wakes, 1);
+    } finally {
+      // Deleting the parent cascades to the child (ON DELETE CASCADE on
+      // parent_session_id, V9__orchestration.sql) and both sessions' turns
+      // and steps (V1's own cascade).
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
+      await pool.end();
+    }
+  },
+});
+
+Deno.test({
+  name: "e2e: three children run concurrently under one parent — the one-running-turn index is per-session, not global",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-concurrency-user");
+      await store.addTurn(parentId, "fan out three explorations");
+
+      const childIds: string[] = [];
+      for (let i = 0; i < 3; i++) {
+        const childId = await store.createChildSession({
+          plugin: "toy-agent",
+          agent: "toy",
+          parentSessionId: parentId,
+          parentTurnId: null,
+          subagent: null,
+          // Distinct nicknames are asserted for real below (store.listChildren),
+          // not merely assumed — pickNickname is exercised through the real
+          // spawn path in the fork_turns test; here each is given explicitly
+          // to isolate what this test is actually proving: concurrency.
+          nickname: `Sibling-${i}`,
+          detached: true,
+        });
+        childIds.push(childId);
+        // Left RUNNING on purpose — never finished. If the one-running-turn
+        // partial unique index (idx_agents_turns_one_running_per_session,
+        // V9) were scoped wrong (globally instead of per session_id), the
+        // SECOND and THIRD of these addTurn calls would themselves be fine
+        // (they're different sessions) but a shared-connection deadlock or a
+        // cross-session serialization would still be visible as three
+        // simultaneously "running" rows failing to coexist below.
+        await store.addTurn(childId, `explore area ${i}`);
+      }
+
+      const children = await store.listChildren(parentId);
+      assertEquals(children.length, 3);
+      const nicknames = new Set(children.map((c) => c.nickname));
+      assertEquals(nicknames.size, 3, "all three children must have distinct nicknames");
+      for (const c of children) assertEquals(c.status, "running");
+
+      // The direct proof: three DIFFERENT sessions each hold a row in
+      // agents.turns with status='running' AT THE SAME TIME. If the unique
+      // index were accidentally global (not `WHERE status='running'`
+      // scoped per session_id), one of the three addTurn calls above would
+      // have thrown a unique-violation instead of reaching this point.
+      const running = await pool.query(
+        `SELECT session_id FROM agents.turns WHERE session_id = ANY($1) AND status = 'running'`,
+        [childIds],
+      );
+      assertEquals(
+        running.rows.length,
+        3,
+        "expected all three siblings' turns to be simultaneously running — " +
+          "if this is short, the one-running-turn index is serializing siblings, which is a real defect, not a test problem",
+      );
+    } finally {
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
+      await pool.end();
+    }
+  },
+});
+
+Deno.test({
+  name: "e2e: a child spawned with fork_turns=\"1\" inherits the parent's tool RESULT text, not just the prompt",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-fork-user");
+
+      // Parent turn 1: a real tool-call + tool-result pair, finished (a
+      // real turn always finishes before the next one starts — enforced by
+      // idx_agents_turns_one_running_per_session).
+      const parentTurn = await store.addTurn(parentId, "read config.ts");
+      await store.addStep(parentTurn.id, 1, "tool-call", "Read", { toolCallId: "c1", input: { path: "config.ts" } });
+      await store.addStep(parentTurn.id, 2, "tool-result", "Read", {
+        toolCallId: "c1",
+        output: "export const PORT = 47291;",
+      });
+      await store.addStep(parentTurn.id, 3, "text", null, { text: "It sets PORT to 47291." });
+      await store.finishTurn(parentTurn.id, "completed");
+
+      // The REAL spawn path (createSpawnCapabilities -> spawnChild ->
+      // forkParentHistory), not a hand-rolled call to forkParentHistory
+      // directly — this is what actually proves the wiring works, which is
+      // the entire reason this task exists. startChildTurn is intercepted
+      // only to CAPTURE what it was handed, never to fake spawnChild's own
+      // work (createChildSession/getHistory below are the real store,
+      // against the real database).
+      let capturedHistory: unknown[] | undefined;
+      const spawn = createSpawnCapabilities({
+        sessionId: parentId,
+        turnId: parentTurn.id,
+        plugin: "toy-agent",
+        agent: "toy",
+        store,
+        config: DEFAULT_CONTEXT_CONFIG,
+        allowDetached: true,
+        startChildTurn: (o) => {
+          capturedHistory = o.history;
+        },
+      });
+
+      const { agentId: childId } = await spawn.spawnChild({
+        subagent: null,
+        prompt: "what port was that?",
+        forkTurns: "1",
+        detached: false,
+      });
+
+      assertExists(capturedHistory, "expected a forked history slice to be handed to the child's first turn");
+      const serialized = JSON.stringify(capturedHistory);
+      // The point of the whole task: the RESULT's actual content, not just
+      // that a message of the right shape/count exists. A shape-only
+      // assertion would pass against an implementation that forwarded the
+      // prompt alone and inherited nothing useful from the parent.
+      assert(
+        serialized.includes("export const PORT = 47291;"),
+        `expected the parent's tool RESULT text in the child's forked history, got: ${serialized}`,
+      );
+      assert(serialized.includes("c1"), "expected the tool call id to survive the fork too");
+      const toolMessages = (capturedHistory as Array<{ role: string }>).filter((m) => m.role === "tool");
+      assert(toolMessages.length >= 1, "expected at least one role:tool message in the forked history");
+      void childId; // real child session created for real (assertion above is on the fork, not on it)
+    } finally {
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
       await pool.end();
     }
   },
