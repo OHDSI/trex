@@ -450,199 +450,221 @@ function startTurn(
       );
     }
 
-    // Fold in anything queued while an earlier turn on this session was
-    // running (see above) — it rides along with this turn's message instead
-    // of racing it as a separate turn. Ordinary case (nothing queued) is a
-    // no-op DB round trip that leaves `message` untouched.
-    //
-    // `queued` items arrived and were queued BEFORE this call's `message`
-    // (they were queued behind a
-    // turn that has since finished or failed; `message` is what just
-    // triggered THIS startTurn call, chronologically after all of them) —
-    // store.ts's takeFollowUps docstring promises "in the order they
-    // arrived", so they must lead, not trail.
-    const queued = await deps.store.takeFollowUps(sessionId);
-    const turnMessage = queued.length > 0 ? [...queued, asText(message)].join("\n\n") : message;
-
     // Built once, up front, so both the pre-turn compaction call below and
     // the real turn's runTurn call (further down) share the same per-request
     // hookCtx — resolveModel/buildInstructions hooks are meant to be called
-    // fresh per REQUEST, not per model resolution within it.
+    // fresh per REQUEST, not per model resolution within it. Synchronous, and
+    // deliberately OUTSIDE the requeue guard below: it touches no queue.
     const hookCtx = buildHookCtx(deps, sessionId, metadata, bearerToken, userId);
 
-    // Pre-turn compaction (task 12; see compact.ts's maybeCompact for the
-    // full rationale). Deliberately PRE-turn only — never mid-stream, since a
-    // mid-turn summary would have to be injected above the last user message
-    // or the model misreads it. Cheap no-op on the common case: an empty or
-    // comfortably-under-budget session short-circuits inside maybeCompact
-    // without ever calling a model.
-    const priorTurns = (await deps.store.getHistory(sessionId)) as TurnRow[];
-    // Assembled ONCE and reused as this turn's `history` on the common path.
-    // The compaction check needs the assembled messages anyway (to size the
-    // estimate fallback and the tokensBefore/tokensAfter payload), and the
-    // turn needs exactly the same messages — running getHistory +
-    // assembleHistory + ensureToolResultsPresent twice per turn bought
-    // nothing. Only a compaction that actually persisted a checkpoint makes
-    // this stale, and that path re-fetches below.
-    let history: ModelMessage[] = ensureToolResultsPresent(
-      assembleHistory(priorTurns, deps.agent.config.context),
-    );
-    // A brand-new child session has no persisted turns of its own (priorTurns
-    // is always [] here), so this can never clobber a session's real history.
-    if (seedHistory && seedHistory.length > 0) history = seedHistory;
-    let compacted = false;
-    if (priorTurns.length > 0) {
-      const priorMsgs = history;
-      const lastUsage = await deps.store.getLastTurnUsage(sessionId).catch((e) => {
-        console.error(`agents: getLastTurnUsage failed for session ${sessionId} (falling back to an estimate):`, e);
-        return null;
-      });
-      // parseModelString throws on anything not "provider/model-id" shaped.
-      // This whole pre-turn block runs before addTurn, with no enclosing
-      // try/catch of its own — it's covered only by the outer fire-and-forget
-      // IIFE's `.catch(... "turn crashed" ...)`, which produces no
-      // turn.failed/session.failed (see that catch's own comment below), so
-      // a malformed static config.model would silently hang every /stream
-      // reader on this session instead of failing the turn gracefully the
-      // way it used to inside runTurn. Degrade to "" (same as the
-      // config.model-absent case) — resolveContextWindow("") falls back to
-      // the conservative FALLBACK_CONTEXT_WINDOW — and log it so it's
-      // diagnosable.
-      let modelId = "";
-      try {
-        if (deps.agent.config.model) modelId = parseModelString(deps.agent.config.model).modelId;
-      } catch (e) {
-        console.error(
-          `agents: could not parse agent model "${deps.agent.config.model}" for session ${sessionId} (using the conservative fallback context window):`,
-          e,
-        );
-      }
-      // The system-prompt + tool-schema term the estimate fallback was
-      // missing. maybeCompact applies it to the estimate only (the observed
-      // count already includes both); it is computed unconditionally anyway
-      // because the tokensAfter figure below is always an estimate and so
-      // always needs it, and a before/after pair measured two different ways
-      // is not a pair.
+    // THE REQUEUE GUARD, and everything it has to cover.
+    //
+    // From the drain below to addTurn further down, the text driving this turn
+    // exists in exactly one place: this function's local variables. It has
+    // been DELETED from agents.turn_followups (takeFollowUps is a
+    // DELETE...RETURNING) and no turn row holds it yet — and on a wake it was
+    // drained even earlier, by deliverChildResult, which hands it straight in
+    // as `message`. Anything that throws in between destroys it outright: the
+    // outer fire-and-forget catch merely logs "turn crashed", and a child's
+    // entire result, or a human's queued instruction, is gone with no turn,
+    // no queue row and no event to say so.
+    //
+    // An earlier fix wrapped only addTurn, which is the LIKELIEST thrower
+    // (V9's one-running-turn index rejects a waker that lost the
+    // check-then-act race) but nowhere near the only one. Between the drain
+    // and addTurn sit getHistory, assembleHistory, getLastTurnUsage and
+    // maybeCompact — and maybeCompact, on a session over its threshold, makes
+    // a whole generateText model call, the single most failure-prone thing in
+    // this function. So the guard starts at the drain, not at addTurn, and
+    // its catch puts the text back exactly as the addTurn case always did:
+    // wake marker first, then the row (see deliverChildResult for why that
+    // order is load-bearing).
+    //
+    // `turnMessage` starts as `message` so that even a takeFollowUps failure
+    // — where nothing was folded in, but a wake's own already-drained text is
+    // still in hand — requeues what it has instead of dropping it.
+    let turn: { id: string; seq: number };
+    let turnMessage: unknown = message;
+    let history: ModelMessage[] = [];
+    try {
+      // Fold in anything queued while an earlier turn on this session was
+      // running (see above) — it rides along with this turn's message instead
+      // of racing it as a separate turn. Ordinary case (nothing queued) is a
+      // no-op DB round trip that leaves `message` untouched.
       //
-      // Every input here is already resolved, in memory, and synchronous:
-      // buildSystemPrompt is string concatenation over agent.instructions +
-      // agent.skills + metadata, agent.tools was populated at load time, and
-      // partitionTools is a single pass. NOTHING is awaited, deliberately —
-      // this block sits inside the check-then-act window documented at the
-      // getRunningTurn read above, and that window must not grow again. The
-      // cost of that constraint is a floor rather than an exact figure
-      // (see estimatePrefixTokens): a buildInstructions hook's output and the
-      // dynamic/connection/built-in tools are all behind an await and stay
-      // uncounted. Under-counting by less is the whole improvement here;
-      // under-counting by nothing would cost a wider race.
-      const prefixTokens = estimatePrefixTokens(
-        buildSystemPrompt(deps.agent, metadata),
-        // Deferred tools are withheld from the request unless activated, so
-        // the core partition is what actually ships. `activated` is passed
-        // empty rather than read: getActivatedTools is an awaited round trip
-        // (it happens after addTurn, below) and pulling it up here to sharpen
-        // an estimate is exactly the widening this comment rules out.
-        partitionTools(deps.agent.tools, [], deps.agent.config.context.deferredTools).core,
+      // `queued` items arrived and were queued BEFORE this call's `message`
+      // (they were queued behind a
+      // turn that has since finished or failed; `message` is what just
+      // triggered THIS startTurn call, chronologically after all of them) —
+      // store.ts's takeFollowUps docstring promises "in the order they
+      // arrived", so they must lead, not trail.
+      const queued = await deps.store.takeFollowUps(sessionId);
+      turnMessage = queued.length > 0 ? [...queued, asText(message)].join("\n\n") : message;
+
+      // Pre-turn compaction (task 12; see compact.ts's maybeCompact for the
+      // full rationale). Deliberately PRE-turn only — never mid-stream, since a
+      // mid-turn summary would have to be injected above the last user message
+      // or the model misreads it. Cheap no-op on the common case: an empty or
+      // comfortably-under-budget session short-circuits inside maybeCompact
+      // without ever calling a model.
+      const priorTurns = (await deps.store.getHistory(sessionId)) as TurnRow[];
+      // Assembled ONCE and reused as this turn's `history` on the common path.
+      // The compaction check needs the assembled messages anyway (to size the
+      // estimate fallback and the tokensBefore/tokensAfter payload), and the
+      // turn needs exactly the same messages — running getHistory +
+      // assembleHistory + ensureToolResultsPresent twice per turn bought
+      // nothing. Only a compaction that actually persisted a checkpoint makes
+      // this stale, and that path re-fetches below.
+      history = ensureToolResultsPresent(
+        assembleHistory(priorTurns, deps.agent.config.context),
       );
-      const outcome = await maybeCompact({
-        turns: priorTurns,
-        msgs: priorMsgs,
-        config: deps.agent.config.context,
-        modelId,
-        observedInputTokens: lastUsage?.inputTokens,
-        prefixTokens,
-        // Model resolution happens lazily, INSIDE callModel: a throw here
-        // (a rejecting resolveModel hook, no credentials, a provider error)
-        // rejects summarize() the exact same way a 502 mid-call would, which
-        // maybeCompact's own catch turns into the drop-oldest-turns
-        // fallback — so a broken model can never prevent that fallback from
-        // still reclaiming budget, and (requirement 5) can never fail the
-        // turn itself either.
-        callModel: async (req) => {
-          const model = deps.model ?? await resolveModelForTurn(deps.agent.config, hookCtx);
-          const { text } = await generateText({ model, system: req.system, messages: req.messages as any });
-          return text;
-        },
-        // The spec's error table requires a warning EVENT when summarization
-        // fails, not just a log line: the drop fallback silently discards
-        // turns the summary would have preserved, and the user is the only
-        // one who can supply that context again. Published on the session
-        // stream even though no turn exists yet (compaction is pre-turn) —
-        // context.compacted is turn-agnostic for exactly this reason.
-        emit: (e) => publish(sessionId, e),
-      });
-      if (outcome.compacted) {
-        compacted = true;
-        // The compaction step is attached to the LAST turn being replaced
-        // (replacedTurnSeqTo), not to the new turn about to be created:
-        // history.ts's assembleHistory resumes assembly right after the
-        // newest turn carrying a "compaction" step, so attaching it there is
-        // what makes the verbatimTurnsAfterCompaction window (the turns
-        // AFTER this boundary) survive into the rebuilt history below,
-        // instead of being discarded along with the replaced range.
-        const boundaryTurn = priorTurns.find((t) => t.seq === outcome.replacedTurnSeqTo);
-        if (boundaryTurn?.id) {
-          // Both halves of the pair count the fixed prefix: the observed
-          // value includes it already, and each estimate adds it explicitly.
-          // Without that, tokensAfter measured a strictly smaller thing than
-          // tokensBefore and the reported saving was inflated by the prefix.
-          const tokensBefore = lastUsage?.inputTokens ?? (estimateTokens(JSON.stringify(priorMsgs)) + prefixTokens);
-          // Local reconstruction of what assembleHistory will produce once
-          // the step below is persisted and re-fetched — purely to size
-          // tokensAfter for the payload; the actual `history` used to drive
-          // this turn still comes from the real re-fetch further down.
-          const keptTurns = priorTurns.slice(priorTurns.indexOf(boundaryTurn) + 1);
-          const keptMsgs = ensureToolResultsPresent(assembleHistory(keptTurns, deps.agent.config.context));
-          const afterMsgs: ModelMessage[] = outcome.summary
-            ? [{ role: "user", content: SUMMARY_PREFIX + outcome.summary }, ...keptMsgs]
-            : keptMsgs;
-          await deps.store.addStep(
-            boundaryTurn.id,
-            boundaryTurn.steps.length + 1,
-            "compaction",
-            null,
-            {
-              summary: outcome.summary,
-              replacedTurnSeqFrom: priorTurns[0].seq,
-              replacedTurnSeqTo: outcome.replacedTurnSeqTo,
-              tokensBefore,
-              tokensAfter: estimateTokens(JSON.stringify(afterMsgs)) + prefixTokens,
-            },
-          ).catch((e) =>
-            console.error(`agents: failed to persist compaction step for session ${sessionId} (continuing without it):`, e)
-          );
-        } else {
+      // A brand-new child session has no persisted turns of its own (priorTurns
+      // is always [] here), so this can never clobber a session's real history.
+      if (seedHistory && seedHistory.length > 0) history = seedHistory;
+      let compacted = false;
+      if (priorTurns.length > 0) {
+        const priorMsgs = history;
+        const lastUsage = await deps.store.getLastTurnUsage(sessionId).catch((e) => {
+          console.error(`agents: getLastTurnUsage failed for session ${sessionId} (falling back to an estimate):`, e);
+          return null;
+        });
+        // parseModelString throws on anything not "provider/model-id" shaped.
+        // This whole pre-turn block runs before addTurn, with no enclosing
+        // try/catch of its own — it's covered only by the outer fire-and-forget
+        // IIFE's `.catch(... "turn crashed" ...)`, which produces no
+        // turn.failed/session.failed (see that catch's own comment below), so
+        // a malformed static config.model would silently hang every /stream
+        // reader on this session instead of failing the turn gracefully the
+        // way it used to inside runTurn. Degrade to "" (same as the
+        // config.model-absent case) — resolveContextWindow("") falls back to
+        // the conservative FALLBACK_CONTEXT_WINDOW — and log it so it's
+        // diagnosable.
+        let modelId = "";
+        try {
+          if (deps.agent.config.model) modelId = parseModelString(deps.agent.config.model).modelId;
+        } catch (e) {
           console.error(
-            `agents: compaction outcome had no matching turn for seq ${outcome.replacedTurnSeqTo} on session ${sessionId} — skipping persist`,
+            `agents: could not parse agent model "${deps.agent.config.model}" for session ${sessionId} (using the conservative fallback context window):`,
+            e,
           );
         }
+        // The system-prompt + tool-schema term the estimate fallback was
+        // missing. maybeCompact applies it to the estimate only (the observed
+        // count already includes both); it is computed unconditionally anyway
+        // because the tokensAfter figure below is always an estimate and so
+        // always needs it, and a before/after pair measured two different ways
+        // is not a pair.
+        //
+        // Every input here is already resolved, in memory, and synchronous:
+        // buildSystemPrompt is string concatenation over agent.instructions +
+        // agent.skills + metadata, agent.tools was populated at load time, and
+        // partitionTools is a single pass. NOTHING is awaited, deliberately —
+        // this block sits inside the check-then-act window documented at the
+        // getRunningTurn read above, and that window must not grow again. The
+        // cost of that constraint is a floor rather than an exact figure
+        // (see estimatePrefixTokens): a buildInstructions hook's output and the
+        // dynamic/connection/built-in tools are all behind an await and stay
+        // uncounted. Under-counting by less is the whole improvement here;
+        // under-counting by nothing would cost a wider race.
+        const prefixTokens = estimatePrefixTokens(
+          buildSystemPrompt(deps.agent, metadata),
+          // Deferred tools are withheld from the request unless activated, so
+          // the core partition is what actually ships. `activated` is passed
+          // empty rather than read: getActivatedTools is an awaited round trip
+          // (it happens after addTurn, below) and pulling it up here to sharpen
+          // an estimate is exactly the widening this comment rules out.
+          partitionTools(deps.agent.tools, [], deps.agent.config.context.deferredTools).core,
+        );
+        const outcome = await maybeCompact({
+          turns: priorTurns,
+          msgs: priorMsgs,
+          config: deps.agent.config.context,
+          modelId,
+          observedInputTokens: lastUsage?.inputTokens,
+          prefixTokens,
+          // Model resolution happens lazily, INSIDE callModel: a throw here
+          // (a rejecting resolveModel hook, no credentials, a provider error)
+          // rejects summarize() the exact same way a 502 mid-call would, which
+          // maybeCompact's own catch turns into the drop-oldest-turns
+          // fallback — so a broken model can never prevent that fallback from
+          // still reclaiming budget, and (requirement 5) can never fail the
+          // turn itself either.
+          callModel: async (req) => {
+            const model = deps.model ?? await resolveModelForTurn(deps.agent.config, hookCtx);
+            const { text } = await generateText({ model, system: req.system, messages: req.messages as any });
+            return text;
+          },
+          // The spec's error table requires a warning EVENT when summarization
+          // fails, not just a log line: the drop fallback silently discards
+          // turns the summary would have preserved, and the user is the only
+          // one who can supply that context again. Published on the session
+          // stream even though no turn exists yet (compaction is pre-turn) —
+          // context.compacted is turn-agnostic for exactly this reason.
+          emit: (e) => publish(sessionId, e),
+        });
+        if (outcome.compacted) {
+          compacted = true;
+          // The compaction step is attached to the LAST turn being replaced
+          // (replacedTurnSeqTo), not to the new turn about to be created:
+          // history.ts's assembleHistory resumes assembly right after the
+          // newest turn carrying a "compaction" step, so attaching it there is
+          // what makes the verbatimTurnsAfterCompaction window (the turns
+          // AFTER this boundary) survive into the rebuilt history below,
+          // instead of being discarded along with the replaced range.
+          const boundaryTurn = priorTurns.find((t) => t.seq === outcome.replacedTurnSeqTo);
+          if (boundaryTurn?.id) {
+            // Both halves of the pair count the fixed prefix: the observed
+            // value includes it already, and each estimate adds it explicitly.
+            // Without that, tokensAfter measured a strictly smaller thing than
+            // tokensBefore and the reported saving was inflated by the prefix.
+            const tokensBefore = lastUsage?.inputTokens ?? (estimateTokens(JSON.stringify(priorMsgs)) + prefixTokens);
+            // Local reconstruction of what assembleHistory will produce once
+            // the step below is persisted and re-fetched — purely to size
+            // tokensAfter for the payload; the actual `history` used to drive
+            // this turn still comes from the real re-fetch further down.
+            const keptTurns = priorTurns.slice(priorTurns.indexOf(boundaryTurn) + 1);
+            const keptMsgs = ensureToolResultsPresent(assembleHistory(keptTurns, deps.agent.config.context));
+            const afterMsgs: ModelMessage[] = outcome.summary
+              ? [{ role: "user", content: SUMMARY_PREFIX + outcome.summary }, ...keptMsgs]
+              : keptMsgs;
+            await deps.store.addStep(
+              boundaryTurn.id,
+              boundaryTurn.steps.length + 1,
+              "compaction",
+              null,
+              {
+                summary: outcome.summary,
+                replacedTurnSeqFrom: priorTurns[0].seq,
+                replacedTurnSeqTo: outcome.replacedTurnSeqTo,
+                tokensBefore,
+                tokensAfter: estimateTokens(JSON.stringify(afterMsgs)) + prefixTokens,
+              },
+            ).catch((e) =>
+              console.error(`agents: failed to persist compaction step for session ${sessionId} (continuing without it):`, e)
+            );
+          } else {
+            console.error(
+              `agents: compaction outcome had no matching turn for seq ${outcome.replacedTurnSeqTo} on session ${sessionId} — skipping persist`,
+            );
+          }
+        }
       }
-    }
 
-    // Re-fetched ONLY when compaction just persisted a checkpoint — that is
-    // the single thing that can have invalidated the assembly done above,
-    // and it goes through the same buildHistory path every other call uses,
-    // so checkpoint-resume logic keeps exactly one implementation
-    // (history.ts's assembleHistory). On every other turn the messages
-    // assembled above are already exactly right.
-    if (compacted) history = await buildHistory(sessionId, deps.store, deps.agent.config.context);
-    // By the time we get here `turnMessage` has ALREADY been drained out of
-    // the follow-up queue (takeFollowUps, above; deliverChildResult drains it
-    // even earlier and hands the text straight in). If addTurn now throws,
-    // that text exists nowhere else — no turn, no queue row, no turn.failed
-    // event — and the outer IIFE catch would simply log "turn crashed" while
-    // a child's entire result vanished.
-    //
-    // The realistic thrower since V9 is
-    // idx_agents_turns_one_running_per_session: a second waker that passed
-    // the getRunningTurn check at the top of this function, then lost the
-    // race over the several round trips (and, on a compacting session, a
-    // whole generateText call) between there and here. The spec's promise for
-    // exactly that case is "the unique index serializes; the loser queues its
-    // followup" — so put it back, in the same order it came out. The winner's
-    // own turn drains it when it ends (the drain-and-chain tail below).
-    let turn: { id: string; seq: number };
-    try {
+      // Re-fetched ONLY when compaction just persisted a checkpoint — that is
+      // the single thing that can have invalidated the assembly done above,
+      // and it goes through the same buildHistory path every other call uses,
+      // so checkpoint-resume logic keeps exactly one implementation
+      // (history.ts's assembleHistory). On every other turn the messages
+      // assembled above are already exactly right.
+      if (compacted) history = await buildHistory(sessionId, deps.store, deps.agent.config.context);
+      // The realistic thrower here since V9 is
+      // idx_agents_turns_one_running_per_session: a second waker that passed
+      // the getRunningTurn check at the top of this function, then lost the
+      // race over the several round trips (and, on a compacting session, a
+      // whole generateText call) between there and here. The spec's promise
+      // for exactly that case is "the unique index serializes; the loser
+      // queues its followup" — which the catch below delivers, along with
+      // every other way this block can fail.
       turn = await deps.store.addTurn(sessionId, turnMessage, metadata);
     } catch (e) {
       console.error(
@@ -657,11 +679,14 @@ function startTurn(
       // branch exists for.
       if (wokenByChildId) {
         await deps.store.markPendingWake(sessionId, wokenByChildId).catch((e2) =>
-          console.error(`agents: markPendingWake after a failed addTurn failed for session ${sessionId}:`, e2)
+          console.error(`agents: markPendingWake after a failed turn start failed for session ${sessionId}:`, e2)
         );
       }
       await deps.store.queueFollowUp(sessionId, asText(turnMessage)).catch((e2) =>
-        console.error(`agents: requeue after a failed addTurn ALSO failed for session ${sessionId} (message lost):`, e2)
+        console.error(
+          `agents: requeue after a failed turn start ALSO failed for session ${sessionId} (message lost):`,
+          e2,
+        )
       );
       return;
     }

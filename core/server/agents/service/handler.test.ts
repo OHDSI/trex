@@ -3863,6 +3863,189 @@ Deno.test({
   },
 });
 
+// --- The requeue guard covers the WHOLE window, not just addTurn -----------
+//
+// The test above proves the addTurn rejection is survivable. But addTurn is
+// the LAST thing in the window: between the drain and it sit getHistory,
+// assembleHistory, getLastTurnUsage and maybeCompact — and maybeCompact, on a
+// session over its compaction threshold, makes an entire generateText model
+// call. A throw from any of those used to land in the outer fire-and-forget
+// `.catch("turn crashed")` with the drained text held only in a local
+// variable: no turn, no queue row, nothing. A child's whole result vanished
+// because a history read blipped.
+//
+// getHistory is the seam used here (it is the first await after the drain and
+// the easiest to fail deterministically); the guard it proves is the same one
+// that now covers the compaction call.
+Deno.test({
+  name: "e2e: a wake whose pre-turn history read throws requeues the drained result instead of destroying it",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-guard-user");
+      // A finished turn, so the parent is idle (the wake really does try to
+      // start a turn) and priorTurns is non-empty (the pre-turn compaction
+      // block is actually entered).
+      const first = await store.addTurn(parentId, "get me three explorations");
+      await store.finishTurn(first.id, "completed");
+
+      let historyThrows = 0;
+      const brokenStore = {
+        ...store,
+        getHistory: (sid: string) => {
+          if (sid === parentId) {
+            historyThrows++;
+            return Promise.reject(new Error("pg: connection terminated unexpectedly"));
+          }
+          return store.getHistory(sid);
+        },
+      };
+      const deps = {
+        agent: await loadAgent(TOY),
+        store: brokenStore,
+        plugin: "toy-agent",
+        agentName: "toy",
+        basePath: "/plugins/trex/toy",
+        model: model("this turn must never happen"),
+      };
+
+      const childId = await store.createChildSession({
+        plugin: "toy-agent",
+        agent: "toy",
+        createdBy: "e2e-guard-user",
+        parentSessionId: parentId,
+        parentTurnId: first.id,
+        subagent: null,
+        nickname: "Noether",
+        detached: true,
+      });
+      const childTurn = await store.addTurn(childId, "explore");
+      await store.addStep(childTurn.id, 1, "text", null, { text: "the fragile result" });
+      await store.finishTurn(childTurn.id, "completed");
+
+      await deliverChildResult(buildDeliverDeps(deps as never), childId, { text: "the fragile result" });
+
+      const deadline = Date.now() + 15_000;
+      let queued: string[] = [];
+      while (Date.now() < deadline) {
+        const r = await pool.query(
+          `SELECT message FROM agents.turn_followups WHERE session_id = $1`,
+          [parentId],
+        );
+        queued = (r.rows as Array<{ message: string }>).map((x) => x.message);
+        if (queued.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assert(historyThrows > 0, "the pre-turn history read must actually have failed");
+      assert(
+        queued.some((m) => m.includes("the fragile result")),
+        `the drained result must be back in agents.turn_followups, got: ${JSON.stringify(queued)}`,
+      );
+      assert(queued.some((m) => m.includes("Noether")), "the requeued followup must be the original, unaltered text");
+
+      // No turn may have been created for the failed attempt — the guard
+      // returns before addTurn is ever reached on this path.
+      const turns = await pool.query(
+        `SELECT id FROM agents.turns WHERE session_id = $1 AND id <> $2`,
+        [parentId, first.id],
+      );
+      assertEquals(turns.rows.length, 0, "a failed turn start must not leave a turn row behind");
+
+      // And the wake marker is re-stamped, exactly as the addTurn case does,
+      // so whatever eventually drains this followup is still charged as a
+      // child-caused turn rather than resetting the wake budget.
+      const sess = await pool.query(
+        `SELECT pending_wake_child_id FROM agents.sessions WHERE id = $1`,
+        [parentId],
+      );
+      assertEquals(sess.rows[0].pending_wake_child_id, childId);
+    } finally {
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
+      await pool.end();
+    }
+  },
+});
+
+// The same guard, at its very first await: a takeFollowUps failure means
+// NOTHING was folded in, but a wake's own text was already drained by
+// deliverChildResult and handed straight in — so there is still something in
+// hand to lose. It must be put back too.
+Deno.test({
+  name: "e2e: a wake whose followup drain itself throws still requeues the result it was handed",
+  ignore: !Deno.env.get("DATABASE_URL"),
+  fn: async () => {
+    const pg = await import("npm:pg@^8");
+    const pool = new pg.default.Pool({ connectionString: Deno.env.get("DATABASE_URL") });
+    const query = (sql: string, params?: unknown[]) => pool.query(sql, params as never);
+    const store = createStore(query as never);
+    let parentId: string | undefined;
+    try {
+      parentId = await store.createSession("toy-agent", "toy", "e2e-guard2-user");
+      const first = await store.addTurn(parentId, "delegate");
+      await store.finishTurn(first.id, "completed");
+
+      // deliverChildResult's OWN drain must succeed (that is how the text
+      // reaches `wake` at all); only startTurn's second drain fails.
+      let drains = 0;
+      const brokenStore = {
+        ...store,
+        takeFollowUps: (sid: string) => {
+          if (sid === parentId && ++drains > 1) {
+            return Promise.reject(new Error("pg: connection terminated unexpectedly"));
+          }
+          return store.takeFollowUps(sid);
+        },
+      };
+      const deps = {
+        agent: await loadAgent(TOY),
+        store: brokenStore,
+        plugin: "toy-agent",
+        agentName: "toy",
+        basePath: "/plugins/trex/toy",
+        model: model("this turn must never happen"),
+      };
+
+      const childId = await store.createChildSession({
+        plugin: "toy-agent",
+        agent: "toy",
+        createdBy: "e2e-guard2-user",
+        parentSessionId: parentId,
+        parentTurnId: first.id,
+        subagent: null,
+        nickname: "Lovelace",
+        detached: true,
+      });
+
+      await deliverChildResult(buildDeliverDeps(deps as never), childId, { text: "the second fragile result" });
+
+      const deadline = Date.now() + 15_000;
+      let queued: string[] = [];
+      while (Date.now() < deadline) {
+        const r = await pool.query(
+          `SELECT message FROM agents.turn_followups WHERE session_id = $1`,
+          [parentId],
+        );
+        queued = (r.rows as Array<{ message: string }>).map((x) => x.message);
+        if (queued.length > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      assertEquals(drains, 2, "both drains must have been attempted");
+      assert(
+        queued.some((m) => m.includes("the second fragile result")),
+        `the handed-in result must be back in the queue, got: ${JSON.stringify(queued)}`,
+      );
+    } finally {
+      if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
+      await pool.end();
+    }
+  },
+});
+
 // --- The wake budget's unit: TURNS nobody asked for, not results delivered --
 //
 // A model whose FIRST call parks until released, so a turn can be held open
