@@ -4,13 +4,14 @@
 // plugins/devx/functions/agent.ts.
 // deno-lint-ignore-file no-explicit-any
 import { streamText, stepCountIs } from "ai";
-import { cacheProviderOptions, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
+import { cacheProviderOptions, mergeProviderOptions, reasoningEffortProviderOptions, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { buildSdkTools, resolveInstructions, resolveUserMessage } from "./toolset.ts";
 import type { ConnectionProviderOpts } from "../connections/provider.ts";
+import type { SpawnCapabilities } from "./spawn.ts";
 
 interface RunTurnOpts {
   agent: LoadedAgent;
@@ -47,6 +48,61 @@ interface RunTurnOpts {
   // turn. Threaded straight through to buildSdkTools via the `{ ...opts }`
   // spread below — see toolset.ts's ToolBuildCtx.activatedTools.
   activatedTools?: string[];
+  // Child-spawn capabilities for this turn's `agent`/`agent_spawn`/...
+  // tools — see toolset.ts's ToolBuildCtx.spawn. Threaded straight through
+  // to buildSdkTools via the `{ ...opts }` spread below. Set by handler.ts's
+  // startTurn once the turn's own id is known (spawnChild needs it as the
+  // child's parent_turn_id); undefined for callers that never wire spawning
+  // (e.g. /chat, and any existing test that doesn't need it).
+  spawn?: SpawnCapabilities;
+  // Threaded through to ToolBuildCtx via the `{ ...opts }` spread below —
+  // see toolset.ts's ToolBuildCtx.depth. Set by handler.ts's startTurn from
+  // a fresh store.isChildSession(sessionId) check on EVERY turn (not passed
+  // down from spawn time) — see that call site's own comment for why a
+  // durable-state check, not a threaded parameter, is what keeps a child
+  // structurally unable to spawn its own children. Undefined defaults to 0
+  // (top level) in buildSdkTools, same as before this field existed.
+  depth?: number;
+  // Cancels this turn's model call and every step after it. Handed straight
+  // to streamText, which is the only thing here that can be mid-flight for
+  // minutes. Set by handler.ts's startTurn for a CHILD turn (depth 1), from
+  // the per-worker registry agent_stop triggers — see aborts.ts. Undefined
+  // for every other turn: nothing else can be stopped from the outside today,
+  // and an unused controller per turn is bookkeeping nobody reads.
+  abortSignal?: AbortSignal;
+}
+
+// A child has exactly ONE turn, so a message queued for it (spawn.ts's
+// sendToChild / the agent_send tool) is only meaningful DURING that turn —
+// there is no "next turn" for it to ride into the way an ordinary session's
+// queueFollowUp does (handler.ts's startTurn drains that queue at the START
+// of a turn). prepareStep is the only AI SDK hook that runs BETWEEN steps of
+// an already-streaming turn, and PrepareStepResult permits a per-step
+// `messages` override (verified against the installed ai's index.d.ts:
+// PrepareStepFunction/PrepareStepResult) — returning one here is what makes
+// mid-turn delivery possible at all.
+//
+// Two consequences, both accepted (see spawn.ts's sendToChild, which reports
+// whether the child was still `running` when it queued the message, not
+// whether it was ever actually read): a message sent while a long tool call
+// is executing lands only once that call returns and the next step's
+// prepareStep runs; a message sent after the turn's FINAL step has already
+// started is never read at all.
+export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStore, "takeFollowUps"> }) {
+  return async ({ messages }: { messages: any[] }) => {
+    const pending = await deps.store.takeFollowUps(deps.sessionId);
+    if (pending.length === 0) return {}; // no override: leave the step untouched
+    // Only the text matters here. A row's origin (V10) answers "did a CHILD
+    // cause the next turn?", and mid-turn delivery creates no turn at all —
+    // nor could a child's own queue carry one: agent_send is the only thing
+    // that writes to it, and it never names an origin.
+    return {
+      messages: [
+        ...messages,
+        ...pending.map((p) => ({ role: "user" as const, content: p.message })),
+      ],
+    };
+  };
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {
@@ -121,14 +177,44 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     system: withSystemCachePoint(model, system),
     messages,
     tools,
+    // Only ever set for a child turn (see RunTurnOpts.abortSignal). Passing
+    // undefined is exactly the same as not passing it at all.
+    abortSignal: opts.abortSignal,
     stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
     // openai/Responses caches automatically; a stable per-agent key keeps the
     // TOOLS+SYSTEM prefix routed to the same cache across turns. No-op ({}) for
     // bedrock/anthropic (they cache via withSystemCachePoint's markers above).
-    providerOptions: cacheProviderOptions(model, agent.dir),
+    // Task 14: reasoningEffortProviderOptions is agent.config.reasoningEffort
+    // applied to THIS turn's own resolved model — nothing spawn-specific is
+    // needed beyond ordinary turn execution, since a child's turn already
+    // runs with its OWN LoadedAgent.config (handler.ts's buildSpawnCapabilities
+    // resolves it before ever calling startTurn).
+    providerOptions: mergeProviderOptions(
+      cacheProviderOptions(model, agent.dir),
+      reasoningEffortProviderOptions(model, agent.config.reasoningEffort, agent.dir),
+    ),
+    // Only wired for a CHILD turn (depth===1). prepareStep runs on every
+    // step of every turn if it's set at all — leaving it undefined for the
+    // overwhelming majority (top-level) case means zero DB round trips for
+    // a feature only children use, rather than relying on makePrepareStep's
+    // own no-op path to be cheap enough. `opts.depth` is already derived once
+    // per turn by handler.ts's startTurn (store.isChildSession) — reusing it
+    // here costs nothing extra.
+    ...(opts.depth === 1 ? { prepareStep: makePrepareStep({ sessionId: opts.sessionId, store: opts.store }) } : {}),
   });
 
   let text = "";
+  // The text produced by the CURRENT step only, reset at every step
+  // boundary (see "finish-step" below). Delegation (toolset.ts's
+  // runAsChild/awaitChild) needs step-scoped semantics — the same thing
+  // ai's own `result.text` promise gives a nested in-process call — because
+  // a preamble step ("Let me check the config...") followed by a tool call
+  // and then the real answer must not have the preamble leak into the
+  // returned answer. `text` above stays the full cross-step narrative
+  // (message.appended/message.completed still want that for a human reading
+  // chat); `lastStepText` is captured alongside it, purely additively.
+  let stepText = "";
+  let lastStepText = "";
   let finishReason = "unknown";
   let textPersisted = false;
   // A clientOnly tool call ends the turn with no text by DESIGN — the caller
@@ -177,8 +263,10 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     textPersisted = true;
     // finishReason travels with the persisted text so a replayed session can
     // reconstruct message.completed's finishReason (see handler.ts's
-    // stepToEvent) the same way the live tail does above.
-    await persist("text", null, { text, finishReason });
+    // stepToEvent) the same way the live tail does above. lastStepText is
+    // for spawn.ts's awaitChild only (see its own comment) — every other
+    // reader of this step keeps using `text`.
+    await persist("text", null, { text, finishReason, lastStepText });
   };
   try {
     for await (const part of result.fullStream) {
@@ -186,6 +274,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
         case "text-delta": {
           const delta = (part as any).text ?? (part as any).delta ?? "";
           text += delta;
+          stepText += delta;
           // eve's message.appended carries both the incremental delta and the
           // cumulative text so far as `messageSoFar` (see COMPAT.md); the
           // one-shot message.completed (final text, once the turn ends) is
@@ -224,6 +313,11 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           // the FINAL step's prefill — see lastStepInputTokens' declaration.
           const u = (part as any).usage;
           if (typeof u?.inputTokens === "number") lastStepInputTokens = u.inputTokens;
+          // Capture THIS step's text before resetting for the next one, so
+          // after the last step lastStepText holds exactly its text (and
+          // nothing from any earlier step) — see stepText's declaration.
+          lastStepText = stepText;
+          stepText = "";
           break;
         }
         case "finish": {
@@ -296,6 +390,26 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           await persistText();
           await persist("finish", null, { finishReason }, usage);
           break;
+        }
+        case "abort": {
+          // The turn was cancelled from outside — today that means agent_stop
+          // reached this worker's controller for a running child (aborts.ts).
+          // ai emits this part and then simply ENDS the stream, so without
+          // this case the loop would fall out and runTurn would return
+          // normally, reporting a stopped turn as a completed one.
+          //
+          // Treated as a failure instead, and by the same route as a model
+          // error: persist an error step (so a replay shows why the turn stops
+          // here) and throw, which hands the turn to handler.ts's startTurn
+          // catch. That catch marks the turn `failed` and, for a child,
+          // delivers to its parent — which is what matters if this abort ever
+          // arrives WITHOUT agent_stop's database marking having taken effect.
+          // Whoever ends the turn must tell the parent; a stopped child must
+          // never end up notifying nobody.
+          const reason = (part as any).reason;
+          const message = `agents: turn aborted${reason ? `: ${reason}` : ""}`;
+          await persist("error", null, { message });
+          throw new Error(message);
         }
         case "error": {
           const message = String((part as any).error ?? "unknown model error");

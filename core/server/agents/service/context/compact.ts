@@ -39,7 +39,14 @@ export function flattenForSummary(msgs: ModelMessage[]): string {
       continue;
     }
     for (const p of m.content) {
-      const output = typeof p.output === "string" ? p.output : JSON.stringify(p.output ?? "");
+      // history.ts tags every replayed output as ai@6's ToolResultOutput
+      // ({type,value}); unwrap it so the summarizer reads the tool's actual
+      // output rather than the envelope around it. A bare value (a
+      // hand-built message) is still rendered as-is.
+      const raw: unknown = p.output !== null && typeof p.output === "object" && "value" in p.output
+        ? (p.output as { value: unknown }).value
+        : p.output;
+      const output = typeof raw === "string" ? raw : JSON.stringify(raw ?? "");
       lines.push(`Result of ${p.toolName}: ${output}`);
     }
   }

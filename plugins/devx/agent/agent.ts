@@ -250,6 +250,26 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 // workspace routing, which always needs SOME concrete choice) whereas this
 // hook's contract requires "no mode / unknown mode" to mean "allow
 // everything", not "treat it as build".
+// Every eve built-in that can start, steer or read a subagent. This IS a
+// hand-written name list, and it is a list of names in a package this one
+// does not import — so it guarantees only that the delegation tools NAMED
+// HERE are dropped in ask mode, and it cannot notice a new `agent_*` built-in
+// added to core. lib/filter_tools.test.ts cross-checks it, but against a
+// second literal in that same file, so a genuinely new built-in slips past
+// both. Adding one to core means adding it here, deliberately; the real
+// backstop is core's own restrictChildTools/metadata threading, which does
+// not depend on any name list.
+// Exported for that cross-check.
+export const AGENT_TOOLS = new Set([
+  "agent",
+  "agent_spawn",
+  "agent_list",
+  "agent_wait",
+  "agent_result",
+  "agent_stop",
+  "agent_send",
+]);
+
 export function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
   const mode = (metadata as { mode?: unknown } | null | undefined)?.mode;
   return mode === "ask" || mode === "plan" || mode === "build" ? mode : undefined;
@@ -270,12 +290,19 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 
   // Ask mode drops state-mutating tools — modifiesState is a devx-only
   // passthrough field carried by lib/context.ts's wrap(), not part of eve's
-  // ToolDef shape, hence the cast. The built-in "agent" tool carries no
-  // modifiesState field (it's a generic eve built-in, not a devx-authored
-  // ToolDef) but legacy's own Agent tool IS modifiesState:true and gets
-  // dropped in ask mode (spawn_agent.ts:33) — name-check it explicitly here
+  // ToolDef shape, hence the cast. The eve built-in delegation tools carry no
+  // modifiesState field (they're generic eve built-ins, not devx-authored
+  // ToolDefs) but legacy's own Agent tool IS modifiesState:true and gets
+  // dropped in ask mode (spawn_agent.ts:33) — name-check them explicitly here
   // to close that asymmetry (documented in task-v4-report.md).
-  if (mode === "ask" && (name === "agent" || (def as { modifiesState?: boolean } | undefined)?.modifiesState)) return false;
+  //
+  // ALL of them, not just "agent". A subagent is a fully capable session: the
+  // point of ask mode is that this session cannot change anything, and a
+  // read-only session able to call agent_spawn could simply delegate the
+  // writing. That made ask mode escapable in one tool call.
+  if (mode === "ask" && (AGENT_TOOLS.has(name) || (def as { modifiesState?: boolean } | undefined)?.modifiesState)) {
+    return false;
+  }
 
   if (mode === "plan" && !PLAN_MODE_TOOLS.has(name)) return false;
 
@@ -315,17 +342,18 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 //      the same fix applied for every other UI engine that never had it.
 //   2. `base` — i.e. this exact file's content, unprocessed by this hook —
 //      used to be verbatim what a SELF-DELEGATED SUBAGENT turn ran on: the
-//      `agent` built-in's runSubagent (core/server/agents/service/
-//      toolset.ts) built its system prompt from the static
+//      `agent` built-in ran the subagent as an in-process nested loop
+//      (core/server/agents/service/toolset.ts's runSubagent, since deleted)
+//      that built its system prompt from the static
 //      buildSystemPrompt(target, ctx.metadata) and never called
 //      resolveInstructions, so it never reached this function either. That
-//      gap is closed — runSubagent now resolves through
-//      resolveInstructions(target, ctx.metadata, ctx.hookCtx), toolset.ts:204,
-//      the same per-request path a top-level turn takes, so a
-//      self-delegated (or named) subagent turn reaches buildInstructions
-//      too and its `base` gets discarded here exactly like a top-level
-//      turn's does. See the defineAgent comment below for what a subagent
-//      turn gets instead.
+//      gap is closed at the root: a subagent is now a real CHILD SESSION
+//      running an ordinary turn (core/server/agents/service/spawn.ts +
+//      handler.ts's startTurn), so it goes through exactly the same
+//      per-request path a top-level turn does — resolveInstructions
+//      included — and its `base` gets discarded here exactly like a
+//      top-level turn's does. See the defineAgent comment below for what a
+//      subagent turn gets instead.
 //
 // askToolAvailable: false — this loop registers no mcp__ask__ask_question
 // tool. eve's ask_question is unimplemented on this runtime altogether (see
@@ -410,7 +438,7 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
 // by the request's HookCtx object itself, not a string session/user id: core
 // builds exactly one HookCtx per request (toolset.ts's ToolBuildCtx.hookCtx,
 // threaded through every authoredTool call for that turn via the `...ctx`
-// spread — see toolset.ts:196/205), and that same object reaches every
+// spread — see toolset.ts's authoredTool), and that same object reaches every
 // onToolCall/onToolResult/onTurnEnd call for the turn. Keying on the object
 // itself, rather than a `${sessionId}:${userId}:${event}` string in a
 // module-level Map, means the cache entry is garbage-collected along with
@@ -503,33 +531,33 @@ export async function buildUserMessage(base: string, ctx: HookCtx): Promise<stri
 // path is reachable in exactly the mode that matters: useAgentsChat.ts's
 // toAgentMode sends mode: undefined for this loop's main coder chat, and
 // filterTools treats an undefined mode as "no restriction", so the `agent`
-// tool is available there. The resulting nested turn is run by runSubagent
-// (core/server/agents/service/toolset.ts), which now builds its system
-// prompt via resolveInstructions(target, ctx.metadata, ctx.hookCtx) — the
-// same per-request resolution path a top-level turn takes — instead of the
-// old static buildSystemPrompt(target, ctx.metadata), which never called
-// resolveInstructions and so never reached agent.config.buildInstructions
-// (i.e. buildInstructions above). So a self-delegated (or explicitly named)
-// devx coder subagent now runs buildInstructions the same way a top-level
-// turn does: the resolved ai_rules winner, <skills-protocol>,
-// <commit-pr-hygiene>, and the cross-repo guard (GENERAL_GUIDELINES_BLOCK,
-// prompts.ts) all reach it. The fix lives entirely in core/ (toolset.ts's
-// runSubagent and resolveInstructions) — nothing in this file changed to
-// close it. plugins/devx/functions/prompt_divergence.test.ts's ENGINES-list
-// guard still cannot take credit for that, and still cannot catch a
-// regression of it: the guard only ever scans plugins/devx, and both
-// runSubagent and resolveInstructions live in
-// core/server/agents/service/toolset.ts, a tree it never opens — see that
-// file's header comment for why a green run there is not evidence either
-// way for this path.
+// tool is available there. The resulting subagent turn is no longer a
+// nested in-process loop with a prompt of its own (toolset.ts's runSubagent,
+// deleted): it is a real CHILD SESSION whose first turn goes through
+// handler.ts's startTurn like any other, so it builds its system prompt via
+// the same per-request resolveInstructions path a top-level turn takes —
+// instead of the old static buildSystemPrompt(target, ctx.metadata), which
+// never called resolveInstructions and so never reached
+// agent.config.buildInstructions (i.e. buildInstructions above). So a
+// self-delegated (or explicitly named) devx coder subagent now runs
+// buildInstructions the same way a top-level turn does: the resolved
+// ai_rules winner, <skills-protocol>, <commit-pr-hygiene>, and the
+// cross-repo guard (GENERAL_GUIDELINES_BLOCK, prompts.ts) all reach it. The
+// fix lives entirely in core/ — nothing in this file changed to close it.
+// plugins/devx/functions/prompt_divergence.test.ts's ENGINES-list guard
+// still cannot take credit for that, and still cannot catch a regression of
+// it: the guard only ever scans plugins/devx, and the whole child-session
+// path lives under core/server/agents/service/, a tree it never opens — see
+// that file's header comment for why a green run there is not evidence
+// either way for this path.
 export default defineAgent({
   // Definition-time, not per-turn: eve's AgentConfig.maxSteps (eve-shim/
   // types.ts) is read once here and consumed by every streamText call that
-  // reads agent.config.maxSteps for this agent — runner.ts:118 (top-level
-  // session turns), handler.ts:721 (the /chat endpoint), AND
-  // toolset.ts:213 (a self-delegated OR named subagent run via runSubagent,
-  // which reads target.config.maxSteps — the same defineAgent config below
-  // when target is a copy of this agent) — not per turn. There is no
+  // reads agent.config.maxSteps for this agent — runner.ts (top-level
+  // session turns), handler.ts's /chat endpoint, AND a self-delegated OR
+  // named subagent's own turn, which is an ordinary child-session turn and
+  // so reads the child LoadedAgent's config.maxSteps — the same defineAgent
+  // config below when the child is a copy of this agent — not per turn. There is no
   // runtime hook that can override it, so the per-user settings.max_steps
   // and the channel profile's maxStepsFloor (both applied inside
   // buildCoderContext for the other three engines) CANNOT reach this loop
@@ -544,7 +572,7 @@ export default defineAgent({
   //
   // Silent effect on a user's own setting: this went 25 -> 100 (DEFAULT_MAX_
   // STEPS), a 4x jump, for BOTH this loop's top-level turns and every nested
-  // self-delegated/named subagent run (toolset.ts:213 reads the same
+  // self-delegated/named subagent run (a child turn reads the same
   // agent.config.maxSteps). A user who deliberately set settings.max_steps
   // to something lower (e.g. 25) to cap spend gets 100 here with no signal
   // that their setting was ignored — devx.settings.max_steps is read and

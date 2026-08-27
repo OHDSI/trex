@@ -198,6 +198,61 @@ export function cacheProviderOptions(model: any, cacheKey: string): Record<strin
   return {};
 }
 
+// Task 14: applies a subagent's declared `reasoningEffort` (AgentConfig,
+// resolved by loader.ts's resolveAgentRole) to the resolved model's
+// providerOptions. openai only for now — it's the one provider in this
+// codebase with established precedent for a plain-string `reasoningEffort`
+// providerOption (see model.test.ts's withToolCachePoint fixtures); anthropic
+// reasoning is a token-budget object, not a "low"/"high"/"medium" string, and
+// bolting an incorrect shape onto a live request with no test to catch it is
+// worse than leaving it a no-op there until a real caller needs it. Empty
+// ({}) whenever effort is unset or the model isn't openai — same "no-op for
+// everything this doesn't explicitly support" posture as cacheProviderOptions
+// above.
+//
+// Fix round 1: silently doing nothing off-openai is exactly the trap an
+// agent author falls into — `:reasoning-effort "high"` parses, loads, and
+// then vanishes with nothing in the logs, on anthropic/bedrock, the primary
+// provider family in this codebase. `warnReasoningEffortOnce` logs it ONCE
+// per (agentLabel, provider) pair, not per turn/step — this runs on every
+// streamText call (runner.ts), and a warning on every step of every child
+// turn would be its own bug.
+const warnedReasoningEffort = new Set<string>();
+function warnReasoningEffortOnce(agentLabel: string, provider: string, effort: string): void {
+  const key = `${agentLabel} ${provider}`;
+  if (warnedReasoningEffort.has(key)) return;
+  warnedReasoningEffort.add(key);
+  console.warn(
+    `agents: ${agentLabel} declares reasoningEffort="${effort}" but its resolved model provider is "${provider}", ` +
+      `not openai — reasoningEffort is currently a no-op there (see model.ts's reasoningEffortProviderOptions)`,
+  );
+}
+
+// `agentLabel` (e.g. a LoadedAgent's `dir`) identifies the agent in the
+// warning above; optional only so a caller with no meaningful label (a bare
+// unit test) can omit it, at the cost of a less actionable message.
+// deno-lint-ignore no-explicit-any
+export function reasoningEffortProviderOptions(model: any, effort: string | undefined, agentLabel?: string): Record<string, any> {
+  if (!effort) return {};
+  if (isOpenAIModel(model)) return { openai: { reasoningEffort: effort } };
+  warnReasoningEffortOnce(agentLabel ?? "an agent", String(model?.provider ?? "unknown"), effort);
+  return {};
+}
+
+// Merges N streamText-level providerOptions objects, per-provider-key —
+// `{...a, ...b}` at the top level would let `b`'s "openai" entirely clobber
+// `a`'s (e.g. reasoningEffortProviderOptions' `reasoningEffort` erasing
+// cacheProviderOptions' `promptCacheKey`, or vice versa) instead of the two
+// coexisting under the same provider key.
+// deno-lint-ignore no-explicit-any
+export function mergeProviderOptions(...opts: Record<string, any>[]): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const o of opts) {
+    for (const [k, v] of Object.entries(o)) out[k] = { ...out[k], ...v };
+  }
+  return out;
+}
+
 // A SystemModelMessage carrying a provider cache marker (Bedrock cachePoint
 // or Anthropic cacheControl), or the plain-string no-op for every other
 // provider.

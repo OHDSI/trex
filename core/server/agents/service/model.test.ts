@@ -1,5 +1,5 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
+import { assert, assertEquals, assertThrows } from "jsr:@std/assert";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, mergeProviderOptions, parseModelString, reasoningEffortProviderOptions, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -144,6 +144,97 @@ Deno.test("cacheProviderOptions returns a promptCacheKey only for openai models"
   assertEquals(cacheProviderOptions({ provider: "anthropic.messages" }, "k"), {});
   // No key → nothing to route on, even for openai.
   assertEquals(cacheProviderOptions({ provider: "openai.responses" }, ""), {});
+});
+
+// reasoningEffortProviderOptions / mergeProviderOptions (agent-orchestration
+// Task 14): a subagent's declared reasoningEffort applied to its resolved
+// model's providerOptions, merged with cacheProviderOptions' output without
+// either clobbering the other's provider key.
+
+Deno.test("reasoningEffortProviderOptions applies only to openai models", () => {
+  assertEquals(
+    reasoningEffortProviderOptions({ provider: "openai.responses" }, "high"),
+    { openai: { reasoningEffort: "high" } },
+  );
+  assertEquals(reasoningEffortProviderOptions({ provider: "anthropic.messages" }, "high"), {});
+  assertEquals(reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "high"), {});
+});
+
+Deno.test("reasoningEffortProviderOptions is a no-op when effort is unset", () => {
+  assertEquals(reasoningEffortProviderOptions({ provider: "openai.responses" }, undefined), {});
+});
+
+// Fix round 1 (Important finding 2): silently doing nothing off-openai is
+// exactly the trap an agent author falls into — `:reasoning-effort "high"`
+// parses, loads, and then vanishes with nothing in the logs on
+// anthropic/bedrock, the primary provider family in this codebase. Captures
+// real console.warn calls (not a fake) so this is testing the actual
+// production log line, not a stand-in for it. Each test uses a unique
+// agentLabel to avoid the module-level one-time-warn dedup state leaking
+// between tests (or between this file and any other module that happens to
+// import the same reasoningEffortProviderOptions in the same test run).
+function captureWarnings(fn: () => void): string[] {
+  const logged: string[] = [];
+  const orig = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    fn();
+  } finally {
+    console.warn = orig;
+  }
+  return logged;
+}
+
+Deno.test("reasoningEffortProviderOptions warns once, naming the agent and the resolved provider, when set off-openai", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "anthropic.messages" }, "high", "code-reviewer-warn-test");
+  });
+  assertEquals(logged.length, 1);
+  assert(logged[0].includes("code-reviewer-warn-test"), "warning should name the agent");
+  assert(logged[0].includes("anthropic.messages"), "warning should name the resolved provider");
+  assert(logged[0].includes("high"), "warning should name the declared effort value");
+});
+
+Deno.test("reasoningEffortProviderOptions warns only ONCE per agent, not per call", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "low", "repeat-warn-test");
+    reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "low", "repeat-warn-test");
+    reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "low", "repeat-warn-test");
+  });
+  assertEquals(logged.length, 1, "a warning on every call (e.g. every turn/step) would be its own bug");
+});
+
+Deno.test("reasoningEffortProviderOptions does not warn for an openai model", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "openai.responses" }, "high", "no-warn-openai-test");
+  });
+  assertEquals(logged.length, 0);
+});
+
+Deno.test("reasoningEffortProviderOptions does not warn when effort is unset", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "anthropic.messages" }, undefined, "no-warn-unset-test");
+  });
+  assertEquals(logged.length, 0);
+});
+
+Deno.test("mergeProviderOptions merges per-provider-key rather than clobbering", () => {
+  const merged = mergeProviderOptions(
+    { openai: { promptCacheKey: "trex-agents/claw" } },
+    { openai: { reasoningEffort: "low" } },
+  );
+  assertEquals(merged, { openai: { promptCacheKey: "trex-agents/claw", reasoningEffort: "low" } });
+});
+
+Deno.test("mergeProviderOptions keeps distinct provider keys separate", () => {
+  const merged = mergeProviderOptions(
+    { anthropic: { cacheControl: { type: "ephemeral" } } },
+    { openai: { reasoningEffort: "low" } },
+  );
+  assertEquals(merged, {
+    anthropic: { cacheControl: { type: "ephemeral" } },
+    openai: { reasoningEffort: "low" },
+  });
 });
 
 // withToolCachePoint (Task 14): the cache breakpoint moves from the system

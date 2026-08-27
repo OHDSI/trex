@@ -143,6 +143,45 @@ export function resolveContextConfig(raw: unknown): ContextConfig {
   return out;
 }
 
+// Task 14: per-subagent role config (reasoningEffort/skills). Only `skills`
+// is a REDUCTION (ported from codex's role.rs — see resolveChildSkills
+// below); `reasoningEffort` is a plain per-subagent override with nothing to
+// cap it against, applied to the child's OWN resolved model. Both share the
+// same allowlist + EDN-kebab-map pattern as resolveContextConfig above, and
+// for the SAME reason: a key missing from the allowlist silently drops the
+// field instead of erroring — that defect dropped
+// contextWindow/summarizationPrompt/compactAtTokens last cycle (see
+// lib/context_config.test.ts). Both keys are optional with no default, so —
+// unlike resolveContextConfig — there is nothing to spread defaults over;
+// this only ever ADDS a key when the raw config actually names it.
+const ROLE_EDN_KEYS: Record<string, "reasoningEffort" | "skills"> = {
+  "reasoning-effort": "reasoningEffort",
+  "skills": "skills",
+};
+const AGENT_ROLE_KEYS: ReadonlySet<"reasoningEffort" | "skills"> = new Set(["reasoningEffort", "skills"]);
+
+/** Extracts an agent's role config fields (reasoningEffort/skills) from a raw config object. */
+export function resolveAgentRole(raw: unknown): Pick<AgentConfig, "reasoningEffort" | "skills"> {
+  const out: Pick<AgentConfig, "reasoningEffort" | "skills"> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = ROLE_EDN_KEYS[k] ?? (k as "reasoningEffort" | "skills");
+    if (AGENT_ROLE_KEYS.has(key)) (out as Record<string, unknown>)[key] = v;
+  }
+  return out;
+}
+
+// Reducing only (codex role.rs): a role may narrow a child, never grant it
+// something its parent does not have. `child === undefined` means the
+// subagent declared no restriction of its own, so it inherits the parent's
+// full set unchanged — NOT its own (potentially larger) list, and never a
+// union of the two.
+export function resolveChildSkills(parent: string[], child: string[] | undefined): string[] {
+  if (child === undefined) return parent;
+  const allowed = new Set(parent);
+  return child.filter((s) => allowed.has(s));
+}
+
 export async function loadAgent(dir: string, opts: { depth?: number } = {}): Promise<LoadedAgent> {
   const depth = opts.depth ?? 0;
   let instructions: string | null = null;
@@ -173,6 +212,25 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
         config = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG }, ...mod.default };
         // Ensure context is always fully resolved, never partial
         config.context = resolveContextConfig(config.context);
+        // Task 14: normalize reasoningEffort/skills through the same
+        // allowlist the EDN path uses below — resolveAgentRole is the one
+        // place that decides what counts as valid role config, so a stray
+        // kebab-case key on the TS side (spread in verbatim, under the
+        // wrong name, by the `...mod.default` spread above) still resolves
+        // correctly instead of silently never surfacing as the real
+        // camelCase field.
+        const role = resolveAgentRole(mod.default);
+        if (role.reasoningEffort !== undefined) config.reasoningEffort = role.reasoningEffort;
+        if (role.skills !== undefined) config.skills = role.skills;
+        // Fix round 1: the spread above also copies a stray EDN-spelled key
+        // (e.g. `"reasoning-effort"`) onto `config` verbatim, under a name
+        // that is not a real AgentConfig field — resolveAgentRole already
+        // normalized its VALUE onto the real camelCase field just above, so
+        // leaving the kebab spelling behind too is garbage on the object,
+        // not a second, competing piece of config. Strip it.
+        for (const ednKey of Object.keys(ROLE_EDN_KEYS)) {
+          if (ednKey in config) delete (config as Record<string, unknown>)[ednKey];
+        }
       }
       configLoaded = true;
       break;
@@ -188,6 +246,9 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
         maxSteps: typeof edn["max-steps"] === "number" ? edn["max-steps"] : 25,
         ...(typeof edn.model === "string" ? { model: edn.model } : {}),
         context: resolveContextConfig(edn.context),
+        // Task 14: :reasoning-effort / :skills, via the same allowlist +
+        // EDN-kebab map as resolveContextConfig above.
+        ...resolveAgentRole(edn),
       };
     }
   }

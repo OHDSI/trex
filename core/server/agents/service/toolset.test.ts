@@ -4,13 +4,14 @@
 // Deviation (ruling applied): the brief's wrapToolWithCap(tool, config,
 // onResult) is dropped to wrapToolWithCap(tool, config) — no callback,
 // asserted on the return value instead. See toolset.ts for why.
-import { assert, assertEquals } from "jsr:@std/assert";
-import { wrapToolWithCap, buildSdkTools } from "./toolset.ts";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { wrapToolWithCap, buildSdkTools, restrictChildSkills } from "./toolset.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { assembleHistory } from "./context/history.ts";
 import { loadAgent } from "../loader.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
 import { createStore } from "./store.ts";
+import { publish } from "./stream.ts";
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {
@@ -65,9 +66,9 @@ Deno.test("wrapToolWithCap: an oversized non-string result is stringified, not d
 
 // ---------------------------------------------------------------------------
 // Integration: the cap is applied inside buildSdkTools (the core boundary),
-// so it covers every authored tool AND the subagent path (runSubagent calls
-// buildSdkTools again at depth 1) without devx (or any other plugin) opting
-// in.
+// so it covers every authored tool AND the subagent path (a child's own turn
+// calls buildSdkTools again at depth 1 — a child is a real nested session
+// now, not an in-process call) without devx (or any other plugin) opting in.
 // ---------------------------------------------------------------------------
 
 Deno.test("buildSdkTools: an authored tool's oversized output is capped on the way out", async () => {
@@ -281,8 +282,9 @@ Deno.test("wrapToolWithCap: a capped result is NOT re-truncated by assembleHisto
     ],
   }], config);
 
-  const result = msgs.find((m) => m.role === "tool") as { content: Array<{ output: unknown }> };
-  const assembled = result.content[0].output as string;
+  const result = msgs.find((m) => m.role === "tool") as { content: Array<{ output: { type: string; value: unknown } }> };
+  assertEquals(result.content[0].output.type, "text", "a string tool result must replay as tagged text");
+  const assembled = result.content[0].output.value as string;
   assertEquals(assembled, stored, "assembleHistory truncated an already-capped value a second time");
 
   // Exactly one header, and it reports the TRUE original length.
@@ -366,4 +368,491 @@ Deno.test("buildSdkTools: no tool-payload log when the agent defers nothing", as
     console.log = origLog;
   }
   assertEquals(logged.filter((l) => l.includes("tool payload")), []);
+});
+
+// ---------------------------------------------------------------------------
+// Task 7: `agent` becomes a child session, keeping its external contract
+// (blocking, `{text}`; unknown subagent -> `{error, available}`). See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-7-brief.md.
+//
+// Fix round 1, Finding 1: the in-process nested loop (runSubagent) is fully
+// deleted, not kept as a fallback — /chat wires ctx.spawn too now (see
+// handler.ts's buildSpawnCapabilities), so there is exactly one delegation
+// implementation and no route where the old fallback is still reachable.
+// The 5 "runSubagent ..." tests that exercised it directly (hooks.test.ts)
+// are migrated to drive the same semantics through the child-session path —
+// see hooks.test.ts's "delegation (child session)" block.
+// ---------------------------------------------------------------------------
+
+// deno-lint-ignore no-explicit-any
+function fakeToolCtx(overrides: Record<string, unknown> = {}): any {
+  return {
+    agent: {
+      dir: "fake-spawn-agent",
+      instructions: "you are a fake agent",
+      tools: {},
+      skills: [],
+      subagents: { "code-reviewer": { dir: "fake-code-reviewer" } },
+      connections: {},
+      config: { context: DEFAULT_CONTEXT_CONFIG, maxSteps: 25 },
+    },
+    sessionId: "s-1",
+    ...overrides,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Task 14: restrictChildSkills — reducing only (codex role.rs). See
+// loader.ts's resolveChildSkills for the pure intersection logic this wires
+// into a real delegation.
+// ---------------------------------------------------------------------------
+
+// deno-lint-ignore no-explicit-any
+function fakeAgentWithSkills(names: string[], configSkills?: string[]): any {
+  return {
+    dir: `fake-${names.join("-") || "none"}`,
+    instructions: "x",
+    tools: {},
+    skills: names.map((name) => ({ name, description: name, path: `/fake/${name}.md` })),
+    subagents: {},
+    connections: {},
+    config: {
+      context: DEFAULT_CONTEXT_CONFIG,
+      maxSteps: 25,
+      ...(configSkills !== undefined ? { skills: configSkills } : {}),
+    },
+  };
+}
+
+Deno.test("restrictChildSkills: a self-delegation is returned unchanged", () => {
+  const agent = fakeAgentWithSkills(["a", "b"]);
+  assertEquals(restrictChildSkills(agent, agent), agent);
+});
+
+Deno.test("restrictChildSkills: a named subagent's skills are intersected with the parent's, never unioned", () => {
+  const parent = fakeAgentWithSkills(["a", "b"]);
+  const child = fakeAgentWithSkills(["b", "c"], ["b", "c"]); // child has b,c loaded AND declares both
+  const restricted = restrictChildSkills(parent, child);
+  assertEquals(restricted.skills.map((s: { name: string }) => s.name), ["b"]); // c dropped: parent lacks it
+});
+
+Deno.test("restrictChildSkills: no config.skills declared inherits everything the parent has, capped by what the child actually loaded", () => {
+  const parent = fakeAgentWithSkills(["a", "b"]);
+  const child = fakeAgentWithSkills(["a"]); // no config.skills; only "a" loaded on disk
+  const restricted = restrictChildSkills(parent, child);
+  assertEquals(restricted.skills.map((s: { name: string }) => s.name), ["a"]);
+});
+
+Deno.test("restrictChildSkills: a subagent cannot grant itself a skill the parent lacks, even if it loaded it", () => {
+  const parent = fakeAgentWithSkills([]); // parent has no skills at all
+  const child = fakeAgentWithSkills(["secret"], ["secret"]);
+  const restricted = restrictChildSkills(parent, child);
+  assertEquals(restricted.skills, []);
+});
+
+Deno.test("agent still returns {text} and now routes through a child session", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "c-1", nickname: "Kepler" });
+      },
+      awaitChild: () => Promise.resolve({ text: "done" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "code-reviewer", prompt: "review" });
+  assertEquals(out, { text: "done" });
+  assertEquals((spawned[0] as { detached: boolean }).detached, false, "blocking agent must spawn NON-detached");
+});
+
+Deno.test("agent passes fork_turns through", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "c-1", nickname: "K" });
+      },
+      awaitChild: () => Promise.resolve({ text: "ok" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  await (tools.agent as { execute: (i: unknown) => Promise<unknown> }).execute({ prompt: "x", fork_turns: "3" });
+  assertEquals((spawned[0] as { forkTurns: string }).forkTurns, "3");
+});
+
+Deno.test("agent still rejects an unknown subagent without spawning", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "x", nickname: "y" });
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "nope", prompt: "x" }) as { error?: string };
+  assert(out.error?.includes("nope"));
+  assertEquals(spawned.length, 0);
+});
+
+Deno.test("agent does not resolve __proto__ as a subagent", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { spawnChild: () => Promise.resolve({ agentId: "x", nickname: "y" }) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "__proto__", prompt: "x" }) as { error?: string };
+  assert(out.error?.includes("__proto__"), "must fall into the unknown-subagent branch");
+});
+
+// Fix round 1, Finding 1: the old in-process fallback (runSubagent) is gone
+// — both real routes (session/turn path and /chat) always wire ctx.spawn now,
+// so there is exactly one delegation implementation. A caller that omits it
+// is a wiring bug and must fail loudly, not silently revive the old path.
+Deno.test("agent rejects loudly (does not silently fall back) when ctx.spawn is not wired", async () => {
+  const agent = await loadAgent(TOY);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  await assertRejects(
+    () => (tools.agent as { execute: (i: unknown) => Promise<unknown> }).execute({ prompt: "x" }),
+    Error,
+    "ctx.spawn",
+  );
+});
+
+// The unknown-subagent guard runs BEFORE ctx.spawn is even checked, so it
+// still works with no spawn capabilities wired at all — this is the ONE
+// case that genuinely needs no ctx.spawn, not a fallback delegation path.
+Deno.test("agent still rejects an unknown subagent even with no ctx.spawn wired at all", async () => {
+  const agent = await loadAgent(TOY);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "nope", prompt: "x" }) as { error?: string; available?: string[] };
+  assertEquals(out, { error: 'unknown subagent "nope"', available: Object.keys(agent.subagents) });
+});
+
+// Fix round 1, Finding 4: the child now runs as its own turn/session, which
+// publishes its own actions.requested/action.result on stream.ts's live
+// fan-out — runAsChild subscribes to that for the duration of the wait and
+// bridges them onto the parent's toolEmit as subagent.tool, under the SAME
+// runId as subagent.start/end, matching the old in-process loop's
+// one-runId granularity.
+Deno.test("agent bridges the child's own tool-call/tool-result events onto the parent's toolEmit as subagent.tool", async () => {
+  const events: Array<{ name: string; data: unknown }> = [];
+  const ctx = fakeToolCtx({
+    toolEmit: (name: string, data: unknown) => events.push({ name, data }),
+    spawn: {
+      spawnChild: () => Promise.resolve({ agentId: "c-1", nickname: "Kepler" }),
+      awaitChild: (agentId: string) => {
+        // Simulate the child's own turn publishing progress WHILE the
+        // parent is still waiting — exactly the live window runAsChild's
+        // subscribe() is meant to observe.
+        publish(agentId, {
+          type: "actions.requested",
+          data: { turnId: "ct-1", actions: [{ kind: "tool-call", callId: "x", toolName: "shout", input: { text: "hi" } }] },
+        });
+        publish(agentId, {
+          type: "action.result",
+          data: { turnId: "ct-1", result: { kind: "tool-result", callId: "x", toolName: "shout", output: "HI" }, status: "completed" },
+        });
+        return { text: "done" };
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> }).execute({ prompt: "go" });
+  assertEquals(out, { text: "done" });
+
+  const names = events.map((e) => e.name);
+  assertEquals(names, ["subagent.start", "subagent.tool", "subagent.tool", "subagent.end"]);
+  const runIds = new Set(events.map((e) => (e.data as { runId: string }).runId));
+  assertEquals(runIds.size, 1, "one runId for the whole delegation, same as the old in-process loop");
+  assertEquals((events[1].data as { name: string; input: unknown }).name, "shout");
+  assertEquals((events[1].data as { input: unknown }).input, { text: "hi" });
+  assertEquals((events[2].data as { result: unknown }).result, "HI");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Finding 2: /chat's session is created fresh per request and
+// never revisited (COMPAT.md) — a DETACHED child spawned from it would be
+// silently orphaned (nothing will ever poll/wake for its result). /chat
+// must only ever get the BLOCKING `agent` tool. This pins that contract at
+// the tool-set level so Task 9 (which registers agent_spawn/agent_list at
+// depth 0, gated on ctx.spawn) cannot give /chat detached spawning by
+// accident — see spawn.ts's SpawnCapabilities.allowDetached, which is the
+// mechanism this must be gated on instead of ctx.spawn alone.
+// ---------------------------------------------------------------------------
+
+Deno.test("a spawn-capable ctx with allowDetached:false still exposes the blocking agent tool", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: false,
+      spawnChild: () => Promise.resolve({ agentId: "c-1", nickname: "K" }),
+      awaitChild: () => Promise.resolve({ text: "ok" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  assert("agent" in tools, "/chat-shaped ctx must still get the blocking agent tool");
+  // Task 9 doesn't exist yet in this codebase snapshot, so these are
+  // trivially absent today — the assertion is a tripwire: once agent_spawn
+  // exists, it must still be absent here specifically BECAUSE ctx.spawn
+  // .allowDetached is false, not merely because nobody wrote it yet.
+  assert(!("agent_spawn" in tools), "a session that cannot spawn detached children must never get agent_spawn");
+  assert(!("agent_list" in tools), "a session that cannot spawn detached children must never get agent_list");
+});
+
+// ---------------------------------------------------------------------------
+// Task 9 (2026-08-27-agent-orchestration): agent_spawn / agent_list. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-9-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_spawn returns a handle immediately and spawns detached", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "c-1", nickname: "Kepler" });
+      },
+      awaitChild: () => {
+        throw new Error("agent_spawn must not await the child");
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_spawn.execute({ prompt: "explore" }, {} as never);
+  assertEquals((out as { agentId: string }).agentId, "c-1");
+  assertEquals((spawned[0] as { detached: boolean }).detached, true);
+});
+
+Deno.test("agent_list reports live children with nicknames", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      listChildren: (opts?: { liveOnly?: boolean }) =>
+        Promise.resolve(
+          opts?.liveOnly
+            ? [{ agentId: "c-2", nickname: "Faraday", status: "running", subagent: "explorer" }]
+            : [
+              { agentId: "c-1", nickname: "Kepler", status: "completed", subagent: "explorer" },
+              { agentId: "c-2", nickname: "Faraday", status: "running", subagent: "explorer" },
+            ],
+        ),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_list.execute({}, {} as never) as { agents: unknown[] };
+  assertEquals(out.agents.length, 1, "the default listing is live children only");
+  assert(JSON.stringify(out.agents).includes("Faraday"));
+});
+
+// The default must be live-only (the spec's tool table says "live children"),
+// and asking for the full history must still be possible — a model that
+// spawned children earlier in the session needs their ids to call
+// agent_result.
+Deno.test("agent_list asks the store for live children by default and for all of them on include_finished", async () => {
+  const asked: Array<{ liveOnly?: boolean } | undefined> = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      listChildren: (opts?: { liveOnly?: boolean }) => {
+        asked.push(opts);
+        return Promise.resolve([]);
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  await tools.agent_list.execute({}, {} as never);
+  await tools.agent_list.execute({ include_finished: true }, {} as never);
+  await tools.agent_list.execute({ include_finished: false }, {} as never);
+  // A model that calls the tool with no arguments at all (the AI SDK can
+  // pass undefined for an all-optional schema) must still get the default.
+  await tools.agent_list.execute(undefined, {} as never);
+  assertEquals(asked.map((o) => o?.liveOnly), [true, false, true, true]);
+});
+
+Deno.test("agent_spawn/agent_list are not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: false,
+      spawnChild: () => Promise.reject(new Error("must not be reachable")),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_spawn, undefined);
+  assertEquals(tools.agent_list, undefined);
+  assert(tools.agent, "the blocking agent tool must still be registered");
+});
+
+// ---------------------------------------------------------------------------
+// Task 10 (2026-08-27-agent-orchestration): agent_wait.
+//
+// It USED to be a pure mailbox wait, reporting which children finished and
+// never their content — which left no tool anywhere in the runtime that could
+// return a child's output. agent_list carries metadata only, and
+// deliverChildResult's queued followup can only ever land on a LATER parent
+// turn, whereas a parent sitting inside agent_wait always has a running turn.
+// A parent could learn WHICH child finished and never WHAT it produced.
+// agent_wait now carries the result, and agent_result reads one back on
+// demand.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_wait returns a finished child's OUTPUT, not just its status", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      waitForChildren: (_ids: unknown, _ms: unknown) =>
+        Promise.resolve([
+          { agentId: "c-1", nickname: "Kepler", status: "completed", subagent: null, startedAt: new Date(), detached: true },
+        ]),
+      readChildResult: (id: string) => Promise.resolve(id === "c-1" ? { text: "found three bugs" } : null),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_wait.execute({}, {} as never) as { updated: unknown[]; timedOut: boolean };
+  assertEquals(out.updated, [{
+    agentId: "c-1",
+    nickname: "Kepler",
+    status: "completed",
+    result: "found three bugs",
+  }]);
+  assertEquals(out.timedOut, false);
+});
+
+Deno.test("agent_wait reports a failed child's error rather than a result", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      waitForChildren: () =>
+        Promise.resolve([
+          { agentId: "c-2", nickname: "Faraday", status: "failed", subagent: null, startedAt: new Date(), detached: true },
+        ]),
+      readChildResult: () => Promise.resolve({ error: "model refused" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_wait.execute({}, {} as never) as { updated: Array<Record<string, unknown>> };
+  assertEquals(out.updated[0].error, "model refused");
+  assertEquals(out.updated[0].result, undefined);
+});
+
+Deno.test("agent_result returns a finished child's text, and { running: true } while it is not done", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      readChildResult: (id: string) => Promise.resolve(id === "done" ? { text: "the answer" } : null),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(await tools.agent_result.execute({ agent_id: "done" }, {} as never), { text: "the answer" });
+  // null covers "still running" AND "not yours / unknown", deliberately
+  // indistinguishable — same posture as every other id-taking spawn path.
+  assertEquals(await tools.agent_result.execute({ agent_id: "other" }, {} as never), { running: true });
+});
+
+Deno.test("agent_result is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_result, undefined);
+});
+
+Deno.test("agent_wait reports an empty list (not an error) on timeout", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, waitForChildren: () => Promise.resolve([]) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_wait.execute({}, {} as never) as { updated: unknown[]; timedOut: boolean };
+  assertEquals(out.updated, []);
+  assertEquals(out.timedOut, true);
+});
+
+Deno.test("agent_wait passes agent_ids/timeout_ms through to waitForChildren", async () => {
+  const calls: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      waitForChildren: (ids: unknown, ms: unknown) => {
+        calls.push([ids, ms]);
+        return Promise.resolve([]);
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  await tools.agent_wait.execute({ agent_ids: ["c-1"], timeout_ms: 5_000 }, {} as never);
+  assertEquals(calls[0], [["c-1"], 5_000]);
+});
+
+Deno.test("agent_wait is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_wait, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Task 11 (2026-08-27-agent-orchestration): agent_stop. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-11-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_stop reports the previous status of a stopped child", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, stopChild: (_id: string) => Promise.resolve("running") },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_stop.execute({ agent_id: "c-1" }, {} as never);
+  assertEquals(out, { previousStatus: "running" });
+});
+
+Deno.test("agent_stop surfaces an unknown/foreign agent id as {error}, not a thrown rejection", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      stopChild: (id: string) => Promise.reject(new Error(`unknown agent "${id}"`)),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_stop.execute({ agent_id: "foreign" }, {} as never) as { error?: string };
+  assert(out.error?.toLowerCase().includes("unknown"));
+});
+
+Deno.test("agent_stop is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_stop, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Task 12 (2026-08-27-agent-orchestration): agent_send. Delivers a message
+// into an already-running child's turn — there is no "next turn" to queue it
+// for (see runner.ts's makePrepareStep). See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-12-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_send reports delivered:true for a running child", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, sendToChild: (_id: string, _msg: string) => Promise.resolve({ delivered: true }) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_send.execute({ agent_id: "c-1", message: "hi" }, {} as never);
+  assertEquals(out, { delivered: true });
+});
+
+Deno.test("agent_send reports delivered:false for a finished child", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, sendToChild: (_id: string, _msg: string) => Promise.resolve({ delivered: false }) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_send.execute({ agent_id: "c-1", message: "hi" }, {} as never);
+  assertEquals(out, { delivered: false });
+});
+
+Deno.test("agent_send is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_send, undefined);
 });
