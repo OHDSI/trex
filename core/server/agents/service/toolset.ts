@@ -432,6 +432,7 @@ const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection
 const BUILTIN_AGENT_SPAWN_DEF: ToolDef = { description: "Start a subagent and return immediately (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List subagents you have started (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_WAIT_DEF: ToolDef = { description: "Wait for a subagent to finish (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_STOP_DEF: ToolDef = { description: "Stop a subagent you started (built-in).", inputSchema: { type: "object" } };
 
 // Caps a tool's output so no single call can push an unbounded blob into
 // agents.steps or the model's context. Applied in buildSdkTools (core
@@ -688,6 +689,28 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
         filterDefs.agent_wait = BUILTIN_AGENT_WAIT_DEF;
       } else {
         console.log("agents: a tool named \"agent_wait\" overrides the built-in agent_wait tool");
+      }
+
+      if (!out.agent_stop) {
+        out.agent_stop = tool({
+          description: "Stop a subagent you started. Returns the status it had when stopped.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: { agent_id: { type: "string" } },
+            required: ["agent_id"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent_id } = input as { agent_id: string };
+            try {
+              return { previousStatus: await ctx.spawn!.stopChild(agent_id) };
+            } catch (e) {
+              return { error: e instanceof Error ? e.message : String(e) };
+            }
+          },
+        });
+        filterDefs.agent_stop = BUILTIN_AGENT_STOP_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_stop\" overrides the built-in agent_stop tool");
       }
     }
   }

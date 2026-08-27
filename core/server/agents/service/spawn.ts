@@ -6,7 +6,7 @@
 // supplies `startChildTurn` as a closure instead. Same pattern as
 // `activateTools` being threaded onto ToolContext rather than the raw store.
 import type { ChildAgent } from "./orchestration.ts";
-import { checkSpawnAllowed } from "./orchestration.ts";
+import { checkSpawnAllowed, STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 import { pickNickname } from "./nicknames.ts";
 import { forkParentHistory } from "./context/fork.ts";
 import type { ContextConfig } from "./context/budget.ts";
@@ -239,7 +239,25 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
       }
     },
 
-    stopChild: NOT_IMPLEMENTED("stopChild"),
+    // Ownership resolved through the parent-scoped store.getChild, same as
+    // awaitChild/waitForChildren — a child of another session comes back
+    // null and is indistinguishable from one that never existed; never
+    // widen this to a raw-id lookup filtered in JS. Returns the PREVIOUS
+    // status rather than silently no-op'ing on an already-finished child:
+    // the model must learn "already done" from the return value, not from
+    // nothing happening.
+    async stopChild(agentId: string): Promise<ChildAgent["status"]> {
+      const child = await store.getChild(agentId, parentSessionId);
+      if (!child) throw new Error(`unknown agent "${agentId}"`);
+      if (child.status === "running") {
+        // Recorded as an ordinary `failed` turn carrying this EXACT error
+        // string — store.ts's status-deriving queries key off it (strict
+        // equality) to display "stopped" instead of "failed". Must use the
+        // shared constant, never a duplicated literal.
+        await store.failTurnsForSession(agentId, STOPPED_BY_PARENT_ERROR);
+      }
+      return child.status;
+    },
     sendToChild: NOT_IMPLEMENTED("sendToChild"),
   };
 }

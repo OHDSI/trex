@@ -2,6 +2,7 @@
 // .superpowers/sdd/2026-08-27-agent-orchestration/task-6-brief.md.
 import { assert, assertEquals } from "jsr:@std/assert";
 import { createSpawnCapabilities, WAIT_DEFAULT_MS, WAIT_MAX_MS } from "./spawn.ts";
+import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 
 // deno-lint-ignore no-explicit-any
 function fakeDeps(over: Record<string, unknown> = {}) {
@@ -158,23 +159,16 @@ Deno.test("listChildren delegates to the parent-scoped store method", async () =
 // waitForChildren is implemented as of Task 10 — see its own tests below.
 // ---------------------------------------------------------------------------
 
-Deno.test("stopChild and sendToChild throw a clear not-implemented error", async () => {
+Deno.test("sendToChild throws a clear not-implemented error", async () => {
   const { deps } = fakeDeps();
   // deno-lint-ignore no-explicit-any
   const caps = createSpawnCapabilities(deps as any);
-  for (
-    const call of [
-      () => caps.stopChild("c-1"),
-      () => caps.sendToChild("c-1", "hi"),
-    ]
-  ) {
-    await call().then(
-      () => {
-        throw new Error("expected a throw");
-      },
-      (e: Error) => assert(e.message.toLowerCase().includes("not implemented"), e.message),
-    );
-  }
+  await caps.sendToChild("c-1", "hi").then(
+    () => {
+      throw new Error("expected a throw");
+    },
+    (e: Error) => assert(e.message.toLowerCase().includes("not implemented"), e.message),
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -357,4 +351,71 @@ Deno.test("agent_wait resolves explicit agent_ids through the parent-scoped stor
 Deno.test("WAIT_DEFAULT_MS and WAIT_MAX_MS have the specified values", () => {
   assertEquals(WAIT_DEFAULT_MS, 60_000);
   assertEquals(WAIT_MAX_MS, 600_000);
+});
+
+// ---------------------------------------------------------------------------
+// Task 11 (2026-08-27-agent-orchestration): agent_stop, and the ownership
+// guard shared by every id-taking capability. See task-11-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_stop marks a running child stopped, writing the exact STOPPED_BY_PARENT_ERROR constant", async () => {
+  const updates: unknown[] = [];
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "running" }),
+      failTurnsForSession: (...a: unknown[]) => {
+        updates.push(a);
+        return Promise.resolve(1);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.stopChild("c-1"), "running");
+  // Strict equality against the shared constant, not a substring match — the
+  // status-deriving store queries key off this exact string.
+  assertEquals(updates, [["c-1", STOPPED_BY_PARENT_ERROR]]);
+});
+
+Deno.test("agent_stop refuses a child belonging to another session (ownership is the query, not a JS filter)", async () => {
+  const updates: unknown[] = [];
+  const { deps } = fakeDeps({
+    store: {
+      // Parent-scoped: this simulates the real store.getChild returning null
+      // for a foreign id, indistinguishable from a nonexistent one.
+      getChild: () => Promise.resolve(null),
+      failTurnsForSession: (...a: unknown[]) => {
+        updates.push(a);
+        return Promise.resolve(1);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  await caps.stopChild("foreign").then(
+    () => {
+      throw new Error("should have refused");
+    },
+    (e: Error) => assert(e.message.toLowerCase().includes("unknown")),
+  );
+  assertEquals(updates.length, 0, "a foreign child must never be touched");
+});
+
+Deno.test("agent_stop returns the previous status without mutating an already-finished child", async () => {
+  const updates: unknown[] = [];
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "completed" }),
+      failTurnsForSession: (...a: unknown[]) => {
+        updates.push(a);
+        return Promise.resolve(0);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  // The model learns the child already finished from the return value, not
+  // from a silent no-op.
+  assertEquals(await caps.stopChild("c-1"), "completed");
+  assertEquals(updates.length, 0, "an already-finished child must not be mutated");
 });

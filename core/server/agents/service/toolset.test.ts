@@ -664,3 +664,35 @@ Deno.test("agent_wait is not registered when the session disallows detached chil
   const tools = await buildSdkTools(ctx as never);
   assertEquals(tools.agent_wait, undefined);
 });
+
+// ---------------------------------------------------------------------------
+// Task 11 (2026-08-27-agent-orchestration): agent_stop. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-11-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_stop reports the previous status of a stopped child", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { allowDetached: true, stopChild: (_id: string) => Promise.resolve("running") },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_stop.execute({ agent_id: "c-1" }, {} as never);
+  assertEquals(out, { previousStatus: "running" });
+});
+
+Deno.test("agent_stop surfaces an unknown/foreign agent id as {error}, not a thrown rejection", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      stopChild: (id: string) => Promise.reject(new Error(`unknown agent "${id}"`)),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_stop.execute({ agent_id: "foreign" }, {} as never) as { error?: string };
+  assert(out.error?.toLowerCase().includes("unknown"));
+});
+
+Deno.test("agent_stop is not registered when the session disallows detached children (/chat)", async () => {
+  const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
+  const tools = await buildSdkTools(ctx as never);
+  assertEquals(tools.agent_stop, undefined);
+});
