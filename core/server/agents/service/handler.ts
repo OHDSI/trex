@@ -1619,6 +1619,32 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       const uiStream = createUIMessageStream({
         execute: ({ writer }) => {
           writeData = (p) => writer.write(p);
+          // NOT wrapped in the model-call retry the other three sites use
+          // (service/retry.ts) — deliberately, not an oversight.
+          //
+          // Those three are background, server-owned work: a turn, a child's
+          // turn, and the compaction summarizer. Nobody is holding a
+          // connection open on them, and a 429 there DESTROYS work only the
+          // server had — a child's result, a summary the user can no longer
+          // supply again. Spending up to ~75s of backoff to save it is
+          // straightforwardly right.
+          //
+          // /chat is the opposite on both counts. It is a synchronous
+          // browser-facing stream, and it is stateless BY DEFINITION (history
+          // comes from the client — see this route's own header comment), so
+          // a client retry is immediate, cheap, and loses nothing: the caller
+          // still holds every message it would re-post. Retrying here would
+          // trade a fast failure for a browser connection that hangs through
+          // the whole backoff schedule and may still fail at the end of it.
+          //
+          // One caveat worth knowing before "improving" this: the failure IS
+          // surfaced to the client (as a UIMessage error part, which is what
+          // useChat's `error` state reads), but createUIMessageStream's
+          // default onError masks the reason to a bare "An error occurred."
+          // to avoid leaking server error detail. So the panel shows an
+          // error, not specifically "rate limited". If that reason should
+          // reach the user, the fix is an explicit `onError` here — not a
+          // retry.
           const result = streamText({
             model,
             // Same system cache-point wrap as runner.ts/toolset.ts (see
