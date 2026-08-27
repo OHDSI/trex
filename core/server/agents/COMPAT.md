@@ -479,12 +479,23 @@ live-tail by event shape.
       sitting inside `agent_wait` always has a turn running — so without
       these it could learn WHICH child finished but never WHAT it produced
       inside its own turn.
-    - **`agent_stop` abandons, it does not interrupt.** It marks the child's
-      turn failed with the `STOPPED_BY_PARENT_ERROR` marker so the parent
-      stops waiting and the child's result is discarded on arrival. The
-      child's WORKER keeps running to completion and keeps billing; there is
-      no `AbortSignal` threaded to a child's turn. The tool description says
-      exactly this, so a model does not treat it as a kill switch.
+    - **`agent_stop` interrupts in-process, and abandons otherwise.** It always
+      marks the child's turn failed with the `STOPPED_BY_PARENT_ERROR` marker,
+      so the parent stops waiting and the child's result is discarded on
+      arrival — that database marking happens FIRST and is what owns the
+      outcome. It then aborts the child's in-flight `streamText` via an
+      `AbortSignal` threaded through `runTurn`, so the child stops calling
+      tools and stops billing rather than running to completion for nothing.
+      That abort reaches only a child running on the SAME WORKER: the registry
+      of live child controllers (`service/aborts.ts`) is per isolate, and a
+      parent woken on another worker — routine, since child turns are started
+      fire-and-forget and a reap can deliver from anywhere — finds no
+      controller and gets the marking alone, which is exactly what `agent_stop`
+      did before. Making it cross-process needs a notification channel the
+      store does not have (the same gap that makes `agent_wait` a poll rather
+      than a push), and is deliberately not half-built here. The tool
+      description says the same thing, so a model does not treat it as a
+      guaranteed kill switch.
     - **All seven are depth-0 only** (`ToolBuildCtx.depth`, derived per turn
       from durable state — `store.isChildSession` — never threaded from spawn
       time, so a child cannot spawn a grandchild even if a worker restarts

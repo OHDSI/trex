@@ -163,6 +163,7 @@ function connectionOptsFor(deps: Deps) {
 export { HEARTBEAT_STALE_MS, STALE_TURN_MS } from "./turn-lifetime.ts";
 import { HEARTBEAT_STALE_MS, STALE_TURN_MS } from "./turn-lifetime.ts";
 import { startTurnHeartbeat } from "./heartbeat.ts";
+import { clearChildTurnAbort, registerChildTurnAbort } from "./aborts.ts";
 import { notifyReaped } from "./reap-notify.ts";
 
 // A turn's `message` column (and the follow-up queue) both want a plain
@@ -742,6 +743,15 @@ function startTurn(
     // Built once, reused by both the success and failure delivery calls
     // below — see buildDeliverDeps' own comment.
     const deliverDeps = buildDeliverDeps(deps);
+    // What makes agent_stop an interrupt rather than only an abandonment, for
+    // a child running on THIS worker: the controller is registered under the
+    // child's session id (the id agent_stop is handed) and its signal goes to
+    // streamText. Children only — nothing else is stoppable from outside
+    // today, and registering every turn would grow the map by one entry per
+    // turn for a capability no caller has. Cleared in the `finally` below,
+    // which is also what keeps the registry from leaking. See aborts.ts for
+    // the per-worker limitation this deliberately does not paper over.
+    const abort = depth === 1 ? registerChildTurnAbort(sessionId) : undefined;
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -752,6 +762,7 @@ function startTurn(
         activatedTools,
         spawn,
         depth,
+        ...(abort ? { abortSignal: abort.signal } : {}),
       });
       // Fix round 1 (2026-08-27-agent-orchestration, tasks 12-13 review):
       // `finishTurn` is now scoped to `WHERE status = 'running'` and reports
@@ -871,6 +882,11 @@ function startTurn(
       // `status = 'running'` guard makes that harmless, but leaving the timer
       // running would leak one per turn for the worker's whole lifetime.)
       heartbeat.stop();
+      // Same reason, same place: a child that finished on its own is no longer
+      // stoppable, and a worker that ran thousands of children must not still
+      // be holding thousands of controllers. Passing the controller (not just
+      // the id) means a turn ending LATE cannot unregister a newer turn's.
+      if (abort) clearChildTurnAbort(sessionId, abort);
     }
   })().catch((e) => console.error("agents: turn crashed:", e));
 }

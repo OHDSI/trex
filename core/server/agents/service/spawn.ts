@@ -8,6 +8,7 @@
 import type { ChildAgent } from "./orchestration.ts";
 import { checkSpawnAllowed, STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 import { pickNickname } from "./nicknames.ts";
+import { abortChildTurn } from "./aborts.ts";
 import { forkParentHistory, parseForkTurns } from "./context/fork.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { FALLBACK_CONTEXT_WINDOW } from "./context/budget.ts";
@@ -305,7 +306,37 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
         // string — store.ts's status-deriving queries key off it (strict
         // equality) to display "stopped" instead of "failed". Must use the
         // shared constant, never a duplicated literal.
+        //
+        // THIS COMES FIRST, and the ordering is load-bearing. The abort below
+        // ends the child's turn, and the child's own catch then calls
+        // finishTurn — which is scoped to `WHERE status = 'running'` and so
+        // reports that it did NOT win, because this UPDATE already did. That
+        // is exactly the intent: the stop owns the outcome, and the child's
+        // result is discarded rather than delivered to a parent that
+        // explicitly abandoned it (unchanged from before there was an abort
+        // at all). Aborting first would invert it — the child could finish,
+        // win finishTurn, and deliver a result for an agent the parent had
+        // just stopped.
         await store.failTurnsForSession(agentId, STOPPED_BY_PARENT_ERROR);
+        // ...and THIS is what makes the stop an interrupt rather than only a
+        // bookkeeping entry: it cancels the child's in-flight streamText so
+        // the worker stops calling tools and stops billing, instead of
+        // running to completion and having its result thrown away on arrival.
+        //
+        // Reaches only a child running on THIS worker. A parent woken on a
+        // different worker (routine — child turns are fire-and-forget and a
+        // reap can deliver from anywhere) finds no controller and gets the
+        // database marking alone, which is the whole of what agent_stop used
+        // to do. Not an error, and not worth failing the tool over: the
+        // parent's observable outcome — the child is stopped, its result
+        // discarded — is the same either way, and the log line says which
+        // happened.
+        if (!abortChildTurn(agentId)) {
+          console.log(
+            `agents: stopped child ${agentId} by marking its turn, but its worker is not this one — ` +
+              `it will keep running until it finishes on its own and its result will be discarded`,
+          );
+        }
       }
       return child.status;
     },

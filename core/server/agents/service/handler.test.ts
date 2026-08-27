@@ -14,6 +14,7 @@ import type { AgentEvent } from "./events.ts";
 import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMessage } from "../channels/adapters/discord-messages.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { ABANDONED_CHILD_ERROR } from "./sweep.ts";
+import { abortChildTurn, liveChildTurnAborts } from "./aborts.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -121,11 +122,19 @@ function inMemoryDb() {
       });
       return Promise.resolve({ rows: [{ id }] });
     }
-    // countChildren — live/total over parent_session_id's children.
+    // countChildren — live/total over parent_session_id's children. `live`
+    // mirrors store.ts's LIVE_CHILD_PREDICATE exactly: the LATEST turn is
+    // running, or there is no turn yet (a child between createChildSession
+    // and its first addTurn, which deriveChildStatus also calls "running").
+    // A fake that counted this differently from the real query would hide the
+    // very disagreement the predicate was introduced to remove.
     if (sql.includes("count(*) FILTER")) {
       const pid = params[0] as string;
       const children = [...sessions.entries()].filter(([, s]) => s.parent_session_id === pid);
-      const live = children.filter(([id]) => turns.some((t) => t.session_id === id && t.status === "running")).length;
+      const live = children.filter(([id]) => {
+        const latest = turns.filter((t) => t.session_id === id).sort((a, b) => b.seq - a.seq)[0];
+        return !latest || latest.status === "running";
+      }).length;
       return Promise.resolve({ rows: [{ live, total: children.length }] });
     }
     // getChild / listChildren — LEFT JOIN LATERAL the latest turn (by seq)
@@ -3861,6 +3870,109 @@ Deno.test({
       await pool.end();
     }
   },
+});
+
+// --- agent_stop actually interrupts (aborts.ts), end to end ---------------
+//
+// A REAL child turn, started through the real agent_spawn path, must register
+// an abort controller under its own session id while it runs and leave nothing
+// behind once it ends. Aborting it here without any accompanying database
+// marking is the deliberately harsher case: it proves the turn ends FAILED and
+// its parent is still told, so a stopped child can never end up notifying
+// nobody. (In the real agent_stop path the marking lands first and OWNS the
+// outcome, so the result is discarded rather than delivered — spawn.ts's
+// stopChild documents why that ordering matters.)
+Deno.test("a running child registers an abort controller, and an aborted child's turn fails AND reaches its parent", async () => {
+  const before = liveChildTurnAborts();
+  let spawnedOnce = false;
+  const model = new MockLanguageModelV3({
+    // deno-lint-ignore no-explicit-any
+    doStream: (options: any) => {
+      const prompt = JSON.stringify(options.prompt);
+      // Which session is calling, told apart by the driving message. The
+      // PARENT's own words are the discriminator, not the child's prompt: the
+      // parent's second step sees its own agent_spawn tool call (and so the
+      // child's prompt) in its message history too.
+      const isParent = prompt.includes("delegate this");
+      // The CHILD's own turn: stall until something aborts it, exactly like a
+      // long tool-heavy child whose parent gives up on it.
+      if (!isParent) {
+        return new Promise((resolve) => {
+          const done = () =>
+            resolve({
+              // Empty, not simulateReadableStream: the latter schedules a
+              // timer per chunk that nothing will consume after an abort.
+              stream: new ReadableStream({
+                start(c) {
+                  c.close();
+                },
+              }),
+            });
+          if (options.abortSignal?.aborted) return done();
+          options.abortSignal?.addEventListener("abort", done);
+        });
+      }
+      // The parent: delegate once, then say something and stop.
+      if (!spawnedOnce) {
+        spawnedOnce = true;
+        return Promise.resolve({
+          stream: simulateReadableStream({
+            chunks: toolCallChunks("agent_spawn", { prompt: "explore the repo" }),
+          }),
+        });
+      }
+      return Promise.resolve({ stream: simulateReadableStream({ chunks: textChunks("delegated") }) });
+    },
+  });
+
+  const { handler, db } = await makeHandler({ model });
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "delegate this" }),
+  }));
+  const parentId = res.headers.get("x-eve-session-id")!;
+
+  // Wait for the child's turn to be genuinely in flight — i.e. registered.
+  await until(() => liveChildTurnAborts() > before);
+  const childEntry = [...db.sessions.entries()].find(([, s]) => s.parent_session_id === parentId);
+  assertExists(childEntry, "expected the agent_spawn call to have created a child session");
+  const [childId, childSession] = childEntry;
+
+  assertEquals(abortChildTurn(childId), true, "the running child must be abortable by its own session id");
+  await until(() => settled(db));
+
+  const childTurn = db.turns.find((t) => t.session_id === childId);
+  assertExists(childTurn);
+  assertEquals(childTurn.status, "failed", "an aborted turn must end failed, never completed");
+  assert(
+    String(childTurn.error).includes("aborted"),
+    `the failure must say the turn was aborted, got: ${childTurn.error}`,
+  );
+
+  // The parent is told, either as a still-queued followup or (more usually)
+  // as the woken turn that already drained it — both are "notified"; what
+  // must never happen is neither.
+  //
+  // The woken turn itself logs an AI_InvalidPromptError here. That is NOT
+  // this test's subject and not a fault in the abort path: context/history.ts
+  // (from #275, already on develop) replays a tool-result's `output` as a
+  // bare string, while ai@6's ToolResultPart requires
+  // `{type:"text"|"json", value}` — so ANY turn that follows a turn which
+  // called a tool is rejected by standardizePrompt before the model is
+  // reached. This test is simply the first to drive that shape.
+  const notified = db.followUps.some((f) => f.session_id === parentId && f.message.includes("aborted")) ||
+    db.turns.some((t) => t.session_id === parentId && JSON.stringify(t.message).includes("aborted"));
+  assert(
+    notified,
+    `the parent must hear that its child was aborted. followUps=${JSON.stringify(db.followUps)} ` +
+      `parentTurns=${JSON.stringify(db.turns.filter((t) => t.session_id === parentId).map((t) => t.message))}`,
+  );
+  assert(String(childSession.nickname ?? "").length > 0);
+
+  // The leak guard, on the real path: a turn that has ended must not leave a
+  // controller registered for the worker's whole lifetime.
+  assertEquals(liveChildTurnAborts(), before, "a finished child must leave nothing in the abort registry");
 });
 
 // --- The requeue guard covers the WHOLE window, not just addTurn -----------

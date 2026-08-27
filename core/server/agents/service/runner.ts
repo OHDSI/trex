@@ -63,6 +63,13 @@ interface RunTurnOpts {
   // structurally unable to spawn its own children. Undefined defaults to 0
   // (top level) in buildSdkTools, same as before this field existed.
   depth?: number;
+  // Cancels this turn's model call and every step after it. Handed straight
+  // to streamText, which is the only thing here that can be mid-flight for
+  // minutes. Set by handler.ts's startTurn for a CHILD turn (depth 1), from
+  // the per-worker registry agent_stop triggers — see aborts.ts. Undefined
+  // for every other turn: nothing else can be stopped from the outside today,
+  // and an unused controller per turn is bookkeeping nobody reads.
+  abortSignal?: AbortSignal;
 }
 
 // A child has exactly ONE turn, so a message queued for it (spawn.ts's
@@ -166,6 +173,9 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     system: withSystemCachePoint(model, system),
     messages,
     tools,
+    // Only ever set for a child turn (see RunTurnOpts.abortSignal). Passing
+    // undefined is exactly the same as not passing it at all.
+    abortSignal: opts.abortSignal,
     stopWhen: stepCountIs(agent.config.maxSteps ?? 25),
     // openai/Responses caches automatically; a stable per-agent key keeps the
     // TOOLS+SYSTEM prefix routed to the same cache across turns. No-op ({}) for
@@ -376,6 +386,26 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           await persistText();
           await persist("finish", null, { finishReason }, usage);
           break;
+        }
+        case "abort": {
+          // The turn was cancelled from outside — today that means agent_stop
+          // reached this worker's controller for a running child (aborts.ts).
+          // ai emits this part and then simply ENDS the stream, so without
+          // this case the loop would fall out and runTurn would return
+          // normally, reporting a stopped turn as a completed one.
+          //
+          // Treated as a failure instead, and by the same route as a model
+          // error: persist an error step (so a replay shows why the turn stops
+          // here) and throw, which hands the turn to handler.ts's startTurn
+          // catch. That catch marks the turn `failed` and, for a child,
+          // delivers to its parent — which is what matters if this abort ever
+          // arrives WITHOUT agent_stop's database marking having taken effect.
+          // Whoever ends the turn must tell the parent; a stopped child must
+          // never end up notifying nobody.
+          const reason = (part as any).reason;
+          const message = `agents: turn aborted${reason ? `: ${reason}` : ""}`;
+          await persist("error", null, { message });
+          throw new Error(message);
         }
         case "error": {
           const message = String((part as any).error ?? "unknown model error");

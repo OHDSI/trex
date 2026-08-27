@@ -1022,6 +1022,78 @@ Deno.test("runTurn wires prepareStep to drain a child session's pending follow-u
   assert(secondCallPrompt.includes("please wrap up now"), "the pending follow-up should reach the model's next step");
 });
 
+// --- agent_stop's interrupt half (aborts.ts) --------------------------------
+//
+// The signal must reach the PROVIDER call, not merely be accepted by runTurn:
+// what an interrupt has to cancel is the in-flight model request, which is
+// the only thing here that can be mid-flight for minutes while the child
+// keeps calling tools and keeps billing.
+Deno.test("runTurn hands its abort signal to the model call", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const controller = new AbortController();
+  const { model, calls } = capturingModel(textChunks("done"));
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store, emit: () => {},
+    model, depth: 1, abortSignal: controller.signal,
+  });
+  assertEquals(calls[0].abortSignal, controller.signal, "the model call must receive the turn's abort signal");
+});
+
+// ai emits an `abort` part and then simply ENDS the stream. Left unhandled,
+// runTurn would return normally and a stopped turn would be reported as a
+// completed one — and handler.ts would take its success path, delivery to the
+// parent included, for a turn that produced nothing.
+Deno.test("an aborted turn fails (and persists why) rather than reporting a completed turn", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const steps: Array<{ kind: string; payload: unknown }> = [];
+  const recording = {
+    ...store,
+    addStep: (_t: string, _s: number, kind: string, _n: unknown, payload: unknown) => {
+      steps.push({ kind, payload });
+      return Promise.resolve();
+    },
+  };
+  const controller = new AbortController();
+  const model = new MockLanguageModelV3({
+    // Stalls until the abort lands — the shape a real long child turn has
+    // when its parent stops it.
+    // deno-lint-ignore no-explicit-any
+    doStream: async (options: any) => {
+      await new Promise<void>((resolve) => {
+        if (options.abortSignal?.aborted) return resolve();
+        options.abortSignal?.addEventListener("abort", () => resolve());
+      });
+      // An empty stream rather than simulateReadableStream: the latter
+      // schedules a real timer per chunk, and nothing consumes them once the
+      // turn has been aborted — Deno's leak sanitizer counts those.
+      return {
+        stream: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+      };
+    },
+  });
+  const run = runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store: recording as never, emit: () => {},
+    model, depth: 1, abortSignal: controller.signal,
+  });
+  controller.abort();
+  const err = await assertRejects(() => run, Error);
+  assert(err.message.includes("aborted"), `expected an abort failure, got: ${err.message}`);
+  const errorStep = steps.find((s) => s.kind === "error");
+  assert(errorStep, "an aborted turn must persist an error step so a replay shows why it stops here");
+  assert(
+    JSON.stringify(errorStep.payload).includes("aborted"),
+    `the persisted reason must say the turn was aborted, got: ${JSON.stringify(errorStep.payload)}`,
+  );
+});
+
 Deno.test("runTurn never calls takeFollowUps for a top-level (non-child) turn — the hot-path cost note", async () => {
   const agent = await loadAgent(TOY);
   const { store } = memoryStoreCalls();

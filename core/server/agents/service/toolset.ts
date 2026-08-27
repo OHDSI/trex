@@ -827,10 +827,11 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
 
       if (!out.agent_stop) {
         out.agent_stop = tool({
-          description: "Abandon a subagent you started: its turn is marked failed and you will " +
-            "never receive its result. This does NOT interrupt the subagent's worker — it keeps " +
-            "running (and billing) until it finishes on its own, and whatever it produces is then " +
-            "discarded. Returns the status it had when stopped.",
+          description: "Stop a subagent you started: its turn is marked failed and you will never " +
+            "receive its result. It is usually interrupted immediately, but not guaranteed to be — " +
+            "if it is running on another worker it keeps running (and billing) until it finishes " +
+            "on its own, and whatever it produces is then discarded either way. Returns the " +
+            "status it had when stopped.",
           inputSchema: jsonSchema({
             type: "object",
             properties: { agent_id: { type: "string" } },

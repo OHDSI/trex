@@ -3,6 +3,7 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { createSpawnCapabilities, WAIT_DEFAULT_MS, WAIT_MAX_MS } from "./spawn.ts";
 import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
+import { clearChildTurnAbort, liveChildTurnAborts, registerChildTurnAbort } from "./aborts.ts";
 
 // deno-lint-ignore no-explicit-any
 function fakeDeps(over: Record<string, unknown> = {}) {
@@ -481,6 +482,73 @@ Deno.test("agent_stop marks a running child stopped, writing the exact STOPPED_B
   // Strict equality against the shared constant, not a substring match — the
   // status-deriving store queries key off this exact string.
   assertEquals(updates, [["c-1", STOPPED_BY_PARENT_ERROR]]);
+});
+
+// The half that makes agent_stop an interrupt rather than a bookkeeping
+// entry. The ORDER is the substance: the database marking must land before the
+// abort, or the child could finish, win finishTurn, and deliver a result for
+// an agent its parent had just stopped.
+Deno.test("agent_stop aborts a running child on this worker, and marks its turn BEFORE doing so", async () => {
+  const order: string[] = [];
+  const controller = registerChildTurnAbort("c-1");
+  try {
+    const { deps } = fakeDeps({
+      store: {
+        getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "running" }),
+        failTurnsForSession: () => {
+          order.push("marked");
+          return Promise.resolve(1);
+        },
+      },
+    });
+    // deno-lint-ignore no-explicit-any
+    const caps = createSpawnCapabilities(deps as any);
+    controller.signal.addEventListener("abort", () => order.push("aborted"));
+    await caps.stopChild("c-1");
+    assertEquals(order, ["marked", "aborted"], "the turn must be marked failed before the abort fires");
+    assert(controller.signal.aborted, "the child's streamText signal must be aborted");
+    assertEquals(liveChildTurnAborts(), 0, "an aborted child must not stay in the registry");
+  } finally {
+    clearChildTurnAbort("c-1", controller);
+  }
+});
+
+// A parent on another worker is the ordinary case, not an error case: the
+// database marking is the whole of the stop there, exactly as it was before
+// any abort existed.
+Deno.test("agent_stop still marks the turn when the child is running on another worker", async () => {
+  const updates: unknown[] = [];
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "elsewhere", nickname: "K", status: "running" }),
+      failTurnsForSession: (...a: unknown[]) => {
+        updates.push(a);
+        return Promise.resolve(1);
+      },
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.stopChild("elsewhere"), "running");
+  assertEquals(updates, [["elsewhere", STOPPED_BY_PARENT_ERROR]]);
+});
+
+Deno.test("agent_stop does not abort a child that has already finished", async () => {
+  const controller = registerChildTurnAbort("c-done");
+  try {
+    const { deps } = fakeDeps({
+      store: {
+        getChild: () => Promise.resolve({ agentId: "c-done", nickname: "K", status: "completed" }),
+        failTurnsForSession: () => Promise.reject(new Error("must not be reached")),
+      },
+    });
+    // deno-lint-ignore no-explicit-any
+    const caps = createSpawnCapabilities(deps as any);
+    assertEquals(await caps.stopChild("c-done"), "completed");
+    assert(!controller.signal.aborted, "a finished child's turn must not be aborted");
+  } finally {
+    clearChildTurnAbort("c-done", controller);
+  }
 });
 
 Deno.test("agent_stop refuses a child belonging to another session (ownership is the query, not a JS filter)", async () => {
