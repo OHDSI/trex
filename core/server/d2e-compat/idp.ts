@@ -73,11 +73,14 @@ export function resolveIdpConfig(
       scope: env.D2E_IDP_SCOPE ?? "openid profile email",
       tokenUrl: `${issuer}/token`,
       resource: env.D2E_IDP_RESOURCE ?? "",
-      // The provider is mounted at `${BASE_PATH}/oidc` (see index.ts), and the
-      // d2e front door strips its own base prefix before proxying, so the
-      // browser-visible path carries no BASE_PATH.
-      authorizePath: "oidc/authorize",
-      endSessionPath: "oidc/session/end",
+      // Browser-visible paths, relative to the public gateway origin. They carry
+      // the mount's base path because the d2e front door does NOT strip it: it
+      // proxies /trex/* to this node as-is, and routes a bare /oidc/* to Logto.
+      // Emitting "oidc/authorize" therefore sent the portal's login to Logto,
+      // which knows nothing of trex's clients or sessions. Derived from the same
+      // issuer the discovery document advertises, so the two cannot drift.
+      authorizePath: `${new URL(issuer).pathname.replace(/^\//, "")}/authorize`,
+      endSessionPath: `${new URL(issuer).pathname.replace(/^\//, "")}/session/end`,
     };
   }
 

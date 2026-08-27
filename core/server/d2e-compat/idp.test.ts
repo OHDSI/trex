@@ -158,3 +158,31 @@ Deno.test("trex: the issuer names the /oidc mount, so discovery sits under it", 
   // The invariant that actually matters, stated directly.
   assertEquals(c.jwksUri.startsWith(c.issuer + "/"), true);
 });
+
+Deno.test("trex: browser paths carry the base path the front door proxies", () => {
+  // The d2e gateway routes a bare /oidc/* to Logto and proxies /trex/* to this
+  // node without stripping. Emitting "oidc/authorize" therefore sent the portal
+  // login to Logto, which knows none of trex's clients or sessions -- the user
+  // never reaches the provider that is supposed to authenticate them.
+  const c = resolveIdpConfig(
+    { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example:41100" },
+    "/trex",
+  );
+  assertEquals(c.authorizePath, "trex/oidc/authorize");
+  assertEquals(c.endSessionPath, "trex/oidc/session/end");
+  // The gateway builds `${origin}/${authorizePath}`, which must land on the
+  // endpoint the discovery document advertises.
+  assertEquals(
+    `https://d2e.example:41100/${c.authorizePath}`,
+    `${c.issuer}/authorize`,
+  );
+});
+
+Deno.test("trex: browser paths follow a deployment mounted at the root", () => {
+  const c = resolveIdpConfig(
+    { D2E_IDP: "trex", TREX_OIDC_ISSUER: "https://d2e.example" },
+    "",
+  );
+  assertEquals(c.authorizePath, "oidc/authorize");
+  assertEquals(`https://d2e.example/${c.authorizePath}`, `${c.issuer}/authorize`);
+});
