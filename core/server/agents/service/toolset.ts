@@ -429,6 +429,8 @@ function connectionSearchTool(ctx: ToolBuildCtx, toolMeta: ConnectionToolMeta[])
 const BUILTIN_SKILL_DEF: ToolDef = { description: "Load an on-demand skill by name (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_AGENT_DEF: ToolDef = { description: "Delegate to a subagent (built-in).", inputSchema: { type: "object" } };
 const BUILTIN_CONNECTION_SEARCH_DEF: ToolDef = { description: "Search connection-backed tools by keyword (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_SPAWN_DEF: ToolDef = { description: "Start a subagent and return immediately (built-in).", inputSchema: { type: "object" } };
+const BUILTIN_AGENT_LIST_DEF: ToolDef = { description: "List subagents you have started (built-in).", inputSchema: { type: "object" } };
 
 // Caps a tool's output so no single call can push an unbounded blob into
 // agents.steps or the model's context. Applied in buildSdkTools (core
@@ -610,6 +612,56 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
       filterDefs.connection_search = BUILTIN_CONNECTION_SEARCH_DEF;
     } else if (out.connection_search) {
       console.log("agents: a tool named \"connection_search\" overrides the built-in connection_search tool");
+    }
+    // agent_spawn/agent_list (and agent_wait/agent_stop/agent_send, Tasks
+    // 10-12) are gated on ctx.spawn.allowDetached, NOT merely ctx.spawn being
+    // truthy: /chat wires ctx.spawn too (for the BLOCKING `agent` tool above)
+    // but its session is ephemeral — nothing will ever revisit it to observe
+    // a detached child's result, so these tools must not even be offered
+    // there. See spawn.ts's SpawnCapabilities.allowDetached.
+    if (ctx.spawn?.allowDetached) {
+      if (!out.agent_spawn) {
+        out.agent_spawn = tool({
+          description: "Start a subagent on a subtask and return immediately. Use agent_wait to " +
+            "learn when it finishes, or agent (blocking) when you have nothing else to do meanwhile.",
+          inputSchema: jsonSchema({
+            type: "object",
+            properties: {
+              agent: { type: "string", description: "subagent name (optional)" },
+              prompt: { type: "string", description: "the subtask" },
+              fork_turns: FORK_TURNS_SCHEMA,
+            },
+            required: ["prompt"],
+          }),
+          execute: async (input: unknown): Promise<unknown> => {
+            const { agent: name, prompt, fork_turns } = input as
+              { agent?: string; prompt: string; fork_turns?: string };
+            const resolved = resolveTarget(ctx, name);
+            if (!resolved.ok) return resolved.error;
+            const { agentId, nickname } = await ctx.spawn!.spawnChild({
+              subagent: name ?? null,
+              prompt,
+              forkTurns: fork_turns ?? "none",
+              detached: true,
+            });
+            return { agentId, nickname, subagent: name ?? null };
+          },
+        });
+        filterDefs.agent_spawn = BUILTIN_AGENT_SPAWN_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_spawn\" overrides the built-in agent_spawn tool");
+      }
+
+      if (!out.agent_list) {
+        out.agent_list = tool({
+          description: "List the subagents you have started, with their nicknames and status.",
+          inputSchema: jsonSchema({ type: "object", properties: {} }),
+          execute: async (): Promise<unknown> => ({ agents: await ctx.spawn!.listChildren() }),
+        });
+        filterDefs.agent_list = BUILTIN_AGENT_LIST_DEF;
+      } else {
+        console.log("agents: a tool named \"agent_list\" overrides the built-in agent_list tool");
+      }
     }
   }
 

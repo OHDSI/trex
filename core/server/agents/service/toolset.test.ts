@@ -555,3 +555,45 @@ Deno.test("a spawn-capable ctx with allowDetached:false still exposes the blocki
   assert(!("agent_spawn" in tools), "a session that cannot spawn detached children must never get agent_spawn");
   assert(!("agent_list" in tools), "a session that cannot spawn detached children must never get agent_list");
 });
+
+// ---------------------------------------------------------------------------
+// Task 9 (2026-08-27-agent-orchestration): agent_spawn / agent_list. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-9-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("agent_spawn returns a handle immediately and spawns detached", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "c-1", nickname: "Kepler" });
+      },
+      awaitChild: () => {
+        throw new Error("agent_spawn must not await the child");
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_spawn.execute({ prompt: "explore" }, {} as never);
+  assertEquals((out as { agentId: string }).agentId, "c-1");
+  assertEquals((spawned[0] as { detached: boolean }).detached, true);
+});
+
+Deno.test("agent_list reports live children with nicknames", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: true,
+      listChildren: () =>
+        Promise.resolve([
+          { agentId: "c-1", nickname: "Kepler", status: "completed", subagent: "explorer" },
+          { agentId: "c-2", nickname: "Faraday", status: "running", subagent: "explorer" },
+        ]),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await tools.agent_list.execute({}, {} as never) as { agents: unknown[] };
+  assertEquals(out.agents.length, 2);
+  assert(JSON.stringify(out.agents).includes("Faraday"));
+});
