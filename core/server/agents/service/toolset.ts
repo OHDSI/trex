@@ -346,10 +346,69 @@ async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCt
   return { text };
 }
 
+// Shared JSON Schema for the fork_turns parameter — reused by agent_spawn
+// (Task 9) so both spawn paths describe the trade-off identically.
+const FORK_TURNS_SCHEMA = {
+  type: "string",
+  description: 'How much of YOUR history to give the subagent: "none" (default) may leave it ' +
+    'without context it needs; "all" gives it everything, at real token cost; or a number for the ' +
+    "most recent N turns.",
+};
+
+type SubagentResolution =
+  | { ok: true; target: LoadedAgent }
+  | { ok: false; error: { error: string; available: string[] } };
+
+// Shared by every id-taking spawn path (agentTool here; agent_spawn in Task
+// 9) so the guard below cannot drift between them.
+function resolveTarget(ctx: ToolBuildCtx, name?: string): SubagentResolution {
+  const names = Object.keys(ctx.agent.subagents);
+  // Object.hasOwn guards against a model-supplied "__proto__" or
+  // "constructor" resolving through the prototype chain instead of a real
+  // subagent entry — a plain `ctx.agent.subagents[name]` lookup would return
+  // Object.prototype/Function itself for those names and crash the turn
+  // (e.g. `.instructions` access downstream) instead of falling into the
+  // ordinary "unknown subagent" result.
+  const target = name
+    ? (Object.hasOwn(ctx.agent.subagents, name) ? ctx.agent.subagents[name] : undefined)
+    : ctx.agent;
+  if (!target) return { ok: false, error: { error: `unknown subagent "${name}"`, available: names } };
+  return { ok: true, target };
+}
+
+// Runs a delegated subtask as a real child session (see spawn.ts) and blocks
+// for its result — the `agent` tool's contract (blocking, `{text}`) is
+// unchanged; only the mechanism underneath it is now a durable session
+// instead of an in-process nested loop. Coarse-grained subagent.start/end
+// toolEmit events bracket the child turn; the old per-tool-call
+// `subagent.tool` events came from being INSIDE the nested loop and have no
+// direct equivalent now that the child runs as its own turn/session with its
+// own event stream — left for a later task to bridge, if ever needed.
+async function runAsChild(
+  ctx: ToolBuildCtx,
+  name: string | null,
+  prompt: string,
+  forkTurns: string | undefined,
+): Promise<{ text: string } | { error: string }> {
+  const { agentId, nickname } = await ctx.spawn!.spawnChild({
+    subagent: name,
+    prompt,
+    forkTurns: forkTurns ?? "none",
+    // Blocking delegation must spawn NON-detached: a detached child queues
+    // its completion as a followup on the parent and starts a redundant
+    // parent turn the moment this (still-running) turn ends.
+    detached: false,
+  });
+  ctx.toolEmit?.("subagent.start", { runId: agentId, agent: name ?? undefined, nickname });
+  const result = await ctx.spawn!.awaitChild(agentId);
+  ctx.toolEmit?.("subagent.end", { runId: agentId, nickname, ...result });
+  return "error" in result ? { error: result.error } : { text: result.text };
+}
+
 function agentTool(ctx: ToolBuildCtx): any {
   const names = Object.keys(ctx.agent.subagents);
   return tool({
-    description: `Delegate a focused subtask to a subagent with fresh context. ` +
+    description: `Delegate a focused subtask to a subagent with fresh context and wait for its result. ` +
       (names.length ? `Named subagents: ${names.join(", ")}. ` : "") +
       `Omit "agent" to delegate to a copy of yourself.`,
     inputSchema: jsonSchema({
@@ -357,6 +416,7 @@ function agentTool(ctx: ToolBuildCtx): any {
       properties: {
         agent: { type: "string", description: "subagent name (optional)" },
         prompt: { type: "string", description: "the subtask" },
+        fork_turns: FORK_TURNS_SCHEMA,
       },
       required: ["prompt"],
     }),
@@ -367,20 +427,16 @@ function agentTool(ctx: ToolBuildCtx): any {
     // arm and reject the JSON Schema inputSchema. Annotating sidesteps that
     // inference without changing runtime behavior.
     execute: (input: unknown): Promise<unknown> => {
-      const { agent: name, prompt } = input as { agent?: string; prompt: string };
-      // Object.hasOwn guards against a model-supplied "__proto__" or
-      // "constructor" resolving through the prototype chain instead of a
-      // real subagent entry — a plain `ctx.agent.subagents[name]` lookup
-      // would return Object.prototype/Function itself for those names and
-      // crash the turn (e.g. `.instructions` access downstream) instead of
-      // falling into the ordinary "unknown subagent" result.
-      const target = name
-        ? (Object.hasOwn(ctx.agent.subagents, name) ? ctx.agent.subagents[name] : undefined)
-        : ctx.agent;
-      if (!target) {
-        return Promise.resolve({ error: `unknown subagent "${name}"`, available: names });
-      }
-      return runSubagent(target, prompt, ctx);
+      const { agent: name, prompt, fork_turns } = input as { agent?: string; prompt: string; fork_turns?: string };
+      const resolved = resolveTarget(ctx, name);
+      if (!resolved.ok) return Promise.resolve(resolved.error);
+      if (ctx.spawn) return runAsChild(ctx, name ?? null, prompt, fork_turns);
+      // No spawn capabilities wired — every real production call site
+      // (handler.ts) wires ctx.spawn; this fallback only exists so a caller
+      // with no session store (most unit tests, and any legacy caller) keeps
+      // working exactly as it always has, via the original in-process
+      // nested loop.
+      return runSubagent(resolved.target, prompt, ctx);
     },
   });
 }

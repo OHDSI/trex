@@ -367,3 +367,106 @@ Deno.test("buildSdkTools: no tool-payload log when the agent defers nothing", as
   }
   assertEquals(logged.filter((l) => l.includes("tool payload")), []);
 });
+
+// ---------------------------------------------------------------------------
+// Task 7: `agent` becomes a child session, keeping its external contract
+// (blocking, `{text}`; unknown subagent -> `{error, available}`). See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-7-brief.md.
+//
+// Deviation from the brief: the in-process nested loop (runSubagent) is kept
+// as a fallback for when ctx.spawn is not wired, rather than deleted. Deleting
+// it breaks hooks.test.ts's "runSubagent ..." tests (5 tests exercising the
+// old in-process behavior — mocked model, granular subagent.tool events, and
+// errors that THROW rather than returning {error} — none of which wire
+// ctx.spawn). Every real production call site (handler.ts) always wires
+// ctx.spawn, so the fallback only serves callers/tests with no session store.
+// ---------------------------------------------------------------------------
+
+// deno-lint-ignore no-explicit-any
+function fakeToolCtx(overrides: Record<string, unknown> = {}): any {
+  return {
+    agent: {
+      dir: "fake-spawn-agent",
+      instructions: "you are a fake agent",
+      tools: {},
+      skills: [],
+      subagents: { "code-reviewer": { dir: "fake-code-reviewer" } },
+      connections: {},
+      config: { context: DEFAULT_CONTEXT_CONFIG, maxSteps: 25 },
+    },
+    sessionId: "s-1",
+    ...overrides,
+  };
+}
+
+Deno.test("agent still returns {text} and now routes through a child session", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "c-1", nickname: "Kepler" });
+      },
+      awaitChild: () => Promise.resolve({ text: "done" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "code-reviewer", prompt: "review" });
+  assertEquals(out, { text: "done" });
+  assertEquals((spawned[0] as { detached: boolean }).detached, false, "blocking agent must spawn NON-detached");
+});
+
+Deno.test("agent passes fork_turns through", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "c-1", nickname: "K" });
+      },
+      awaitChild: () => Promise.resolve({ text: "ok" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  await (tools.agent as { execute: (i: unknown) => Promise<unknown> }).execute({ prompt: "x", fork_turns: "3" });
+  assertEquals((spawned[0] as { forkTurns: string }).forkTurns, "3");
+});
+
+Deno.test("agent still rejects an unknown subagent without spawning", async () => {
+  const spawned: unknown[] = [];
+  const ctx = fakeToolCtx({
+    spawn: {
+      spawnChild: (o: unknown) => {
+        spawned.push(o);
+        return Promise.resolve({ agentId: "x", nickname: "y" });
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "nope", prompt: "x" }) as { error?: string };
+  assert(out.error?.includes("nope"));
+  assertEquals(spawned.length, 0);
+});
+
+Deno.test("agent does not resolve __proto__ as a subagent", async () => {
+  const ctx = fakeToolCtx({
+    spawn: { spawnChild: () => Promise.resolve({ agentId: "x", nickname: "y" }) },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "__proto__", prompt: "x" }) as { error?: string };
+  assert(out.error?.includes("__proto__"), "must fall into the unknown-subagent branch");
+});
+
+Deno.test("agent falls back to the in-process nested loop when ctx.spawn is not wired", async () => {
+  const agent = await loadAgent(TOY);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  // No subagent named "shouter" invocation needed here — this only proves the
+  // fallback path is reachable and still returns the old {error, available}
+  // shape for an unknown name, with no ctx.spawn required to get there.
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
+    .execute({ agent: "nope", prompt: "x" }) as { error?: string; available?: string[] };
+  assertEquals(out, { error: 'unknown subagent "nope"', available: Object.keys(agent.subagents) });
+});
