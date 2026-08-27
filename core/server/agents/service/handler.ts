@@ -408,7 +408,8 @@ function startTurn(
     //
     // `wokenByChildId` covers both shapes of child-caused turn: a wake
     // (deliverChildResult's own `wake` call) and a chain (the drain-and-chain
-    // tail below, which learns it from the session's pending-wake stamp). It
+    // tail below, which learns it from the origin recorded on the followup
+    // rows it drained). It
     // is a dedicated parameter rather than anything in `metadata` —
     // `metadata` is client-supplied on the session routes (`body.metadata`),
     // so keying off it would let an external caller's own
@@ -999,7 +1000,7 @@ export function buildDeliverDeps(deps: Deps): DeliverDeps {
  * bounded is TURNS nobody asked for, so it is charged in startTurn, at the
  * one point such a turn is created — covering both the `wake` below and the
  * chained turn the parent's own drain-and-chain tail starts, which the
- * pending-wake stamp written above identifies. Delivering a result costs
+ * origin recorded on the followup row queued above identifies. Delivering a result costs
  * nothing on its own: N results drained into one chained turn are one unit,
  * and a result injected mid-turn by makePrepareStep is none at all.
  * resetConsecutiveWakes (called from startTurn on any turn NOT caused by a

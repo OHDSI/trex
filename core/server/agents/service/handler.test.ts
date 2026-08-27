@@ -3812,7 +3812,7 @@ Deno.test({
       );
 
       // An ordinary, externally-driven turn resets the budget (and retires
-      // the pending-wake stamp), so a long-lived session woken legitimately
+      // the origin on the followup rows a chain drains), so a long-lived session woken legitimately
       // many times never creeps toward the cap. A message that lands while a
       // turn is still running is FOLDED into that turn's chain rather than
       // starting its own, and a chained turn deliberately does not reset — so
