@@ -2771,17 +2771,17 @@ Deno.test({
 //
 // A deliberately narrow fake — not a full store/handler — so these tests
 // exercise deliverChildResult's own decision logic (blocking vs detached,
-// busy-parent, the wake budget) in isolation from a real runTurn/model.
-// `wakes` seeds what bumpConsecutiveWakes resolves TO (the post-increment
-// value a real UPDATE...RETURNING would give), not a pre-increment count.
+// busy-parent, delivery) in isolation from a real runTurn/model. It carries
+// no wake-budget accounting because deliverChildResult has none: the budget
+// is charged per child-caused TURN, in startTurn, and is covered by the
+// end-to-end tests further down.
 function fakeDeliverDeps(opts: {
   followUps?: unknown[];
   started?: unknown[];
   child?: { detached?: boolean };
   runningTurn?: { id: string } | null;
-  wakes?: number;
-  // Records markPendingWake calls — the stamp deliverChildResult leaves on a
-  // BUSY parent so the turn it chains next does not reset the wake budget.
+  // Records markPendingWake calls — the stamp deliverChildResult leaves so
+  // whichever turn drains the result does not reset the wake budget.
   pendingWakes?: unknown[];
 } = {}) {
   const followUps = opts.followUps ?? [];
@@ -2798,7 +2798,6 @@ function fakeDeliverDeps(opts: {
         return Promise.resolve();
       },
       getRunningTurn: (_sessionId: string) => Promise.resolve(opts.runningTurn ?? null),
-      bumpConsecutiveWakes: (_sessionId: string) => Promise.resolve(opts.wakes ?? 1),
       takeFollowUps: (_sessionId: string) => Promise.resolve(pending.splice(0)),
       markPendingWake: (sessionId: string, childSessionId: string) => {
         pendingWakes.push({ sessionId, childSessionId });
@@ -2856,14 +2855,23 @@ Deno.test("a busy parent gets the followup but no second turn", async () => {
   assertEquals(pendingWakes, [{ sessionId: "p-1", childSessionId: "c-1" }]);
 });
 
-Deno.test("the wake budget stops a runaway loop", async () => {
-  const started: unknown[] = [];
-  await deliverChildResult(
-    fakeDeliverDeps({ started, wakes: MAX_CONSECUTIVE_WAKES }) as never,
-    "c-1",
-    { text: "x" },
-  );
-  assertEquals(started.length, 0, "at the cap the parent must not be woken again");
+// The budget is charged per child-caused TURN, in startTurn — not per
+// delivery, and so not here. Delivering only queues a result and (when the
+// parent is idle) asks for a turn; whether that turn is allowed is startTurn's
+// decision. A counter is deliberately put WITHIN REACH here so this proves
+// deliverChildResult declines to use it, rather than merely proving the fake
+// omits it.
+Deno.test("delivering a result never charges the wake budget itself", async () => {
+  const bumps: string[] = [];
+  const deps = fakeDeliverDeps();
+  // deno-lint-ignore no-explicit-any
+  (deps.store as any).bumpConsecutiveWakes = (sessionId: string) => {
+    bumps.push(sessionId);
+    return Promise.resolve(1);
+  };
+  await deliverChildResult(deps as never, "c-1", { text: "x" });
+  await deliverChildResult(deps as never, "c-2", { text: "y" });
+  assertEquals(bumps, [], "the counter belongs to the turn that runs, not to each result delivered");
 });
 
 Deno.test("a session with no parent (or an unknown session) is left alone", async () => {
@@ -3541,10 +3549,23 @@ Deno.test({
       // drain-and-chain tail has decided whether to start another turn. Ending
       // the pool in that window leaves real work running against a dead pool
       // and trips Deno's leak sanitizer. Require quiet to HOLD.
-      const settle = async () => {
+      //
+      // Bounded, and it THROWS on the bound. Deno has no default per-test
+      // timeout, so an unbounded wait here would turn a regression into a
+      // hung CI runner — strictly worse than a red test, because a failure
+      // says what broke and a hang says nothing.
+      const settle = async (ms = 20_000) => {
+        const deadline = Date.now() + ms;
         for (let stable = 0; stable < 4;) {
           const quiet = (await idle()) && (await queuedTexts()).length === 0;
           stable = quiet ? stable + 1 : 0;
+          if (Date.now() >= deadline) {
+            const t = await parentTurns();
+            throw new Error(
+              `settle() timed out after ${ms}ms waiting for session ${parentId} to go quiet — ` +
+                `turns: ${JSON.stringify(t.map((x) => x.status))}, queued: ${JSON.stringify(await queuedTexts())}`,
+            );
+          }
           await new Promise((resolve) => setTimeout(resolve, 60));
         }
       };
@@ -3559,6 +3580,12 @@ Deno.test({
         return results.every((r) => all.includes(r));
       });
       void settledOut; // the per-result assertions below report far better
+      // waitFor's condition can be satisfied in the instant between a turn
+      // flipping to `completed` and the drain-and-chain tail's takeFollowUps,
+      // during which a result is momentarily in NEITHER the turn nor the
+      // queue. Snapshotting there would report a result lost that is not.
+      // Requiring quiet to hold closes that window before we look.
+      await settle();
 
       // NOTHING WAS DESTROYED. Every child's result is either already folded
       // into one of the parent's turns or still sitting in its followup queue
@@ -3576,15 +3603,21 @@ Deno.test({
       }
       assert(turns.length >= 2, "the parent should have gained at least one turn after its own");
 
-      // THE WAKE BUDGET. Three children delivered => three bumps, and no
-      // chained turn may have zeroed it on the way. Read BEFORE the ordinary
-      // message below, which legitimately resets it.
+      // THE WAKE BUDGET: one unit per child-caused TURN, never one per
+      // delivered result. Every parent turn after its own first one here is
+      // child-caused (nothing external has spoken yet), so the counter must
+      // equal exactly that many — which also proves no chained turn zeroed it
+      // on the way, since a reset would leave it short. How MANY such turns
+      // there are depends on which waker wins the race; how many UNITS they
+      // cost does not. Read BEFORE the ordinary message below, which
+      // legitimately resets it.
       const sess = await pool.query(`SELECT consecutive_wakes FROM agents.sessions WHERE id = $1`, [parentId]);
       assertEquals(
         sess.rows[0].consecutive_wakes,
-        3,
-        "each of the three deliveries must count against the wake budget, and a turn chained from a " +
-          "queued child result must NOT reset it — otherwise MAX_CONSECUTIVE_WAKES can never fire",
+        turns.length - 1,
+        `expected one unit of wake budget per child-caused turn (${turns.length - 1} of them), got ` +
+          `${sess.rows[0].consecutive_wakes} — too high means results are being charged instead of turns, ` +
+          "too low means a chained turn reset a budget it was itself caused by",
       );
 
       // ... AND THE PARENT SEES ALL THREE. Anything still queued rides the
@@ -3751,4 +3784,141 @@ Deno.test({
       await pool.end();
     }
   },
+});
+
+// --- The wake budget's unit: TURNS nobody asked for, not results delivered --
+//
+// A model whose FIRST call parks until released, so a turn can be held open
+// while children complete underneath it. That is the shape the budget's unit
+// actually matters for: results that land mid-turn are drained together by
+// the parent's own drain-and-chain tail, producing ONE turn no matter how
+// many of them there were.
+// deno-lint-ignore no-explicit-any
+function gatedModel(gate: Promise<void>, ...responses: any[][]) {
+  let call = 0;
+  return new MockLanguageModelV3({
+    doStream: async () => {
+      const i = call++;
+      if (i === 0) await gate;
+      return { stream: simulateReadableStream({ chunks: responses[Math.min(i, responses.length - 1)] }) };
+    },
+  });
+}
+
+async function budgetHarness(model: unknown) {
+  const agent = await loadAgent(TOY);
+  const db = inMemoryDb();
+  const store = createStore(db.query as never);
+  const deps = {
+    agent,
+    store,
+    plugin: "toy-agent",
+    agentName: "toy",
+    basePath: "/plugins/trex/toy",
+    model,
+  };
+  return { db, store, deps, handler: createHandler(deps as never) };
+}
+
+// The finding this test exists for: charging per DELIVERED RESULT made a
+// canonical dispatching-parallel-agents fan-out of eight consume 80% of a
+// ten-unit budget inside ONE human-requested turn, and two such rounds under
+// a single human request exhausted it — after which a child completing on an
+// idle parent was silently not delivered until a human spoke again. Four
+// children draining into one chained turn is one turn, one model call, one
+// unit.
+Deno.test("the wake budget charges one unit per child-caused TURN, not one per child", async () => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const { db, store, deps, handler } = await budgetHarness(
+    gatedModel(gate, textChunks("fanning out"), textChunks("all four in, thanks")),
+  );
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "fan out four explorations" }),
+  }));
+  const parentId = res.headers.get("x-eve-session-id")!;
+  // The parent's turn is now parked inside the model call, holding the
+  // session busy for as long as we want.
+  await until(() => db.turns.some((t) => t.session_id === parentId && t.status === "running"));
+
+  const deliverDeps = buildDeliverDeps(deps as never);
+  for (let i = 0; i < 4; i++) {
+    const childId = await store.createChildSession({
+      plugin: "toy-agent",
+      agent: "toy",
+      parentSessionId: parentId,
+      parentTurnId: null,
+      subagent: null,
+      nickname: `Sib-${i}`,
+      detached: true,
+    });
+    await deliverChildResult(deliverDeps, childId, { text: `finding ${i}` });
+  }
+  // None of them woke anything: the parent was mid-turn throughout.
+  assertEquals(
+    db.turns.filter((t) => t.session_id === parentId).length,
+    1,
+    "a delivery to a busy parent must not start a turn of its own",
+  );
+
+  release();
+  await until(() => db.turns.filter((t) => t.session_id === parentId).length === 2);
+  await until(() => settled(db));
+
+  const turns = db.turns.filter((t) => t.session_id === parentId).sort((a, b) => a.seq - b.seq);
+  assertEquals(turns.length, 2, "all four results must be drained into ONE chained turn");
+  for (let i = 0; i < 4; i++) {
+    assert(
+      String(turns[1].message).includes(`finding ${i}`),
+      `child ${i}'s result should be in the single chained turn: ${JSON.stringify(turns[1].message)}`,
+    );
+  }
+  assertEquals(
+    db.sessions.get(parentId)?.consecutive_wakes,
+    1,
+    "four children delivered into one chained turn must cost ONE unit of wake budget, not four",
+  );
+});
+
+// The other half of the same accounting: the cap is enforced where the turn
+// is created, and refusing must not destroy the results the caller had
+// already drained out of the queue on its way here.
+Deno.test("the wake budget refuses a child-caused turn at the cap and requeues its results", async () => {
+  const { db, store, deps } = await budgetHarness(model("must never run"));
+  const parentId = await store.createSession("toy-agent", "toy", "cap-user");
+  // One below the cap: this delivery's own turn is the one that reaches it.
+  db.sessions.get(parentId)!.consecutive_wakes = MAX_CONSECUTIVE_WAKES - 1;
+
+  const childId = await store.createChildSession({
+    plugin: "toy-agent",
+    agent: "toy",
+    parentSessionId: parentId,
+    parentTurnId: null,
+    subagent: null,
+    nickname: "Late",
+    detached: true,
+  });
+  await deliverChildResult(buildDeliverDeps(deps as never), childId, { text: "one round too many" });
+
+  // The refusal happens inside startTurn's fire-and-forget IIFE: wait for the
+  // bump that precedes it, then for the requeue that follows.
+  await until(() => db.sessions.get(parentId)?.consecutive_wakes === MAX_CONSECUTIVE_WAKES);
+  await until(() =>
+    db.followUps.some((f) => f.session_id === parentId && f.message.includes("one round too many"))
+  );
+
+  assertEquals(
+    db.turns.filter((t) => t.session_id === parentId).length,
+    0,
+    "at the cap no child-caused turn may run",
+  );
+  assert(
+    db.followUps.some((f) => f.session_id === parentId && f.message.includes("Late")),
+    "a refused wake must put back the text it had already drained, not drop it",
+  );
 });

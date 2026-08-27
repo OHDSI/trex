@@ -250,11 +250,16 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 // workspace routing, which always needs SOME concrete choice) whereas this
 // hook's contract requires "no mode / unknown mode" to mean "allow
 // everything", not "treat it as build".
-// Every eve built-in that can start, steer or read a subagent. Kept as one
-// set so a built-in added to core cannot quietly bypass ask mode by not being
-// on a hand-written name list — a new agent_* built-in belongs here.
-// Exported so lib/filter_tools.test.ts can assert the set covers every
-// delegation built-in core actually registers.
+// Every eve built-in that can start, steer or read a subagent. This IS a
+// hand-written name list, and it is a list of names in a package this one
+// does not import — so it guarantees only that the delegation tools NAMED
+// HERE are dropped in ask mode, and it cannot notice a new `agent_*` built-in
+// added to core. lib/filter_tools.test.ts cross-checks it, but against a
+// second literal in that same file, so a genuinely new built-in slips past
+// both. Adding one to core means adding it here, deliberately; the real
+// backstop is core's own restrictChildTools/metadata threading, which does
+// not depend on any name list.
+// Exported for that cross-check.
 export const AGENT_TOOLS = new Set([
   "agent",
   "agent_spawn",

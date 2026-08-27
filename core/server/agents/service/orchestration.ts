@@ -1,7 +1,14 @@
 // Limits are module constants, not per-agent config: a knob nobody has asked
 // for is speculation. Add one when a real workload needs it.
 
-/** Turns in a row started by a child completing rather than by anyone asking. */
+/**
+ * Turns in a row started by a child completing rather than by anyone asking.
+ * Charged per TURN, in handler.ts's startTurn — the one place such a turn is
+ * created — covering both a wake and the turn a parent chains for results
+ * that were queued while it was busy. Never per delivered result: several
+ * children draining into one chained turn are one turn, one model call, and
+ * therefore one unit.
+ */
 export const MAX_CONSECUTIVE_WAKES = 10;
 /** Children running at once under one parent. */
 export const MAX_LIVE_CHILDREN = 8;

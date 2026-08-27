@@ -44,8 +44,10 @@ Deno.test("filterTools: ask mode drops EVERY delegation built-in, not just 'agen
   for (const name of AGENT_TOOLS) {
     assert(!filterTools(name, READ_ONLY_DEF, ctx), `${name} must not survive ask mode`);
   }
-  // The set must actually cover what core registers, or this test proves
-  // nothing about the tools that exist.
+  // The set must cover the delegation built-ins core registers TODAY. This
+  // second literal is a hand-written list in the same file, so it catches a
+  // name dropped from AGENT_TOOLS but not a built-in newly added to core —
+  // see AGENT_TOOLS' own comment for what actually backstops that.
   for (
     const name of ["agent", "agent_spawn", "agent_list", "agent_wait", "agent_result", "agent_stop", "agent_send"]
   ) {

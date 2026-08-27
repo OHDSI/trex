@@ -392,22 +392,59 @@ function startTurn(
       return;
     }
 
-    // The wake budget (deliverChildResult, below) counts child results
-    // delivered in a row with nobody having asked for anything. Reset it here
-    // on every turn NOT caused by one, so a session legitimately woken many
-    // times over a long life, with real messages in between, never creeps
-    // toward MAX_CONSECUTIVE_WAKES. `wokenByChildId` reaches a chained turn
-    // through the session's pending-wake stamp, so a turn that merely picked
-    // up a child's queued result is not mistaken for an external one. Gated
-    // on `wokenByChildId`
-    // (a dedicated parameter, above) rather than anything in `metadata` —
+    // THE WAKE BUDGET, and the one place it is accounted. It counts TURNS
+    // this session ran because a child completed rather than because anyone
+    // asked — "how far the system has run without anyone asking it to". This
+    // is the only point at which such a turn is created, so it is the only
+    // point that may charge for one.
+    //
+    // Deliberately NOT per delivered result. Three children draining into one
+    // chained turn are one turn, one model call, one unit — charging three
+    // would make a canonical eight-way fan-out consume 80% of the budget
+    // inside a single human-requested turn, and two rounds under one human
+    // request would exhaust it, after which a child completing on an idle
+    // parent is silently not delivered until a human speaks again. Likewise a
+    // result that `makePrepareStep` injects into an already-running turn
+    // between steps costs no turn, no model call and no billing, so it must
+    // cost no budget.
+    //
+    // `wokenByChildId` covers both shapes of child-caused turn: a wake
+    // (deliverChildResult's own `wake` call) and a chain (the drain-and-chain
+    // tail below, which learns it from the session's pending-wake stamp). It
+    // is a dedicated parameter rather than anything in `metadata` —
     // `metadata` is client-supplied on the session routes (`body.metadata`),
-    // so a decision keyed off it would let an external caller's own
-    // `{"metadata":{"wokenBy":"..."}}` silently skip the reset on a turn a
-    // human actually started. Best-effort: a failed reset must not fail the
-    // turn over bookkeeping, same posture as the other non-critical reads
-    // below.
-    if (!wokenByChildId) {
+    // so keying off it would let an external caller's own
+    // `{"metadata":{"wokenBy":"..."}}` pass their own turn off as
+    // child-caused, skipping the reset and walking a session toward the cap
+    // with nothing in the logs to explain why its fan-outs went quiet.
+    if (wokenByChildId) {
+      // A failed bump must not fail the turn over bookkeeping, but it must
+      // also not silently uncap the loop: degrade to "charged, not capped"
+      // (0) and log, rather than guessing a number that could refuse a
+      // legitimate turn.
+      const wakes = await deps.store.bumpConsecutiveWakes(sessionId).catch((e) => {
+        console.error(`agents: bumpConsecutiveWakes failed for session ${sessionId} (continuing uncapped):`, e);
+        return 0;
+      });
+      if (wakes >= MAX_CONSECUTIVE_WAKES) {
+        console.warn(
+          `agents: refusing to run a child-caused turn on session ${sessionId} (woken by child ${wokenByChildId}) — ` +
+            `${wakes} consecutive child-caused turns reached MAX_CONSECUTIVE_WAKES (${MAX_CONSECUTIVE_WAKES}). ` +
+            `The results are queued and ride the next time something else (a human, a channel) messages this session.`,
+        );
+        // Both child-caused callers hand over text they have ALREADY drained
+        // out of the queue, so refusing means putting it back — the same
+        // obligation the addTurn-rejection path below has.
+        await deps.store.queueFollowUp(sessionId, asText(message)).catch((e) =>
+          console.error(`agents: requeue after refusing a capped wake failed for session ${sessionId}:`, e)
+        );
+        return;
+      }
+    } else {
+      // Reset on every turn NOT caused by a child, so a session legitimately
+      // woken many times over a long life, with real messages in between,
+      // never creeps toward the cap. Best-effort, same posture as the other
+      // non-critical bookkeeping here.
       await deps.store.resetConsecutiveWakes(sessionId).catch((e) =>
         console.error(`agents: resetConsecutiveWakes failed for session ${sessionId} (continuing):`, e)
       );
@@ -843,7 +880,6 @@ export interface DeliverDeps {
     | "getSession"
     | "queueFollowUp"
     | "getRunningTurn"
-    | "bumpConsecutiveWakes"
     | "takeFollowUps"
     | "markPendingWake"
   >;
@@ -904,22 +940,21 @@ export function buildDeliverDeps(deps: Deps): DeliverDeps {
  * "the unique index serializes; the loser queues its followup" holds even
  * though the text has already been drained out of the queue by then.
  *
- * Invariant 4: the wake budget. MAX_CONSECUTIVE_WAKES bounds a parent that
- * spawns a child on every wake into an unbroken chain that would otherwise
- * run forever, one real model call per link, billed to the caller's own API
- * key. The counter is bumped for every DELIVERY, before the running-turn
- * check below — not only for the deliveries that literally call `wake`. A
- * child finishing while the parent is mid-turn produces no wake here, yet
- * the parent's own drain-and-chain tail starts a turn for it anyway;
- * counting only the wake call left that entire loop shape unbudgeted, which
- * is precisely the shape a fast-failing child produces. Such a delivery
- * instead stamps the session (markPendingWake) so the chained turn is
- * recognised as child-caused and skips resetConsecutiveWakes.
+ * Invariant 4: the wake budget, which this function does NOT account for.
+ * MAX_CONSECUTIVE_WAKES bounds a parent that spawns a child on every wake
+ * into an unbroken chain that would otherwise run forever, one real model
+ * call per link, billed to the caller's own API key. The quantity being
+ * bounded is TURNS nobody asked for, so it is charged in startTurn, at the
+ * one point such a turn is created — covering both the `wake` below and the
+ * chained turn the parent's own drain-and-chain tail starts, which the
+ * pending-wake stamp written above identifies. Delivering a result costs
+ * nothing on its own: N results drained into one chained turn are one unit,
+ * and a result injected mid-turn by makePrepareStep is none at all.
  * resetConsecutiveWakes (called from startTurn on any turn NOT caused by a
  * child) is what keeps this counter measuring "how far this run has gone
- * with nobody asking" rather than "how many child results this session has
- * ever had" — without that reset, a long-lived session woken legitimately
- * many times would eventually hit this cap for no good reason.
+ * with nobody asking" rather than "how many child-caused turns this session
+ * has ever had" — without that reset, a long-lived session woken
+ * legitimately many times would eventually hit this cap for no good reason.
  *
  * Invariant 5 (2026-08-27 orchestration task 13, closed at the root in fix
  * round 1): delivers AT MOST ONCE per child. Before task 13 there were
@@ -989,23 +1024,13 @@ export async function deliverChildResult(
   );
   await deps.store.queueFollowUp(parentSessionId, text);
 
-  // Bumped BEFORE the running-turn check, not after it. The budget counts
-  // "child results delivered to this parent with nobody having asked for
-  // anything", which is the quantity that actually needs bounding — not
-  // "turns literally started by the wake call below". A child that finishes
-  // while the parent's turn is still running produces no wake here, but the
-  // parent's own drain-and-chain tail starts a further turn for it anyway;
-  // counting only the wake call left that entire loop shape unbudgeted.
-  const wakes = await deps.store.bumpConsecutiveWakes(parentSessionId);
-  if (wakes >= MAX_CONSECUTIVE_WAKES) {
-    console.warn(
-      `agents: not waking session ${parentSessionId} after child ${childSessionId} (${who}) completed — ` +
-        `${wakes} consecutive wakes reached MAX_CONSECUTIVE_WAKES (${MAX_CONSECUTIVE_WAKES}). The result is ` +
-        `queued and will be delivered the next time something else (a human, a channel) messages this session.`,
-    );
-    return;
-  }
-
+  // No budget accounting here, deliberately. Delivering a result is not
+  // what costs anything — running a TURN for it is, and this function creates
+  // no turn: the wake below goes through startTurn, which charges (and can
+  // refuse) exactly once for the turn it is about to create, whether that
+  // turn came from this wake or from the parent's own drain-and-chain tail.
+  // See startTurn's own comment for why the unit is turns and not deliveries.
+  //
   // The parent is mid-turn: it will drain the followup queued above when it
   // finishes and chain a turn for it, and the stamp written above is what
   // tells that turn it was child-caused.

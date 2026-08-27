@@ -506,24 +506,39 @@ live-tail by event shape.
       (`handler.ts`'s `deliverChildResult`); a BLOCKING child (`agent`,
       `detached: false`) returns through the tool call that started it
       instead and never queues anything. Bounded by `MAX_CONSECUTIVE_WAKES`
-      child results delivered in a row with nobody having asked for
-      anything, reset by any turn NOT caused by one — otherwise a session
-      that spawns a child on every wake would chain forever, one real model
-      call per link, billed to the caller. The counter is bumped on every
-      delivery, not only on the ones that literally start a turn: a child
-      that finishes while the parent is still mid-turn queues its result and
-      the parent's own drain-and-chain tail starts a turn for it anyway, so
-      counting only the wake call left that entire loop shape unbudgeted.
-      Every delivery stamps `agents.sessions.pending_wake_child_id` BEFORE
-      it queues its followup row, so a turn that can see a child's result can
-      always see why it is there. A chained turn READS the stamp (it never
-      clears it — one slot cannot be handed out to several simultaneous
-      deliveries) and skips the reset while it stands; only an external turn
-      retires it, in the same `UPDATE` that zeroes the counter. Consequence,
-      deliberate: a human message that lands while a turn is running is
-      folded into that turn's chain rather than starting its own, so its
-      reset is deferred to the next turn that is genuinely its own —
-      under-resetting is the safe direction here.
+      TURNS in a row that this session ran because a child completed rather
+      than because anyone asked — otherwise a session that spawns a child on
+      every wake would chain forever, one real model call per link, billed to
+      the caller.
+      - **The unit is turns, not results.** The counter is charged once in
+        `startTurn`, at the single point a child-caused turn is created,
+        covering BOTH a wake and the turn a parent chains for results that
+        were queued while it was busy. N children draining into one chained
+        turn are one turn, one model call, one unit; a result that
+        `makePrepareStep` injects into an already-running turn between steps
+        costs no turn and therefore no budget. Charging per delivered result
+        instead would let a canonical eight-way `dispatching-parallel-agents`
+        fan-out consume 80% of the budget inside a single human-requested
+        turn.
+      - **How a chained turn knows.** Every delivery stamps
+        `agents.sessions.pending_wake_child_id` BEFORE it queues its followup
+        row, so a turn that can see a child's result can always see why it is
+        there. A chained turn READS the stamp (it never clears it — one slot
+        cannot be handed out to several simultaneous deliveries) and both
+        charges itself and skips the reset while it stands. Only an external
+        turn retires it, in the same `UPDATE` that zeroes the counter.
+      - **Consequence, deliberate.** A message that lands while a turn is
+        running is folded into that turn's chain rather than starting its
+        own, and a chained turn does not reset. So under sustained mid-turn
+        traffic the reset is deferred for as many turns as that traffic keeps
+        up — unbounded in turn count, not merely one turn. It is never
+        permanent: any message that arrives on an idle session starts a turn
+        of its own, which retires the stamp and zeroes the counter.
+        Under-resetting is the safe direction here; over-resetting is what
+        made the cap unreachable in the first place.
+      - **At the cap** the turn is refused rather than the result dropped:
+        `startTurn` requeues the text it had already drained and logs, and
+        everything rides the next message that is genuinely someone asking.
       A wake racing another parent message is resolved by
       `idx_agents_turns_one_running_per_session` (a partial unique index,
       PER session — it does not serialize siblings spawned under the same
