@@ -182,11 +182,9 @@ function inMemoryDb() {
     // the wake budget). Checked BEFORE the consecutive_wakes branches: both
     // statements target agents.sessions and only the column name tells them
     // apart.
-    if (sql.includes("pending_wake_child_id = NULL")) {
+    if (sql.includes("SELECT pending_wake_child_id")) {
       const s = sessions.get(params[0] as string);
-      const was = s?.pending_wake_child_id ?? null;
-      if (s) s.pending_wake_child_id = null;
-      return Promise.resolve({ rows: was ? [{ pending_wake_child_id: was }] : [] });
+      return Promise.resolve({ rows: [{ pending_wake_child_id: s?.pending_wake_child_id ?? null }] });
     }
     if (sql.includes("pending_wake_child_id = $2")) {
       const s = sessions.get(params[0] as string);
@@ -202,7 +200,10 @@ function inMemoryDb() {
     }
     if (sql.includes("SET consecutive_wakes = 0")) {
       const s = sessions.get(params[0] as string);
-      if (s) s.consecutive_wakes = 0;
+      if (s) {
+        s.consecutive_wakes = 0;
+        s.pending_wake_child_id = null; // an external turn retires the stamp too
+      }
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
@@ -3535,6 +3536,18 @@ Deno.test({
         }
         return true;
       };
+      // "Idle" read once is not enough to tear down on: a turn flips to
+      // `completed` a moment before its heartbeat ticker stops and before the
+      // drain-and-chain tail has decided whether to start another turn. Ending
+      // the pool in that window leaves real work running against a dead pool
+      // and trips Deno's leak sanitizer. Require quiet to HOLD.
+      const settle = async () => {
+        for (let stable = 0; stable < 4;) {
+          const quiet = (await idle()) && (await queuedTexts()).length === 0;
+          stable = quiet ? stable + 1 : 0;
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        }
+      };
       // Settled = no parent turn still running AND every result accounted
       // for somewhere. `idle` alone is true the instant this test starts (the
       // parent's own turn is already finished), so it would snapshot before
@@ -3584,7 +3597,7 @@ Deno.test({
           body: JSON.stringify({ message: "what did they all find?" }),
         }));
         assertEquals(res.status, 202);
-        assert(await waitFor(async () => (await idle()) && (await queuedTexts()).length === 0));
+        await settle();
         turns = await parentTurns();
         queued = await queuedTexts();
       }
@@ -3602,13 +3615,29 @@ Deno.test({
         "no parent turn may be left running",
       );
 
-      // An ordinary, externally-driven turn resets the budget, so a
-      // long-lived session woken legitimately many times never creeps toward
-      // the cap. (Only meaningful if such a turn actually ran above.)
-      if (turns.length > 2) {
-        const after = await pool.query(`SELECT consecutive_wakes FROM agents.sessions WHERE id = $1`, [parentId]);
-        assertEquals(after.rows[0].consecutive_wakes, 0, "a human-driven turn must reset the wake budget");
+      // An ordinary, externally-driven turn resets the budget (and retires
+      // the pending-wake stamp), so a long-lived session woken legitimately
+      // many times never creeps toward the cap. A message that lands while a
+      // turn is still running is FOLDED into that turn's chain rather than
+      // starting its own, and a chained turn deliberately does not reset — so
+      // drive messages until one of them actually starts a turn of its own.
+      const wakesNow = async () => {
+        const r = await pool.query(`SELECT consecutive_wakes FROM agents.sessions WHERE id = $1`, [parentId]);
+        return r.rows[0].consecutive_wakes as number;
+      };
+      let budget = await wakesNow();
+      for (let attempt = 0; attempt < 3 && budget !== 0; attempt++) {
+        await settle();
+        await handler(new Request(`http://local/plugins/trex/toy/eve/v1/session/${parentId}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ message: `anything else? (${attempt})` }),
+        }));
+        await settle();
+        budget = await wakesNow();
       }
+      assertEquals(budget, 0, "a human-driven turn must reset the wake budget");
+      await settle(); // nothing may still be running against the pool below
     } finally {
       if (parentId) await pool.query(`DELETE FROM agents.sessions WHERE id = $1`, [parentId]);
       await pool.end();

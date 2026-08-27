@@ -668,8 +668,15 @@ export function createStore(query: QueryFn) {
       return r.rows[0]?.consecutive_wakes ?? 0;
     },
 
+    // Clears the pending-wake stamp too. An EXTERNAL turn is the only thing
+    // that should retire it: the stamp means "a child result has landed on
+    // this session since anyone last asked for anything", and only somebody
+    // actually asking makes that false again. See readPendingWake.
     async resetConsecutiveWakes(sessionId: string): Promise<void> {
-      await query(`UPDATE agents.sessions SET consecutive_wakes = 0 WHERE id = $1`, [sessionId]);
+      await query(
+        `UPDATE agents.sessions SET consecutive_wakes = 0, pending_wake_child_id = NULL WHERE id = $1`,
+        [sessionId],
+      );
     },
 
     // The wake budget's missing half. deliverChildResult bumps the counter
@@ -693,13 +700,19 @@ export function createStore(query: QueryFn) {
       );
     },
 
-    // Read-and-clear in ONE statement: two turns draining the same session
-    // must not both come away believing they were the wake-caused one.
-    async takePendingWake(sessionId: string): Promise<string | null> {
+    // READ ONLY — deliberately not read-and-clear. The stamp is a single
+    // slot and a fan-out produces several deliveries at once, so a drainer
+    // that cleared it would just as often be clearing a SIBLING's stamp as
+    // its own; that sibling's result would then be drained later by a chained
+    // turn with no marker, which resets the very budget the sibling had
+    // bumped. Since every delivery re-stamps before it queues, a standing
+    // stamp means "at least one child result has landed here since the last
+    // time anyone asked for anything" — which is exactly the question a
+    // chained turn needs answered, and it stays true for all of them.
+    // resetConsecutiveWakes (an external turn) is what retires it.
+    async readPendingWake(sessionId: string): Promise<string | null> {
       const r = await query(
-        `UPDATE agents.sessions SET pending_wake_child_id = NULL
-         WHERE id = $1 AND pending_wake_child_id IS NOT NULL
-         RETURNING pending_wake_child_id`,
+        `SELECT pending_wake_child_id FROM agents.sessions WHERE id = $1`,
         [sessionId],
       );
       return r.rows[0]?.pending_wake_child_id ?? null;

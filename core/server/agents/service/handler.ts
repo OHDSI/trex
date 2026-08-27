@@ -358,6 +358,15 @@ function startTurn(
         // same posture as the reap-failure branch above.
         console.error(`agents: pending-gate check failed for session ${sessionId} (queueing without resolving):`, e);
       }
+      // See deliverChildResult's own comment: the stamp goes down BEFORE the
+      // queue row, so a drainer that can see the result can always see why it
+      // is there. A wake that lost to a running turn hands its marker over
+      // with the text; the running turn will drain both.
+      if (wokenByChildId) {
+        await deps.store.markPendingWake(sessionId, wokenByChildId).catch((e) =>
+          console.error(`agents: markPendingWake for a queued wake failed for session ${sessionId}:`, e)
+        );
+      }
       try {
         await deps.store.queueFollowUp(sessionId, asText(message));
         // Queued messages previously vanished with no acknowledgement until
@@ -383,11 +392,14 @@ function startTurn(
       return;
     }
 
-    // The wake budget (deliverChildResult, below) counts turns in a row
-    // started by a child completing rather than by anyone asking. Reset it
-    // here on every turn NOT started that way, so a session legitimately
-    // woken many times over a long life, with real messages in between,
-    // never creeps toward MAX_CONSECUTIVE_WAKES. Gated on `wokenByChildId`
+    // The wake budget (deliverChildResult, below) counts child results
+    // delivered in a row with nobody having asked for anything. Reset it here
+    // on every turn NOT caused by one, so a session legitimately woken many
+    // times over a long life, with real messages in between, never creeps
+    // toward MAX_CONSECUTIVE_WAKES. `wokenByChildId` reaches a chained turn
+    // through the session's pending-wake stamp, so a turn that merely picked
+    // up a child's queued result is not mistaken for an external one. Gated
+    // on `wokenByChildId`
     // (a dedicated parameter, above) rather than anything in `metadata` —
     // `metadata` is client-supplied on the session routes (`body.metadata`),
     // so a decision keyed off it would let an external caller's own
@@ -600,19 +612,20 @@ function startTurn(
         `agents: could not create a turn for session ${sessionId} (requeueing the message rather than dropping it):`,
         e,
       );
-      await deps.store.queueFollowUp(sessionId, asText(turnMessage)).catch((e2) =>
-        console.error(`agents: requeue after a failed addTurn ALSO failed for session ${sessionId} (message lost):`, e2)
-      );
-      // A LOSING WAKER also hands over its wake marker with the text. The
-      // turn that beat it will drain this followup and chain a turn for it,
-      // and that chained turn must still be recognised as child-caused —
-      // otherwise it resets the wake budget and the runaway guard goes back
-      // to being unreachable by exactly the race this branch exists for.
+      // Marker first, then the text — same ordering rule as everywhere else
+      // (see deliverChildResult): the turn that beat this one will drain the
+      // followup and chain a turn for it, and that chained turn must still be
+      // recognised as child-caused, or it resets the wake budget and the
+      // runaway guard goes back to being unreachable by exactly the race this
+      // branch exists for.
       if (wokenByChildId) {
         await deps.store.markPendingWake(sessionId, wokenByChildId).catch((e2) =>
           console.error(`agents: markPendingWake after a failed addTurn failed for session ${sessionId}:`, e2)
         );
       }
+      await deps.store.queueFollowUp(sessionId, asText(turnMessage)).catch((e2) =>
+        console.error(`agents: requeue after a failed addTurn ALSO failed for session ${sessionId} (message lost):`, e2)
+      );
       return;
     }
     // Surface the freshly-created turn id to the caller (the channel layer uses
@@ -728,8 +741,8 @@ function startTurn(
             // rather than woken, the chain resets the counter, forever.
             // Best-effort, like the other bookkeeping reads: a blip here
             // must not fail a turn.
-            const wokenBy = await deps.store.takePendingWake(sessionId).catch((e) => {
-              console.error(`agents: takePendingWake failed for session ${sessionId} (continuing):`, e);
+            const wokenBy = await deps.store.readPendingWake(sessionId).catch((e) => {
+              console.error(`agents: readPendingWake failed for session ${sessionId} (continuing):`, e);
               return null;
             });
             startTurn(deps, sessionId, followUps.join("\n\n"), {
@@ -959,6 +972,21 @@ export async function deliverChildResult(
     : outcome.text.trim()
     ? `Agent ${who} finished:\n\n${outcome.text}`
     : `Agent ${who} finished with no output (its final step produced no text).`;
+
+  // STAMPED BEFORE THE ROW IS QUEUED, always — not only on the busy-parent
+  // branch below. Whichever turn ends up draining this followup reads the
+  // stamp to learn it was caused by a child (and so must not reset the wake
+  // budget). Writing the queue row first would leave a window in which a
+  // drainer sees the row but not yet the marker, resets the budget, and the
+  // marker lands unused — the exact race that made the runaway guard
+  // unreachable under a real fan-out, where several children finish at once
+  // and only one of them wins the wake. Ordering it this way makes "if you
+  // can see the result, you can see why it is here" true by construction.
+  // Best-effort: losing the stamp costs accounting accuracy, never the
+  // result itself.
+  await deps.store.markPendingWake(parentSessionId, childSessionId).catch((e) =>
+    console.error(`agents: markPendingWake failed for parent ${parentSessionId} (continuing):`, e)
+  );
   await deps.store.queueFollowUp(parentSessionId, text);
 
   // Bumped BEFORE the running-turn check, not after it. The budget counts
@@ -979,17 +1007,9 @@ export async function deliverChildResult(
   }
 
   // The parent is mid-turn: it will drain the followup queued above when it
-  // finishes and chain a turn for it. Stamp the session so that chained turn
-  // knows it was caused by a child, and therefore does NOT reset the budget
-  // just bumped (see startTurn's drain-and-chain tail, and store.ts's
-  // markPendingWake). Best-effort — losing the stamp costs accounting
-  // accuracy, never the result itself, which is already queued.
-  if (await deps.store.getRunningTurn(parentSessionId)) {
-    await deps.store.markPendingWake(parentSessionId, childSessionId).catch((e) =>
-      console.error(`agents: markPendingWake failed for parent ${parentSessionId} (continuing):`, e)
-    );
-    return;
-  }
+  // finishes and chain a turn for it, and the stamp written above is what
+  // tells that turn it was child-caused.
+  if (await deps.store.getRunningTurn(parentSessionId)) return;
 
   // Drained here, not left for startTurn to re-drain, so the drain and the
   // start below cannot interleave with another waker racing the same check —
@@ -997,6 +1017,14 @@ export async function deliverChildResult(
   // the result straight into `wake`.
   const queued = await deps.store.takeFollowUps(parentSessionId);
   if (queued.length === 0) return; // another waker already won this race
+  // The stamp written above is deliberately NOT consumed here, even though
+  // this call carries the marker in hand: several wakers race the same
+  // session, and a waker that cleared the stamp would be clearing whichever
+  // SIBLING's stamp happened to be standing — leaving that sibling's queued
+  // result to be drained by a chained turn with no marker, which then resets
+  // the very budget the sibling had just bumped. Leaving it costs at most one
+  // extra skipped reset on a later chain; clearing it wrongly is what makes
+  // the runaway guard unreachable. Under-resetting is the safe direction.
   deps.wake(parentSessionId, queued.join("\n\n"), childSessionId);
 }
 
