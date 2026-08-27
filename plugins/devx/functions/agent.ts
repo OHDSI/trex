@@ -185,7 +185,7 @@ export async function streamAgentChat({
   // channel turns. Kept AHEAD of readProjectRules below so the rules come from
   // the worktree the coder will actually run in.
   if (!workspacePathOverride && useWorktree && appId && chatId) {
-    const wt = await ensureChatWorktree(userId, appId, chatId);
+    const wt = await ensureChatWorktree(userId, appId, chatId, sqlFn);
     if (wt) workspacePath = wt;
   }
 

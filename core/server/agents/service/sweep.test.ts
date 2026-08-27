@@ -11,7 +11,7 @@ import type { AgentStore } from "./store.ts";
 function fakeStore(overrides: Partial<AgentStore> = {}): AgentStore {
   return {
     listSessionsWithStaleRunningTurns: async () => [],
-    reapStaleTurns: async () => 0,
+    reapStaleTurns: async () => [],
     ...overrides,
   } as AgentStore;
 }
@@ -21,14 +21,14 @@ Deno.test("startStaleTurnSweep: reaps every session the store reports as stale, 
   const reaped: string[] = [];
   const store = fakeStore({
     listSessionsWithStaleRunningTurns: async () => ["s-1", "s-2"],
-    reapStaleTurns: async (sessionId: string) => { reaped.push(sessionId); return 1; },
+    reapStaleTurns: async (sessionId: string) => { reaped.push(sessionId); return [{ id: `t-${sessionId}`, metadata: null }]; },
   });
   const notified: Array<[string, number]> = [];
   const handle = startStaleTurnSweep(store, {
     plugin: "toy-agent",
     agent: "toy",
     intervalMs: 1000,
-    onReap: (id, n) => notified.push([id, n]),
+    onReap: (id, r) => notified.push([id, r.length]),
   });
   // tickAsync only flushes microtasks BEFORE advancing time, not after firing
   // the due timer — the interval callback here has multiple sequential
@@ -49,7 +49,7 @@ Deno.test("startStaleTurnSweep: does not call onReap for a session where reapSta
   using time = new FakeTime();
   const store = fakeStore({
     listSessionsWithStaleRunningTurns: async () => ["s-1"],
-    reapStaleTurns: async () => 0, // race: another trigger (e.g. a lazy reap) already cleared it
+    reapStaleTurns: async () => [], // race: another trigger (e.g. a lazy reap) already cleared it
   });
   const notified: unknown[] = [];
   const handle = startStaleTurnSweep(store, {
@@ -73,7 +73,7 @@ Deno.test("startStaleTurnSweep: a failure listing sessions on one tick doesn't k
       if (call === 1) throw new Error("db blip");
       return ["s-1"];
     },
-    reapStaleTurns: async () => 1,
+    reapStaleTurns: async () => [{ id: "t-1", metadata: null }],
   });
   const notified: unknown[] = [];
   const handle = startStaleTurnSweep(store, {
@@ -137,7 +137,7 @@ Deno.test("startStaleTurnSweep: an explicit staleMs is threaded through to both 
   const seenReapStaleMs: number[] = [];
   const store = fakeStore({
     listSessionsWithStaleRunningTurns: async (staleMs: number) => { seenListStaleMs.push(staleMs); return ["s-1"]; },
-    reapStaleTurns: async (_sessionId: string, staleMs: number) => { seenReapStaleMs.push(staleMs); return 1; },
+    reapStaleTurns: async (_sessionId: string, staleMs: number) => { seenReapStaleMs.push(staleMs); return [{ id: "t-1", metadata: null }]; },
   });
   const handle = startStaleTurnSweep(store, {
     plugin: "toy-agent",
@@ -163,7 +163,7 @@ Deno.test("startStaleTurnSweep: sweeps once at startup, before any interval has 
   const reaped: string[] = [];
   const store = fakeStore({
     listSessionsWithStaleRunningTurns: async () => ["orphan-from-last-boot"],
-    reapStaleTurns: async (sessionId: string) => { reaped.push(sessionId); return 1; },
+    reapStaleTurns: async (sessionId: string) => { reaped.push(sessionId); return [{ id: "t-1", metadata: null }]; },
   });
   const handle = startStaleTurnSweep(store, {
     plugin: "toy-agent",

@@ -25,6 +25,20 @@ const OIDC_WAIT_MS = Number(Deno.env.get("WEBAPI_OIDC_WAIT_MS") ?? 180_000);
 const DEFAULT_PROBE_TIMEOUT_MS = 5_000;
 
 /**
+ * Consecutive successful probes required before WebAPI is started.
+ *
+ * One success is not enough. This process serves discovery on a single event
+ * loop, and boot work continues after the listener is up, so it can answer a
+ * probe and then be unavailable moments later. WebAPI builds its client
+ * registration from discovery during Spring's context refresh, seconds after
+ * launch, with a fixed read timeout it does not expose — if that request lands
+ * in a stall it fails with "Read timed out", the bean dies, Tomcat never starts
+ * and nothing retries. Requiring a streak means the loop has been answering
+ * steadily, not merely once.
+ */
+const DEFAULT_READY_STREAK = 3;
+
+/**
  * Block until the OIDC discovery document is served, or the budget runs out.
  *
  * WebAPI builds its client registration from discovery while the Spring context
@@ -57,24 +71,36 @@ export async function waitForOidcDiscovery(
   const probeTimeoutMs = Number(
     env.WEBAPI_OIDC_PROBE_TIMEOUT_MS ?? DEFAULT_PROBE_TIMEOUT_MS,
   );
+  const readyStreak = Number(env.WEBAPI_OIDC_READY_STREAK ?? DEFAULT_READY_STREAK);
 
   const deadline = Date.now() + budgetMs;
   let announced = false;
+  let streak = 0;
   while (Date.now() < deadline) {
+    let ok = false;
     try {
       const res = await fetch(url, { signal: AbortSignal.timeout(probeTimeoutMs) });
       // Drain the body so the connection is not left dangling.
       await res.body?.cancel();
-      if (res.ok) {
+      ok = res.ok;
+    } catch (_e) {
+      // Not listening yet, or too busy to answer — same handling as a non-200.
+    }
+
+    if (ok) {
+      streak += 1;
+      if (streak >= readyStreak) {
         if (announced) log(`OIDC discovery ready at ${url}`);
         return;
       }
-    } catch (_e) {
-      // Not listening yet — same handling as a non-200.
-    }
-    if (!announced) {
-      log(`waiting for OIDC discovery at ${url} ...`);
-      announced = true;
+    } else {
+      // A stall in the middle of the streak means the node is not steadily
+      // available yet; start counting again rather than accepting it.
+      streak = 0;
+      if (!announced) {
+        log(`waiting for OIDC discovery at ${url} ...`);
+        announced = true;
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
@@ -103,16 +129,40 @@ export async function startNativeWebApi(): Promise<void> {
     // pulled image; rolling deploys skew the same way), and without the
     // fallback WebAPI never starts and the whole cache pipeline strands on
     // "Cache not ready". Try the primary, fall back on a catalog miss.
+    // Prefer the non-waiting start. The blocking one runs WebAPI's entire boot
+    // before it returns, and it returns on this event loop — the same loop that
+    // serves the OIDC discovery document WebAPI fetches while booting. Waiting
+    // therefore deadlocks the two: WebAPI's request cannot be answered until
+    // WebAPI is up, and it cannot come up until its request is answered. It
+    // surfaces as "Read timed out" building the ClientRegistration bean, after
+    // which Tomcat never starts and the cache pipeline strands.
+    //
+    // Older webapi.trex builds register neither the _nowait nor the trex_ name,
+    // so fall back twice: a NEW core routinely runs against an OLD extension
+    // (the e2e job rebundles this branch's core into a pulled image; rolling
+    // deploys skew the same way).
+    const attempts = [
+      "SELECT trex_webapi_start_nowait() AS msg",
+      "SELECT trex_webapi_start() AS msg",
+      "SELECT webapi_start() AS msg",
+    ];
     let startRows;
-    try {
-      startRows = await conn.execute("SELECT trex_webapi_start() AS msg", []);
-    } catch (e) {
-      const msg = (e as Error).message ?? "";
-      if (!msg.includes("trex_webapi_start does not exist")) throw e;
-      log("trex_webapi_start not registered (pre-rename webapi.trex) — falling back to webapi_start()");
-      startRows = await conn.execute("SELECT webapi_start() AS msg", []);
+    let lastErr: Error | undefined;
+    for (const sql of attempts) {
+      try {
+        startRows = await conn.execute(sql, []);
+        lastErr = undefined;
+        break;
+      } catch (e) {
+        lastErr = e as Error;
+        // Only a missing catalog entry is worth trying the next name for;
+        // anything else is a real failure and should surface as-is.
+        if (!(lastErr.message ?? "").includes("does not exist")) throw e;
+        log(`${sql.slice(7, sql.indexOf("("))} not registered — trying the next name`);
+      }
     }
-    log(`native WebAPI — ${startRows[0]?.msg}`);
+    if (lastErr) throw lastErr;
+    log(`native WebAPI — ${startRows?.[0]?.msg}`);
   } catch (e) {
     err(`webapi_start failed: ${(e as Error).message}`);
   }

@@ -1,0 +1,12 @@
+-- Pin each chat's isolated worktree branch.
+--
+-- The name is `<github username>/<topic>` (see functions/chat_branch.ts). It
+-- cannot be recomputed per turn — the topic comes from the chat title, which
+-- can be renamed, and the owner from whichever GitHub account is linked — while
+-- the worktree reuse guard has to compare every later turn against the SAME
+-- name. So the first turn computes it and writes it here.
+--
+-- NULL means "not yet pinned": chats created before this migration keep running
+-- on their legacy `claw/<chat id>` branch until their next turn, which renames
+-- the branch and fills this column in.
+ALTER TABLE devx.chats ADD COLUMN IF NOT EXISTS worktree_branch VARCHAR(200);

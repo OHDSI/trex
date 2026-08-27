@@ -147,6 +147,36 @@ class GitOps {
     await this.runGit(repoRoot, `git fetch ${remote} ${ref}`);
   }
 
+  // Does this ref resolve in the repo? Used to tell "the fetch failed but we
+  // still have a previously fetched copy of the base branch" from "there is no
+  // base branch here at all" — the two need very different handling.
+  async refExists(repoRoot: string, ref: string): Promise<boolean> {
+    try {
+      await this.runGit(repoRoot, `git rev-parse --verify --quiet ${ref}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // The commit a ref points at, or null when it does not resolve.
+  async revParse(repoRoot: string, ref: string): Promise<string | null> {
+    try {
+      return (await this.runGit(repoRoot, `git rev-parse ${ref}`)).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Rename a branch in place. The working tree, index and reflog are untouched,
+  // which is what lets a chat's worktree move from its legacy branch name onto
+  // the `<github username>/<topic>` scheme mid-flight without disturbing work.
+  async branchRename(wsPath: string, from: string, to: string): Promise<void> {
+    validateBranchName(from);
+    validateBranchName(to);
+    await this.runGit(wsPath, `git branch -m ${from} ${to}`);
+  }
+
   // `startPoint` (e.g. "origin/develop") bases the new branch there instead of
   // the repo's current HEAD, so a feature worktree starts from an up-to-date tree.
   async worktreeAdd(repoRoot: string, worktreePath: string, branch: string, startPoint?: string): Promise<string> {

@@ -65,6 +65,7 @@ Deno.test("returns immediately when discovery already serves", async () => {
     await waitForOidcDiscovery(r.log, r.err, {
       SECURITY_AUTH_OIDC_ENABLED: "true",
       SECURITY_AUTH_OIDC_URL: s.url,
+      WEBAPI_OIDC_READY_STREAK: "1",
     }, 5000);
     assertEquals(s.hits(), 1);
     // Nothing to announce when there was no wait.
@@ -83,6 +84,7 @@ Deno.test("waits through 502s and proceeds once discovery comes up", async () =>
     await waitForOidcDiscovery(r.log, r.err, {
       SECURITY_AUTH_OIDC_ENABLED: "true",
       SECURITY_AUTH_OIDC_URL: s.url,
+      WEBAPI_OIDC_READY_STREAK: "1",
     }, 20000);
     assertEquals(s.hits(), 3);
     assertEquals(r.errs.length, 0);
@@ -147,5 +149,51 @@ Deno.test("a connection that is accepted but never answered still respects the b
         // Already torn down by the aborted request.
       }
     }
+  }
+});
+
+Deno.test("a node that answers once and then stalls does not count as ready", async () => {
+  // The failure this exists for: discovery answered a probe, WebAPI was started,
+  // and its Spring context refresh seconds later hit a busy event loop and died
+  // with "Read timed out" -- no retry, no Tomcat, cache pipeline stranded. One
+  // success is not evidence the node is steadily available.
+  let hits = 0;
+  const server = Deno.serve({ port: 0, onListen: () => {} }, () => {
+    hits += 1;
+    // Succeed, stall, then succeed steadily.
+    const ok = hits !== 2;
+    return new Response(ok ? "{}" : "busy", { status: ok ? 200 : 503 });
+  });
+  const url = `http://localhost:${(server.addr as Deno.NetAddr).port}/.well-known/openid-configuration`;
+
+  try {
+    const r = recorder();
+    await waitForOidcDiscovery(r.log, r.err, {
+      SECURITY_AUTH_OIDC_ENABLED: "true",
+      SECURITY_AUTH_OIDC_URL: url,
+      WEBAPI_OIDC_READY_STREAK: "3",
+    }, 30000);
+    // The stall at probe 2 resets the streak, so readiness needs 3 more after it.
+    assertEquals(hits, 5);
+    assertEquals(r.errs.length, 0);
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("the streak is satisfied by consecutive successes alone", async () => {
+  const s = discoveryServer(0);
+  try {
+    const r = recorder();
+    await waitForOidcDiscovery(r.log, r.err, {
+      SECURITY_AUTH_OIDC_ENABLED: "true",
+      SECURITY_AUTH_OIDC_URL: s.url,
+      WEBAPI_OIDC_READY_STREAK: "3",
+    }, 30000);
+    assertEquals(s.hits(), 3);
+    // Nothing was ever failing, so there is nothing to announce.
+    assertEquals([r.logs.length, r.errs.length], [0, 0]);
+  } finally {
+    await s.close();
   }
 });

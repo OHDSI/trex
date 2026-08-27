@@ -151,8 +151,10 @@ function connectionOptsFor(deps: Deps) {
 // Defined in ./turn-lifetime.ts so plugin/agents.ts can size the worker's
 // lifetime to it without importing this module's graph (`ai`, loader, runner).
 // Re-exported here because existing callers import it from handler.ts.
-export { STALE_TURN_MS } from "./turn-lifetime.ts";
-import { STALE_TURN_MS } from "./turn-lifetime.ts";
+export { HEARTBEAT_STALE_MS, STALE_TURN_MS } from "./turn-lifetime.ts";
+import { HEARTBEAT_STALE_MS, STALE_TURN_MS } from "./turn-lifetime.ts";
+import { startTurnHeartbeat } from "./heartbeat.ts";
+import { notifyReaped } from "./reap-notify.ts";
 
 // A turn's `message` column (and the follow-up queue) both want a plain
 // string; non-string messages (only possible on the native /eve/v1/session
@@ -220,8 +222,15 @@ function startTurn(
       // through to the queue branch so the message still gets queued and
       // still gets acknowledged.
       try {
-        await deps.store.reapStaleTurns(sessionId, STALE_TURN_MS);
+        const reaped = await deps.store.reapStaleTurns(sessionId, STALE_TURN_MS, HEARTBEAT_STALE_MS);
         running = await deps.store.getRunningTurn(sessionId);
+        // The lazy path used to reap in total silence: the turn just vanished,
+        // and the human — who had already been waiting on it — got no hint
+        // that anything had gone wrong or that their message was now driving a
+        // fresh turn. publish() cannot carry this: no delivery is registered
+        // for THIS message's turn yet (registerForTurn runs after addTurn,
+        // further down), so the event would go to no subscriber.
+        if (reaped.length > 0) await notifyReapedForSession(deps, sessionId, reaped);
       } catch (e) {
         console.error(`agents: stale-turn reap failed for session ${sessionId} (treating session as busy):`, e);
       }
@@ -505,6 +514,12 @@ function startTurn(
       console.error(`agents: getActivatedTools failed for session ${sessionId} (continuing with none activated):`, e);
       return [];
     });
+    // Liveness stamp for as long as this turn runs. Without it the only signal
+    // that a turn is still alive is `started_at`, so a worker killed mid-turn
+    // (crash, redeploy, or the runtime's EarlyDrop at half of workerTimeoutMs)
+    // leaves the row `running` and every later message on the session queued
+    // behind it until the two-hour started_at cutoff.
+    const heartbeat = startTurnHeartbeat(deps.store, turn.id);
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -539,8 +554,30 @@ function startTurn(
       publish(sessionId, { type: "turn.failed", data: { turnId: turn.id, message: msg } });
       await deps.store.finishTurn(turn.id, "failed", msg);
       publish(sessionId, { type: "session.failed", data: { sessionId, message: msg } });
+    } finally {
+      // Both exits stop the ticker: a turn that ended is no longer alive, and
+      // a beat landing after finishTurn would be a lie. (store.heartbeatTurn's
+      // `status = 'running'` guard makes that harmless, but leaving the timer
+      // running would leak one per turn for the worker's whole lifetime.)
+      heartbeat.stop();
     }
   })().catch((e) => console.error("agents: turn crashed:", e));
+}
+
+// Reap notifications need the agent's channel definitions and the channel
+// store, both of which live on Deps — bridged here so startTurn's lazy path and
+// index.ts's sweep can share one notifier (service/reap-notify.ts).
+async function notifyReapedForSession(
+  deps: Deps,
+  sessionId: string,
+  reaped: Array<{ id: string; metadata: unknown }>,
+): Promise<void> {
+  const channelStore = deps.channelStore;
+  if (!channelStore) return;
+  await notifyReaped(sessionId, reaped, {
+    channels: deps.agent.channels ?? {},
+    channelForSession: (id) => channelStore.channelForSession(id),
+  });
 }
 
 export function createHandler(deps: Deps): (req: Request) => Promise<Response> {

@@ -8,12 +8,13 @@ import pg from "npm:pg@^8";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { createChannelStore } from "../channels/store.ts";
-import { createHandler, STALE_TURN_MS, type OAuthBrokerDeps } from "./handler.ts";
+import { createHandler, HEARTBEAT_STALE_MS, STALE_TURN_MS, type OAuthBrokerDeps } from "./handler.ts";
 import { createOAuthStore } from "../connections/oauth/store.ts";
 import { decryptWithDek, encryptWithDek, initDek } from "../../auth/dek.ts";
 import { deriveSubkeyBase64, LABELS } from "../../auth/keys.ts";
 import { startStaleTurnSweep } from "./sweep.ts";
 import { publish } from "./stream.ts";
+import { notifyReaped } from "./reap-notify.ts";
 
 const agentDir = Deno.env.get("TREX_AGENT_DIR");
 if (!agentDir) throw new Error("agents: TREX_AGENT_DIR not set");
@@ -46,11 +47,12 @@ if (Deno.env.get("TREX_ROOT_KEY")) {
 }
 
 const store = createStore(query);
+const channelStore = createChannelStore(query);
 
 const handler = createHandler({
   agent,
   store,
-  channelStore: createChannelStore(query),
+  channelStore,
   plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
   agentName: Deno.env.get("TREX_AGENT_NAME") || "agent",
   basePath,
@@ -73,8 +75,18 @@ startStaleTurnSweep(store, {
   plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
   agent: Deno.env.get("TREX_AGENT_NAME") || "agent",
   staleMs: STALE_TURN_MS,
-  onReap: (sessionId, count) => {
-    publish(sessionId, { type: "turn.reaped", data: { count, reason: "stale" } });
+  heartbeatStaleMs: HEARTBEAT_STALE_MS,
+  onReap: (sessionId, reaped) => {
+    // Live readers (an open /stream) get it through the fan-out...
+    publish(sessionId, { type: "turn.reaped", data: { count: reaped.length, reason: "stale" } });
+    // ...but the sweep runs in a background timer, where there is usually no
+    // subscriber at all — a session nobody is watching is exactly the one this
+    // sweep exists for. Go to the channel directly as well, so the thread
+    // actually learns its turn was abandoned instead of just going quiet.
+    void notifyReaped(sessionId, reaped, {
+      channels: agent.channels ?? {},
+      channelForSession: (id) => channelStore.channelForSession(id),
+    });
   },
 });
 

@@ -102,6 +102,26 @@ export function createChannelStore(query: QueryFn) {
       return r.rows.length > 0;
     },
 
+    // The channel a session belongs to, or null for a session with no channel
+    // mapping (the native /eve/v1/session routes). Used by the reap notifier
+    // (service/reap-notify.ts) to reach a session's channel from the background
+    // sweep, which — unlike every other channel path — has no inbound request
+    // carrying the channel id.
+    //
+    // LIMIT 1 with an explicit order: a session re-keyed under several
+    // continuation tokens has several rows, all naming the SAME channel (the
+    // channel is part of the key resolveOrCreateSession writes), so any row
+    // answers the question — but an unordered LIMIT 1 would be
+    // non-deterministic for no reason.
+    async channelForSession(sessionId: string): Promise<string | null> {
+      const r = await query(
+        `SELECT channel FROM agents.channel_sessions
+          WHERE session_id = $1 ORDER BY created_at ASC LIMIT 1`,
+        [sessionId],
+      );
+      return r.rows[0]?.channel ?? null;
+    },
+
     // Re-keys a parked session under a (channel, token): idempotently points
     // that token at sessionId, updating the mapping if the token was already in
     // use (spec §4.1 "session.setContinuationToken re-keys a parked session").
