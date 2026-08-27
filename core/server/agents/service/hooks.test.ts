@@ -919,12 +919,16 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
     }
     if (sql.includes("UPDATE agents.turns")) {
-      const t = turns.find((t) => t.id === params[0]);
-      if (t) {
-        t.status = params[1] as string;
-        t.error = (params[2] as string | null) ?? null;
-      }
-      return Promise.resolve({ rows: [] });
+      // finishTurn (fix round 1, 2026-08-27-agent-orchestration tasks 12-13
+      // review) is now scoped to `WHERE id = $1 AND status = 'running'` and
+      // reports whether it won via `RETURNING id` — mirror that here so this
+      // file's own resolveModel-hook tests still see turn.failed's
+      // downstream publish (session.failed) fire.
+      const t = turns.find((t) => t.id === params[0] && t.status === "running");
+      if (!t) return Promise.resolve({ rows: [] });
+      t.status = params[1] as string;
+      t.error = (params[2] as string | null) ?? null;
+      return Promise.resolve({ rows: [{ id: t.id }] });
     }
     if (sql.includes("INSERT INTO agents.steps")) {
       steps.push({

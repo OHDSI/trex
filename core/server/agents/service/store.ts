@@ -118,11 +118,25 @@ export function createStore(query: QueryFn) {
       throw lastError;
     },
 
-    async finishTurn(turnId: string, status: "completed" | "failed", error?: string) {
-      await query(
-        `UPDATE agents.turns SET status = $2, error = $3, finished_at = NOW() WHERE id = $1`,
+    // Scoped to `status = 'running'` (same pattern as heartbeatTurn,
+    // reapStaleTurns, and failTurnsForSession below — this was the one
+    // unscoped mutator among the four). Returns whether THIS call actually
+    // won the running->{completed,failed} transition: a caller that lost the
+    // race (a reap already flipped the row to `failed` first) gets `false`
+    // and must not act as if it owns the turn's outcome — see handler.ts's
+    // two call sites, which gate their follow-up chain and deliverChildResult
+    // on this. Without the scope, a worker that merely stalled (a GC pause,
+    // event-loop starvation) past the heartbeat cutoff — not actually died —
+    // could resurface after a reap already marked its turn `failed` and
+    // silently overwrite that row back to `completed`, and then (pre-fix)
+    // call deliverChildResult a second time with a contradictory outcome.
+    async finishTurn(turnId: string, status: "completed" | "failed", error?: string): Promise<boolean> {
+      const r = await query(
+        `UPDATE agents.turns SET status = $2, error = $3, finished_at = NOW()
+          WHERE id = $1 AND status = 'running' RETURNING id`,
         [turnId, status, error ?? null],
       );
+      return r.rows.length > 0;
     },
 
     // Liveness stamp for a running turn (service/heartbeat.ts drives the

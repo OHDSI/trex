@@ -9,6 +9,7 @@ import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
 import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMessage } from "../channels/adapters/discord-messages.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
+import { ABANDONED_CHILD_ERROR } from "./sweep.ts";
 
 // Builds the message the way adapters/discord.ts:807's sendToThread actually
 // composes it for a thread-turn (`[contextBlock, attachmentsBlock, text]`
@@ -196,6 +197,22 @@ function inMemoryDb() {
       };
       turns.push(t);
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
+    }
+    if (sql.includes("UPDATE agents.turns") && sql.includes("WHERE id = $1 AND status = 'running'")) {
+      // finishTurn (fix round 1, 2026-08-27-agent-orchestration tasks 12-13
+      // review) — scoped to the turn still being `running`; RETURNING id
+      // reports whether THIS call actually won the running->{completed,
+      // failed} transition (false when a reap already claimed it first).
+      // Matched on the WHERE clause specifically (not just "UPDATE
+      // agents.turns" + "RETURNING id") because reapStaleTurns/
+      // failTurnsForSession's real SQL also contains "RETURNING id" but with
+      // a different params shape ([sessionId, cutoff, errorText, ...] /
+      // [sessionId, error]) that this branch must never be handed.
+      const t = turns.find((t) => t.id === params[0] && t.status === "running");
+      if (!t) return Promise.resolve({ rows: [] });
+      t.status = params[1] as string;
+      t.error = (params[2] as string | null) ?? null;
+      return Promise.resolve({ rows: [{ id: t.id }] });
     }
     if (sql.includes("UPDATE agents.turns") && sql.includes("RETURNING id")) {
       // reapStaleTurns — cutoff is a JS-computed Date passed as a param (see
@@ -2705,17 +2722,31 @@ Deno.test("a lazily-reaped DETACHED CHILD's abandonment reaches its parent, not 
     body: JSON.stringify({ message: "are you still there?" }),
   }));
 
-  await until(() => db.turns.filter((t) => t.session_id === parentId).length > turnsBeforeWake);
-  await until(() => settled(db));
+  // Waits for the SPECIFIC abandonment wake turn, by content, rather than a
+  // turn count — re-messaging the child session directly (as this test
+  // does, to trigger the lazy path at all) ALSO falls through, once reaped,
+  // to the same pre-existing, session-agnostic "then run the incoming
+  // message as this session's own fresh turn" recovery behavior the
+  // ORIGINAL "stale (abandoned) running turn" test (above) exercises for a
+  // top-level session — unrelated to and out of scope for both fix-round-1
+  // findings, but it means the CHILD session here can legitimately go on to
+  // complete a second, real turn of its own after being reaped, which (now
+  // correctly, per fix round 1) delivers a SECOND, separate, genuine result
+  // to the parent. A turn-count assertion would be racy against exactly
+  // when that second, unrelated delivery lands; asserting by content is not.
+  await until(() =>
+    db.turns.some((t) =>
+      t.session_id === parentId && typeof t.message === "string" && t.message.toLowerCase().includes("abandoned")
+    )
+  );
+  await until(() => settled(db)); // drain the (unrelated) second child turn too, so nothing leaks past this test
 
   assertEquals(childTurn.status, "failed", "the child's abandoned turn must be reaped");
-  const parentTurns = db.turns.filter((t) => t.session_id === parentId).sort((a, b) => a.seq - b.seq);
-  assertEquals(parentTurns.length, turnsBeforeWake + 1, "the parent should have gained exactly one new (wake) turn");
-  const wokenTurn = parentTurns[parentTurns.length - 1];
-  assert(
-    typeof wokenTurn.message === "string" && wokenTurn.message.toLowerCase().includes("abandoned"),
-    `expected the woken turn's message to say the child was abandoned: ${JSON.stringify(wokenTurn.message)}`,
+  const abandonedWake = db.turns.find((t) =>
+    t.session_id === parentId && typeof t.message === "string" && t.message.toLowerCase().includes("abandoned")
   );
+  assert(abandonedWake, "expected a wake turn on the parent saying the child was abandoned");
+  assert(db.turns.filter((t) => t.session_id === parentId).length > turnsBeforeWake, "the parent must have gained at least one new (wake) turn");
 });
 
 Deno.test("a blocking (non-detached) child's completion never wakes its parent", async () => {
@@ -2756,6 +2787,82 @@ Deno.test("a blocking (non-detached) child's completion never wakes its parent",
     "a blocking child's completion must never start a new parent turn",
   );
   assertEquals(db.followUps.filter((f) => f.session_id === parentId).length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1 (2026-08-27-agent-orchestration, tasks 12-13 review), finding
+// 2: "a child has exactly one turn" must be actually true, not usually true.
+// The post-finishTurn drain-and-chain used to be unconditional: an
+// agent_send message landing in the narrow window after the child's LAST
+// prepareStep call (runner.ts) but before this finishTurn would get drained
+// here and chained into a SECOND turn — the exact same message would
+// sometimes be read mid-turn (if it arrived earlier) and sometimes start a
+// whole new turn (if it arrived in this window), decided by timing the
+// caller cannot observe. It is now gated on depth===0 (top-level only).
+// ---------------------------------------------------------------------------
+
+Deno.test("fix round 1 (finding 2): a follow-up that lands in the race window right before a child's finishTurn is never chained into a second turn", async () => {
+  const agent = await loadAgent(TOY);
+  const db = inMemoryDb();
+  const baseStore = createStore(db.query as never);
+
+  // Assigned once the child session exists (below), same pattern as the
+  // finding-1 test above — targets only the CHILD's own turn.
+  let childId = "";
+  let queuedOnce = false;
+  const raceyStore = {
+    ...baseStore,
+    finishTurn: async (turnId: string, status: "completed" | "failed", error?: string) => {
+      const t = db.turns.find((t) => t.id === turnId);
+      if (status === "completed" && !queuedOnce && t && t.session_id === childId) {
+        queuedOnce = true;
+        // Simulates an agent_send message (spawn.ts's sendToChild ->
+        // store.queueFollowUp) landing in the exact race window: after the
+        // child's last prepareStep call already drained nothing, but before
+        // this finishTurn commits.
+        await baseStore.queueFollowUp(childId, "wrap it up now");
+      }
+      return baseStore.finishTurn(turnId, status, error);
+    },
+  };
+
+  const handler = createHandler({
+    agent, store: raceyStore as never, plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: model("the subtask is done"),
+  });
+
+  const parentRes = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "kick off a background task" }),
+  }));
+  const parentId = parentRes.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+
+  childId = await baseStore.createChildSession({
+    plugin: "toy-agent", agent: "toy", parentSessionId: parentId, parentTurnId: null,
+    subagent: null, nickname: "wisp", detached: true,
+  });
+
+  await handler(new Request(`${BASE}/eve/v1/session/${childId}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "do the subtask" }),
+  }));
+  await until(() => settled(db));
+  await until(() => queuedOnce);
+  // Give any (incorrect) second turn a moment to land before asserting its
+  // absence — matching the "blocking child" test's own posture above.
+  await new Promise((r) => setTimeout(r, 100));
+
+  assertEquals(
+    db.turns.filter((t) => t.session_id === childId).length,
+    1,
+    "a child must never gain a second turn, even when a follow-up is queued for it in the finishTurn race window",
+  );
+  assertEquals(
+    db.followUps.filter((f) => f.session_id === childId).length,
+    1,
+    "the follow-up is simply never read (documented consequence, runner.ts's makePrepareStep) — not silently drained either",
+  );
 });
 
 // Single real turn (not two) — a second full turn through the toy agent's
@@ -2841,39 +2948,100 @@ Deno.test("a detached child with no final text step delivers an explicit no-outp
 });
 
 // ---------------------------------------------------------------------------
-// Task 13 (2026-08-27-agent-orchestration): deliverChildResult must deliver
-// AT MOST ONCE per child. Before this task there were exactly two callers
-// (the turn's own success tail and its failure catch), structurally mutually
-// exclusive (a turn ends exactly one way), so nothing needed to enforce this.
-// Task 13 adds a THIRD caller (a reap, from either reap path) that CAN race
-// a turn genuinely still finishing on its own: reapStaleTurns' heartbeat
-// cutoff can fire on a worker that merely stalled (a GC pause, event-loop
-// starvation) rather than actually died, and finishTurn's own UPDATE is
-// unconditional (not scoped to status='running'), so a stalled worker that
-// later wakes up and calls finishTurn("completed") can resurrect a turn the
-// reap already marked failed — and BOTH paths would then call
-// deliverChildResult for the same child with CONTRADICTORY outcomes.
+// Fix round 1 (2026-08-27-agent-orchestration, tasks 12-13 review):
+// deliverChildResult must be reached AT MOST ONCE per child. This is no
+// longer enforced by a guard inside deliverChildResult itself (an earlier
+// draft used a per-process WeakMap keyed on store identity; deleted once the
+// database became the sole arbiter — see handler.ts's Invariant 5 comment).
+// It is enforced structurally, one level up: store.finishTurn is now scoped
+// to `WHERE status = 'running'` and reports whether the caller actually won
+// that transition (store.test.ts covers the scoping directly); handler.ts's
+// success tail and failure catch both skip the follow-up chain AND
+// deliverChildResult when they lose that race. This test proves the
+// end-to-end contract: a reap wins first (marks the turn `failed` and
+// delivers, exactly like sweep.ts/handler.ts's own reap paths), and the
+// SAME worker's own stalled `finishTurn("completed")` resurfacing afterward
+// must neither resurrect the row nor deliver a second, contradictory result.
+// It would fail against the pre-fix (unscoped finishTurn) code: the row
+// would flip back to `completed` and the parent would gain a second wake
+// turn from the real deliverChildResult call handler.ts's success tail used
+// to make unconditionally.
 // ---------------------------------------------------------------------------
 
-Deno.test("deliverChildResult delivers at most once per child — a second call (e.g. a reap racing the turn's own tail) is a no-op", async () => {
-  const followUps: unknown[] = [];
-  const started: unknown[] = [];
-  const deps = fakeDeliverDeps({ followUps, started });
-  await deliverChildResult(deps as never, "race-child", { text: "genuine success" });
-  await deliverChildResult(deps as never, "race-child", { error: "abandoned by a racing reap" });
-  assertEquals(followUps.length, 1, "the second, racing call must not queue a second (contradictory) result");
-  assert(JSON.stringify(followUps[0]).includes("genuine success"));
-  assertEquals(started.length, 1, "the parent must only be woken once");
-});
+Deno.test("fix round 1: a turn a reap already claimed is not resurrected by a late finishTurn, and the parent is not delivered to a second time", async () => {
+  const agent = await loadAgent(TOY);
+  const db = inMemoryDb();
+  const baseStore = createStore(db.query as never);
+  const simulatedReapDeliveries: unknown[] = [];
 
-Deno.test("deliverChildResult's once-per-child guard is scoped to the store instance — unrelated calls (e.g. different tests/deps) are unaffected", async () => {
-  // Uses the exact literal childSessionId ("c-1") every other test in this
-  // file already reuses freely — proving the guard is keyed on something
-  // that does NOT leak across a fresh fakeDeliverDeps() (i.e. a fresh store
-  // instance), matching a fresh worker/store in production.
-  const followUps: unknown[] = [];
-  const deps = fakeDeliverDeps({ followUps });
-  await deliverChildResult(deps as never, "c-1", { text: "unrelated call, must still deliver" });
-  assertEquals(followUps.length, 1);
-  assert(JSON.stringify(followUps[0]).includes("unrelated call, must still deliver"));
+  // Forces the exact race fix round 1 closes: the FIRST time this worker's
+  // own success tail tries to finishTurn("completed"), a reap (the periodic
+  // sweep or the lazy on-message reap, running concurrently in the real
+  // system) wins FIRST — marking the SAME row `failed` and delivering to the
+  // parent, exactly like sweep.ts's/handler.ts's own reap paths do — before
+  // this call's own finishTurn runs.
+  // Assigned once the child session exists (below) — the closure reads the
+  // variable at call time, not at construction time, so this correctly
+  // targets only the CHILD's own turn, never the parent's own first turn
+  // (which also calls finishTurn("completed") earlier in this same test).
+  let childId = "";
+  let racedOnce = false;
+  const raceyStore = {
+    ...baseStore,
+    finishTurn: async (turnId: string, status: "completed" | "failed", error?: string) => {
+      const t = db.turns.find((t) => t.id === turnId);
+      if (status === "completed" && !racedOnce && t && t.session_id === childId) {
+        racedOnce = true;
+        t.status = "failed";
+        t.error = ABANDONED_CHILD_ERROR;
+        // A recording `wake`, not a real one — proves the REAP's own
+        // delivery landed exactly once, independent of whatever handler.ts's
+        // real (possibly still-buggy) success tail does moments later.
+        await deliverChildResult(
+          { store: baseStore, wake: (sid, msg, childId) => simulatedReapDeliveries.push({ sid, msg, childId }) } as never,
+          t.session_id,
+          { error: ABANDONED_CHILD_ERROR },
+        );
+      }
+      return baseStore.finishTurn(turnId, status, error);
+    },
+  };
+
+  const handler = createHandler({
+    agent, store: raceyStore as never, plugin: "toy-agent", agentName: "toy",
+    basePath: "/plugins/trex/toy", model: model("too late"),
+  });
+
+  const parentRes = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "kick off a background task" }),
+  }));
+  const parentId = parentRes.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  const turnsBeforeWake = db.turns.filter((t) => t.session_id === parentId).length;
+
+  childId = await baseStore.createChildSession({
+    plugin: "toy-agent", agent: "toy", parentSessionId: parentId, parentTurnId: null,
+    subagent: null, nickname: "wisp", detached: true,
+  });
+
+  await handler(new Request(`${BASE}/eve/v1/session/${childId}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "do the subtask" }),
+  }));
+  await until(() => settled(db));
+  await until(() => simulatedReapDeliveries.length > 0);
+
+  const childTurn = db.turns.find((t) => t.session_id === childId)!;
+  assertEquals(
+    childTurn.status,
+    "failed",
+    "the reap's failure must survive the stalled worker's late finishTurn(completed) — the row must not be resurrected",
+  );
+  assertEquals(simulatedReapDeliveries.length, 1, "sanity: the simulated reap's own delivery landed exactly once");
+  assertEquals(
+    db.turns.filter((t) => t.session_id === parentId).length,
+    turnsBeforeWake,
+    "the parent must gain NO real wake turn from the stale, losing finishTurn(completed) — only the reap's delivery (recorded above, not a real turn) may have happened",
+  );
 });

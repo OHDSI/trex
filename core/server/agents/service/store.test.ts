@@ -63,12 +63,32 @@ Deno.test("getSession returns null when not found", async () => {
   assertEquals(await store.getSession("missing"), null);
 });
 
-Deno.test("finishTurn updates status and error", async () => {
-  const { fn, calls } = fakeQuery([{ rows: [] }]);
+Deno.test("finishTurn updates status and error, scoped to a still-running turn, and reports whether it won", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ id: "t-1" }] }]);
   const store = createStore(fn as never);
-  await store.finishTurn("t-1", "failed", "boom");
+  const won = await store.finishTurn("t-1", "failed", "boom");
   assert(calls[0].sql.includes("UPDATE agents.turns"));
+  assert(calls[0].sql.includes("status = 'running'"), "finishTurn must not overwrite a turn a reap already finished");
   assertEquals(calls[0].params, ["t-1", "failed", "boom"]);
+  assertEquals(won, true);
+});
+
+// Fix round 1 (2026-08-27-agent-orchestration, tasks 12-13 review): before
+// this, finishTurn was the one mutator among {heartbeatTurn, reapStaleTurns,
+// failTurnsForSession, finishTurn} that was NOT scoped to `status =
+// 'running'` — a stalled-then-resurfacing worker's finishTurn("completed")
+// could silently overwrite a turn a reap had already marked `failed`, and
+// handler.ts's success tail had no way to know it had lost that race and
+// would still walk into the follow-up chain and deliverChildResult. This
+// test proves the scoping directly: a turn already `failed` (standing in for
+// "a reap won first") must not be resurrected, and the caller must be told
+// it did not win.
+Deno.test("finishTurn reports false (and does not affect any row) when the turn is no longer running — the reap-wins race", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]); // RETURNING id matched nothing: WHERE excluded the row
+  const store = createStore(fn as never);
+  const won = await store.finishTurn("t-1", "completed");
+  assert(calls[0].sql.includes("status = 'running'"));
+  assertEquals(won, false, "a late finishTurn on an already-reaped turn must report it did not win");
 });
 
 Deno.test("addStep inserts with null payload/usage passthrough", async () => {

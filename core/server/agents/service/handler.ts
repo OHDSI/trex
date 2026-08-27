@@ -621,53 +621,95 @@ function startTurn(
         spawn,
         depth,
       });
-      await deps.store.finishTurn(turn.id, "completed");
-      // A follow-up may have been queued WHILE this turn ran (the
-      // getRunningTurn check above only sees turns that existed before THIS
-      // one started). Drain and run it immediately as the next turn — rather
-      // than publishing session.waiting and waiting for some future message
-      // to arrive and pick it up — so an instruction the user already sent
-      // during the busy window is never silently stranded in the queue.
-      // Reuses onTurnCreated so a channel's delivery still gets registered
-      // for this follow-up turn.
-      const followUps = await deps.store.takeFollowUps(sessionId);
-      if (followUps.length > 0) {
-        startTurn(deps, sessionId, followUps.join("\n\n"), metadata, bearerToken, userId, onTurnCreated);
-        return;
-      }
-      // This session IS a child (depth===1) and its own work has genuinely
-      // ended (no follow-up chain above) — tell its parent. Only meaningful
-      // for a DETACHED child; deliverChildResult itself no-ops for a
-      // blocking one (spawn.ts's awaitChild reads the result directly).
-      // Gated on `depth` (already known, no extra query) rather than always
-      // calling deliverChildResult and letting its own getSession check
-      // no-op — the overwhelming majority of turns are top-level.
-      if (depth === 1) {
-        const text = await readChildResultText(deps.store, sessionId).catch((e) => {
-          console.error(`agents: could not read child ${sessionId}'s result for delivery to its parent:`, e);
-          return "";
-        });
-        deliverChildResult(deliverDeps, sessionId, { text }).catch((e) =>
-          console.error(`agents: deliverChildResult failed for child ${sessionId}:`, e)
+      // Fix round 1 (2026-08-27-agent-orchestration, tasks 12-13 review):
+      // `finishTurn` is now scoped to `WHERE status = 'running'` and reports
+      // whether THIS call actually won that transition. `false` means a reap
+      // (the periodic sweep or the lazy on-message reap) already marked this
+      // turn `failed` and — because reapStaleTurns' own UPDATE is the same
+      // kind of atomic, mutually-exclusive transition — has ALREADY called
+      // deliverChildResult for this child. Walking into the follow-up chain
+      // or calling deliverChildResult again here would be exactly the
+      // stalled-worker resurrection this scoping exists to prevent: a worker
+      // that merely stalled past the heartbeat cutoff (not actually died)
+      // resurfacing after its turn was already given up on.
+      const finished = await deps.store.finishTurn(turn.id, "completed");
+      if (finished) {
+        // A follow-up may have been queued WHILE this turn ran (the
+        // getRunningTurn check above only sees turns that existed before
+        // THIS one started). Drain and run it immediately as the next turn —
+        // rather than publishing session.waiting and waiting for some future
+        // message to arrive and pick it up — so an instruction the user
+        // already sent during the busy window is never silently stranded in
+        // the queue. Reuses onTurnCreated so a channel's delivery still gets
+        // registered for this follow-up turn.
+        //
+        // TOP-LEVEL ONLY (depth===0). A child has exactly one turn by design
+        // (spawn.ts's sendToChild / runner.ts's makePrepareStep both document
+        // this as the reason mid-turn delivery exists at all) — chaining a
+        // second turn here for a child would silently contradict that
+        // whenever an agent_send message lands in the narrow window after
+        // the child's last prepareStep call but before this finishTurn: the
+        // SAME message would sometimes be read mid-turn (if it arrived
+        // earlier) and sometimes start a whole new turn (if it arrived in
+        // this window) — different behavior for the same call, decided by
+        // timing the caller cannot observe. Gating this on depth makes
+        // sendToChild's own contract honest: delivered mid-turn while the
+        // child is running, `{delivered:false}` otherwise. Any follow-up
+        // still queued for a child at this point is simply never read
+        // (documented consequence — see makePrepareStep's own comment).
+        if (depth === 0) {
+          const followUps = await deps.store.takeFollowUps(sessionId);
+          if (followUps.length > 0) {
+            startTurn(deps, sessionId, followUps.join("\n\n"), metadata, bearerToken, userId, onTurnCreated);
+            return;
+          }
+        }
+        // This session IS a child (depth===1) and its own work has genuinely
+        // ended (no follow-up chain above) — tell its parent. Only meaningful
+        // for a DETACHED child; deliverChildResult itself no-ops for a
+        // blocking one (spawn.ts's awaitChild reads the result directly).
+        // Gated on `depth` (already known, no extra query) rather than always
+        // calling deliverChildResult and letting its own getSession check
+        // no-op — the overwhelming majority of turns are top-level.
+        if (depth === 1) {
+          const text = await readChildResultText(deps.store, sessionId).catch((e) => {
+            console.error(`agents: could not read child ${sessionId}'s result for delivery to its parent:`, e);
+            return "";
+          });
+          deliverChildResult(deliverDeps, sessionId, { text }).catch((e) =>
+            console.error(`agents: deliverChildResult failed for child ${sessionId}:`, e)
+          );
+        }
+        // eve's client (t.send()/MessageResponse.result()) ends its per-turn
+        // read on session.waiting/session.completed/session.failed, not
+        // turn.completed — see events.ts. We have no multi-turn parking
+        // state, so "turn completed" and "session parked, ready for the next
+        // message" are the same moment for us.
+        publish(sessionId, { type: "session.waiting", data: { wait: "next-user-message" } });
+      } else {
+        console.error(
+          `agents: turn ${turn.id} for session ${sessionId} completed, but was already reaped as abandoned before this could commit — discarding the stale completion (something else already owns this turn's outcome)`,
         );
       }
-      // eve's client (t.send()/MessageResponse.result()) ends its per-turn
-      // read on session.waiting/session.completed/session.failed, not
-      // turn.completed — see events.ts. We have no multi-turn parking state,
-      // so "turn completed" and "session parked, ready for the next message"
-      // are the same moment for us.
-      publish(sessionId, { type: "session.waiting", data: { wait: "next-user-message" } });
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       publish(sessionId, { type: "turn.failed", data: { turnId: turn.id, message: msg } });
-      await deps.store.finishTurn(turn.id, "failed", msg);
-      publish(sessionId, { type: "session.failed", data: { sessionId, message: msg } });
-      // A thrown turn is still a terminal state for a child — the parent
-      // must hear about it too (invariant: a failure must reach the parent,
-      // never vanish silently into a queue nobody drains).
-      if (depth === 1) {
-        deliverChildResult(deliverDeps, sessionId, { error: msg }).catch((e2) =>
-          console.error(`agents: deliverChildResult failed for child ${sessionId}:`, e2)
+      // See the success path's own comment above — `finished` distinguishes
+      // "this call owns the turn's outcome" from "a reap already does".
+      const finished = await deps.store.finishTurn(turn.id, "failed", msg);
+      if (finished) {
+        publish(sessionId, { type: "session.failed", data: { sessionId, message: msg } });
+        // A thrown turn is still a terminal state for a child — the parent
+        // must hear about it too (invariant: a failure must reach the parent,
+        // never vanish silently into a queue nobody drains).
+        if (depth === 1) {
+          deliverChildResult(deliverDeps, sessionId, { error: msg }).catch((e2) =>
+            console.error(`agents: deliverChildResult failed for child ${sessionId}:`, e2)
+          );
+        }
+      } else {
+        console.error(
+          `agents: turn ${turn.id} for session ${sessionId} failed, but was already finished/reaped by something else — discarding this stale failure (something else already owns this turn's outcome)`,
         );
       }
     } finally {
@@ -696,37 +738,6 @@ async function readChildResultText(store: AgentStore, sessionId: string): Promis
 }
 
 export type ChildOutcome = { text: string } | { error: string };
-
-// Per-child, per-store delivery guard for deliverChildResult (Invariant 5,
-// below) — keyed on `deps.store` object IDENTITY, not on any DB column, so
-// this stays a plain in-process check with no schema change: in production
-// a single Deps.store instance lives for the whole worker process and is
-// reused by EVERY call site (startTurn's success tail, its failure catch,
-// and both reap paths — see buildDeliverDeps, which is what makes them all
-// share one store reference), so the guard is effectively "has THIS worker
-// already delivered THIS child". A fresh test fixture's own fresh store
-// object is a distinct key, so this cannot leak state between unrelated
-// Deno.test cases that happen to reuse the same childSessionId literal (e.g.
-// "c-1", used freely throughout this file's tests).
-//
-// This closes the race for every caller within ONE worker process — which
-// is the case actually observed (a reap racing a turn finishing in the SAME
-// process; the periodic sweep runs as a setInterval in that same process
-// too). It does NOT close a genuinely cross-process race (an old worker's
-// completion tail racing a NEW worker's sweep during a redeploy overlap) —
-// closing that fully needs a DB-level compare-and-set column, a schema
-// change judged out of scope for this pair of commits.
-const deliveredChildrenByStore = new WeakMap<object, Set<string>>();
-function alreadyDelivered(store: object, childSessionId: string): boolean {
-  let delivered = deliveredChildrenByStore.get(store);
-  if (!delivered) {
-    delivered = new Set();
-    deliveredChildrenByStore.set(store, delivered);
-  }
-  if (delivered.has(childSessionId)) return true;
-  delivered.add(childSessionId);
-  return false;
-}
 
 // Deliberately narrow — not the full Deps/AgentStore — so deliverChildResult
 // is unit-testable without a real agent/model/runTurn. The DB-shaped
@@ -803,20 +814,34 @@ export function buildDeliverDeps(deps: Deps): DeliverDeps {
  * reset, a long-lived session woken legitimately many times would eventually
  * hit this cap for no good reason.
  *
- * Invariant 5 (2026-08-27 orchestration task 13): delivers AT MOST ONCE per
- * child. Before task 13 there were exactly two callers — the turn's own
- * success tail and its failure catch (both in startTurn, above) — which are
- * structurally mutually exclusive (a turn ends exactly one way), so nothing
- * needed to enforce this. Task 13 adds a THIRD caller: a reap (either the
- * periodic sweep or the lazy on-message reap), which CAN race a turn that is
- * genuinely still finishing on its own — reapStaleTurns' heartbeat cutoff can
- * fire on a worker that merely stalled (a GC pause, event-loop starvation)
- * rather than actually died, and finishTurn's own UPDATE is unconditional
- * (not scoped to status='running'), so a stalled worker that later wakes up
- * and calls finishTurn("completed") can resurrect a turn the reap already
- * marked failed — and BOTH paths would then call this for the same child
- * with CONTRADICTORY outcomes, queuing the result twice. See
- * alreadyDelivered's own comment for why the guard is keyed the way it is.
+ * Invariant 5 (2026-08-27 orchestration task 13, closed at the root in fix
+ * round 1): delivers AT MOST ONCE per child. Before task 13 there were
+ * exactly two callers — the turn's own success tail and its failure catch
+ * (both in startTurn, above) — which are structurally mutually exclusive (a
+ * turn ends exactly one way). Task 13 added a THIRD caller: a reap (either
+ * the periodic sweep or the lazy on-message reap), which CAN race a turn
+ * that is genuinely still finishing on its own — reapStaleTurns' heartbeat
+ * cutoff can fire on a worker that merely stalled (a GC pause, event-loop
+ * starvation) rather than actually died.
+ *
+ * This is NOT enforced here with a guard of its own — deliverChildResult
+ * trusts its caller. It is enforced structurally, one level up, by making
+ * every caller gate on an atomic, mutually-exclusive DATABASE transition
+ * before it ever gets here: store.finishTurn is now scoped to `WHERE status
+ * = 'running'` and reports whether the caller actually won that transition
+ * (handler.ts's success tail and failure catch both check this before
+ * calling deliverChildResult), and store.reapStaleTurns was already scoped
+ * the same way (both reap paths only call deliverChildResult when
+ * `reaped.length > 0`, i.e. they actually won it). Since a turn has exactly
+ * one `status` column and every mutator that can end it now competes for the
+ * same `WHERE status = 'running'` row via a single atomic UPDATE, at most one
+ * of {this turn's own success, this turn's own failure, a reap} can ever
+ * "win" — so at most one caller ever reaches this function for a given
+ * child's turn. An earlier fix used a per-process WeakMap keyed on store
+ * identity as a belt-and-suspenders guard here; it was removed once the
+ * database became the sole arbiter (see task-12-13-report.md's fix-round-1
+ * section) — a workaround left beside its own root fix only invites drift
+ * between the two.
  */
 export async function deliverChildResult(
   deps: DeliverDeps,
@@ -827,7 +852,6 @@ export async function deliverChildResult(
     | { parent_session_id?: string | null; detached?: boolean; nickname?: string | null }
     | null;
   if (!child?.parent_session_id || !child.detached) return;
-  if (alreadyDelivered(deps.store, childSessionId)) return;
 
   const parentSessionId = child.parent_session_id;
   const who = child.nickname || childSessionId;
