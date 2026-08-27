@@ -15,6 +15,7 @@
 import { assert, assertEquals } from "jsr:@std/assert";
 import { loadAgent } from "../../../../core/server/agents/loader.ts";
 import { TOOL_DEFINITIONS } from "../../functions/tools/registry.ts";
+import { assembleHistory, type TurnRow } from "../../../../core/server/agents/service/context/history.ts";
 
 const AGENT_DIR = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
 
@@ -72,4 +73,43 @@ Deno.test("parity: ported tool-name set equals legacy TOOL_DEFINITIONS minus the
 // here as a distinct number instead of silently inflating a closed batch.
 Deno.test("parity: registry total accounts for exactly batch A (25) + batch B (41) + Figma (2) + exclusions (3)", () => {
   assertEquals(TOOL_DEFINITIONS.length, 25 + 41 + 2 + 3);
+});
+
+// ---------------------------------------------------------------------------
+// Task 16, Step 5, deviation from task-16-brief.md: the brief's sample test
+// asserts a bare `assembleHistory(turns, DEFAULT_CONTEXT_CONFIG)` — but that
+// exact fixture and assertion (4 messages, roles
+// user/assistant/tool/assistant, a Bash tool-call/tool-result round trip
+// folded into history) is ALREADY covered, near-verbatim, by core's own
+// "assembleHistory emits tool-call and tool-result parts in seq order" test
+// (core/server/agents/service/context/history.test.ts) — adding an
+// identical copy here would be pure duplication, not new coverage, and
+// doesn't fit this file's actual theme (tool-NAME-set parity, not history
+// assembly). What's genuinely devx-specific and worth pinning HERE instead:
+// that DEVX'S OWN resolved context config (agent.config.context — via a real
+// loadAgent(AGENT_DIR), not a bare DEFAULT_CONTEXT_CONFIG import) still
+// preserves this divergence from the legacy loop, so a future devx-specific
+// override (e.g. a tighter freshTurns/freshToolOutputChars) can't silently
+// regress the tool-call round trip that Task 8 exists to guarantee.
+// ---------------------------------------------------------------------------
+Deno.test("parity: devx's own context config still preserves tool calls the legacy loop dropped", async () => {
+  const agent = await loadAgent(AGENT_DIR);
+  const turns: TurnRow[] = [{
+    seq: 1,
+    message: "run the tests",
+    metadata: null,
+    steps: [
+      { kind: "tool-call", name: "Bash", payload: { toolCallId: "c1", input: { command: "npm test" } } },
+      { kind: "tool-result", name: "Bash", payload: { toolCallId: "c1", output: "2 failing" } },
+      { kind: "text", name: null, payload: { text: "Two tests fail." } },
+    ],
+  }];
+  // The legacy AI-SDK loop's history builder (functions/agent.ts) persisted
+  // only the final text step per turn — turn 2 had no idea what turn 1's
+  // tools did. This loop's assembleHistory (Task 8) folds tool-call/
+  // tool-result steps back in too: 4 messages, not 2. Deliberate divergence,
+  // not a bug.
+  const msgs = assembleHistory(turns, agent.config.context);
+  assertEquals(msgs.length, 4);
+  assertEquals(msgs.map((m) => m.role), ["user", "assistant", "tool", "assistant"]);
 });

@@ -2,8 +2,19 @@
 // mode. Legacy is NOT being retired -- claude-code (sidecar) users live there
 // permanently (see useEffectiveLoop.ts) -- so this is an ongoing invariant,
 // not a migration check.
+//
+// Task 16 exception (same posture as the is_builtin skill-listing exception
+// below): this loop's buildInstructions appends a fixed note steering the
+// model toward ToolSearch for tools withheld by agent.ts's
+// context.deferredTools (agent.ts's DEFERRED_TOOLS_NOTE). Legacy has no
+// deferred-tool concept at all -- every legacy tool is always fully visible
+// -- so its prompt never carries this suffix, and never can. Parity is
+// therefore checked as EXACT equality against legacy's spine plus that one
+// known suffix. An earlier startsWith + includes pair looked equivalent but
+// was not: it permitted arbitrary extra trailing content, so a stray
+// appended block would have passed both assertions unnoticed.
 import { assert, assertEquals } from "jsr:@std/assert";
-import { buildInstructions } from "../agent.ts";
+import { buildInstructions, DEFERRED_TOOLS_NOTE } from "../agent.ts";
 import { buildCoderContext } from "../../functions/coder_context.ts";
 
 // is_builtin: true on both rows is load-bearing (R12). The eve loop lists
@@ -40,7 +51,7 @@ Deno.test("plan mode gets the plan prompt, not the agent prompt", async () => {
     settings: { max_steps: undefined },
     skills: SKILLS,
   });
-  assertEquals(planPrompt, legacy.systemPrompt);
+  assertEquals(planPrompt, `${legacy.systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`);
 });
 
 Deno.test("an unset mode still resolves to the agent prompt", async () => {
@@ -52,7 +63,7 @@ Deno.test("an unset mode still resolves to the agent prompt", async () => {
     settings: { max_steps: undefined },
     skills: SKILLS,
   });
-  assertEquals(p, legacy.systemPrompt);
+  assertEquals(p, `${legacy.systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`);
 });
 
 Deno.test("every enabled skill is named in the prompt", async () => {

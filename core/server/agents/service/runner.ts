@@ -42,6 +42,11 @@ interface RunTurnOpts {
   // buildSdkTools via the `{ ...opts }` spread below so kind:"oauth"
   // connections resolve/park tokens. Undefined when no broker is wired.
   connectionOpts?: ConnectionProviderOpts;
+  // Task 15: this session's already-activated deferred-tool names, read
+  // fresh by handler.ts's startTurn (store.getActivatedTools) before every
+  // turn. Threaded straight through to buildSdkTools via the `{ ...opts }`
+  // spread below — see toolset.ts's ToolBuildCtx.activatedTools.
+  activatedTools?: string[];
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {
@@ -152,6 +157,14 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   // this task exists to fix — must NOT claim nothing changed, since it might
   // have).
   let sawAnyToolCall = false;
+  // The LAST step's input-token count, which is the only usage number that
+  // approximates "how full is the context window". ai@6's fullStream carries
+  // per-step usage ONLY on `finish-step`; the terminal `finish` part carries
+  // `totalUsage`, documented in ai/dist/index.d.ts as "the sum of all step
+  // usages". Summing input tokens across steps is meaningless as a context
+  // size — a 20-step turn over a 30k context reports ~600k — and compaction
+  // reads this number, so it must be the last step's, not the sum.
+  let lastStepInputTokens: number | undefined;
   // Persist the final assistant text exactly once. Called from the "finish"
   // case BEFORE the "finish" step so the stored seq order (text → finish)
   // matches the live emit order (message.completed → turn.completed) —
@@ -206,6 +219,13 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           await persist("tool-result", p.toolName, { toolCallId: p.toolCallId, output: p.output });
           break;
         }
+        case "finish-step": {
+          // Overwritten on every step, so after the stream drains this holds
+          // the FINAL step's prefill — see lastStepInputTokens' declaration.
+          const u = (part as any).usage;
+          if (typeof u?.inputTokens === "number") lastStepInputTokens = u.inputTokens;
+          break;
+        }
         case "finish": {
           const p = part as any;
           finishReason = p.finishReason ?? "stop";
@@ -218,9 +238,17 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           // re-expose them under the provider-raw names here since that's
           // the vocabulary the rest of this codebase/docs use. undefined on
           // every non-caching provider/response (unchanged shape otherwise).
+          //
+          // inputTokens/outputTokens stay TOTALS (billing/eval vocabulary —
+          // what the turn cost). lastStepInputTokens is a SEPARATE field
+          // because it answers a different question: how full the window was
+          // on the final request of the turn. store.ts's getLastTurnUsage
+          // reads only that one; feeding it the total made a multi-step turn
+          // look like a near-full window and re-summarized before every turn.
           const usage = {
             inputTokens: p.totalUsage?.inputTokens,
             outputTokens: p.totalUsage?.outputTokens,
+            lastStepInputTokens,
             cacheReadInputTokens: p.totalUsage?.inputTokenDetails?.cacheReadTokens,
             cacheWriteInputTokens: p.totalUsage?.inputTokenDetails?.cacheWriteTokens,
           };

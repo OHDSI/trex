@@ -377,6 +377,39 @@ Deno.test("reapStaleTurns denies nothing and issues no approvals query when it r
   assertEquals(calls.some((c) => c.q.includes("UPDATE agents.approvals")), false);
 });
 
+Deno.test("getLastTurnUsage returns the most recent finish step's LAST-STEP input tokens", async () => {
+  const { fn, calls } = fakeQuery([{
+    rows: [{ usage: { inputTokens: 600_000, outputTokens: 200, lastStepInputTokens: 12345 } }],
+  }]);
+  const store = createStore(fn as never);
+  const usage = await store.getLastTurnUsage("s-1");
+  assertEquals(usage, { inputTokens: 12345 });
+  assert(calls[0].sql.includes("kind = 'finish'"));
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
+// The defect this field exists to fix: `inputTokens` is ai@6's totalUsage —
+// the SUM over every step of the turn — so a long multi-step turn reports a
+// number many times the real context size. Reading it as a window occupancy
+// tripped compaction before nearly every turn.
+Deno.test("getLastTurnUsage never falls back to the SUMMED inputTokens total", async () => {
+  const { fn } = fakeQuery([{ rows: [{ usage: { inputTokens: 600_000, outputTokens: 200 } }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getLastTurnUsage("s-1"), null);
+});
+
+Deno.test("getLastTurnUsage returns null when no finish step exists yet", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getLastTurnUsage("s-1"), null);
+});
+
+Deno.test("getLastTurnUsage returns null when the finish step recorded no usable usage", async () => {
+  const { fn } = fakeQuery([{ rows: [{ usage: null }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getLastTurnUsage("s-1"), null);
+});
+
 Deno.test("denyApprovalsForTurns: no-ops on an empty list without querying", async () => {
   let called = false;
   const query: QueryFn = async () => { called = true; return { rows: [] }; };
@@ -394,6 +427,41 @@ Deno.test("denyApprovalsForTurns: only denies still-undecided approvals, scoped 
   };
   const n = await denyApprovalsForTurns(["t-1"], query);
   assertEquals(n, 2);
+});
+
+Deno.test("activateTools: no-ops on an empty list without querying", async () => {
+  const { fn, calls } = fakeQuery([]);
+  const store = createStore(fn as never);
+  await store.activateTools("s-1", []);
+  assertEquals(calls.length, 0);
+});
+
+Deno.test("activateTools: appends the given names onto agents.sessions.activated_tools", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  await store.activateTools("s-1", ["KBSearch", "ExecuteSQL"]);
+  assert(calls[0].sql.includes("UPDATE agents.sessions"));
+  assert(calls[0].sql.includes("activated_tools"));
+  assertEquals(calls[0].params, ["s-1", ["KBSearch", "ExecuteSQL"]]);
+});
+
+Deno.test("getActivatedTools: returns the persisted array", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ activated_tools: ["KBSearch"] }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getActivatedTools("s-1"), ["KBSearch"]);
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
+Deno.test("getActivatedTools: returns [] when the session has never activated anything (NULL column)", async () => {
+  const { fn } = fakeQuery([{ rows: [{ activated_tools: null }] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getActivatedTools("s-1"), []);
+});
+
+Deno.test("getActivatedTools: returns [] when the session row doesn't exist", async () => {
+  const { fn } = fakeQuery([{ rows: [] }]);
+  const store = createStore(fn as never);
+  assertEquals(await store.getActivatedTools("missing"), []);
 });
 
 // --- heartbeat clock (V7__turn_heartbeat.sql) ------------------------------

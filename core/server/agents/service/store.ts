@@ -110,14 +110,45 @@ export function createStore(query: QueryFn) {
 
     async getHistory(sessionId: string) {
       const r = await query(
-        `SELECT t.message, t.metadata,
+        `SELECT t.id, t.seq, t.message, t.metadata,
                 COALESCE(jsonb_agg(jsonb_build_object('kind', s.kind, 'name', s.name, 'payload', s.payload)
                          ORDER BY s.seq) FILTER (WHERE s.id IS NOT NULL), '[]') AS steps
          FROM agents.turns t LEFT JOIN agents.steps s ON s.turn_id = t.id
-         WHERE t.session_id = $1 GROUP BY t.id ORDER BY t.seq`,
+         WHERE t.session_id = $1 GROUP BY t.id, t.seq ORDER BY t.seq`,
         [sessionId],
       );
       return r.rows;
+    },
+
+    // The most recently persisted turn's observed context size, used by
+    // compact.ts's maybeCompact to judge context pressure from what the
+    // provider actually counted rather than the char/4 estimateTokens
+    // heuristic (budget.ts).
+    //
+    // Reads `lastStepInputTokens` — the FINAL step's prefill — and never
+    // `inputTokens`, which runner.ts persists as ai@6's `totalUsage`: the SUM
+    // of every step's usage. A summed counter is not a context size (a
+    // 20-step turn over a 30k context sums to ~600k), and using it tripped
+    // the compaction threshold on almost every turn, replacing history with
+    // a fresh summary each time without ever converging.
+    //
+    // Null when the session has no completed turn yet, or when the finish
+    // step carries no usable lastStepInputTokens — a turn persisted before
+    // this field existed, or a mocked/partial usage object in a test. The
+    // caller then falls back to estimateTokens, which is conservative and
+    // correct; silently substituting the summed total would not be.
+    async getLastTurnUsage(sessionId: string): Promise<{ inputTokens: number } | null> {
+      const r = await query(
+        `SELECT s.usage FROM agents.steps s
+           JOIN agents.turns t ON t.id = s.turn_id
+          WHERE t.session_id = $1 AND s.kind = 'finish'
+          ORDER BY t.seq DESC, s.seq DESC LIMIT 1`,
+        [sessionId],
+      );
+      const usage = r.rows[0]?.usage as { lastStepInputTokens?: unknown } | null | undefined;
+      return usage && typeof usage.lastStepInputTokens === "number"
+        ? { inputTokens: usage.lastStepInputTokens }
+        : null;
     },
 
     async createApproval(sessionId: string, turnId: string, tool: string, input: unknown): Promise<string> {
@@ -425,6 +456,37 @@ export function createStore(query: QueryFn) {
          ON CONFLICT (user_id, plugin, agent, tool) DO UPDATE SET consent = EXCLUDED.consent`,
         [userId, plugin, agent, tool, consent],
       );
+    },
+
+    // Task 15: persists a ToolSearch match onto agents.sessions.activated_tools
+    // (TEXT[], migration V7) so it stays visible for every later turn of
+    // this session, not just the one it was found in — toolset.ts's
+    // buildSdkTools reads it back via handler.ts's getActivatedTools call in
+    // startTurn. Deduplicating with a DISTINCT unnest rather than a plain
+    // array_cat: a session re-searching the same tool must not grow the
+    // column unboundedly. A no-op (no query) on an empty `names` — nothing to
+    // add, and an empty $2::text[] would otherwise turn a NULL column into an
+    // empty (but non-null) array for no reason.
+    async activateTools(sessionId: string, names: string[]): Promise<void> {
+      if (names.length === 0) return;
+      await query(
+        `UPDATE agents.sessions
+            SET activated_tools = (
+              SELECT ARRAY(
+                SELECT DISTINCT unnest(COALESCE(activated_tools, ARRAY[]::text[]) || $2::text[])
+              )
+            )
+          WHERE id = $1`,
+        [sessionId, names],
+      );
+    },
+
+    // The session's activated deferred-tool names so far (possibly empty) —
+    // read fresh per turn (never cached) and threaded into buildSdkTools as
+    // ToolBuildCtx.activatedTools, see handler.ts's startTurn.
+    async getActivatedTools(sessionId: string): Promise<string[]> {
+      const r = await query(`SELECT activated_tools FROM agents.sessions WHERE id = $1`, [sessionId]);
+      return (r.rows[0]?.activated_tools as string[] | null | undefined) ?? [];
     },
   };
 }

@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -144,4 +144,130 @@ Deno.test("cacheProviderOptions returns a promptCacheKey only for openai models"
   assertEquals(cacheProviderOptions({ provider: "anthropic.messages" }, "k"), {});
   // No key → nothing to route on, even for openai.
   assertEquals(cacheProviderOptions({ provider: "openai.responses" }, ""), {});
+});
+
+// withToolCachePoint (Task 14): the cache breakpoint moves from the system
+// message (withSystemCachePoint, above) onto the LAST CORE tool, so that
+// appending activated tools after it never shifts what's cached — only the
+// content up to and including the marked tool is hashed for the cache key.
+
+Deno.test("withToolCachePoint marks the last core tool for anthropic", () => {
+  // NOTE: model.provider for the real @ai-sdk/anthropic provider is
+  // "anthropic.messages" (see isAnthropicModel's comment above) — the task
+  // brief's sample test used a bare "anthropic", which isAnthropicModel
+  // never matches. Corrected here.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  const names = Object.keys(out);
+  assertEquals(names, ["Read", "Bash", "KBSearch"]);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { anthropic: { cacheControl: { type: "ephemeral" } } },
+  );
+  // The marker sits ONLY on the last core tool — never on an earlier core
+  // tool and never on an appended activated tool (that would defeat the
+  // whole point: activation must not change what's inside the cached span).
+  assertEquals((out.Read as { providerOptions?: unknown }).providerOptions, undefined);
+  assertEquals((out.KBSearch as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint marks the last core tool for bedrock", () => {
+  const model = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { bedrock: { cachePoint: { type: "default" } } },
+  );
+  assertEquals((out.Read as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint adds no marker for openai/google — stable ordering only", () => {
+  // OpenAI does automatic prefix caching (see cacheProviderOptions' comment)
+  // and Google gets nothing at all; both must see the core tools followed by
+  // activated tools, untouched, with no providerOptions key added anywhere.
+  for (const model of [{ provider: "openai.responses" }, { provider: "google" }, { provider: undefined }]) {
+    const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+    assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch"]);
+    for (const def of Object.values(out)) {
+      assertEquals((def as { providerOptions?: unknown }).providerOptions, undefined);
+    }
+  }
+});
+
+Deno.test("withToolCachePoint appends activated tools after core, unmarked, in given order", () => {
+  const model = { provider: "anthropic.messages" };
+  const out = withToolCachePoint(
+    model,
+    [["Read", {}], ["Bash", {}]] as never,
+    [["KBSearch", {}], ["FigmaPullMockups", {}]] as never,
+  );
+  assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch", "FigmaPullMockups"]);
+  assertEquals((out.KBSearch as { providerOptions?: unknown }).providerOptions, undefined);
+  assertEquals((out.FigmaPullMockups as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint handles an empty core list without crashing", () => {
+  const model = { provider: "anthropic.messages" };
+  const out = withToolCachePoint(model, [] as never, [["KBSearch", {}]] as never);
+  assertEquals(Object.keys(out), ["KBSearch"]);
+});
+
+Deno.test("serialized core prefix is byte-identical across activation", () => {
+  // The point of the whole design: activating a deferred tool mid-session
+  // must never change the bytes of the cached TOOLS+SYSTEM prefix, or every
+  // subsequent request pays a full cache-write instead of a cache-read.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const before = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+  const after = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  const prefix = (o: Record<string, unknown>) =>
+    JSON.stringify(Object.fromEntries(Object.entries(o).filter(([n]) => n !== "KBSearch")));
+  assertEquals(prefix(before), prefix(after));
+});
+
+Deno.test("withToolCachePoint merges the cache marker into an existing providerOptions, not replacing it", () => {
+  // Fix round 1, Finding 2: a tool that already sets its own providerOptions
+  // (e.g. a future connection-backed tool with provider-specific hints) must
+  // keep them — the cache marker is added alongside, never in place of.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const bashWithHints = { providerOptions: { openai: { reasoningEffort: "low" } } };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", bashWithHints]] as never, [] as never);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { openai: { reasoningEffort: "low" }, anthropic: { cacheControl: { type: "ephemeral" } } },
+  );
+});
+
+// The case this branch was gated wrongly for, and the one that was never
+// tested. A non-Anthropic Bedrock model (e.g. Z.AI's zai.glm-*) rejects ANY
+// request carrying a cachePoint with AccessDeniedException — on a streaming
+// turn that kills the turn silently: typing indicator, no reply.
+// withSystemCachePoint has always used the narrow bedrockSupportsPromptCaching
+// gate for exactly this; withToolCachePoint shipped with the broad
+// isBedrockModel gate, reintroducing the defect.
+Deno.test("withToolCachePoint adds NO marker for a non-Anthropic bedrock model", () => {
+  const model = { provider: "amazon-bedrock", modelId: "zai.glm-4-6" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch"]);
+  for (const [name, def] of Object.entries(out)) {
+    assertEquals(
+      (def as { providerOptions?: unknown }).providerOptions,
+      undefined,
+      `${name} must not carry a cachePoint — a non-Anthropic bedrock model rejects the whole request`,
+    );
+  }
+});
+
+// The narrow gate and the tool-level marker must agree: whatever
+// withSystemCachePoint decides to mark, withToolCachePoint decides the same
+// way. A divergence here is how the broad gate crept back in.
+Deno.test("withToolCachePoint and withSystemCachePoint agree on which bedrock models get a marker", () => {
+  for (const modelId of ["us.anthropic.claude-sonnet-4-6", "anthropic.claude-haiku-4-5", "zai.glm-4-6", "meta.llama3-70b"]) {
+    const model = { provider: "amazon-bedrock", modelId };
+    const system = withSystemCachePoint(model, "SYSTEM");
+    const systemMarked = typeof system !== "string";
+    const tools = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+    const toolMarked = (tools.Bash as { providerOptions?: unknown }).providerOptions !== undefined;
+    assertEquals(toolMarked, systemMarked, `disagreement on ${modelId}`);
+    assertEquals(toolMarked, bedrockSupportsPromptCaching(model), `neither matches the narrow gate on ${modelId}`);
+  }
 });
