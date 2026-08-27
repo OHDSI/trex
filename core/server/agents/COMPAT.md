@@ -172,11 +172,15 @@ live-tail by event shape.
       (`buildSdkTools` runs before the UIMessage stream is created, with
       the writer late-bound into `toolEmit`); failures after streaming
       begins surface as in-stream error frames, inherent to SSE.
-    - **Subagents** (depth 1, `toolset.ts`'s `runSubagent`) inherit the
-      parent's `toolEmit` unchanged via the existing `{ ...ctx }` spread — a
-      subagent's `ctx.emit(...)` call lands on the SAME channel (session
-      stream or chat writer) as its parent's, not a distinct one; there is
-      no per-subagent tagging of a `tool.event`'s origin.
+    - **Subagents** (depth 1) inherit the parent's `toolEmit` unchanged: a
+      subagent now runs as its own child SESSION (divergence 19), publishing
+      on its own session stream, and `toolset.ts`'s `runAsChild` relays those
+      events onto the PARENT's `toolEmit` for the duration of a blocking
+      `agent` call. So a subagent's tool events still land on the SAME
+      channel (session stream or chat writer) as its parent's, not a distinct
+      one; there is no per-subagent tagging of a `tool.event`'s origin. (The
+      in-process nested loop this used to describe, `runSubagent`, is gone —
+      it was a second, divergent delegation implementation.)
 11. **`resolveModel`/`buildInstructions` request hooks (H1)** are additive
     `AgentConfig` fields real eve's `defineAgent` doesn't define — eve
     silently ignores unknown fields, so an agent directory that uses them
@@ -447,11 +451,40 @@ live-tail by event shape.
     inherits the machinery a top-level turn already has: heartbeat liveness
     and stale-turn reaping, tool-history assembly and the
     tool-call/tool-result pairing invariant (divergence 18), two-tier
-    truncation, token-budget compaction, and approvals.
-    - **Six tools instead of one.** `agent` keeps its blocking contract and
+    truncation of the history it is given, and approvals.
+    - **What a child does NOT inherit: compaction.** Compaction is strictly
+      PRE-turn (`context/compact.ts`'s `maybeCompact`, called from
+      `startTurn` before `addTurn`), and it short-circuits when the session
+      has no prior turns. A child session has exactly one turn — its first
+      and only (`runner.ts`'s `makePrepareStep`; `startTurn`'s
+      drain-and-chain tail is gated on `depth === 0` precisely so a child
+      never gains a second) — so the compaction check on a child is always
+      the no-op case. A child therefore CANNOT compact, structurally, and
+      no amount of context growth inside its single turn will trigger it.
+      In practice a child starts near-empty (its forked slice is capped at a
+      quarter of the conservative fallback window — `spawn.ts`'s
+      `FORK_TOKEN_BUDGET`) and is bounded by the same per-tool-output cap
+      and two-tier truncation every turn gets, so the exposure is a single
+      very long tool-heavy child turn overrunning its window. Closing it
+      needs MID-turn compaction, which this runtime does not have and which
+      is its own change (a mid-turn summary has to be injected above the
+      last user message or the model misreads it — see `compact.ts`).
+    - **Seven tools instead of one.** `agent` keeps its blocking contract and
       return shape (`{text}`, or `{error}`) — `agent_spawn` / `agent_wait` /
-      `agent_list` / `agent_send` / `agent_stop` are new
-      (`service/toolset.ts`, `service/spawn.ts`). All are depth-0 only
+      `agent_result` / `agent_list` / `agent_send` / `agent_stop` are new
+      (`service/toolset.ts`, `service/spawn.ts`). `agent_wait` returns each
+      finished child's OUTPUT alongside its status, and `agent_result` reads
+      one back on demand: a detached child's result is otherwise only
+      delivered as a queued followup on a LATER parent turn, and a parent
+      sitting inside `agent_wait` always has a turn running — so without
+      these it could learn WHICH child finished but never WHAT it produced
+      inside its own turn.
+    - **`agent_stop` abandons, it does not interrupt.** It marks the child's
+      turn failed with the `STOPPED_BY_PARENT_ERROR` marker so the parent
+      stops waiting and the child's result is discarded on arrival. The
+      child's WORKER keeps running to completion and keeps billing; there is
+      no `AbortSignal` threaded to a child's turn. The tool description says
+      exactly this, so a model does not treat it as a kill switch. All are depth-0 only
       (`ToolBuildCtx.depth`, derived per turn from durable state —
       `store.isChildSession` — never threaded from spawn time, so a child
       cannot spawn a grandchild even if a worker restarts mid-turn) and
@@ -473,9 +506,17 @@ live-tail by event shape.
       (`handler.ts`'s `deliverChildResult`); a BLOCKING child (`agent`,
       `detached: false`) returns through the tool call that started it
       instead and never queues anything. Bounded by `MAX_CONSECUTIVE_WAKES`
-      turns started by a wake in a row, reset by any turn NOT started by
-      one — otherwise a session that spawns a child on every wake would
-      chain forever, one real model call per link, billed to the caller.
+      child results delivered in a row with nobody having asked for
+      anything, reset by any turn NOT caused by one — otherwise a session
+      that spawns a child on every wake would chain forever, one real model
+      call per link, billed to the caller. The counter is bumped on every
+      delivery, not only on the ones that literally start a turn: a child
+      that finishes while the parent is still mid-turn queues its result and
+      the parent's own drain-and-chain tail starts a turn for it anyway, so
+      counting only the wake call left that entire loop shape unbudgeted.
+      Such a delivery stamps `agents.sessions.pending_wake_child_id`, which
+      the chained turn reads-and-clears so it does not reset the budget it
+      was itself caused by.
       A wake racing another parent message is resolved by
       `idx_agents_turns_one_running_per_session` (a partial unique index,
       PER session — it does not serialize siblings spawned under the same
@@ -494,7 +535,14 @@ live-tail by event shape.
       their union — a caller can narrow what it delegates but never grant a
       child more than it already has itself (`toolset.ts`'s
       `restrictChildSkills`, applied at delegation time in
-      `handler.ts`'s `buildSpawnCapabilities`). **What this actually caps
+      `handler.ts`'s `buildSpawnCapabilities`). **Tools are intersected the
+      same way** (`toolset.ts`'s `restrictChildTools`, applied at the same
+      point): a subagent directory declaring `tools/` entries its parent does
+      not have gets them dropped, so a child's tool set can only ever narrow
+      its parent's. A child also runs its parent's `filterTools` hook under
+      the PARENT's own `metadata` — its turn is started with the spawning
+      turn's metadata, bearer token and user id — so a mode-restricted
+      session (devx's `ask`) cannot delegate its way out of that restriction. **What this actually caps
       today is the child's advertised system-prompt text, not a live
       privilege**: `buildSdkTools` gates the built-in `skill` tool behind
       `depth === 0`, and every child runs at depth 1 (this divergence's own

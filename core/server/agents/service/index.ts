@@ -52,10 +52,14 @@ const channelStore = createChannelStore(query);
 // A named const (not an inline literal) so the SAME Deps object backs both
 // createHandler AND buildDeliverDeps below — the periodic sweep's `deliver`
 // needs a real, wake-capable DeliverDeps (handler.ts's private startTurn is
-// what actually starts the parent's next turn), and building one from
-// anything other than this exact object would give the sweep a Deps whose
-// `store` differs from the handler's own — defeating deliverChildResult's
-// once-per-child guard, which is keyed on store identity (see handler.ts).
+// what actually starts the parent's next turn), and a sweep holding a
+// DIFFERENT store/agent/model than the handler would be a second, silently
+// divergent configuration of the same delegation path. (An earlier version
+// of this comment justified the sharing by a per-process WeakMap keyed on
+// store identity; that guard is gone — deliver-at-most-once is now enforced
+// by the database, since every caller must first win the same atomic
+// `WHERE status = 'running'` transition. See deliverChildResult's
+// Invariant 5.)
 const deps: Deps = {
   agent,
   store,
