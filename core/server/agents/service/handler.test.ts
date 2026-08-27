@@ -1,9 +1,10 @@
 import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { createHandler, buildHistory } from "./handler.ts";
+import { createHandler, buildHistory, deliverChildResult } from "./handler.ts";
 import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
+import { MAX_CONSECUTIVE_WAKES } from "./orchestration.ts";
 import { publish, subscribe, subscriberCount } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
 import { formatDiscordMessageContextBlock, formatMessagesBlock, type HistoryMessage } from "../channels/adapters/discord-messages.ts";
@@ -59,6 +60,9 @@ function inMemoryDb() {
     subagent?: string | null;
     nickname?: string;
     detached?: boolean;
+    // Task 8 (deliverChildResult's wake budget) — undefined reads as 0, same
+    // as the real column's NOT NULL DEFAULT 0.
+    consecutive_wakes?: number;
     createdAt: Date;
   }>();
   const turns: Array<
@@ -142,14 +146,40 @@ function inMemoryDb() {
       sessions.set(id, { status: "active", created_by: (params[2] as string | null) ?? null, createdAt: new Date() });
       return Promise.resolve({ rows: [{ id }] });
     }
-    if (sql.includes("SELECT id, status, created_by FROM agents.sessions")) {
+    // getSession — matched on a short, stable prefix (not the full SELECT
+    // text) so adding columns (Task 8: parent_session_id/detached/nickname,
+    // for deliverChildResult) doesn't silently stop matching this branch.
+    if (sql.includes("SELECT id, status, created_by")) {
       const s = sessions.get(params[0] as string);
-      return Promise.resolve({ rows: s ? [{ id: params[0], status: s.status, created_by: s.created_by }] : [] });
+      return Promise.resolve({
+        rows: s
+          ? [{
+            id: params[0],
+            status: s.status,
+            created_by: s.created_by,
+            parent_session_id: s.parent_session_id ?? null,
+            detached: s.detached ?? false,
+            nickname: s.nickname ?? null,
+          }]
+          : [],
+      });
     }
     // isChildSession (fix round 2) — depth, derived fresh every turn.
     if (sql.includes("SELECT parent_session_id FROM agents.sessions")) {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: [{ parent_session_id: s?.parent_session_id ?? null }] });
+    }
+    // bumpConsecutiveWakes / resetConsecutiveWakes (Task 8).
+    if (sql.includes("consecutive_wakes = consecutive_wakes + 1")) {
+      const s = sessions.get(params[0] as string);
+      if (!s) return Promise.resolve({ rows: [] });
+      s.consecutive_wakes = (s.consecutive_wakes ?? 0) + 1;
+      return Promise.resolve({ rows: [{ consecutive_wakes: s.consecutive_wakes }] });
+    }
+    if (sql.includes("SET consecutive_wakes = 0")) {
+      const s = sessions.get(params[0] as string);
+      if (s) s.consecutive_wakes = 0;
+      return Promise.resolve({ rows: [] });
     }
     if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
       // getRunningTurn — the most-recently-started running turn.
@@ -2473,4 +2503,220 @@ Deno.test({
       await pool.end();
     }
   },
+});
+
+// --- Task 8: deliverChildResult (completion delivery and parent wake) -----
+//
+// A deliberately narrow fake — not a full store/handler — so these tests
+// exercise deliverChildResult's own decision logic (blocking vs detached,
+// busy-parent, the wake budget) in isolation from a real runTurn/model.
+// `wakes` seeds what bumpConsecutiveWakes resolves TO (the post-increment
+// value a real UPDATE...RETURNING would give), not a pre-increment count.
+function fakeDeliverDeps(opts: {
+  followUps?: unknown[];
+  started?: unknown[];
+  child?: { detached?: boolean };
+  runningTurn?: { id: string } | null;
+  wakes?: number;
+} = {}) {
+  const followUps = opts.followUps ?? [];
+  const started = opts.started ?? [];
+  const pending: string[] = [];
+  return {
+    store: {
+      getSession: (_id: string) =>
+        Promise.resolve({ parent_session_id: "p-1", detached: true, nickname: "wisp", ...opts.child }),
+      queueFollowUp: (sessionId: string, text: string) => {
+        followUps.push({ sessionId, text });
+        pending.push(text);
+        return Promise.resolve();
+      },
+      getRunningTurn: (_sessionId: string) => Promise.resolve(opts.runningTurn ?? null),
+      bumpConsecutiveWakes: (_sessionId: string) => Promise.resolve(opts.wakes ?? 1),
+      takeFollowUps: (_sessionId: string) => Promise.resolve(pending.splice(0)),
+    },
+    wake: (sessionId: string, message: string, metadata: unknown) => {
+      started.push({ sessionId, message, metadata });
+    },
+  };
+}
+
+Deno.test("a detached child's completion queues a followup and wakes the parent", async () => {
+  const followUps: unknown[] = [];
+  const started: unknown[] = [];
+  await deliverChildResult(fakeDeliverDeps({ followUps, started }) as never, "c-1", { text: "found three bugs" });
+  assertEquals(followUps.length, 1);
+  assert(JSON.stringify(followUps[0]).includes("found three bugs"));
+  assertEquals(started.length, 1, "an idle parent must be woken");
+});
+
+Deno.test("a blocking child neither queues nor wakes", async () => {
+  const followUps: unknown[] = [];
+  const started: unknown[] = [];
+  await deliverChildResult(
+    fakeDeliverDeps({ followUps, started, child: { detached: false } }) as never,
+    "c-1",
+    { text: "x" },
+  );
+  assertEquals(followUps.length, 0);
+  assertEquals(started.length, 0);
+});
+
+Deno.test("a failed child still reaches its parent", async () => {
+  const followUps: unknown[] = [];
+  await deliverChildResult(fakeDeliverDeps({ followUps }) as never, "c-1", { error: "model refused" });
+  assert(JSON.stringify(followUps[0]).includes("model refused"), "a failure must not vanish");
+});
+
+Deno.test("a busy parent gets the followup but no second turn", async () => {
+  const followUps: unknown[] = [];
+  const started: unknown[] = [];
+  await deliverChildResult(
+    fakeDeliverDeps({ followUps, started, runningTurn: { id: "t-9" } }) as never,
+    "c-1",
+    { text: "x" },
+  );
+  assertEquals(followUps.length, 1);
+  assertEquals(started.length, 0, "one turn at a time — the running turn will drain it");
+});
+
+Deno.test("the wake budget stops a runaway loop", async () => {
+  const started: unknown[] = [];
+  await deliverChildResult(
+    fakeDeliverDeps({ started, wakes: MAX_CONSECUTIVE_WAKES }) as never,
+    "c-1",
+    { text: "x" },
+  );
+  assertEquals(started.length, 0, "at the cap the parent must not be woken again");
+});
+
+Deno.test("a session with no parent (or an unknown session) is left alone", async () => {
+  const followUps: unknown[] = [];
+  const started: unknown[] = [];
+  const deps = fakeDeliverDeps({ followUps, started });
+  // deno-lint-ignore no-explicit-any
+  (deps.store as any).getSession = (_id: string) => Promise.resolve(null);
+  await deliverChildResult(deps as never, "top-level-session", { text: "x" });
+  assertEquals(followUps.length, 0);
+  assertEquals(started.length, 0);
+});
+
+// --- Task 8: end-to-end through the real handler --------------------------
+
+Deno.test("a real detached child's completion wakes its idle parent with a followup turn", async () => {
+  const { handler, db } = await makeHandler({ model: model("the subtask is done") });
+  const store = createStore(db.query as never);
+
+  const parentRes = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "kick off a background task" }),
+  }));
+  const parentId = parentRes.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  const turnsBeforeWake = db.turns.filter((t) => t.session_id === parentId).length;
+
+  const childId = await store.createChildSession({
+    plugin: "toy-agent",
+    agent: "toy",
+    parentSessionId: parentId,
+    parentTurnId: null,
+    subagent: null,
+    nickname: "wisp",
+    detached: true,
+  });
+
+  const childRes = await handler(new Request(`${BASE}/eve/v1/session/${childId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "do the subtask" }),
+  }));
+  assertEquals(childRes.status, 202);
+
+  // Waits for the wake turn's row to actually appear before checking it
+  // finished — settled(db) alone would race true the instant the child's own
+  // turn completes but before deliverChildResult has started the parent's
+  // next turn.
+  await until(() => db.turns.filter((t) => t.session_id === parentId).length > turnsBeforeWake);
+  await until(() => settled(db));
+
+  const parentTurns = db.turns.filter((t) => t.session_id === parentId).sort((a, b) => a.seq - b.seq);
+  assertEquals(parentTurns.length, turnsBeforeWake + 1, "the parent should have gained exactly one new turn");
+  const wokenTurn = parentTurns[parentTurns.length - 1];
+  assertEquals(wokenTurn.status, "completed");
+  assert(
+    typeof wokenTurn.message === "string" && wokenTurn.message.includes("wisp") &&
+      wokenTurn.message.includes("the subtask is done"),
+    `expected the woken turn's message to name the child and carry its result: ${JSON.stringify(wokenTurn.message)}`,
+  );
+  assertEquals(db.sessions.get(parentId)?.consecutive_wakes, 1, "the wake budget should have bumped exactly once");
+});
+
+Deno.test("a blocking (non-detached) child's completion never wakes its parent", async () => {
+  const { handler, db } = await makeHandler({ model: model("blocking child result") });
+  const store = createStore(db.query as never);
+
+  const parentRes = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const parentId = parentRes.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  const turnsBeforeWake = db.turns.filter((t) => t.session_id === parentId).length;
+
+  const childId = await store.createChildSession({
+    plugin: "toy-agent",
+    agent: "toy",
+    parentSessionId: parentId,
+    parentTurnId: null,
+    subagent: null,
+    nickname: "blocker",
+    detached: false,
+  });
+
+  await handler(new Request(`${BASE}/eve/v1/session/${childId}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "do it" }),
+  }));
+  await until(() => settled(db));
+  // Give any (incorrect) wake a moment to land before asserting its absence.
+  await new Promise((r) => setTimeout(r, 100));
+
+  assertEquals(
+    db.turns.filter((t) => t.session_id === parentId).length,
+    turnsBeforeWake,
+    "a blocking child's completion must never start a new parent turn",
+  );
+  assertEquals(db.followUps.filter((f) => f.session_id === parentId).length, 0);
+});
+
+// Single real turn (not two) — a second full turn through the toy agent's
+// real MCP connection attempt is what made this test flake on Deno's leak
+// sanitizer (an environmental issue shared with several pre-existing
+// Discord/channel-gate tests in this file, not a bug in this logic). The
+// wake e2e test above already proves the OTHER half — that a wake-started
+// turn does NOT reset the budget — via its final consecutive_wakes === 1
+// assertion (a buggy unconditional reset there would zero it back out after
+// deliverChildResult's bump).
+Deno.test("resetConsecutiveWakes fires for an ordinary (non-wake) turn", async () => {
+  const resets: string[] = [];
+  const { handler, db } = await makeHandler({
+    wrapStore: (s) => ({
+      ...s,
+      resetConsecutiveWakes: (id: string) => {
+        resets.push(id);
+        return s.resetConsecutiveWakes(id);
+      },
+    }),
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  const sessionId = res.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  assertEquals(resets, [sessionId], "an ordinary, non-wake turn must reset the wake budget");
 });

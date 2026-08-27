@@ -75,8 +75,18 @@ export function createStore(query: QueryFn) {
     // created_by is read back here (not just written by createSession) so
     // handler.ts's approval routes can enforce session ownership — see
     // resolveApprovalDecision's caller-side check.
+    //
+    // parent_session_id/detached/nickname are additive (Task 8,
+    // deliverChildResult): the only other read of a child's own row,
+    // getChild(agentId, parentSessionId), requires the parent id already
+    // known — useless from a child's own terminal path, which knows only its
+    // OWN session id and must discover whether it even HAS a parent, and
+    // whether that parent should be woken.
     async getSession(id: string) {
-      const r = await query(`SELECT id, status, created_by FROM agents.sessions WHERE id = $1`, [id]);
+      const r = await query(
+        `SELECT id, status, created_by, parent_session_id, detached, nickname FROM agents.sessions WHERE id = $1`,
+        [id],
+      );
       return r.rows[0] ?? null;
     },
 

@@ -22,6 +22,7 @@ import { maybeCompact } from "./context/compact.ts";
 import { partitionTools } from "./context/toolsplit.ts";
 import { SUMMARY_PREFIX } from "./context/prompts.ts";
 import { createSpawnCapabilities, type SpawnCapabilities } from "./spawn.ts";
+import { MAX_CONSECUTIVE_WAKES } from "./orchestration.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -325,6 +326,21 @@ function startTurn(
       return;
     }
 
+    // The wake budget (deliverChildResult, below) counts turns in a row
+    // started by a child completing rather than by anyone asking. Reset it
+    // here on every turn NOT started that way, so a session legitimately
+    // woken many times over a long life, with real messages in between,
+    // never creeps toward MAX_CONSECUTIVE_WAKES — only deliverChildResult's
+    // own `wake` call sets metadata.wokenBy, so its absence here means a
+    // human or channel (or the session's own first message) started this
+    // turn. Best-effort: a failed reset must not fail the turn over
+    // bookkeeping, same posture as the other non-critical reads below.
+    if (!(metadata && typeof metadata === "object" && "wokenBy" in (metadata as Record<string, unknown>))) {
+      await deps.store.resetConsecutiveWakes(sessionId).catch((e) =>
+        console.error(`agents: resetConsecutiveWakes failed for session ${sessionId} (continuing):`, e)
+      );
+    }
+
     // Fold in anything queued while an earlier turn on this session was
     // running (see above) — it rides along with this turn's message instead
     // of racing it as a separate turn. Ordinary case (nothing queued) is a
@@ -551,6 +567,15 @@ function startTurn(
     // to (addTurn, above) moments ago, and guessing 0 on a blip could let a
     // child spawn a grandchild for the one turn it guessed wrong.
     const depth = (await deps.store.isChildSession(sessionId)) ? 1 : 0;
+    // Built once, reused by both the success and failure delivery calls
+    // below. Deliberately a narrow object (not the full Deps) so
+    // deliverChildResult stays unit-testable without a real runTurn/model —
+    // `wake` closes over THIS turn's `deps`, exactly mirroring
+    // buildSpawnCapabilities' own startChildTurn closure a few lines up.
+    const deliverDeps: DeliverDeps = {
+      store: deps.store,
+      wake: (sid, msg, meta) => startTurn(deps, sid, msg, meta),
+    };
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -576,6 +601,22 @@ function startTurn(
         startTurn(deps, sessionId, followUps.join("\n\n"), metadata, bearerToken, userId, onTurnCreated);
         return;
       }
+      // This session IS a child (depth===1) and its own work has genuinely
+      // ended (no follow-up chain above) — tell its parent. Only meaningful
+      // for a DETACHED child; deliverChildResult itself no-ops for a
+      // blocking one (spawn.ts's awaitChild reads the result directly).
+      // Gated on `depth` (already known, no extra query) rather than always
+      // calling deliverChildResult and letting its own getSession check
+      // no-op — the overwhelming majority of turns are top-level.
+      if (depth === 1) {
+        const text = await readChildResultText(deps.store, sessionId).catch((e) => {
+          console.error(`agents: could not read child ${sessionId}'s result for delivery to its parent:`, e);
+          return "";
+        });
+        deliverChildResult(deliverDeps, sessionId, { text }).catch((e) =>
+          console.error(`agents: deliverChildResult failed for child ${sessionId}:`, e)
+        );
+      }
       // eve's client (t.send()/MessageResponse.result()) ends its per-turn
       // read on session.waiting/session.completed/session.failed, not
       // turn.completed — see events.ts. We have no multi-turn parking state,
@@ -587,6 +628,14 @@ function startTurn(
       publish(sessionId, { type: "turn.failed", data: { turnId: turn.id, message: msg } });
       await deps.store.finishTurn(turn.id, "failed", msg);
       publish(sessionId, { type: "session.failed", data: { sessionId, message: msg } });
+      // A thrown turn is still a terminal state for a child — the parent
+      // must hear about it too (invariant: a failure must reach the parent,
+      // never vanish silently into a queue nobody drains).
+      if (depth === 1) {
+        deliverChildResult(deliverDeps, sessionId, { error: msg }).catch((e2) =>
+          console.error(`agents: deliverChildResult failed for child ${sessionId}:`, e2)
+        );
+      }
     } finally {
       // Both exits stop the ticker: a turn that ended is no longer alive, and
       // a beat landing after finishTurn would be a lie. (store.heartbeatTurn's
@@ -595,6 +644,109 @@ function startTurn(
       heartbeat.stop();
     }
   })().catch((e) => console.error("agents: turn crashed:", e));
+}
+
+// Reads back a just-finished turn's result the same way spawn.ts's
+// awaitChild does for a BLOCKING child, so a DETACHED child's delivered
+// result matches what a blocking parent would have seen for the identical
+// turn: `lastStepText` (step-scoped), never the full cross-step `text`
+// runTurn returns — a preamble step ("Let me check...") before the real
+// answer must not leak into what's delivered. Not exported: only
+// deliverChildResult's own caller (startTurn, above) needs it.
+async function readChildResultText(store: AgentStore, sessionId: string): Promise<string> {
+  const turns = await store.getHistory(sessionId);
+  const steps = (turns[turns.length - 1]?.steps ?? []) as Array<{ kind: string; payload: unknown }>;
+  const textStep = [...steps].reverse().find((s) => s.kind === "text");
+  const payload = textStep?.payload as { text?: string; lastStepText?: string } | undefined;
+  return payload?.lastStepText ?? payload?.text ?? "";
+}
+
+export type ChildOutcome = { text: string } | { error: string };
+
+// Deliberately narrow — not the full Deps/AgentStore — so deliverChildResult
+// is unit-testable without a real agent/model/runTurn. The DB-shaped
+// bookkeeping calls are `Pick`ed straight off AgentStore, so a test fake is
+// checked against the real method signatures; `wake` is a plain callback the
+// real call site (startTurn, above) binds to itself, the same pattern
+// spawn.ts's SpawnDeps.startChildTurn already uses to keep spawn.ts decoupled
+// from this module's concrete startTurn.
+export interface DeliverDeps {
+  store: Pick<
+    AgentStore,
+    "getSession" | "queueFollowUp" | "getRunningTurn" | "bumpConsecutiveWakes" | "takeFollowUps"
+  >;
+  /** Starts (or resumes) the parent session's next turn. Fire-and-forget, same posture as startTurn itself. */
+  wake(sessionId: string, message: string, metadata: unknown): void;
+}
+
+/**
+ * A child's turn has ended. Tell its parent, and wake the parent if nobody
+ * else is going to.
+ *
+ * Invariant 1 (priority order): a BLOCKING child (detached: false) returns
+ * through the tool call that started it — spawn.ts's awaitChild polls the
+ * child's own history directly. This must NOT queue anything for a blocking
+ * child: a followup would spawn a redundant parent turn the instant the
+ * parent's own turn (the one awaiting this child) ends.
+ *
+ * Invariant 2: a failure must reach the parent exactly like a success does —
+ * both outcomes fold into the SAME queued-followup-then-maybe-wake path
+ * below, just with different wording. A result that silently vanished into a
+ * queue nobody ever drains is worse than a visible error.
+ *
+ * Invariant 3: one turn at a time. A parent already running a turn will
+ * drain this followup itself once it finishes (see startTurn's own
+ * takeFollowUps call) — starting a second turn here is exactly the bug
+ * idx_agents_turns_one_running_per_session (V9) exists to make impossible;
+ * this check is the primary defense, not a reliance on catching that index's
+ * rejection.
+ *
+ * Invariant 4: the wake budget. `wake` is only ever invoked from here, so
+ * MAX_CONSECUTIVE_WAKES bounds a parent that spawns a child on every wake
+ * into an unbroken chain that would otherwise run forever, one real model
+ * call per link, billed to the caller's own API key. resetConsecutiveWakes
+ * (called from startTurn on any turn NOT started by a wake) is what keeps
+ * this counter measuring "how far this run has gone with nobody asking"
+ * rather than "how many wakes this session has ever had" — without that
+ * reset, a long-lived session woken legitimately many times would eventually
+ * hit this cap for no good reason.
+ */
+export async function deliverChildResult(
+  deps: DeliverDeps,
+  childSessionId: string,
+  outcome: ChildOutcome,
+): Promise<void> {
+  const child = await deps.store.getSession(childSessionId) as
+    | { parent_session_id?: string | null; detached?: boolean; nickname?: string | null }
+    | null;
+  if (!child?.parent_session_id || !child.detached) return;
+
+  const parentSessionId = child.parent_session_id;
+  const who = child.nickname || childSessionId;
+  const text = "error" in outcome
+    ? `Agent ${who} failed: ${outcome.error}`
+    : `Agent ${who} finished:\n\n${outcome.text}`;
+  await deps.store.queueFollowUp(parentSessionId, text);
+
+  if (await deps.store.getRunningTurn(parentSessionId)) return;
+
+  const wakes = await deps.store.bumpConsecutiveWakes(parentSessionId);
+  if (wakes >= MAX_CONSECUTIVE_WAKES) {
+    console.warn(
+      `agents: not waking session ${parentSessionId} after child ${childSessionId} (${who}) completed — ` +
+        `${wakes} consecutive wakes reached MAX_CONSECUTIVE_WAKES (${MAX_CONSECUTIVE_WAKES}). The result is ` +
+        `queued and will be delivered the next time something else (a human, a channel) messages this session.`,
+    );
+    return;
+  }
+
+  // Drained here, not left for startTurn to re-drain, so the drain and the
+  // start below cannot interleave with another waker racing the same check —
+  // see startTurn's own takeFollowUps call, which this bypasses by passing
+  // the result straight into `wake`.
+  const queued = await deps.store.takeFollowUps(parentSessionId);
+  if (queued.length === 0) return; // another waker already won this race
+  deps.wake(parentSessionId, queued.join("\n\n"), { wokenBy: childSessionId });
 }
 
 // Shared by every route that can delegate (the session/turn path above and
