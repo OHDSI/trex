@@ -137,6 +137,17 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
   });
 
   let text = "";
+  // The text produced by the CURRENT step only, reset at every step
+  // boundary (see "finish-step" below). Delegation (toolset.ts's
+  // runAsChild/awaitChild) needs step-scoped semantics — the same thing
+  // ai's own `result.text` promise gives a nested in-process call — because
+  // a preamble step ("Let me check the config...") followed by a tool call
+  // and then the real answer must not have the preamble leak into the
+  // returned answer. `text` above stays the full cross-step narrative
+  // (message.appended/message.completed still want that for a human reading
+  // chat); `lastStepText` is captured alongside it, purely additively.
+  let stepText = "";
+  let lastStepText = "";
   let finishReason = "unknown";
   let textPersisted = false;
   // A clientOnly tool call ends the turn with no text by DESIGN — the caller
@@ -185,8 +196,10 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     textPersisted = true;
     // finishReason travels with the persisted text so a replayed session can
     // reconstruct message.completed's finishReason (see handler.ts's
-    // stepToEvent) the same way the live tail does above.
-    await persist("text", null, { text, finishReason });
+    // stepToEvent) the same way the live tail does above. lastStepText is
+    // for spawn.ts's awaitChild only (see its own comment) — every other
+    // reader of this step keeps using `text`.
+    await persist("text", null, { text, finishReason, lastStepText });
   };
   try {
     for await (const part of result.fullStream) {
@@ -194,6 +207,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
         case "text-delta": {
           const delta = (part as any).text ?? (part as any).delta ?? "";
           text += delta;
+          stepText += delta;
           // eve's message.appended carries both the incremental delta and the
           // cumulative text so far as `messageSoFar` (see COMPAT.md); the
           // one-shot message.completed (final text, once the turn ends) is
@@ -232,6 +246,11 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
           // the FINAL step's prefill — see lastStepInputTokens' declaration.
           const u = (part as any).usage;
           if (typeof u?.inputTokens === "number") lastStepInputTokens = u.inputTokens;
+          // Capture THIS step's text before resetting for the next one, so
+          // after the last step lastStepText holds exactly its text (and
+          // nothing from any earlier step) — see stepText's declaration.
+          lastStepText = stepText;
+          stepText = "";
           break;
         }
         case "finish": {

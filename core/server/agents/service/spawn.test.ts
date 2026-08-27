@@ -21,6 +21,10 @@ function fakeDeps(over: Record<string, unknown> = {}) {
         ...(over.store as object ?? {}),
       },
       config: { freshTurns: 3 },
+      // Fix round 1: defaults to a durable-session parent (matches every
+      // existing test in this file, which spawns detached:true fixtures);
+      // /chat's own ephemeral-parent case is covered separately below.
+      allowDetached: true,
       startChildTurn: (o: unknown) => {
         started.push(o);
         return Promise.resolve();
@@ -172,4 +176,111 @@ Deno.test("waitForChildren, stopChild and sendToChild throw a clear not-implemen
       (e: Error) => assert(e.message.toLowerCase().includes("not implemented"), e.message),
     );
   }
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Finding 1/2: /chat's parent session is ephemeral (created per
+// request, never revisited) — a DETACHED child spawned from it would be
+// silently orphaned, since nothing will ever poll/wake for its result.
+// spawnChild refuses at the capability level so a future built-in that
+// forgets to gate its own registration on `allowDetached` still fails
+// loudly instead of quietly leaking an unreachable child.
+// ---------------------------------------------------------------------------
+
+Deno.test("spawnChild refuses a detached child when the parent session disallows it", async () => {
+  const { deps, started } = fakeDeps({ allowDetached: false });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(caps.allowDetached, false);
+  await caps.spawnChild({ subagent: null, prompt: "x", forkTurns: "none", detached: true })
+    .then(() => {
+      throw new Error("should have refused");
+    })
+    .catch((e: Error) => assert(e.message.toLowerCase().includes("detached"), e.message));
+  assertEquals(started.length, 0, "no turn may start when the spawn is refused");
+});
+
+Deno.test("spawnChild still allows a NON-detached (blocking) child when the parent disallows detached", async () => {
+  const { deps, started } = fakeDeps({ allowDetached: false });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  const out = await caps.spawnChild({ subagent: null, prompt: "x", forkTurns: "none", detached: false });
+  assertEquals(out.agentId, "c-1");
+  assertEquals(started.length, 1);
+});
+
+Deno.test("SpawnCapabilities.allowDetached reflects the deps it was built from", async () => {
+  const { deps: allowed } = fakeDeps({ allowDetached: true });
+  const { deps: disallowed } = fakeDeps({ allowDetached: false });
+  // deno-lint-ignore no-explicit-any
+  assertEquals(createSpawnCapabilities(allowed as any).allowDetached, true);
+  // deno-lint-ignore no-explicit-any
+  assertEquals(createSpawnCapabilities(disallowed as any).allowDetached, false);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Finding 3: awaitChild must return STEP-SCOPED text (what the
+// old in-process runSubagent got for free from ai's own `result.text`), not
+// runner.ts's cross-step narrative `text` field — a child that narrates
+// before calling a tool ("Let me check the config...") must not have that
+// preamble leak into the answer agent_wait/agent callers see.
+// ---------------------------------------------------------------------------
+
+Deno.test("awaitChild returns lastStepText (step-scoped), not the cross-step text, when both are present", async () => {
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "completed" }),
+      getHistory: () =>
+        Promise.resolve([
+          {
+            seq: 1,
+            message: "go",
+            metadata: null,
+            steps: [{
+              kind: "text",
+              name: null,
+              payload: { text: "Let me check the config...found it", lastStepText: "found it" },
+            }],
+          },
+        ]),
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.awaitChild("c-1"), { text: "found it" });
+});
+
+Deno.test("awaitChild falls back to `text` only when lastStepText is genuinely absent (pre-migration data)", async () => {
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "completed" }),
+      getHistory: () =>
+        Promise.resolve([
+          { seq: 1, message: "go", metadata: null, steps: [{ kind: "text", name: null, payload: { text: "done" } }] },
+        ]),
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.awaitChild("c-1"), { text: "done" });
+});
+
+Deno.test("awaitChild returns an intentionally-empty lastStepText as-is, not the stale earlier-step text", async () => {
+  const { deps } = fakeDeps({
+    store: {
+      getChild: () => Promise.resolve({ agentId: "c-1", nickname: "K", status: "completed" }),
+      getHistory: () =>
+        Promise.resolve([
+          {
+            seq: 1,
+            message: "go",
+            metadata: null,
+            steps: [{ kind: "text", name: null, payload: { text: "stale preamble", lastStepText: "" } }],
+          },
+        ]),
+    },
+  });
+  // deno-lint-ignore no-explicit-any
+  const caps = createSpawnCapabilities(deps as any);
+  assertEquals(await caps.awaitChild("c-1"), { text: "" });
 });

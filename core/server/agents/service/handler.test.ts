@@ -50,7 +50,17 @@ function inMemoryDb() {
   // Minimal in-memory impl of the SQL the store issues, keyed by table.
   // Exposed state (turns/steps/approvals) lets tests assert on persistence
   // and drive approval decisions without Postgres.
-  const sessions = new Map<string, { status: string; created_by: string | null }>();
+  const sessions = new Map<string, {
+    status: string;
+    created_by: string | null;
+    // Orchestration columns (fix round 1) — undefined for an ordinary
+    // (non-child) session, same as agents.sessions' real nullable columns.
+    parent_session_id?: string;
+    subagent?: string | null;
+    nickname?: string;
+    detached?: boolean;
+    createdAt: Date;
+  }>();
   const turns: Array<
     { id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown; startedAt: Date }
   > = [];
@@ -70,9 +80,66 @@ function inMemoryDb() {
   let n = 0;
   const query = (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params });
+    // Orchestration (fix round 1): createChildSession's INSERT also matches
+    // the generic "INSERT INTO agents.sessions" substring below, so it MUST
+    // be checked first — distinguished by the parent_session_id column,
+    // which only this statement's column list names.
+    if (sql.includes("INSERT INTO agents.sessions") && sql.includes("parent_session_id")) {
+      const id = `s-${++n}`;
+      const [plugin_, agent_, createdBy, parentSessionId, , subagent, nickname, detached] = params as [
+        string,
+        string,
+        string | null,
+        string,
+        string | null,
+        string | null,
+        string,
+        boolean,
+      ];
+      void plugin_;
+      void agent_;
+      sessions.set(id, {
+        status: "active",
+        created_by: createdBy,
+        parent_session_id: parentSessionId,
+        subagent,
+        nickname,
+        detached,
+        createdAt: new Date(),
+      });
+      return Promise.resolve({ rows: [{ id }] });
+    }
+    // countChildren — live/total over parent_session_id's children.
+    if (sql.includes("count(*) FILTER")) {
+      const pid = params[0] as string;
+      const children = [...sessions.entries()].filter(([, s]) => s.parent_session_id === pid);
+      const live = children.filter(([id]) => turns.some((t) => t.session_id === id && t.status === "running")).length;
+      return Promise.resolve({ rows: [{ live, total: children.length }] });
+    }
+    // getChild / listChildren — LEFT JOIN LATERAL the latest turn (by seq)
+    // for each child session; getChild additionally scopes to one id.
+    if (sql.includes("turn_status") && sql.includes("turn_error")) {
+      const pid = sql.includes("s.id = $1 AND s.parent_session_id = $2") ? (params[1] as string) : (params[0] as string);
+      const onlyId = sql.includes("s.id = $1 AND s.parent_session_id = $2") ? (params[0] as string) : undefined;
+      const rows = [...sessions.entries()]
+        .filter(([id, s]) => s.parent_session_id === pid && (onlyId === undefined || id === onlyId))
+        .map(([id, s]) => {
+          const latest = turns.filter((t) => t.session_id === id).sort((a, b) => b.seq - a.seq)[0];
+          return {
+            id,
+            nickname: s.nickname,
+            subagent: s.subagent ?? null,
+            detached: s.detached ?? false,
+            created_at: s.createdAt,
+            turn_status: latest?.status ?? null,
+            turn_error: latest?.error ?? null,
+          };
+        });
+      return Promise.resolve({ rows });
+    }
     if (sql.includes("INSERT INTO agents.sessions")) {
       const id = `s-${++n}`;
-      sessions.set(id, { status: "active", created_by: (params[2] as string | null) ?? null });
+      sessions.set(id, { status: "active", created_by: (params[2] as string | null) ?? null, createdAt: new Date() });
       return Promise.resolve({ rows: [{ id }] });
     }
     if (sql.includes("SELECT id, status, created_by FROM agents.sessions")) {
@@ -208,9 +275,31 @@ function inMemoryDb() {
         .map((s) => ({ turn_id: s.turn_id, kind: s.kind, name: s.name, payload: parse(s.payload), usage: parse(s.usage) }));
       return Promise.resolve({ rows });
     }
+    // getHistory — turns with their steps aggregated (used by both the
+    // compaction/history-assembly path and, orchestration-wise, by
+    // spawn.ts's spawnChild (forking the parent's history) and awaitChild
+    // (reading a child's own final text/error step).
+    if (sql.includes("jsonb_agg")) {
+      const sid = params[0] as string;
+      const parse = (v: unknown) => (typeof v === "string" ? JSON.parse(v) : v);
+      const rows = turns
+        .filter((t) => t.session_id === sid)
+        .sort((a, b) => a.seq - b.seq)
+        .map((t) => ({
+          id: t.id,
+          seq: t.seq,
+          message: t.message,
+          metadata: null,
+          steps: steps
+            .filter((s) => s.turn_id === t.id)
+            .sort((a, b) => a.seq - b.seq)
+            .map((s) => ({ kind: s.kind, name: s.name, payload: parse(s.payload) })),
+        }));
+      return Promise.resolve({ rows });
+    }
     return Promise.resolve({ rows: [] });
   };
-  return { query, turns, steps, approvals, toolConsents, calls, followUps };
+  return { query, sessions, turns, steps, approvals, toolConsents, calls, followUps };
 }
 
 // See runner.test.ts's FINISH/sequencedModel comment: ai@6's raw doStream
@@ -1869,6 +1958,43 @@ Deno.test("POST /chat returns a UIMessage stream", async () => {
   assert((res.headers.get("content-type") || "").includes("text/event-stream"));
   const body = await res.text();
   assert(body.length > 0);
+});
+
+// Fix round 1, Finding 1: /chat is a second live production route
+// (COMPAT.md — kept for useChat frontends), and it now wires ctx.spawn too
+// (handler.ts's buildSpawnCapabilities), so the built-in `agent` tool goes
+// through the SAME child-session delegation the session/turn path uses —
+// there is exactly one implementation, not two that can silently diverge on
+// fork_turns/error-shape/progress-events by which route the caller happens
+// to hit. This proves it actually works end-to-end on /chat, not merely
+// that the code compiles: a real child session gets created, runs its own
+// turn (through the SAME mocked model, since /chat's tool call blocks on
+// awaitChild before the parent's own next model call can happen), and its
+// answer reaches the parent's final reply.
+Deno.test("POST /chat: the built-in agent tool spawns and awaits a REAL child session", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(
+      toolCallChunks("agent", { prompt: "say hi" }),
+      textChunks("child says hi"),
+      textChunks("parent says done"),
+    ),
+  });
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "delegate this" }] }] }),
+  }));
+  assertEquals(res.status, 200);
+  const text = await res.text();
+  assert(text.includes("parent says done"), `expected the parent's post-delegation answer in the stream: ${text}`);
+
+  // Proves this went through spawnChild/createChildSession for real — a
+  // child session row exists, scoped to the /chat request's (ephemeral)
+  // session as its parent.
+  const children = [...db.sessions.values()].filter((s) => s.parent_session_id !== undefined);
+  assertEquals(children.length, 1, "expected exactly one child session created by the agent tool");
+  // And its own turn actually ran and completed (not left running/orphaned).
+  const childTurns = db.turns.filter((t) => t.session_id !== undefined && t.status === "completed");
+  assert(childTurns.length >= 1, "expected at least the child's own turn to have completed");
 });
 
 // task-u1: usage must reach the wire via the finish part's messageMetadata —

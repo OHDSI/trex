@@ -44,6 +44,17 @@ export interface SpawnCapabilities {
   /** Polls until the child's turn reaches a terminal state (see AWAIT_CHILD_*). */
   awaitChild(agentId: string): Promise<{ text: string } | { error: string }>;
   listChildren(): Promise<ChildAgent[]>;
+  // Whether spawnChild will accept detached: true for THIS parent session.
+  // False for an ephemeral, never-revisited session (/chat — see
+  // handler.ts's wiring) where a detached child's completion would have
+  // nobody left to observe it. Built-ins that create detached children
+  // (agent_spawn/agent_list — Task 9; agent_wait/agent_stop/agent_send —
+  // Tasks 10-12) MUST gate their own registration on this flag, not merely
+  // on ctx.spawn being truthy — /chat wires ctx.spawn too, for the
+  // BLOCKING `agent` tool. spawnChild itself also refuses a detached
+  // request when this is false, so a caller that skips the registration
+  // check still fails loudly instead of silently orphaning a child.
+  readonly allowDetached: boolean;
   // Filled in by Task 10 (agent_wait). Present now so a caller that reaches
   // for it fails loudly instead of silently doing nothing.
   waitForChildren(agentIds: string[] | null, timeoutMs: number): Promise<ChildAgent[]>;
@@ -83,6 +94,8 @@ export interface SpawnDeps {
   agent: string;
   store: SpawnStore;
   config: ContextConfig;
+  // See SpawnCapabilities.allowDetached — passed straight through.
+  allowDetached: boolean;
   // Kicks off the child's first turn. Fire-and-forget (same posture as
   // handler.ts's own startTurn) — this resolves once the turn has been
   // asked to start, not once it finishes. `history`, when given, seeds the
@@ -102,7 +115,15 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
   const { store, sessionId: parentSessionId, turnId: parentTurnId, plugin, agent, config } = deps;
 
   return {
+    allowDetached: deps.allowDetached,
+
     async spawnChild({ subagent, prompt, forkTurns, detached }) {
+      if (detached && !deps.allowDetached) {
+        throw new Error(
+          "agents: this session cannot spawn a detached agent — it is never revisited, " +
+            "so a detached child's result would be silently orphaned; use blocking delegation instead",
+        );
+      }
       const counts = await store.countChildren(parentSessionId);
       const admit = checkSpawnAllowed(counts);
       if (!admit.allowed) throw new Error(admit.reason);
@@ -165,7 +186,17 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
         const message = (errorStep?.payload as { message?: string } | undefined)?.message;
         return { error: message ?? `agent "${child.nickname}" failed` };
       }
-      const text = (textStep?.payload as { text?: string } | undefined)?.text ?? "";
+      // lastStepText (runner.ts) is step-scoped, matching what a nested
+      // in-process call's own `result.text` always gave — a preamble step
+      // ("Let me check the config...") before a tool call must not leak
+      // into a delegated answer, even if the FINAL step itself produced no
+      // text at all (then this is correctly ""; see runner.ts). `??`, not
+      // `||`: an intentional empty final step must not fall back to the
+      // (stale, earlier-step) `text` field — that fallback is only for a
+      // turn persisted before lastStepText existed at all (field genuinely
+      // absent), or a test fixture that fabricates only `text`.
+      const payload = textStep?.payload as { text?: string; lastStepText?: string } | undefined;
+      const text = payload?.lastStepText ?? payload?.text ?? "";
       return { text };
     },
 

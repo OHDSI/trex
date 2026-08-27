@@ -21,7 +21,7 @@ import { estimatePrefixTokens, estimateTokens, type ContextConfig } from "./cont
 import { maybeCompact } from "./context/compact.ts";
 import { partitionTools } from "./context/toolsplit.ts";
 import { SUMMARY_PREFIX } from "./context/prompts.ts";
-import { createSpawnCapabilities } from "./spawn.ts";
+import { createSpawnCapabilities, type SpawnCapabilities } from "./spawn.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -532,40 +532,11 @@ function startTurn(
     const heartbeat = startTurnHeartbeat(deps.store, turn.id);
     // Built fresh per turn (spawnChild forks THIS turn's parent history at
     // spawn time, and a spawned child's parent_turn_id is this turn's own
-    // id — neither is known any earlier in this function).
-    const spawn = createSpawnCapabilities({
-      sessionId,
-      turnId: turn.id,
-      plugin: deps.plugin,
-      agent: deps.agentName,
-      store: deps.store,
-      config: deps.agent.config.context,
-      startChildTurn: (o) => {
-        // A named subagent's child turn must run under ITS OWN
-        // instructions/tools/model, not the parent's — mirrors the
-        // Object.hasOwn guard resolveTarget applies before a subagent name
-        // ever reaches here (toolset.ts), repeated defensively so a bogus
-        // value can never resolve through the prototype chain.
-        const childAgent = o.subagent && Object.hasOwn(deps.agent.subagents, o.subagent)
-          ? deps.agent.subagents[o.subagent]
-          : deps.agent;
-        if (o.subagent && childAgent === deps.agent) {
-          console.error(
-            `agents: spawnChild resolved an unknown subagent "${o.subagent}" on session ${sessionId} — running the child as a copy of the parent instead`,
-          );
-        }
-        startTurn(
-          { ...deps, agent: childAgent },
-          o.sessionId,
-          o.message,
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          o.history,
-        );
-      },
-    });
+    // id — neither is known any earlier in this function). true: this
+    // session is durable and gets revisited, so a detached child (Task 9+)
+    // can be woken later — see buildSpawnCapabilities' own comment for why
+    // /chat passes false here instead.
+    const spawn = buildSpawnCapabilities(deps, sessionId, turn.id, true);
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -609,6 +580,67 @@ function startTurn(
       heartbeat.stop();
     }
   })().catch((e) => console.error("agents: turn crashed:", e));
+}
+
+// Shared by every route that can delegate (the session/turn path above and
+// /chat below) so there is exactly ONE wiring of ctx.spawn, and therefore
+// exactly one implementation of delegation (toolset.ts's runAsChild) for the
+// built-in `agent` tool to go through — see fix-round-1 in
+// task-6-7-report.md for why a second, divergent implementation
+// (the old in-process runSubagent, now deleted) was a bug factory: fork_turns
+// honored on one route and silently ignored on the other, errors returned on
+// one and thrown on the other, progress events differing between them.
+//
+// `allowDetached` is the one real difference between the two callers: the
+// session path's session is durable and gets revisited (a later message, the
+// periodic sweep, ...), so a detached child (Task 9's agent_spawn onward) can
+// be woken later by something. /chat's session is created fresh per request
+// and never revisited (COMPAT.md) — a detached child spawned from it would be
+// silently orphaned, since nothing will ever poll or wake for its result. See
+// spawn.ts's SpawnCapabilities.allowDetached for where this is actually
+// enforced (spawnChild itself refuses a detached request when this is
+// false — not just a "don't register the tool" convention a future built-in
+// could get wrong).
+function buildSpawnCapabilities(
+  deps: Deps,
+  sessionId: string,
+  turnId: string,
+  allowDetached: boolean,
+): SpawnCapabilities {
+  return createSpawnCapabilities({
+    sessionId,
+    turnId,
+    plugin: deps.plugin,
+    agent: deps.agentName,
+    store: deps.store,
+    config: deps.agent.config.context,
+    allowDetached,
+    startChildTurn: (o) => {
+      // A named subagent's child turn must run under ITS OWN
+      // instructions/tools/model, not the parent's — mirrors the
+      // Object.hasOwn guard resolveTarget applies before a subagent name
+      // ever reaches here (toolset.ts), repeated defensively so a bogus
+      // value can never resolve through the prototype chain.
+      const childAgent = o.subagent && Object.hasOwn(deps.agent.subagents, o.subagent)
+        ? deps.agent.subagents[o.subagent]
+        : deps.agent;
+      if (o.subagent && childAgent === deps.agent) {
+        console.error(
+          `agents: spawnChild resolved an unknown subagent "${o.subagent}" on session ${sessionId} — running the child as a copy of the parent instead`,
+        );
+      }
+      startTurn(
+        { ...deps, agent: childAgent },
+        o.sessionId,
+        o.message,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        o.history,
+      );
+    },
+  });
 }
 
 // Reap notifications need the agent's channel definitions and the channel
@@ -974,10 +1006,18 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       // persists the id would help. There is no such client: the one
       // in-repo caller (devx's AGENTS_CHAT_URL) moved to the session API
       // and is now unreferenced.
+      // false: /chat's session is created fresh per request and never
+      // revisited — see buildSpawnCapabilities' own comment. The built-in
+      // `agent` tool still works (spawnChild/awaitChild both run and
+      // resolve inside THIS request, same as the session path), but a
+      // detached child (Task 9's agent_spawn onward) would be orphaned, so
+      // spawnChild refuses one outright.
+      const spawn = buildSpawnCapabilities(deps, sessionId, turn.id, false);
       const tools = await buildSdkTools({
         agent, sessionId, metadata: body.metadata, bearerToken, userId: createdBy, model, store, hookCtx, toolEmit,
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
+        spawn,
       });
       // Switched from the bare `result.toUIMessageStreamResponse()` to
       // createUIMessageStream + writer.merge so ToolContext.emit has somewhere

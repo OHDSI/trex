@@ -4,13 +4,14 @@
 // Deviation (ruling applied): the brief's wrapToolWithCap(tool, config,
 // onResult) is dropped to wrapToolWithCap(tool, config) — no callback,
 // asserted on the return value instead. See toolset.ts for why.
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { wrapToolWithCap, buildSdkTools } from "./toolset.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { assembleHistory } from "./context/history.ts";
 import { loadAgent } from "../loader.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
 import { createStore } from "./store.ts";
+import { publish } from "./stream.ts";
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {
@@ -373,13 +374,13 @@ Deno.test("buildSdkTools: no tool-payload log when the agent defers nothing", as
 // (blocking, `{text}`; unknown subagent -> `{error, available}`). See
 // .superpowers/sdd/2026-08-27-agent-orchestration/task-7-brief.md.
 //
-// Deviation from the brief: the in-process nested loop (runSubagent) is kept
-// as a fallback for when ctx.spawn is not wired, rather than deleted. Deleting
-// it breaks hooks.test.ts's "runSubagent ..." tests (5 tests exercising the
-// old in-process behavior — mocked model, granular subagent.tool events, and
-// errors that THROW rather than returning {error} — none of which wire
-// ctx.spawn). Every real production call site (handler.ts) always wires
-// ctx.spawn, so the fallback only serves callers/tests with no session store.
+// Fix round 1, Finding 1: the in-process nested loop (runSubagent) is fully
+// deleted, not kept as a fallback — /chat wires ctx.spawn too now (see
+// handler.ts's buildSpawnCapabilities), so there is exactly one delegation
+// implementation and no route where the old fallback is still reachable.
+// The 5 "runSubagent ..." tests that exercised it directly (hooks.test.ts)
+// are migrated to drive the same semantics through the child-session path —
+// see hooks.test.ts's "delegation (child session)" block.
 // ---------------------------------------------------------------------------
 
 // deno-lint-ignore no-explicit-any
@@ -460,13 +461,97 @@ Deno.test("agent does not resolve __proto__ as a subagent", async () => {
   assert(out.error?.includes("__proto__"), "must fall into the unknown-subagent branch");
 });
 
-Deno.test("agent falls back to the in-process nested loop when ctx.spawn is not wired", async () => {
+// Fix round 1, Finding 1: the old in-process fallback (runSubagent) is gone
+// — both real routes (session/turn path and /chat) always wire ctx.spawn now,
+// so there is exactly one delegation implementation. A caller that omits it
+// is a wiring bug and must fail loudly, not silently revive the old path.
+Deno.test("agent rejects loudly (does not silently fall back) when ctx.spawn is not wired", async () => {
   const agent = await loadAgent(TOY);
   const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
-  // No subagent named "shouter" invocation needed here — this only proves the
-  // fallback path is reachable and still returns the old {error, available}
-  // shape for an unknown name, with no ctx.spawn required to get there.
+  await assertRejects(
+    () => (tools.agent as { execute: (i: unknown) => Promise<unknown> }).execute({ prompt: "x" }),
+    Error,
+    "ctx.spawn",
+  );
+});
+
+// The unknown-subagent guard runs BEFORE ctx.spawn is even checked, so it
+// still works with no spawn capabilities wired at all — this is the ONE
+// case that genuinely needs no ctx.spawn, not a fallback delegation path.
+Deno.test("agent still rejects an unknown subagent even with no ctx.spawn wired at all", async () => {
+  const agent = await loadAgent(TOY);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
   const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> })
     .execute({ agent: "nope", prompt: "x" }) as { error?: string; available?: string[] };
   assertEquals(out, { error: 'unknown subagent "nope"', available: Object.keys(agent.subagents) });
+});
+
+// Fix round 1, Finding 4: the child now runs as its own turn/session, which
+// publishes its own actions.requested/action.result on stream.ts's live
+// fan-out — runAsChild subscribes to that for the duration of the wait and
+// bridges them onto the parent's toolEmit as subagent.tool, under the SAME
+// runId as subagent.start/end, matching the old in-process loop's
+// one-runId granularity.
+Deno.test("agent bridges the child's own tool-call/tool-result events onto the parent's toolEmit as subagent.tool", async () => {
+  const events: Array<{ name: string; data: unknown }> = [];
+  const ctx = fakeToolCtx({
+    toolEmit: (name: string, data: unknown) => events.push({ name, data }),
+    spawn: {
+      spawnChild: () => Promise.resolve({ agentId: "c-1", nickname: "Kepler" }),
+      awaitChild: (agentId: string) => {
+        // Simulate the child's own turn publishing progress WHILE the
+        // parent is still waiting — exactly the live window runAsChild's
+        // subscribe() is meant to observe.
+        publish(agentId, {
+          type: "actions.requested",
+          data: { turnId: "ct-1", actions: [{ kind: "tool-call", callId: "x", toolName: "shout", input: { text: "hi" } }] },
+        });
+        publish(agentId, {
+          type: "action.result",
+          data: { turnId: "ct-1", result: { kind: "tool-result", callId: "x", toolName: "shout", output: "HI" }, status: "completed" },
+        });
+        return { text: "done" };
+      },
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  const out = await (tools.agent as { execute: (i: unknown) => Promise<unknown> }).execute({ prompt: "go" });
+  assertEquals(out, { text: "done" });
+
+  const names = events.map((e) => e.name);
+  assertEquals(names, ["subagent.start", "subagent.tool", "subagent.tool", "subagent.end"]);
+  const runIds = new Set(events.map((e) => (e.data as { runId: string }).runId));
+  assertEquals(runIds.size, 1, "one runId for the whole delegation, same as the old in-process loop");
+  assertEquals((events[1].data as { name: string; input: unknown }).name, "shout");
+  assertEquals((events[1].data as { input: unknown }).input, { text: "hi" });
+  assertEquals((events[2].data as { result: unknown }).result, "HI");
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Finding 2: /chat's session is created fresh per request and
+// never revisited (COMPAT.md) — a DETACHED child spawned from it would be
+// silently orphaned (nothing will ever poll/wake for its result). /chat
+// must only ever get the BLOCKING `agent` tool. This pins that contract at
+// the tool-set level so Task 9 (which registers agent_spawn/agent_list at
+// depth 0, gated on ctx.spawn) cannot give /chat detached spawning by
+// accident — see spawn.ts's SpawnCapabilities.allowDetached, which is the
+// mechanism this must be gated on instead of ctx.spawn alone.
+// ---------------------------------------------------------------------------
+
+Deno.test("a spawn-capable ctx with allowDetached:false still exposes the blocking agent tool", async () => {
+  const ctx = fakeToolCtx({
+    spawn: {
+      allowDetached: false,
+      spawnChild: () => Promise.resolve({ agentId: "c-1", nickname: "K" }),
+      awaitChild: () => Promise.resolve({ text: "ok" }),
+    },
+  });
+  const tools = await buildSdkTools(ctx as never);
+  assert("agent" in tools, "/chat-shaped ctx must still get the blocking agent tool");
+  // Task 9 doesn't exist yet in this codebase snapshot, so these are
+  // trivially absent today — the assertion is a tripwire: once agent_spawn
+  // exists, it must still be absent here specifically BECAUSE ctx.spawn
+  // .allowDetached is false, not merely because nobody wrote it yet.
+  assert(!("agent_spawn" in tools), "a session that cannot spawn detached children must never get agent_spawn");
+  assert(!("agent_list" in tools), "a session that cannot spawn detached children must never get agent_list");
 });

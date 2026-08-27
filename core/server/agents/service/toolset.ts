@@ -3,8 +3,8 @@
 // Shared by runner.ts (session API) and handler.ts (/chat) so the two
 // endpoints cannot drift. Spec §3 (skills/subagents) + §4 (extensions).
 // deno-lint-ignore-file no-explicit-any
-import { streamText, tool, jsonSchema, stepCountIs } from "ai";
-import { cacheProviderOptions, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
+import { tool, jsonSchema } from "ai";
+import { withToolCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
@@ -12,6 +12,7 @@ import { buildConnectionProvider, type ConnectionProviderOpts } from "../connect
 import { type ConnectionToolMeta, searchConnectionTools } from "../connections/search.ts";
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
+import { subscribe } from "./stream.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { partitionTools } from "./context/toolsplit.ts";
@@ -259,93 +260,6 @@ function skillTool(ctx: ToolBuildCtx): any {
   });
 }
 
-// Runs a subagent (or a copy of the current agent) as a nested loop with
-// fresh history. Nested activity is streamed step-by-step via toolEmit
-// (subagent.start/tool/end, one runId per invocation) so a delegated turn
-// is not opaque until it finishes; no UI consumes these events yet.
-async function runSubagent(target: LoadedAgent, prompt: string, ctx: ToolBuildCtx): Promise<{ text: string }> {
-  // A subagent's own declared model wins; otherwise inherit the caller's
-  // (already-resolved) model, resolving the parent's string as last resort.
-  const model = target.config.model
-    ? resolveModel(target.config.model)
-    : ctx.model ?? resolveModel(ctx.agent.config.model);
-  // depth: 1 suppresses the target's own dynamic-tools.ts provider (a
-  // top-level-only concern, same rationale as skill/agent built-ins being
-  // top-level-only — see buildSdkTools) but NOT target.config.filterTools,
-  // which still runs against depth-1's (smaller) tool set using the same
-  // hookCtx carried in via the ...ctx spread.
-  const tools = await buildSdkTools({ ...ctx, agent: target, depth: 1 });
-  // Resolved through the same path a top-level turn uses (resolveInstructions),
-  // not the bare static buildSystemPrompt — a subagent is not a
-  // second-class turn, and its target may define its own buildInstructions
-  // hook (e.g. project rules, session state) that a static prompt can never
-  // carry. hookCtx comes along via the `...ctx` spread above.
-  const system = await resolveInstructions(target, ctx.metadata, ctx.hookCtx);
-  // Same cache-point treatment (bedrock + anthropic) as runner.ts's
-  // primary turn loop, for consistency — a subagent's system+tools prefix is
-  // just as stable/repeated (across its own steps) as the top-level turn's.
-  const result = streamText({
-    model,
-    system: withSystemCachePoint(model, system),
-    messages: [{ role: "user" as const, content: prompt }],
-    tools,
-    stopWhen: stepCountIs(target.config.maxSteps ?? 25),
-    // Same openai prompt-cache routing as runner.ts, keyed by the subagent's dir.
-    providerOptions: cacheProviderOptions(model, target.dir),
-  });
-  // Consume fullStream for progress events (subagent.tool) so the nested
-  // turn's steps reach the UI via toolEmit (already threaded in via the
-  // {...ctx} spread above — no new plumbing). Part shapes match runner.ts's
-  // own switch over this same ai@6 stream (toolCallId/toolName/input/output).
-  // runId keeps concurrent subagent runs apart on the shared channel.
-  // LoadedAgent has no `name` field (see loader.ts) — derive it from the
-  // agent's directory, the same way handler.ts's subagents.local listing
-  // does for depth-0 subagents (Object.entries key there; here we only have
-  // `target`, so its dir's basename is the closest equivalent).
-  const runId = crypto.randomUUID();
-  const agentName = target.dir.split("/").filter(Boolean).pop() ?? target.dir;
-  ctx.toolEmit?.("subagent.start", { runId, agent: agentName });
-  let text = "";
-  let error: string | undefined;
-  try {
-    for await (const part of result.fullStream) {
-      const p = part as any;
-      switch (p.type) {
-        case "tool-call":
-          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, input: p.input });
-          break;
-        case "tool-result":
-          ctx.toolEmit?.("subagent.tool", { runId, callId: p.toolCallId, name: p.toolName, result: p.output });
-          break;
-        case "error":
-          // fullStream surfaces a model/stream error as an "error" part
-          // WITHOUT throwing out of the for-await loop, and result.text
-          // below still resolves (to whatever text preceded the error)
-          // rather than rejecting — verified empirically (task-4-report.md).
-          // So this must be captured explicitly or it is silently dropped.
-          error = p.error instanceof Error ? p.error.message : String(p.error ?? "unknown model error");
-          break;
-      }
-    }
-    // Preserve the OLD (pre-Task-4) semantics exactly: `await result.text`
-    // resolves to only the FINAL step's text, not a sum of every step's
-    // text-delta (ai's recordedContent resets at each step boundary) —
-    // verified empirically that draining fullStream first neither hangs nor
-    // starves this promise (task-4-report.md). A preamble-then-tool-call
-    // step's text must NOT leak into the returned answer.
-    text = await result.text;
-    if (error) throw new Error(error);
-  } catch (e) {
-    error = error ?? (e instanceof Error ? e.message : String(e));
-    throw e;
-  } finally {
-    // Always fires, success or failure, so a subagent.start never goes
-    // without a matching subagent.end (observability: no dangling runs).
-    ctx.toolEmit?.("subagent.end", { runId, text, ...(error ? { error } : {}) });
-  }
-  return { text };
-}
-
 // Shared JSON Schema for the fork_turns parameter — reused by agent_spawn
 // (Task 9) so both spawn paths describe the trade-off identically.
 const FORK_TURNS_SCHEMA = {
@@ -379,11 +293,12 @@ function resolveTarget(ctx: ToolBuildCtx, name?: string): SubagentResolution {
 // Runs a delegated subtask as a real child session (see spawn.ts) and blocks
 // for its result — the `agent` tool's contract (blocking, `{text}`) is
 // unchanged; only the mechanism underneath it is now a durable session
-// instead of an in-process nested loop. Coarse-grained subagent.start/end
-// toolEmit events bracket the child turn; the old per-tool-call
-// `subagent.tool` events came from being INSIDE the nested loop and have no
-// direct equivalent now that the child runs as its own turn/session with its
-// own event stream — left for a later task to bridge, if ever needed.
+// instead of an in-process nested loop. subagent.start/tool/end toolEmit
+// events (one runId per invocation, same vocabulary the old in-process loop
+// used) still fire: the child publishes actions.requested/action.result on
+// its OWN session's live stream (runner.ts, via stream.ts's publish), same
+// as any turn does, so this subscribes to that stream for the duration of
+// the wait and translates them onto the PARENT's toolEmit channel.
 async function runAsChild(
   ctx: ToolBuildCtx,
   name: string | null,
@@ -399,10 +314,36 @@ async function runAsChild(
     // parent turn the moment this (still-running) turn ends.
     detached: false,
   });
-  ctx.toolEmit?.("subagent.start", { runId: agentId, agent: name ?? undefined, nickname });
-  const result = await ctx.spawn!.awaitChild(agentId);
-  ctx.toolEmit?.("subagent.end", { runId: agentId, nickname, ...result });
+  const runId = agentId;
+  ctx.toolEmit?.("subagent.start", { runId, agent: name ?? undefined, nickname });
+  // No-op (not just unsubscribed) when nobody wired toolEmit — subscribing
+  // to a stream nobody will ever read is pure overhead.
+  const unsubscribe = ctx.toolEmit ? subscribe(agentId, (e: AgentEvent) => bridgeChildEvent(ctx, runId, e)) : undefined;
+  let result: { text: string } | { error: string };
+  try {
+    result = await ctx.spawn!.awaitChild(agentId);
+  } finally {
+    unsubscribe?.();
+  }
+  ctx.toolEmit?.("subagent.end", { runId, nickname, ...result });
   return "error" in result ? { error: result.error } : { text: result.text };
+}
+
+// Translates the child's OWN tool-call/tool-result events (runner.ts emits
+// these for every turn, parent or child alike) into the parent's
+// subagent.tool toolEmit vocabulary. Best-effort: the child's turn also
+// publishes turn.started/message.appended/etc, which have no subagent.*
+// counterpart and are silently ignored here — this only ever needs the two
+// action shapes runSubagent (now removed) used to report.
+function bridgeChildEvent(ctx: ToolBuildCtx, runId: string, e: AgentEvent): void {
+  if (e.type === "actions.requested") {
+    for (const a of e.data.actions) {
+      ctx.toolEmit?.("subagent.tool", { runId, callId: a.callId, name: a.toolName, input: a.input });
+    }
+  } else if (e.type === "action.result") {
+    const r = e.data.result;
+    ctx.toolEmit?.("subagent.tool", { runId, callId: r.callId, name: r.toolName, result: r.output });
+  }
 }
 
 function agentTool(ctx: ToolBuildCtx): any {
@@ -430,13 +371,17 @@ function agentTool(ctx: ToolBuildCtx): any {
       const { agent: name, prompt, fork_turns } = input as { agent?: string; prompt: string; fork_turns?: string };
       const resolved = resolveTarget(ctx, name);
       if (!resolved.ok) return Promise.resolve(resolved.error);
-      if (ctx.spawn) return runAsChild(ctx, name ?? null, prompt, fork_turns);
-      // No spawn capabilities wired — every real production call site
-      // (handler.ts) wires ctx.spawn; this fallback only exists so a caller
-      // with no session store (most unit tests, and any legacy caller) keeps
-      // working exactly as it always has, via the original in-process
-      // nested loop.
-      return runSubagent(resolved.target, prompt, ctx);
+      // Both real routes (the session/turn path and /chat) always wire
+      // ctx.spawn — see handler.ts's buildSpawnCapabilities. A caller that
+      // doesn't is a wiring bug: fail loudly rather than silently reviving
+      // the old in-process nested loop, which would let fork_turns/error
+      // shape/progress-event behavior quietly diverge by call site again
+      // (see fix-round-1 in task-6-7-report.md for why that was a bug, not
+      // a feature).
+      if (!ctx.spawn) {
+        return Promise.reject(new Error("agents: the agent tool requires ctx.spawn to be wired"));
+      }
+      return runAsChild(ctx, name ?? null, prompt, fork_turns);
     },
   });
 }

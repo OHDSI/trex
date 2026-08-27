@@ -2,9 +2,13 @@ import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { runTurn } from "./runner.ts";
 import { loadAgent } from "../loader.ts";
+import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
+import { createSpawnCapabilities, type SpawnCapabilities } from "./spawn.ts";
+import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
+import { publish } from "./stream.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 
@@ -364,6 +368,75 @@ Deno.test("built-in skill tool returns available list for unknown skill", async 
   assert(JSON.stringify(ev.data.result.output).includes("greeting-style"));
 });
 
+// Fix round 1 (task-6-7-report.md), Finding 1: the built-in `agent` tool now
+// ALWAYS routes through a real child session (ctx.spawn is required, no more
+// in-process fallback) — see toolset.ts's agentTool/runAsChild. A bare
+// runTurn() call (this file drives runTurn directly, not through
+// handler.ts's startTurn) must wire RunTurnOpts.spawn itself, same as
+// hooks.test.ts's makeChildSpawn.
+interface FakeChild {
+  status: "running" | "completed" | "failed";
+  steps: Array<{ kind: string; name: string | null; payload: unknown }>;
+}
+
+function makeChildSpawn(agent: LoadedAgent, model: unknown): SpawnCapabilities {
+  const children = new Map<string, FakeChild>();
+  let n = 0;
+  return createSpawnCapabilities({
+    sessionId: "p-1",
+    turnId: "pt-1",
+    plugin: "toy-agent",
+    agent: "toy",
+    config: DEFAULT_CONTEXT_CONFIG,
+    allowDetached: false,
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: children.size }),
+      listChildren: () => Promise.resolve([]),
+      createChildSession: () => {
+        const id = `c-${++n}`;
+        children.set(id, { status: "running", steps: [] });
+        return Promise.resolve(id);
+      },
+      getHistory: (sessionId: string) => {
+        const child = children.get(sessionId);
+        return Promise.resolve(child ? [{ seq: 1, message: "", metadata: null, steps: child.steps }] : []);
+      },
+      getChild: (agentId: string) => {
+        const child = children.get(agentId);
+        return Promise.resolve(
+          child
+            ? { agentId, nickname: "Kid", subagent: null, status: child.status, startedAt: new Date(), detached: false }
+            : null,
+        );
+      },
+      failTurnsForSession: () => Promise.resolve(0),
+      queueFollowUp: () => Promise.resolve(),
+      takeFollowUps: () => Promise.resolve([]),
+    },
+    startChildTurn: (o) => {
+      const child = children.get(o.sessionId)!;
+      const target = o.subagent ? agent.subagents[o.subagent] : agent;
+      const fakeStore = {
+        addStep: (_turnId: string, _seq: number, kind: string, name: string | null, payload: unknown) => {
+          child.steps.push({ kind, name, payload });
+          return Promise.resolve();
+        },
+      };
+      (async () => {
+        try {
+          await runTurn({
+            agent: target, sessionId: o.sessionId, turnId: "ct-1", history: o.history ?? [],
+            message: o.message, store: fakeStore as never, emit: (e) => publish(o.sessionId, e), model,
+          });
+          child.status = "completed";
+        } catch {
+          child.status = "failed";
+        }
+      })();
+    },
+  });
+}
+
 Deno.test("built-in agent tool runs a named subagent and returns its text", async () => {
   const agent = await loadAgent(TOY);
   const { store } = memoryStoreCalls();
@@ -378,6 +451,7 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
   await runTurn({
     agent, sessionId: "s-1", turnId: "t-1", history: [],
     message: "delegate", store, emit: (e) => events.push(e), model,
+    spawn: makeChildSpawn(agent, model),
   });
   const ev = events.find(
     (e) => e.type === "action.result" && (e as { data: { result: { toolName: string } } }).data.result.toolName === "agent",
