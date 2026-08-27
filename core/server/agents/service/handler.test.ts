@@ -2273,6 +2273,9 @@ Deno.test({
       await store.addStep(t1.id, 1, "tool-call", "Read", { toolCallId: "c1", input: { path: "config.ts" } });
       await store.addStep(t1.id, 2, "tool-result", "Read", { toolCallId: "c1", output: "export const PORT = 8080;" });
       await store.addStep(t1.id, 3, "text", null, { text: "It sets PORT to 8080." });
+      // Real turns always finish before the next one starts — enforced by
+      // idx_agents_turns_one_running_per_session (V9) — so this must too.
+      await store.finishTurn(t1.id, "completed");
 
       // Turn 2: what the model would actually be sent.
       await store.addTurn(sessionId, "what port was that?");
