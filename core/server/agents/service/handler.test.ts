@@ -1,6 +1,6 @@
 import { assert, assertEquals, assertExists, assertRejects } from "jsr:@std/assert";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { createHandler, buildHistory, deliverChildResult, buildDeliverDeps } from "./handler.ts";
+import { createHandler, buildHistory, deliverChildResult, buildDeliverDeps, type DeliverDeps } from "./handler.ts";
 import { createSpawnCapabilities } from "./spawn.ts";
 import { restrictChildTools } from "./toolset.ts";
 import { resolveModelForTurn } from "./model.ts";
@@ -3402,7 +3402,7 @@ Deno.test("fix round 1: a turn a reap already claimed is not resurrected by a la
   const agent = await loadAgent(TOY);
   const db = inMemoryDb();
   const baseStore = createStore(db.query as never);
-  const simulatedReapDeliveries: unknown[] = [];
+  const simulatedReapDeliveries: { sid: string; msg: string; childId: string }[] = [];
 
   // Forces the exact race fix round 1 closes: the FIRST time this worker's
   // own success tail tries to finishTurn("completed"), a reap (the periodic
@@ -3427,11 +3427,16 @@ Deno.test("fix round 1: a turn a reap already claimed is not resurrected by a la
         // A recording `wake`, not a real one — proves the REAP's own
         // delivery landed exactly once, independent of whatever handler.ts's
         // real (possibly still-buggy) success tail does moments later.
-        await deliverChildResult(
-          { store: baseStore, wake: (sid, msg, childId) => simulatedReapDeliveries.push({ sid, msg, childId }) } as never,
-          t.session_id,
-          { error: ABANDONED_CHILD_ERROR },
-        );
+        // Built as a real DeliverDeps rather than cast to `never`: the cast
+        // stripped the contextual type off `wake`, leaving its three
+        // parameters implicitly `any` — so nothing checked that this fake
+        // records the same (sessionId, message, childSessionId) triple the
+        // real wake is handed.
+        const reapDeps: DeliverDeps = {
+          store: baseStore,
+          wake: (sid, msg, childId) => void simulatedReapDeliveries.push({ sid, msg, childId }),
+        };
+        await deliverChildResult(reapDeps, t.session_id, { error: ABANDONED_CHILD_ERROR });
       }
       return baseStore.finishTurn(turnId, status, error);
     },

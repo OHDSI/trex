@@ -93,6 +93,10 @@ function mockArgs(
     waitUntil: (p) => {
       pending.push(p);
     },
+    // Never called by this adapter (it has no thread-following path), but
+    // ChannelRouteArgs requires it — and a fixture that silently omitted a
+    // required member is exactly how this file drifted from the interface.
+    hasSession: () => Promise.resolve(false),
     requestIp: null,
   };
   return { args, sends, resumes, flush: async () => void (await Promise.allSettled(pending)) };

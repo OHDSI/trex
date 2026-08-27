@@ -11,6 +11,25 @@ function fakeQuery(responses: Array<{ rows: unknown[] }>) {
   return { fn, calls };
 }
 
+type RecordedCall = { sql: string; params?: unknown[] };
+
+/**
+ * The parameters of the nth recorded query.
+ *
+ * QueryFn's `params` is genuinely optional — a parameter-free query passes
+ * none — so `calls[0].params[0]` is an index into a possibly-undefined value.
+ * Rather than assert it away, this states the thing the test actually means:
+ * THIS query must have been parameterised. A store method that silently
+ * stopped passing its params now fails with that sentence instead of a bare
+ * "cannot read property 0 of undefined".
+ */
+function paramsOf(calls: RecordedCall[], n = 0): unknown[] {
+  const call = calls[n];
+  assert(call, `expected at least ${n + 1} recorded quer${n ? "ies" : "y"}, got ${calls.length}`);
+  assert(call.params, `query ${n} was issued with no parameters at all: ${call.sql}`);
+  return call.params;
+}
+
 Deno.test("createSession inserts and returns id", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ id: "s-1" }] }]);
   const store = createStore(fn as never);
@@ -300,10 +319,10 @@ Deno.test("reapStaleTurns issues the exact SQL shape and abandoned-turn error st
   // reads the delivery channel off it, and by reap time the row is the only
   // place still holding it.
   assert(calls[0].sql.includes("RETURNING id, metadata"));
-  assertEquals(calls[0].params[0], "s-1");
+  assertEquals(paramsOf(calls)[0], "s-1");
   assert(
-    calls[0].params.includes("turn abandoned (no completion within 120 minutes)"),
-    `expected the exact abandoned-turn error string in params, got: ${JSON.stringify(calls[0].params)}`,
+    paramsOf(calls).includes("turn abandoned (no completion within 120 minutes)"),
+    `expected the exact abandoned-turn error string in params, got: ${JSON.stringify(paramsOf(calls))}`,
   );
 });
 
@@ -313,8 +332,8 @@ Deno.test("reapStaleTurns computes a cutoff strictly in the past (catches a reve
   const before = Date.now();
   await store.reapStaleTurns("s-1", 2 * 60 * 60 * 1000); // 2h
   const after = Date.now();
-  const cutoff = calls[0].params[1] as Date;
-  assert(cutoff instanceof Date, `expected a Date parameter, got: ${JSON.stringify(calls[0].params)}`);
+  const cutoff = paramsOf(calls)[1] as Date;
+  assert(cutoff instanceof Date, `expected a Date parameter, got: ${JSON.stringify(paramsOf(calls))}`);
   // cutoff must land within [before - 2h, after - 2h] — i.e. "2h ago", not
   // "2h from now" (which a Date.now() + olderThanMs bug would produce, and
   // which this range would never contain).
@@ -341,9 +360,9 @@ Deno.test("listSessionsWithStaleRunningTurns scopes to the given plugin+agent vi
   assert(calls[0].sql.includes("status = 'running'"));
   assert(calls[0].sql.includes("s.plugin = $2"));
   assert(calls[0].sql.includes("s.agent = $3"));
-  assertEquals(calls[0].params[1], "claw-agent");
-  assertEquals(calls[0].params[2], "claw");
-  assert(calls[0].params[0] instanceof Date);
+  assertEquals(paramsOf(calls)[1], "claw-agent");
+  assertEquals(paramsOf(calls)[2], "claw");
+  assert(paramsOf(calls)[0] instanceof Date);
 });
 
 // The follow-up queue a busy session folds a new message into (instead of

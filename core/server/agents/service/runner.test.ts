@@ -750,9 +750,13 @@ Deno.test("authored tools get ToolContext.sql; provider-sourced (dynamic-tools) 
 
 Deno.test("runTurn: onTurnEnd receives the final text and finishReason", async () => {
   const agent = await loadAgent(TOY);
-  let seen: { text: string; finishReason: string } | null = null;
+  // Collected rather than held in a `let ... | null`: TS narrows such a
+  // binding to `null` at the read site (it cannot see the callback assign to
+  // it), which made `seen?.text` an access on `never`. An array also lets the
+  // test say the hook ran EXACTLY once, which the nullable form never checked.
+  const seen: { text: string; finishReason: string }[] = [];
   agent.config.onTurnEnd = (turn: { text: string; finishReason: string }) => {
-    seen = turn;
+    seen.push(turn);
     return Promise.resolve();
   };
   const { store } = memoryStoreCalls();
@@ -763,8 +767,9 @@ Deno.test("runTurn: onTurnEnd receives the final text and finishReason", async (
     hookCtx: fakeHookCtx(),
   });
   assertEquals(out.text, "all done");
-  assertEquals(seen?.text, "all done");
-  assertEquals(seen?.finishReason, "stop");
+  assertEquals(seen.length, 1, "onTurnEnd must run exactly once per turn");
+  assertEquals(seen[0]?.text, "all done");
+  assertEquals(seen[0]?.finishReason, "stop");
 });
 
 Deno.test("runTurn: a throwing onTurnEnd does not fail the turn", async () => {
