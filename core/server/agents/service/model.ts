@@ -198,6 +198,39 @@ export function cacheProviderOptions(model: any, cacheKey: string): Record<strin
   return {};
 }
 
+// Task 14: applies a subagent's declared `reasoningEffort` (AgentConfig,
+// resolved by loader.ts's resolveAgentRole) to the resolved model's
+// providerOptions. openai only for now — it's the one provider in this
+// codebase with established precedent for a plain-string `reasoningEffort`
+// providerOption (see model.test.ts's withToolCachePoint fixtures); anthropic
+// reasoning is a token-budget object, not a "low"/"high"/"medium" string, and
+// bolting an incorrect shape onto a live request with no test to catch it is
+// worse than leaving it a no-op there until a real caller needs it. Empty
+// ({}) whenever effort is unset or the model isn't openai — same "no-op for
+// everything this doesn't explicitly support" posture as cacheProviderOptions
+// above.
+// deno-lint-ignore no-explicit-any
+export function reasoningEffortProviderOptions(model: any, effort: string | undefined): Record<string, any> {
+  if (effort && isOpenAIModel(model)) {
+    return { openai: { reasoningEffort: effort } };
+  }
+  return {};
+}
+
+// Merges N streamText-level providerOptions objects, per-provider-key —
+// `{...a, ...b}` at the top level would let `b`'s "openai" entirely clobber
+// `a`'s (e.g. reasoningEffortProviderOptions' `reasoningEffort` erasing
+// cacheProviderOptions' `promptCacheKey`, or vice versa) instead of the two
+// coexisting under the same provider key.
+// deno-lint-ignore no-explicit-any
+export function mergeProviderOptions(...opts: Record<string, any>[]): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const o of opts) {
+    for (const [k, v] of Object.entries(o)) out[k] = { ...out[k], ...v };
+  }
+  return out;
+}
+
 // A SystemModelMessage carrying a provider cache marker (Bedrock cachePoint
 // or Anthropic cacheControl), or the plain-string no-op for every other
 // provider.

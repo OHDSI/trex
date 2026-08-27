@@ -55,6 +55,16 @@ export interface AgentConfig {
   model?: string; // eve/AI-Gateway format: "provider/model-id"
   maxSteps?: number;
   context?: Partial<ContextConfig>;
+  // Per-subagent role config (task-14, ported from codex's role.rs). Both are
+  // REDUCING ONLY: a caller delegating to a subagent can never grant it more
+  // than it already has itself. `skills`, when declared on a subagent, is
+  // intersected against the delegating session's OWN skill names — never
+  // unioned — by loader.ts's resolveChildSkills; wired at delegation time by
+  // service/toolset.ts's restrictChildSkills. `reasoningEffort` is applied to
+  // the resolved model's providerOptions (model.ts's
+  // reasoningEffortProviderOptions) when the child's own turn runs.
+  reasoningEffort?: string;
+  skills?: string[];
   // Additive hooks (eve ignores unknown defineAgent fields): called on EVERY
   // turn/chat request, never cached at agent-load time. A thrown/rejected
   // hook must fail the request rather than silently falling back to

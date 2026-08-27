@@ -1,5 +1,5 @@
 import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, mergeProviderOptions, parseModelString, reasoningEffortProviderOptions, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -144,6 +144,43 @@ Deno.test("cacheProviderOptions returns a promptCacheKey only for openai models"
   assertEquals(cacheProviderOptions({ provider: "anthropic.messages" }, "k"), {});
   // No key → nothing to route on, even for openai.
   assertEquals(cacheProviderOptions({ provider: "openai.responses" }, ""), {});
+});
+
+// reasoningEffortProviderOptions / mergeProviderOptions (agent-orchestration
+// Task 14): a subagent's declared reasoningEffort applied to its resolved
+// model's providerOptions, merged with cacheProviderOptions' output without
+// either clobbering the other's provider key.
+
+Deno.test("reasoningEffortProviderOptions applies only to openai models", () => {
+  assertEquals(
+    reasoningEffortProviderOptions({ provider: "openai.responses" }, "high"),
+    { openai: { reasoningEffort: "high" } },
+  );
+  assertEquals(reasoningEffortProviderOptions({ provider: "anthropic.messages" }, "high"), {});
+  assertEquals(reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "high"), {});
+});
+
+Deno.test("reasoningEffortProviderOptions is a no-op when effort is unset", () => {
+  assertEquals(reasoningEffortProviderOptions({ provider: "openai.responses" }, undefined), {});
+});
+
+Deno.test("mergeProviderOptions merges per-provider-key rather than clobbering", () => {
+  const merged = mergeProviderOptions(
+    { openai: { promptCacheKey: "trex-agents/claw" } },
+    { openai: { reasoningEffort: "low" } },
+  );
+  assertEquals(merged, { openai: { promptCacheKey: "trex-agents/claw", reasoningEffort: "low" } });
+});
+
+Deno.test("mergeProviderOptions keeps distinct provider keys separate", () => {
+  const merged = mergeProviderOptions(
+    { anthropic: { cacheControl: { type: "ephemeral" } } },
+    { openai: { reasoningEffort: "low" } },
+  );
+  assertEquals(merged, {
+    anthropic: { cacheControl: { type: "ephemeral" } },
+    openai: { reasoningEffort: "low" },
+  });
 });
 
 // withToolCachePoint (Task 14): the cache breakpoint moves from the system

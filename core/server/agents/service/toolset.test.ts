@@ -5,7 +5,7 @@
 // onResult) is dropped to wrapToolWithCap(tool, config) — no callback,
 // asserted on the return value instead. See toolset.ts for why.
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
-import { wrapToolWithCap, buildSdkTools } from "./toolset.ts";
+import { wrapToolWithCap, buildSdkTools, restrictChildSkills } from "./toolset.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { assembleHistory } from "./context/history.ts";
 import { loadAgent } from "../loader.ts";
@@ -399,6 +399,55 @@ function fakeToolCtx(overrides: Record<string, unknown> = {}): any {
     ...overrides,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Task 14: restrictChildSkills — reducing only (codex role.rs). See
+// loader.ts's resolveChildSkills for the pure intersection logic this wires
+// into a real delegation.
+// ---------------------------------------------------------------------------
+
+// deno-lint-ignore no-explicit-any
+function fakeAgentWithSkills(names: string[], configSkills?: string[]): any {
+  return {
+    dir: `fake-${names.join("-") || "none"}`,
+    instructions: "x",
+    tools: {},
+    skills: names.map((name) => ({ name, description: name, path: `/fake/${name}.md` })),
+    subagents: {},
+    connections: {},
+    config: {
+      context: DEFAULT_CONTEXT_CONFIG,
+      maxSteps: 25,
+      ...(configSkills !== undefined ? { skills: configSkills } : {}),
+    },
+  };
+}
+
+Deno.test("restrictChildSkills: a self-delegation is returned unchanged", () => {
+  const agent = fakeAgentWithSkills(["a", "b"]);
+  assertEquals(restrictChildSkills(agent, agent), agent);
+});
+
+Deno.test("restrictChildSkills: a named subagent's skills are intersected with the parent's, never unioned", () => {
+  const parent = fakeAgentWithSkills(["a", "b"]);
+  const child = fakeAgentWithSkills(["b", "c"], ["b", "c"]); // child has b,c loaded AND declares both
+  const restricted = restrictChildSkills(parent, child);
+  assertEquals(restricted.skills.map((s: { name: string }) => s.name), ["b"]); // c dropped: parent lacks it
+});
+
+Deno.test("restrictChildSkills: no config.skills declared inherits everything the parent has, capped by what the child actually loaded", () => {
+  const parent = fakeAgentWithSkills(["a", "b"]);
+  const child = fakeAgentWithSkills(["a"]); // no config.skills; only "a" loaded on disk
+  const restricted = restrictChildSkills(parent, child);
+  assertEquals(restricted.skills.map((s: { name: string }) => s.name), ["a"]);
+});
+
+Deno.test("restrictChildSkills: a subagent cannot grant itself a skill the parent lacks, even if it loaded it", () => {
+  const parent = fakeAgentWithSkills([]); // parent has no skills at all
+  const child = fakeAgentWithSkills(["secret"], ["secret"]);
+  const restricted = restrictChildSkills(parent, child);
+  assertEquals(restricted.skills, []);
+});
 
 Deno.test("agent still returns {text} and now routes through a child session", async () => {
   const spawned: unknown[] = [];

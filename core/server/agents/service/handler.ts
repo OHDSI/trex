@@ -6,7 +6,7 @@ import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
-import { buildSdkTools, buildSystemPrompt, resolveInstructions } from "./toolset.ts";
+import { buildSdkTools, buildSystemPrompt, resolveInstructions, restrictChildSkills } from "./toolset.ts";
 import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx, QueryFn } from "../eve-shim/types.ts";
@@ -927,14 +927,18 @@ function buildSpawnCapabilities(
       // Object.hasOwn guard resolveTarget applies before a subagent name
       // ever reaches here (toolset.ts), repeated defensively so a bogus
       // value can never resolve through the prototype chain.
-      const childAgent = o.subagent && Object.hasOwn(deps.agent.subagents, o.subagent)
+      const rawChildAgent = o.subagent && Object.hasOwn(deps.agent.subagents, o.subagent)
         ? deps.agent.subagents[o.subagent]
         : deps.agent;
-      if (o.subagent && childAgent === deps.agent) {
+      if (o.subagent && rawChildAgent === deps.agent) {
         console.error(
           `agents: spawnChild resolved an unknown subagent "${o.subagent}" on session ${sessionId} — running the child as a copy of the parent instead`,
         );
       }
+      // Task 14: reducing only — a named subagent's skills are intersected
+      // against the PARENT session's own, never a superset of them. No-op
+      // for self-delegation (rawChildAgent === deps.agent).
+      const childAgent = restrictChildSkills(deps.agent, rawChildAgent);
       startTurn(
         { ...deps, agent: childAgent },
         o.sessionId,

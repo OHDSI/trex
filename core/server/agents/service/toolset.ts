@@ -8,6 +8,7 @@ import { withToolCachePoint } from "./model.ts";
 import { isZodSchema } from "../eve-shim/types.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
+import { resolveChildSkills } from "../loader.ts";
 import { buildConnectionProvider, type ConnectionProviderOpts } from "../connections/provider.ts";
 import { type ConnectionToolMeta, searchConnectionTools } from "../connections/search.ts";
 import type { AgentStore } from "./store.ts";
@@ -295,6 +296,30 @@ function resolveTarget(ctx: ToolBuildCtx, name?: string): SubagentResolution {
     : ctx.agent;
   if (!target) return { ok: false, error: { error: `unknown subagent "${name}"`, available: names } };
   return { ok: true, target };
+}
+
+// Task 14: reducing only (codex role.rs) — a delegating session can never
+// grant a child MORE capability than it itself has. Called by handler.ts's
+// buildSpawnCapabilities at the point it resolves which LoadedAgent will
+// actually run the child's turn (NOT here in resolveTarget: that function's
+// result is only used for validation/description text by agentTool/
+// agent_spawn — the child's real turn re-resolves the subagent independently
+// in handler.ts, so that is the only place a restriction actually takes
+// effect). A self-delegation (`childAgent === parentAgent`, i.e. "delegate to
+// a copy of yourself") is returned unchanged: there is nothing to reduce
+// against, and re-filtering would be a costly no-op on the common path.
+//
+// The child's own skills/ directory stays authoritative for CONTENT (a
+// child never gains a skill neither side loaded); `childAgent.config.skills`,
+// when declared, further narrows which of the PARENT's names the child may
+// use; left undeclared, the child inherits every name the parent currently
+// has (resolveChildSkills' `undefined` case) — capped, either way, by what
+// the child's own directory actually loaded.
+export function restrictChildSkills(parentAgent: LoadedAgent, childAgent: LoadedAgent): LoadedAgent {
+  if (childAgent === parentAgent) return childAgent;
+  const parentNames = parentAgent.skills.map((s) => s.name);
+  const allowed = new Set(resolveChildSkills(parentNames, childAgent.config.skills));
+  return { ...childAgent, skills: childAgent.skills.filter((s) => allowed.has(s.name)) };
 }
 
 // Runs a delegated subtask as a real child session (see spawn.ts) and blocks

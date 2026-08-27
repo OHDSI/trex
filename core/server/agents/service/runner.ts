@@ -4,7 +4,7 @@
 // plugins/devx/functions/agent.ts.
 // deno-lint-ignore-file no-explicit-any
 import { streamText, stepCountIs } from "ai";
-import { cacheProviderOptions, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
+import { cacheProviderOptions, mergeProviderOptions, reasoningEffortProviderOptions, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
 import type { HookCtx, ToolDef } from "../eve-shim/types.ts";
 import type { LoadedAgent } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
@@ -170,7 +170,15 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     // openai/Responses caches automatically; a stable per-agent key keeps the
     // TOOLS+SYSTEM prefix routed to the same cache across turns. No-op ({}) for
     // bedrock/anthropic (they cache via withSystemCachePoint's markers above).
-    providerOptions: cacheProviderOptions(model, agent.dir),
+    // Task 14: reasoningEffortProviderOptions is agent.config.reasoningEffort
+    // applied to THIS turn's own resolved model — nothing spawn-specific is
+    // needed beyond ordinary turn execution, since a child's turn already
+    // runs with its OWN LoadedAgent.config (handler.ts's buildSpawnCapabilities
+    // resolves it before ever calling startTurn).
+    providerOptions: mergeProviderOptions(
+      cacheProviderOptions(model, agent.dir),
+      reasoningEffortProviderOptions(model, agent.config.reasoningEffort),
+    ),
     // Only wired for a CHILD turn (depth===1). prepareStep runs on every
     // step of every turn if it's set at all — leaving it undefined for the
     // overwhelming majority (top-level) case means zero DB round trips for
