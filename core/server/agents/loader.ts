@@ -135,12 +135,17 @@ const CONTEXT_CONFIG_KEYS: ReadonlySet<keyof ContextConfig> = new Set([
 /** Merge an agent's partial `context` block over the conservative defaults. */
 export function resolveContextConfig(raw: unknown): ContextConfig {
   if (!raw || typeof raw !== "object") return { ...DEFAULT_CONTEXT_CONFIG };
-  const out: ContextConfig = { ...DEFAULT_CONTEXT_CONFIG };
+  // The merge is BY DYNAMIC KEY and ContextConfig has no index signature, so
+  // the allowlisted overrides are collected in an open record and applied over
+  // the defaults with Object.assign — which needs no cast in either direction.
+  // The allowlist check is what makes that sound: nothing outside
+  // CONTEXT_CONFIG_KEYS can ever reach `overrides`.
+  const overrides: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
     const key = (EDN_KEY_MAP[k] ?? k) as keyof ContextConfig;
-    if (CONTEXT_CONFIG_KEYS.has(key)) (out as Record<string, unknown>)[key] = v;
+    if (CONTEXT_CONFIG_KEYS.has(key)) overrides[key] = v;
   }
-  return out;
+  return Object.assign({ ...DEFAULT_CONTEXT_CONFIG }, overrides);
 }
 
 // Task 14: per-subagent role config (reasoningEffort/skills). Only `skills`
@@ -202,35 +207,45 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     throw new Error(`agents: ${dir}/instructions.md is required but missing (or instructions.edn)`);
   }
 
-  let config: AgentConfig = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG } };
+  // ResolvedAgentConfig, not AgentConfig: this is what LoadedAgent.config is
+  // declared as, and every branch below already produces a fully resolved
+  // `context`. Typing the local honestly is what makes the return statement
+  // type-check without a cast — and what keeps a future branch from assigning
+  // a partial context and having it surface as an undefined field at some
+  // reader far away instead of here.
+  let config: ResolvedAgentConfig = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG } };
   let configLoaded = false;
   for (const f of ["agent.ts", "agent.js"]) {
     try {
       await Deno.stat(`${dir}/${f}`);
       const mod = await import(`file://${dir}/${f}`);
       if (mod.default) {
-        config = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG }, ...mod.default };
-        // Ensure context is always fully resolved, never partial
-        config.context = resolveContextConfig(config.context);
+        // Both repairs that used to follow this assignment now happen BEFORE
+        // it, so `config` is never transiently invalid:
+        //
+        // - `context` is resolved in the same expression that spreads
+        //   mod.default. Its own `context` is a Partial<ContextConfig>, so a
+        //   two-step version leaves `config` briefly holding an unresolved
+        //   context that only convention stops a later edit from reading.
+        // - the stray EDN-spelled keys are deleted from the copy. The spread
+        //   copies e.g. `"reasoning-effort"` verbatim, under a name that is
+        //   not an AgentConfig field at all; resolveAgentRole below normalizes
+        //   its VALUE onto the real camelCase field, so the kebab spelling is
+        //   garbage rather than a second competing piece of config. Stripping
+        //   it here also means nothing has to reach into the resolved config
+        //   through an index signature it does not have.
+        const authored = { ...(mod.default as AgentConfig) } as AgentConfig & Record<string, unknown>;
+        for (const ednKey of Object.keys(ROLE_EDN_KEYS)) delete authored[ednKey];
+        config = { maxSteps: 25, ...authored, context: resolveContextConfig(authored.context) };
         // Task 14: normalize reasoningEffort/skills through the same
         // allowlist the EDN path uses below — resolveAgentRole is the one
         // place that decides what counts as valid role config, so a stray
-        // kebab-case key on the TS side (spread in verbatim, under the
-        // wrong name, by the `...mod.default` spread above) still resolves
-        // correctly instead of silently never surfacing as the real
-        // camelCase field.
+        // kebab-case key on the TS side still resolves correctly instead of
+        // silently never surfacing as the real camelCase field. Read off the
+        // ORIGINAL mod.default, which still carries those kebab keys.
         const role = resolveAgentRole(mod.default);
         if (role.reasoningEffort !== undefined) config.reasoningEffort = role.reasoningEffort;
         if (role.skills !== undefined) config.skills = role.skills;
-        // Fix round 1: the spread above also copies a stray EDN-spelled key
-        // (e.g. `"reasoning-effort"`) onto `config` verbatim, under a name
-        // that is not a real AgentConfig field — resolveAgentRole already
-        // normalized its VALUE onto the real camelCase field just above, so
-        // leaving the kebab spelling behind too is garbage on the object,
-        // not a second, competing piece of config. Strip it.
-        for (const ednKey of Object.keys(ROLE_EDN_KEYS)) {
-          if (ednKey in config) delete (config as Record<string, unknown>)[ednKey];
-        }
       }
       configLoaded = true;
       break;
