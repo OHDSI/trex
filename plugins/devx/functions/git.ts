@@ -168,6 +168,66 @@ class GitOps {
     }
   }
 
+  // The repo's real default branch, without a network round trip.
+  //
+  // Hardcoding "develop" was wrong in a way that cost a whole conversation: in
+  // Data2Evidence `main` exists but is an UNRELATED ROOT — `git merge-base
+  // origin/main origin/develop` is empty — so a coder that guessed `main` got
+  // "no history in common" from `gh pr create` and a rebase that claimed 2137
+  // unrelated commits, then flailed. `origin/HEAD` is what the remote itself
+  // says its default is, so ask that first and only fall back to guessing.
+  async defaultBranch(repoRoot: string): Promise<string> {
+    const head = await this.revParse(repoRoot, "--abbrev-ref origin/HEAD");
+    // "origin/develop" -> "develop". A repo with no origin/HEAD ref returns
+    // the literal input or fails; both fall through to the candidates below.
+    if (head && head.startsWith("origin/") && !head.includes(" ")) return head.slice("origin/".length);
+    for (const candidate of ["develop", "main", "master"]) {
+      if (await this.refExists(repoRoot, `refs/remotes/origin/${candidate}`)) return candidate;
+    }
+    throw new Error(`could not determine the default branch of ${repoRoot} (no origin/HEAD and no origin/develop|main|master)`);
+  }
+
+  // The worktree's own git directory (worktrees have a .git FILE pointing at
+  // <main>/.git/worktrees/<name>, which is where an in-progress rebase's state
+  // lives — NOT the main repo's .git).
+  async gitDir(wsPath: string): Promise<string | null> {
+    return await this.revParse(wsPath, "--absolute-git-dir");
+  }
+
+  // Which multi-step operation, if any, is halfway through in this worktree.
+  // A turn must never resume on top of one: an interrupted rebase leaves a
+  // DETACHED head with the other branch's tree checked out, which reads as
+  // thousands of uncommitted changes and wedges the reuse guard permanently.
+  async inProgressOperation(wsPath: string): Promise<"rebase" | "merge" | "cherry-pick" | "revert" | null> {
+    const dir = await this.gitDir(wsPath);
+    if (!dir) return null;
+    const probes: Array<[string, "rebase" | "merge" | "cherry-pick" | "revert"]> = [
+      ["rebase-merge", "rebase"],
+      ["rebase-apply", "rebase"],
+      ["MERGE_HEAD", "merge"],
+      ["CHERRY_PICK_HEAD", "cherry-pick"],
+      ["REVERT_HEAD", "revert"],
+    ];
+    for (const [name, kind] of probes) {
+      try {
+        await Deno.stat(`${dir}/${name}`);
+        return kind;
+      } catch { /* not this one */ }
+    }
+    return null;
+  }
+
+  // Abort a half-finished operation, restoring the branch and tree it started
+  // from. Best-effort: if the abort itself fails there is nothing better to try,
+  // and the caller's reuse guard still refuses the worktree.
+  async abortOperation(wsPath: string, kind: "rebase" | "merge" | "cherry-pick" | "revert"): Promise<boolean> {
+    try {
+      await this.runGit(wsPath, `git ${kind} --abort`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
   // Rename a branch in place. The working tree, index and reflog are untouched,
   // which is what lets a chat's worktree move from its legacy branch name onto
   // the `<github username>/<topic>` scheme mid-flight without disturbing work.

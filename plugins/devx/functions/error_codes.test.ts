@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertStringIncludes } from "jsr:@std/assert";
 import { classifyCoderError } from "./error_codes.ts";
 
 Deno.test("classifies an expired OAuth token", () => {
@@ -22,6 +22,34 @@ Deno.test("falls back to unclassified with a generic safe message", () => {
   const got = classifyCoderError("something nobody predicted");
   assertEquals(got.code, "unclassified");
   assertEquals(got.safe, "An error occurred while generating a response. Check the server logs for details.");
+});
+
+// Wrong-base and already-open-PR both produced multi-turn retry loops in the
+// live system: the coder reran the identical command four times because the
+// raw git/gh text gave it nothing to act on. Both classifiers must sit ahead
+// of the generic 404 / "not found" checks, whose substrings appear inside this
+// output for unrelated reasons.
+Deno.test("classifyCoderError: an unrelated base branch is named as the problem, not retried", () => {
+  for (
+    const raw of [
+      `pull request create failed: GraphQL: The trex/data-source-access-state-ui branch has no history in common with develop`,
+      `fatal: refusing to merge unrelated histories`,
+      `The rebase failed because the feature branch has 2137 unrelated commits`,
+    ]
+  ) {
+    const { code, safe } = classifyCoderError(raw);
+    assertEquals(code, "git_unrelated_base", `misclassified: ${raw}`);
+    assertStringIncludes(safe, "origin/HEAD");
+    assertStringIncludes(safe, "Retrying the same command");
+  }
+});
+
+Deno.test("classifyCoderError: an existing PR points at lookup rather than another create", () => {
+  const { code, safe } = classifyCoderError(
+    `{"message":"Validation Failed","errors":[{"resource":"PullRequest","code":"custom","message":"A pull request already exists for OHDSI:trex/data-source-ui-plugin-pr."}],"status":"422"}`,
+  );
+  assertEquals(code, "pr_already_exists");
+  assertStringIncludes(safe, "gh pr list --head");
 });
 
 Deno.test("classifies GitHub's workflow-scope push rejection and names the files", () => {

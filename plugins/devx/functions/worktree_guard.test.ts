@@ -1,5 +1,6 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
+  foreignDirtCount,
   branchSlug,
   chatWorktreeBranch,
   legacyChatWorktreeBranch,
@@ -116,8 +117,66 @@ Deno.test("worktreeReuseDecision: own branch ok; clean foreign branch restores; 
     worktreeReuseDecision([], wt, branch, 0),
     { error: `directory exists but git does not list it as a worktree` },
   );
+  // A detached head with a CLEAN tree is recoverable — and treating it as a
+  // hard error wedged a chat permanently: a coder that rebased onto a wrong
+  // base left its worktree detached, and nothing in the system ever puts a
+  // worktree back on its branch, so every later turn failed the same way.
   assertEquals(
     worktreeReuseDecision([{ path: wt, branch: null, detached: true }], wt, branch, 0),
-    { error: `worktree is detached (expected branch ${branch})` },
+    { restore: true, foreignBranch: "a detached HEAD" },
   );
+  // Detached AND dirty stays an error, for the same reason a dirty foreign
+  // branch does: those edits belong to some other state.
+  assertEquals(
+    worktreeReuseDecision([{ path: wt, branch: null, detached: true }], wt, branch, 3995),
+    {
+      error: `worktree is detached (expected branch ${branch}) with 3995 ` +
+        `uncommitted change(s) — cannot restore the chat branch without risking them`,
+    },
+  );
+});
+
+// worktreeReuseError is the older, stricter helper and is deliberately NOT
+// changed: it has no dirtiness input, so it cannot tell a recoverable detached
+// head from a dangerous one. Consumers use worktreeReuseDecision.
+Deno.test("worktreeReuseError still rejects a detached worktree outright", () => {
+  const wt = "/ws/u1/app1/.worktrees/chat-1";
+  assertEquals(
+    worktreeReuseError([{ path: wt, branch: null, detached: true }], wt, "owner/topic"),
+    "worktree is detached (expected branch owner/topic)",
+  );
+});
+
+// Regression (chat wedged permanently): a worktree left on the coder's own
+// feature branch with nothing dirty but devx's OWN scratch was refused as
+// "2 uncommitted change(s)" on that turn and every turn after — and the coder
+// could not repair it, because ensureChatWorktree throws before the coder runs.
+Deno.test("foreignDirtCount: devx's own untracked scratch is not someone's work", () => {
+  assertEquals(
+    foreignDirtCount([
+      { path: "attachments/", status: "??" },
+      { path: "plugins/ui/apps/flow/.devServer/", status: "??" },
+      { path: "trex/screenshots/mockup-sidebar.png", status: "??" },
+      { path: ".worktrees/abc/", status: "??" },
+    ]),
+    0,
+  );
+});
+
+Deno.test("foreignDirtCount: real edits still count, including inside a repo that tracks those paths", () => {
+  // Only UNTRACKED artifacts are discounted. A repo that genuinely tracks a
+  // path of that name has real content there, and a modification to it is real.
+  assertEquals(foreignDirtCount([{ path: "attachments/logo.png", status: "M" }]), 1);
+  assertEquals(foreignDirtCount([{ path: "src/index.ts", status: "??" }]), 1);
+  assertEquals(
+    foreignDirtCount([
+      { path: "attachments/", status: "??" },
+      { path: "src/index.ts", status: " M" },
+    ]),
+    1,
+  );
+});
+
+Deno.test("foreignDirtCount: an empty status is clean", () => {
+  assertEquals(foreignDirtCount([]), 0);
 });

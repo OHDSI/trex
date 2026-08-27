@@ -463,7 +463,6 @@ Deno.test("getActivatedTools: returns [] when the session row doesn't exist", as
   const store = createStore(fn as never);
   assertEquals(await store.getActivatedTools("missing"), []);
 });
-
 // --- heartbeat clock (V7__turn_heartbeat.sql) ------------------------------
 // `started_at` says how long a turn has been RUNNING, which for a live turn is
 // evidence of nothing — long turns are legitimate. `heartbeat_at` says when the

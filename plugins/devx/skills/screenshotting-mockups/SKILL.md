@@ -53,6 +53,10 @@ for (const screen of readdirSync(`${ws}/prototypes`)) {
 await browser.close();
 ```
 
+- **Never commit these.** `trex/screenshots/` is a staging area for images on
+  their way to a channel, not repository content — a PR carrying mockup PNGs is a
+  PR the reviewer has to clean up. Leave them untracked; devx does not count them
+  as uncommitted work.
 - Save into **`trex/screenshots/`**, named `mockup-<screen-name>.png` — that is
   the workspace-relative location claw's `postScreenshots` reads from.
 - `fullPage: true` — option grids are usually taller than one viewport.

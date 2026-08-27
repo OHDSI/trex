@@ -10,6 +10,8 @@ export type CoderErrorCode =
   | "model_not_found"
   | "invalid_key"
   | "git_workflow_scope"
+  | "git_unrelated_base"
+  | "pr_already_exists"
   | "unclassified";
 
 const GENERIC = "An error occurred while generating a response. Check the server logs for details.";
@@ -44,6 +46,38 @@ export function classifyCoderError(raw: string): { code: CoderErrorCode; safe: s
     };
   }
   const lower = msg.toLowerCase();
+
+  // Both of these MUST precede the generic 404 / "not found" and auth checks
+  // below, whose substrings ("not found", "404") appear inside git and gh
+  // output for entirely unrelated reasons.
+
+  // Wrong base branch. Data2Evidence has both `main` and `develop` and they
+  // share NO history, so a coder that targeted `main` got these errors and then
+  // retried the same command for four turns, ending with a worktree left
+  // detached mid-rebase. The repair is never a retry — it is a different base.
+  if (
+    /no history in common/i.test(msg) ||
+    /refusing to merge unrelated histories/i.test(msg) ||
+    /\bunrelated commits\b/i.test(msg)
+  ) {
+    return {
+      code: "git_unrelated_base",
+      safe: "The branch and the base you targeted share no history — the base branch is wrong. " +
+        "Check what the remote's default actually is (`git rev-parse --abbrev-ref origin/HEAD`) and use that; " +
+        "in this repo `main` and `develop` are unrelated roots, so rebasing or opening a PR across them can never work. " +
+        "Retrying the same command will produce the same error.",
+    };
+  }
+
+  // The PR already exists. Retrying `gh pr create` cannot succeed; the useful
+  // action is to report the PR that is already open.
+  if (/a pull request already exists/i.test(msg)) {
+    return {
+      code: "pr_already_exists",
+      safe: "A pull request already exists for this branch. Look it up " +
+        "(`gh pr list --head <branch>`) and report its URL instead of creating another.",
+    };
+  }
 
   if (lower.includes("oauth") && lower.includes("expired")) {
     return { code: "auth_expired", safe: "The coding session's credentials expired. Re-authenticate to continue." };
