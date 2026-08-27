@@ -178,6 +178,21 @@ function startTurn(
   // session has no persisted turns of its own for buildHistory to assemble
   // from.
   seedHistory?: ModelMessage[],
+  // Set ONLY by deliverChildResult's own `wake` call, below — the id of the
+  // child whose completion is starting this turn. Deliberately a dedicated
+  // parameter, never smuggled inside `metadata`: on the session routes,
+  // `metadata` is `body.metadata`, caller-supplied JSON. A wake marker keyed
+  // off metadata would let any external caller send
+  // `{"metadata":{"wokenBy":"x"}}` and have their own, human-started turn
+  // silently treated as wake-started — skipping resetConsecutiveWakes and
+  // walking a session toward MAX_CONSECUTIVE_WAKES with nothing in the logs
+  // to explain why its fan-outs went quiet. Keying the reset decision off a
+  // parameter no route ever forwards from request input makes that
+  // structurally impossible regardless of how many ingress points exist now
+  // or are added later — stripping a reserved key from client metadata at
+  // each route would need every current AND future ingress point to
+  // remember to do it; this doesn't.
+  wokenByChildId?: string,
 ) {
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
@@ -330,12 +345,15 @@ function startTurn(
     // started by a child completing rather than by anyone asking. Reset it
     // here on every turn NOT started that way, so a session legitimately
     // woken many times over a long life, with real messages in between,
-    // never creeps toward MAX_CONSECUTIVE_WAKES — only deliverChildResult's
-    // own `wake` call sets metadata.wokenBy, so its absence here means a
-    // human or channel (or the session's own first message) started this
-    // turn. Best-effort: a failed reset must not fail the turn over
-    // bookkeeping, same posture as the other non-critical reads below.
-    if (!(metadata && typeof metadata === "object" && "wokenBy" in (metadata as Record<string, unknown>))) {
+    // never creeps toward MAX_CONSECUTIVE_WAKES. Gated on `wokenByChildId`
+    // (a dedicated parameter, above) rather than anything in `metadata` —
+    // `metadata` is client-supplied on the session routes (`body.metadata`),
+    // so a decision keyed off it would let an external caller's own
+    // `{"metadata":{"wokenBy":"..."}}` silently skip the reset on a turn a
+    // human actually started. Best-effort: a failed reset must not fail the
+    // turn over bookkeeping, same posture as the other non-critical reads
+    // below.
+    if (!wokenByChildId) {
       await deps.store.resetConsecutiveWakes(sessionId).catch((e) =>
         console.error(`agents: resetConsecutiveWakes failed for session ${sessionId} (continuing):`, e)
       );
@@ -574,7 +592,11 @@ function startTurn(
     // buildSpawnCapabilities' own startChildTurn closure a few lines up.
     const deliverDeps: DeliverDeps = {
       store: deps.store,
-      wake: (sid, msg, meta) => startTurn(deps, sid, msg, meta),
+      // wokenByChildId lands in startTurn's dedicated parameter (see its own
+      // comment), never in `metadata` — metadata here is `undefined`: this
+      // synthetic turn has no client-supplied context of its own, the same
+      // as a brand-new child session's first turn.
+      wake: (sid, msg, childId) => startTurn(deps, sid, msg, undefined, undefined, undefined, undefined, undefined, childId),
     };
     try {
       await runTurn({
@@ -675,8 +697,14 @@ export interface DeliverDeps {
     AgentStore,
     "getSession" | "queueFollowUp" | "getRunningTurn" | "bumpConsecutiveWakes" | "takeFollowUps"
   >;
-  /** Starts (or resumes) the parent session's next turn. Fire-and-forget, same posture as startTurn itself. */
-  wake(sessionId: string, message: string, metadata: unknown): void;
+  /**
+   * Starts (or resumes) the parent session's next turn. Fire-and-forget,
+   * same posture as startTurn itself. `childSessionId` is threaded straight
+   * into startTurn's dedicated `wokenByChildId` parameter — never packed
+   * into a `metadata` object, which on the real call site is a value a
+   * client could otherwise forge (see startTurn's own comment).
+   */
+  wake(sessionId: string, message: string, childSessionId: string): void;
 }
 
 /**
@@ -723,9 +751,16 @@ export async function deliverChildResult(
 
   const parentSessionId = child.parent_session_id;
   const who = child.nickname || childSessionId;
+  // A child whose final step produced no text (a tool-only turn that ended
+  // without a closing reply) must still say so explicitly — silently
+  // queuing "Agent x finished:\n\n" with nothing after it reads, to a
+  // model, exactly like a truncated message, not like a turn that
+  // genuinely had nothing to report.
   const text = "error" in outcome
     ? `Agent ${who} failed: ${outcome.error}`
-    : `Agent ${who} finished:\n\n${outcome.text}`;
+    : outcome.text.trim()
+    ? `Agent ${who} finished:\n\n${outcome.text}`
+    : `Agent ${who} finished with no output (its final step produced no text).`;
   await deps.store.queueFollowUp(parentSessionId, text);
 
   if (await deps.store.getRunningTurn(parentSessionId)) return;
@@ -746,7 +781,7 @@ export async function deliverChildResult(
   // the result straight into `wake`.
   const queued = await deps.store.takeFollowUps(parentSessionId);
   if (queued.length === 0) return; // another waker already won this race
-  deps.wake(parentSessionId, queued.join("\n\n"), { wokenBy: childSessionId });
+  deps.wake(parentSessionId, queued.join("\n\n"), childSessionId);
 }
 
 // Shared by every route that can delegate (the session/turn path above and

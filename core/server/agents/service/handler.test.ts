@@ -2535,8 +2535,8 @@ function fakeDeliverDeps(opts: {
       bumpConsecutiveWakes: (_sessionId: string) => Promise.resolve(opts.wakes ?? 1),
       takeFollowUps: (_sessionId: string) => Promise.resolve(pending.splice(0)),
     },
-    wake: (sessionId: string, message: string, metadata: unknown) => {
-      started.push({ sessionId, message, metadata });
+    wake: (sessionId: string, message: string, childSessionId: string) => {
+      started.push({ sessionId, message, childSessionId });
     },
   };
 }
@@ -2719,4 +2719,57 @@ Deno.test("resetConsecutiveWakes fires for an ordinary (non-wake) turn", async (
   const sessionId = res.headers.get("x-eve-session-id")!;
   await until(() => settled(db));
   assertEquals(resets, [sessionId], "an ordinary, non-wake turn must reset the wake budget");
+});
+
+// Fix round 1 (review): the wake marker must not be readable from any
+// client-writable field. Before the fix, startTurn keyed the reset decision
+// off `metadata.wokenBy` — but on the session routes `metadata` IS
+// `body.metadata`, caller-supplied JSON. A client sending
+// `{"message":"...","metadata":{"wokenBy":"anything"}}` would have had its
+// own, human-started turn silently treated as wake-started, skipping the
+// reset and walking consecutive_wakes toward MAX_CONSECUTIVE_WAKES with
+// nothing in the logs to explain why that session's fan-outs went quiet.
+// This test forges exactly that request body and asserts the reset still
+// fires — it would have failed against the pre-fix code.
+Deno.test("a client-forged metadata.wokenBy does not suppress the wake-budget reset", async () => {
+  const resets: string[] = [];
+  const { handler, db } = await makeHandler({
+    wrapStore: (s) => ({
+      ...s,
+      resetConsecutiveWakes: (id: string) => {
+        resets.push(id);
+        return s.resetConsecutiveWakes(id);
+      },
+    }),
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    // A real wake never reaches startTurn this way (deliverChildResult's
+    // `wake` call passes no metadata at all — see startTurn's dedicated
+    // `wokenByChildId` parameter) — this is exactly what an ordinary,
+    // externally-supplied request body forging that shape looks like.
+    body: JSON.stringify({ message: "hi", metadata: { wokenBy: "forged-child-id" } }),
+  }));
+  const sessionId = res.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  assertEquals(
+    resets,
+    [sessionId],
+    "a client-supplied metadata.wokenBy must not be able to suppress the wake-budget reset",
+  );
+  assertEquals(db.sessions.get(sessionId)?.consecutive_wakes, 0);
+});
+
+// Minor (review): a child whose final step produced no text must not
+// silently deliver "Agent x finished:\n\n" with nothing after it — that
+// reads, to a model, like a truncated message rather than a turn that
+// genuinely had nothing to report.
+Deno.test("a detached child with no final text step delivers an explicit no-output notice", async () => {
+  const followUps: unknown[] = [];
+  await deliverChildResult(fakeDeliverDeps({ followUps }) as never, "c-1", { text: "" });
+  assertEquals(followUps.length, 1);
+  const delivered = (followUps[0] as { text: string }).text;
+  assert(!delivered.includes("finished:\n\n\n"), "must not produce a bare, contentless followup");
+  assert(delivered.includes("no output"), `expected an explicit no-output notice, got: ${delivered}`);
 });
