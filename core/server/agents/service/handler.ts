@@ -5,6 +5,7 @@ import type { LoadedAgent } from "../loader.ts";
 import { packOfSkillName } from "../loader.ts";
 import type { AgentStore } from "./store.ts";
 import { runTurn } from "./runner.ts";
+import { type ModelRetryOpts, retryEmitter, withModelRetry } from "./retry.ts";
 import { publish, subscribe, ndjsonEncode } from "./stream.ts";
 import { buildSdkTools, buildSystemPrompt, resolveInstructions, restrictChildSkills, restrictChildTools } from "./toolset.ts";
 import { cacheProviderOptions, parseModelString, resolveModelForTurn, withSystemCachePoint } from "./model.ts";
@@ -67,6 +68,11 @@ export interface Deps {
   // AND the connection provider gets the broker so kind:"oauth" connections
   // resolve/park tokens. Unset → those routes 404 and oauth connections skip.
   oauth?: OAuthBrokerDeps;
+  // Test seam for the model-call retry schedule (service/retry.ts), threaded
+  // to BOTH retried call sites: the compaction summarizer here and, via
+  // runTurn's own retrySleep, the turn loop. Undefined in production, where
+  // retry.ts uses a real timer.
+  retrySleep?: ModelRetryOpts["sleep"];
 }
 
 const defaultEnv: EnvFn = (k) => Deno.env.get(k);
@@ -602,11 +608,27 @@ function startTurn(
           // fallback — so a broken model can never prevent that fallback from
           // still reclaiming budget, and (requirement 5) can never fail the
           // turn itself either.
-          callModel: async (req) => {
-            const model = deps.model ?? await resolveModelForTurn(deps.agent.config, hookCtx);
-            const { text } = await generateText({ model, system: req.system, messages: req.messages as any });
-            return text;
-          },
+          // Retried on 429/5xx/connection failure (service/retry.ts) BEFORE
+          // maybeCompact's catch ever sees the error. This call site needs it
+          // more than the turn loop does, not less: its failure mode is
+          // silent. maybeCompact treats any throw as "summarizer unavailable"
+          // and drops the oldest turns instead — so without a retry, a single
+          // rate-limit blip permanently costs the user history that a summary
+          // would have preserved, and all they see is a warning after the
+          // fact. Model resolution stays INSIDE the retried function so a
+          // transient credential-broker failure is retried too; a terminal one
+          // still falls through to the drop fallback exactly as before.
+          callModel: (req) =>
+            withModelRetry(async () => {
+              const model = deps.model ?? await resolveModelForTurn(deps.agent.config, hookCtx);
+              const { text } = await generateText({ model, system: req.system, messages: req.messages as any });
+              return text;
+            }, {
+              // Turn-agnostic: compaction runs before addTurn, so there is no
+              // turnId to attach yet (see events.ts's model.retrying).
+              onRetry: retryEmitter((e) => publish(sessionId, e), { phase: "compaction" }),
+              sleep: deps.retrySleep,
+            }),
           // The spec's error table requires a warning EVENT when summarization
           // fails, not just a log line: the drop fallback silently discards
           // turns the summary would have preserved, and the user is the only
@@ -768,6 +790,7 @@ function startTurn(
         activatedTools,
         spawn,
         depth,
+        retrySleep: deps.retrySleep,
         ...(abort ? { abortSignal: abort.signal } : {}),
       });
       // Fix round 1 (2026-08-27-agent-orchestration, tasks 12-13 review):

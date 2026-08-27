@@ -2,6 +2,8 @@ import { assert, assertEquals } from "jsr:@std/assert";
 import { buildSummarizationRequest, flattenForSummary, maybeCompact, summarize } from "./compact.ts";
 import { SUMMARIZATION_PROMPT } from "./prompts.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./budget.ts";
+import { APICallError } from "ai";
+import { MAX_MODEL_ATTEMPTS, withModelRetry } from "../retry.ts";
 
 Deno.test("summarization prompt is the checkpoint handoff prompt", () => {
   assert(SUMMARIZATION_PROMPT.includes("CONTEXT CHECKPOINT COMPACTION"));
@@ -315,4 +317,69 @@ Deno.test("a throwing emit subscriber does not change the compaction outcome", a
     emit: boom,
   });
   assertEquals((dropped as { via: string }).via, "drop");
+});
+
+// --- retry composition (handler.ts's callModel wraps this in withModelRetry) --
+//
+// maybeCompact treats ANY throw as "summarizer unavailable" and silently
+// degrades to dropping the oldest turns — so before the retry wrapper, a
+// single 429 permanently cost the user history a summary would have kept.
+// These two prove the composition handler.ts builds actually changes that
+// outcome, not just that withModelRetry retries in isolation.
+Deno.test("a transient 429 in the summarizer no longer degrades compaction to a drop", async () => {
+  const waits: number[] = [];
+  let attempts = 0;
+  const out = await maybeCompact({
+    turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG,
+    modelId: MODEL_ID,
+    observedInputTokens: 190_000,
+    callModel: () =>
+      withModelRetry(() => {
+        attempts++;
+        if (attempts === 1) {
+          return Promise.reject(
+            new APICallError({
+              message: "rate limit exceeded",
+              url: "https://example.test/v1",
+              requestBodyValues: {},
+              statusCode: 429,
+            }),
+          );
+        }
+        return Promise.resolve("summary text");
+      }, { sleep: (ms) => (waits.push(ms), Promise.resolve()) }),
+  });
+  assertEquals(attempts, 2);
+  assertEquals(waits, [5_000]);
+  assertEquals(out.compacted, true);
+  assertEquals((out as { via: string }).via, "summary");
+  assertEquals((out as { summary: string }).summary, "summary text");
+});
+
+Deno.test("an exhausted retry budget still falls back to dropping turns rather than failing the turn", async () => {
+  let attempts = 0;
+  const out = await maybeCompact({
+    turns: [{ seq: 1, message: "a", metadata: null, steps: [] }],
+    msgs: [{ role: "user", content: "hi" }],
+    config: DEFAULT_CONTEXT_CONFIG,
+    modelId: MODEL_ID,
+    observedInputTokens: 190_000,
+    callModel: () =>
+      withModelRetry(() => {
+        attempts++;
+        return Promise.reject(
+          new APICallError({
+            message: "rate limit exceeded",
+            url: "https://example.test/v1",
+            requestBodyValues: {},
+            statusCode: 429,
+          }),
+        );
+      }, { sleep: () => Promise.resolve() }),
+  });
+  assertEquals(attempts, MAX_MODEL_ATTEMPTS);
+  assertEquals(out.compacted, true);
+  assertEquals((out as { via: string }).via, "drop");
 });

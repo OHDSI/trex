@@ -1,4 +1,5 @@
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { APICallError } from "ai";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
 import { runTurn, makePrepareStep } from "./runner.ts";
 import { loadAgent } from "../loader.ts";
@@ -1114,4 +1115,125 @@ Deno.test("runTurn never calls takeFollowUps for a top-level (non-child) turn �
     // depth omitted entirely — the overwhelmingly common (top-level) case.
   });
   assertEquals(called, false, "a top-level turn must not query the follow-up queue at all");
+});
+
+// --- model-call retry wiring (service/retry.ts) ------------------------------
+
+// A rate limit that arrives as an `error` PART rather than a rejection — the
+// case runner.ts's own comment flags, and the one a naive
+// withModelRetry(() => streamText(...)) cannot see at all.
+const rateLimited = () =>
+  new APICallError({
+    message: "rate limit exceeded",
+    url: "https://example.test/v1",
+    requestBodyValues: {},
+    statusCode: 429,
+  });
+
+Deno.test("runTurn retries a 429 that arrives before any output, and publishes model.retrying", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hello", store, emit: (e) => events.push(e),
+    model: sequencedModel([{ type: "error", error: rateLimited() }], textChunks("hi there")),
+    retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+  });
+
+  assertEquals(res.text, "hi there");
+  assertEquals(waits, [5_000]);
+  const retrying = events.filter((e) => e.type === "model.retrying");
+  assertEquals(retrying.length, 1);
+  const data = (retrying[0] as { data: { attempt: number; delayMs: number; phase: string; turnId?: string } }).data;
+  assertEquals(data.attempt, 1);
+  assertEquals(data.delayMs, 5_000);
+  assertEquals(data.phase, "turn");
+  assertEquals(data.turnId, "t-1");
+  // The abandoned attempt contributed no text and no duplicate turn boundary.
+  assertEquals(events.filter((e) => e.type === "turn.completed").length, 1);
+  assertEquals(
+    events.filter((e) => e.type === "message.appended").map((e) => (e as { data: { messageDelta: string } }).data.messageDelta),
+    ["hi there"],
+  );
+});
+
+Deno.test("runTurn does not retry a 401 — it fails the turn on the first attempt", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+  let starts = 0;
+
+  const model = new MockLanguageModelV3({
+    doStream: () => {
+      starts++;
+      return Promise.resolve({
+        stream: simulateReadableStream({
+          chunks: [{
+            type: "error",
+            error: new APICallError({
+              message: "invalid api key",
+              url: "https://example.test/v1",
+              requestBodyValues: {},
+              statusCode: 401,
+            }),
+          }],
+        }),
+      });
+    },
+  });
+
+  await assertRejects(() =>
+    runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: (e) => events.push(e),
+      model,
+      retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+    })
+  );
+
+  assertEquals(starts, 1, "an auth failure must not be re-requested");
+  assertEquals(waits, []);
+  assertEquals(events.filter((e) => e.type === "model.retrying").length, 0);
+});
+
+Deno.test("runTurn does NOT retry a 429 that arrives after text was already emitted", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+  let starts = 0;
+
+  const model = new MockLanguageModelV3({
+    doStream: () => {
+      starts++;
+      return Promise.resolve({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "text-start", id: "1" },
+            { type: "text-delta", id: "1", delta: "partial" },
+            { type: "error", error: rateLimited() },
+          ],
+        }),
+      });
+    },
+  });
+
+  // Retrying here would re-stream "partial" into the channel a second time.
+  // The contract is pre-output only, so the turn fails instead.
+  await assertRejects(() =>
+    runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: (e) => events.push(e),
+      model,
+      retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+    })
+  );
+
+  assertEquals(starts, 1);
+  assertEquals(waits, []);
+  assertEquals(events.filter((e) => e.type === "message.appended").length, 1);
 });
