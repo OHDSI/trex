@@ -177,7 +177,7 @@ export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finish
     // resolves it before ever calling startTurn).
     providerOptions: mergeProviderOptions(
       cacheProviderOptions(model, agent.dir),
-      reasoningEffortProviderOptions(model, agent.config.reasoningEffort),
+      reasoningEffortProviderOptions(model, agent.config.reasoningEffort, agent.dir),
     ),
     // Only wired for a CHILD turn (depth===1). prepareStep runs on every
     // step of every turn if it's set at all — leaving it undefined for the

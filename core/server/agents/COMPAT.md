@@ -486,23 +486,33 @@ live-tail by event shape.
     - **Depth stays capped at 1.** A child receives no `agent*` tools at
       all, so it structurally cannot spawn a grandchild regardless of what
       it's told.
-    - **Per-subagent role reduction (`reasoningEffort`/`skills`) is
-      REDUCING ONLY**, ported from codex's `role.rs`: a subagent's `skills`
-      (`AgentConfig.skills`, resolved by `loader.ts`'s
+    - **Per-subagent role config (`reasoningEffort`/`skills`).** Only
+      `skills` is REDUCING ONLY, ported from codex's `role.rs`: a
+      subagent's `skills` (`AgentConfig.skills`, resolved by `loader.ts`'s
       `resolveAgentRole`/`resolveChildSkills`) is the INTERSECTION of its
       own declared list and the delegating session's own skill names, never
       their union — a caller can narrow what it delegates but never grant a
       child more than it already has itself (`toolset.ts`'s
       `restrictChildSkills`, applied at delegation time in
-      `handler.ts`'s `buildSpawnCapabilities`). `reasoningEffort` applies to
-      the child's own resolved model as a `providerOptions` override
-      (openai only for now — see `model.ts`'s
-      `reasoningEffortProviderOptions`). Both keys are read from either
-      camelCase (`agent.ts`) or EDN kebab-case (`:reasoning-effort`,
-      `agent.edn`) via the same explicit-allowlist pattern divergence 18's
-      `ContextConfig` fields use — a key missing from that allowlist is
-      exactly what silently dropped two `ContextConfig` fields in an
-      earlier cycle of this runtime.
+      `handler.ts`'s `buildSpawnCapabilities`). **What this actually caps
+      today is the child's advertised system-prompt text, not a live
+      privilege**: `buildSdkTools` gates the built-in `skill` tool behind
+      `depth === 0`, and every child runs at depth 1 (this divergence's own
+      depth cap, above), so no child can invoke a skill at all regardless of
+      this field. The reduction exists for when that changes — a future
+      grant of skill-invoking access to children must route through
+      `resolveChildSkills`, not assume this field already enforced it.
+      `reasoningEffort` is NOT reduced against anything — it is just the
+      child's own declared value, applied to its own resolved model as a
+      `providerOptions` override (openai only for now; a one-time `console.warn`
+      names the agent and the resolved provider when it's set on a
+      non-openai model, since it would otherwise silently do nothing — see
+      `model.ts`'s `reasoningEffortProviderOptions`). Both keys are read
+      from either camelCase (`agent.ts`) or EDN kebab-case
+      (`:reasoning-effort`, `agent.edn`) via the same explicit-allowlist
+      pattern divergence 18's `ContextConfig` fields use — a key missing
+      from that allowlist is exactly what silently dropped two
+      `ContextConfig` fields in an earlier cycle of this runtime.
 
 ## Channels
 

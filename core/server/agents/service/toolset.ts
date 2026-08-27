@@ -299,7 +299,7 @@ function resolveTarget(ctx: ToolBuildCtx, name?: string): SubagentResolution {
 }
 
 // Task 14: reducing only (codex role.rs) — a delegating session can never
-// grant a child MORE capability than it itself has. Called by handler.ts's
+// advertise a child MORE skills than it itself has. Called by handler.ts's
 // buildSpawnCapabilities at the point it resolves which LoadedAgent will
 // actually run the child's turn (NOT here in resolveTarget: that function's
 // result is only used for validation/description text by agentTool/
@@ -315,6 +315,15 @@ function resolveTarget(ctx: ToolBuildCtx, name?: string): SubagentResolution {
 // use; left undeclared, the child inherits every name the parent currently
 // has (resolveChildSkills' `undefined` case) — capped, either way, by what
 // the child's own directory actually loaded.
+//
+// What this filters TODAY is the child's advertised skill list — the "##
+// Skills" section of its system prompt and the built-in `skill` tool's own
+// description (buildSystemPrompt/skillTool) — NOT a live privilege: this
+// module's own buildSdkTools gates the `skill` tool behind `depth === 0`,
+// and every child runs at depth 1, so a child cannot invoke any skill at
+// all today regardless of this field. Kept anyway: if a later change ever
+// lets a child invoke skills, THIS is the enforcement point that change
+// must route through, not something to assume already covers it.
 export function restrictChildSkills(parentAgent: LoadedAgent, childAgent: LoadedAgent): LoadedAgent {
   if (childAgent === parentAgent) return childAgent;
   const parentNames = parentAgent.skills.map((s) => s.name);

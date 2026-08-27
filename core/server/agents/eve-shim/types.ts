@@ -55,14 +55,28 @@ export interface AgentConfig {
   model?: string; // eve/AI-Gateway format: "provider/model-id"
   maxSteps?: number;
   context?: Partial<ContextConfig>;
-  // Per-subagent role config (task-14, ported from codex's role.rs). Both are
-  // REDUCING ONLY: a caller delegating to a subagent can never grant it more
-  // than it already has itself. `skills`, when declared on a subagent, is
+  // Per-subagent role config (task-14, ported from codex's role.rs). Only
+  // `skills` is REDUCING ONLY: when declared on a subagent, it is
   // intersected against the delegating session's OWN skill names — never
-  // unioned — by loader.ts's resolveChildSkills; wired at delegation time by
-  // service/toolset.ts's restrictChildSkills. `reasoningEffort` is applied to
-  // the resolved model's providerOptions (model.ts's
-  // reasoningEffortProviderOptions) when the child's own turn runs.
+  // unioned — by loader.ts's resolveChildSkills, wired at delegation time by
+  // service/toolset.ts's restrictChildSkills. `reasoningEffort` is NOT
+  // capped against anything; it is just the child's own declared value,
+  // applied to the RESOLVED MODEL's providerOptions (model.ts's
+  // reasoningEffortProviderOptions, openai only today — see that function's
+  // own comment for the one-time warning it logs off-openai) when the
+  // child's own turn runs.
+  //
+  // What `skills` reduction actually affects TODAY: only the child's
+  // advertised system-prompt text (buildSystemPrompt's "## Skills" section)
+  // and the built-in `skill` tool's own description — NOT a live privilege,
+  // because toolset.ts's buildSdkTools gates the `skill` tool behind
+  // `depth === 0` and every child runs at depth 1 (COMPAT.md divergence
+  // 19's depth cap). A child cannot invoke ANY skill today regardless of
+  // this field, so there is currently nothing for the intersection to
+  // escalate past. This is recorded here deliberately: if a later change
+  // ever grants children skill-invoking access, resolveChildSkills is the
+  // enforcement point that change must route through — do not assume this
+  // guard already covers that case just because the field already exists.
   reasoningEffort?: string;
   skills?: string[];
   // Additive hooks (eve ignores unknown defineAgent fields): called on EVERY

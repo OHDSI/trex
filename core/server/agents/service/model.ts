@@ -209,11 +209,33 @@ export function cacheProviderOptions(model: any, cacheKey: string): Record<strin
 // ({}) whenever effort is unset or the model isn't openai — same "no-op for
 // everything this doesn't explicitly support" posture as cacheProviderOptions
 // above.
+//
+// Fix round 1: silently doing nothing off-openai is exactly the trap an
+// agent author falls into — `:reasoning-effort "high"` parses, loads, and
+// then vanishes with nothing in the logs, on anthropic/bedrock, the primary
+// provider family in this codebase. `warnReasoningEffortOnce` logs it ONCE
+// per (agentLabel, provider) pair, not per turn/step — this runs on every
+// streamText call (runner.ts), and a warning on every step of every child
+// turn would be its own bug.
+const warnedReasoningEffort = new Set<string>();
+function warnReasoningEffortOnce(agentLabel: string, provider: string, effort: string): void {
+  const key = `${agentLabel} ${provider}`;
+  if (warnedReasoningEffort.has(key)) return;
+  warnedReasoningEffort.add(key);
+  console.warn(
+    `agents: ${agentLabel} declares reasoningEffort="${effort}" but its resolved model provider is "${provider}", ` +
+      `not openai — reasoningEffort is currently a no-op there (see model.ts's reasoningEffortProviderOptions)`,
+  );
+}
+
+// `agentLabel` (e.g. a LoadedAgent's `dir`) identifies the agent in the
+// warning above; optional only so a caller with no meaningful label (a bare
+// unit test) can omit it, at the cost of a less actionable message.
 // deno-lint-ignore no-explicit-any
-export function reasoningEffortProviderOptions(model: any, effort: string | undefined): Record<string, any> {
-  if (effort && isOpenAIModel(model)) {
-    return { openai: { reasoningEffort: effort } };
-  }
+export function reasoningEffortProviderOptions(model: any, effort: string | undefined, agentLabel?: string): Record<string, any> {
+  if (!effort) return {};
+  if (isOpenAIModel(model)) return { openai: { reasoningEffort: effort } };
+  warnReasoningEffortOnce(agentLabel ?? "an agent", String(model?.provider ?? "unknown"), effort);
   return {};
 }
 
