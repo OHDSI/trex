@@ -439,6 +439,70 @@ live-tail by event shape.
     legacy AI-SDK loop's (see `lib/prompt_parity.test.ts`'s own exception
     for it): legacy has no deferred-tool concept at all, so its prompt
     never carries an equivalent suffix, and never can.
+19. **Subagents are nested sessions (2026-08-27 orchestration) — a trex
+    extension over eve's `Agent` framework tool.** Upstream eve runs a
+    subagent as an in-process nested loop that returns a string. trex runs
+    one as a real `agents.sessions` row with `parent_session_id` /
+    `parent_turn_id` (`migrations/V9__orchestration.sql`), so a child
+    inherits the machinery a top-level turn already has: heartbeat liveness
+    and stale-turn reaping, tool-history assembly and the
+    tool-call/tool-result pairing invariant (divergence 18), two-tier
+    truncation, token-budget compaction, and approvals.
+    - **Six tools instead of one.** `agent` keeps its blocking contract and
+      return shape (`{text}`, or `{error}`) — `agent_spawn` / `agent_wait` /
+      `agent_list` / `agent_send` / `agent_stop` are new
+      (`service/toolset.ts`, `service/spawn.ts`). All are depth-0 only
+      (`ToolBuildCtx.depth`, derived per turn from durable state —
+      `store.isChildSession` — never threaded from spawn time, so a child
+      cannot spawn a grandchild even if a worker restarts mid-turn) and
+      none is deferrable by default: `deferredTools` activation only takes
+      effect from the NEXT request (divergence 18), and a model mid-fan-out
+      needs these tools now, not next turn.
+    - **`fork_turns`** on `agent` and `agent_spawn` lets a child inherit the
+      last N of the PARENT's own turns (`"none"` default, matching prior
+      behaviour; `"all"`, or a positive integer — `context/fork.ts`'s
+      `parseForkTurns`). Slicing is whole-turn only, trimmed from the oldest
+      end to fit a fixed token budget: a partial turn would separate a tool
+      call from its result and the provider would reject the child's very
+      first request. Depends on divergence 18's history-includes-tool-calls
+      work — a forked slice is only worth inheriting once history carries
+      real tool call/result content, not just final text.
+    - **Detached children deliver and wake.** A detached child's completion
+      (success or failure) queues a `turn_followups` row on the parent and
+      starts a parent turn if none is already running
+      (`handler.ts`'s `deliverChildResult`); a BLOCKING child (`agent`,
+      `detached: false`) returns through the tool call that started it
+      instead and never queues anything. Bounded by `MAX_CONSECUTIVE_WAKES`
+      turns started by a wake in a row, reset by any turn NOT started by
+      one — otherwise a session that spawns a child on every wake would
+      chain forever, one real model call per link, billed to the caller.
+      A wake racing another parent message is resolved by
+      `idx_agents_turns_one_running_per_session` (a partial unique index,
+      PER session — it does not serialize siblings spawned under the same
+      parent): the loser degrades to queueing its followup for the
+      already-running turn to drain, rather than two turns ever coexisting.
+    - **`agent_wait` polls.** The store exposes a plain query function with
+      no notification channel; `LISTEN`/`NOTIFY` is a separate change.
+    - **Depth stays capped at 1.** A child receives no `agent*` tools at
+      all, so it structurally cannot spawn a grandchild regardless of what
+      it's told.
+    - **Per-subagent role reduction (`reasoningEffort`/`skills`) is
+      REDUCING ONLY**, ported from codex's `role.rs`: a subagent's `skills`
+      (`AgentConfig.skills`, resolved by `loader.ts`'s
+      `resolveAgentRole`/`resolveChildSkills`) is the INTERSECTION of its
+      own declared list and the delegating session's own skill names, never
+      their union — a caller can narrow what it delegates but never grant a
+      child more than it already has itself (`toolset.ts`'s
+      `restrictChildSkills`, applied at delegation time in
+      `handler.ts`'s `buildSpawnCapabilities`). `reasoningEffort` applies to
+      the child's own resolved model as a `providerOptions` override
+      (openai only for now — see `model.ts`'s
+      `reasoningEffortProviderOptions`). Both keys are read from either
+      camelCase (`agent.ts`) or EDN kebab-case (`:reasoning-effort`,
+      `agent.edn`) via the same explicit-allowlist pattern divergence 18's
+      `ContextConfig` fields use — a key missing from that allowlist is
+      exactly what silently dropped two `ContextConfig` fields in an
+      earlier cycle of this runtime.
 
 ## Channels
 

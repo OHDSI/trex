@@ -120,3 +120,30 @@ Deno.test("the deferred-tools note is not duplicated into instructions.md", asyn
     "instructions.md is discarded by buildInstructions on this loop; the note belongs only in the returned prompt",
   );
 });
+
+// 2026-08-27 orchestration Task 16: the six agent-orchestration built-ins
+// (core/server/agents/service/toolset.ts) must never join DEFERRED_TOOLS.
+// Deferred-tool activation only takes effect from the NEXT request
+// (toolset.ts's cache-breakpoint ordering — see COMPAT.md divergence 18's
+// "Deferred tools" note), but a model mid-fan-out needs agent_spawn/
+// agent_wait/agent_list/agent_send/agent_stop (and the blocking `agent`)
+// THIS turn, not next turn — deferring any of them would make them
+// unreachable exactly when they're needed. Same tripwire shape as the
+// ALWAYS_ON test above: currently trivially true (none of these names are
+// devx tools, so none could accidentally land in DEFERRED_TOOLS today), but
+// it guards against a future edit adding one by mistake.
+Deno.test("the orchestration tools are never deferred", () => {
+  const deferred = new Set(agent.context?.deferredTools);
+  for (const name of ["agent", "agent_spawn", "agent_wait", "agent_list", "agent_send", "agent_stop"]) {
+    assert(!deferred.has(name), `${name} must stay always-on: a model mid-fan-out cannot wait a turn for it`);
+  }
+});
+
+Deno.test("the built-in subagents declare their reasoning effort", async () => {
+  for (const name of ["code-reviewer", "code-explorer"]) {
+    const edn = await Deno.readTextFile(
+      new URL(`../subagents/${name}/agent.edn`, import.meta.url),
+    );
+    assert(edn.includes("reasoning-effort"), `${name} should declare :reasoning-effort`);
+  }
+});
