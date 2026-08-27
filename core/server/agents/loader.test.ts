@@ -298,3 +298,44 @@ Deno.test("packOfSkillName derives pack provenance from the reserved '--' separa
   assertEquals(packOfSkillName("plain"), null);
   assertEquals(packOfSkillName("--weird"), null);          // no empty pack name
 });
+
+// --- role config survives loading (regression) -------------------------------
+//
+// resolveAgentRole is unit-tested in lib/subagent_role.test.ts and has always
+// been correct. What was never tested is whether its output SURVIVES into
+// LoadedAgent.config — and it did not. loadAgent assigned config.skills from
+// the resolved role and then, two lines later, looped over ROLE_EDN_KEYS
+// deleting each key from config to strip stray EDN spellings. ROLE_EDN_KEYS
+// maps "skills" to "skills", so that loop deleted the field it had just set.
+// Every agent.ts-authored agent loaded with config.skills === undefined, and a
+// TS-authored subagent declaring a narrowing skills list received no narrowing
+// at all.
+//
+// Nothing above covers this: every existing skills assertion is about
+// LoadedAgent.skills — the on-disk skill FILES — which is a different field
+// populated by a different code path.
+Deno.test("a TS-authored agent's narrowing skills list survives into config (not stripped by the EDN key cleanup)", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  await Deno.writeTextFile(
+    `${tmp}/agent.ts`,
+    'export default { model: "anthropic/claude-sonnet-5", skills: ["greeting-style"], reasoningEffort: "low" };\n',
+  );
+  const a = await loadAgent(tmp);
+  assertEquals(a.config.skills, ["greeting-style"], "config.skills must survive loadAgent");
+  assertEquals(a.config.reasoningEffort, "low");
+  assertEquals(a.config.model, "anthropic/claude-sonnet-5");
+});
+
+Deno.test("the EDN-spelled role keys are still stripped from a TS-authored config", async () => {
+  const tmp = await Deno.makeTempDir();
+  await Deno.writeTextFile(`${tmp}/instructions.md`, "hi");
+  // The kebab spelling is normalized onto the real camelCase field; leaving
+  // the kebab key on config too would be garbage, so it must not survive.
+  await Deno.writeTextFile(`${tmp}/agent.ts`, 'export default { "reasoning-effort": "high" };\n');
+  const a = await loadAgent(tmp);
+  assertEquals(a.config.reasoningEffort, "high");
+  // Object.hasOwn rather than an `in` over a cast: ResolvedAgentConfig has no
+  // index signature, and asserting absence needs no cast at all.
+  assertEquals(Object.hasOwn(a.config, "reasoning-effort"), false);
+});
