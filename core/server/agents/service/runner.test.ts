@@ -81,8 +81,10 @@ const textChunks = (text: string) => [
   { type: "text-end", id: "1" },
   FINISH,
 ];
-const toolCallChunks = (toolName: string, input: unknown) => [
-  { type: "tool-call", toolCallId: "c-1", toolName, input: JSON.stringify(input) },
+// toolCallId is a parameter so a multi-step turn can issue DISTINCT calls;
+// it defaults to the single id every existing caller relied on.
+const toolCallChunks = (toolName: string, input: unknown, toolCallId = "c-1") => [
+  { type: "tool-call", toolCallId, toolName, input: JSON.stringify(input) },
   {
     type: "finish",
     finishReason: { unified: "tool-calls", raw: "tool-calls" },
@@ -1326,4 +1328,46 @@ Deno.test("a follow-up delivered to one step is not re-injected into the next", 
   const total = per.reduce((a: number, b: number) => a + b, 0);
   assertEquals(total, 1, "the follow-up must reach the model exactly once across the turn, got " + per);
   assertEquals(per[0], 1, "and it must be the step it was injected into that carried it");
+});
+
+// The test above drains at step 0, which is the case that was ALREADY safe:
+// the seal clears the buffer before step 1 ever asks. The dangerous case is a
+// message that arrives LATER — which is the case agent_send exists for, since
+// a message sent while the child is inside a long tool call reaches step >= 1
+// by construction. After the stream has sealed there is no further attempt to
+// carry into, so continuing to carry is not merely redundant, it re-injects
+// the same instruction into every remaining step of the turn.
+Deno.test("a follow-up arriving at a LATER step is delivered once, not re-injected into every remaining step", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      // Nothing queued before step 0; the message lands during the turn, on
+      // the SECOND drain.
+      return Promise.resolve(
+        drains === 2 ? [{ message: "do X now", originChildSessionId: null }] : [],
+      );
+    },
+  };
+  // Three steps: two tool calls (distinct ids) then a closing text step, so
+  // there are two prepareStep calls AFTER the one that picked the message up.
+  const { model, calls } = capturingModel(
+    toolCallChunks("echo", { text: "one" }, "c-1"),
+    toolCallChunks("echo", { text: "two" }, "c-2"),
+    textChunks("done"),
+  );
+
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+
+  assert(drains >= 3, "the turn must have run at least three steps, got " + drains);
+  const per = calls.map((c) => JSON.stringify(c?.prompt ?? c).split("do X now").length - 1);
+  const total = per.reduce((a: number, b: number) => a + b, 0);
+  assertEquals(total, 1, "the follow-up must reach the model exactly once across the turn, per-step counts: " + per);
 });

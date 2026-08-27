@@ -111,6 +111,13 @@ export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStor
   // model. Held until commit() reports the carrying attempt can no longer be
   // abandoned.
   let carried: string[] = [];
+  // Whether the stream has sealed. Carrying is ONLY meaningful before that:
+  // once no further attempt can be made, a row handed to a step has been
+  // delivered, full stop. Keeping it in the buffer past the seal re-injects
+  // the same instruction into every remaining step of the turn — which is the
+  // common case, not an edge one, because a message sent while the child is
+  // inside a long tool call arrives at step >= 1 by construction.
+  let sealed = false;
 
   const prepareStep = async ({ messages }: { messages: any[] }) => {
     const pending = await deps.store.takeFollowUps(deps.sessionId);
@@ -120,12 +127,16 @@ export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStor
     // that writes to it, and it never names an origin.
     if (pending.length > 0) carried = [...carried, ...pending.map((p) => p.message)];
     if (carried.length === 0) return {}; // no override: leave the step untouched
-    return {
+    const override = {
       messages: [
         ...messages,
         ...carried.map((content) => ({ role: "user" as const, content })),
       ],
     };
+    // Delivered: this step's request is the last one that could have been
+    // replayed, so nothing is left to carry.
+    if (sealed) carried = [];
+    return override;
   };
 
   /**
@@ -133,13 +144,16 @@ export function makePrepareStep(deps: { sessionId: string; store: Pick<AgentStor
    * these messages can no longer be abandoned — they really did reach the
    * model. Called by runTurn once streamWithModelRetry seals an attempt.
    *
-   * Clearing here is also what keeps the common multi-step case unchanged: by
-   * the time step 2's prepareStep runs, step 1 has necessarily emitted a
-   * committing part, so the buffer is empty again and only genuinely NEW
-   * arrivals are injected — never a second copy of step 1's.
+   * Fires once per TURN, not once per step, which is the whole reason `sealed`
+   * exists alongside the clear. Clearing here only ever covers rows drained
+   * BEFORE the seal (the step-0 arrival); a row drained by any later step is
+   * never seen by this function again, so `prepareStep` has to clear those
+   * itself. Assuming this one call was enough is what re-injected a
+   * late-arriving message into every remaining step.
    */
   const commit = () => {
     carried = [];
+    sealed = true;
   };
 
   return { prepareStep, commit };
