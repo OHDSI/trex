@@ -55,6 +55,14 @@ interface RunTurnOpts {
   // child's parent_turn_id); undefined for callers that never wire spawning
   // (e.g. /chat, and any existing test that doesn't need it).
   spawn?: SpawnCapabilities;
+  // Threaded through to ToolBuildCtx via the `{ ...opts }` spread below —
+  // see toolset.ts's ToolBuildCtx.depth. Set by handler.ts's startTurn from
+  // a fresh store.isChildSession(sessionId) check on EVERY turn (not passed
+  // down from spawn time) — see that call site's own comment for why a
+  // durable-state check, not a threaded parameter, is what keeps a child
+  // structurally unable to spawn its own children. Undefined defaults to 0
+  // (top level) in buildSdkTools, same as before this field existed.
+  depth?: number;
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {

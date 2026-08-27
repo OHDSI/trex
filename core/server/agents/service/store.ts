@@ -527,6 +527,22 @@ export function createStore(query: QueryFn) {
 
     // --- child sessions (V9__orchestration.sql / 2026-08-27 orchestration) --
 
+    // Depth, derived from DURABLE STATE rather than a threaded parameter —
+    // see toolset.ts's ToolBuildCtx.depth and handler.ts's startTurn, which
+    // calls this once per turn (both the top-level and child cases; it has
+    // no cheaper way to tell them apart) to decide whether the `agent`/
+    // `agent_spawn`/... built-ins are offered. A parameter passed only at
+    // spawn time would be forgotten by any future spawn call site, and is
+    // lost entirely once a reaped child turn is restarted by a different
+    // worker with no memory of how the session was created; parent_session_id
+    // is already in the row and cannot drift from the truth. One indexed
+    // lookup by primary key — the same cost class as getRunningTurn, which
+    // every turn already pays.
+    async isChildSession(sessionId: string): Promise<boolean> {
+      const r = await query(`SELECT parent_session_id FROM agents.sessions WHERE id = $1`, [sessionId]);
+      return r.rows[0]?.parent_session_id != null;
+    },
+
     async createChildSession(opts: {
       plugin: string;
       agent: string;

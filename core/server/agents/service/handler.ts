@@ -537,6 +537,20 @@ function startTurn(
     // can be woken later — see buildSpawnCapabilities' own comment for why
     // /chat passes false here instead.
     const spawn = buildSpawnCapabilities(deps, sessionId, turn.id, true);
+    // Depth, from DURABLE STATE (store.isChildSession), not a value threaded
+    // down from spawn time — see toolset.ts's ToolBuildCtx.depth and
+    // store.ts's isChildSession for why: a passed parameter would be
+    // forgotten by a future spawn call site and lost entirely once a reaped
+    // child turn is restarted by a different worker, while parent_session_id
+    // cannot drift from the truth. This is what keeps a child structurally
+    // unable to spawn its own children (the spec's wake-loop safety
+    // argument depends on exactly this). Checked fresh on EVERY turn, not
+    // cached: nothing here distinguishes a session's first turn from any
+    // later one. A read failure is left to fail the turn (the catch below)
+    // rather than guessed in either direction — this table was just written
+    // to (addTurn, above) moments ago, and guessing 0 on a blip could let a
+    // child spawn a grandchild for the one turn it guessed wrong.
+    const depth = (await deps.store.isChildSession(sessionId)) ? 1 : 0;
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -546,6 +560,7 @@ function startTurn(
         connectionOpts: connectionOptsFor(deps),
         activatedTools,
         spawn,
+        depth,
       });
       await deps.store.finishTurn(turn.id, "completed");
       // A follow-up may have been queued WHILE this turn ran (the

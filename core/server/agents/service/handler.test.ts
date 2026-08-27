@@ -146,6 +146,11 @@ function inMemoryDb() {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: s ? [{ id: params[0], status: s.status, created_by: s.created_by }] : [] });
     }
+    // isChildSession (fix round 2) — depth, derived fresh every turn.
+    if (sql.includes("SELECT parent_session_id FROM agents.sessions")) {
+      const s = sessions.get(params[0] as string);
+      return Promise.resolve({ rows: [{ parent_session_id: s?.parent_session_id ?? null }] });
+    }
     if (sql.includes("SELECT id, seq, started_at FROM agents.turns")) {
       // getRunningTurn — the most-recently-started running turn.
       const running = turns.filter((t) => t.session_id === params[0] && t.status === "running")
@@ -1990,11 +1995,59 @@ Deno.test("POST /chat: the built-in agent tool spawns and awaits a REAL child se
   // Proves this went through spawnChild/createChildSession for real — a
   // child session row exists, scoped to the /chat request's (ephemeral)
   // session as its parent.
-  const children = [...db.sessions.values()].filter((s) => s.parent_session_id !== undefined);
-  assertEquals(children.length, 1, "expected exactly one child session created by the agent tool");
-  // And its own turn actually ran and completed (not left running/orphaned).
-  const childTurns = db.turns.filter((t) => t.session_id !== undefined && t.status === "completed");
-  assert(childTurns.length >= 1, "expected at least the child's own turn to have completed");
+  const childEntries = [...db.sessions.entries()].filter(([, s]) => s.parent_session_id !== undefined);
+  assertEquals(childEntries.length, 1, "expected exactly one child session created by the agent tool");
+  const [childId] = childEntries[0];
+  // Fix round 2, Minor: `session_id` is set on EVERY turn row (including the
+  // parent's), so filtering on it alone proved nothing — this would have
+  // passed even if the child's turn never ran at all. Scope to the actual
+  // child session id and assert its OWN turn reached "completed" (not left
+  // "running", i.e. orphaned).
+  const childTurn = db.turns.find((t) => t.session_id === childId);
+  assert(childTurn, "expected the child session to have its own turn row");
+  assertEquals(childTurn.status, "completed", "expected the child's own turn to have completed, not be left running/orphaned");
+});
+
+// Fix round 2 (task-6-7-report.md), Critical finding: depth must be derived
+// from durable state (agents.sessions.parent_session_id, via
+// store.isChildSession), not threaded from spawn time — a child session's
+// OWN turn must never receive the built-in `agent` tool, or it could spawn a
+// grandchild, defeating the one-level depth cap the wake-loop safety
+// argument depends on. Drives the exact same real spawn as the test above,
+// but inspects the ACTUAL tool schema sent to the model for both the
+// parent's call (must include "agent") and the child's own call (must not),
+// via a model that captures its doStream() options — the strongest proof
+// available: the tool is unreachable by the model, not merely absent from
+// some intermediate object nothing downstream reads.
+Deno.test("POST /chat: a spawned child's own turn is depth-capped — it does not receive the agent tool", async () => {
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  let call = 0;
+  const responses = [
+    toolCallChunks("agent", { prompt: "say hi" }), // parent's step 1: delegate
+    textChunks("child says hi"), // child's own (and only) step
+    textChunks("parent says done"), // parent's step 2: after the child returns
+  ];
+  const model = new MockLanguageModelV3({
+    // deno-lint-ignore no-explicit-any
+    doStream: (options: any) => {
+      calls.push(options);
+      const chunks = responses[Math.min(call++, responses.length - 1)];
+      return Promise.resolve({ stream: simulateReadableStream({ chunks }) });
+    },
+  });
+  const { handler } = await makeHandler({ model });
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ messages: [{ role: "user", parts: [{ type: "text", text: "delegate this" }] }] }),
+  }));
+  await res.text(); // drain the stream so the whole delegation actually runs to completion
+
+  assertEquals(calls.length, 3, `expected exactly 3 model calls (parent, child, parent); got ${calls.length}`);
+  const toolNames = (i: number): string[] =>
+    ((calls[i].tools ?? []) as Array<{ name: string }>).map((t) => t.name);
+  assert(toolNames(0).includes("agent"), "the parent's own turn must offer the agent tool");
+  assert(!toolNames(1).includes("agent"), "the spawned child's own turn must NOT offer the agent tool (depth must be 1, not 0)");
 });
 
 // task-u1: usage must reach the wire via the finish part's messageMetadata —

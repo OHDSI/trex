@@ -38,9 +38,13 @@ export interface ToolBuildCtx {
   // authoredTool passes it through as-is, matching ToolContext.emit's "safe
   // no-op when unwired" contract (eve-shim/types.ts) since an absent field
   // makes `ctx?.emit?.(...)` a no-op at the call site, not a throw here.
-  // Inherited by subagent runs (depth 1) via runSubagent's `{ ...ctx }`
-  // spread below — a subagent's tool.event lands on the SAME channel
-  // (session stream / chat writer) as its parent's, not a distinct one.
+  // A depth-1 (child) turn gets its OWN toolEmit, wired the same way as any
+  // top-level turn's (session stream / chat writer) — a child's tool calls
+  // are not inherently visible on its PARENT's channel. Delegation
+  // (toolset.ts's runAsChild) bridges them back explicitly: it subscribes to
+  // the child's own event stream and re-emits its tool-call/tool-result
+  // pairs onto the parent's toolEmit as subagent.tool, alongside the coarse
+  // subagent.start/end it emits directly.
   toolEmit?: (name: string, data: unknown) => void;
   approvalPollMs?: number;
   approvalTimeoutMs?: number;
@@ -77,9 +81,12 @@ export interface ToolBuildCtx {
   activatedTools?: string[];
   // Child-spawn capabilities for the `agent`/`agent_spawn`/`agent_wait`/...
   // built-ins — see spawn.ts's createSpawnCapabilities, built once per turn
-  // by handler.ts's startTurn. Optional: a caller with no session store
-  // (most unit tests here, and any legacy caller) falls back to the
-  // original in-process nested loop instead — see agentTool/runSubagent.
+  // by handler.ts's startTurn (both the session/turn path and /chat wire
+  // it — see fix-round-1 in task-6-7-report.md). Optional only because the
+  // TypeScript type must accommodate a caller that never sets it (mostly
+  // unit tests exercising unrelated tools); the `agent` tool itself treats a
+  // missing one as a wiring bug and rejects loudly rather than falling back
+  // to anything — see agentTool.
   spawn?: SpawnCapabilities;
 }
 
@@ -503,8 +510,9 @@ function serializedToolBytes(tools: Record<string, any>): number {
 //     throwing filter propagates uncaught: filterTools is an authored
 //     AgentConfig hook like resolveModel/buildInstructions, and shares their
 //     posture of never silently keeping/dropping a tool the author didn't
-//     actually decide on. See runSubagent for why step 2 is skipped but
-//     step 4 still runs at subagent depth (1).
+//     actually decide on. Step 2 (dynamic-tools.ts provider) is depth-0
+//     only by design (see below); step 4 (filterTools) still runs at depth
+//     1 too, on a child session's own turn.
 export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, any>> {
   const { agent } = ctx;
   const depth = ctx.depth ?? 0;
@@ -617,8 +625,10 @@ export async function buildSdkTools(ctx: ToolBuildCtx): Promise<Record<string, a
   }
 
   // Step 5: cap every surviving tool's output (authored, dynamic, built-in
-  // alike). Subagents go through this too, via the recursive buildSdkTools
-  // call in runSubagent (depth 1) — no extra plumbing needed.
+  // alike). A child session's own turn goes through this too, via its own
+  // top-level runTurn -> buildSdkTools call (depth 1, derived from
+  // parent_session_id — see handler.ts's startTurn) — no extra plumbing
+  // needed.
   for (const name of Object.keys(out)) {
     out[name] = wrapToolWithCap(out[name], agent.config.context);
   }

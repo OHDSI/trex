@@ -460,6 +460,15 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
   assertEquals(ev.data.result.output?.text, "BANANA");
 });
 
+// This only proves buildSdkTools' own `if (depth === 0)` gate works when
+// `depth` is handed to it directly — it says nothing about where a REAL
+// child turn's depth comes from. It kept passing, for the wrong reason,
+// through the entire window where a real child turn (started via
+// handler.ts's startChildTurn -> runTurn) always ran at depth 0 regardless
+// (ctx.depth defaulted to 0 and nothing ever set it for a child), so a child
+// could spawn a grandchild. See the test below for the fix (depth derived
+// from store.isChildSession, not threaded) exercised through the real
+// runTurn.
 Deno.test("subagent runs do not get a nested agent tool (one level only)", async () => {
   const agent = await loadAgent(TOY);
   const { buildSdkTools } = await import("./toolset.ts");
@@ -468,6 +477,53 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   const top = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
   assert("agent" in top);
   assert("skill" in top);
+});
+
+// Fix round 2 (task-6-7-report.md): depth must come from durable state
+// (agents.sessions.parent_session_id via store.isChildSession), not a value
+// threaded down from spawn time — see handler.ts's startTurn and its own
+// comment for why. This drives the REAL runTurn (not just buildSdkTools in
+// isolation) with a depth value obtained from the REAL store.isChildSession,
+// against a session genuinely shaped like a child (parent_session_id set),
+// and inspects the actual tool schema sent to the model (via
+// capturingModel) rather than reaching into buildSdkTools' return value —
+// proving the tool is truly withheld from the model, not just absent from
+// some intermediate object nothing downstream reads.
+Deno.test("depth is derived from durable state: a child session's own turn never gets the agent tool, a top-level session's still does", async () => {
+  const agent = await loadAgent(TOY);
+  const query = (sql: string, params: unknown[] = []) => {
+    if (sql.includes("SELECT parent_session_id FROM agents.sessions")) {
+      const sid = params[0] as string;
+      return Promise.resolve({ rows: [{ parent_session_id: sid === "child-1" ? "parent-1" : null }] });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  const store = createStore(query as never);
+
+  const topDepth = (await store.isChildSession("top-1")) ? 1 : 0;
+  const childDepth = (await store.isChildSession("child-1")) ? 1 : 0;
+  assertEquals(topDepth, 0, "a session with no parent_session_id is depth 0");
+  assertEquals(childDepth, 1, "a session WITH a parent_session_id is depth 1");
+
+  const top = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "top-1", turnId: "t-1", history: [], message: "hi",
+    store, emit: () => {}, model: top.model, depth: topDepth,
+  });
+  assert(
+    top.calls[0].tools?.some((t: { name: string }) => t.name === "agent"),
+    "a top-level turn must still get the built-in agent tool",
+  );
+
+  const child = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "child-1", turnId: "t-2", history: [], message: "hi",
+    store, emit: () => {}, model: child.model, depth: childDepth,
+  });
+  assert(
+    !child.calls[0].tools?.some((t: { name: string }) => t.name === "agent"),
+    "a child session's own turn must NOT get the agent tool — this is what keeps depth capped at one level",
+  );
 });
 
 // ToolContext.emit: the session path publishes a live tool.event and persists a
