@@ -514,9 +514,16 @@ live-tail by event shape.
       that finishes while the parent is still mid-turn queues its result and
       the parent's own drain-and-chain tail starts a turn for it anyway, so
       counting only the wake call left that entire loop shape unbudgeted.
-      Such a delivery stamps `agents.sessions.pending_wake_child_id`, which
-      the chained turn reads-and-clears so it does not reset the budget it
-      was itself caused by.
+      Every delivery stamps `agents.sessions.pending_wake_child_id` BEFORE
+      it queues its followup row, so a turn that can see a child's result can
+      always see why it is there. A chained turn READS the stamp (it never
+      clears it — one slot cannot be handed out to several simultaneous
+      deliveries) and skips the reset while it stands; only an external turn
+      retires it, in the same `UPDATE` that zeroes the counter. Consequence,
+      deliberate: a human message that lands while a turn is running is
+      folded into that turn's chain rather than starting its own, so its
+      reset is deferred to the next turn that is genuinely its own —
+      under-resetting is the safe direction here.
       A wake racing another parent message is resolved by
       `idx_agents_turns_one_running_per_session` (a partial unique index,
       PER session — it does not serialize siblings spawned under the same

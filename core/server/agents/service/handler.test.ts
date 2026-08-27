@@ -177,11 +177,11 @@ function inMemoryDb() {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: [{ parent_session_id: s?.parent_session_id ?? null }] });
     }
-    // markPendingWake / takePendingWake — the stamp a busy parent gets so the
-    // turn it chains next is recognised as child-caused (and so does not reset
-    // the wake budget). Checked BEFORE the consecutive_wakes branches: both
-    // statements target agents.sessions and only the column name tells them
-    // apart.
+    // markPendingWake / readPendingWake — the stamp a parent gets so the turn
+    // it chains next is recognised as child-caused (and so does not reset the
+    // wake budget). Checked BEFORE the consecutive_wakes branches: these
+    // statements target agents.sessions too and only the column name tells
+    // them apart.
     if (sql.includes("SELECT pending_wake_child_id")) {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: [{ pending_wake_child_id: s?.pending_wake_child_id ?? null }] });

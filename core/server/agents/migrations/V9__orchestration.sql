@@ -16,14 +16,17 @@ ALTER TABLE agents.sessions
     -- On the PARENT row: how many turns in a row were started by a child
     -- completing rather than by anyone asking. Reset by any external turn.
     ADD COLUMN IF NOT EXISTS consecutive_wakes INT NOT NULL DEFAULT 0,
-    -- On the PARENT row: the child whose result was queued while the parent
-    -- already had a turn running. That parent's own turn drains the queue and
-    -- CHAINS a further turn when it ends; without this marker the chained turn
-    -- looks like an ordinary one and resets consecutive_wakes, so the runaway
-    -- guard can never fire for the one loop shape it exists to bound. Read
-    -- and cleared in a single UPDATE ... RETURNING (store.ts's
-    -- takePendingWake). Not a foreign key: the marker must survive the child
-    -- row being deleted, and it is only ever compared for NULL-ness.
+    -- On the PARENT row: the last child whose result was delivered here with
+    -- nobody having asked for anything. The parent's own turn drains the
+    -- followup queue and CHAINS a further turn when it ends; without this
+    -- marker that chained turn looks like an ordinary one and resets
+    -- consecutive_wakes, so the runaway guard can never fire for the one loop
+    -- shape it exists to bound. Written BEFORE the followup row it explains,
+    -- read (never cleared) by a chained turn, and retired only by an external
+    -- turn's resetConsecutiveWakes — see store.ts's readPendingWake for why a
+    -- read-and-clear slot cannot serve several simultaneous deliveries. Not a
+    -- foreign key: the marker must outlive the child row, and it is only ever
+    -- compared for NULL-ness.
     ADD COLUMN IF NOT EXISTS pending_wake_child_id UUID;
 
 CREATE INDEX IF NOT EXISTS idx_agents_sessions_parent
