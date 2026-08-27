@@ -21,6 +21,7 @@ import { estimatePrefixTokens, estimateTokens, type ContextConfig } from "./cont
 import { maybeCompact } from "./context/compact.ts";
 import { partitionTools } from "./context/toolsplit.ts";
 import { SUMMARY_PREFIX } from "./context/prompts.ts";
+import { createSpawnCapabilities } from "./spawn.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -170,6 +171,12 @@ function startTurn(
   bearerToken?: string,
   userId?: string,
   onTurnCreated?: (turnId: string) => void,
+  // Set only by a child session's very first turn (see spawn.ts's
+  // spawnChild / createSpawnCapabilities' startChildTurn below) — the
+  // parent's forked history slice, seeded directly since a brand-new child
+  // session has no persisted turns of its own for buildHistory to assemble
+  // from.
+  seedHistory?: ModelMessage[],
 ) {
   // Fire and forget: the turn streams via publish(); errors land as error
   // events + failed turn status, never as unhandled rejections.
@@ -355,6 +362,9 @@ function startTurn(
     let history: ModelMessage[] = ensureToolResultsPresent(
       assembleHistory(priorTurns, deps.agent.config.context),
     );
+    // A brand-new child session has no persisted turns of its own (priorTurns
+    // is always [] here), so this can never clobber a session's real history.
+    if (seedHistory && seedHistory.length > 0) history = seedHistory;
     let compacted = false;
     if (priorTurns.length > 0) {
       const priorMsgs = history;
@@ -520,6 +530,42 @@ function startTurn(
     // leaves the row `running` and every later message on the session queued
     // behind it until the two-hour started_at cutoff.
     const heartbeat = startTurnHeartbeat(deps.store, turn.id);
+    // Built fresh per turn (spawnChild forks THIS turn's parent history at
+    // spawn time, and a spawned child's parent_turn_id is this turn's own
+    // id — neither is known any earlier in this function).
+    const spawn = createSpawnCapabilities({
+      sessionId,
+      turnId: turn.id,
+      plugin: deps.plugin,
+      agent: deps.agentName,
+      store: deps.store,
+      config: deps.agent.config.context,
+      startChildTurn: (o) => {
+        // A named subagent's child turn must run under ITS OWN
+        // instructions/tools/model, not the parent's — mirrors the
+        // Object.hasOwn guard resolveTarget applies before a subagent name
+        // ever reaches here (toolset.ts), repeated defensively so a bogus
+        // value can never resolve through the prototype chain.
+        const childAgent = o.subagent && Object.hasOwn(deps.agent.subagents, o.subagent)
+          ? deps.agent.subagents[o.subagent]
+          : deps.agent;
+        if (o.subagent && childAgent === deps.agent) {
+          console.error(
+            `agents: spawnChild resolved an unknown subagent "${o.subagent}" on session ${sessionId} — running the child as a copy of the parent instead`,
+          );
+        }
+        startTurn(
+          { ...deps, agent: childAgent },
+          o.sessionId,
+          o.message,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          o.history,
+        );
+      },
+    });
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -528,6 +574,7 @@ function startTurn(
         plugin: deps.plugin, agentName: deps.agentName,
         connectionOpts: connectionOptsFor(deps),
         activatedTools,
+        spawn,
       });
       await deps.store.finishTurn(turn.id, "completed");
       // A follow-up may have been queued WHILE this turn ran (the

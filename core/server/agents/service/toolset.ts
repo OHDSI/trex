@@ -15,6 +15,7 @@ import type { AgentEvent } from "./events.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { partitionTools } from "./context/toolsplit.ts";
+import type { SpawnCapabilities } from "./spawn.ts";
 
 export interface ToolBuildCtx {
   agent: LoadedAgent;
@@ -73,6 +74,12 @@ export interface ToolBuildCtx {
   // activation state (or an agent with no deferredTools at all) simply never
   // see a deferred tool withheld-then-revealed.
   activatedTools?: string[];
+  // Child-spawn capabilities for the `agent`/`agent_spawn`/`agent_wait`/...
+  // built-ins — see spawn.ts's createSpawnCapabilities, built once per turn
+  // by handler.ts's startTurn. Optional: a caller with no session store
+  // (most unit tests here, and any legacy caller) falls back to the
+  // original in-process nested loop instead — see agentTool/runSubagent.
+  spawn?: SpawnCapabilities;
 }
 
 export function buildSystemPrompt(agent: LoadedAgent, metadata?: unknown): string {

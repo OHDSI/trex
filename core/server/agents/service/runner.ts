@@ -11,6 +11,7 @@ import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { buildSdkTools, resolveInstructions, resolveUserMessage } from "./toolset.ts";
 import type { ConnectionProviderOpts } from "../connections/provider.ts";
+import type { SpawnCapabilities } from "./spawn.ts";
 
 interface RunTurnOpts {
   agent: LoadedAgent;
@@ -47,6 +48,13 @@ interface RunTurnOpts {
   // turn. Threaded straight through to buildSdkTools via the `{ ...opts }`
   // spread below — see toolset.ts's ToolBuildCtx.activatedTools.
   activatedTools?: string[];
+  // Child-spawn capabilities for this turn's `agent`/`agent_spawn`/...
+  // tools — see toolset.ts's ToolBuildCtx.spawn. Threaded straight through
+  // to buildSdkTools via the `{ ...opts }` spread below. Set by handler.ts's
+  // startTurn once the turn's own id is known (spawnChild needs it as the
+  // child's parent_turn_id); undefined for callers that never wire spawning
+  // (e.g. /chat, and any existing test that doesn't need it).
+  spawn?: SpawnCapabilities;
 }
 
 export async function runTurn(opts: RunTurnOpts): Promise<{ text: string; finishReason: string }> {
