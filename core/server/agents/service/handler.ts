@@ -23,6 +23,10 @@ import { partitionTools } from "./context/toolsplit.ts";
 import { SUMMARY_PREFIX } from "./context/prompts.ts";
 import { createSpawnCapabilities, type SpawnCapabilities } from "./spawn.ts";
 import { MAX_CONSECUTIVE_WAKES } from "./orchestration.ts";
+// Shared with service/sweep.ts's periodic reap path so a parent sees ONE
+// consistent message for "your child's worker stopped responding" whichever
+// reap path (this lazy one, or the periodic sweep) noticed first.
+import { ABANDONED_CHILD_ERROR } from "./sweep.ts";
 
 type EnvFn = (k: string) => string | undefined;
 
@@ -34,7 +38,10 @@ export interface OAuthBrokerDeps extends OAuthProviderDeps {
   basePath: string;
 }
 
-interface Deps {
+// Exported so index.ts can build a real, wake-capable DeliverDeps (via
+// buildDeliverDeps, below) for the periodic sweep — see that function's own
+// comment for why the sweep needs one at all.
+export interface Deps {
   agent: LoadedAgent;
   store: AgentStore;
   plugin: string;
@@ -253,7 +260,22 @@ function startTurn(
         // fresh turn. publish() cannot carry this: no delivery is registered
         // for THIS message's turn yet (registerForTurn runs after addTurn,
         // further down), so the event would go to no subscriber.
-        if (reaped.length > 0) await notifyReapedForSession(deps, sessionId, reaped);
+        if (reaped.length > 0) {
+          await notifyReapedForSession(deps, sessionId, reaped);
+          // 2026-08-27 orchestration task 13: the reaped SESSION might itself
+          // be a DETACHED CHILD whose PARENT is waiting to hear about it —
+          // reapStaleTurns only flips a DB row, it has no route to
+          // deliverChildResult on its own. Safe to call unconditionally:
+          // deliverChildResult no-ops for a top-level or blocking session
+          // (its own getSession/detached check), and is itself idempotent
+          // per child (see its Invariant 5) — a race against this same
+          // child's turn finishing on its own cannot double-deliver.
+          await deliverChildResult(buildDeliverDeps(deps), sessionId, {
+            error: ABANDONED_CHILD_ERROR,
+          }).catch((e) =>
+            console.error(`agents: deliverChildResult failed after reaping session ${sessionId}:`, e)
+          );
+        }
       } catch (e) {
         console.error(`agents: stale-turn reap failed for session ${sessionId} (treating session as busy):`, e);
       }
@@ -586,18 +608,8 @@ function startTurn(
     // child spawn a grandchild for the one turn it guessed wrong.
     const depth = (await deps.store.isChildSession(sessionId)) ? 1 : 0;
     // Built once, reused by both the success and failure delivery calls
-    // below. Deliberately a narrow object (not the full Deps) so
-    // deliverChildResult stays unit-testable without a real runTurn/model —
-    // `wake` closes over THIS turn's `deps`, exactly mirroring
-    // buildSpawnCapabilities' own startChildTurn closure a few lines up.
-    const deliverDeps: DeliverDeps = {
-      store: deps.store,
-      // wokenByChildId lands in startTurn's dedicated parameter (see its own
-      // comment), never in `metadata` — metadata here is `undefined`: this
-      // synthetic turn has no client-supplied context of its own, the same
-      // as a brand-new child session's first turn.
-      wake: (sid, msg, childId) => startTurn(deps, sid, msg, undefined, undefined, undefined, undefined, undefined, childId),
-    };
+    // below — see buildDeliverDeps' own comment.
+    const deliverDeps = buildDeliverDeps(deps);
     try {
       await runTurn({
         agent: deps.agent, sessionId, turnId: turn.id, history, message: turnMessage, metadata,
@@ -685,6 +697,37 @@ async function readChildResultText(store: AgentStore, sessionId: string): Promis
 
 export type ChildOutcome = { text: string } | { error: string };
 
+// Per-child, per-store delivery guard for deliverChildResult (Invariant 5,
+// below) — keyed on `deps.store` object IDENTITY, not on any DB column, so
+// this stays a plain in-process check with no schema change: in production
+// a single Deps.store instance lives for the whole worker process and is
+// reused by EVERY call site (startTurn's success tail, its failure catch,
+// and both reap paths — see buildDeliverDeps, which is what makes them all
+// share one store reference), so the guard is effectively "has THIS worker
+// already delivered THIS child". A fresh test fixture's own fresh store
+// object is a distinct key, so this cannot leak state between unrelated
+// Deno.test cases that happen to reuse the same childSessionId literal (e.g.
+// "c-1", used freely throughout this file's tests).
+//
+// This closes the race for every caller within ONE worker process — which
+// is the case actually observed (a reap racing a turn finishing in the SAME
+// process; the periodic sweep runs as a setInterval in that same process
+// too). It does NOT close a genuinely cross-process race (an old worker's
+// completion tail racing a NEW worker's sweep during a redeploy overlap) —
+// closing that fully needs a DB-level compare-and-set column, a schema
+// change judged out of scope for this pair of commits.
+const deliveredChildrenByStore = new WeakMap<object, Set<string>>();
+function alreadyDelivered(store: object, childSessionId: string): boolean {
+  let delivered = deliveredChildrenByStore.get(store);
+  if (!delivered) {
+    delivered = new Set();
+    deliveredChildrenByStore.set(store, delivered);
+  }
+  if (delivered.has(childSessionId)) return true;
+  delivered.add(childSessionId);
+  return false;
+}
+
 // Deliberately narrow — not the full Deps/AgentStore — so deliverChildResult
 // is unit-testable without a real agent/model/runTurn. The DB-shaped
 // bookkeeping calls are `Pick`ed straight off AgentStore, so a test fake is
@@ -705,6 +748,27 @@ export interface DeliverDeps {
    * client could otherwise forge (see startTurn's own comment).
    */
   wake(sessionId: string, message: string, childSessionId: string): void;
+}
+
+// Builds a real, wake-capable DeliverDeps from a full Deps — `wake` closes
+// over THIS Deps and calls the module-private startTurn, exactly mirroring
+// buildSpawnCapabilities' own startChildTurn closure. Used at THREE call
+// sites now (2026-08-27 orchestration task 13): startTurn's own success tail
+// and failure catch (below), AND startTurn's lazy on-message reap branch
+// (above) — all three need the SAME wake capability, so this is factored out
+// once rather than reconstructed at each site. Exported so index.ts can also
+// build one for the PERIODIC sweep (service/sweep.ts's `deliver` option) —
+// that path has no `Deps` of its own; it is handed a real one built from the
+// exact same object index.ts already constructs for createHandler.
+export function buildDeliverDeps(deps: Deps): DeliverDeps {
+  return {
+    store: deps.store,
+    // wokenByChildId lands in startTurn's dedicated parameter (see its own
+    // comment), never in `metadata` — metadata here is `undefined`: this
+    // synthetic turn has no client-supplied context of its own, the same
+    // as a brand-new child session's first turn.
+    wake: (sid, msg, childId) => startTurn(deps, sid, msg, undefined, undefined, undefined, undefined, undefined, childId),
+  };
 }
 
 /**
@@ -738,6 +802,21 @@ export interface DeliverDeps {
  * rather than "how many wakes this session has ever had" — without that
  * reset, a long-lived session woken legitimately many times would eventually
  * hit this cap for no good reason.
+ *
+ * Invariant 5 (2026-08-27 orchestration task 13): delivers AT MOST ONCE per
+ * child. Before task 13 there were exactly two callers — the turn's own
+ * success tail and its failure catch (both in startTurn, above) — which are
+ * structurally mutually exclusive (a turn ends exactly one way), so nothing
+ * needed to enforce this. Task 13 adds a THIRD caller: a reap (either the
+ * periodic sweep or the lazy on-message reap), which CAN race a turn that is
+ * genuinely still finishing on its own — reapStaleTurns' heartbeat cutoff can
+ * fire on a worker that merely stalled (a GC pause, event-loop starvation)
+ * rather than actually died, and finishTurn's own UPDATE is unconditional
+ * (not scoped to status='running'), so a stalled worker that later wakes up
+ * and calls finishTurn("completed") can resurrect a turn the reap already
+ * marked failed — and BOTH paths would then call this for the same child
+ * with CONTRADICTORY outcomes, queuing the result twice. See
+ * alreadyDelivered's own comment for why the guard is keyed the way it is.
  */
 export async function deliverChildResult(
   deps: DeliverDeps,
@@ -748,6 +827,7 @@ export async function deliverChildResult(
     | { parent_session_id?: string | null; detached?: boolean; nickname?: string | null }
     | null;
   if (!child?.parent_session_id || !child.detached) return;
+  if (alreadyDelivered(deps.store, childSessionId)) return;
 
   const parentSessionId = child.parent_session_id;
   const who = child.nickname || childSessionId;

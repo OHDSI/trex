@@ -2652,6 +2652,72 @@ Deno.test("a real detached child's completion wakes its idle parent with a follo
   assertEquals(db.sessions.get(parentId)?.consecutive_wakes, 1, "the wake budget should have bumped exactly once");
 });
 
+// Task 13 (2026-08-27-agent-orchestration): the LAZY on-message reap (see the
+// "stale (abandoned) running turn" tests above, in the busy-branch section)
+// only ever notified the CHANNEL a turn came from (notifyReapedForSession) —
+// a DETACHED CHILD's parent heard nothing when its child was reaped this
+// way, which is exactly the silent-hang class the heartbeat work exists to
+// close: a child abandoned on a session nobody messages again would recover
+// via the periodic sweep (sweep.test.ts covers that path), but a child that
+// SOMEONE re-messages directly (its own session id, known to the caller)
+// hits this lazy path instead, and used to leave its parent waiting forever.
+//
+// Deliberately placed here (with the other end-to-end deliverChildResult
+// tests) rather than beside the busy-branch reap tests above: this file's
+// "stale (abandoned) running turn" tests deliberately leave a genuinely
+// pending model call running past the end of their own test (see their own
+// comments) — an unrelated, pre-existing Deno leak-sanitizer artifact of
+// that technique (green in CI) that otherwise bleeds into whichever test
+// runs immediately next in file order.
+Deno.test("a lazily-reaped DETACHED CHILD's abandonment reaches its parent, not just the channel", async () => {
+  const { handler, db } = await makeHandler({ model: model("kicked off") });
+  const store = createStore(db.query as never);
+
+  const parentRes = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "kick off a background task" }),
+  }));
+  const parentId = parentRes.headers.get("x-eve-session-id")!;
+  await until(() => settled(db));
+  const turnsBeforeWake = db.turns.filter((t) => t.session_id === parentId).length;
+
+  const childId = await store.createChildSession({
+    plugin: "toy-agent", agent: "toy", parentSessionId: parentId, parentTurnId: null,
+    subagent: null, nickname: "wisp", detached: true,
+  });
+
+  // A running turn on the child, fabricated directly via the store (no real
+  // model/turn loop involved — a genuinely-stuck model call would leave a
+  // dangling timer for this test's whole lifetime, since nothing here ever
+  // needs it to actually finish). Backdated well past the reap cutoff, same
+  // technique the busy-branch reap tests use, standing in for a worker that
+  // died mid-turn.
+  await store.addTurn(childId, "do the subtask");
+  const childTurn = db.turns.find((t) => t.session_id === childId)!;
+  childTurn.startedAt = new Date(Date.now() - 3 * 60 * 60 * 1000);
+
+  // A message lands on the (stale) CHILD session directly — e.g. a caller
+  // that knows the child's session id re-messaging it. This is what
+  // triggers the LAZY on-message reap (handler.ts's startTurn busy branch);
+  // the periodic sweep is covered separately in sweep.test.ts.
+  await handler(new Request(`${BASE}/eve/v1/session/${childId}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "are you still there?" }),
+  }));
+
+  await until(() => db.turns.filter((t) => t.session_id === parentId).length > turnsBeforeWake);
+  await until(() => settled(db));
+
+  assertEquals(childTurn.status, "failed", "the child's abandoned turn must be reaped");
+  const parentTurns = db.turns.filter((t) => t.session_id === parentId).sort((a, b) => a.seq - b.seq);
+  assertEquals(parentTurns.length, turnsBeforeWake + 1, "the parent should have gained exactly one new (wake) turn");
+  const wokenTurn = parentTurns[parentTurns.length - 1];
+  assert(
+    typeof wokenTurn.message === "string" && wokenTurn.message.toLowerCase().includes("abandoned"),
+    `expected the woken turn's message to say the child was abandoned: ${JSON.stringify(wokenTurn.message)}`,
+  );
+});
+
 Deno.test("a blocking (non-detached) child's completion never wakes its parent", async () => {
   const { handler, db } = await makeHandler({ model: model("blocking child result") });
   const store = createStore(db.query as never);
@@ -2772,4 +2838,42 @@ Deno.test("a detached child with no final text step delivers an explicit no-outp
   const delivered = (followUps[0] as { text: string }).text;
   assert(!delivered.includes("finished:\n\n\n"), "must not produce a bare, contentless followup");
   assert(delivered.includes("no output"), `expected an explicit no-output notice, got: ${delivered}`);
+});
+
+// ---------------------------------------------------------------------------
+// Task 13 (2026-08-27-agent-orchestration): deliverChildResult must deliver
+// AT MOST ONCE per child. Before this task there were exactly two callers
+// (the turn's own success tail and its failure catch), structurally mutually
+// exclusive (a turn ends exactly one way), so nothing needed to enforce this.
+// Task 13 adds a THIRD caller (a reap, from either reap path) that CAN race
+// a turn genuinely still finishing on its own: reapStaleTurns' heartbeat
+// cutoff can fire on a worker that merely stalled (a GC pause, event-loop
+// starvation) rather than actually died, and finishTurn's own UPDATE is
+// unconditional (not scoped to status='running'), so a stalled worker that
+// later wakes up and calls finishTurn("completed") can resurrect a turn the
+// reap already marked failed — and BOTH paths would then call
+// deliverChildResult for the same child with CONTRADICTORY outcomes.
+// ---------------------------------------------------------------------------
+
+Deno.test("deliverChildResult delivers at most once per child — a second call (e.g. a reap racing the turn's own tail) is a no-op", async () => {
+  const followUps: unknown[] = [];
+  const started: unknown[] = [];
+  const deps = fakeDeliverDeps({ followUps, started });
+  await deliverChildResult(deps as never, "race-child", { text: "genuine success" });
+  await deliverChildResult(deps as never, "race-child", { error: "abandoned by a racing reap" });
+  assertEquals(followUps.length, 1, "the second, racing call must not queue a second (contradictory) result");
+  assert(JSON.stringify(followUps[0]).includes("genuine success"));
+  assertEquals(started.length, 1, "the parent must only be woken once");
+});
+
+Deno.test("deliverChildResult's once-per-child guard is scoped to the store instance — unrelated calls (e.g. different tests/deps) are unaffected", async () => {
+  // Uses the exact literal childSessionId ("c-1") every other test in this
+  // file already reuses freely — proving the guard is keyed on something
+  // that does NOT leak across a fresh fakeDeliverDeps() (i.e. a fresh store
+  // instance), matching a fresh worker/store in production.
+  const followUps: unknown[] = [];
+  const deps = fakeDeliverDeps({ followUps });
+  await deliverChildResult(deps as never, "c-1", { text: "unrelated call, must still deliver" });
+  assertEquals(followUps.length, 1);
+  assert(JSON.stringify(followUps[0]).includes("unrelated call, must still deliver"));
 });

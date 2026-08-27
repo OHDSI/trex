@@ -3,7 +3,7 @@
 // FakeTime from jsr:@std/testing/time, matching how this codebase avoids
 // real setInterval delays in tests — check for an existing FakeTime usage
 // elsewhere in agents/ first and match its import style if one exists).
-import { assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals } from "jsr:@std/assert";
 import { FakeTime } from "jsr:@std/testing/time";
 import { startStaleTurnSweep } from "./sweep.ts";
 import type { AgentStore } from "./store.ts";
@@ -151,6 +151,105 @@ Deno.test("startStaleTurnSweep: an explicit staleMs is threaded through to both 
   assertEquals(seenListStaleMs.length > 0 && seenReapStaleMs.length > 0, true, "sweep never called the store");
   assertEquals(seenListStaleMs.every((v) => v === explicitStaleMs), true, `list saw ${seenListStaleMs}`);
   assertEquals(seenReapStaleMs.every((v) => v === explicitStaleMs), true, `reap saw ${seenReapStaleMs}`);
+  handle.stop();
+});
+
+// ---------------------------------------------------------------------------
+// Task 13 (2026-08-27-agent-orchestration): the sweep tells a parent when it
+// reaps a child. reapStaleTurns/failTurnsForSession only flip a DB row —
+// nothing else in this path knows to call deliverChildResult, so without
+// this a detached child whose worker dies leaves its parent waiting forever.
+// `deliver` is injected (not called directly here) because sweep.ts has no
+// way to actually START the parent's next turn (handler.ts's private
+// startTurn) — see handler.ts's exported buildDeliverDeps, which index.ts
+// wires as the real `deliver` in production. Whether the reaped session
+// actually IS a detached child is deliverChildResult's own job (it no-ops
+// for a top-level/blocking session) — these tests only prove the sweep
+// calls `deliver` exactly when something was reaped, with the right
+// arguments, and survives a `deliver` failure.
+// See .superpowers/sdd/2026-08-27-agent-orchestration/task-13-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("startStaleTurnSweep: calls deliver with an abandoned-error outcome when a session's turns were reaped", async () => {
+  using time = new FakeTime();
+  const store = fakeStore({
+    listSessionsWithStaleRunningTurns: async () => ["c-1"],
+    reapStaleTurns: async () => [{ id: "t-1", metadata: null }],
+  });
+  const delivered: Array<[string, unknown]> = [];
+  const handle = startStaleTurnSweep(store, {
+    plugin: "toy-agent",
+    agent: "toy",
+    intervalMs: 1000,
+    deliver: (sessionId, outcome) => {
+      delivered.push([sessionId, outcome]);
+      return Promise.resolve();
+    },
+  });
+  await time.runMicrotasks();
+  assertEquals(delivered.length, 1);
+  assertEquals(delivered[0][0], "c-1");
+  const outcome = delivered[0][1] as { error: string };
+  assert(outcome.error.toLowerCase().includes("abandoned"), outcome.error);
+  handle.stop();
+});
+
+Deno.test("startStaleTurnSweep: does not call deliver when nothing was reaped for a session", async () => {
+  using time = new FakeTime();
+  const store = fakeStore({
+    listSessionsWithStaleRunningTurns: async () => ["s-1"],
+    reapStaleTurns: async () => [], // race: another trigger already cleared it
+  });
+  const delivered: unknown[] = [];
+  const handle = startStaleTurnSweep(store, {
+    plugin: "toy-agent",
+    agent: "toy",
+    intervalMs: 1000,
+    deliver: (...a) => {
+      delivered.push(a);
+      return Promise.resolve();
+    },
+  });
+  await time.tickAsync(1000);
+  await time.runMicrotasks();
+  assertEquals(delivered.length, 0);
+  handle.stop();
+});
+
+Deno.test("startStaleTurnSweep: works with no deliver configured at all (opt-in, back-compat)", async () => {
+  using time = new FakeTime();
+  const store = fakeStore({
+    listSessionsWithStaleRunningTurns: async () => ["s-1"],
+    reapStaleTurns: async () => [{ id: "t-1", metadata: null }],
+  });
+  const notified: unknown[] = [];
+  const handle = startStaleTurnSweep(store, {
+    plugin: "toy-agent",
+    agent: "toy",
+    intervalMs: 1000,
+    onReap: (...a) => notified.push(a),
+  });
+  await time.runMicrotasks(); // must not throw for lack of a `deliver`
+  assertEquals(notified.length, 1);
+  handle.stop();
+});
+
+Deno.test("startStaleTurnSweep: a failing deliver is swallowed — it does not stop onReap from firing or kill the tick", async () => {
+  using time = new FakeTime();
+  const store = fakeStore({
+    listSessionsWithStaleRunningTurns: async () => ["c-1"],
+    reapStaleTurns: async () => [{ id: "t-1", metadata: null }],
+  });
+  const notified: unknown[] = [];
+  const handle = startStaleTurnSweep(store, {
+    plugin: "toy-agent",
+    agent: "toy",
+    intervalMs: 1000,
+    onReap: (...a) => notified.push(a),
+    deliver: () => Promise.reject(new Error("db blip")),
+  });
+  await time.runMicrotasks(); // must not throw / hang the sweep
+  assertEquals(notified.length, 1, "onReap must still fire even though deliver rejected");
   handle.stop();
 });
 
