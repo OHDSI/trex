@@ -1,4 +1,4 @@
-import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects, assertStringIncludes } from "jsr:@std/assert";
 import { createStore, denyApprovalsForTurns, RUNNING_TURN_INDEX, type QueryFn } from "./store.ts";
 import { STOPPED_BY_PARENT_ERROR } from "./orchestration.ts";
 
@@ -36,7 +36,7 @@ Deno.test("createSession inserts and returns id", async () => {
   const id = await store.createSession("toy-agent", "toy", "user-1");
   assertEquals(id, "s-1");
   assert(calls[0].sql.includes("INSERT INTO agents.sessions"));
-  assertEquals(calls[0].params, ["toy-agent", "toy", "user-1"]);
+  assertEquals(calls[0].params, ["toy-agent", "toy", "user-1", false]);
 });
 
 Deno.test("addTurn computes next seq atomically in SQL", async () => {
@@ -166,7 +166,7 @@ Deno.test("approval round trip", async () => {
     { rows: [{ decision: "approve" }] },    // getApprovalDecision
   ]);
   const store = createStore(fn as never);
-  const rid = await store.createApproval("s-1", "t-1", "dangerous_tool", { x: 1 });
+  const rid = await store.createApproval("s-1", "t-1", "dangerous_tool", { x: 1 }, "");
   assertEquals(rid, "r-1");
   assertEquals(await store.resolveApproval("r-1", "approve", "s-1"), true);
   assert(calls[1].sql.includes("session_id = $3"));
@@ -428,24 +428,77 @@ Deno.test("resetConsecutiveWakes zeroes the counter and no longer touches the re
 Deno.test("getToolConsent returns the stored consent verb", async () => {
   const { fn, calls } = fakeQuery([{ rows: [{ consent: "always" }] }]);
   const store = createStore(fn as never);
-  assertEquals(await store.getToolConsent("user-1", "toy-agent", "toy", "guarded"), "always");
+  assertEquals(await store.getToolConsent("user-1", "toy-agent", "toy", "guarded", ""), "always");
   assert(calls[0].sql.includes("FROM agents.tool_consents"));
-  assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded"]);
+  assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded", ""]);
 });
 
 Deno.test("getToolConsent returns null when no consent is on file", async () => {
   const { fn } = fakeQuery([{ rows: [] }]);
   const store = createStore(fn as never);
-  assertEquals(await store.getToolConsent("user-1", "toy-agent", "toy", "guarded"), null);
+  assertEquals(await store.getToolConsent("user-1", "toy-agent", "toy", "guarded", ""), null);
 });
 
-Deno.test("setToolConsent upserts on the (user, plugin, agent, tool) key", async () => {
+Deno.test("setToolConsent upserts on the (user, plugin, agent, tool, scope_key) key", async () => {
   const { fn, calls } = fakeQuery([{ rows: [] }]);
   const store = createStore(fn as never);
-  await store.setToolConsent("user-1", "toy-agent", "toy", "guarded", "never");
+  await store.setToolConsent("user-1", "toy-agent", "toy", "guarded", "", "never");
   assert(calls[0].sql.includes("INSERT INTO agents.tool_consents"));
   assert(calls[0].sql.includes("ON CONFLICT"));
-  assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded", "never"]);
+  assertEquals(calls[0].params, ["user-1", "toy-agent", "toy", "guarded", "", "never"]);
+});
+
+Deno.test("getToolConsent keys on the scope", async () => {
+  const seen: unknown[][] = [];
+  const store = createStore((_sql, params) => {
+    seen.push(params ?? []);
+    return Promise.resolve({ rows: [{ consent: "always" }] });
+  });
+  assertEquals(await store.getToolConsent("u", "p", "a", "Bash", "npm"), "always");
+  assertEquals(seen[0], ["u", "p", "a", "Bash", "npm"]);
+});
+
+Deno.test("setToolConsent upserts on the five-column key", async () => {
+  let sql = "";
+  const store = createStore((s, _p) => { sql = s; return Promise.resolve({ rows: [] }); });
+  await store.setToolConsent("u", "p", "a", "Bash", "npm", "always");
+  assertStringIncludes(sql, "ON CONFLICT (user_id, plugin, agent, tool, scope_key)");
+});
+
+Deno.test("createApproval persists the scope key", async () => {
+  let params: unknown[] = [];
+  const store = createStore((_s, p) => { params = p ?? []; return Promise.resolve({ rows: [{ request_id: "r1" }] }); });
+  await store.createApproval("s1", "t1", "Bash", { command: "rm -rf x" }, "rm");
+  assertEquals(params[4], "rm");
+});
+
+Deno.test("getApprovalScope returns tool and scope together", async () => {
+  const store = createStore(() => Promise.resolve({ rows: [{ tool: "Bash", scope_key: "rm" }] }));
+  assertEquals(await store.getApprovalScope("r1"), { tool: "Bash", scopeKey: "rm" });
+});
+
+Deno.test("getApprovalScope returns null for an unknown request", async () => {
+  const store = createStore(() => Promise.resolve({ rows: [] }));
+  assertEquals(await store.getApprovalScope("nope"), null);
+});
+
+Deno.test("isChannelBound is true when a channel_sessions row exists", async () => {
+  assertEquals(await createStore(() => Promise.resolve({ rows: [{ "?column?": 1 }] })).isChannelBound("s1"), true);
+  assertEquals(await createStore(() => Promise.resolve({ rows: [] })).isChannelBound("s1"), false);
+});
+
+Deno.test("isUnattended reads the session flag, defaulting closed", async () => {
+  assertEquals(await createStore(() => Promise.resolve({ rows: [{ unattended: true }] })).isUnattended("s1"), true);
+  assertEquals(await createStore(() => Promise.resolve({ rows: [] })).isUnattended("s1"), false);
+});
+
+Deno.test("createSession persists unattended, defaulting false", async () => {
+  let params: unknown[] = [];
+  const store = createStore((_s, p) => { params = p ?? []; return Promise.resolve({ rows: [{ id: "s1" }] }); });
+  await store.createSession("p", "a", "u");
+  assertEquals(params[3], false);
+  await store.createSession("p", "a", "u", true);
+  assertEquals(params[3], true);
 });
 
 Deno.test("reapStaleTurns also denies every still-pending approval belonging to the turns it reaps", async () => {
@@ -674,6 +727,36 @@ Deno.test("createChildSession writes parent pointers and nickname", async () => 
   assertEquals(id, "c-1");
   assert(calls[0].sql.includes("parent_session_id"));
   assert(calls[0].params?.includes("Kepler"));
+});
+
+// A child of an unattended parent has no human approver either, so the flag
+// must reach the child row too — not just the top-level createSession.
+Deno.test("createChildSession persists unattended, defaulting false", async () => {
+  const { fn, calls } = fakeQuery([{ rows: [{ id: "c-1" }] }, { rows: [{ id: "c-2" }] }]);
+  const store = createStore(fn as never);
+  await store.createChildSession({
+    plugin: "devx",
+    agent: "devx",
+    parentSessionId: "p-1",
+    parentTurnId: "t-1",
+    subagent: "code-reviewer",
+    nickname: "Kepler",
+    detached: true,
+  });
+  assert(calls[0].sql.includes("unattended"));
+  assertEquals(calls[0].params?.at(-1), false);
+
+  await store.createChildSession({
+    plugin: "devx",
+    agent: "devx",
+    parentSessionId: "p-1",
+    parentTurnId: "t-1",
+    subagent: "code-reviewer",
+    nickname: "Faraday",
+    detached: true,
+    unattended: true,
+  });
+  assertEquals(calls[1].params?.at(-1), true);
 });
 
 Deno.test("countChildren returns live and total separately", async () => {
