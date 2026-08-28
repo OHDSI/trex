@@ -12,6 +12,7 @@ import { loadAgent } from "../loader.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
 import { createStore } from "./store.ts";
 import { publish } from "./stream.ts";
+import { INITIAL_POLL_MS, nextPollDelay } from "./toolset.ts";
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {
@@ -855,4 +856,149 @@ Deno.test("agent_send is not registered when the session disallows detached chil
   const ctx = fakeToolCtx({ spawn: { allowDetached: false } });
   const tools = await buildSdkTools(ctx as never);
   assertEquals(tools.agent_send, undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Task 5 (2026-08-28-approval-scoping-and-claw-gates): the needsApproval gate
+// now delegates to approval-policy.ts's resolveApproval instead of
+// re-implementing precedence inline. See task-5-brief.md.
+// ---------------------------------------------------------------------------
+
+// A ctx whose agent exposes three gated tools, plus the identity fields the
+// consent lookup needs. deno-lint-ignore no-explicit-any
+function gatedCtx(overrides: Record<string, unknown> = {}): any {
+  const tool = (name: string, out: string, props: Record<string, unknown>) => ({
+    description: name,
+    inputSchema: { type: "object", properties: props },
+    needsApproval: true,
+    execute: () => Promise.resolve(out),
+  });
+  return fakeToolCtx({
+    agent: {
+      dir: "fake-gate-agent",
+      instructions: "x",
+      tools: {
+        Write: tool("Write", "written", { path: { type: "string" } }),
+        GitPush: tool("GitPush", "pushed", {}),
+        Bash: tool("Bash", "ran", { command: { type: "string" } }),
+      },
+      skills: [],
+      subagents: {},
+      connections: {},
+      config: { context: DEFAULT_CONTEXT_CONFIG, maxSteps: 25 },
+    },
+    turnId: "t-1",
+    userId: "u-1",
+    plugin: "p",
+    agentName: "a",
+    emit: () => {},
+    ...overrides,
+  });
+}
+
+// Only the methods the gate actually calls.
+function gateStore(over: Record<string, unknown> = {}) {
+  return {
+    getToolConsent: () => Promise.resolve(null),
+    createApproval: () => Promise.resolve("r-1"),
+    getApprovalDecision: () => Promise.resolve("approve"),
+    ...over,
+  };
+}
+
+const run = (tools: Record<string, unknown>, name: string, input: unknown) =>
+  (tools[name] as { execute: (i: unknown) => Promise<unknown> }).execute(input);
+
+Deno.test("an unattended session executes a gated tool without creating an approval", async () => {
+  let approvals = 0;
+  const tools = await buildSdkTools(gatedCtx({
+    unattended: true,
+    store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
+  }));
+  assertEquals(await run(tools, "Write", { path: "a.ts" }), "written");
+  assertEquals(approvals, 0);
+});
+
+// Parking here would relocate the 30-minute hang instead of fixing it.
+Deno.test("an escalated tool on an unattended session with no channel denies immediately", async () => {
+  let approvals = 0;
+  const tools = await buildSdkTools(gatedCtx({
+    unattended: true,
+    channelBound: false,
+    escalate: [{ tool: "GitPush", scopes: [] }],
+    store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
+  }));
+  assertEquals(await run(tools, "GitPush", {}), {
+    error: "requires approval but this session has no approver",
+  });
+  assertEquals(approvals, 0);
+});
+
+Deno.test("an escalated tool on a channel-bound session still creates an approval", async () => {
+  let approvals = 0;
+  const tools = await buildSdkTools(gatedCtx({
+    unattended: true,
+    channelBound: true,
+    escalate: [{ tool: "GitPush", scopes: [] }],
+    store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
+  }));
+  assertEquals(await run(tools, "GitPush", {}), "pushed");
+  assertEquals(approvals, 1);
+});
+
+// The whole point of Task 1: the consent is looked up per action, not per tool.
+Deno.test("the consent lookup is keyed on the derived scope", async () => {
+  const seen: string[] = [];
+  const tools = await buildSdkTools(gatedCtx({
+    store: gateStore({
+      getToolConsent: (_u: string, _p: string, _a: string, _t: string, scope: string) => {
+        seen.push(scope);
+        return Promise.resolve("always");
+      },
+    }),
+  }));
+  await run(tools, "Bash", { command: "/usr/bin/npm test" });
+  await run(tools, "Write", { path: "./src/a.ts" });
+  assertEquals(seen, ["npm", "src/a.ts"]);
+});
+
+Deno.test("a sticky never denies without creating an approval", async () => {
+  let approvals = 0;
+  const tools = await buildSdkTools(gatedCtx({
+    store: gateStore({
+      getToolConsent: () => Promise.resolve("never"),
+      createApproval: () => { approvals++; return Promise.resolve("r-1"); },
+    }),
+  }));
+  assertEquals(await run(tools, "Write", { path: "a.ts" }), { error: "denied by user" });
+  assertEquals(approvals, 0);
+});
+
+Deno.test("a denied approval reports the user's denial, a timeout reports a timeout", async () => {
+  const denied = await buildSdkTools(gatedCtx({
+    store: gateStore({ getApprovalDecision: () => Promise.resolve("deny") }),
+  }));
+  assertEquals(await run(denied, "Write", { path: "a.ts" }), { error: "denied by user" });
+
+  const timedOut = await buildSdkTools(gatedCtx({
+    approvalTimeoutMs: 0,
+    store: gateStore({ getApprovalDecision: () => Promise.resolve(null) }),
+  }));
+  assertEquals(await run(timedOut, "Write", { path: "a.ts" }), { error: "approval timed out" });
+});
+
+// The backoff schedule is exported as a pure function so the cadence can be
+// asserted exactly, without sleeping through a 30-minute deadline.
+Deno.test("an explicit approvalPollMs keeps a flat cadence", () => {
+  let d = 50;
+  const seen = [d];
+  for (let i = 0; i < 3; i++) { d = nextPollDelay(d, 50); seen.push(d); }
+  assertEquals(seen, [50, 50, 50, 50]);
+});
+
+Deno.test("the default poll backs off to a 5s ceiling", () => {
+  let d = INITIAL_POLL_MS;
+  const seen = [d];
+  for (let i = 0; i < 5; i++) { d = nextPollDelay(d, undefined); seen.push(d); }
+  assertEquals(seen, [500, 1000, 2000, 4000, 5000, 5000]);
 });
