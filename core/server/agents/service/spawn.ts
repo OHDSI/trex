@@ -115,7 +115,11 @@ export interface SpawnStore {
     subagent: string | null;
     nickname: string;
     detached: boolean;
+    unattended?: boolean;
   }): Promise<string>;
+  // A child of an unattended parent has no human approver either, so the flag
+  // is inherited from durable state rather than threaded down from spawn time.
+  isUnattended(sessionId: string): Promise<boolean>;
   getHistory(sessionId: string): Promise<TurnRow[]>;
   getChild(agentId: string, parentSessionId: string): Promise<ChildAgent | null>;
   failTurnsForSession(sessionId: string, error: string): Promise<number>;
@@ -233,6 +237,7 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
         subagent,
         nickname,
         detached,
+        unattended: await store.isUnattended(parentSessionId),
       });
 
       await deps.startChildTurn({

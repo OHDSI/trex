@@ -69,13 +69,17 @@ function inMemoryDb() {
     // Task 8 (deliverChildResult's wake budget) — undefined reads as 0, same
     // as the real column's NOT NULL DEFAULT 0.
     consecutive_wakes?: number;
+    unattended?: boolean;
     createdAt: Date;
   }>();
   const turns: Array<
     { id: string; session_id: string; seq: number; status: string; error: string | null; message: unknown; startedAt: Date }
   > = [];
   const steps: Array<{ turn_id: string; seq: number; kind: string; name: string | null; payload: unknown; usage: unknown }> = [];
-  const approvals = new Map<string, { decision: string | null; sessionId: string; tool: string; turnId: string }>();
+  const approvals = new Map<
+    string,
+    { decision: string | null; sessionId: string; tool: string; turnId: string; scopeKey?: string }
+  >();
   // The follow-up queue a busy session's new message folds into (store.ts's
   // queueFollowUp/takeFollowUps), keyed the same order-preserving way
   // agents.turn_followups is (insertion order).
@@ -87,6 +91,9 @@ function inMemoryDb() {
   // params a route handed to the store (e.g. created_by, session-scoping)
   // without needing a real Postgres.
   const calls: Array<{ sql: string; params: unknown[] }> = [];
+  // Session ids a test has declared channel-bound. Empty by default:
+  // store.isChannelBound must answer "no rows" for an ordinary session.
+  const channelBound = new Set<string>();
   let n = 0;
   const query = (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params });
@@ -96,7 +103,7 @@ function inMemoryDb() {
     // which only this statement's column list names.
     if (sql.includes("INSERT INTO agents.sessions") && sql.includes("parent_session_id")) {
       const id = `s-${++n}`;
-      const [plugin_, agent_, createdBy, parentSessionId, , subagent, nickname, detached] = params as [
+      const [plugin_, agent_, createdBy, parentSessionId, , subagent, nickname, detached, unattended] = params as [
         string,
         string,
         string | null,
@@ -104,6 +111,7 @@ function inMemoryDb() {
         string | null,
         string | null,
         string,
+        boolean,
         boolean,
       ];
       void plugin_;
@@ -115,6 +123,7 @@ function inMemoryDb() {
         subagent,
         nickname,
         detached,
+        unattended: unattended === true,
         createdAt: new Date(),
       });
       return Promise.resolve({ rows: [{ id }] });
@@ -157,7 +166,12 @@ function inMemoryDb() {
     }
     if (sql.includes("INSERT INTO agents.sessions")) {
       const id = `s-${++n}`;
-      sessions.set(id, { status: "active", created_by: (params[2] as string | null) ?? null, createdAt: new Date() });
+      sessions.set(id, {
+        status: "active",
+        created_by: (params[2] as string | null) ?? null,
+        unattended: params[3] === true,
+        createdAt: new Date(),
+      });
       return Promise.resolve({ rows: [{ id }] });
     }
     // getSession — matched on a short, stable prefix (not the full SELECT
@@ -182,6 +196,15 @@ function inMemoryDb() {
     if (sql.includes("SELECT parent_session_id FROM agents.sessions")) {
       const s = sessions.get(params[0] as string);
       return Promise.resolve({ rows: [{ parent_session_id: s?.parent_session_id ?? null }] });
+    }
+    // isUnattended — a missing session reads as attended, like the real store.
+    if (sql.includes("SELECT unattended FROM agents.sessions")) {
+      const s = sessions.get(params[0] as string);
+      return Promise.resolve({ rows: s ? [{ unattended: s.unattended === true }] : [] });
+    }
+    // isChannelBound — rows only for an id a test registered in `channelBound`.
+    if (sql.includes("FROM agents.channel_sessions")) {
+      return Promise.resolve({ rows: channelBound.has(params[0] as string) ? [{ "?column?": 1 }] : [] });
     }
     // bumpConsecutiveWakes / resetConsecutiveWakes (Task 8). The
     // pending_wake_child_id branches that used to sit here are gone with the
@@ -288,6 +311,9 @@ function inMemoryDb() {
       const id = `r-${++n}`;
       approvals.set(id, {
         decision: null, sessionId: params[0] as string, turnId: params[1] as string, tool: params[2] as string,
+        // V11's scope_key — the 5th param. getApprovalScope reads it back to
+        // key a sticky consent and to check the escalate floor.
+        scopeKey: (params[4] as string | null) ?? "",
       });
       return Promise.resolve({ rows: [{ request_id: id }] });
     }
@@ -313,6 +339,13 @@ function inMemoryDb() {
       const a = approvals.get(params[0] as string);
       return Promise.resolve({ rows: a ? [{ decision: a.decision }] : [] });
     }
+    // getApprovalScope. Its column list ("tool, scope_key") does not contain
+    // the bare "SELECT tool FROM agents.approvals" substring below, but the two
+    // are kept adjacent so they cannot drift into matching each other.
+    if (sql.includes("SELECT tool, scope_key FROM agents.approvals")) {
+      const a = approvals.get(params[0] as string);
+      return Promise.resolve({ rows: a ? [{ tool: a.tool, scope_key: a.scopeKey ?? "" }] : [] });
+    }
     if (sql.includes("SELECT tool FROM agents.approvals")) {
       const a = approvals.get(params[0] as string);
       return Promise.resolve({ rows: a ? [{ tool: a.tool }] : [] });
@@ -327,14 +360,17 @@ function inMemoryDb() {
       const t = a ? turns.find((t) => t.id === a.turnId) : undefined;
       return Promise.resolve({ rows: t ? [{ status: t.status }] : [] });
     }
+    // V11 widened the primary key with scope_key, so the fake keys on all five
+    // columns — keying on four would let a grant for one action answer for
+    // every other action of the same tool.
     if (sql.includes("SELECT consent FROM agents.tool_consents")) {
-      const [userId, plugin, agentName, tool] = params as string[];
-      const consent = toolConsents.get(`${userId}|${plugin}|${agentName}|${tool}`);
+      const [userId, plugin, agentName, tool, scopeKey] = params as string[];
+      const consent = toolConsents.get(`${userId}|${plugin}|${agentName}|${tool}|${scopeKey}`);
       return Promise.resolve({ rows: consent ? [{ consent }] : [] });
     }
     if (sql.includes("INSERT INTO agents.tool_consents")) {
-      const [userId, plugin, agentName, tool, consent] = params as string[];
-      toolConsents.set(`${userId}|${plugin}|${agentName}|${tool}`, consent as "always" | "never");
+      const [userId, plugin, agentName, tool, scopeKey, consent] = params as string[];
+      toolConsents.set(`${userId}|${plugin}|${agentName}|${tool}|${scopeKey}`, consent as "always" | "never");
       return Promise.resolve({ rows: [] });
     }
     if (sql.includes("FROM agents.steps")) {
@@ -374,7 +410,7 @@ function inMemoryDb() {
     }
     return Promise.resolve({ rows: [] });
   };
-  return { query, sessions, turns, steps, approvals, toolConsents, calls, followUps };
+  return { query, sessions, turns, steps, approvals, toolConsents, calls, followUps, channelBound };
 }
 
 // See runner.test.ts's FINISH/sequencedModel comment: ai@6's raw doStream
@@ -880,7 +916,7 @@ Deno.test("POST /approval with decision 'always' resolves as approve and upserts
   assertEquals(ok.status, 200);
   assertEquals(await ok.json(), { resolved: true });
   assertEquals(db.approvals.get(requestId)!.decision, "approve");
-  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "always");
+  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded|"), "always");
 
   await until(() => settled(db), 10_000);
   assertEquals(db.turns[0].status, "completed");
@@ -911,7 +947,7 @@ Deno.test("POST /approval with decision 'never' resolves as deny and upserts a s
   }));
   assertEquals(ok.status, 200);
   assertEquals(db.approvals.get(requestId)!.decision, "deny");
-  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "never");
+  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded|"), "never");
 
   // Drain the fire-and-forget turn (denied tool call still lets the turn
   // finish, per the existing deny path) — see the `until` helper's own comment
@@ -983,7 +1019,7 @@ Deno.test("POST /eve/v1/session/:id with inputResponses optionId 'always' resolv
     body: JSON.stringify({ inputResponses: [{ requestId, optionId: "always" }] }),
   }));
   assertEquals(res.status, 202);
-  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded"), "always");
+  assertEquals(db.toolConsents.get("user-1|toy-agent|toy|guarded|"), "always");
   await until(() => settled(db), 10_000);
   assertEquals(db.turns[0].status, "completed");
 });
@@ -2254,7 +2290,7 @@ Deno.test("x-user-id header populates created_by on session creation (POST /eve/
   }));
   const insert = db.calls.find((c) => c.sql.includes("INSERT INTO agents.sessions"));
   assert(insert, "expected an agents.sessions insert");
-  assertEquals(insert!.params, ["toy-agent", "toy", "user-42"]);
+  assertEquals(insert!.params, ["toy-agent", "toy", "user-42", false]);
 });
 
 Deno.test("created_by is null when x-user-id header is absent (POST /eve/v1/session)", async () => {
@@ -2265,7 +2301,7 @@ Deno.test("created_by is null when x-user-id header is absent (POST /eve/v1/sess
   }));
   const insert = db.calls.find((c) => c.sql.includes("INSERT INTO agents.sessions"));
   assert(insert, "expected an agents.sessions insert");
-  assertEquals(insert!.params, ["toy-agent", "toy", null]);
+  assertEquals(insert!.params, ["toy-agent", "toy", null, false]);
 });
 
 Deno.test("x-user-id header populates created_by on the /chat endpoint's session", async () => {
@@ -2281,7 +2317,7 @@ Deno.test("x-user-id header populates created_by on the /chat endpoint's session
   await res.text();
   const insert = db.calls.find((c) => c.sql.includes("INSERT INTO agents.sessions"));
   assert(insert, "expected an agents.sessions insert");
-  assertEquals(insert!.params, ["toy-agent", "toy", "user-7"]);
+  assertEquals(insert!.params, ["toy-agent", "toy", "user-7", false]);
 });
 
 Deno.test("GET /stream (live tail) delivers events published after replay completes", async () => {
@@ -4378,4 +4414,110 @@ Deno.test("the wake budget refuses a child-caused turn at the cap and requeues i
     db.followUps.some((f) => f.session_id === parentId && f.message.includes("Late")),
     "a refused wake must put back the text it had already drained, not drop it",
   );
+});
+
+
+// ---------------------------------------------------------------------------
+// The `unattended` session flag (V11). Create-time only: it is written by the
+// route that creates the session and never mutated afterwards, so a caller
+// cannot disarm a gate on a session that is already running.
+
+// Strict === true. A truthy string arriving in a request body must never widen
+// an approval gate — functions/autonomy.ts states the same rule for the loop
+// this replaces.
+Deno.test("POST /eve/v1/session persists unattended only for a strict true", async () => {
+  for (const [body, expected] of [
+    [{ unattended: true }, true],
+    [{ unattended: "true" }, false],
+    [{ unattended: 1 }, false],
+    [{}, false],
+  ] as Array<[Record<string, unknown>, boolean]>) {
+    const { handler, db } = await makeHandler();
+    const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+    assertEquals(res.status, 200);
+    const session = [...db.sessions.values()][0];
+    assertEquals(session.unattended, expected, `body ${JSON.stringify(body)}`);
+  }
+});
+
+// /chat is a SECOND live session-creation route. Missing it is the known
+// failure mode in this file — a previous change wired only the session route.
+Deno.test("POST /chat persists the flag the same way", async () => {
+  for (const [body, expected] of [
+    [{ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }], unattended: true }, true],
+    [{ messages: [{ role: "user", parts: [{ type: "text", text: "hi" }] }] }, false],
+  ] as Array<[Record<string, unknown>, boolean]>) {
+    const { handler, db } = await makeHandler();
+    const res = await handler(new Request(`${BASE}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    }));
+    assertEquals(res.status, 200);
+    await res.text();
+    const session = [...db.sessions.values()][0];
+    assertEquals(session.unattended, expected);
+  }
+});
+
+// Both flags are resolved ONCE per turn. buildSdkTools spreads its ctx into
+// every authored tool, so a per-tool-call query would issue one round trip per
+// gated call.
+Deno.test("the unattended and channel-bound flags are resolved once per turn", async () => {
+  let unattendedCalls = 0;
+  let channelCalls = 0;
+  const { handler, db } = await makeHandler({
+    wrapStore: (s) => ({
+      ...s,
+      isUnattended: (id: string) => {
+        unattendedCalls++;
+        return s.isUnattended(id);
+      },
+      isChannelBound: (id: string) => {
+        channelCalls++;
+        return s.isChannelBound(id);
+      },
+    }) as typeof s,
+  });
+  const res = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "hi" }),
+  }));
+  assertEquals(res.status, 200);
+  await until(() => settled(db));
+  assertEquals(unattendedCalls, 1);
+  assertEquals(channelCalls, 1);
+});
+
+// A child of an unattended parent has no human approver either, so the flag
+// must reach createChildSession rather than defaulting to false there. Drives
+// the same REAL spawn as "POST /chat: the built-in agent tool spawns and
+// awaits a REAL child session" above, with the parent created unattended.
+Deno.test("a spawned child inherits its parent's unattended flag", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(
+      toolCallChunks("agent", { prompt: "say hi" }),
+      textChunks("child says hi"),
+      textChunks("parent says done"),
+    ),
+  });
+  const res = await handler(new Request(`${BASE}/chat`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      messages: [{ role: "user", parts: [{ type: "text", text: "delegate this" }] }],
+      unattended: true,
+    }),
+  }));
+  assertEquals(res.status, 200);
+  await res.text();
+
+  const childEntries = [...db.sessions.entries()].filter(([, s]) => s.parent_session_id !== undefined);
+  assertEquals(childEntries.length, 1, "expected exactly one child session created by the agent tool");
+  assertEquals(childEntries[0][1].unattended, true, "the child must inherit the parent's unattended flag");
 });

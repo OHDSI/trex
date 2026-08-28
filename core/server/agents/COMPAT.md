@@ -611,6 +611,85 @@ live-tail by event shape.
       from that allowlist is exactly what silently dropped two
       `ContextConfig` fields in an earlier cycle of this runtime.
 
+## Unattended sessions and the escalate floor
+
+trex-only (eve has no equivalent). Both pieces exist to answer one question a
+bot-driven turn cannot: **who clicks "approve"?**
+
+### The `unattended` session flag
+
+`agents.sessions.unattended` (migration V11) marks a session that has no human
+watching it. It is **create-time only** — set by whichever route creates the
+session and never mutated afterwards, so a later request cannot disarm a gate on
+a turn that is already running. Three creation sites write it:
+
+| site | source |
+| --- | --- |
+| `POST /eve/v1/session` | request body `unattended` |
+| `POST /chat` | request body `unattended` |
+| the spawn path (`spawnChild` → `store.createChildSession`) | inherited from the parent, read back from durable state |
+
+Both HTTP routes require a **strict `=== true`**: `"true"`, `1`, and any other
+truthy value persist as `false`. A truthy string arriving in a request body must
+never widen an approval gate (`functions/autonomy.ts` states the same rule for
+the loop this replaces).
+
+A child of an unattended parent inherits the flag rather than defaulting to
+`false` — it has no approver either. Inheritance reads
+`store.isUnattended(parentSessionId)` at spawn time rather than threading a
+parameter down, for the same reason `depth` is derived from
+`parent_session_id`: durable state cannot be forgotten by a future call site.
+
+**Channel binding implies unattended.** A session with a row in
+`agents.channel_sessions` has no browser consent UI to answer a gate, so
+`handler.ts` resolves `unattended = channelBound || isUnattended(sessionId)`.
+Both flags are resolved **once per turn**, alongside `depth` — `buildSdkTools`
+spreads its `ToolBuildCtx` into every authored tool, so resolving them per tool
+call would cost one round trip per gated call.
+
+### `AGENTS_ESCALATE_TOOLS`
+
+The deployment's floor: tools that require a human every time, no matter what
+the session or a stored consent says. Read **once, at module load, in
+`handler.ts` only** — `toolset.ts` and `approvals.ts` take the parsed list as a
+parameter and fall back to the same parsed-once default when a caller passes
+nothing.
+
+Grammar: a comma-separated list of `Tool` or `Tool:scope|scope|…`. A bare tool
+name matches every invocation; scopes match against the invocation's derived
+scope key (`scope-key.ts`: the Bash executable, the normalized path, or the
+normalized `[source, destination]` pair), case-insensitively. Default:
+
+```
+GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp,Bash:rm|sudo|curl|wget|ssh|scp|dd|chmod|chown
+```
+
+Unset uses that default. An **explicitly empty string** is a deliberate opt-out
+(no floor at all). A value that parses to nothing is treated as a typo: it warns
+and keeps the default, rather than silently removing the floor.
+
+### Precedence
+
+`resolveApproval` (`approval-policy.ts`) is pure and exhaustively tested. In
+order:
+
+1. a stored `never` consent → **deny** (`consent-never`)
+2. a match on the escalate list → **gate** if channel-bound, else **deny**
+   (`no-approver`) — no channel to ask on means deny, not park
+3. a stored `always` consent → **allow**
+4. `unattended` → **allow**
+5. otherwise → **gate**
+
+Rule 2 sits above rules 3 and 4 deliberately: under a shared bot identity, one
+`always` click would otherwise disarm the floor for every user of that identity.
+
+For the same reason, **`always` is refused at write time for an escalate-list
+tool**. `POST .../approval` and the `inputResponses` path both reject the
+decision with `"<Tool> cannot be granted 'always' — it requires approval every
+time"` instead of accepting the click and ignoring the row at read time — the
+person clicking must learn the grant did not stick. `never` is still accepted
+(it only narrows), and a plain one-shot `approve` is unaffected.
+
 ## Channels
 
 trex implements eve's **channels** — inbound platform entry points that
