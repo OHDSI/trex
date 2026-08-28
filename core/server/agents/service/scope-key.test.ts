@@ -1,4 +1,4 @@
-import { assertEquals } from "jsr:@std/assert";
+import { assertEquals, assertNotEquals } from "jsr:@std/assert";
 import { bashExecutable, deriveScopeKey, normalizePath } from "./scope-key.ts";
 
 Deno.test("bashExecutable strips the directory and lowercases", () => {
@@ -47,7 +47,16 @@ Deno.test("deriveScopeKey keys path tools on the normalized path", () => {
 Deno.test("deriveScopeKey keys pair tools on both endpoints", () => {
   assertEquals(
     deriveScopeKey("CopyFile", { source: "./a.ts", destination: "b/../c.ts" }),
-    "a.ts c.ts",
+    '["a.ts","c.ts"]',
+  );
+});
+
+// Spaces are legal in POSIX paths, so a space-joined key would make these two
+// distinct copies share one consent row.
+Deno.test("pair-tool keys cannot collide across the separator", () => {
+  assertNotEquals(
+    deriveScopeKey("CopyFile", { source: "a b", destination: "c" }),
+    deriveScopeKey("CopyFile", { source: "a", destination: "b c" }),
   );
 });
 

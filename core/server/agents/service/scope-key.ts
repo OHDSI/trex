@@ -41,7 +41,9 @@ export function deriveScopeKey(toolName: string, input: unknown): string {
   }
   if (PAIR_TOOLS.has(toolName)) {
     if (typeof obj.source !== "string" || typeof obj.destination !== "string") return "";
-    return `${normalizePath(obj.source)} ${normalizePath(obj.destination)}`;
+    // JSON, not a space join: spaces are legal in POSIX paths, so ("a b","c")
+    // and ("a","b c") would otherwise collapse onto one key.
+    return JSON.stringify([normalizePath(obj.source), normalizePath(obj.destination)]);
   }
   return "";
 }
