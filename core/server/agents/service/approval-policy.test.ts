@@ -13,7 +13,7 @@ function outcome(over: Partial<Parameters<typeof resolveApproval>[0]>) {
   return resolveApproval({
     toolName: "Write", scopeKey: "a.ts", consent: null,
     unattended: false, channelBound: false, escalate: NONE, ...over,
-  });
+  }).outcome;
 }
 
 Deno.test("a plain gated tool still gates", () => {
@@ -81,4 +81,11 @@ Deno.test("an unparseable value falls back to the default, not to empty", () => 
 
 Deno.test("malformed entries are skipped without dropping good ones", () => {
   assertEquals(parseEscalateList("GitPush,:,Bash:"), [{ tool: "GitPush", scopes: [] }]);
+});
+
+Deno.test("a deny reports which rule produced it", () => {
+  assertEquals(resolveApproval({ toolName: "Write", scopeKey: "a.ts", consent: "never",
+    unattended: false, channelBound: false, escalate: NONE }).reason, "consent-never");
+  assertEquals(resolveApproval({ toolName: "GitPush", scopeKey: "", consent: null,
+    unattended: true, channelBound: false, escalate: ESC }).reason, "no-approver");
 });

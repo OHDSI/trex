@@ -3,6 +3,12 @@
 // approval-policy.test.ts, which pins rule 2 above rules 3 and 4.
 export type ApprovalOutcome = "allow" | "gate" | "deny";
 
+export interface ApprovalVerdict {
+  outcome: ApprovalOutcome;
+  // Why a deny happened, so callers never re-derive it from their inputs.
+  reason?: "consent-never" | "no-approver";
+}
+
 // One parsed escalate rule. Empty `scopes` matches every invocation of the tool.
 export type EscalateList = Array<{ tool: string; scopes: string[] }>;
 
@@ -18,6 +24,10 @@ export interface ApprovalPolicyInput {
 export const DEFAULT_ESCALATE =
   "GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp," +
   "Bash:rm|sudo|curl|wget|ssh|scp|dd|chmod|chown";
+
+// Parsed once. toolset.ts falls back to this when a caller passes no list;
+// the environment override is read by handler.ts, not here.
+export const DEFAULT_ESCALATE_LIST: EscalateList = parseEscalateList(undefined);
 
 function parseEntries(raw: string): EscalateList {
   const out: EscalateList = [];
@@ -57,15 +67,15 @@ export function matchesEscalate(list: EscalateList, toolName: string, scopeKey: 
   return list.some((e) => e.tool === toolName && (e.scopes.length === 0 || e.scopes.includes(scope)));
 }
 
-export function resolveApproval(input: ApprovalPolicyInput): ApprovalOutcome {
-  if (input.consent === "never") return "deny";
+export function resolveApproval(input: ApprovalPolicyInput): ApprovalVerdict {
+  if (input.consent === "never") return { outcome: "deny", reason: "consent-never" };
   // Above `always` and `unattended` deliberately: the escalate list is the
   // deployment's floor, and under a shared bot identity one click would
   // otherwise disarm it for everyone. No channel to ask means deny, not park.
   if (matchesEscalate(input.escalate, input.toolName, input.scopeKey)) {
-    return input.channelBound ? "gate" : "deny";
+    return input.channelBound ? { outcome: "gate" } : { outcome: "deny", reason: "no-approver" };
   }
-  if (input.consent === "always") return "allow";
-  if (input.unattended) return "allow";
-  return "gate";
+  if (input.consent === "always") return { outcome: "allow" };
+  if (input.unattended) return { outcome: "allow" };
+  return { outcome: "gate" };
 }

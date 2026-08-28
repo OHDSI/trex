@@ -5,14 +5,13 @@
 // onResult) is dropped to wrapToolWithCap(tool, config) — no callback,
 // asserted on the return value instead. See toolset.ts for why.
 import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
-import { wrapToolWithCap, buildSdkTools, restrictChildSkills } from "./toolset.ts";
+import { buildSdkTools, INITIAL_POLL_MS, nextPollDelay, restrictChildSkills, wrapToolWithCap } from "./toolset.ts";
 import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 import { assembleHistory } from "./context/history.ts";
 import { loadAgent } from "../loader.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
 import { createStore } from "./store.ts";
 import { publish } from "./stream.ts";
-import { INITIAL_POLL_MS, nextPollDelay } from "./toolset.ts";
 
 function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
   return {
@@ -865,7 +864,8 @@ Deno.test("agent_send is not registered when the session disallows detached chil
 // ---------------------------------------------------------------------------
 
 // A ctx whose agent exposes three gated tools, plus the identity fields the
-// consent lookup needs. deno-lint-ignore no-explicit-any
+// consent lookup needs.
+// deno-lint-ignore no-explicit-any
 function gatedCtx(overrides: Record<string, unknown> = {}): any {
   const tool = (name: string, out: string, props: Record<string, unknown>) => ({
     description: name,
@@ -987,6 +987,47 @@ Deno.test("a denied approval reports the user's denial, a timeout reports a time
   assertEquals(await run(timedOut, "Write", { path: "a.ts" }), { error: "approval timed out" });
 });
 
+// Fix round 1: pins the default deployment floor — an unattended session with
+// no `escalate` field set at all (the real-world default) must still refuse
+// an escalate-listed tool rather than silently allowing it.
+Deno.test("an escalated tool falls back to the built-in default list when ctx.escalate is omitted", async () => {
+  let approvals = 0;
+  const tools = await buildSdkTools(gatedCtx({
+    unattended: true,
+    store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
+  }));
+  assertEquals(await run(tools, "GitPush", {}), {
+    error: "requires approval but this session has no approver",
+  });
+  assertEquals(approvals, 0);
+});
+
+// Fix round 1: the design's central claim — escalate outranks a sticky
+// "always" grant — and nothing pinned it at the toolset.ts integration level.
+Deno.test("a sticky always does not bypass an escalated tool on a channel-bound session", async () => {
+  let approvals = 0;
+  const tools = await buildSdkTools(gatedCtx({
+    channelBound: true,
+    escalate: [{ tool: "GitPush", scopes: [] }],
+    store: gateStore({
+      getToolConsent: () => Promise.resolve("always"),
+      createApproval: () => { approvals++; return Promise.resolve("r-1"); },
+    }),
+  }));
+  assertEquals(await run(tools, "GitPush", {}), "pushed");
+  assertEquals(approvals, 1, "escalate must still gate, not fall through on the sticky always");
+});
+
+// Fix round 1: a sticky "never" on an escalated tool must report the user's
+// own denial, not the no-approver message — the two reasons must not blur.
+Deno.test("a sticky never on an escalated tool still reports denied by user, not no-approver", async () => {
+  const tools = await buildSdkTools(gatedCtx({
+    escalate: [{ tool: "GitPush", scopes: [] }],
+    store: gateStore({ getToolConsent: () => Promise.resolve("never") }),
+  }));
+  assertEquals(await run(tools, "GitPush", {}), { error: "denied by user" });
+});
+
 // The backoff schedule is exported as a pure function so the cadence can be
 // asserted exactly, without sleeping through a 30-minute deadline.
 Deno.test("an explicit approvalPollMs keeps a flat cadence", () => {
@@ -1001,4 +1042,9 @@ Deno.test("the default poll backs off to a 5s ceiling", () => {
   const seen = [d];
   for (let i = 0; i < 5; i++) { d = nextPollDelay(d, undefined); seen.push(d); }
   assertEquals(seen, [500, 1000, 2000, 4000, 5000, 5000]);
+});
+
+// Fix round 1: approvalPollMs: 0 must not busy-loop getApprovalDecision.
+Deno.test("a non-positive approvalPollMs falls back to the default backoff instead of busy-looping", () => {
+  assertEquals(nextPollDelay(500, 0), 1000);
 });

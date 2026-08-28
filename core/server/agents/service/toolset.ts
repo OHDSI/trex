@@ -15,7 +15,7 @@ import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { subscribe } from "./stream.ts";
 import { deriveScopeKey } from "./scope-key.ts";
-import { type EscalateList, parseEscalateList, resolveApproval } from "./approval-policy.ts";
+import { DEFAULT_ESCALATE_LIST, type EscalateList, resolveApproval } from "./approval-policy.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
 import { partitionTools } from "./context/toolsplit.ts";
@@ -26,7 +26,10 @@ import { type SpawnCapabilities, WAIT_DEFAULT_MS, WAIT_MAX_MS } from "./spawn.ts
 // 30-minute park from ~3600 round-trips to ~370.
 export const INITIAL_POLL_MS = 500;
 export function nextPollDelay(current: number, flat: number | undefined): number {
-  return flat !== undefined ? flat : Math.min(current * 2, 5_000);
+  // A non-positive flat value (e.g. approvalPollMs: 0) is not a valid flat
+  // cadence — busy-looping getApprovalDecision for up to 30 minutes — so it
+  // falls back to the default backoff schedule instead.
+  return flat !== undefined && flat > 0 ? flat : Math.min(current * 2, 5_000);
 }
 
 export interface ToolBuildCtx {
@@ -171,20 +174,20 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
         if (store && userId && plugin && agentName) {
           consent = await store.getToolConsent(userId, plugin, agentName, name, scopeKey);
         }
-        const outcome = resolveApproval({
+        const verdict = resolveApproval({
           toolName: name,
           scopeKey,
           consent,
           unattended: ctx.unattended === true,
           channelBound: ctx.channelBound === true,
-          escalate: ctx.escalate ?? parseEscalateList(Deno.env.get("AGENTS_ESCALATE_TOOLS")),
+          escalate: ctx.escalate ?? DEFAULT_ESCALATE_LIST,
         });
-        if (outcome === "deny") {
-          return consent === "never"
+        if (verdict.outcome === "deny") {
+          return verdict.reason === "consent-never"
             ? { error: "denied by user" }
             : { error: "requires approval but this session has no approver" };
         }
-        if (outcome === "gate") {
+        if (verdict.outcome === "gate") {
           if (!store || !turnId || !emit) {
             return { error: "approval required — use the session API" };
           }
@@ -201,7 +204,9 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
           // deterministic cadence. The default backs off 500ms -> 5s, cutting
           // a 30-minute park from ~3600 round-trips to ~370.
           const flat = ctx.approvalPollMs;
-          let wait = flat ?? INITIAL_POLL_MS;
+          // A non-positive flat (approvalPollMs: 0) must not seed the loop at
+          // 0ms either — see nextPollDelay's own guard below.
+          let wait = flat !== undefined && flat > 0 ? flat : INITIAL_POLL_MS;
           let decision: string | null = null;
           while (Date.now() < deadline) {
             decision = await store.getApprovalDecision(requestId);
@@ -213,7 +218,7 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
             return { error: decision === "deny" ? "denied by user" : "approval timed out" };
           }
         }
-        // outcome === "allow" falls through to execute.
+        // verdict.outcome === "allow" falls through to execute.
       }
       // Hooks come from ctx.agent.config, so a subagent turn runs the
       // SUBAGENT's hooks — same posture as filterTools at depth 1.
