@@ -119,7 +119,10 @@ export interface SpawnStore {
   }): Promise<string>;
   // A child of an unattended parent has no human approver either, so the flag
   // is inherited from durable state rather than threaded down from spawn time.
+  // Both are needed: a channel session never writes the unattended column, its
+  // unattended-ness comes from the binding (handler.ts resolves the same pair).
   isUnattended(sessionId: string): Promise<boolean>;
+  isChannelBound(sessionId: string): Promise<boolean>;
   getHistory(sessionId: string): Promise<TurnRow[]>;
   getChild(agentId: string, parentSessionId: string): Promise<ChildAgent | null>;
   failTurnsForSession(sessionId: string, error: string): Promise<number>;
@@ -237,7 +240,8 @@ export function createSpawnCapabilities(deps: SpawnDeps): SpawnCapabilities {
         subagent,
         nickname,
         detached,
-        unattended: await store.isUnattended(parentSessionId),
+        unattended: (await store.isUnattended(parentSessionId)) ||
+          (await store.isChannelBound(parentSessionId)),
       });
 
       await deps.startChildTurn({

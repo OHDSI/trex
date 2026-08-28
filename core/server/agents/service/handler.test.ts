@@ -1060,6 +1060,76 @@ Deno.test("POST /eve/v1/session/:id rejects inputResponses optionId 'never' with
   await until(() => settled(db), 10_000);
 });
 
+// The escalate refusal must reach the caller. Swallowed, the clicker is told
+// "unknown or already-decided request", the gate stays pending, and the turn
+// parks until the approval deadline — the exact hang this design removes.
+// Channel-bound so the escalated tool GATES (rather than denying outright) and
+// a pending request exists to refuse; the turn is started only after the
+// binding is registered, since it is read once at turn start.
+async function pendingEscalatedApproval() {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("GitPush", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.GitPush = {
+        description: "push", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({}),
+  }));
+  const sid = create.headers.get("x-eve-session-id") ?? "";
+  db.channelBound.add(sid);
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  await until(() => db.approvals.size > 0);
+  return { handler, db, sid, requestId: [...db.approvals.keys()][0] };
+}
+
+Deno.test("POST /approval surfaces the escalate refusal with a 400", async () => {
+  const { handler, db, sid, requestId } = await pendingEscalatedApproval();
+  const refused = await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ requestId, decision: "always" }),
+  }));
+  assertEquals(refused.status, 400);
+  assertEquals(await refused.json(), {
+    error: "GitPush cannot be granted 'always' — it requires approval every time",
+  });
+  assertEquals(db.approvals.get(requestId)?.decision, null);
+  assertEquals(db.toolConsents.size, 0);
+
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}/approval`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ requestId, decision: "deny" }),
+  }));
+  await until(() => settled(db), 10_000);
+});
+
+Deno.test("POST /eve/v1/session/:id inputResponses surfaces the escalate refusal with a 400", async () => {
+  const { handler, db, sid, requestId } = await pendingEscalatedApproval();
+  const refused = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "always" }] }),
+  }));
+  assertEquals(refused.status, 400);
+  assertEquals(await refused.json(), {
+    error: "GitPush cannot be granted 'always' — it requires approval every time",
+  });
+  assertEquals(db.approvals.get(requestId)?.decision, null);
+
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json", "x-user-id": "user-1" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "deny" }] }),
+  }));
+  await until(() => settled(db), 10_000);
+});
+
 // Ride-along security fix: approval resolution must verify the caller is the
 // session's owner, not just (requestId, sessionId) — otherwise any
 // authenticated user who learns those ids could resolve someone else's pending

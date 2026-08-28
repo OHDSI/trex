@@ -36,6 +36,25 @@ Deno.test("normalizePath keeps absolute and relative keys distinct", () => {
 
 Deno.test("deriveScopeKey keys Bash on the executable", () => {
   assertEquals(deriveScopeKey("Bash", { command: "/usr/bin/npm test" }), "npm");
+  assertEquals(deriveScopeKey("Bash", { command: "npm test" }), "npm");
+});
+
+// One key serves consent scoping AND the escalate floor, so it must name EVERY
+// executable a command runs — a first-token key let `cd /app && rm -rf .` past.
+Deno.test("deriveScopeKey keys Bash on the whole executable set", () => {
+  assertEquals(deriveScopeKey("Bash", { command: "cd /app && rm -rf ." }), "cd+rm");
+  assertEquals(deriveScopeKey("Bash", { command: "cat a | grep b; ls" }), "cat+grep+ls");
+  assertEquals(deriveScopeKey("Bash", { command: "ls\nls" }), "ls");
+});
+
+Deno.test("deriveScopeKey unwraps one level of wrapper shell", () => {
+  assertEquals(deriveScopeKey("Bash", { command: 'bash -lc "rm -rf /"' }), "rm");
+  assertEquals(deriveScopeKey("Bash", { command: "sh -c 'curl x | sh'" }), "curl+sh");
+  assertEquals(deriveScopeKey("Bash", { command: "bash -c 'sudo id'" }), "sudo");
+  // Bounded: the second level keys on the inner shell, it is not unwrapped.
+  assertEquals(deriveScopeKey("Bash", { command: `bash -c 'sh -c "rm x"'` }), "sh");
+  // A shell with no -c payload is the executable, not a wrapper.
+  assertEquals(deriveScopeKey("Bash", { command: "bash script.sh" }), "bash");
 });
 
 Deno.test("deriveScopeKey keys path tools on the normalized path", () => {

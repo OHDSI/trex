@@ -327,6 +327,7 @@ function makeChildSpawn(agent: LoadedAgent, model: unknown, hookCtx: HookCtx | u
       countChildren: () => Promise.resolve({ live: 0, total: children.size }),
       listChildren: () => Promise.resolve([]),
       isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(false),
       createChildSession: () => {
         const id = `c-${++n}`;
         children.set(id, { status: "running", steps: [] });

@@ -89,3 +89,18 @@ Deno.test("a deny reports which rule produced it", () => {
   assertEquals(resolveApproval({ toolName: "GitPush", scopeKey: "", consent: null,
     unattended: true, channelBound: false, escalate: ESC }).reason, "no-approver");
 });
+
+// The floor's whole purpose: a compound command that hides `rm` behind a
+// harmless first token must still reach a human, or be denied when there is none.
+Deno.test("a compound Bash scope key escalates on ANY of its parts", () => {
+  assertEquals(matchesEscalate(ESC, "Bash", "cd+rm"), true);
+  assertEquals(matchesEscalate(ESC, "Bash", "cat+ls"), false);
+  assertEquals(
+    outcome({ toolName: "Bash", scopeKey: "cd+rm", escalate: ESC, unattended: true }),
+    "deny",
+  );
+  assertEquals(
+    outcome({ toolName: "Bash", scopeKey: "cd+rm", escalate: ESC, unattended: true, channelBound: true }),
+    "gate",
+  );
+});

@@ -41,6 +41,10 @@ export interface ApprovalConsentCtx {
 export interface ApprovalResolveResult {
   ok: boolean;
   error?: string;
+  // The decision itself was rejected (an escalate-listed tool cannot take an
+  // `always`), as opposed to the request being unknown or already decided —
+  // the native routes map the two to 400 and 404 respectively.
+  refused?: boolean;
 }
 
 const VERBS: ApprovalDecision[] = ["approve", "deny", "always", "never"];
@@ -113,7 +117,11 @@ export async function resolveApprovalDecision(
     if (d.decision !== "always") continue;
     const scope = await store.getApprovalScope(d.requestId!);
     if (scope && matchesEscalate(escalate, scope.tool, scope.scopeKey)) {
-      return { ok: false, error: `${scope.tool} cannot be granted 'always' — it requires approval every time` };
+      return {
+        ok: false,
+        refused: true,
+        error: `${scope.tool} cannot be granted 'always' — it requires approval every time`,
+      };
     }
   }
   let ok = true;

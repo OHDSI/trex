@@ -636,9 +636,12 @@ the loop this replaces).
 
 A child of an unattended parent inherits the flag rather than defaulting to
 `false` — it has no approver either. Inheritance reads
-`store.isUnattended(parentSessionId)` at spawn time rather than threading a
-parameter down, for the same reason `depth` is derived from
+`isUnattended(parent) || isChannelBound(parent)` at spawn time rather than
+threading a parameter down, for the same reason `depth` is derived from
 `parent_session_id`: durable state cannot be forgotten by a future call site.
+Both reads are needed — a channel session never writes the `unattended` column,
+so the durable flag alone would leave a delegated child gating on its own event
+stream, which no channel adapter subscribes to.
 
 **Channel binding implies unattended.** A session with a row in
 `agents.channel_sessions` has no browser consent UI to answer a gate, so
@@ -657,8 +660,8 @@ nothing.
 
 Grammar: a comma-separated list of `Tool` or `Tool:scope|scope|…`. A bare tool
 name matches every invocation; scopes match against the invocation's derived
-scope key (`scope-key.ts`: the Bash executable, the normalized path, or the
-normalized `[source, destination]` pair), case-insensitively. Default:
+scope key (`scope-key.ts`: the Bash executable **set**, the normalized path, or
+the normalized `[source, destination]` pair), case-insensitively. Default:
 
 ```
 GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp,Bash:rm|sudo|curl|wget|ssh|scp|dd|chmod|chown
@@ -667,6 +670,42 @@ GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp,Bash:rm|sudo|curl
 Unset uses that default. An **explicitly empty string** is a deliberate opt-out
 (no floor at all). A value that parses to nothing is treated as a typo: it warns
 and keeps the default, rather than silently removing the floor.
+
+#### What the `Bash` scope match is, and is not
+
+A `Bash` scope key is the sorted, de-duplicated, `+`-joined **set** of
+executables the command runs: segments are split on `&&`, `||`, `;`, `|` and
+newlines (quote-aware), each segment's leading `NAME=value` assignments are
+skipped, the first token is stripped to its basename and lowercased, and exactly
+**one** level of `sh -c "…"` / `bash -c "…"` / `bash -lc "…"` is unwrapped into
+its payload. So `npm test` → `npm`, `cd /app && rm -rf .` → `cd+rm`,
+`bash -lc "rm -rf /"` → `rm`, `sh -c 'curl x | sh'` → `curl+sh`.
+`matchesEscalate` treats the key as a set and escalates when **any** part
+matches a listed scope.
+
+This is **best-effort protection against accidental destructive commands, not a
+boundary that resists deliberate evasion.** A command can still obscure what it
+runs — variable indirection (`X=rm; $X -rf /`), `eval`, a base64/`printf`
+payload piped into a shell, or a second level of nesting (`bash -c 'sh -c "rm
+x"'` keys on `sh`, not `rm`). Treat the floor as a guard rail on an agent's own
+mistakes; a genuinely adversarial prompt is a sandbox problem, not a scope-key
+problem.
+
+Two accepted limitations, both recorded rather than fixed:
+
+- **Scope keys carry no workspace or app component.** An `always` granted on
+  `src/a.ts` in one app also covers `src/a.ts` in another app the same user
+  drives through the same plugin/agent pair. Narrowing this needs a workspace
+  component in the consent key (migration + a new column), which this change
+  deliberately does not take on.
+- **Escalate scope matching is case-insensitive; the consent row it guards is
+  case-sensitive.** `Bash:RM` in the env list matches a key of `rm`, but a
+  stored consent for `RM` and one for `rm` are two different rows. The
+  mismatch only ever makes the floor match *more* often than the consent it
+  guards, which is the safe direction.
+- Path keys are matched against the same `+`-split, so a path containing a
+  literal `+` (a file named `a+b.ts`) can over-match a listed scope — again,
+  toward more escalation.
 
 ### Precedence
 
@@ -689,6 +728,11 @@ decision with `"<Tool> cannot be granted 'always' — it requires approval every
 time"` instead of accepting the click and ignoring the row at read time — the
 person clicking must learn the grant did not stick. `never` is still accepted
 (it only narrows), and a plain one-shot `approve` is unaffected.
+
+Both routes return that refusal as **400** with `{ error }`. A 404 (`"unknown
+or already-decided request"`) is reserved for a request that genuinely is not
+resolvable. Swallowing the refusal would leave the gate pending and park the
+turn for the full approval deadline.
 
 ## Channels
 

@@ -1447,12 +1447,16 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
           if ((r.optionId === "always" || r.optionId === "never") && !createdBy) {
             return json({ error: "always/never decisions require an authenticated user" }, 400);
           }
-          await resolveApprovalDecision(
+          const resolved = await resolveApprovalDecision(
             store,
             sessionId,
             { requestId: r.requestId, decision: r.optionId },
             { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
           );
+          // A refusal (e.g. `always` on an escalate-list tool) must reach the
+          // clicker; swallowing it parks the turn until the approval deadline.
+          // 400 matches this route's other rejections above.
+          if (!resolved.ok && resolved.error) return json({ error: resolved.error }, 400);
         }
       }
       if (body.message != null) {
@@ -1482,13 +1486,18 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
       if ((body.decision === "always" || body.decision === "never") && !createdBy) {
         return json({ error: "always/never decisions require an authenticated user" }, 400);
       }
-      const { ok } = await resolveApprovalDecision(
+      const { ok, error, refused } = await resolveApprovalDecision(
         store,
         sessionId,
         { requestId: body.requestId, decision: body.decision },
         { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
       );
-      return ok ? json({ resolved: true }) : json({ error: "unknown or already-decided request" }, 404);
+      if (ok) return json({ resolved: true });
+      // A refused decision is a bad request, not a missing resource. Every
+      // other failure keeps today's 404 — the request really was unknown,
+      // already decided, or belongs to a turn that is no longer running.
+      if (refused && error) return json({ error }, 400);
+      return json({ error: "unknown or already-decided request" }, 404);
     }
 
     const stream = path.match(/^\/eve\/v1\/session\/([^/]+)\/stream$/);

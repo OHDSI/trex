@@ -62,9 +62,15 @@ export function parseEscalateList(raw: string | undefined): EscalateList {
   return parsed;
 }
 
+// A scope key is a `+`-separated SET (Bash keys on every executable a command
+// runs), and ANY part matching escalates. A path key holding a literal `+` (a
+// file named `a+b.ts`) can therefore over-match — that errs toward MORE
+// escalation, the safe direction.
 export function matchesEscalate(list: EscalateList, toolName: string, scopeKey: string): boolean {
-  const scope = scopeKey.toLowerCase();
-  return list.some((e) => e.tool === toolName && (e.scopes.length === 0 || e.scopes.includes(scope)));
+  const parts = scopeKey.toLowerCase().split("+");
+  return list.some((e) =>
+    e.tool === toolName && (e.scopes.length === 0 || parts.some((p) => e.scopes.includes(p)))
+  );
 }
 
 export function resolveApproval(input: ApprovalPolicyInput): ApprovalVerdict {
