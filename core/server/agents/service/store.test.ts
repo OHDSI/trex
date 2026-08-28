@@ -180,20 +180,6 @@ Deno.test("resolveApproval is session-scoped: a requestId for another session re
   assertEquals(await store.resolveApproval("r-1", "approve", "wrong-session"), false);
 });
 
-Deno.test("getApprovalTool returns the tool name for a requestId", async () => {
-  const { fn, calls } = fakeQuery([{ rows: [{ tool: "dangerous_tool" }] }]);
-  const store = createStore(fn as never);
-  assertEquals(await store.getApprovalTool("r-1"), "dangerous_tool");
-  assert(calls[0].sql.includes("FROM agents.approvals"));
-  assertEquals(calls[0].params, ["r-1"]);
-});
-
-Deno.test("getApprovalTool returns null when the request is unknown", async () => {
-  const { fn } = fakeQuery([{ rows: [] }]);
-  const store = createStore(fn as never);
-  assertEquals(await store.getApprovalTool("nope"), null);
-});
-
 // Backstop for reapStaleTurns/denyApprovalsForTurns's own failure mode
 // (Fix 1): resolveApprovalDecision refuses to resolve an approval whose turn
 // isn't running, so an approval left un-denied by a failed deny is still safe.

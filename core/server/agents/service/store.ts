@@ -532,17 +532,10 @@ export function createStore(query: QueryFn) {
       }));
     },
 
-    // Looks up the tool an approval request was raised for, so a sticky
-    // (always/never) decision on that request can be recorded against the
-    // right (user, plugin, agent, tool) key — see handler.ts's approval
-    // routes, which call this only after resolveApproval succeeds.
-    async getApprovalTool(requestId: string): Promise<string | null> {
-      const r = await query(`SELECT tool FROM agents.approvals WHERE request_id = $1`, [requestId]);
-      return r.rows[0]?.tool ?? null;
-    },
-
-    // Replaces getApprovalTool: the escalate check in approvals.ts needs the
-    // scope key too, and reading both in one row removes a re-derivation.
+    // Looks up the tool + scope an approval request was raised for, so a sticky
+    // (always/never) decision can be recorded against the right
+    // (user, plugin, agent, tool, scope) key, and so the escalate check in
+    // approvals.ts can evaluate it before the decision is written.
     async getApprovalScope(requestId: string): Promise<{ tool: string; scopeKey: string } | null> {
       const r = await query(`SELECT tool, scope_key FROM agents.approvals WHERE request_id = $1`, [requestId]);
       const row = r.rows[0];
