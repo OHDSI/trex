@@ -1002,6 +1002,22 @@ Deno.test("an escalated tool falls back to the built-in default list when ctx.es
   assertEquals(approvals, 0);
 });
 
+// End to end through the real deriveScopeKey and the real default list: `rm`
+// hidden behind a harmless first token must still hit the floor. Two unit tests
+// meeting at the literal "cd+rm" proved nothing about the wiring between them.
+Deno.test("a compound Bash command reaches the default floor through the derived scope key", async () => {
+  let approvals = 0;
+  const tools = await buildSdkTools(gatedCtx({
+    unattended: true,
+    channelBound: false,
+    store: gateStore({ createApproval: () => { approvals++; return Promise.resolve("r-1"); } }),
+  }));
+  assertEquals(await run(tools, "Bash", { command: "cd /app && rm -rf ." }), {
+    error: "requires approval but this session has no approver",
+  });
+  assertEquals(approvals, 0);
+});
+
 // Fix round 1: the design's central claim — escalate outranks a sticky
 // "always" grant — and nothing pinned it at the toolset.ts integration level.
 Deno.test("a sticky always does not bypass an escalated tool on a channel-bound session", async () => {

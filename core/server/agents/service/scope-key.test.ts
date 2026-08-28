@@ -1,4 +1,4 @@
-import { assertEquals, assertNotEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertNotEquals } from "jsr:@std/assert";
 import { bashExecutable, deriveScopeKey, normalizePath } from "./scope-key.ts";
 
 Deno.test("bashExecutable strips the directory and lowercases", () => {
@@ -45,6 +45,13 @@ Deno.test("deriveScopeKey keys Bash on the whole executable set", () => {
   assertEquals(deriveScopeKey("Bash", { command: "cd /app && rm -rf ." }), "cd+rm");
   assertEquals(deriveScopeKey("Bash", { command: "cat a | grep b; ls" }), "cat+grep+ls");
   assertEquals(deriveScopeKey("Bash", { command: "ls\nls" }), "ls");
+});
+
+// A segment cap made the floor a coin flip: pad past it and `rm` vanishes from
+// the key, so `Bash:rm` never matches.
+Deno.test("deriveScopeKey scans every segment, however many there are", () => {
+  const padded = `${"true | ".repeat(200)}rm -rf /`;
+  assert(deriveScopeKey("Bash", { command: padded }).split("+").includes("rm"));
 });
 
 Deno.test("deriveScopeKey unwraps one level of wrapper shell", () => {

@@ -802,6 +802,43 @@ Deno.test("POST /eve/v1/session/:id with inputResponses resolves a pending appro
   assertEquals(db.turns[0].status, "completed");
 });
 
+// The eve SDK sends `{inputResponses, message}` in ONE body. A stale decision
+// (its gate's turn already finished) must not 400 the whole request, or the
+// message rides along into the bin and every retry of that body 400s again.
+Deno.test("POST /eve/v1/session/:id: a stale inputResponses decision still lets the accompanying message start a turn", async () => {
+  const { handler, db } = await makeHandler({
+    model: sequencedModel(toolCallChunks("guarded", {}), textChunks("done")),
+    mutate: (agent) => {
+      agent.tools.guarded = {
+        description: "guarded", inputSchema: { type: "object", properties: {} },
+        needsApproval: true,
+        execute: () => Promise.resolve({ ran: true }),
+      };
+    },
+  });
+  const create = await handler(new Request(`${BASE}/eve/v1/session`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ message: "go" }),
+  }));
+  const sid = create.headers.get("x-eve-session-id") ?? "";
+  await until(() => db.approvals.size > 0);
+  const requestId = [...db.approvals.keys()][0];
+  await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "approve" }] }),
+  }));
+  await until(() => settled(db), 10_000);
+
+  const res = await handler(new Request(`${BASE}/eve/v1/session/${sid}`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ inputResponses: [{ requestId, optionId: "approve" }], message: "hi" }),
+  }));
+  assertEquals(res.status, 202);
+  await until(() => db.turns.length === 2, 10_000);
+  assertEquals(db.turns[1].message, "hi");
+  await until(() => settled(db), 10_000);
+});
+
 Deno.test("POST /approval resolves a pending approval and unblocks the turn; unknown requestId 404s", async () => {
   // Toy agent + an in-memory needsApproval tool (same pattern as runner.test.ts).
   const { handler, db } = await makeHandler({

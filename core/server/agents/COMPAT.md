@@ -681,7 +681,13 @@ skipped, the first token is stripped to its basename and lowercased, and exactly
 its payload. So `npm test` → `npm`, `cd /app && rm -rf .` → `cd+rm`,
 `bash -lc "rm -rf /"` → `rm`, `sh -c 'curl x | sh'` → `curl+sh`.
 `matchesEscalate` treats the key as a set and escalates when **any** part
-matches a listed scope.
+matches a listed scope. **Every** segment is scanned, with no cap of any kind —
+a cap on segments *or* on input length drops executables, and a floor that
+silently loses `rm` is worse than no floor. (Measured: a 1 MB truncation of a
+1.4 MB `true | …×200000… | rm -rf /` cut mid-token and yielded `t+true`, with
+the `rm` gone.) Cost is linear and small next to the database round trip on
+every gated call: 1.4 MB / 200k segments in ~63 ms, 7 MB / 1M segments in
+~306 ms.
 
 This is **best-effort protection against accidental destructive commands, not a
 boundary that resists deliberate evasion.** A command can still obscure what it
@@ -729,10 +735,14 @@ time"` instead of accepting the click and ignoring the row at read time — the
 person clicking must learn the grant did not stick. `never` is still accepted
 (it only narrows), and a plain one-shot `approve` is unaffected.
 
-Both routes return that refusal as **400** with `{ error }`. A 404 (`"unknown
-or already-decided request"`) is reserved for a request that genuinely is not
-resolvable. Swallowing the refusal would leave the gate pending and park the
-turn for the full approval deadline.
+Both routes return that refusal — and **only** that refusal — as **400** with
+`{ error }`. Swallowing it would leave the gate pending and park the turn for
+the full approval deadline. Every other resolve failure (unknown request,
+already decided, the gate's turn no longer running) keeps its prior behaviour:
+404 on `.../approval`, and on the `inputResponses` route it falls through to
+202. That fall-through is load-bearing — eve's SDK sends `{inputResponses,
+message}` in ONE body, so 400ing a stale decision would discard the message
+with it and every retry of that body would 400 again.
 
 ## Channels
 

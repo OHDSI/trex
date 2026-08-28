@@ -24,9 +24,6 @@ export function normalizePath(p: string): string {
 // A wrapper shell's own name says nothing about what runs; `bash -lc "rm -rf /"`
 // must key on `rm`. Unwrapped exactly one level (see collectExecutables).
 const WRAPPER_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "ash"]);
-// Bounds the work a pathological command can cause. A truncated key can only
-// omit executables, never invent one.
-const MAX_SEGMENTS = 64;
 
 interface Token {
   value: string;
@@ -125,8 +122,11 @@ export function bashExecutable(command: string): string {
   return segmentExecutable(tokenize(command)).exe;
 }
 
+// Every segment is scanned, with no cap: any cap drops executables, and a floor
+// that silently loses `rm` is worse than no floor. Cost is linear (a 7 MB, 1M-
+// segment pipeline derives in ~300 ms) against a DB round trip per gated call.
 function collectExecutables(command: string, depth: number, out: Set<string>): void {
-  for (const segment of splitSegments(command).slice(0, MAX_SEGMENTS)) {
+  for (const segment of splitSegments(command)) {
     const tokens = tokenize(segment);
     const { exe, index } = segmentExecutable(tokens);
     if (!exe) continue;

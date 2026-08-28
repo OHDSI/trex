@@ -1453,10 +1453,11 @@ export function createHandler(deps: Deps): (req: Request) => Promise<Response> {
             { requestId: r.requestId, decision: r.optionId },
             { plugin: deps.plugin, agentName: deps.agentName, userId: createdBy, escalate: ESCALATE_LIST },
           );
-          // A refusal (e.g. `always` on an escalate-list tool) must reach the
-          // clicker; swallowing it parks the turn until the approval deadline.
-          // 400 matches this route's other rejections above.
-          if (!resolved.ok && resolved.error) return json({ error: resolved.error }, 400);
+          // Only a refused decision 400s (same rule as the /approval route).
+          // Any other failure must fall through, or an `{inputResponses,
+          // message}` body would lose its message every time the gate's turn
+          // has already finished.
+          if (resolved.refused && resolved.error) return json({ error: resolved.error }, 400);
         }
       }
       if (body.message != null) {
