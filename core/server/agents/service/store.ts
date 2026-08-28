@@ -273,7 +273,7 @@ export function createStore(query: QueryFn) {
     // acted on in minutes. `started_at` only says how long the turn has been
     // running, which for a live turn is not evidence of anything — long turns
     // are legitimate — so it stays the slow two-hour fallback, used only for
-    // rows with no heartbeat at all (written before V7__turn_heartbeat.sql).
+    // rows with no heartbeat at all (written before V8__turn_heartbeat.sql).
     // A NULL-heartbeat row is never reaped on the heartbeat cutoff: absence of
     // a stamp is not absence of a worker.
     //

@@ -1,6 +1,7 @@
 import { assertEquals } from "jsr:@std/assert";
 import {
   foreignDirtCount,
+  quarantinePath,
   branchSlug,
   chatWorktreeBranch,
   legacyChatWorktreeBranch,
@@ -81,13 +82,12 @@ Deno.test("worktreeReuseDecision: own branch ok; clean foreign branch restores; 
     worktreeReuseDecision(onPr, wt, branch, 0),
     { restore: true, foreignBranch: "ohdsi-trex/some-pr-branch" },
   );
-  // Foreign branch, dirty tree → hard error naming the risk.
+  // Foreign branch, dirty tree → preserve (stash), NOT a hard error. Refusing
+  // outright killed the chat: the throw happens before the coder starts, so
+  // nothing in the session could ever repair it.
   assertEquals(
     worktreeReuseDecision(onPr, wt, branch, 2),
-    {
-      error: `worktree has 'ohdsi-trex/some-pr-branch' checked out (expected ${branch}) ` +
-        `with 2 uncommitted change(s) — cannot restore the chat branch without risking them`,
-    },
+    { preserve: true, foreignBranch: "ohdsi-trex/some-pr-branch", dirtyFileCount: 2 },
   );
   // This chat's own LEGACY name → rename, not "foreign branch". Dirtiness is
   // irrelevant: `git branch -m` leaves the working tree and index alone, and
@@ -125,14 +125,10 @@ Deno.test("worktreeReuseDecision: own branch ok; clean foreign branch restores; 
     worktreeReuseDecision([{ path: wt, branch: null, detached: true }], wt, branch, 0),
     { restore: true, foreignBranch: "a detached HEAD" },
   );
-  // Detached AND dirty stays an error, for the same reason a dirty foreign
-  // branch does: those edits belong to some other state.
+  // Detached AND dirty is preserved the same way — stash, then reattach.
   assertEquals(
     worktreeReuseDecision([{ path: wt, branch: null, detached: true }], wt, branch, 3995),
-    {
-      error: `worktree is detached (expected branch ${branch}) with 3995 ` +
-        `uncommitted change(s) — cannot restore the chat branch without risking them`,
-    },
+    { preserve: true, foreignBranch: "a detached HEAD", dirtyFileCount: 3995 },
   );
 });
 
@@ -179,4 +175,32 @@ Deno.test("foreignDirtCount: real edits still count, including inside a repo tha
 
 Deno.test("foreignDirtCount: an empty status is clean", () => {
   assertEquals(foreignDirtCount([]), 0);
+});
+
+// `error` is now reserved for the ONE state with nothing to act on. Everything
+// else has a repair, because a terminal refusal is what wedged chats: the throw
+// fires before the coder starts, so no session could ever fix itself.
+Deno.test("worktreeReuseDecision: the only remaining error is an unregistered directory", () => {
+  const wt = "/ws/u1/app1/.worktrees/chat-1";
+  assertEquals(
+    worktreeReuseDecision([], wt, "owner/topic", 0),
+    { error: "directory exists but git does not list it as a worktree" },
+  );
+  assertEquals(
+    worktreeReuseDecision([], wt, "owner/topic", 99),
+    { error: "directory exists but git does not list it as a worktree" },
+  );
+});
+
+Deno.test("quarantinePath: sibling of the original, never equal, collision-resolvable", () => {
+  const wt = "/ws/u1/app1/.worktrees/chat-1";
+  const stamp = "2026-08-28T11-00-00-000Z";
+  const first = quarantinePath(wt, stamp);
+  assertEquals(first, `${wt}.quarantine-${stamp}`);
+  assertEquals(first === wt, false);
+  // Two quarantines within the same timestamp must not clobber each other.
+  assertEquals(quarantinePath(wt, stamp, 1), `${wt}.quarantine-${stamp}-1`);
+  assertEquals(quarantinePath(wt, stamp, 1) === first, false);
+  // Stays inside .worktrees/ so the existing sweep still sees it.
+  assertEquals(first.startsWith("/ws/u1/app1/.worktrees/"), true);
 });

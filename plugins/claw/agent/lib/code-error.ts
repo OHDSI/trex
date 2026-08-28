@@ -13,6 +13,8 @@ const SENTENCES: Record<string, string> = {
   invalid_key: "The coder's API key was rejected. It needs to be corrected in devx settings.",
   git_unrelated_base:
     "I targeted the wrong base branch — it shares no history with the feature branch, so neither the rebase nor the PR could ever work. I will redo this against the repository's actual default branch; retrying the same command would just repeat the error.",
+  workspace_quarantined:
+    "This chat's workspace had got into a state it could not run from, so I reset it to a clean one — nothing was deleted, the previous workspace is kept aside. Send that last request again and it will go through.",
   pr_already_exists:
     "A pull request for this branch is already open, so there was nothing to create. I will report the existing one instead.",
 };

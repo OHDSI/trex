@@ -24,7 +24,10 @@ const MIGRATION_DIRS = [
  * the way V18__v17_collision_repair.sql does.
  */
 const GRANDFATHERED: Record<string, number[]> = {
-  "plugins/devx/migrations": [17],
+  // Empty on purpose. devx V17 was grandfathered here because an applied
+  // collision cannot be renumbered — but that collision was resolved by
+  // renumbering the UNAPPLIED side (V17__agent_model_selection -> V19), so the
+  // exception went stale and this test's own staleness check caught it.
 };
 
 async function versionsIn(dir: string): Promise<Map<number, string[]>> {

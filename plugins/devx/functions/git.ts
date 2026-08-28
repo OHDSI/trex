@@ -237,12 +237,62 @@ class GitOps {
     await this.runGit(wsPath, `git branch -m ${from} ${to}`);
   }
 
+  // Stash the worktree's TRACKED modifications under a findable message.
+  //
+  // Deliberately no `-u`: including untracked files would sweep node_modules and
+  // other build output into the stash — slow, enormous, and rarely what anyone
+  // wants back. Untracked files do not block a branch switch unless the target
+  // branch has a file at the same path, and the caller falls back to quarantine
+  // if the switch fails anyway. Returns false when there was nothing to stash.
+  async stashPush(wsPath: string, message: string): Promise<boolean> {
+    // run_command splits on whitespace with no shell, so the message has to be
+    // a single token — hyphenate it rather than trying to quote it.
+    const token = message.replace(/\s+/g, "-").replace(/[^a-zA-Z0-9_.\-\/]/g, "");
+    try {
+      const out = await this.runGit(wsPath, `git stash push -m ${token}`);
+      return !/No local changes to save/i.test(out);
+    } catch {
+      return false;
+    }
+  }
+
+  /** The most recent stash ref, so a human can be told where their work went. */
+  async latestStash(wsPath: string): Promise<string | null> {
+    try {
+      const out = await this.runGit(wsPath, `git stash list --max-count=1`);
+      return out.trim().split(":")[0] || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Does `<ref>:<path>` exist in that tree? Used to spot a branch based on a
+  // root carrying no .gitignore, where every build artifact reads as dirt.
+  async pathExistsInRef(repoRoot: string, ref: string, path: string): Promise<boolean> {
+    try {
+      await this.runGit(repoRoot, `git cat-file -e ${ref}:${path}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // `startPoint` (e.g. "origin/develop") bases the new branch there instead of
   // the repo's current HEAD, so a feature worktree starts from an up-to-date tree.
   async worktreeAdd(repoRoot: string, worktreePath: string, branch: string, startPoint?: string): Promise<string> {
     validateBranchName(branch);
     const from = startPoint ? ` ${startPoint}` : "";
     await this.runGit(repoRoot, `git worktree add ${worktreePath} -b ${branch}${from}`);
+    return worktreePath;
+  }
+
+  // Attach a worktree to a branch that ALREADY exists. `worktreeAdd`'s `-b`
+  // fails in that case, which happens whenever a quarantined worktree leaves
+  // its branch behind — the branch is the chat's own work and must be reused,
+  // not renamed around.
+  async worktreeAddExisting(repoRoot: string, worktreePath: string, branch: string): Promise<string> {
+    validateBranchName(branch);
+    await this.runGit(repoRoot, `git worktree add ${worktreePath} ${branch}`);
     return worktreePath;
   }
 
