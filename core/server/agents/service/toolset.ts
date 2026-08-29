@@ -14,7 +14,7 @@ import { type ConnectionToolMeta, searchConnectionTools } from "../connections/s
 import type { AgentStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
 import { subscribe } from "./stream.ts";
-import { deriveScopeKey } from "./scope-key.ts";
+import { deriveScopeKey, touchedPaths } from "./scope-key.ts";
 import { DEFAULT_ESCALATE_LIST, type EscalateList, resolveApproval } from "./approval-policy.ts";
 import { TRUNCATION_HEADER_OVERHEAD, truncateMiddle } from "./context/truncate.ts";
 import type { ContextConfig } from "./context/budget.ts";
@@ -266,6 +266,23 @@ function authoredTool(name: string, def: any, ctx: ToolBuildCtx, isAuthored: boo
           ? (names: string[]) => ctx.store!.activateTools(ctx.sessionId, names)
           : undefined,
       });
+
+      // Task 10: record which paths this call actually touched — AFTER
+      // def.execute returned and only on success, never for a call the gate
+      // above denied (those never reach here). A result shaped {error} means
+      // the tool itself failed; claiming a change that did not happen is
+      // worse than under-reporting one that did, so nothing is recorded then.
+      const isToolError = !!result && typeof result === "object" && "error" in (result as object);
+      if (!isToolError && ctx.store && ctx.turnId) {
+        const paths = touchedPaths(name, effectiveInput);
+        if (paths.length > 0) {
+          try {
+            await ctx.store.recordTouchedPaths(ctx.turnId, paths);
+          } catch (e) {
+            console.error(`agents: failed to record touched paths for turn ${ctx.turnId}:`, e);
+          }
+        }
+      }
 
       if (cfg?.onToolResult) {
         // Same wiring-bug-must-throw posture as onToolCall above.

@@ -153,6 +153,23 @@ export function bashScopeKey(command: string): string {
   return [...out].sort().join("+");
 }
 
+// The workspace path(s) a successful call to `toolName` actually touched, for
+// Task 10's touched_paths recording. Uses the same PATH_TOOLS/PAIR_TOOLS sets
+// and normalizePath as deriveScopeKey above so the two cannot drift; unlike
+// deriveScopeKey (one opaque string, JSON-joined for a pair), this returns
+// each endpoint separately so both sides of a copy/rename get recorded.
+export function touchedPaths(toolName: string, input: unknown): string[] {
+  const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  if (PATH_TOOLS.has(toolName)) {
+    return typeof obj.path === "string" ? [normalizePath(obj.path)] : [];
+  }
+  if (PAIR_TOOLS.has(toolName)) {
+    if (typeof obj.source !== "string" || typeof obj.destination !== "string") return [];
+    return [normalizePath(obj.source), normalizePath(obj.destination)];
+  }
+  return [];
+}
+
 export function deriveScopeKey(toolName: string, input: unknown): string {
   const obj = input && typeof input === "object" ? input as Record<string, unknown> : {};
   if (toolName === "Bash") {

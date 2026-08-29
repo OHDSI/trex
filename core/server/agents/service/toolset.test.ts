@@ -896,12 +896,16 @@ function gatedCtx(overrides: Record<string, unknown> = {}): any {
   });
 }
 
-// Only the methods the gate actually calls.
+// Only the methods the gate actually calls. recordTouchedPaths defaults to a
+// no-op here (not per-test) — Task 10 wired the gate to call it on every
+// successful path-tool execution, so every existing gated-tool test would
+// otherwise throw "undefined is not a function".
 function gateStore(over: Record<string, unknown> = {}) {
   return {
     getToolConsent: () => Promise.resolve(null),
     createApproval: () => Promise.resolve("r-1"),
     getApprovalDecision: () => Promise.resolve("approve"),
+    recordTouchedPaths: () => Promise.resolve(),
     ...over,
   };
 }
@@ -1101,4 +1105,42 @@ Deno.test("the default poll backs off to a 5s ceiling", () => {
 // Fix round 1: approvalPollMs: 0 must not busy-loop getApprovalDecision.
 Deno.test("a non-positive approvalPollMs falls back to the default backoff instead of busy-looping", () => {
   assertEquals(nextPollDelay(500, 0), 1000);
+});
+
+// ---------------------------------------------------------------------------
+// Task 10 (2026-08-29-claw-safe-approvals): record which paths a turn's file
+// tools actually touched, AFTER def.execute returns and only on success —
+// never for a call the gate denied. See task-10-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("a successful file tool records its path", async () => {
+  const recorded: string[][] = [];
+  const tools = await buildSdkTools(gatedCtx({
+    unattended: true,
+    store: gateStore({ recordTouchedPaths: (_t: string, p: string[]) => { recorded.push(p); return Promise.resolve(); } }),
+  }));
+  await run(tools, "Write", { path: "./src/a.ts" });
+  assertEquals(recorded, [["src/a.ts"]]);
+});
+
+Deno.test("a denied call records nothing", async () => {
+  const recorded: string[][] = [];
+  const tools = await buildSdkTools(gatedCtx({
+    store: gateStore({
+      getToolConsent: () => Promise.resolve("never"),
+      recordTouchedPaths: (_t: string, p: string[]) => { recorded.push(p); return Promise.resolve(); },
+    }),
+  }));
+  await run(tools, "Write", { path: "a.ts" });
+  assertEquals(recorded, []);
+});
+
+Deno.test("Bash records nothing", async () => {
+  const recorded: string[][] = [];
+  const tools = await buildSdkTools(gatedCtx({
+    unattended: true,
+    store: gateStore({ recordTouchedPaths: (_t: string, p: string[]) => { recorded.push(p); return Promise.resolve(); } }),
+  }));
+  await run(tools, "Bash", { command: "rm -rf x" });
+  assertEquals(recorded, []);
 });
