@@ -55,6 +55,24 @@ export const REQUIRED_TABLES: TableRef[] = [
   { schema: "logto", table: "users" },
 ];
 
+/**
+ * The tables worth waiting for, given the IdP in use.
+ *
+ * `logto.users` only means something when Logto is the IdP. A trex-authenticated
+ * stack need never populate it, and waiting on it holds back the seeding WebAPI
+ * authorization depends on: sec_external_role_map is what turns a token's
+ * `admin` claim into WebAPI's admin role. Seeded late, the first caller gets
+ * "403 Access Denied" from an otherwise correct stack — which is what a fresh
+ * database produced, the setup running minutes before the map existed.
+ *
+ * Logto keeps the full list, so those deployments behave exactly as before.
+ */
+export function requiredTablesFor(idp: string | undefined): TableRef[] {
+  return (idp ?? "").trim().toLowerCase() === "trex"
+    ? REQUIRED_TABLES.filter((t) => t.schema !== "logto")
+    : REQUIRED_TABLES;
+}
+
 /** psql meta-commands (`\gset`, `\if`, `\endif`, ...) are a psql client feature,
  *  not SQL. The retired webapi-init container piped these files through psql;
  *  this hook uses the wire protocol, whose simple-query parser rejects the whole
@@ -86,6 +104,8 @@ export interface AtlasDbInitDeps {
   log: (m: string) => void;
   err: (m: string) => void;
   wait?: WaitOptions;
+  /** Which IdP the stack authenticates against; selects the tables to wait for. */
+  idp?: string;
 }
 
 /** Returns the number of SQL files applied. Never throws — the caller runs
@@ -105,10 +125,11 @@ export async function applyAtlasDbInit(deps: AtlasDbInitDeps): Promise<number> {
     return 0;
   }
 
-  const ready = await waitForTables(deps.tableExists, REQUIRED_TABLES, deps.wait);
+  const required = requiredTablesFor(deps.idp);
+  const ready = await waitForTables(deps.tableExists, required, deps.wait);
   if (!ready) {
     deps.err(
-      "atlas-db-init skipped — webapi.sec_role / logto.users not ready before timeout; will retry on next boot",
+      `atlas-db-init skipped — ${required.map((t) => `${t.schema}.${t.table}`).join(" / ")}` + " not ready before timeout; will retry on next boot",
     );
     return 0;
   }

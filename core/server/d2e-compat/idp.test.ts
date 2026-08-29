@@ -186,3 +186,28 @@ Deno.test("trex: browser paths follow a deployment mounted at the root", () => {
   assertEquals(c.authorizePath, "oidc/authorize");
   assertEquals(`https://d2e.example/${c.authorizePath}`, `${c.issuer}/authorize`);
 });
+
+Deno.test("trex: an internal base redirects server-side fetches but not `iss`", () => {
+  // Local and CI stacks reach the gateway by container name, not by the public
+  // FQDN -- which from inside resolves to this container. Without a separate
+  // base the token proxy fetched https://localhost/trex/oidc/token and failed
+  // with "error sending request". `iss` must NOT move: it is what every verifier
+  // compares against, including WebAPI.
+  const c = resolveIdpConfig({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+    TREX_OIDC_INTERNAL_BASE: "http://d2e-trex:33001",
+  }, "/trex");
+  assertEquals(c.issuer, "https://d2e.example:41100/trex/oidc");
+  assertEquals(c.tokenUrl, "http://d2e-trex:33001/trex/oidc/token");
+  assertEquals(c.jwksUri, "http://d2e-trex:33001/trex/oidc/.well-known/jwks.json");
+});
+
+Deno.test("trex: without an internal base everything stays on the issuer", () => {
+  const c = resolveIdpConfig({
+    D2E_IDP: "trex",
+    TREX_OIDC_ISSUER: "https://d2e.example:41100",
+  }, "/trex");
+  assertEquals(c.tokenUrl, `${c.issuer}/token`);
+  assertEquals(c.jwksUri, `${c.issuer}/.well-known/jwks.json`);
+});

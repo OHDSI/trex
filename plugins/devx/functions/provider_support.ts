@@ -85,6 +85,29 @@ export const AGENT_NAMES: readonly AgentName[] = Object.freeze(["devx", "claw", 
 // slipped through — this gate stops the row from being assignable in the
 // first place, at the one place (POST/PUT agent-model-selection) a user could
 // otherwise create that dead configuration.
+// Providers a NON-devx agent (claw, d2esupport) can actually construct a client
+// for. Kept in lockstep with the sets in plugins/claw/agent/lib/
+// agent-model-override.ts and plugins/d2esupport/agent/lib/
+// agent-model-override.ts — provider_support.test.ts asserts the three agree.
+//
+// This list exists because the two vocabularies silently diverged: devx offers
+// `openai-compatible`, the gate below only refused `claude-code`, so an
+// `openai-compatible` config could be ASSIGNED to claw and then threw
+// "devx assigned claw an unsupported provider" on every single turn — a
+// mis-assignment that looked fine in Settings and only failed at use.
+const AGENT_SUPPORTED_PROVIDERS = new Set([
+  "anthropic",
+  "openai",
+  "google",
+  "bedrock",
+  // Reaches the same AI-SDK client as `openai`, with the config's base_url —
+  // see core/server/agents/service/model.ts's buildModel, whose openai branch
+  // is explicitly "openai and openai-compatible (custom base url)".
+  "openai-compatible",
+]);
+
+export const AGENT_SUPPORTED_PROVIDER_NAMES: readonly string[] = Object.freeze([...AGENT_SUPPORTED_PROVIDERS]);
+
 const DEVX_ONLY_PROVIDERS = new Set(["claude-code"]);
 
 export function isDevxOnlyProvider(provider: string | null | undefined): boolean {
@@ -92,8 +115,18 @@ export function isDevxOnlyProvider(provider: string | null | undefined): boolean
 }
 
 export function assertProviderAllowedForAgent(provider: string | null | undefined, agent: AgentName): void {
-  if (agent !== "devx" && isDevxOnlyProvider(provider)) {
+  if (agent === "devx") return;
+  if (isDevxOnlyProvider(provider)) {
     throw new Error(`claude-code is only available for devx — choose a different provider for ${agent}.`);
+  }
+  // Reject at ASSIGNMENT time anything the agent could not construct a client
+  // for. Previously only claude-code was refused here, so any other provider
+  // devx grew was assignable and then failed on every turn instead.
+  if (typeof provider === "string" && !AGENT_SUPPORTED_PROVIDERS.has(provider)) {
+    throw new Error(
+      `${agent} cannot use the "${provider}" provider — it supports ` +
+        `${AGENT_SUPPORTED_PROVIDER_NAMES.join(", ")}. Choose a different provider for ${agent}.`,
+    );
   }
 }
 

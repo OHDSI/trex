@@ -364,6 +364,9 @@ export async function d2eBoot(): Promise<void> {
     const dir = Deno.env.get("D2E_ATLAS_DB_INIT_DIR") || "/usr/src/atlas-db-init";
     await applyAtlasDbInit({
       dir,
+      // Selects which tables the seeding waits for: logto.users is only
+      // meaningful while Logto is the IdP.
+      idp: Deno.env.get("D2E_IDP"),
       readDir: async (d: string) => {
         const out: string[] = [];
         for await (const e of Deno.readDir(d)) if (e.isFile) out.push(e.name);
