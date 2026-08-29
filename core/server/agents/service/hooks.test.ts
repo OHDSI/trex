@@ -19,9 +19,11 @@ import { loadAgent } from "../loader.ts";
 import type { LoadedAgent } from "../loader.ts";
 import { _resetMcpCache, type McpClient, type McpConnectFn } from "../connections/mcp.ts";
 import { createStore } from "./store.ts";
-import { subscribe } from "./stream.ts";
+import { publish, subscribe } from "./stream.ts";
 import type { AgentEvent } from "./events.ts";
 import type { HookCtx } from "../eve-shim/types.ts";
+import { createSpawnCapabilities, type SpawnCapabilities } from "./spawn.ts";
+import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 const BASE = "http://local/plugins/trex/toy";
@@ -287,12 +289,107 @@ Deno.test("runTurn: ToolContext.sql is undefined (not a throw) when no hookCtx i
 });
 
 // ---------------------------------------------------------------------------
-// runSubagent (toolset.ts, via the built-in `agent` tool): a subagent's
-// system prompt resolves through the same buildInstructions hook path as a
-// top-level turn, not just the static buildSystemPrompt.
+// Delegation (child session) — fix round 1 (task-6-7-report.md), Finding 4:
+// migrated from the in-process runSubagent (deleted in fix round 1; see
+// Finding 1) onto the real child-session path (toolset.ts's
+// runAsChild/spawn.ts's createSpawnCapabilities), preserving the same
+// semantics: a subagent's system prompt resolves through the same
+// buildInstructions hook path as a top-level turn, step-scoped return text,
+// one-runId subagent.start/tool/end progress, and subagent.end firing even
+// when the run errors mid-stream.
+//
+// makeChildSpawn below is a lightweight, faithful stand-in for handler.ts's
+// real buildSpawnCapabilities: same resolution of a named subagent to its
+// own LoadedAgent, same fire-and-forget startChildTurn driving the REAL
+// runTurn (against the SAME mocked model these tests already used), and
+// fake-but-honest orchestration bookkeeping (status + persisted steps) for
+// spawn.ts's getChild/getHistory to read back — exactly what awaitChild
+// consumes. This exercises runAsChild/awaitChild/runner.ts's real
+// step/text/error persistence, not a re-implementation of any of it.
 // ---------------------------------------------------------------------------
 
-Deno.test("agent tool: a target subagent's buildInstructions hook runs and its return reaches the nested model's system prompt", async () => {
+interface FakeChild {
+  status: "running" | "completed" | "failed";
+  steps: Array<{ kind: string; name: string | null; payload: unknown }>;
+}
+
+function makeChildSpawn(agent: LoadedAgent, model: unknown, hookCtx: HookCtx | undefined): SpawnCapabilities {
+  const children = new Map<string, FakeChild>();
+  let n = 0;
+  return createSpawnCapabilities({
+    sessionId: "p-1",
+    turnId: "pt-1",
+    plugin: "toy-agent",
+    agent: "toy",
+    config: DEFAULT_CONTEXT_CONFIG,
+    allowDetached: false,
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: children.size }),
+      listChildren: () => Promise.resolve([]),
+      isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(false),
+      createChildSession: () => {
+        const id = `c-${++n}`;
+        children.set(id, { status: "running", steps: [] });
+        return Promise.resolve(id);
+      },
+      getHistory: (sessionId: string) => {
+        const child = children.get(sessionId);
+        return Promise.resolve(child ? [{ seq: 1, message: "", metadata: null, steps: child.steps }] : []);
+      },
+      getChild: (agentId: string) => {
+        const child = children.get(agentId);
+        return Promise.resolve(
+          child
+            ? { agentId, nickname: "Kid", subagent: null, status: child.status, startedAt: new Date(), detached: false }
+            : null,
+        );
+      },
+      failTurnsForSession: () => Promise.resolve(0),
+      queueFollowUp: () => Promise.resolve(),
+      takeFollowUps: () => Promise.resolve([]),
+    },
+    startChildTurn: (o) => {
+      const child = children.get(o.sessionId)!;
+      const target = o.subagent ? agent.subagents[o.subagent] : agent;
+      const fakeStore = {
+        addStep: (_turnId: string, _seq: number, kind: string, name: string | null, payload: unknown) => {
+          child.steps.push({ kind, name, payload });
+          return Promise.resolve();
+        },
+      };
+      // Fire-and-forget, same posture as handler.ts's real startTurn.
+      (async () => {
+        try {
+          await runTurn({
+            agent: target,
+            sessionId: o.sessionId,
+            turnId: "ct-1",
+            history: o.history ?? [],
+            message: o.message,
+            // deno-lint-ignore no-explicit-any
+            store: fakeStore as any,
+            emit: (e) => publish(o.sessionId, e),
+            model,
+            hookCtx,
+          });
+          child.status = "completed";
+        } catch {
+          // Mirrors production exactly: a pre-stream throw (e.g. a
+          // buildInstructions hook configured with no hookCtx) never
+          // reaches runner.ts's own step-persisting try/catch, so nothing
+          // is added to child.steps — only handler.ts's real startTurn
+          // catch captures the message, and only onto agents.turns.error,
+          // which awaitChild does not read today (see the "no hookCtx"
+          // test below for the resulting, documented gap).
+          child.status = "failed";
+        }
+      })();
+    },
+  });
+}
+
+Deno.test("agent tool: a target subagent's buildInstructions hook runs and its return reaches the child's system prompt", async () => {
   const agent = await loadAgent(TOY);
   const shouter = agent.subagents.shouter;
   let seenBase = "";
@@ -301,7 +398,8 @@ Deno.test("agent tool: a target subagent's buildInstructions hook runs and its r
     return Promise.resolve(base + "\n\nSUBAGENT HOOK MARKER");
   };
   const { model, calls } = capturingModel(textChunks("done"));
-  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx() });
+  const hookCtx = fakeHookCtx();
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx, spawn: makeChildSpawn(agent, model, hookCtx) });
   const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
     .execute({ agent: "shouter", prompt: "shout banana" });
   assertEquals(result.text, "done");
@@ -309,7 +407,7 @@ Deno.test("agent tool: a target subagent's buildInstructions hook runs and its r
   assert(seenBase.includes(shouter.instructions));
   assertEquals(calls.length, 1);
   const systemMsg = calls[0].prompt.find((m: { role: string }) => m.role === "system");
-  assert(systemMsg, "expected a system message in the nested model's prompt");
+  assert(systemMsg, "expected a system message in the child's prompt");
   assert(systemMsg.content.includes("SUBAGENT HOOK MARKER"));
 });
 
@@ -317,27 +415,150 @@ Deno.test("agent tool: a target subagent with no buildInstructions hook gets exa
   const agent = await loadAgent(TOY);
   const shouter = agent.subagents.shouter;
   const { model, calls } = capturingModel(textChunks("done"));
-  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx: fakeHookCtx() });
+  const hookCtx = fakeHookCtx();
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx, spawn: makeChildSpawn(agent, model, hookCtx) });
   await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
     .execute({ agent: "shouter", prompt: "shout banana" });
   const systemMsg = calls[0].prompt.find((m: { role: string }) => m.role === "system");
-  assert(systemMsg, "expected a system message in the nested model's prompt");
+  assert(systemMsg, "expected a system message in the child's prompt");
   assertEquals(systemMsg.content, buildSystemPrompt(shouter, undefined));
 });
 
-Deno.test("agent tool: a target subagent's buildInstructions hook without a hookCtx fails loudly instead of silently using the base prompt", async () => {
+Deno.test("agent tool: delegating to a subagent whose buildInstructions hook needs a hookCtx that isn't available fails the delegation (not silently using the base prompt)", async () => {
   const agent = await loadAgent(TOY);
   const shouter = agent.subagents.shouter;
   shouter.config.buildInstructions = (base: string) => Promise.resolve(base);
   const { model } = capturingModel(textChunks("done"));
-  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model }); // no hookCtx
-  await assertRejects(
-    () =>
-      (tools.agent as { execute: (input: unknown) => Promise<unknown> })
-        .execute({ agent: "shouter", prompt: "shout banana" }),
-    Error,
-    "hookCtx",
-  );
+  // No hookCtx anywhere — top-level ctx, nor the child's own runTurn call.
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, spawn: makeChildSpawn(agent, model, undefined) });
+  const out = await (tools.agent as { execute: (input: unknown) => Promise<unknown> })
+    .execute({ agent: "shouter", prompt: "shout banana" }) as { error?: string };
+  // Documented gap (fix round 1, Finding 4): the OLD in-process path
+  // propagated resolveInstructions' own exception message ("...no request
+  // context (hookCtx) available") straight out of the tool call
+  // (assertRejects(..., "hookCtx") used to hold here). The child-session
+  // path can't reproduce that exact message: the throw happens in the
+  // child's pre-stream setup, before runner.ts's step-persisting loop ever
+  // starts, so nothing is written for awaitChild to read back except the
+  // child's terminal status. handler.ts's real startTurn DOES capture the
+  // real message — but only onto agents.turns.error, which spawn.ts's
+  // awaitChild does not read (it only reads a persisted "error" STEP,
+  // written solely by runner.ts's own mid-stream error handling — a
+  // genuinely different case, covered below). The delegation still
+  // correctly FAILS — it just reports a generic reason instead of the
+  // specific one. Fixing that needs awaitChild to also fall back to the
+  // turn's own error column, which ChildAgent does not expose today.
+  assert(out.error, "delegation must still fail, not silently succeed with the base prompt");
+});
+
+Deno.test("agent tool: delegation emits subagent.start/tool/end progress under one runId, via toolEmit", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  const model = sequencedModel(toolCallChunks("shout", { text: "hi" }), textChunks("found it"));
+  const hookCtx = fakeHookCtx();
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx, spawn: makeChildSpawn(agent, model, hookCtx),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+
+  assertEquals(result.text, "found it");
+  const names = events.map((e) => e.name);
+  assertEquals(names[0], "subagent.start");
+  assertEquals(names[names.length - 1], "subagent.end");
+  // The child's own tool-call/tool-result, bridged onto the parent's
+  // toolEmit by runAsChild's subscribe() — see toolset.ts's
+  // bridgeChildEvent.
+  assert(names.includes("subagent.tool"));
+
+  // One runId for the whole delegation.
+  const runIds = new Set(events.map((e) => e.data.runId));
+  assertEquals(runIds.size, 1);
+  assertEquals(events[0].data.agent, "shouter");
+  assertEquals(events[events.length - 1].data.text, "found it");
+});
+
+Deno.test("agent tool: delegation's return value is unchanged ({ text }) when no toolEmit is wired", async () => {
+  const agent = await loadAgent(TOY);
+  const model = sequencedModel(toolCallChunks("shout", { text: "hi" }), textChunks("found it"));
+  const hookCtx = fakeHookCtx();
+  // No toolEmit in ctx at all — must not throw, must return the same shape.
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, model, hookCtx, spawn: makeChildSpawn(agent, model, hookCtx) });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+  assertEquals(result, { text: "found it" });
+});
+
+Deno.test("agent tool: delegation returns only the FINAL step's text — a preamble before a tool call must not leak into the answer", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  // Step 1: the model narrates BEFORE calling the tool (a common pattern),
+  // then calls shouter's own `shout` tool. Step 2: the final text only.
+  // deno-lint-ignore no-explicit-any
+  const preambleThenToolCall: any[] = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "Let me check... " },
+    { type: "text-end", id: "1" },
+    { type: "tool-call", toolCallId: "c-1", toolName: "shout", input: JSON.stringify({ text: "hi" }) },
+    {
+      type: "finish",
+      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      usage: { inputTokens: { total: 1 }, outputTokens: { total: 1 } },
+    },
+  ];
+  const model = sequencedModel(preambleThenToolCall, textChunks("final answer"));
+  const hookCtx = fakeHookCtx();
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx, spawn: makeChildSpawn(agent, model, hookCtx),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  const result = await (tools.agent as { execute: (input: unknown) => Promise<{ text: string }> })
+    .execute({ agent: "shouter", prompt: "shout hi" });
+
+  // NOT "Let me check... final answer" — that would be every step's
+  // text-delta summed, which runner.ts's lastStepText (fix round 1,
+  // Finding 3) exists to avoid: awaitChild reads that step-scoped field,
+  // not the turn's cross-step narrative text.
+  assertEquals(result.text, "final answer");
+  const endEvent = events.find((e) => e.name === "subagent.end");
+  assertEquals(endEvent?.data.text, "final answer");
+});
+
+Deno.test("agent tool: delegation always fires a matching subagent.end (with the error) when the child's stream errors mid-run", async () => {
+  const agent = await loadAgent(TOY);
+  const events: Array<{ name: string; data: any }> = [];
+  // deno-lint-ignore no-explicit-any
+  const errorMidStream: any[] = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "partial..." },
+    { type: "text-end", id: "1" },
+    { type: "error", error: new Error("boom") },
+  ];
+  const model = sequencedModel(errorMidStream);
+  const hookCtx = fakeHookCtx();
+  const tools = await buildSdkTools({
+    agent, sessionId: "s-1", depth: 0, model, hookCtx, spawn: makeChildSpawn(agent, model, hookCtx),
+    toolEmit: (name: string, data: unknown) => events.push({ name, data: data as any }),
+  });
+  const out = await (tools.agent as { execute: (input: unknown) => Promise<unknown> })
+    .execute({ agent: "shouter", prompt: "go" }) as { error?: string };
+
+  // The delegation now REPORTS an error rather than throwing — runAsChild's
+  // {error}-return contract, a deliberate change from the old in-process
+  // loop (which threw; see task-6-7-report.md's Task 7 section). The
+  // message comes from runner.ts's own error-part stringification
+  // (String(error), used for every turn's error, not just a child's), which
+  // for an Error object is "Error: <message>" rather than the bare
+  // e.message the old path used — a small, accepted format change (now
+  // consistent with every other turn's error text), not a lost signal.
+  assert(out.error?.includes("boom"), `expected the underlying error text in ${out.error}`);
+  const names = events.map((e) => e.name);
+  assertEquals(names[0], "subagent.start");
+  assertEquals(names[names.length - 1], "subagent.end", "subagent.end must fire even though the child's run errored");
+  const endEvent = events[events.length - 1];
+  assertEquals(endEvent.data.runId, events[0].data.runId);
+  assert(endEvent.data.error?.includes("boom"), "the in-stream error must not be silently dropped");
 });
 
 // ---------------------------------------------------------------------------
@@ -532,6 +753,145 @@ Deno.test("buildSdkTools: an authored tools/connection_search wins over the buil
 });
 
 // ---------------------------------------------------------------------------
+// buildSdkTools / authoredTool (toolset.ts): Task 2 — onToolCall/onToolResult
+// interception hooks. See task-2-brief.md. `makeAgent`/`makeToolBuildCtx`
+// helpers named in the brief don't exist in this file — adapted to the
+// loadAgent(TOY) + ad-hoc agent.tools/agent.config mutation + plain ctx
+// object literal style every other test above already uses.
+// ---------------------------------------------------------------------------
+
+Deno.test("onToolCall can rewrite a tool's input before execute", async () => {
+  const agent = await loadAgent(TOY);
+  let seen: unknown = null;
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object", properties: { v: { type: "string" } } },
+    execute: (input: unknown) => {
+      seen = input;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = (call) =>
+    Promise.resolve({ allow: true, input: { v: `${(call.input as { v: string }).v}!` } });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  await (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({ v: "hi" });
+  assertEquals(seen, { v: "hi!" });
+});
+
+Deno.test("onToolCall returning allow:false blocks execute and surfaces reason", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.resolve({ allow: false, reason: "blocked by policy" });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(ran, false);
+  assertEquals(out, { error: "blocked by policy" });
+});
+
+Deno.test("a throwing onToolCall denies the call without failing the turn", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.reject(new Error("hook exploded"));
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(ran, false);
+  assert(String((out as { error: string }).error).includes("hook exploded"));
+});
+
+Deno.test("onToolResult rewrites the tool result", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("raw"),
+  };
+  agent.config.onToolResult = (call) => Promise.resolve(`wrapped(${call.result})`);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  assertEquals(await (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({}), "wrapped(raw)");
+});
+
+// Ordering is a security property, not a preference: a hook that ran before
+// the approval gate could approve on the user's behalf.
+Deno.test("the approval gate runs BEFORE onToolCall", async () => {
+  const agent = await loadAgent(TOY);
+  const order: string[] = [];
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    needsApproval: true,
+    execute: () => Promise.resolve("ok"),
+  };
+  agent.config.onToolCall = () => {
+    order.push("hook");
+    return Promise.resolve({ allow: true });
+  };
+  // No store/turnId/emit wired -> the approval gate short-circuits with
+  // "approval required", which must happen without the hook ever running.
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0, hookCtx: fakeHookCtx() });
+  const out = await (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({});
+  assertEquals(out, { error: "approval required — use the session API" });
+  assertEquals(order, []);
+});
+
+// Review fix (round 1, Finding 2): a configured onToolCall/onToolResult hook
+// with no hookCtx wired must THROW, not silently skip the hook — that gap is
+// a caller wiring bug, not a hook failure, and fail-open would defeat a
+// control whose entire purpose is to deny. Same posture as buildInstructions'
+// existing hookCtx check (resolveInstructions above).
+Deno.test("a configured onToolCall hook with no hookCtx available throws instead of silently skipping", async () => {
+  const agent = await loadAgent(TOY);
+  let ran = false;
+  agent.tools.danger = {
+    description: "d",
+    inputSchema: { type: "object" },
+    execute: () => {
+      ran = true;
+      return Promise.resolve("ok");
+    },
+  };
+  agent.config.onToolCall = () => Promise.resolve({ allow: true });
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 }); // no hookCtx
+  await assertRejects(
+    () => (tools.danger as { execute: (input: unknown) => Promise<unknown> }).execute({}),
+    Error,
+    "onToolCall hook configured but no request context (hookCtx) available",
+  );
+  assertEquals(ran, false);
+});
+
+Deno.test("a configured onToolResult hook with no hookCtx available throws instead of silently skipping", async () => {
+  const agent = await loadAgent(TOY);
+  agent.tools.rewriteme = {
+    description: "echo",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("raw"),
+  };
+  agent.config.onToolResult = (call) => Promise.resolve(`wrapped(${call.result})`);
+  const tools = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 }); // no hookCtx
+  await assertRejects(
+    () => (tools.rewriteme as { execute: (input: unknown) => Promise<unknown> }).execute({}),
+    Error,
+    "onToolResult hook configured but no request context (hookCtx) available",
+  );
+});
+
+// ---------------------------------------------------------------------------
 // createHandler (handler.ts): end-to-end wiring for both the session API and
 // /chat — x-user-id header sourcing, and a throwing resolveModel hook
 // failing the turn instead of silently using env-configured credentials.
@@ -561,12 +921,16 @@ function inMemoryDb() {
       return Promise.resolve({ rows: [{ id: t.id, seq }] });
     }
     if (sql.includes("UPDATE agents.turns")) {
-      const t = turns.find((t) => t.id === params[0]);
-      if (t) {
-        t.status = params[1] as string;
-        t.error = (params[2] as string | null) ?? null;
-      }
-      return Promise.resolve({ rows: [] });
+      // finishTurn (fix round 1, 2026-08-27-agent-orchestration tasks 12-13
+      // review) is now scoped to `WHERE id = $1 AND status = 'running'` and
+      // reports whether it won via `RETURNING id` — mirror that here so this
+      // file's own resolveModel-hook tests still see turn.failed's
+      // downstream publish (session.failed) fire.
+      const t = turns.find((t) => t.id === params[0] && t.status === "running");
+      if (!t) return Promise.resolve({ rows: [] });
+      t.status = params[1] as string;
+      t.error = (params[2] as string | null) ?? null;
+      return Promise.resolve({ rows: [{ id: t.id }] });
     }
     if (sql.includes("INSERT INTO agents.steps")) {
       steps.push({

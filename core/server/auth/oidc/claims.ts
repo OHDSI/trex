@@ -8,7 +8,10 @@ export interface IdTokenUser {
   id: string;
   email: string;
   name?: string | null;
+  /** trex's own admin/user role. Gates trex features; not application access. */
   role: string;
+  /** Named application roles. This is what a relying party authorizes against. */
+  appRoles: string[];
   emailVerified?: boolean;
 }
 
@@ -35,9 +38,8 @@ export interface IdTokenClaims {
   email_verified?: boolean;
   name?: string;
   trex_role: string;
-  // The same role as a list. Relying parties that map a role claim generally
-  // expect a collection — Spring's OAuth2 mapping among them — and would take a
-  // bare string as an unparseable single value.
+  // Named application roles, not the system role: what a relying party
+  // authorizes against.
   roles: string[];
   app_metadata: { trex_role: string };
 }
@@ -58,7 +60,9 @@ export function buildIdTokenClaims(user: IdTokenUser, opts: IdTokenOptions): IdT
     exp: now + (opts.ttlSeconds ?? DEFAULT_ID_TOKEN_TTL_SECONDS),
     auth_time: opts.authTime ?? now,
     trex_role: user.role,
-    roles: [user.role],
+    // Application roles, never the system role: they are different concepts and
+    // conflating them would grant application access on a trex admin flag.
+    roles: user.appRoles,
     app_metadata: { trex_role: user.role },
   };
 

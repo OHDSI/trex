@@ -18,7 +18,8 @@
 import { parseEDNString } from "edn-data";
 import type { ChannelDef } from "./channels/types.ts";
 import type { ConnectionDef } from "./connections/types.ts";
-import type { AgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
+import type { AgentConfig, ResolvedAgentConfig, ToolDef, ToolProviderFn } from "./eve-shim/types.ts";
+import { type ContextConfig, DEFAULT_CONTEXT_CONFIG } from "./service/context/budget.ts";
 
 export interface SkillMeta {
   name: string;
@@ -53,7 +54,7 @@ async function readEdn(path: string): Promise<any | null> {
 export interface LoadedAgent {
   dir: string;
   instructions: string;
-  config: AgentConfig;
+  config: ResolvedAgentConfig;
   tools: Record<string, ToolDef>;
   skills: SkillMeta[];
   subagents: Record<string, LoadedAgent>;
@@ -100,6 +101,92 @@ export function packOfSkillName(name: string): string | null {
   return i > 0 ? name.slice(0, i) : null;
 }
 
+const EDN_KEY_MAP: Record<string, keyof ContextConfig> = {
+  "fresh-tool-output-chars": "freshToolOutputChars",
+  "stale-tool-output-chars": "staleToolOutputChars",
+  "fresh-turns": "freshTurns",
+  "compact-at-fraction": "compactAtFraction",
+  "compact-at-tokens": "compactAtTokens",
+  "verbatim-turns-after-compaction": "verbatimTurnsAfterCompaction",
+  "context-window": "contextWindow",
+  "summarization-prompt": "summarizationPrompt",
+  "deferred-tools": "deferredTools",
+};
+
+// Explicit allowlist, NOT `key in out`. `out` starts as a spread of
+// DEFAULT_CONTEXT_CONFIG, which deliberately omits the three OPTIONAL keys
+// (`contextWindow`, `summarizationPrompt` and `compactAtTokens` have no
+// default) — so an `in`-based guard silently DROPPED them, in camelCase and EDN kebab-case
+// alike. That made `contextWindow` unsettable, and it is the spec's only
+// escape hatch for budget.ts's CONTEXT_WINDOWS map lagging a model release.
+// Any new ContextConfig field must be added here as well as to the type.
+const CONTEXT_CONFIG_KEYS: ReadonlySet<keyof ContextConfig> = new Set([
+  "freshToolOutputChars",
+  "staleToolOutputChars",
+  "freshTurns",
+  "compactAtFraction",
+  "compactAtTokens",
+  "verbatimTurnsAfterCompaction",
+  "contextWindow",
+  "summarizationPrompt",
+  "deferredTools",
+]);
+
+/** Merge an agent's partial `context` block over the conservative defaults. */
+export function resolveContextConfig(raw: unknown): ContextConfig {
+  if (!raw || typeof raw !== "object") return { ...DEFAULT_CONTEXT_CONFIG };
+  // The merge is BY DYNAMIC KEY and ContextConfig has no index signature, so
+  // the allowlisted overrides are collected in an open record and applied over
+  // the defaults with Object.assign — which needs no cast in either direction.
+  // The allowlist check is what makes that sound: nothing outside
+  // CONTEXT_CONFIG_KEYS can ever reach `overrides`.
+  const overrides: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = (EDN_KEY_MAP[k] ?? k) as keyof ContextConfig;
+    if (CONTEXT_CONFIG_KEYS.has(key)) overrides[key] = v;
+  }
+  return Object.assign({ ...DEFAULT_CONTEXT_CONFIG }, overrides);
+}
+
+// Task 14: per-subagent role config (reasoningEffort/skills). Only `skills`
+// is a REDUCTION (ported from codex's role.rs — see resolveChildSkills
+// below); `reasoningEffort` is a plain per-subagent override with nothing to
+// cap it against, applied to the child's OWN resolved model. Both share the
+// same allowlist + EDN-kebab-map pattern as resolveContextConfig above, and
+// for the SAME reason: a key missing from the allowlist silently drops the
+// field instead of erroring — that defect dropped
+// contextWindow/summarizationPrompt/compactAtTokens last cycle (see
+// lib/context_config.test.ts). Both keys are optional with no default, so —
+// unlike resolveContextConfig — there is nothing to spread defaults over;
+// this only ever ADDS a key when the raw config actually names it.
+const ROLE_EDN_KEYS: Record<string, "reasoningEffort" | "skills"> = {
+  "reasoning-effort": "reasoningEffort",
+  "skills": "skills",
+};
+const AGENT_ROLE_KEYS: ReadonlySet<"reasoningEffort" | "skills"> = new Set(["reasoningEffort", "skills"]);
+
+/** Extracts an agent's role config fields (reasoningEffort/skills) from a raw config object. */
+export function resolveAgentRole(raw: unknown): Pick<AgentConfig, "reasoningEffort" | "skills"> {
+  const out: Pick<AgentConfig, "reasoningEffort" | "skills"> = {};
+  if (!raw || typeof raw !== "object") return out;
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = ROLE_EDN_KEYS[k] ?? (k as "reasoningEffort" | "skills");
+    if (AGENT_ROLE_KEYS.has(key)) (out as Record<string, unknown>)[key] = v;
+  }
+  return out;
+}
+
+// Reducing only (codex role.rs): a role may narrow a child, never grant it
+// something its parent does not have. `child === undefined` means the
+// subagent declared no restriction of its own, so it inherits the parent's
+// full set unchanged — NOT its own (potentially larger) list, and never a
+// union of the two.
+export function resolveChildSkills(parent: string[], child: string[] | undefined): string[] {
+  if (child === undefined) return parent;
+  const allowed = new Set(parent);
+  return child.filter((s) => allowed.has(s));
+}
+
 export async function loadAgent(dir: string, opts: { depth?: number } = {}): Promise<LoadedAgent> {
   const depth = opts.depth ?? 0;
   let instructions: string | null = null;
@@ -120,13 +207,46 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
     throw new Error(`agents: ${dir}/instructions.md is required but missing (or instructions.edn)`);
   }
 
-  let config: AgentConfig = { maxSteps: 25 };
+  // ResolvedAgentConfig, not AgentConfig: this is what LoadedAgent.config is
+  // declared as, and every branch below already produces a fully resolved
+  // `context`. Typing the local honestly is what makes the return statement
+  // type-check without a cast — and what keeps a future branch from assigning
+  // a partial context and having it surface as an undefined field at some
+  // reader far away instead of here.
+  let config: ResolvedAgentConfig = { maxSteps: 25, context: { ...DEFAULT_CONTEXT_CONFIG } };
   let configLoaded = false;
   for (const f of ["agent.ts", "agent.js"]) {
     try {
       await Deno.stat(`${dir}/${f}`);
       const mod = await import(`file://${dir}/${f}`);
-      if (mod.default) config = { maxSteps: 25, ...mod.default };
+      if (mod.default) {
+        // Both repairs that used to follow this assignment now happen BEFORE
+        // it, so `config` is never transiently invalid:
+        //
+        // - `context` is resolved in the same expression that spreads
+        //   mod.default. Its own `context` is a Partial<ContextConfig>, so a
+        //   two-step version leaves `config` briefly holding an unresolved
+        //   context that only convention stops a later edit from reading.
+        // - the stray EDN-spelled keys are deleted from the copy. The spread
+        //   copies e.g. `"reasoning-effort"` verbatim, under a name that is
+        //   not an AgentConfig field at all; resolveAgentRole below normalizes
+        //   its VALUE onto the real camelCase field, so the kebab spelling is
+        //   garbage rather than a second competing piece of config. Stripping
+        //   it here also means nothing has to reach into the resolved config
+        //   through an index signature it does not have.
+        const authored = { ...(mod.default as AgentConfig) } as AgentConfig & Record<string, unknown>;
+        for (const ednKey of Object.keys(ROLE_EDN_KEYS)) delete authored[ednKey];
+        config = { maxSteps: 25, ...authored, context: resolveContextConfig(authored.context) };
+        // Task 14: normalize reasoningEffort/skills through the same
+        // allowlist the EDN path uses below — resolveAgentRole is the one
+        // place that decides what counts as valid role config, so a stray
+        // kebab-case key on the TS side still resolves correctly instead of
+        // silently never surfacing as the real camelCase field. Read off the
+        // ORIGINAL mod.default, which still carries those kebab keys.
+        const role = resolveAgentRole(mod.default);
+        if (role.reasoningEffort !== undefined) config.reasoningEffort = role.reasoningEffort;
+        if (role.skills !== undefined) config.skills = role.skills;
+      }
       configLoaded = true;
       break;
     } catch (e) {
@@ -140,6 +260,10 @@ export async function loadAgent(dir: string, opts: { depth?: number } = {}): Pro
       config = {
         maxSteps: typeof edn["max-steps"] === "number" ? edn["max-steps"] : 25,
         ...(typeof edn.model === "string" ? { model: edn.model } : {}),
+        context: resolveContextConfig(edn.context),
+        // Task 14: :reasoning-effort / :skills, via the same allowlist +
+        // EDN-kebab map as resolveContextConfig above.
+        ...resolveAgentRole(edn),
       };
     }
   }

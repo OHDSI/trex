@@ -12,18 +12,26 @@ import type { HookCtx, ModelSpec } from "eve";
 // header comment for why this doesn't create a real dependency on core).
 import type { ToolDef } from "../../../core/server/agents/eve-shim/types.ts";
 import { readMetadata } from "./lib/context.ts";
+import { loadSkillsForPrompt } from "../functions/skills/resolver.ts";
 import { ensureAppWorkspace, readProjectRules } from "../functions/tools/workspace.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey } from "../functions/provider_key.ts";
 import { assertProviderSupported } from "../functions/provider_support.ts";
 import { classifyCoderError } from "../functions/error_codes.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "../functions/coder_context.ts";
+import { loadHooks, runPostToolHooks, runPreToolHooks, runStopHooks } from "../functions/skills/hooks.ts";
+import type { Hook } from "../functions/skills/types.ts";
+import { materializeAttachments, renderAttachmentBlock } from "../functions/attachments.ts";
+import { DEFERRED_TOOLS } from "./lib/deferred_tools.ts";
 
 // Port of functions/tools/registry.ts's buildToolSet PLAN_MODE_TOOLS
 // (registry.ts:197-205) — legacy names map 1:1 to the eve wrapper names
 // ported in plugins/devx/agent/tools/ (batch A/B, task-v2-brief.md).
 // NOTE: transcribed, not imported — the legacy const is unexported (declared
 // inline inside buildToolSet), so keep this list in sync manually.
-const PLAN_MODE_TOOLS = new Set([
+// Exported so lib/deferred_tools.test.ts can assert this set and
+// DEFERRED_TOOLS stay disjoint. Deferral runs after filterTools, so a tool in
+// both lists is dropped from plan mode outright — see DEFERRED_TOOLS' comment.
+export const PLAN_MODE_TOOLS = new Set([
   "Read", "Glob", "Grep", "CodeSearch",
   "GitStatus", "GitLog", "GitBranchList",
   "AskUserQuestion", "WritePlan", "ExitPlanMode",
@@ -32,6 +40,36 @@ const PLAN_MODE_TOOLS = new Set([
   "TaskGet", "TaskList",
   "CronList", "ToolSearch",
 ]);
+
+// Task 16, deviation from task-16-brief.md: the brief's sample only adds
+// this note to the static instructions.md file (kept below, for a human
+// reading that file and for lib/deferred_tools.test.ts's literal-text
+// check) — but instructions.md's content is NOT what a turn on this loop
+// actually sends the model. buildInstructions below discards its own
+// `base` argument (the resolved instructions.md text) entirely in favor of
+// buildCoderContext's systemPrompt (see this file's header comment on
+// defineAgent, "2. `base` ... used to be verbatim..."). Without appending
+// this note to the REAL returned prompt too, the model would never learn
+// ToolSearch exists to reveal DEFERRED_TOOLS — the whole mechanism would be
+// silently unreachable on this loop. Appended unconditionally: this agent's
+// `context.deferredTools` (below) is never empty.
+// Exported so lib/prompt_parity.test.ts can assert the REAL returned prompt is
+// exactly legacy's spine plus this note, rather than "starts with the spine
+// and contains the note somewhere", which permitted arbitrary extra content.
+// The categories listed track DEFERRED_TOOLS: knowledge base is deliberately
+// absent, since the KB* tools are no longer deferred (they are plan-mode
+// allowlisted — see deferred_tools.ts). Every OTHER deferred tool must be
+// reachable from one of these categories, or the model has no phrasing that
+// would lead it to ToolSearch for that tool — lib/deferred_tools.test.ts
+// asserts that by ranking each parsed category against the real ToolSearch
+// candidates, so the list here cannot drift from DEFERRED_TOOLS again.
+// Categories are comma-separated between the two em dashes; that shape is
+// what the test parses.
+export const DEFERRED_TOOLS_NOTE =
+  "Your tool list is partial. Less common tools — scheduled tasks, Figma, browser automation, " +
+  "database inspection, image generation, web crawling, dependency installation — are not " +
+  "listed above. Call ToolSearch to find and enable them; they become available from your " +
+  "next message onward.";
 
 interface ProviderRow {
   provider: string;
@@ -149,12 +187,16 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
   // this bedrock=bearer-only gap). Silently dropping IAM creds would swap in
   // whatever AWS_BEARER_TOKEN_BEDROCK happens to be set (or nothing at all,
   // producing a confusing downstream auth failure) — throw a clear,
-  // actionable error instead; useEffectiveLoop.ts routes IAM-shaped bedrock
-  // users to the legacy loop before this hook is ever reached, so reaching
-  // this throw in production means that client-side gate was bypassed or is
-  // out of sync, and failing loud here is strictly better than a silent
-  // wrong-credential turn (same "a thrown resolveModel fails the turn"
-  // posture as every other error path in this file).
+  // actionable error instead. IAM-shaped bedrock credentials are a decided
+  // unsupported configuration (not implementing SigV4 auth on this loop was
+  // a deliberate call, not an oversight to fix later) — this throw is now
+  // the SINGLE enforcement point for that decision, so reaching it in
+  // production is the NORMAL path for a user on IAM-shaped bedrock creds,
+  // not a sign that some other gate was bypassed. It must stay loud (same
+  // "a thrown resolveModel fails the turn" posture as every other error
+  // path in this file): a clear, actionable error a real user will see is
+  // far better than silently swapping in whatever AWS_BEARER_TOKEN_BEDROCK
+  // happens to be set to.
   let apiKey: string | undefined = resolvedApiKey ?? undefined;
   if (provider === "bedrock" && resolvedApiKey) {
     let parsed: unknown;
@@ -182,7 +224,8 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
         apiKey = creds.bearerToken;
       } else if (creds.accessKeyId || creds.secretAccessKey) {
         throw new Error(
-          "bedrock IAM credentials are not supported on the agents loop yet — use bearer token or the legacy loop",
+          "bedrock IAM (access key/secret key) credentials are not supported — " +
+            "generate a bedrock bearer token and update this provider's credentials to use it",
         );
       } else {
         // Valid JSON object but NEITHER shape (e.g. {"bearerToken": ""} or
@@ -207,7 +250,27 @@ async function resolveModel(ctx: HookCtx): Promise<ModelSpec> {
 // workspace routing, which always needs SOME concrete choice) whereas this
 // hook's contract requires "no mode / unknown mode" to mean "allow
 // everything", not "treat it as build".
-function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
+// Every eve built-in that can start, steer or read a subagent. This IS a
+// hand-written name list, and it is a list of names in a package this one
+// does not import — so it guarantees only that the delegation tools NAMED
+// HERE are dropped in ask mode, and it cannot notice a new `agent_*` built-in
+// added to core. lib/filter_tools.test.ts cross-checks it, but against a
+// second literal in that same file, so a genuinely new built-in slips past
+// both. Adding one to core means adding it here, deliberately; the real
+// backstop is core's own restrictChildTools/metadata threading, which does
+// not depend on any name list.
+// Exported for that cross-check.
+export const AGENT_TOOLS = new Set([
+  "agent",
+  "agent_spawn",
+  "agent_list",
+  "agent_wait",
+  "agent_result",
+  "agent_stop",
+  "agent_send",
+]);
+
+export function readMode(metadata: unknown): "ask" | "plan" | "build" | undefined {
   const mode = (metadata as { mode?: unknown } | null | undefined)?.mode;
   return mode === "ask" || mode === "plan" || mode === "build" ? mode : undefined;
 }
@@ -227,12 +290,19 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 
   // Ask mode drops state-mutating tools — modifiesState is a devx-only
   // passthrough field carried by lib/context.ts's wrap(), not part of eve's
-  // ToolDef shape, hence the cast. The built-in "agent" tool carries no
-  // modifiesState field (it's a generic eve built-in, not a devx-authored
-  // ToolDef) but legacy's own Agent tool IS modifiesState:true and gets
-  // dropped in ask mode (spawn_agent.ts:33) — name-check it explicitly here
+  // ToolDef shape, hence the cast. The eve built-in delegation tools carry no
+  // modifiesState field (they're generic eve built-ins, not devx-authored
+  // ToolDefs) but legacy's own Agent tool IS modifiesState:true and gets
+  // dropped in ask mode (spawn_agent.ts:33) — name-check them explicitly here
   // to close that asymmetry (documented in task-v4-report.md).
-  if (mode === "ask" && (name === "agent" || (def as { modifiesState?: boolean } | undefined)?.modifiesState)) return false;
+  //
+  // ALL of them, not just "agent". A subagent is a fully capable session: the
+  // point of ask mode is that this session cannot change anything, and a
+  // read-only session able to call agent_spawn could simply delegate the
+  // writing. That made ask mode escapable in one tool call.
+  if (mode === "ask" && (AGENT_TOOLS.has(name) || (def as { modifiesState?: boolean } | undefined)?.modifiesState)) {
+    return false;
+  }
 
   if (mode === "plan" && !PLAN_MODE_TOOLS.has(name)) return false;
 
@@ -272,17 +342,18 @@ function filterTools(name: string, def: ToolDef, ctx: HookCtx): boolean {
 //      the same fix applied for every other UI engine that never had it.
 //   2. `base` — i.e. this exact file's content, unprocessed by this hook —
 //      used to be verbatim what a SELF-DELEGATED SUBAGENT turn ran on: the
-//      `agent` built-in's runSubagent (core/server/agents/service/
-//      toolset.ts) built its system prompt from the static
+//      `agent` built-in ran the subagent as an in-process nested loop
+//      (core/server/agents/service/toolset.ts's runSubagent, since deleted)
+//      that built its system prompt from the static
 //      buildSystemPrompt(target, ctx.metadata) and never called
 //      resolveInstructions, so it never reached this function either. That
-//      gap is closed — runSubagent now resolves through
-//      resolveInstructions(target, ctx.metadata, ctx.hookCtx), toolset.ts:204,
-//      the same per-request path a top-level turn takes, so a
-//      self-delegated (or named) subagent turn reaches buildInstructions
-//      too and its `base` gets discarded here exactly like a top-level
-//      turn's does. See the defineAgent comment below for what a subagent
-//      turn gets instead.
+//      gap is closed at the root: a subagent is now a real CHILD SESSION
+//      running an ordinary turn (core/server/agents/service/spawn.ts +
+//      handler.ts's startTurn), so it goes through exactly the same
+//      per-request path a top-level turn does — resolveInstructions
+//      included — and its `base` gets discarded here exactly like a
+//      top-level turn's does. See the defineAgent comment below for what a
+//      subagent turn gets instead.
 //
 // askToolAvailable: false — this loop registers no mcp__ask__ask_question
 // tool. eve's ask_question is unimplemented on this runtime altogether (see
@@ -320,14 +391,136 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
     if (projectRules !== undefined) rules = projectRules;
   }
 
+  // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+  // invocable") — loadSkillsForPrompt is the one shared resolver every
+  // dispatch path uses (functions/agent.ts, claude_code_agent.ts, index.ts,
+  // and this loop).
+  //
+  // builtinOnly is a DELIBERATE divergence from the legacy loops (R12), NOT
+  // an oversight: this loop's actual skill loader is core's `skillTool`,
+  // which resolves against the `agent/skills -> ../skills` symlink, i.e.
+  // built-in (filesystem-synced) skills only. Listing a user-created
+  // devx.skills row here would have the model call `skill` and get back
+  // `unknown skill`. Advertising a skill the agent cannot load is worse than
+  // a listing that differs between loops — see loadSkillsForPrompt's own
+  // comment for the full rationale.
+  const skills = await loadSkillsForPrompt(userId, ctx.sql, { builtinOnly: true });
+
   const { systemPrompt } = await buildCoderContext({
-    mode: "agent",
+    // Share filterTools' own helper so the prompt and the tool set can never
+    // disagree about the mode. readMode returns undefined for unset/unknown,
+    // which maps to "agent" -- preserving the previous behaviour for callers
+    // that send no mode.
+    mode: readMode(ctx.metadata) ?? "agent",
     aiRules: rules,
+    // skillContext is deliberately NOT passed on this loop (R11). Legacy
+    // PRE-INJECTS a resolved skill body into the system prompt because its
+    // own `Skill` tool is a no-op stub returning a canned string — without
+    // the injection the model could never see a skill's content. eve has
+    // core's REAL `skill` built-in (core/server/agents/service/toolset.ts's
+    // skillTool), which loads a skill body on demand mid-turn, so gap 2 is
+    // closed here by a different mechanism, not left open. Accepting a
+    // client-supplied skillContext instead would be a posture regression:
+    // on legacy the value is SERVER-derived (functions/index.ts:756-775
+    // resolves the slash command / skill intent and loads the body), and
+    // nothing in the eve request path resolves it server-side.
     remoteChannel: false,
     askToolAvailable: false,
     settings: { max_steps: undefined },
+    skills,
   });
-  return systemPrompt;
+  return `${systemPrompt}\n\n${DEFERRED_TOOLS_NOTE}`;
+}
+
+// devx.hooks (PreToolUse/PostToolUse/Stop) rows are loaded ONCE PER TURN, not
+// once per tool call — legacy loads them once at functions/agent.ts:235, and
+// a per-call load would issue one query per tool. Cached on a WeakMap keyed
+// by the request's HookCtx object itself, not a string session/user id: core
+// builds exactly one HookCtx per request (toolset.ts's ToolBuildCtx.hookCtx,
+// threaded through every authoredTool call for that turn via the `...ctx`
+// spread — see toolset.ts's authoredTool), and that same object reaches every
+// onToolCall/onToolResult/onTurnEnd call for the turn. Keying on the object
+// itself, rather than a `${sessionId}:${userId}:${event}` string in a
+// module-level Map, means the cache entry is garbage-collected along with
+// the HookCtx when the turn ends — no unbounded growth in a long-lived
+// worker, unlike a string-keyed Map that never evicts. The inner Map (event
+// -> Promise<Hook[]>) covers the up-to-three events one turn can request.
+const hookRowCache = new WeakMap<object, Map<string, Promise<Hook[]>>>();
+function turnHooks(ctx: HookCtx, event: string): Promise<Hook[]> {
+  let byEvent = hookRowCache.get(ctx);
+  if (!byEvent) {
+    byEvent = new Map();
+    hookRowCache.set(ctx, byEvent);
+  }
+  let p = byEvent.get(event);
+  if (!p) {
+    // userId is the trusted identity (x-user-id via HookCtx), never read
+    // from ctx.metadata.
+    p = loadHooks(ctx.userId ?? "", event, ctx.sql);
+    byEvent.set(event, p);
+  }
+  return p;
+}
+
+// H2: PreToolUse hooks. Runs inside toolset.ts's authoredTool AFTER the
+// approval gate (see AgentConfig.onToolCall's doc comment in eve-shim/
+// types.ts) and fails CLOSED — a throw here denies this one tool call and
+// the turn continues, so genuine errors are left to propagate rather than
+// being swallowed into a permissive `{ allow: true }`.
+export async function onToolCall(
+  call: { name: string; input: unknown },
+  ctx: HookCtx,
+): Promise<{ allow: boolean; input?: unknown; reason?: string }> {
+  const hooks = await turnHooks(ctx, "PreToolUse");
+  if (hooks.length === 0) return { allow: true };
+  const result = await runPreToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, hooks);
+  if (!result.allow) return { allow: false, reason: "blocked by a PreToolUse hook" };
+  return result.modifiedArgs ? { allow: true, input: result.modifiedArgs } : { allow: true };
+}
+
+// H2: PostToolUse hooks.
+export async function onToolResult(
+  call: { name: string; input: unknown; result: unknown },
+  ctx: HookCtx,
+): Promise<unknown> {
+  const hooks = await turnHooks(ctx, "PostToolUse");
+  if (hooks.length === 0) return call.result;
+  // runPostToolHooks (functions/skills/hooks.ts:75-80) is string-in/
+  // string-out. A non-string tool result must pass through UNTOUCHED rather
+  // than being JSON-stringified into a shape the model has never seen from
+  // that tool before.
+  if (typeof call.result !== "string") return call.result;
+  return await runPostToolHooks(call.name, (call.input ?? {}) as Record<string, unknown>, call.result, hooks);
+}
+
+// H3: Stop hooks. Only reached after a successful turn (core never calls
+// onTurnEnd for a failed one) and its errors are logged and swallowed by
+// core, not propagated here.
+export async function onTurnEnd(turn: { text: string; finishReason: string }, ctx: HookCtx): Promise<void> {
+  const hooks = await turnHooks(ctx, "Stop");
+  const { chatId } = readMetadata(ctx.metadata);
+  if (!chatId) return;
+  await runStopHooks(hooks, { chatId, content: turn.text });
+}
+
+// H3: attachment materialization, folded into buildUserMessage (per-turn
+// content, not the cache-pointed system prompt — see AgentConfig.
+// buildUserMessage's doc comment). Attachments are UI-reachable, not just
+// channel-only (ChatInput.tsx), so ordinary browser turns need this too.
+export async function buildUserMessage(base: string, ctx: HookCtx): Promise<string> {
+  const { appId, attachments } = readMetadata(ctx.metadata);
+  if (!ctx.userId || !appId || !attachments?.length) return base;
+  // Same defensive shape filter and cap-of-10 the legacy path applies at
+  // functions/index.ts:405-408 -- these urls are remote/untrusted input.
+  const safe = attachments
+    .filter((a) => a && typeof a.url === "string" && typeof a.name === "string")
+    .slice(0, 10);
+  if (safe.length === 0) return base;
+  const workspacePath = await ensureAppWorkspace(ctx.userId, appId);
+  const saved = await materializeAttachments(workspacePath, safe);
+  // Only paths ever enter the prompt, never file content -- the coder Reads
+  // them itself (images render multimodally through Read).
+  return base + renderAttachmentBlock(saved);
 }
 
 // CLOSED: a self-delegated subagent turn now gets the shared contract
@@ -338,33 +531,33 @@ export async function buildInstructions(base: string, ctx: HookCtx): Promise<str
 // path is reachable in exactly the mode that matters: useAgentsChat.ts's
 // toAgentMode sends mode: undefined for this loop's main coder chat, and
 // filterTools treats an undefined mode as "no restriction", so the `agent`
-// tool is available there. The resulting nested turn is run by runSubagent
-// (core/server/agents/service/toolset.ts), which now builds its system
-// prompt via resolveInstructions(target, ctx.metadata, ctx.hookCtx) — the
-// same per-request resolution path a top-level turn takes — instead of the
-// old static buildSystemPrompt(target, ctx.metadata), which never called
-// resolveInstructions and so never reached agent.config.buildInstructions
-// (i.e. buildInstructions above). So a self-delegated (or explicitly named)
-// devx coder subagent now runs buildInstructions the same way a top-level
-// turn does: the resolved ai_rules winner, <skills-protocol>,
-// <commit-pr-hygiene>, and the cross-repo guard (GENERAL_GUIDELINES_BLOCK,
-// prompts.ts) all reach it. The fix lives entirely in core/ (toolset.ts's
-// runSubagent and resolveInstructions) — nothing in this file changed to
-// close it. plugins/devx/functions/prompt_divergence.test.ts's ENGINES-list
-// guard still cannot take credit for that, and still cannot catch a
-// regression of it: the guard only ever scans plugins/devx, and both
-// runSubagent and resolveInstructions live in
-// core/server/agents/service/toolset.ts, a tree it never opens — see that
-// file's header comment for why a green run there is not evidence either
-// way for this path.
+// tool is available there. The resulting subagent turn is no longer a
+// nested in-process loop with a prompt of its own (toolset.ts's runSubagent,
+// deleted): it is a real CHILD SESSION whose first turn goes through
+// handler.ts's startTurn like any other, so it builds its system prompt via
+// the same per-request resolveInstructions path a top-level turn takes —
+// instead of the old static buildSystemPrompt(target, ctx.metadata), which
+// never called resolveInstructions and so never reached
+// agent.config.buildInstructions (i.e. buildInstructions above). So a
+// self-delegated (or explicitly named) devx coder subagent now runs
+// buildInstructions the same way a top-level turn does: the resolved
+// ai_rules winner, <skills-protocol>, <commit-pr-hygiene>, and the
+// cross-repo guard (GENERAL_GUIDELINES_BLOCK, prompts.ts) all reach it. The
+// fix lives entirely in core/ — nothing in this file changed to close it.
+// plugins/devx/functions/prompt_divergence.test.ts's ENGINES-list guard
+// still cannot take credit for that, and still cannot catch a regression of
+// it: the guard only ever scans plugins/devx, and the whole child-session
+// path lives under core/server/agents/service/, a tree it never opens — see
+// that file's header comment for why a green run there is not evidence
+// either way for this path.
 export default defineAgent({
   // Definition-time, not per-turn: eve's AgentConfig.maxSteps (eve-shim/
   // types.ts) is read once here and consumed by every streamText call that
-  // reads agent.config.maxSteps for this agent — runner.ts:118 (top-level
-  // session turns), handler.ts:721 (the /chat endpoint), AND
-  // toolset.ts:213 (a self-delegated OR named subagent run via runSubagent,
-  // which reads target.config.maxSteps — the same defineAgent config below
-  // when target is a copy of this agent) — not per turn. There is no
+  // reads agent.config.maxSteps for this agent — runner.ts (top-level
+  // session turns), handler.ts's /chat endpoint, AND a self-delegated OR
+  // named subagent's own turn, which is an ordinary child-session turn and
+  // so reads the child LoadedAgent's config.maxSteps — the same defineAgent
+  // config below when the child is a copy of this agent — not per turn. There is no
   // runtime hook that can override it, so the per-user settings.max_steps
   // and the channel profile's maxStepsFloor (both applied inside
   // buildCoderContext for the other three engines) CANNOT reach this loop
@@ -379,7 +572,7 @@ export default defineAgent({
   //
   // Silent effect on a user's own setting: this went 25 -> 100 (DEFAULT_MAX_
   // STEPS), a 4x jump, for BOTH this loop's top-level turns and every nested
-  // self-delegated/named subagent run (toolset.ts:213 reads the same
+  // self-delegated/named subagent run (a child turn reads the same
   // agent.config.maxSteps). A user who deliberately set settings.max_steps
   // to something lower (e.g. 25) to cap spend gets 100 here with no signal
   // that their setting was ignored — devx.settings.max_steps is read and
@@ -392,4 +585,29 @@ export default defineAgent({
   resolveModel,
   filterTools,
   buildInstructions,
+  onToolCall,
+  onToolResult,
+  onTurnEnd,
+  buildUserMessage,
+  // Task 16: the long tail of less-common tools (KB, cron, Figma, browser
+  // automation, DB inspection, image gen, AddDependency — see
+  // lib/deferred_tools.ts's own comment for the full list and the
+  // always-on names that must never be added here) withheld from every
+  // request until ToolSearch reveals them (core's service/context/
+  // toolsplit.ts + toolset.ts's buildSdkTools Step 6). `context` is a
+  // `Partial<ContextConfig>` here, exactly as authored — resolveContextConfig
+  // (loader.ts) fills in the rest (freshTurns, compactAtFraction, ...) at
+  // load time; this raw defineAgent() return value carries only what's
+  // explicitly set.
+  context: {
+    deferredTools: DEFERRED_TOOLS,
+    // A COST ceiling, not a correctness limit. compactAtFraction (0.75) is
+    // the correctness bound and stays in force; on the 1M-token windows this
+    // agent's models have, it would first compact around 750k input tokens —
+    // correct, but an enormously expensive single request. The trigger is
+    // min(fraction * window, this). Expected to be tuned once there is real
+    // data on where devx turns actually land; it is deliberately devx-only,
+    // since claw and d2esupport set no context block at all.
+    compactAtTokens: 200_000,
+  },
 });

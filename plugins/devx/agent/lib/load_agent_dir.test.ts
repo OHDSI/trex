@@ -89,6 +89,14 @@ Deno.test({
     assertEquals(agent.config.maxSteps, DEFAULT_MAX_STEPS);
     assert(agent.instructions.length > 0);
 
+    // Asserted through the REAL loader, not on agent.ts's raw export: the
+    // ceiling only takes effect if resolveContextConfig's explicit key
+    // allowlist carries it (an omitted key is dropped silently — the exact
+    // bug contextWindow and summarizationPrompt hit). On a 1M window the
+    // fraction alone would first compact around 750k tokens.
+    assertEquals(agent.config.context.compactAtTokens, 200_000);
+    assertEquals(agent.config.context.compactAtFraction, 0.75);
+
     // Part 4 (task-v3-brief.md): plugins/devx/agent/skills is a relative
     // symlink (`skills -> ../skills`) to the canonical plugins/devx/skills
     // directory — the two pre-existing consumers (functions/skills/sync.ts,
@@ -110,10 +118,30 @@ Deno.test({
     // agents — functions/skills/sync.ts registers the same ones for the
     // legacy loop (see builtin_agents_sync.test.ts).
     const EXPECTED_SUBAGENT_TOOLS = ["Read", "Glob", "Grep", "CodeSearch", "GitLog", "GitDiff"];
+    // Fix round 1 (Important finding 3, 2026-08-27 orchestration Task 14/16):
+    // the previous cycle of work on this runtime dropped two ContextConfig
+    // fields with a Critical finding — they parsed, they loaded, and a key
+    // missing from loader.ts's explicit allowlist silently threw them away.
+    // subagent_role.test.ts and deferred_tools.test.ts both stop short of
+    // the real loader (one exercises resolveAgentRole against hand-built JS
+    // objects, the other greps the raw .edn TEXT for a substring) — neither
+    // would have caught that exact failure mode for :reasoning-effort. This
+    // calls the REAL loadAgent() on the REAL shipped subagent dirs and
+    // asserts the value came out the other side, exactly like the
+    // max-steps/tools assertions already in this loop.
+    const EXPECTED_REASONING_EFFORT: Record<string, string> = {
+      "code-reviewer": "high",
+      "code-explorer": "low",
+    };
     for (const name of ["code-reviewer", "code-explorer"]) {
       const sub = agent.subagents[name];
       assert(sub, `expected subagent "${name}" to be loaded`);
       assertEquals(sub.config.maxSteps, 15, `${name}: max-steps should come from agent.edn`);
+      assertEquals(
+        sub.config.reasoningEffort,
+        EXPECTED_REASONING_EFFORT[name],
+        `${name}: reasoningEffort should come from agent.edn's :reasoning-effort through the real loader`,
+      );
       assert(sub.instructions.length > 0, `${name}: instructions.md body should be non-empty`);
       assertEquals(
         Object.keys(sub.tools).sort(),

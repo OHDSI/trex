@@ -24,6 +24,7 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { SupportSection } from "@/components/settings/SupportSection";
 import { FigmaSection } from "@/components/settings/FigmaSection";
+import { AgentRoutingSection } from "@/components/settings/AgentRoutingSection";
 import { useSettings } from "@/hooks/useSettings";
 import { useGitHub } from "@/hooks/useGitHub";
 import { useGitSigning } from "@/hooks/useGitSigning";
@@ -87,7 +88,7 @@ export default function SettingsPage() {
 
   // General fields
   const [defaultChatMode, setDefaultChatMode] = useState<ChatMode>("agent");
-  const [loop, setLoop] = useState<"legacy" | "agents">("legacy");
+  const [loop, setLoop] = useState<"legacy" | "agents">("agents");
   const [language, setLang] = useState(getLanguage());
 
   // Add provider form
@@ -125,7 +126,7 @@ export default function SettingsPage() {
       setMaxSteps(settings.max_steps ?? 100);
       setMaxToolSteps(settings.max_tool_steps ?? 10);
       setAutoFixProblems(settings.auto_fix_problems ?? false);
-      setLoop(settings.loop ?? "legacy");
+      setLoop(settings.loop ?? "agents");
       setGitAuthorName(settings.git_author_name || "");
       setGitAuthorEmail(settings.git_author_email || "");
     }
@@ -654,6 +655,10 @@ export default function SettingsPage() {
                   Leave empty to use defaults (React + TypeScript + Tailwind + shadcn/ui)
                 </p>
               </div>
+
+              <Separator />
+
+              <AgentRoutingSection />
             </div>
           )}
 

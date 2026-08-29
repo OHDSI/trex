@@ -1,5 +1,5 @@
-import { assertEquals, assertThrows } from "jsr:@std/assert";
-import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, parseModelString, resolveModel, withSystemCachePoint } from "./model.ts";
+import { assert, assertEquals, assertThrows } from "jsr:@std/assert";
+import { bedrockSupportsPromptCaching, cacheProviderOptions, isAnthropicModel, isBedrockModel, isOpenAIModel, mergeProviderOptions, parseModelString, reasoningEffortProviderOptions, resolveModel, withSystemCachePoint, withToolCachePoint } from "./model.ts";
 
 Deno.test("parseModelString splits on first slash only", () => {
   assertEquals(parseModelString("anthropic/claude-sonnet-5"), {
@@ -144,4 +144,221 @@ Deno.test("cacheProviderOptions returns a promptCacheKey only for openai models"
   assertEquals(cacheProviderOptions({ provider: "anthropic.messages" }, "k"), {});
   // No key → nothing to route on, even for openai.
   assertEquals(cacheProviderOptions({ provider: "openai.responses" }, ""), {});
+});
+
+// reasoningEffortProviderOptions / mergeProviderOptions (agent-orchestration
+// Task 14): a subagent's declared reasoningEffort applied to its resolved
+// model's providerOptions, merged with cacheProviderOptions' output without
+// either clobbering the other's provider key.
+
+Deno.test("reasoningEffortProviderOptions applies only to openai models", () => {
+  assertEquals(
+    reasoningEffortProviderOptions({ provider: "openai.responses" }, "high"),
+    { openai: { reasoningEffort: "high" } },
+  );
+  assertEquals(reasoningEffortProviderOptions({ provider: "anthropic.messages" }, "high"), {});
+  assertEquals(reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "high"), {});
+});
+
+Deno.test("reasoningEffortProviderOptions is a no-op when effort is unset", () => {
+  assertEquals(reasoningEffortProviderOptions({ provider: "openai.responses" }, undefined), {});
+});
+
+// Fix round 1 (Important finding 2): silently doing nothing off-openai is
+// exactly the trap an agent author falls into — `:reasoning-effort "high"`
+// parses, loads, and then vanishes with nothing in the logs on
+// anthropic/bedrock, the primary provider family in this codebase. Captures
+// real console.warn calls (not a fake) so this is testing the actual
+// production log line, not a stand-in for it. Each test uses a unique
+// agentLabel to avoid the module-level one-time-warn dedup state leaking
+// between tests (or between this file and any other module that happens to
+// import the same reasoningEffortProviderOptions in the same test run).
+function captureWarnings(fn: () => void): string[] {
+  const logged: string[] = [];
+  const orig = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    fn();
+  } finally {
+    console.warn = orig;
+  }
+  return logged;
+}
+
+Deno.test("reasoningEffortProviderOptions warns once, naming the agent and the resolved provider, when set off-openai", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "anthropic.messages" }, "high", "code-reviewer-warn-test");
+  });
+  assertEquals(logged.length, 1);
+  assert(logged[0].includes("code-reviewer-warn-test"), "warning should name the agent");
+  assert(logged[0].includes("anthropic.messages"), "warning should name the resolved provider");
+  assert(logged[0].includes("high"), "warning should name the declared effort value");
+});
+
+Deno.test("reasoningEffortProviderOptions warns only ONCE per agent, not per call", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "low", "repeat-warn-test");
+    reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "low", "repeat-warn-test");
+    reasoningEffortProviderOptions({ provider: "amazon-bedrock" }, "low", "repeat-warn-test");
+  });
+  assertEquals(logged.length, 1, "a warning on every call (e.g. every turn/step) would be its own bug");
+});
+
+Deno.test("reasoningEffortProviderOptions does not warn for an openai model", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "openai.responses" }, "high", "no-warn-openai-test");
+  });
+  assertEquals(logged.length, 0);
+});
+
+Deno.test("reasoningEffortProviderOptions does not warn when effort is unset", () => {
+  const logged = captureWarnings(() => {
+    reasoningEffortProviderOptions({ provider: "anthropic.messages" }, undefined, "no-warn-unset-test");
+  });
+  assertEquals(logged.length, 0);
+});
+
+Deno.test("mergeProviderOptions merges per-provider-key rather than clobbering", () => {
+  const merged = mergeProviderOptions(
+    { openai: { promptCacheKey: "trex-agents/claw" } },
+    { openai: { reasoningEffort: "low" } },
+  );
+  assertEquals(merged, { openai: { promptCacheKey: "trex-agents/claw", reasoningEffort: "low" } });
+});
+
+Deno.test("mergeProviderOptions keeps distinct provider keys separate", () => {
+  const merged = mergeProviderOptions(
+    { anthropic: { cacheControl: { type: "ephemeral" } } },
+    { openai: { reasoningEffort: "low" } },
+  );
+  assertEquals(merged, {
+    anthropic: { cacheControl: { type: "ephemeral" } },
+    openai: { reasoningEffort: "low" },
+  });
+});
+
+// withToolCachePoint (Task 14): the cache breakpoint moves from the system
+// message (withSystemCachePoint, above) onto the LAST CORE tool, so that
+// appending activated tools after it never shifts what's cached — only the
+// content up to and including the marked tool is hashed for the cache key.
+
+Deno.test("withToolCachePoint marks the last core tool for anthropic", () => {
+  // NOTE: model.provider for the real @ai-sdk/anthropic provider is
+  // "anthropic.messages" (see isAnthropicModel's comment above) — the task
+  // brief's sample test used a bare "anthropic", which isAnthropicModel
+  // never matches. Corrected here.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  const names = Object.keys(out);
+  assertEquals(names, ["Read", "Bash", "KBSearch"]);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { anthropic: { cacheControl: { type: "ephemeral" } } },
+  );
+  // The marker sits ONLY on the last core tool — never on an earlier core
+  // tool and never on an appended activated tool (that would defeat the
+  // whole point: activation must not change what's inside the cached span).
+  assertEquals((out.Read as { providerOptions?: unknown }).providerOptions, undefined);
+  assertEquals((out.KBSearch as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint marks the last core tool for bedrock", () => {
+  const model = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { bedrock: { cachePoint: { type: "default" } } },
+  );
+  assertEquals((out.Read as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint adds no marker for openai/google — stable ordering only", () => {
+  // OpenAI does automatic prefix caching (see cacheProviderOptions' comment)
+  // and Google gets nothing at all; both must see the core tools followed by
+  // activated tools, untouched, with no providerOptions key added anywhere.
+  for (const model of [{ provider: "openai.responses" }, { provider: "google" }, { provider: undefined }]) {
+    const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+    assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch"]);
+    for (const def of Object.values(out)) {
+      assertEquals((def as { providerOptions?: unknown }).providerOptions, undefined);
+    }
+  }
+});
+
+Deno.test("withToolCachePoint appends activated tools after core, unmarked, in given order", () => {
+  const model = { provider: "anthropic.messages" };
+  const out = withToolCachePoint(
+    model,
+    [["Read", {}], ["Bash", {}]] as never,
+    [["KBSearch", {}], ["FigmaPullMockups", {}]] as never,
+  );
+  assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch", "FigmaPullMockups"]);
+  assertEquals((out.KBSearch as { providerOptions?: unknown }).providerOptions, undefined);
+  assertEquals((out.FigmaPullMockups as { providerOptions?: unknown }).providerOptions, undefined);
+});
+
+Deno.test("withToolCachePoint handles an empty core list without crashing", () => {
+  const model = { provider: "anthropic.messages" };
+  const out = withToolCachePoint(model, [] as never, [["KBSearch", {}]] as never);
+  assertEquals(Object.keys(out), ["KBSearch"]);
+});
+
+Deno.test("serialized core prefix is byte-identical across activation", () => {
+  // The point of the whole design: activating a deferred tool mid-session
+  // must never change the bytes of the cached TOOLS+SYSTEM prefix, or every
+  // subsequent request pays a full cache-write instead of a cache-read.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const before = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+  const after = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  const prefix = (o: Record<string, unknown>) =>
+    JSON.stringify(Object.fromEntries(Object.entries(o).filter(([n]) => n !== "KBSearch")));
+  assertEquals(prefix(before), prefix(after));
+});
+
+Deno.test("withToolCachePoint merges the cache marker into an existing providerOptions, not replacing it", () => {
+  // Fix round 1, Finding 2: a tool that already sets its own providerOptions
+  // (e.g. a future connection-backed tool with provider-specific hints) must
+  // keep them — the cache marker is added alongside, never in place of.
+  const model = { provider: "anthropic.messages", modelId: "claude-sonnet-5" };
+  const bashWithHints = { providerOptions: { openai: { reasoningEffort: "low" } } };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", bashWithHints]] as never, [] as never);
+  assertEquals(
+    (out.Bash as never as { providerOptions: unknown }).providerOptions,
+    { openai: { reasoningEffort: "low" }, anthropic: { cacheControl: { type: "ephemeral" } } },
+  );
+});
+
+// The case this branch was gated wrongly for, and the one that was never
+// tested. A non-Anthropic Bedrock model (e.g. Z.AI's zai.glm-*) rejects ANY
+// request carrying a cachePoint with AccessDeniedException — on a streaming
+// turn that kills the turn silently: typing indicator, no reply.
+// withSystemCachePoint has always used the narrow bedrockSupportsPromptCaching
+// gate for exactly this; withToolCachePoint shipped with the broad
+// isBedrockModel gate, reintroducing the defect.
+Deno.test("withToolCachePoint adds NO marker for a non-Anthropic bedrock model", () => {
+  const model = { provider: "amazon-bedrock", modelId: "zai.glm-4-6" };
+  const out = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [["KBSearch", {}]] as never);
+  assertEquals(Object.keys(out), ["Read", "Bash", "KBSearch"]);
+  for (const [name, def] of Object.entries(out)) {
+    assertEquals(
+      (def as { providerOptions?: unknown }).providerOptions,
+      undefined,
+      `${name} must not carry a cachePoint — a non-Anthropic bedrock model rejects the whole request`,
+    );
+  }
+});
+
+// The narrow gate and the tool-level marker must agree: whatever
+// withSystemCachePoint decides to mark, withToolCachePoint decides the same
+// way. A divergence here is how the broad gate crept back in.
+Deno.test("withToolCachePoint and withSystemCachePoint agree on which bedrock models get a marker", () => {
+  for (const modelId of ["us.anthropic.claude-sonnet-4-6", "anthropic.claude-haiku-4-5", "zai.glm-4-6", "meta.llama3-70b"]) {
+    const model = { provider: "amazon-bedrock", modelId };
+    const system = withSystemCachePoint(model, "SYSTEM");
+    const systemMarked = typeof system !== "string";
+    const tools = withToolCachePoint(model, [["Read", {}], ["Bash", {}]] as never, [] as never);
+    const toolMarked = (tools.Bash as { providerOptions?: unknown }).providerOptions !== undefined;
+    assertEquals(toolMarked, systemMarked, `disagreement on ${modelId}`);
+    assertEquals(toolMarked, bedrockSupportsPromptCaching(model), `neither matches the narrow gate on ${modelId}`);
+  }
 });

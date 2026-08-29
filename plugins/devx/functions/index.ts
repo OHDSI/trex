@@ -2,7 +2,9 @@
 import { getMaxHistoryTurns } from "./prompts.ts";
 import { buildCoderContext, DEFAULT_MAX_STEPS } from "./coder_context.ts";
 import { classifyCoderError } from "./error_codes.ts";
+import { createSseWriter } from "./sse.ts";
 import { deriveAuthShape } from "./auth_shape.ts";
+import { runsUnattended } from "./autonomy.ts";
 import { maskKey, settingsKeyWriteDecision } from "./api_key_mask.ts";
 import { assertEncryptionMigrated, assertProviderConfigEncryptionMigrated, readProviderKey, writeProviderKeyFields } from "./provider_key.ts";
 import { isNoKeyProvider, removedProviderResponse } from "./provider_support.ts";
@@ -25,6 +27,7 @@ import { ensureGitConfig, refreshUserGitConfigs } from "./git_identity.ts";
 import { getGithubToken, injectToken } from "./routes/github_routes.ts";
 // Phase 6: Extracted route handlers
 import { handleGitRoutes } from "./routes/git_routes.ts";
+import { handleWorktreeHealthRoutes } from "./routes/worktree_health_routes.ts";
 import { handleGithubRoutes } from "./routes/github_routes.ts";
 import { handleMcpRoutes } from "./routes/mcp_routes.ts";
 import { handleTrexRoutes } from "./routes/trex_routes.ts";
@@ -44,6 +47,7 @@ import { handleClaudeCodeRoutes } from "./routes/claude_code_routes.ts";
 import { handleClaudeCodeModelsRoutes } from "./routes/claude_code_models_routes.ts";
 import { handleFigmaRoutes } from "./routes/figma_routes.ts";
 import { handleProviderConfigRoutes } from "./routes/provider_config_routes.ts";
+import { handleAgentModelRoutes } from "./routes/agent_model_routes.ts";
 import { handleSupportRoutes } from "./routes/support_routes.ts";
 import { syncBuiltins } from "./skills/sync.ts";
 import {
@@ -51,6 +55,7 @@ import {
   resolveCommand,
   buildCommandOverride,
   loadSkillMetadata,
+  loadSkillsForPrompt,
   matchSkillBySlug,
   matchSkillsByIntent,
   loadSkillBody,
@@ -211,12 +216,14 @@ Deno.serve(async (req: Request) => {
     // Phase 6: Dispatch to extracted route handlers
     const routeResult =
       await handleGitRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleWorktreeHealthRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleGithubRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSigningRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleClaudeCodeModelsRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleFigmaRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleProviderConfigRoutes(path, method, req, userId, sql, corsHeaders) ||
+      await handleAgentModelRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleMcpRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleSupabaseRoutes(path, method, req, userId, sql, corsHeaders) ||
       await handleTrexRoutes(path, method, req, userId, sql, corsHeaders) ||
@@ -505,6 +512,18 @@ Deno.serve(async (req: Request) => {
         settings = { ...legacyNoCiphertext, api_key: resolvedLegacyApiKey };
       }
 
+      // Single authority for the channel rule: both branches above carry
+      // their own plain auto_approve preference through, so it is applied
+      // exactly once, here, to whichever settings object resulted —
+      // otherwise a remote channel could stall on every consent.
+      settings = {
+        ...settings,
+        auto_approve: runsUnattended({
+          remoteChannel: streamRemoteChannel,
+          userAutoApprove: settings.auto_approve ?? false,
+        }),
+      };
+
       // Rows naming a removed engine are still in the database (the
       // provider_configs/settings tables were deliberately left unmigrated).
       // Reject them on the provider NAME, not on the missing key: the key gate
@@ -588,9 +607,20 @@ Deno.serve(async (req: Request) => {
       // --- Skill/Command resolution ---
       let skillContext = undefined;
       let commandOverride = undefined;
+      // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+      // invocable") — resolved inside the try below so a devx.skills failure
+      // degrades the same way every other skill/command read here does
+      // (logged, request proceeds without it) rather than hard-failing the
+      // turn.
+      let skills = [];
       const streamAppId = chatCheck.rows[0].app_id;
 
       try {
+        // Independent of slash-command/intent matching below; resolved
+        // first so every branch (including the early-return meta-commands)
+        // still has a best-effort listing if reached later.
+        skills = await loadSkillsForPrompt(userId, sql);
+
         // --- Meta-commands: respond inline without AI ---
         const slashInput = parseSlashInput(prompt);
 
@@ -778,6 +808,9 @@ Deno.serve(async (req: Request) => {
         if (rules !== undefined) aiRules = rules;
       }
 
+      // `skills` was already resolved above, inside the Skill/Command
+      // resolution try/catch — degrades to [] on a devx.skills failure
+      // rather than failing the turn.
       const { systemPrompt } = await buildCoderContext({
         mode: chatMode,
         aiRules,
@@ -789,6 +822,7 @@ Deno.serve(async (req: Request) => {
         // below with a single fetch, not through the tool-calling registries —
         // none of them register mcp__ask__ask_question.
         askToolAvailable: false,
+        skills,
       });
       const maxHistory = getMaxHistoryTurns(chatMode);
 
@@ -834,15 +868,16 @@ Deno.serve(async (req: Request) => {
       // Stream the AI response
       const stream = new ReadableStream({
         async start(controller) {
-          const encoder = new TextEncoder();
-          const send = (data: unknown) => {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
-          };
+          // See functions/sse.ts: writing to a dead stream must never throw, and
+          // close() must be idempotent — an unguarded send() in the catch below
+          // once skipped its own close() and stranded claw's runCodeTurn on the
+          // fetch for 65 minutes after a recoverable rate limit.
+          const writer = createSseWriter(controller);
+          const { send, sendRaw } = writer;
+          const closeStream = () => writer.close();
 
           // SSE heartbeat keeps the connection alive during long waits (e.g. questionnaires)
-          const heartbeat = setInterval(() => {
-            try { controller.enqueue(encoder.encode(": heartbeat\n\n")); } catch { /* stream closed */ }
-          }, 15000);
+          const heartbeat = setInterval(() => { sendRaw(": heartbeat\n\n"); }, 15000);
 
           try {
             let fullContent = "";
@@ -919,9 +954,9 @@ Deno.serve(async (req: Request) => {
             );
 
             send({ type: "done", message: saveResult.rows[0], content: saveResult.rows[0]?.content ?? "" });
-            controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+            sendRaw("data: [DONE]\n\n");
             clearInterval(heartbeat);
-            controller.close();
+            closeStream();
           } catch (err) {
             clearInterval(heartbeat);
             console.error("Stream error:", err);
@@ -935,7 +970,10 @@ Deno.serve(async (req: Request) => {
               // message so the channel gets something actionable instead of "unknown".
               ...(streamRemoteChannel ? { raw: msg } : {}),
             });
-            controller.close();
+            // Unconditional: whether or not the error frame made it onto the
+            // wire, the response MUST terminate or the caller blocks on a
+            // stream that will never produce another byte.
+            closeStream();
           }
         },
         cancel() {
@@ -1359,8 +1397,9 @@ Deno.serve(async (req: Request) => {
       // Resolve through the encryption helper before masking/auth_shape —
       // once a row is encrypted the plaintext api_key column alone is NULL,
       // so deriving those straight from SQL would silently show "no key" for
-      // a row that has one (auth_shape "iam" gates the bedrock legacy-loop
-      // fallback in useEffectiveLoop.ts, so this isn't just cosmetic). Unlike
+      // a row that has one. auth_shape is a display-only hint (it does not
+      // gate the loop — see functions/auth_shape.ts), but it's still real
+      // signal for the Settings UI, so this isn't just cosmetic. Unlike
       // the coder-turn read sites above, a row this can't decrypt must not
       // take down the whole Settings page — degrade to "unknown" and log,
       // same posture as GET /provider-configs' resolveForDisplay.
@@ -1392,8 +1431,8 @@ Deno.serve(async (req: Request) => {
       // Mask API key. auth_shape is a derived, NON-SECRET hint (bearer/iam/
       // plain/none) computed from the raw key BEFORE masking — the masked
       // api_key is never valid JSON, so a client cannot derive the shape
-      // itself (useEffectiveLoop.ts gates bedrock-IAM users onto the legacy
-      // loop with it; see functions/auth_shape.ts).
+      // itself. It is a display-only hint for the Settings UI, not a loop
+      // gate (see functions/auth_shape.ts).
       row.auth_shape = deriveAuthShape(resolvedApiKey);
       row.api_key = maskKey(resolvedApiKey);
       row.key_status = keyStatus;
@@ -1461,7 +1500,7 @@ Deno.serve(async (req: Request) => {
       const keyFields = await writeProviderKeyFields(keyWrite.apply ? keyWrite.plaintext : null);
       const result = await sql(
         `INSERT INTO devx.settings (user_id, provider, model, api_key, api_key_encrypted, api_key_iv, base_url, ai_rules, auto_approve, max_steps, max_tool_steps, auto_fix_problems, loop, git_author_name, git_author_email)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, 'legacy'), $14, $15)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, COALESCE($13, 'agents'), $14, $15)
          ON CONFLICT (user_id) DO UPDATE SET
            provider = EXCLUDED.provider,
            model = EXCLUDED.model,

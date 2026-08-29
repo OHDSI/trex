@@ -508,6 +508,78 @@ Deno.test("message.queued is a no-op without a channelId, and swallows a deliver
   assert(logged.some((l) => l.includes("message.queued")));
 });
 
+// ---- delivery: turn.reaped --------------------------------------------------
+
+Deno.test("turn.reaped posts a channel notification (singular wording for count 1)", async () => {
+  const calls: Array<{ url: string; method: string; body: unknown }> = [];
+  const fetchMock: typeof fetch = (input, init) => {
+    calls.push({
+      url: String(input),
+      method: init?.method ?? "GET",
+      body: init?.body ? JSON.parse(String(init.body)) : undefined,
+    });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  const channelCtx = { state: { channelId: "chan-1" } };
+
+  await channel.events!["turn.reaped"]({ count: 1, reason: "stale" }, channelCtx);
+
+  assertEquals(calls.length, 1);
+  assertEquals(calls[0].method, "POST");
+  assertEquals(calls[0].url.endsWith("/channels/chan-1/messages"), true);
+  const content = (calls[0].body as { content: string }).content;
+  assert(content.includes("timed out"));
+  assert(content.includes("reset"));
+});
+
+Deno.test("turn.reaped posts a channel notification (plural wording with the count for count > 1)", async () => {
+  const calls: Array<{ body: unknown }> = [];
+  const fetchMock: typeof fetch = (_input, init) => {
+    calls.push({ body: init?.body ? JSON.parse(String(init.body)) : undefined });
+    return Promise.resolve(new Response(JSON.stringify({ id: "m1" }), { status: 200 }));
+  };
+  const channel = discordChannel({
+    credentials: { applicationId: "app-1", botToken: "bot-1" },
+    api: { fetch: fetchMock, apiBaseUrl: "https://discord.test/api/v10" },
+  });
+  const channelCtx = { state: { channelId: "chan-1" } };
+
+  await channel.events!["turn.reaped"]({ count: 3, reason: "stale" }, channelCtx);
+
+  assertEquals(calls.length, 1);
+  const content = (calls[0].body as { content: string }).content;
+  assert(content.includes("3"));
+});
+
+Deno.test("turn.reaped is a no-op without a channelId, and swallows a delivery failure", async () => {
+  let called = 0;
+  const fetchMock: typeof fetch = () => {
+    called++;
+    return Promise.resolve(new Response("boom", { status: 500 }));
+  };
+  const channel = discordChannel({ credentials: { applicationId: "app-1" }, api: { fetch: fetchMock } });
+
+  // No channelId in state → nothing to post to.
+  await channel.events!["turn.reaped"]({ count: 1, reason: "stale" }, { state: {} });
+  assertEquals(called, 0);
+
+  // A channelId that leads to a failed delivery must not throw (best-effort).
+  const logged: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args.map(String).join(" "));
+  try {
+    await channel.events!["turn.reaped"]({ count: 1, reason: "stale" }, { state: { channelId: "chan-1" } });
+  } finally {
+    console.warn = origWarn;
+  }
+  assertEquals(called, 1);
+  assert(logged.some((l) => l.includes("turn.reaped")));
+});
+
 // ---- delivery: input.requested → HITL components --------------------------
 
 Deno.test("input.requested renders approve/deny button components", async () => {

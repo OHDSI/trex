@@ -32,9 +32,13 @@ export const CHAT_MODES: { id: ChatMode; label: string; description: string }[] 
 // Server-derived, NON-SECRET credential-shape hint. api_key is masked in
 // every GET response (LEFT(...,8)||'...'||RIGHT(...,4)), so the shape of the
 // stored credential cannot be derived client-side — the server computes it
-// from the raw key before masking (functions/auth_shape.ts). Used by
-// useEffectiveLoop.ts to gate bedrock-IAM users onto the legacy loop.
-// Absent on older server builds (optional everywhere it appears).
+// from the raw key before masking (functions/auth_shape.ts). Display-only:
+// shown alongside key_status/is_plaintext so the Settings UI can tell the
+// user what kind of credential is on file. NOT a loop gate — only
+// provider === "claude-code" forces the legacy loop (useEffectiveLoop.ts);
+// IAM-shaped bedrock credentials are simply unsupported and error at
+// agent.ts's resolveModel. Absent on older server builds (optional
+// everywhere it appears).
 export type AuthShape = "bearer" | "iam" | "plain" | "none";
 
 export interface DevxSettings {
@@ -109,6 +113,22 @@ export interface ProviderConfigRecord {
   created_at: string;
   updated_at: string;
 }
+
+// Agent model assignment — which provider config each LLM-backed agent
+// (devx's own coder, claw, d2esupport) is assigned to. Mirrors
+// functions/agent_model_selection.ts's AgentModelSelection.
+export type AgentName = "devx" | "claw" | "d2esupport";
+
+export interface AgentModelSelectionRecord {
+  agent: AgentName;
+  providerConfigId: string;
+  provider: string;
+  model: string;
+  baseUrl: string | null;
+  displayName: string | null;
+}
+
+export type AgentModelSelections = Record<AgentName, AgentModelSelectionRecord | null>;
 
 // Agent types
 

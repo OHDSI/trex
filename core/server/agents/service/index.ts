@@ -8,10 +8,13 @@ import pg from "npm:pg@^8";
 import { loadAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import { createChannelStore } from "../channels/store.ts";
-import { createHandler, type OAuthBrokerDeps } from "./handler.ts";
+import { buildDeliverDeps, createHandler, deliverChildResult, HEARTBEAT_STALE_MS, STALE_TURN_MS, type Deps, type OAuthBrokerDeps } from "./handler.ts";
 import { createOAuthStore } from "../connections/oauth/store.ts";
 import { decryptWithDek, encryptWithDek, initDek } from "../../auth/dek.ts";
 import { deriveSubkeyBase64, LABELS } from "../../auth/keys.ts";
+import { startStaleTurnSweep } from "./sweep.ts";
+import { publish } from "./stream.ts";
+import { notifyReaped } from "./reap-notify.ts";
 
 const agentDir = Deno.env.get("TREX_AGENT_DIR");
 if (!agentDir) throw new Error("agents: TREX_AGENT_DIR not set");
@@ -43,15 +46,67 @@ if (Deno.env.get("TREX_ROOT_KEY")) {
   }
 }
 
-const handler = createHandler({
+const store = createStore(query);
+const channelStore = createChannelStore(query);
+
+// A named const (not an inline literal) so the SAME Deps object backs both
+// createHandler AND buildDeliverDeps below — the periodic sweep's `deliver`
+// needs a real, wake-capable DeliverDeps (handler.ts's private startTurn is
+// what actually starts the parent's next turn), and a sweep holding a
+// DIFFERENT store/agent/model than the handler would be a second, silently
+// divergent configuration of the same delegation path. (An earlier version
+// of this comment justified the sharing by a per-process WeakMap keyed on
+// store identity; that guard is gone — deliver-at-most-once is now enforced
+// by the database, since every caller must first win the same atomic
+// `WHERE status = 'running'` transition. See deliverChildResult's
+// Invariant 5.)
+const deps: Deps = {
   agent,
-  store: createStore(query),
-  channelStore: createChannelStore(query),
+  store,
+  channelStore,
   plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
   agentName: Deno.env.get("TREX_AGENT_NAME") || "agent",
   basePath,
   sql: query,
   oauth,
+};
+const handler = createHandler(deps);
+const deliverDeps = buildDeliverDeps(deps);
+
+// Periodic sweep for turns stuck `running` past STALE_TURN_MS — the same
+// recovery handler.ts's startTurn performs lazily on-message, but this
+// worker's per-process one-time init, so it also catches a session nobody
+// ever messages again after it gets stuck (that session's lazy path in
+// startTurn never fires — no new message ever lands on it). See sweep.ts's
+// header for the incident this closes.
+startStaleTurnSweep(store, {
+  // Same env vars createHandler above is keyed on, so the sweep only ever
+  // lists/reaps sessions for THIS worker's own agent — see sweep.ts's
+  // SweepOptions comment for why an unscoped sweep is the bug (with multiple
+  // agents deployed, every worker would otherwise sweep every OTHER agent's
+  // sessions too).
+  plugin: Deno.env.get("TREX_PLUGIN_NAME") || "unknown",
+  agent: Deno.env.get("TREX_AGENT_NAME") || "agent",
+  staleMs: STALE_TURN_MS,
+  heartbeatStaleMs: HEARTBEAT_STALE_MS,
+  // 2026-08-27 orchestration task 13: a reaped session might be a DETACHED
+  // CHILD whose PARENT is waiting to hear about it — reapStaleTurns only
+  // flips a DB row, it has no route to deliverChildResult on its own.
+  // deliverChildResult itself no-ops for a top-level/blocking session, so
+  // this is safe to wire unconditionally.
+  deliver: (sessionId, outcome) => deliverChildResult(deliverDeps, sessionId, outcome),
+  onReap: (sessionId, reaped) => {
+    // Live readers (an open /stream) get it through the fan-out...
+    publish(sessionId, { type: "turn.reaped", data: { count: reaped.length, reason: "stale" } });
+    // ...but the sweep runs in a background timer, where there is usually no
+    // subscriber at all — a session nobody is watching is exactly the one this
+    // sweep exists for. Go to the channel directly as well, so the thread
+    // actually learns its turn was abandoned instead of just going quiet.
+    void notifyReaped(sessionId, reaped, {
+      channels: agent.channels ?? {},
+      channelForSession: (id) => channelStore.channelForSession(id),
+    });
+  },
 });
 
 Deno.serve((req) => handler(req));

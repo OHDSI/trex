@@ -11,9 +11,14 @@ import { createAmazonBedrock } from "npm:@ai-sdk/amazon-bedrock";
 import { buildToolSet, getToolByName } from "./tools/registry.ts";
 import type { AgentContext } from "./tools/types.ts";
 import { ensureWorkspace, ensureAppWorkspace, readProjectRules } from "./tools/workspace.ts";
+import { ensureChatWorktree } from "./chat_worktree.ts";
+import { materializeAttachments, renderAttachmentBlock } from "./attachments.ts";
 import { mcpManager } from "./mcp_manager.ts";
 import { loadHooks, runPreToolHooks, runPostToolHooks, runStopHooks } from "./skills/hooks.ts";
+import { loadSkillsForPrompt } from "./skills/resolver.ts";
 import { buildCoderContext } from "./coder_context.ts";
+import { openaiTransport } from "./openai_transport.ts";
+import { ensureGitConfig } from "./git_identity.ts";
 
 /** Clean up all pending consents for a given chat (called on stream abort) */
 export async function clearPendingConsents(chatId, sqlFn?) {
@@ -113,7 +118,7 @@ function createModel(settings) {
     apiKey: api_key,
     ...(base_url ? { baseURL: base_url } : {}),
   });
-  return openai(model);
+  return openaiTransport(base_url) === "chat" ? openai.chat(model) : openai(model);
 }
 
 export async function streamAgentChat({
@@ -132,8 +137,8 @@ export async function streamAgentChat({
   // Optional isolated workspace (e.g. a git worktree for an agent-driven run)
   workspacePathOverride,
   // Channel-driven (claw) fields: per-chat worktree isolation, remote-channel
-  // sandbox prompt, and relayed file attachments. Only the Claude Code agent
-  // consumes them today; dropping them here silently disabled all three for
+  // sandbox prompt, and relayed file attachments. Both coder engines consume
+  // them now; dropping them here would silently disable all three for
   // agent-mode chats (the only mode claw uses).
   useWorktree,
   remoteChannel,
@@ -158,11 +163,31 @@ export async function streamAgentChat({
 
   // Ensure workspace exists — app-scoped if chat belongs to an app, or an
   // explicit override (e.g. an isolated git worktree for an agent-driven run).
-  const workspacePath = workspacePathOverride
+  let workspacePath = workspacePathOverride
     ? workspacePathOverride
     : appId
     ? await ensureAppWorkspace(userId, appId)
     : await ensureWorkspace(userId);
+  // Per-user git identity/signing: sync the MAIN repo's devx include file at
+  // the start of every coder turn. Worktrees share the main repo's
+  // .git/config, so this also covers commits made inside the per-chat
+  // worktree below; local repo config beats any global gh-derived identity.
+  if (appId) {
+    try {
+      await ensureGitConfig(workspacePath, userId, sqlFn);
+    } catch (e) {
+      console.warn("[devx-agent] git identity setup failed:", e?.message || e);
+    }
+  }
+  // Facilitated (claw) sessions pin to a stable per-chat worktree so feature
+  // work stays isolated and survives the cwd reset between turns — the same
+  // guarantee claude_code_agent.ts gives, now that this engine also serves
+  // channel turns. Kept AHEAD of readProjectRules below so the rules come from
+  // the worktree the coder will actually run in.
+  if (!workspacePathOverride && useWorktree && appId && chatId) {
+    const wt = await ensureChatWorktree(userId, appId, chatId, sqlFn);
+    if (wt) workspacePath = wt;
+  }
 
   // Read project rules (TREX.md, legacy AI_RULES.md) from the app workspace,
   // fall back to DB settings.
@@ -171,6 +196,12 @@ export async function streamAgentChat({
     const rules = await readProjectRules(workspacePath);
     if (rules !== undefined) aiRules = rules;
   }
+
+  // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+  // invocable") — loadSkillsForPrompt is the one shared resolver every
+  // dispatch path (including the eve loop) uses, so this loop's listing is
+  // identical to the others.
+  const skills = await loadSkillsForPrompt(userId, sqlFn);
 
   const { systemPrompt, maxSteps } = await buildCoderContext({
     mode, aiRules, skillContext, remoteChannel,
@@ -186,6 +217,7 @@ export async function streamAgentChat({
     // mcp__ask__ask_question — telling the model to MUST use it (and to
     // NEVER ask in plain text) would take away its only real way to ask.
     askToolAvailable: false,
+    skills,
   });
 
   // Load user consent preferences
@@ -458,6 +490,22 @@ export async function streamAgentChat({
       role: m.role,
       content: m.content,
     }));
+
+  // Channel attachments (claw relay): download into the resolved workspace —
+  // AFTER worktree resolution so they land where the coder actually runs — and
+  // point the coder at the paths. Only paths enter the prompt, never content.
+  if (attachments?.length) {
+    const saved = await materializeAttachments(workspacePath, attachments);
+    const block = renderAttachmentBlock(saved);
+    if (block) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === "user") {
+          messages[i] = { ...messages[i], content: `${messages[i].content}${block}` };
+          break;
+        }
+      }
+    }
+  }
 
   const model = createModel(effectiveSettings);
   let fullContent = "";

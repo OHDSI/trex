@@ -9,92 +9,15 @@ import { buildCoderContext } from "./coder_context.ts";
 import {
   ensureWorkspace,
   ensureAppWorkspace,
-  ensureWorktreeParent,
-  getAppWorkspacePath,
-  getRunWorktreePath,
   readProjectRules,
 } from "./tools/workspace.ts";
-import { gitOps } from "./git.ts";
 import { ensureGitConfig } from "./git_identity.ts";
-import { chatWorktreeBranch, worktreeReuseDecision } from "./worktree_guard.ts";
+import { ensureChatWorktree } from "./chat_worktree.ts";
+import { materializeAttachments, renderAttachmentBlock } from "./attachments.ts";
 import { loadHooks, runStopHooks } from "./skills/hooks.ts";
+import { loadSkillsForPrompt } from "./skills/resolver.ts";
 import { getValidOAuthToken } from "./routes/claude_code_routes.ts";
 import { getFigmaToken } from "./routes/figma_routes.ts";
-
-// Pin a chat to a stable, isolated git worktree so a feature's work persists
-// across turns — each /stream turn otherwise resets the coder's cwd to the app
-// root — and parallel chats on the same app don't collide on one working tree.
-// Returns null ONLY when the app is not a git repo (nothing to branch from —
-// the shared workspace is then the only tree). Any other failure THROWS:
-// silently continuing on the shared app workspace put an isolated task's edits
-// into whatever branch/state the shared tree happened to hold (cross-task
-// contamination), and a reused worktree is trusted only after verifying its
-// checked-out branch is this chat's own branch. The branch/worktree are keyed
-// deterministically on the chat id, created once and reused thereafter.
-
-async function ensureChatWorktree(userId: string, appId: string, chatId: string): Promise<string | null> {
-  const repoRoot = getAppWorkspacePath(userId, appId);
-  try {
-    await Deno.stat(`${repoRoot}/.git`);
-  } catch {
-    return null; // not a git repo — nothing to branch from
-  }
-  const worktree = getRunWorktreePath(userId, appId, chatId);
-  const branch = chatWorktreeBranch(chatId);
-  let exists = false;
-  try {
-    await Deno.stat(worktree);
-    exists = true;
-  } catch { /* create below */ }
-  if (exists) {
-    // Never trust bare directory existence: verify the worktree is registered
-    // and has THIS chat's branch checked out before reusing it. A foreign
-    // branch with a CLEAN tree is the coder's own doing (it checks out e.g. an
-    // existing PR branch mid-turn and leaves it checked out) — restore the
-    // chat branch instead of failing the turn. A status failure counts as
-    // dirty: when we cannot PROVE the tree is clean, keep refusing.
-    const entries = await gitOps.worktreeList(repoRoot);
-    const dirtyCount = await gitOps.status(worktree)
-      .then((s) => s.files.length)
-      .catch(() => Number.MAX_SAFE_INTEGER);
-    const decision = worktreeReuseDecision(entries, worktree, branch, dirtyCount);
-    if ("error" in decision) {
-      throw new Error(
-        `chat worktree ${worktree} is unusable: ${decision.error}. ` +
-          `Refusing to run the coder outside its isolated branch.`,
-      );
-    }
-    if ("restore" in decision) {
-      console.warn(
-        `[claude_code_agent] chat worktree ${worktree} was left on '${decision.foreignBranch}' ` +
-          `(clean tree) — restoring ${branch}`,
-      );
-      await gitOps.branchSwitch(worktree, branch);
-    }
-    return worktree;
-  }
-  try {
-    await ensureWorktreeParent(userId, appId);
-    // Base the feature worktree on the latest origin/develop so work always
-    // starts from an up-to-date tree, not whatever the app workspace was left at.
-    let startPoint: string | undefined;
-    try {
-      await gitOps.fetch(repoRoot, "origin", "develop");
-      startPoint = "origin/develop";
-    } catch (e) {
-      console.warn("[claude_code_agent] fetch origin/develop failed; basing worktree on current HEAD:", e?.message || e);
-    }
-    await gitOps.worktreeAdd(repoRoot, worktree, branch, startPoint);
-    return worktree;
-  } catch (err) {
-    // Do NOT fall back to the shared app workspace — that is where other
-    // branches'/tasks' state lives. Fail the turn loudly instead.
-    throw new Error(
-      `could not create the isolated worktree for this chat (${err?.message || err}). ` +
-        `Refusing to run the coder on the shared app workspace.`,
-    );
-  }
-}
 
 const CLAUDE_PORT = 4322;
 const CLAUDE_PROCESS = "claude-code-node-server";
@@ -138,39 +61,6 @@ export async function ensureClaudeCodeServer() {
   throw new Error("Claude Code Node.js server failed to start");
 }
 
-// Materialize channel attachments (screenshots etc., relayed by claw as
-// name/url metadata) into `<workspace>/attachments/` so the coder can Read
-// them — images render multimodally through the Read tool, so nothing is ever
-// inlined into a prompt. Returns the workspace-relative paths written; failures
-// are per-file and non-fatal (the turn still runs, the miss is logged).
-const ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024; // 20MB per file
-async function materializeAttachments(
-  workspacePath,
-  attachments,
-) {
-  const saved = [];
-  const dir = `${workspacePath}/attachments`;
-  for (const a of attachments) {
-    // Basename only, conservative charset — the name is remote input.
-    const base = String(a.name).split(/[\\/]/).pop() || "file";
-    const safe = base.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 120);
-    try {
-      const res = await fetch(a.url);
-      if (!res.ok) throw new Error(`fetch ${res.status}`);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      if (bytes.byteLength > ATTACHMENT_MAX_BYTES) throw new Error(`too large (${bytes.byteLength} bytes)`);
-      await Deno.mkdir(dir, { recursive: true });
-      // Prefix with an index to keep same-named files from clobbering.
-      const rel = `attachments/${saved.length}-${safe}`;
-      await Deno.writeFile(`${workspacePath}/${rel}`, bytes);
-      saved.push({ path: rel, contentType: a.contentType });
-    } catch (err) {
-      console.warn(`[claude-code] attachment '${safe}' skipped:`, err?.message || err);
-    }
-  }
-  return saved;
-}
-
 export async function streamClaudeCodeChat({
   chatId, userId, appId, chatMode, settings, history, send, sqlFn,
   skillContext, commandOverride, hasComponentSelection, workspacePathOverride, useWorktree, remoteChannel, attachments,
@@ -201,7 +91,7 @@ export async function streamClaudeCodeChat({
   // Facilitated (claw) sessions pin to a stable per-chat worktree so feature
   // work stays isolated and survives the cwd reset between turns.
   if (!workspacePathOverride && useWorktree && appId && chatId) {
-    const wt = await ensureChatWorktree(userId, appId, chatId);
+    const wt = await ensureChatWorktree(userId, appId, chatId, sqlFn);
     if (wt) workspacePath = wt;
   }
 
@@ -211,12 +101,19 @@ export async function streamClaudeCodeChat({
     if (rules !== undefined) aiRules = rules;
   }
 
+  // Skills listing for SKILL_USAGE_RULE ("The skills above are real and
+  // invocable") — loadSkillsForPrompt is the one shared resolver every
+  // dispatch path (including the eve loop) uses, so this loop's listing is
+  // identical to the others.
+  const skills = await loadSkillsForPrompt(userId, sqlFn);
+
   const { systemPrompt, maxSteps } = await buildCoderContext({
     mode, aiRules, skillContext, remoteChannel,
     hasComponentSelection, settings: effectiveSettings,
     // Only this sidecar registers mcp__ask__ask_question (see server.js) —
     // the rule that instructs the model to use it is safe to enable here.
     askToolAvailable: true,
+    skills,
   });
   // Remote-channel context is no longer appended here: for a channel turn,
   // buildCoderContext's resolveCoderProfile() already selected
@@ -236,12 +133,7 @@ export async function streamClaudeCodeChat({
   // content; the coder Reads images multimodally on its own.
   if (attachments?.length) {
     const saved = await materializeAttachments(workspacePath, attachments);
-    if (saved.length > 0) {
-      const listing = saved
-        .map((s) => `- ${s.path}${s.contentType ? ` (${s.contentType})` : ""}`)
-        .join("\n");
-      prompt += `\n\n<user_attachments>\nThe user attached files with this request; they are saved in the workspace:\n${listing}\nView them with the Read tool (images render visually) when they are relevant to the task.\n</user_attachments>`;
-    }
+    prompt += renderAttachmentBlock(saved);
   }
 
   // Refreshes the token in-place when expired (it lives ~1h) so long-lived

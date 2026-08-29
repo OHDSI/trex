@@ -10,6 +10,8 @@
 // investigate-hitl-turns.md). agents.approvals.decision's CHECK stays
 // approve/deny; the sticky verbs are folded to approve/deny before they hit it.
 import type { AgentStore } from "./store.ts";
+import { DEFAULT_ESCALATE_LIST, matchesEscalate } from "./approval-policy.ts";
+import type { EscalateList } from "./approval-policy.ts";
 
 export type ApprovalDecision = "approve" | "deny" | "always" | "never";
 
@@ -31,11 +33,18 @@ export interface ApprovalConsentCtx {
   plugin: string;
   agentName: string;
   userId: string | undefined;
+  // Caller-supplied escalate list; defaults to DEFAULT_ESCALATE_LIST so
+  // tests can inject one without touching Deno.env (handler.ts owns that read).
+  escalate?: EscalateList;
 }
 
 export interface ApprovalResolveResult {
   ok: boolean;
   error?: string;
+  // The decision itself was rejected (an escalate-listed tool cannot take an
+  // `always`), as opposed to the request being unknown or already decided —
+  // the native routes map the two to 400 and 404 respectively.
+  refused?: boolean;
 }
 
 const VERBS: ApprovalDecision[] = ["approve", "deny", "always", "never"];
@@ -82,6 +91,39 @@ export async function resolveApprovalDecision(
       return { ok: false, error: "always/never decisions require an authenticated user" };
     }
   }
+  // A decision write with no live turn to drive it is inert — worse, if it
+  // happens to match gate vocabulary on a later plain-text reply, it silently
+  // consumes that reply and starts nothing (see denyApprovalsForTurns's
+  // comment for the incident this closes). Refuse the whole batch rather than
+  // resolve some requests and silently no-op others.
+  for (const d of decisions) {
+    const status = await store.getApprovalTurnStatus(d.requestId!);
+    if (status !== "running") {
+      return {
+        ok: false,
+        error: status === null
+          ? "unknown approval request"
+          : `approval's turn is no longer running (${status}) — cannot resolve`,
+      };
+    }
+  }
+  // Refuse at write time rather than ignoring the row at read time: the person
+  // clicking "always" must learn the grant did not stick. Under a shared bot
+  // identity one such grant would disarm the floor for every user.
+  // No env read here: handler.ts owns AGENTS_ESCALATE_TOOLS and passes the
+  // parsed list in. This fallback is the same parsed-once default the gate uses.
+  const escalate = consent.escalate ?? DEFAULT_ESCALATE_LIST;
+  for (const d of decisions) {
+    if (d.decision !== "always") continue;
+    const scope = await store.getApprovalScope(d.requestId!);
+    if (scope && matchesEscalate(escalate, scope.tool, scope.scopeKey)) {
+      return {
+        ok: false,
+        refused: true,
+        error: `${scope.tool} cannot be granted 'always' — it requires approval every time`,
+      };
+    }
+  }
   let ok = true;
   for (const d of decisions) {
     const decision = d.decision as ApprovalDecision;
@@ -91,8 +133,8 @@ export async function resolveApprovalDecision(
     if (resolved && sticky) {
       // consent.userId is guaranteed present here — the batch validation above
       // rejects a sticky verb without one.
-      const tool = await store.getApprovalTool(d.requestId!);
-      if (tool) await store.setToolConsent(consent.userId!, consent.plugin, consent.agentName, tool, decision);
+      const scope = await store.getApprovalScope(d.requestId!);
+      if (scope) await store.setToolConsent(consent.userId!, consent.plugin, consent.agentName, scope.tool, scope.scopeKey, decision);
     }
     if (!resolved) ok = false;
   }

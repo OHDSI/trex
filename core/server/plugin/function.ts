@@ -341,7 +341,16 @@ async function _callWorker(
   const options: any = {
     servicePath,
     memoryLimitMb: fncfg.memoryLimitMb ?? 4096,
-    workerTimeoutMs: 30 * 60 * 1000,
+    // Per-config like memoryLimitMb/cpuTimeSoftLimitMs above, because 30 minutes
+    // is right for a request/response function but far too short for an agent
+    // turn. A claw coding turn makes several askCodeAgent hand-offs at 5-12
+    // minutes each; observed turns died at 29m01s and 23m25s with the runtime
+    // logging `reason: "EarlyDrop"`, while every turn that COMPLETED was under
+    // 12 minutes. A dropped worker never runs finishTurn, so the turn sat
+    // `running` and silently queued every later message behind it until the
+    // 2-hour stale sweep. The agents plugin raises this (see plugin/agents.ts);
+    // everything else keeps the previous 30-minute lifetime.
+    workerTimeoutMs: fncfg.workerTimeoutMs ?? 30 * 60 * 1000,
     // Hot-reload needs BOTH a fresh worker (forceCreate) AND a source re-read:
     // with the module cache on, a fresh worker still loads the cached module, so
     // the file edit is invisible. Bypass the cache only for hot-reloaded workers.

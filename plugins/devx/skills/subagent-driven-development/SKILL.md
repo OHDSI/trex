@@ -7,7 +7,9 @@ description: Use when executing implementation plans with independent tasks in t
 
 Execute plan by dispatching fresh subagent per task, with two-stage review after each: spec compliance review first, then code quality review.
 
-**Why subagents:** You delegate tasks to specialized agents with isolated context. By precisely crafting their instructions and context, you ensure they stay focused and succeed at their task. They should never inherit your session's context or history — you construct exactly what they need. This also preserves your own context for coordination work.
+**Why subagents:** You delegate tasks to specialized agents that run as their own sessions with their own context. By precisely crafting their instructions, you keep them focused and let them succeed at their task, while preserving your own context for coordination work.
+
+**Context: construct it, and inherit only on purpose.** A subagent starts with nothing but the prompt you give it, and for this workflow that is almost always right — you have already extracted each task's full text, so the implementer needs your prompt, not your history. But `fork_turns` exists for the cases where it isn't: pass it a small number to hand the subagent the last N of YOUR turns, verbatim tool calls and results included. It earns its cost for a REVIEWER (which needs to see what the implementer actually did and said) and for a re-dispatch after `NEEDS_CONTEXT`, where the missing context is something already in your history. `"none"` (the default) starts clean; `"all"` is rarely the right answer and is never a substitute for a clear prompt.
 
 **Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration
 
@@ -125,6 +127,31 @@ Implementer subagents report one of four statuses. Handle each appropriately:
 - `./spec-reviewer-prompt.md` - Dispatch spec compliance reviewer subagent
 - `./code-quality-reviewer-prompt.md` - Dispatch code quality reviewer subagent
 
+## Dispatching
+
+This workflow is deliberately SEQUENTIAL — one implementer at a time, then
+its reviewers — so the blocking `agent` tool is the right one: it runs the
+subagent and returns its output (`{text}`, or `{error}`) directly, and you
+carry straight on.
+
+```
+agent(prompt: "<the full implementer prompt>")            -> a copy of yourself
+agent(agent: "code-reviewer", prompt: "<review prompt>")   -> a named subagent
+agent(prompt: "<review prompt>", fork_turns: "2")          -> plus your last 2 turns
+```
+
+Omit `agent` to delegate to a copy of yourself; name one to run the task
+under that subagent's own instructions, tools and model. A subagent's tools
+and skills always INTERSECT yours — naming one can only narrow what the task
+runs with, never widen it.
+
+The non-blocking tools (`agent_spawn`, `agent_wait`, `agent_result`,
+`agent_list`, `agent_send`, `agent_stop`) exist for fan-out and are covered
+by **devx:dispatching-parallel-agents**. Do not use them to run implementers
+concurrently here — see Red Flags below. `agent_send` is still worth knowing:
+it delivers a correction to a subagent WHILE it is still running, which
+beats letting it finish down the wrong path and re-dispatching.
+
 ## Example Workflow
 
 ```
@@ -239,7 +266,7 @@ Done!
 - Start implementation on main/master branch without explicit user consent
 - Skip reviews (spec compliance OR code quality)
 - Proceed with unfixed issues
-- Dispatch multiple implementation subagents in parallel (conflicts)
+- Dispatch multiple implementation subagents in parallel (conflicts) — no `agent_spawn` fan-out of implementers; use the blocking `agent` tool, one at a time
 - Make subagent read plan file (provide full text instead)
 - Skip scene-setting context (subagent needs to understand where task fits)
 - Ignore subagent questions (answer before letting them proceed)

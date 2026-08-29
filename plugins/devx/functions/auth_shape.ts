@@ -6,10 +6,14 @@
 // useEffectiveLoop.ts sees api_key it is never valid JSON, so any client-side
 // shape sniffing is dead code; see final-007 merge-gate re-review).
 //
-// The one consumer that gates on this today: useEffectiveLoop.ts forces the
-// legacy loop when provider === "bedrock" && auth_shape === "iam", because
-// the agents loop's resolveModel (plugins/devx/agent/agent.ts) only
-// implements bearer-token bedrock auth and throws for IAM-shaped creds.
+// Not a loop gate: useEffectiveLoop.ts does NOT branch on this value (only
+// provider === "claude-code" forces the legacy loop). It is a display-only
+// hint — GET /settings and GET /provider-configs attach it so the frontend
+// can show what kind of credential is on file (see src/hooks/useSettings.ts
+// and src/lib/types.ts) alongside key_status/is_plaintext. IAM-shaped
+// bedrock credentials are simply unsupported: the agents loop's resolveModel
+// (plugins/devx/agent/agent.ts) only implements bearer-token bedrock auth
+// and throws a clear, actionable error for IAM-shaped creds.
 //
 // Must be computed from the UNMASKED api_key server-side, BEFORE masking.
 export type AuthShape = "bearer" | "iam" | "plain" | "none";

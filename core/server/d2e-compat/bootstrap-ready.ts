@@ -6,7 +6,7 @@
 // healthcheck condition on the trex service. Those services poll this
 // listener instead of waiting on a compose edge.
 //
-// Started only after runD2eBootstrap() has succeeded — see the call site in
+// Started only after the trex.provision plugins have succeeded — see the call site in
 // index.ts, immediately after that try/catch. It answers 200 on any path and
 // method the instant it is asked: there is nothing to route, and no auth,
 // because the only fact it conveys is "the roles/schemas/grants exist now".

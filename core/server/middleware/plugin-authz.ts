@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import { ROLE_SCOPES, REQUIRED_URL_SCOPES, SERVICE_CLIENT_ROLES } from "../plugin/function.ts";
-import { extractToken, verifyLogtoToken } from "../d2e-compat/auth.ts";
+import { extractToken, verifyIdpToken } from "../d2e-compat/auth.ts";
+import { type D2eIdp, d2eIdp, isSystemAdminClaims } from "../d2e-compat/idp.ts";
 import { fetchUserGroups } from "../d2e-compat/lib/usermgmt.ts";
 
 export function pluginAuthz(
@@ -166,7 +167,7 @@ export const d2eAuthn = async (
     return;
   }
 
-  const payload = await verifyLogtoToken(token);
+  const payload = await verifyIdpToken(token);
   if (!payload) {
     res.status(401).send("Authentication Token not valid");
     return;
@@ -174,12 +175,23 @@ export const d2eAuthn = async (
   (req as any).logtoSubject = (payload["sub"] as string | undefined) ?? null;
 
   const roles = tokenRoles(payload);
+  // Also the fallback for the role resolution further down: when the token
+  // already carries userMgmtGroups there is no need to call usermgmt for them.
   const tokenGroups = payload["userMgmtGroups"] as Record<string, unknown> | undefined;
 
-  // System admins pass (parity with pluginAuthz's admin bypass). System-admin is on
-  // the Logto `roles` claim (role.systemadmin); tolerate a userMgmtGroups flag too.
-  if (roles.includes("role.systemadmin") ||
-      tokenGroups?.["alp_role_system_admin"] === true) {
+  // System admins pass (parity with pluginAuthz's admin bypass). The claim shape
+  // depends on the IdP — see isSystemAdminClaims. d2eIdp throws on an
+  // unrecognised D2E_IDP; this handler is async, so an uncaught throw would be an
+  // unhandled rejection rather than a response.
+  let idp: D2eIdp;
+  try {
+    idp = d2eIdp(Deno.env.toObject());
+  } catch (err) {
+    console.error(`[d2e-compat] d2eAuthn: IdP config invalid: ${err}`);
+    res.status(500).json({ error: "Auth configuration error" });
+    return;
+  }
+  if (isSystemAdminClaims(payload, idp)) {
     next();
     return;
   }

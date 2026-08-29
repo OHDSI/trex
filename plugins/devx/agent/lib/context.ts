@@ -45,6 +45,20 @@ export interface DevxMetadata {
   mode: "ask" | "plan" | "build";
   chatId: string;
   appId?: string;
+  // NO skillContext field here, deliberately (R11): on the legacy loop
+  // skillContext is SERVER-derived — index.ts resolves a slash command or
+  // matches skill intent and loads the body itself. Accepting it as client
+  // metadata would turn a server-resolved value into untrusted client input
+  // that lands verbatim in the system prompt. eve does not need the
+  // pre-injection at all: see agent.ts's buildCoderContext call site.
+  //
+  // Untrusted client-supplied passthrough (same posture as mode/chatId/appId
+  // above), consumed by agent.ts's buildUserMessage hook, which applies the
+  // same defensive shape filter + cap-of-10 the legacy path applies at
+  // functions/index.ts:405-408 before ever fetching anything. Reachable from
+  // the browser UI, not just a chat channel (ChatInput.tsx), so it must be
+  // handled on this loop too. Never used for authorization.
+  attachments?: Array<{ url: string; name: string; contentType?: string }>;
 }
 
 // Exported for agent.ts's buildInstructions hook (V3), which needs the same
@@ -60,6 +74,11 @@ export function readMetadata(metadata: unknown): DevxMetadata {
     mode: m.mode === "ask" || m.mode === "plan" ? m.mode : "build",
     chatId: typeof m.chatId === "string" ? m.chatId : "",
     appId: typeof m.appId === "string" ? m.appId : undefined,
+    // Passed through raw (array-shape only) -- the per-item shape filter and
+    // cap-of-10 live in agent.ts's buildUserMessage, right where the fetch
+    // happens, matching the legacy validation site (functions/index.ts:
+    // 405-408) rather than duplicating it here.
+    attachments: Array.isArray(m.attachments) ? (m.attachments as DevxMetadata["attachments"]) : undefined,
   };
 }
 

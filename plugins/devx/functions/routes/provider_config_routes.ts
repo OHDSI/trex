@@ -12,6 +12,7 @@ import {
   readProviderKey,
   writeProviderKeyFields,
 } from "../provider_key.ts";
+import { activateDevxProviderConfig } from "../agent_model_selection.ts";
 
 // Resolve a row's key for display (masking, auth_shape) purposes only. Unlike
 // the coder-turn read sites (index.ts), a row this can't decrypt must not take
@@ -51,9 +52,11 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     // the masked preview and auth_shape can be computed from the actually
     // resolved value — once a row is encrypted, the plaintext api_key column
     // alone is NULL, so deriving these straight from SQL would silently show
-    // "no key" / auth_shape "none" for a row that has one (auth_shape "iam"
-    // gates the bedrock legacy-loop fallback in useEffectiveLoop.ts, so this
-    // isn't just cosmetic).
+    // "no key" / auth_shape "none" for a row that has one. auth_shape does
+    // not gate the loop (useEffectiveLoop.ts only forces legacy for
+    // provider === "claude-code"); it's a display-only credential-shape hint
+    // for the Settings UI, but that's still real signal, so this isn't just
+    // cosmetic.
     const result = await sql(
       `SELECT id, user_id, provider, model, api_key, api_key_encrypted, api_key_iv,
               base_url, display_name, is_active, created_at, updated_at
@@ -310,35 +313,24 @@ export async function handleProviderConfigRoutes(path, method, req, userId, sql,
     return Response.json(updated, { headers: corsHeaders });
   }
 
-  // PUT /provider-configs/:id/activate — set as active (deactivates others)
+  // PUT /provider-configs/:id/activate — set as active (deactivates others).
+  // Delegates to activateDevxProviderConfig (agent_model_selection.ts) so
+  // this route and PUT /agent-model-selection/devx share the exact same
+  // is_active / devx.settings / agent_model_selection write sequence and can
+  // never drift apart — see that function's header comment.
   const activateMatch = path.match(/\/provider-configs\/([^/]+)\/activate$/);
   if (activateMatch && method === "PUT") {
     const configId = activateMatch[1];
-
-    // Deactivate all, then activate the chosen one
-    await sql(
-      `UPDATE devx.provider_configs SET is_active = false WHERE user_id = $1`,
-      [userId],
-    );
-    const result = await sql(
-      `UPDATE devx.provider_configs SET is_active = true, updated_at = NOW()
-       WHERE id = $1 AND user_id = $2
-       RETURNING id, provider, model, is_active`,
-      [configId, userId],
-    );
-
-    if (result.rows.length === 0) {
-      return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+    try {
+      const activated = await activateDevxProviderConfig(userId, configId, sql);
+      return Response.json({ ok: true, active: { ...activated, is_active: true } }, { headers: corsHeaders });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === "provider config not found") {
+        return Response.json({ error: "Not found" }, { status: 404, headers: corsHeaders });
+      }
+      throw err;
     }
-
-    // Also update devx.settings for backward compatibility
-    const config = result.rows[0];
-    await sql(
-      `UPDATE devx.settings SET provider = $1, model = $2, updated_at = NOW() WHERE user_id = $3`,
-      [config.provider, config.model, userId],
-    );
-
-    return Response.json({ ok: true, active: config }, { headers: corsHeaders });
   }
 
   // DELETE /provider-configs/:id — remove a config

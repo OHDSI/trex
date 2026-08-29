@@ -147,12 +147,152 @@ class GitOps {
     await this.runGit(repoRoot, `git fetch ${remote} ${ref}`);
   }
 
+  // Does this ref resolve in the repo? Used to tell "the fetch failed but we
+  // still have a previously fetched copy of the base branch" from "there is no
+  // base branch here at all" — the two need very different handling.
+  async refExists(repoRoot: string, ref: string): Promise<boolean> {
+    try {
+      await this.runGit(repoRoot, `git rev-parse --verify --quiet ${ref}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // The commit a ref points at, or null when it does not resolve.
+  async revParse(repoRoot: string, ref: string): Promise<string | null> {
+    try {
+      return (await this.runGit(repoRoot, `git rev-parse ${ref}`)).trim() || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // The repo's real default branch, without a network round trip.
+  //
+  // Hardcoding "develop" was wrong in a way that cost a whole conversation: in
+  // Data2Evidence `main` exists but is an UNRELATED ROOT — `git merge-base
+  // origin/main origin/develop` is empty — so a coder that guessed `main` got
+  // "no history in common" from `gh pr create` and a rebase that claimed 2137
+  // unrelated commits, then flailed. `origin/HEAD` is what the remote itself
+  // says its default is, so ask that first and only fall back to guessing.
+  async defaultBranch(repoRoot: string): Promise<string> {
+    const head = await this.revParse(repoRoot, "--abbrev-ref origin/HEAD");
+    // "origin/develop" -> "develop". A repo with no origin/HEAD ref returns
+    // the literal input or fails; both fall through to the candidates below.
+    if (head && head.startsWith("origin/") && !head.includes(" ")) return head.slice("origin/".length);
+    for (const candidate of ["develop", "main", "master"]) {
+      if (await this.refExists(repoRoot, `refs/remotes/origin/${candidate}`)) return candidate;
+    }
+    throw new Error(`could not determine the default branch of ${repoRoot} (no origin/HEAD and no origin/develop|main|master)`);
+  }
+
+  // The worktree's own git directory (worktrees have a .git FILE pointing at
+  // <main>/.git/worktrees/<name>, which is where an in-progress rebase's state
+  // lives — NOT the main repo's .git).
+  async gitDir(wsPath: string): Promise<string | null> {
+    return await this.revParse(wsPath, "--absolute-git-dir");
+  }
+
+  // Which multi-step operation, if any, is halfway through in this worktree.
+  // A turn must never resume on top of one: an interrupted rebase leaves a
+  // DETACHED head with the other branch's tree checked out, which reads as
+  // thousands of uncommitted changes and wedges the reuse guard permanently.
+  async inProgressOperation(wsPath: string): Promise<"rebase" | "merge" | "cherry-pick" | "revert" | null> {
+    const dir = await this.gitDir(wsPath);
+    if (!dir) return null;
+    const probes: Array<[string, "rebase" | "merge" | "cherry-pick" | "revert"]> = [
+      ["rebase-merge", "rebase"],
+      ["rebase-apply", "rebase"],
+      ["MERGE_HEAD", "merge"],
+      ["CHERRY_PICK_HEAD", "cherry-pick"],
+      ["REVERT_HEAD", "revert"],
+    ];
+    for (const [name, kind] of probes) {
+      try {
+        await Deno.stat(`${dir}/${name}`);
+        return kind;
+      } catch { /* not this one */ }
+    }
+    return null;
+  }
+
+  // Abort a half-finished operation, restoring the branch and tree it started
+  // from. Best-effort: if the abort itself fails there is nothing better to try,
+  // and the caller's reuse guard still refuses the worktree.
+  async abortOperation(wsPath: string, kind: "rebase" | "merge" | "cherry-pick" | "revert"): Promise<boolean> {
+    try {
+      await this.runGit(wsPath, `git ${kind} --abort`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  // Rename a branch in place. The working tree, index and reflog are untouched,
+  // which is what lets a chat's worktree move from its legacy branch name onto
+  // the `<github username>/<topic>` scheme mid-flight without disturbing work.
+  async branchRename(wsPath: string, from: string, to: string): Promise<void> {
+    validateBranchName(from);
+    validateBranchName(to);
+    await this.runGit(wsPath, `git branch -m ${from} ${to}`);
+  }
+
+  // Stash the worktree's TRACKED modifications under a findable message.
+  //
+  // Deliberately no `-u`: including untracked files would sweep node_modules and
+  // other build output into the stash — slow, enormous, and rarely what anyone
+  // wants back. Untracked files do not block a branch switch unless the target
+  // branch has a file at the same path, and the caller falls back to quarantine
+  // if the switch fails anyway. Returns false when there was nothing to stash.
+  async stashPush(wsPath: string, message: string): Promise<boolean> {
+    // run_command splits on whitespace with no shell, so the message has to be
+    // a single token — hyphenate it rather than trying to quote it.
+    const token = message.replace(/\s+/g, "-").replace(/[^a-zA-Z0-9_.\-\/]/g, "");
+    try {
+      const out = await this.runGit(wsPath, `git stash push -m ${token}`);
+      return !/No local changes to save/i.test(out);
+    } catch {
+      return false;
+    }
+  }
+
+  /** The most recent stash ref, so a human can be told where their work went. */
+  async latestStash(wsPath: string): Promise<string | null> {
+    try {
+      const out = await this.runGit(wsPath, `git stash list --max-count=1`);
+      return out.trim().split(":")[0] || null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Does `<ref>:<path>` exist in that tree? Used to spot a branch based on a
+  // root carrying no .gitignore, where every build artifact reads as dirt.
+  async pathExistsInRef(repoRoot: string, ref: string, path: string): Promise<boolean> {
+    try {
+      await this.runGit(repoRoot, `git cat-file -e ${ref}:${path}`);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   // `startPoint` (e.g. "origin/develop") bases the new branch there instead of
   // the repo's current HEAD, so a feature worktree starts from an up-to-date tree.
   async worktreeAdd(repoRoot: string, worktreePath: string, branch: string, startPoint?: string): Promise<string> {
     validateBranchName(branch);
     const from = startPoint ? ` ${startPoint}` : "";
     await this.runGit(repoRoot, `git worktree add ${worktreePath} -b ${branch}${from}`);
+    return worktreePath;
+  }
+
+  // Attach a worktree to a branch that ALREADY exists. `worktreeAdd`'s `-b`
+  // fails in that case, which happens whenever a quarantined worktree leaves
+  // its branch behind — the branch is the chat's own work and must be reused,
+  // not renamed around.
+  async worktreeAddExisting(repoRoot: string, worktreePath: string, branch: string): Promise<string> {
+    validateBranchName(branch);
+    await this.runGit(repoRoot, `git worktree add ${worktreePath} ${branch}`);
     return worktreePath;
   }
 

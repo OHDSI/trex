@@ -9,7 +9,18 @@ ARG DUCKDB_VERSION=1.4.4
 ARG DUCKDB_CORE_EXTENSIONS="avro aws delta ducklake fts httpfs icu iceberg inet json mysql_scanner parquet postgres_scanner spatial sqlite_scanner vss"
 # NOTE: `bigquery` is not fetched from community-extensions.duckdb.org — see
 # DUCKDB_BIGQUERY_* below.
-ARG DUCKDB_COMMUNITY_EXTENSIONS=""
+#
+# `snowflake` is redistributable: the extension is MIT (duckdb/community-
+# extensions extensions/snowflake/description.yml, upstream iqea-ai/duckdb-
+# snowflake), unlike the SAP HANA and Simba BigQuery JDBC drivers that have to
+# be fetched at container start. It is published for v1.4.4 on both linux_amd64
+# and linux_arm64, so it belongs in the fail-loud list rather than the optional
+# one. ~11MB compressed.
+#
+# It is a thin wrapper that dlopen()s the Apache Arrow ADBC Snowflake driver
+# (Apache-2.0) at ATTACH time, and that driver is NOT bundled with it, so the
+# prod stage installs it into /usr/local/lib.
+ARG DUCKDB_COMMUNITY_EXTENSIONS="snowflake"
 ARG DUCKDB_OPTIONAL_EXTENSIONS=""
 # DuckDB extensions taken from a prebuilt release rather than extensions.duckdb.org.
 # Recorded as ENV in the final image so `docker inspect` still shows which
@@ -381,6 +392,7 @@ RUN chmod 755 /usr/src/entrypoint.sh
 # not published by CI, but kept as a build option: docker build --target prod .)
 FROM node:22-trixie-slim AS prod
 
+ARG TARGETARCH
 ARG DENO_VERSION
 ARG DUCKDB_VERSION
 ARG DUCKDB_CORE_EXTENSIONS
@@ -413,6 +425,55 @@ COPY --from=builder /usr/src/trexsql/target/release/libtrexsql_engine.so /usr/li
 COPY --from=assembler /opt/ci-libs/ /usr/lib/
 COPY --from=assembler /usr/lib/trexsql/ /usr/lib/trexsql/
 RUN ldconfig
+
+# ONNX Runtime, dlopen()d by the runtime's AI extension: trex-runtime's ext/ai
+# builds `ort` with the load-dynamic feature (ext/ai/Cargo.toml), so the shared
+# library is resolved at call time rather than linked in. Without it the AI
+# extension fails the moment a model is used. MIT (microsoft/onnxruntime).
+#
+# Only libonnxruntime.so* is kept — the release tarball also carries headers and
+# static archives that nothing here links against. Same version the bao plugin
+# image pins.
+ARG ONNXRUNTIME_VERSION=1.20.1
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) ONNX_ARCH=x64 ;; \
+      arm64) ONNX_ARCH=aarch64 ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH for onnxruntime" >&2; exit 1 ;; \
+    esac; \
+    NAME="onnxruntime-linux-${ONNX_ARCH}-${ONNXRUNTIME_VERSION}"; \
+    cd /tmp && curl -fsSL \
+      "https://github.com/microsoft/onnxruntime/releases/download/v${ONNXRUNTIME_VERSION}/${NAME}.tgz" \
+      | tar xz && \
+    cp -a "${NAME}/lib/libonnxruntime.so"* /usr/lib/ && \
+    rm -rf "$NAME" && ldconfig && \
+    test -s /usr/lib/libonnxruntime.so
+
+# Native driver for the `snowflake` DuckDB extension, which does not bundle it:
+# the extension dlopen()s libadbc_driver_snowflake.so at ATTACH time, so without
+# this LOAD succeeds and ATTACH fails. /usr/local/lib is one of the paths it
+# searches and is DuckDB-version independent — only the CPU arch has to match.
+#
+# Apache Arrow ADBC, Apache-2.0 (PyPI license_expression), so it is
+# redistributable in the image, unlike the SAP HANA and Simba BigQuery JDBC
+# drivers. Section 4(d) of that licence requires carrying the attribution
+# notices, so LICENSE.txt and NOTICE.txt ship beside the object. Wheels are
+# pinned to immutable hashed URLs.
+ARG ADBC_SNOWFLAKE_VERSION=1.8.0
+RUN set -eu; \
+    case "$TARGETARCH" in \
+      amd64) WHL="https://files.pythonhosted.org/packages/b8/6f/ff6d76ca035f0f2308733e7c7e96aeb094d2927a1de1e1a1721593286d3e/adbc_driver_snowflake-${ADBC_SNOWFLAKE_VERSION}-py3-none-manylinux1_x86_64.manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_5_x86_64.whl" ;; \
+      arm64) WHL="https://files.pythonhosted.org/packages/a4/14/7f448f5be225a3c596aa1a14a704fb4d8a2871e306d8725f98028af4265f/adbc_driver_snowflake-${ADBC_SNOWFLAKE_VERSION}-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl" ;; \
+      *) echo "unsupported TARGETARCH=$TARGETARCH for the ADBC snowflake driver" >&2; exit 1 ;; \
+    esac; \
+    cd /tmp && curl -fsSL -o adbc.whl "$WHL" && \
+    unzip -q adbc.whl -d adbc_extract && \
+    cp "$(find adbc_extract -name 'libadbc_driver_snowflake.so' | head -n1)" /usr/local/lib/ && \
+    mkdir -p /usr/share/doc/adbc-driver-snowflake && \
+    find adbc_extract \( -name 'LICENSE.txt' -o -name 'NOTICE.txt' \) \
+      -exec cp {} /usr/share/doc/adbc-driver-snowflake/ \; && \
+    ldconfig && rm -rf adbc.whl adbc_extract && \
+    test -s /usr/local/lib/libadbc_driver_snowflake.so
 
 # Official DuckDB extensions (offline LOAD). node-owned so DuckDB can still
 # install additional extensions through the /home/node/.duckdb symlink into

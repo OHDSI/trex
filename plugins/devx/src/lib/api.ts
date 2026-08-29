@@ -16,7 +16,11 @@ import type {
   UserMapEntry,
   SlackAllowlistEntry,
   ModelInfo,
+  AgentName,
+  AgentModelSelections,
+  AgentModelSelectionRecord,
 } from "./types";
+import type { UploadedAttachment } from "@/hooks/turnMetadata";
 
 // task-u1: exported so useAgentsChat.ts can build the Authorization header
 // for the eve/agents runtime's /chat endpoint (a different plugin mount than
@@ -48,6 +52,30 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init?.headers,
     },
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`API error ${res.status}: ${body}`);
+  }
+  return res.json();
+}
+
+// Attachments
+// Uploads one picked file to POST /chats/:id/attachments (functions/routes/
+// attachment_routes.ts) and returns the stored row. Deliberately NOT routed
+// through apiFetch: that helper forces `Content-Type: application/json`,
+// which would stop the browser emitting the multipart boundary this route
+// requires. Used by useAgentsChat.ts to turn ChatInput's File objects into
+// the {url, name} metadata agent/agent.ts's buildUserMessage consumes.
+export async function uploadAttachment(chatId: string, file: File): Promise<UploadedAttachment> {
+  const token = getAuthToken();
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/chats/${chatId}/attachments`, {
+    method: "POST",
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: form,
     credentials: "include",
   });
   if (!res.ok) {
@@ -166,10 +194,10 @@ export interface ActiveProviderConfig {
 // surfaces as a bare uncaught 500, not a parseable error. Read-only; never
 // used for anything security-sensitive, same posture as the server-side
 // fallback it mirrors. Also carries `auth_shape` (final-007 review finding
-// #4 + merge-gate re-review) so useEffectiveLoop.ts can detect IAM-shaped
-// bedrock credentials — resolveModel throws for those too (agents loop is
-// bearer-token-only), the exact same "gate it before /chat" reasoning as the
-// claude-code case above.
+// #4 + merge-gate re-review): a non-secret, display-only credential-shape
+// hint, NOT a loop gate — IAM-shaped bedrock credentials are an unsupported
+// configuration that resolveModel throws a clear, actionable error for
+// (agent.ts), not something the client routes around.
 export async function getActiveProviderConfig(): Promise<ActiveProviderConfig> {
   const configs = await getProviderConfigs().catch(() => [] as ProviderConfigRecord[]);
   const active = configs.find((c) => c.is_active);
@@ -211,6 +239,26 @@ export async function deleteProviderConfig(id: string): Promise<void> {
 
 export async function activateProviderConfig(id: string): Promise<void> {
   await apiFetch(`/provider-configs/${id}/activate`, { method: "PUT" });
+}
+
+// Agent model assignment — which provider config each LLM-backed agent
+// (devx's own coder, claw, d2esupport) runs on. See routes/agent_model_routes.ts.
+export async function getAgentModelSelections(): Promise<AgentModelSelections> {
+  return apiFetch("/agent-model-selection");
+}
+
+export async function setAgentModelSelection(agent: AgentName, providerConfigId: string): Promise<AgentModelSelectionRecord> {
+  return apiFetch(`/agent-model-selection/${agent}`, {
+    method: "PUT",
+    body: JSON.stringify({ provider_config_id: providerConfigId }),
+  });
+}
+
+// Reverts an agent to the legacy env-based fallback. devx can't be cleared
+// this way (it always has an active provider config) — the server rejects
+// that with a 400, which the caller should surface.
+export async function clearAgentModelSelection(agent: AgentName): Promise<void> {
+  await apiFetch(`/agent-model-selection/${agent}`, { method: "DELETE" });
 }
 
 export interface EncryptExistingKeysResult {

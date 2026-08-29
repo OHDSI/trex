@@ -161,3 +161,25 @@ Deno.test("namespacedToken joins channel and raw token with a colon", () => {
   assertEquals(namespacedToken("discord", "u1"), "discord:u1");
   assertEquals(namespacedToken("slack", "T1/C1/U1"), "slack:T1/C1/U1");
 });
+
+Deno.test("channelForSession returns the session's channel, deterministically", async () => {
+  const calls: Array<{ sql: string; params?: unknown[] }> = [];
+  const query = (sql: string, params?: unknown[]) => {
+    calls.push({ sql, params });
+    return Promise.resolve({ rows: [{ channel: "discord" }] });
+  };
+  const store = createChannelStore(query as never);
+  assertEquals(await store.channelForSession("s-1"), "discord");
+  assert(calls[0].sql.includes("FROM agents.channel_sessions"));
+  assert(calls[0].sql.includes("session_id = $1"));
+  // A session re-keyed under several continuation tokens has several rows,
+  // all naming the same channel — but an unordered LIMIT 1 would be
+  // non-deterministic for no reason.
+  assert(calls[0].sql.includes("ORDER BY created_at ASC LIMIT 1"));
+  assertEquals(calls[0].params, ["s-1"]);
+});
+
+Deno.test("channelForSession returns null for a session with no channel mapping (native /eve/v1/session)", async () => {
+  const store = createChannelStore((() => Promise.resolve({ rows: [] })) as never);
+  assertEquals(await store.channelForSession("s-1"), null);
+});

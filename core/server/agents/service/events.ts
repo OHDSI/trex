@@ -101,4 +101,62 @@ export type AgentEvent =
   // when a denied gate puts it back in the human's — the gate is closed and
   // their reply is about to drive the revision. Optional so a publisher that
   // never checks a gate can omit it (absent === false).
-  | { type: "message.queued"; data: { text: string; deniedPendingGate?: boolean } };
+  | { type: "message.queued"; data: { text: string; deniedPendingGate?: boolean } }
+  // Trex extension (not part of eve's documented vocabulary): fired by the
+  // periodic stale-turn sweep (service/sweep.ts) when it reaps one or more
+  // turns stuck `running` on this session — the same recovery handler.ts's
+  // lazy on-message reap performs, just triggered by the sweep's timer
+  // instead of a new message arriving. Turn-agnostic (no single turnId — a
+  // sweep tick can reap more than one stale turn on a session) and
+  // live-only, same wire posture as message.queued above (not
+  // persisted/replayed) — but UNLIKE message.queued, a subscriber missing
+  // this event is a KNOWN LIMITATION, not an acceptable outcome. A reap only
+  // happens ≥2 hours after the turn started, and the dominant cause of a
+  // stuck turn is a worker crash/redeploy — in exactly that case the isolate
+  // that held the subscription is gone, so this publishes into an empty
+  // subscriber set and the human is told nothing. Best-effort delivery is
+  // frequently lost for this event specifically; making it reliable needs a
+  // durable out-of-band delivery path (e.g. via agents.channel_sessions) —
+  // tracked as a follow-up, not fixed here.
+  | { type: "turn.reaped"; data: { count: number; reason: "stale" } }
+  // Trex extension (not part of eve's documented vocabulary): pre-turn
+  // context compaction replaced the oldest turns of this session (see
+  // context/compact.ts). Emitted so a user watching the stream can see WHY
+  // the agent's memory of early turns just changed shape, rather than
+  // silently discovering it mid-answer.
+  //
+  // `warning` carries the reason the summarizer could not run, and is
+  // present exactly when `via` is "drop" — the spec's error table requires a
+  // warning event on that path, because dropping turns loses information a
+  // summary would have kept and the user is the only one who can supply it
+  // again. Turn-agnostic (compaction runs BEFORE the turn is created, so
+  // there is no turnId yet) and live-only, same wire posture as
+  // message.queued/turn.reaped above.
+  | {
+    type: "context.compacted";
+    data: { via: "summary" | "drop"; replacedTurnSeqTo: number; warning?: string };
+  }
+  // Trex extension (not part of eve's documented vocabulary): a model call
+  // was refused with a 429/5xx/connection error and will be retried after
+  // `delayMs` (see service/retry.ts). Emitted so a client can show "rate
+  // limited, retrying in 10s" instead of appearing hung — the backoff
+  // schedule tops out at a 60s wait, long enough that silence reads as a hang.
+  //
+  // `phase` says WHICH model call is being retried, because they fail
+  // differently from the user's point of view: "turn" is the turn's own
+  // streamText, "compaction" is the pre-turn summarization call whose failure
+  // silently degrades to dropping the oldest turns. Turn-agnostic when
+  // `phase` is "compaction" (compaction runs BEFORE the turn is created, so
+  // there is no turnId yet) — same wire posture as context.compacted above:
+  // live-only, not persisted, not replayed.
+  | {
+    type: "model.retrying";
+    data: {
+      turnId?: string;
+      phase: "turn" | "compaction";
+      attempt: number;
+      maxAttempts: number;
+      delayMs: number;
+      reason: string;
+    };
+  };

@@ -1,5 +1,6 @@
 // @ts-nocheck - Deno edge function
 import { getAppWorkspacePath } from "../tools/workspace.ts";
+import { createSseWriter } from "../sse.ts";
 import { duckdb, escapeSql } from "../duckdb.ts";
 import { SECURITY_REVIEW_SYSTEM_PROMPT, parseSecurityFindings } from "../security_review_prompt.ts";
 import { CODE_REVIEW_SYSTEM_PROMPT, parseCodeReviewFindings } from "../code_review_prompt.ts";
@@ -269,9 +270,11 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
 
     const stream = new ReadableStream({
       async start(controller) {
-        const send = (data: any) => {
-          controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(data)}\n\n`));
-        };
+        // See ../sse.ts: enqueue on a closed controller throws, and this send is
+        // called from the catch below whose controller.close() would then be
+        // skipped, leaving the caller on a stream that never terminates.
+        const writer = createSseWriter(controller, "devx review");
+        const send = (data: any) => writer.send(data);
 
         try {
           send({ type: `${opts.eventPrefix}_progress`, message: "Starting review agent..." });
@@ -357,7 +360,7 @@ export async function handleSecurityRoutes(path, method, req, userId, sql, corsH
           send({ type: `${opts.eventPrefix}_error`, error: err.message });
         }
 
-        controller.close();
+        writer.close();
       },
     });
 

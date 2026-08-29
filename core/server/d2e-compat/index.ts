@@ -70,28 +70,33 @@ export async function applyD2eCompat(app: Express): Promise<void> {
 }
 
 /**
- * Provision the d2e database objects (login users, supabase roles, schemas,
- * grants) before any plugin runs. Replaces the alp-minerva-pg-mgmt-init
- * container. No-op unless D2E_COMPAT.
+ * Guard the handoff to the `trex.provision` plugin kind.
  *
- * Unlike runD2eBoot, a failure here is FATAL: every downstream consumer assumes
- * these roles and schemas exist, and continuing produces confusing errors much
- * later in boot.
+ * The provisioning itself (login users, supabase roles, schemas, grants) now
+ * lives in d2e as @data2evidence/d2e-bootstrap, so the policy ships with the
+ * services that depend on it. What cannot move here is the failure mode: if the
+ * plugin is not mounted, trex would boot healthy onto an unprovisioned database
+ * and every consumer would fail much later with a confusing error (alp-logto
+ * crash-looping on a missing role, say). So when d2e's bootstrap config is
+ * present, a provision plugin having run is mandatory.
  */
-export async function runD2eBootstrap(): Promise<void> {
-  if (!D2E_COMPAT) return;
-  const { parseBootstrapConfigFromEnv, runBootstrapStatements } = await import("./bootstrap.ts");
-  const cfg = parseBootstrapConfigFromEnv(Deno.env.toObject());
-  if (!cfg) {
-    console.log("[d2e-compat] bootstrap skipped — POSTGRES_MANAGE_CONFIG/USERS not set");
+export function assertD2eProvisioned(appliedTargets: number): void {
+  // Env read at call time, not via the module-level D2E_COMPAT const, so the
+  // guard is exercisable without re-importing this module (which drags in
+  // routes.ts). It runs once at boot, so there is no hot path to protect.
+  if (Deno.env.get("D2E_COMPAT") !== "true") return;
+  const configured = Deno.env.get("POSTGRES_MANAGE_CONFIG") &&
+    Deno.env.get("POSTGRES_MANAGE_USERS");
+  if (!configured) {
+    console.log("[d2e-compat] provisioning skipped — POSTGRES_MANAGE_CONFIG/USERS not set");
     return;
   }
-  const { pool } = await import("../db.ts");
-  const applied = await runBootstrapStatements(
-    (sql) => pool.query(sql),
-    cfg,
-  );
-  console.log(`[d2e-compat] bootstrap applied ${applied} statement(s)`);
+  if (appliedTargets === 0) {
+    throw new Error(
+      "POSTGRES_MANAGE_CONFIG/USERS are set but no trex.provision plugin was found. " +
+        "Mount @data2evidence/d2e-bootstrap under a PLUGINS_DEV_PATH entry.",
+    );
+  }
 }
 
 /**

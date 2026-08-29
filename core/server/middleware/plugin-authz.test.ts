@@ -18,6 +18,21 @@ jwk.kid = "test-key";
 jwk.alg = "RS256";
 jwk.use = "sig";
 
+/** A regular (non-service) user token. `userMgmtGroups` is what old main put on
+ *  the token so authz could skip the usermgmt round trip. */
+function userToken(groups: Record<string, unknown> | undefined): Promise<string> {
+  const claims: Record<string, unknown> = { roles: ["role.researcher"] };
+  if (groups) claims.userMgmtGroups = groups;
+  return new SignJWT(claims)
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setSubject("user-1")
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .setIssuer(ISSUER)
+    .setAudience(AUDIENCE)
+    .sign(privateKey);
+}
+
 function serviceToken(clientId: string): Promise<string> {
   return new SignJWT({ client_id: clientId })
     .setProtectedHeader({ alg: "RS256", kid: "test-key" })
@@ -91,6 +106,36 @@ Deno.test("d2eAuthn client-credentials authorization", async (t) => {
       const { status, nexted } = await run(
         await serviceToken("some-other-client"),
         "/system-portal/supabase-storage/get/file",
+      );
+      assertEquals(nexted, false);
+      assertEquals(status, 403);
+    });
+
+    // Regression: every step above uses a service token, which returns before
+    // the role-resolution block. A user token is the only shape that reaches it,
+    // so a variable dropped there went unnoticed until it threw at runtime
+    // (ReferenceError: tokenGroups is not defined) and took d2eAuthn down.
+    await t.step("resolves a user token's roles from userMgmtGroups on the token", async () => {
+      REQUIRED_URL_SCOPES.push({
+        path: "^/system-portal/dataset/list",
+        scopes: ["portal.dataset.read"],
+        httpMethods: ["GET"],
+      });
+      // Deliberately NOT a system admin: that shape returns on the admin bypass
+      // before the role-resolution block this is here to cover.
+      registerPluginRoles({ ALP_DASHBOARD_VIEWER: ["portal.dataset.read"] });
+      const { status, nexted } = await run(
+        await userToken({ alp_role_dashboard_viewer: true }),
+        "/system-portal/dataset/list",
+      );
+      assertEquals(nexted, true);
+      assertEquals(status, 0);
+    });
+
+    await t.step("denies a user token whose groups carry no matching role", async () => {
+      const { status, nexted } = await run(
+        await userToken({ alp_role_etl_mapping_contributor: true }),
+        "/system-portal/dataset/list",
       );
       assertEquals(nexted, false);
       assertEquals(status, 403);

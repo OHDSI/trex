@@ -59,6 +59,17 @@ concurrency:
   group: plugin-ci-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: true
 
+# GitHub Actions cache budget (hard 10 GB per repository, LRU-evicted).
+# Measured entry sizes: runtime amd64 5.62 GB, runtime arm64 5.59 GB, every
+# other Rust plugin 0.85-1.13 GB. Caching all of them across plugin-ci,
+# coverage and integration-tests demanded ~16 GB, so the quota stayed
+# permanently overcommitted and the largest -- and most valuable -- entry never
+# survived. Only two caches are funded now, both chosen for wall-clock:
+#   plugin-ci build runtime (amd64)  ~5.6 GB  gates e2e-d2e
+#   integration-tests trexas         ~2.5 GB  39 -> 22 min on that workflow
+# leaving ~1.9 GB of headroom. Adding another Rust target cache means taking
+# the room from one of these two, not from thin air.
+
 env:
   GIT_BRANCH_NAME: ${{ github.event.inputs.GIT_BRANCH_NAME || github.head_ref || github.ref_name }} # workflow_dispatch || pull_request || push
   GIT_REPO_FULL_NAME: ${{ github.event.inputs.GIT_REPO_FULL_NAME || github.event.pull_request.head.repo.full_name || github.event.repository.full_name }} # workflow_dispatch || pull_request || push
@@ -184,12 +195,22 @@ jobs:
         # loses its @types and setTimeout types shift to Node's Timeout — 22
         # typecheck errors that npm's layout doesn't produce.
         run: cd core/server && npm ci
-      - name: Prepare test database (trexdb schema + memory import-state table)
+      - name: Prepare test database (trexdb schema, memory import-state table, agents schema)
         run: |
           psql "$DATABASE_URL" -v ON_ERROR_STOP=1 \
             -c 'CREATE SCHEMA IF NOT EXISTS trexdb;' \
             -c 'DO $$ BEGIN CREATE ROLE authenticated; EXCEPTION WHEN duplicate_object THEN NULL; END $$;' \
             -f core/schema/V6__memory_import_state.sql
+          # The agents runtime's own schema. Several tests under agents/ are
+          # DB-backed (the V7 migration test; the history and pre-turn
+          # compaction tests in service/handler.test.ts) and guard on
+          # DATABASE_URL, which IS set for this job — so without the schema
+          # they FAIL rather than skip. Applied in version order via sort -V so
+          # a future V10 does not sort before V2.
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c 'CREATE SCHEMA IF NOT EXISTS agents;'
+          for f in $(ls core/server/agents/migrations/V*.sql | sort -V); do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f"
+          done
       # --no-check like the gbrain-worker/claw legs below: the deno workspace
       # root is core/ (its deno.json declares the workspace, so its
       # nodeModulesDir wins) and TYPE-REFERENCE directives from npm packages
@@ -198,6 +219,26 @@ jobs:
       # core/server can never satisfy them. Runtime npm: resolution works from
       # core/server/node_modules either way. Typechecking runs on dev machines
       # via the same command without --no-check.
+      # Blocking type gate for the agents runtime, run as its OWN step rather
+      # than by dropping --no-check from the test leg above. The --no-check
+      # rationale documented right above applies to that leg's WHOLE file set
+      # (plugin/, memory/, d2e-compat/, webapi-native.test.ts pull in npm
+      # packages whose /// <reference types="..."> directives resolve against
+      # core/node_modules); agents/ imports no such package, so it can be
+      # checked on the npm ci layout CI actually has. Verified by checking
+      # agents/ with core/node_modules removed.
+      #
+      # Depends on the `npm ci` step above for the same reason the test legs
+      # do: nodeModulesDir is "manual" (byonm), so npm:ai / npm:@ai-sdk/*
+      # resolve out of core/server/node_modules.
+      #
+      # Worth gating despite the cost: agents/ carries a tagged union added
+      # specifically to make a class of bug a compile error, and under
+      # --no-check that protection bound nothing. Tests are gated too — a
+      # fixture that drifts out of sync with an interface is exactly the
+      # defect a tests-excluded gate keeps missing.
+      - name: core/server type check (agents runtime)
+        run: cd core/server && deno check agents/
       - name: core/server tests (agents, plugin loader, memory importer, d2e-compat)
         run: cd core/server && deno test --no-check --allow-all agents/ plugin/ memory/importer.test.ts d2e-compat/ webapi-native.test.ts
       # The gbrain worker suite runs under its OWN import map (gbrain/ alias +
@@ -218,6 +259,13 @@ jobs:
       # env-set and env-unset paths, and CI has no real devx user to loop back to.
       - name: d2esupport plugin tests
         run: deno test --no-check --allow-all --import-map plugins/d2esupport/importmap.json --node-modules-dir=auto plugins/d2esupport/
+      # devx authors its agent dir against the "eve"/"eve/tools" bare
+      # specifiers that core/server/agents/eve-shim provides; the test-only
+      # import map resolves them without vendoring. Paths inside the map are
+      # relative to the map file (plugins/devx/agent/), so ../../../ is the
+      # repo root.
+      - name: devx plugin tests
+        run: deno test --no-check --allow-all --import-map plugins/devx/agent/local-test-import-map.json --node-modules-dir=auto plugins/devx/agent/ plugins/devx/functions/
 
   build:
     needs: [pick_runner]
@@ -263,6 +311,9 @@ jobs:
             NODE_VERSION: "22.x"
           - PKGPATH: ./plugins/runtime
             RUNNER: ubuntu-24.04
+            # The only plugin with a Rust target cache: 26 min cold, and it
+            # gates e2e-d2e, so it is the one entry that buys pipeline time.
+            RUST_CACHE: true
           - PKGPATH: ./plugins/devx
             RUNNER: ubuntu-24.04
           - PKGPATH: ./plugins/devx-ext
@@ -382,12 +433,17 @@ jobs:
       # is triggered by `npm pack` -> the plugin's prepack hook, so caches
       # need to be in place before that. Without this the runtime (trexas)
       # build takes ~29 min on every PR which blocks e2e-d2e.
-      # Non-Rust build state (maven/leiningen/CMake). The Rust cache is handled by
-      # rust-cache below, which prunes target/ to just dependency artifacts so it
-      # stays well under GitHub's 10 GB cache limit (the raw target/ cache here was
-      # evicted, forcing the ~29 min trexas rebuild on nearly every run).
+      #
+      # RESTORE on every run, SAVE only on develop/main. GitHub scopes a cache
+      # written on a PR ref to that PR alone, and evicts LRU once the repo passes
+      # its 10 GB quota. The runtime rust-cache entry alone is ~5.7 GB, so every
+      # PR run used to write an entry nobody else could read that evicted all of
+      # develop's entries -- leaving the repo with *zero* reusable caches and
+      # every Rust plugin compiling cold on every run. Branches restore from
+      # develop via restore-keys, which is where the reuse actually comes from.
       - name: Restore build cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
+        id: build-cache
         with:
           path: |
             ~/.m2/repository
@@ -396,14 +452,18 @@ jobs:
           key: plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-${{ hashFiles(format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
           restore-keys: |
             plugin-ci-${{ matrix.PKGPATH }}-${{ runner.os }}-
-      # Compact, eviction-resilient Rust cache (~/.cargo + pruned target/) for the
-      # plugins that have a Cargo.lock (runtime/trexas, bao, etl, chdb, …).
+      # Rust target cache, for RUST_CACHE plugins only -- see the cache budget
+      # note at the top of this workflow. Caching every Cargo.lock plugin
+      # overcommitted the 10 GB quota by ~6 GB, so nothing survived and the one
+      # entry that pays for itself (runtime, ~5.6 GB) was evicted every run.
       - name: Rust build cache
-        if: ${{ hashFiles(format('{0}/Cargo.lock', matrix.PKGPATH)) != '' }}
+        if: ${{ matrix.RUST_CACHE == true }}
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ matrix.PKGPATH }}
           cache-on-failure: "true"
+          # Same single-writer rule as the build cache above.
+          save-if: ${{ github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main' }}
       - name: Configure @trex publish registry
         uses: actions/setup-node@v4
         with:
@@ -438,6 +498,17 @@ jobs:
         run: |
           cd ${{ matrix.PKGPATH }}
           npm pack
+      # Counterpart to the restore above: only develop/main publish cache entries,
+      # so PR runs can never evict the entries every branch restores from.
+      - name: Save build cache
+        if: ${{ (github.ref == 'refs/heads/develop' || github.ref == 'refs/heads/main') && steps.build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.cache/lein
+            ${{ matrix.PKGPATH }}/build
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
       - name: Verify .trex artifact in tarball (extension plugins only)
         run: |
           cd ${{ matrix.PKGPATH }}
@@ -607,6 +678,28 @@ jobs:
           sudo mkswap /mnt/swapfile
           sudo swapon /mnt/swapfile
 
+      # build-arm had no caching at all, so every arm64 plugin compiled cold on
+      # every develop push (runtime ~18 min, db ~10 min). This job only runs on
+      # develop/main/release/dispatch/tags -- never on PRs -- so it is always a
+      # legitimate cache writer and needs no save-if gate.
+      - name: Restore build cache (arm64)
+        uses: actions/cache/restore@v4
+        id: build-cache-arm
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.cache/lein
+            ${{ matrix.PKGPATH }}/build
+          key: plugin-ci-arm64-${{ matrix.PKGPATH }}-${{ hashFiles(format('{0}/pom.xml', matrix.PKGPATH), format('{0}/CMakeLists.txt', matrix.PKGPATH), format('{0}/package-lock.json', matrix.PKGPATH)) }}
+          restore-keys: |
+            plugin-ci-arm64-${{ matrix.PKGPATH }}-
+      # No Rust target cache on arm64 on purpose. The arm runtime entry was
+      # 5.59 GB -- on its own as large as the amd64 one -- and the two together
+      # (11.21 GB) exceeded the entire 10 GB quota, so each run evicted the
+      # other and every plugin still built cold. build-arm feeds build-docker
+      # (~42 min combined) and never gates e2e-d2e, so it is off the critical
+      # path and the quota is better spent on amd64 runtime.
+
       - name: Build
         env:
           # Use the git CLI for fetches: libgit2 chokes on the large rusty_v8
@@ -635,6 +728,16 @@ jobs:
             make release
           fi
           mv build/release/extension/*/*.trex . 2>/dev/null || true
+
+      - name: Save build cache (arm64)
+        if: ${{ steps.build-cache-arm.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            ~/.m2/repository
+            ~/.cache/lein
+            ${{ matrix.PKGPATH }}/build
+          key: ${{ steps.build-cache-arm.outputs.cache-primary-key }}
 
       - name: Extract extension name
         id: extname
@@ -671,6 +774,9 @@ jobs:
           - arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
         id: checkout_wn
@@ -722,17 +828,50 @@ jobs:
           sudo swapon /swapfile
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+      # Registry-backed layer cache. Without it this job re-downloaded the pinned
+      # 500 MB GraalVM tarball, re-resolved all of Maven (the Dockerfile's
+      # --mount=type=cache,target=/root/.m2 dies with the builder) and re-ran
+      # native-image from scratch on every push -- ~27 min amd64 / ~21 min arm64,
+      # on build-docker's critical path. GHCR rather than BuildKit's type=gha
+      # because gha cache is charged against the same 10 GB Actions cache quota
+      # the Rust caches already contend for.
+      - name: Log in to GHCR (build cache)
+        if: github.repository == 'OHDSI/trex'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build libwebapi-native.so (${{ matrix.arch }})
+        env:
+          CACHE_REF: ghcr.io/ohdsi/trex-buildcache:webapi-native-${{ matrix.arch }}
         run: |
-          DOCKER_BUILDKIT=1 docker build \
+          # cache-from is best-effort: a missing/unauthorized ref just warns and
+          # builds cold. Only develop/main publish, so PR runs cannot poison it.
+          CACHE_ARGS="--cache-from type=registry,ref=${CACHE_REF}"
+          if [ "${{ github.repository }}" = "OHDSI/trex" ] \
+             && { [ "${{ github.ref_name }}" = "develop" ] || [ "${{ github.ref_name }}" = "main" ]; }; then
+            CACHE_ARGS="$CACHE_ARGS --cache-to type=registry,ref=${CACHE_REF},mode=max,ignore-error=true"
+          fi
+          docker buildx build \
             --target export -o type=local,dest=./out \
+            $CACHE_ARGS \
             -f plugins/webapi/Dockerfile.native-lib .
           ls -lh out/out/libwebapi-native.so
       # Boot the native lib end-to-end (ephemeral Postgres + dlopen + webapi_start).
       # smoke.sh prints results but always exits 0, so assert on its output here.
       - name: Boot smoke test (${{ matrix.arch }})
+        env:
+          CACHE_REF: ghcr.io/ohdsi/trex-buildcache:webapi-smoke-${{ matrix.arch }}
         run: |
-          DOCKER_BUILDKIT=1 docker build -f plugins/webapi/smoke/Dockerfile.smoke -t webapi-smoke .
+          # The smoke image compiles its own Rust engine stage; same cache rules.
+          CACHE_ARGS="--cache-from type=registry,ref=${CACHE_REF}"
+          if [ "${{ github.repository }}" = "OHDSI/trex" ] \
+             && { [ "${{ github.ref_name }}" = "develop" ] || [ "${{ github.ref_name }}" = "main" ]; }; then
+            CACHE_ARGS="$CACHE_ARGS --cache-to type=registry,ref=${CACHE_REF},mode=max,ignore-error=true"
+          fi
+          docker buildx build $CACHE_ARGS --load \
+            -f plugins/webapi/smoke/Dockerfile.smoke -t webapi-smoke .
           docker run --rm webapi-smoke | tee smoke.out
           if ! grep -q "status=running" smoke.out; then
             echo "::error::webapi_start did not reach running state"; exit 1
@@ -957,11 +1096,53 @@ jobs:
       - name: List extensions
         run: ls -la extensions/${{ matrix.arch }}/ 2>/dev/null || echo "none"
 
+      # The image builds below plus the buildx layer cache need headroom; the
+      # runner ships with ~14 GB free and the full image alone is multi-GB.
+      - name: Free disk space
+        continue-on-error: true
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
+
       # Native build on a matching-arch runner — no QEMU needed.
+      #
+      # docker-container (the default driver) rather than `driver: docker`: the
+      # plain docker driver cannot export a build cache at all, so this job threw
+      # away every layer at the end of the run and rebuilt the whole image cold on
+      # the next one (~27 min amd64 / ~18 min arm64). Layers are cached to GHCR
+      # instead of type=gha to stay off the 10 GB Actions cache quota.
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR (build cache)
+        if: github.repository == 'OHDSI/trex'
+        uses: docker/login-action@v3
         with:
-          driver: docker
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # cache-to only from develop/main so PR runs read the shared cache but
+      # never write it. mode=max because the expensive work lives in the ten
+      # builder stages (the Rust `builder` stage above all) -- mode=min exports
+      # only the final image's own layers and would cache none of them.
+      - name: Resolve layer cache refs
+        id: dcache
+        run: |
+          REF=ghcr.io/ohdsi/trex-buildcache:image-${{ matrix.arch }}
+          echo "from=type=registry,ref=$REF" >> "$GITHUB_OUTPUT"
+          if [ "${{ github.repository }}" = "OHDSI/trex" ] \
+             && { [ "${{ github.ref_name }}" = "develop" ] || [ "${{ github.ref_name }}" = "main" ]; }; then
+            echo "to=type=registry,ref=$REF,mode=max,ignore-error=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "to=" >> "$GITHUB_OUTPUT"
+          fi
 
       # Non-pushed smoke build: keeps the lean prod target from bit-rotting.
       - name: Build prod image for testing
@@ -973,6 +1154,7 @@ jobs:
           platforms: linux/${{ matrix.arch }}
           load: true
           tags: trexsql-test:prod
+          cache-from: ${{ steps.dcache.outputs.from }}
 
       - name: Build full image for testing
         uses: docker/build-push-action@v6
@@ -984,6 +1166,8 @@ jobs:
           tags: trexsql-test:full
           build-args: |
             DEVX_EXT_VERSION=${{ github.sha }}
+          cache-from: ${{ steps.dcache.outputs.from }}
+          cache-to: ${{ steps.dcache.outputs.to }}
 
       - name: Test extensions load (${{ matrix.arch }})
         run: |
@@ -1036,19 +1220,13 @@ jobs:
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         run: echo "IMAGE_NS=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
 
-      - name: Login to GHCR
-        # Push only from canonical repo on develop/main.
-        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       # Each arch pushes an -<arch>-suffixed tag; merge-docker assembles these
-      # into the multi-arch manifests (:latest, :sha-<sha>, :dev, ...).
-      # Single published image: the full (default) target, with devx gated off
-      # by default. The prod target is intentionally NOT published.
+      # into the multi-arch manifests (:latest, :sha-<sha>, :dev, :prod, ...).
+      # Two published images off the same Dockerfile: the full (default) target,
+      # with devx gated off by default, and the lean prod target. They differ by
+      # ~2.5GB of dev tooling — playwright + chromium, the Claude Code CLI, gh,
+      # bun/uv/prefect and the devx payload — which a deployed stack never runs.
+      # Consumers that want it (docker-compose-local.yml) take the full tag.
       - name: Build and push image (per-arch)
         if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
         uses: docker/build-push-action@v6
@@ -1060,6 +1238,24 @@ jobs:
           build-args: |
             DEVX_EXT_VERSION=${{ github.sha }}
           tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:sha-${{ github.sha }}-${{ matrix.arch }}
+          # Identical to the "full" build above, so this resolves entirely from
+          # the builder's cache instead of recompiling the image a second time.
+          cache-from: ${{ steps.dcache.outputs.from }}
+
+      - name: Build and push prod image (per-arch)
+        if: github.repository == 'OHDSI/trex' && (github.ref_name == 'develop' || github.ref_name == 'main')
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          target: prod
+          platforms: linux/${{ matrix.arch }}
+          push: true
+          tags: ghcr.io/${{ env.IMAGE_NS }}/trexsql:prod-sha-${{ github.sha }}-${{ matrix.arch }}
+          # Same target and inputs as the "prod image for testing" build above,
+          # so this is a cache resolve, not a second compile. No
+          # DEVX_EXT_VERSION: the devx payload is a full-only stage.
+          cache-from: ${{ steps.dcache.outputs.from }}
 
       - name: Build and push studio sidecar image (per-arch)
         # The studio sidecar (referenced by docker-compose.yml) ships as its own
@@ -1112,11 +1308,17 @@ jobs:
           docker buildx imagetools create \
             -t "${NS}/trexsql:dev" -t "${NS}/trexsql:dev-sha-${SHA}" \
             $(srcs "${NS}/trexsql:sha-${SHA}")
+          # The lean prod target, under its own tags. Deployed stacks pin
+          # :prod-sha-<sha>; :prod is the moving alias.
+          docker buildx imagetools create \
+            -t "${NS}/trexsql:prod" -t "${NS}/trexsql:prod-sha-${SHA}" \
+            $(srcs "${NS}/trexsql:prod-sha-${SHA}")
           docker buildx imagetools create \
             -t "${NS}/trex-studio:latest" -t "${NS}/trex-studio:sha-${SHA}" \
             $(srcs "${NS}/trex-studio:sha-${SHA}")
           echo "=== resulting manifests ==="
           docker buildx imagetools inspect "${NS}/trexsql:sha-${SHA}" | grep -A2 -i platform || true
+          docker buildx imagetools inspect "${NS}/trexsql:prod-sha-${SHA}" | grep -A2 -i platform || true
 
   e2e-d2e:
     name: "E2E (D2E)"
@@ -1282,41 +1484,56 @@ jobs:
           }
 
           TAG=""
-          # A commit-pinned tag is preferred because it pins the whole set to one
-          # d2e revision, but d2e only republishes an image when its content
-          # changes, so most commits never produce a tag every image carries --
-          # d2e-logto has had two "${D2E_TREX_TAG_PREFIX}"* tags in its entire
-          # history. Try briefly for a genuine mid-publish gap, then fall back.
-          for attempt in $(seq 1 3); do
-            TAGS=$(tags_of d2e-trex)
-            if [ -z "$TAGS" ]; then
-              echo "no d2e-trex tag matching '${D2E_TREX_TAG_PREFIX}*' found"
-              break
-            fi
-            for img in $IMAGES; do tags_of "$img" > "${RUNNER_TEMP}/tags-${img}"; done
-
-            for t in $TAGS; do
+          # Only ONE commit-pinned tag is acceptable: the one matching the d2e
+          # revision this job checked out. The images are not used on their own —
+          # the steps below bind-mount this checkout's d2e sources (plugins/
+          # functions, seeds, migrations) straight into the running containers,
+          # so image and source have to describe the same revision.
+          #
+          # This used to scan the whole tag list and take the newest tag every
+          # image happened to share. Because d2e only republishes an image when
+          # its content changes, that search walks backwards through history
+          # whenever one image lags, and it silently paired a months-old image
+          # set with current sources. The failure that produced is not obviously
+          # a version mismatch: the alp-dataflow-gen-init worker cannot bootstrap
+          # ("failed to bootstrap runtime: No such file or directory"), trex logs
+          # "add init fn done" anyway, the prefect blocks are never seeded, and
+          # the run dies minutes later in setupdemo with "Running DQD on demo
+          # dataset ... status code 500".
+          #
+          # So: try the checkout's own tag (retrying briefly for a genuine
+          # mid-publish gap), and otherwise fall through to the floating tag,
+          # which every image keeps current and therefore keeps the set
+          # self-consistent.
+          D2E_SHA="$(git -C d2e rev-parse --short=7 HEAD 2>/dev/null || true)"
+          if [ -z "$D2E_SHA" ]; then
+            echo "::warning::could not read the d2e checkout revision; skipping the pinned-tag path"
+          else
+            WANT="${D2E_TREX_TAG_PREFIX}${D2E_SHA}"
+            echo "d2e checkout is ${D2E_SHA}; the only acceptable pinned tag is '${WANT}'"
+            for attempt in $(seq 1 3); do
               ok=1
               for img in $IMAGES; do
-                if ! grep -qx "$t" "${RUNNER_TEMP}/tags-${img}"; then
-                  echo "skip ${t}: ${img} has no such tag"
+                if ! tags_of "$img" | grep -qx "$WANT"; then
+                  echo "attempt ${attempt}/3: ${img} has no '${WANT}' tag yet"
                   ok=0; break
                 fi
               done
-              [ "$ok" = "1" ] || continue
-              # Pull the whole set NOW. A tag that merely resolved can be pruned
-              # before the later compose pull; once pulled it is ours regardless.
-              if ( for img in $IMAGES; do docker pull -q "${PREFIX}${img}:${t}" || exit 1; done ); then
-                TAG="$t"; break
+              if [ "$ok" = "1" ]; then
+                # Pull the whole set NOW. A tag that merely resolved can be pruned
+                # before the later compose pull; once pulled it is ours regardless.
+                if ( for img in $IMAGES; do docker pull -q "${PREFIX}${img}:${WANT}" || exit 1; done ); then
+                  TAG="$WANT"; break
+                fi
+                echo "skip ${WANT}: rotated away mid-pull"
               fi
-              echo "skip ${t}: rotated away mid-pull"
+              [ "$attempt" -lt 3 ] && \
+                echo "waiting for the d2e publish of ${D2E_SHA} to complete" && \
+                sleep 60
             done
-
-            [ -n "$TAG" ] && break
-            [ "$attempt" -lt 3 ] && \
-              echo "attempt ${attempt}/3: no tag has the complete image set yet; waiting for the next d2e publish" && \
-              sleep 60
-          done
+            [ -n "$TAG" ] || \
+              echo "::warning::no complete image set published for the d2e checkout (${D2E_SHA}); using the floating tag so image and source stay consistent"
+          fi
 
           # Fall back to the branch's floating tag, which every image keeps
           # current. Less reproducible than a pinned set, but it is the same
@@ -1406,26 +1623,13 @@ jobs:
                 # before /usr/src/plugins, so the image's baked (unpatched) seed would
                 # win — overwrite it directly so the patch actually takes effect.
                 - ./plugins/functions/mri-pg-config/src/db/seeds/03_Config.ts:/usr/src/bundled-plugins/d2e-functions/mri-pg-config/src/db/seeds/03_Config.ts:ro
-              # d2e's notebook-migrate waits only on Postgres, so it provisions the
-              # `notebook` schema CONCURRENTLY with trex's own core trexdb migration.
-              # The two then write the same system catalog rows and one loses with
-              # "tuple concurrently updated", which fails V1__initial_schema, leaves
-              # trexdb empty, and boot dies 60s later on "kek_wrapped_dek not present".
-              # It also GRANTs to anon/authenticated before pg-mgmt-init has created
-              # those roles. Serialise the three so nothing provisions in parallel:
-              #   pg-mgmt-init -> notebook-migrate -> trex
-              # Remove this once d2e provisions from trex instead (OHDSI/d2e).
-              depends_on: !override
-                alp-minerva-pg-mgmt-init:
-                  condition: service_completed_successfully
-                alp-logto-post-init:
-                  condition: service_completed_successfully
-                notebook-migrate:
-                  condition: service_completed_successfully
-            notebook-migrate:
-              depends_on: !override
-                alp-minerva-pg-mgmt-init:
-                  condition: service_completed_successfully
+              # No depends_on override here: d2e now provisions the database from
+              # trex itself, so trex only needs Postgres healthy — which is exactly
+              # what d2e's own compose already declares. The serialisation this
+              # block used to force (pg-mgmt-init -> notebook-migrate -> trex) named
+              # services d2e has since retired, and re-adding an edge to
+              # alp-logto-post-init would deadlock: logto cannot migrate until trex
+              # has created logto_postgres and the logto schema, so trex must boot first.
           EOF
           cat d2e/docker-compose-ci.yml
 
@@ -1574,30 +1778,6 @@ jobs:
             docker exec d2e-trex ls -la /usr/src/bundled-plugins/ || true
             exit 1
           fi
-
-      - name: Wait for webapi-init to complete
-        if: env.D2E_UNAVAILABLE != 'true'
-        run: |
-          echo "Waiting for webapi-init to complete (ensures logto admin user is created)..."
-          for i in $(seq 1 60); do
-            status=$(docker ps -a --filter "name=webapi-init" --format '{{.Status}}')
-            if echo "$status" | grep -q "(healthy)"; then
-              echo "webapi-init completed successfully"
-              break
-            fi
-            if echo "$status" | grep -qE "Exited \([1-9]"; then
-              echo "webapi-init failed!"
-              docker logs d2e-webapi-init || true
-              exit 1
-            fi
-            echo "Waiting for webapi-init... ($i/60) (status: $status)"
-            sleep 5
-            if [ $i -eq 60 ]; then
-              echo "::error::Timed out waiting for webapi-init to become healthy (final status: $status)"
-              docker logs d2e-webapi-init || true
-              exit 1
-            fi
-          done
 
       - name: Disable IPv6 to prevent ERR_NETWORK_CHANGED
         if: env.D2E_UNAVAILABLE != 'true'

@@ -45,6 +45,8 @@ function mockArgs(
     },
     params: {},
     waitUntil: () => {},
+    // Never called by this adapter — see the note in github.test.ts.
+    hasSession: () => Promise.resolve(false),
     requestIp: null,
   };
   return { args, sends, resumes };

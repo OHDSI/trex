@@ -36,7 +36,14 @@ const SKILL_USAGE_RULE = `<skill-usage>\nThe skills above are real and invocable
 // disableCoderAttribution): that suppresses the SDK's automatic trailer/
 // footer; this stops the model from MENTIONING the tooling in text it
 // writes itself.
-const COMMIT_HYGIENE_RULE = `<commit-pr-hygiene>\nCommits, branch names, and pull-request text belong to the user, not the tooling. Never mention Claude, Anthropic, AI, or that the work was generated/assisted, anywhere in a commit message, commit trailer (no Co-Authored-By: Claude or similar), branch name, PR title, or PR description. Write them exactly as the human author of the change would. Branch names always follow <github-username>/<topic> (the connected GitHub account's username, short kebab-case topic, e.g. p-hoffmann/fix-filter-race).\nBranches are created DIRECTLY in the app repository and pushed to its origin — the connected account has push access. Never fork the repository or push to a fork (no \`gh repo fork\`, no \`gh pr create --fork\`); if pushing to origin fails, report the permission problem instead of falling back to a fork.\nIf you wrote a plan or spec for the change (e.g. under trex/plans/), COMMIT that file to the same feature branch before opening the PR — the plan is part of the reviewable change, not a scratch artifact. Keep it updated if the implementation diverges from it.\n</commit-pr-hygiene>`;
+const COMMIT_HYGIENE_RULE = `<commit-pr-hygiene>\nCommits, branch names, and pull-request text belong to the user, not the tooling. Never mention Claude, Anthropic, AI, or that the work was generated/assisted, anywhere in a commit message, commit trailer (no Co-Authored-By: Claude or similar), branch name, PR title, or PR description. Write them exactly as the human author of the change would. Branch names always follow <github-username>/<topic> (the connected GitHub account's username, short kebab-case topic, e.g. p-hoffmann/fix-filter-race).\nBranches are created DIRECTLY in the app repository and pushed to its origin — the connected account has push access. Never fork the repository or push to a fork (no \`gh repo fork\`, no \`gh pr create --fork\`); if pushing to origin fails, report the permission problem instead of falling back to a fork.\nIf you wrote a plan or spec for the change (e.g. under trex/plans/), COMMIT that file to the same feature branch before opening the PR — the plan is part of the reviewable change, not a scratch artifact. Keep it updated if the implementation diverges from it.\nNever commit \`trex/screenshots/\` — those images are posted to the channel, not reviewed in the diff.\n</commit-pr-hygiene>`;
+
+// The workspace you are given IS an isolated branch of its own. Every locked
+// chat observed in production began the same way: the coder checked out some
+// other branch and left it checked out at turn end. The guard then refused the
+// next turn — before the coder starts, so nothing in-session could repair it.
+// Defence in depth only: chat_worktree.ts must (and does) recover regardless.
+const WORKTREE_HYGIENE_RULE = `<worktree-hygiene>\nYou are already on an isolated branch created for this task — do your work on it. You rarely need another branch; do not create one just to have a nicer name.\nIf you must check out a different branch (to inspect or iterate on an existing PR), switch BACK to the branch you started on before you finish the turn, and commit or stash anything you changed first. A turn that ends on someone else's branch with uncommitted files leaves the workspace unusable for the next message.\nNever end a turn with a rebase, merge, cherry-pick or revert half-finished — complete it or abort it.\nNever rename or delete the branch you were given.\n</worktree-hygiene>`;
 
 // Always-on preamble: the using-skills skill content is injected into
 // every session's system prompt. Loaded lazily and cached for the worker
@@ -65,6 +72,12 @@ export interface CoderContextInput {
   remoteChannel?: boolean;
   hasComponentSelection?: boolean;
   settings: { max_steps?: number };
+  // Enabled skills for this user, rendered as a listing immediately before
+  // SKILL_USAGE_RULE -- which tells the model "The skills above are real and
+  // invocable", a sentence that previously referred to nothing on either loop.
+  // Sourced from devx.skills via loadSkillMetadata so both loops render the
+  // identical block from one place.
+  skills?: Array<{ name: string; description: string }>;
   // Whether THIS engine actually registers the mcp__ask__ask_question tool
   // that buildAskQuestionRule's <asking-questions> block instructs the model
   // to call. Today that tool exists only in the claude-code sidecar
@@ -94,9 +107,12 @@ export async function buildCoderContext(input: CoderContextInput): Promise<Coder
     // channel — buildAskQuestionRule already enforces this), AND the calling
     // engine actually providing the tool the rule tells the model to call.
     const askQuestionRule = input.askToolAvailable ? buildAskQuestionRule(profile) : "";
+    const skillsListing = (input.skills ?? []).length > 0
+      ? `<available-skills>\n${(input.skills ?? []).map((s) => `- ${s.name}: ${s.description}`).join("\n")}\n</available-skills>\n\n`
+      : "";
     systemPrompt =
-      `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${SKILL_USAGE_RULE}\n\n` +
-      `${askQuestionRule ? askQuestionRule + "\n\n" : ""}${COMMIT_HYGIENE_RULE}\n\n${systemPrompt}`;
+      `<skills-protocol>\n${skillsPreamble}\n</skills-protocol>\n\n${skillsListing}${SKILL_USAGE_RULE}\n\n` +
+      `${askQuestionRule ? askQuestionRule + "\n\n" : ""}${COMMIT_HYGIENE_RULE}\n\n${WORKTREE_HYGIENE_RULE}\n\n${systemPrompt}`;
   }
 
   if (input.hasComponentSelection) systemPrompt += COMPONENT_SELECTION_LINE;

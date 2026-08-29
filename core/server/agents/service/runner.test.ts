@@ -1,9 +1,15 @@
-import { assert, assertEquals } from "jsr:@std/assert";
+import { assert, assertEquals, assertRejects } from "jsr:@std/assert";
+import { APICallError } from "ai";
 import { MockLanguageModelV3, simulateReadableStream } from "ai/test";
-import { runTurn } from "./runner.ts";
+import { runTurn, makePrepareStep } from "./runner.ts";
 import { loadAgent } from "../loader.ts";
+import type { LoadedAgent } from "../loader.ts";
 import { createStore } from "./store.ts";
 import type { AgentEvent } from "./events.ts";
+import type { HookCtx } from "../eve-shim/types.ts";
+import { createSpawnCapabilities, type SpawnCapabilities } from "./spawn.ts";
+import { DEFAULT_CONTEXT_CONFIG } from "./context/budget.ts";
+import { publish } from "./stream.ts";
 
 const TOY = new URL("../testdata/toy-agent/agent", import.meta.url).pathname;
 
@@ -23,6 +29,35 @@ function sequencedModel(...responses: any[][]) {
       return Promise.resolve({ stream: simulateReadableStream({ chunks }) });
     },
   });
+}
+
+// Captures every doStream() call's options (notably `prompt`, which carries
+// the system message as one entry and the user/history messages as the
+// rest) so a test can assert on what the model actually received, not just
+// what runTurn intended to send. Mirrors hooks.test.ts's capturingModel.
+// deno-lint-ignore no-explicit-any
+function capturingModel(...responses: any[][]) {
+  let call = 0;
+  // deno-lint-ignore no-explicit-any
+  const calls: any[] = [];
+  const model = new MockLanguageModelV3({
+    // deno-lint-ignore no-explicit-any
+    doStream: (options: any) => {
+      calls.push(options);
+      const chunks = responses[Math.min(call++, responses.length - 1)];
+      return Promise.resolve({ stream: simulateReadableStream({ chunks }) });
+    },
+  });
+  return { model, calls };
+}
+
+function fakeHookCtx(overrides: Partial<HookCtx> = {}): HookCtx {
+  return {
+    sessionId: "s-1",
+    env: () => undefined,
+    sql: () => Promise.resolve({ rows: [] }),
+    ...overrides,
+  };
 }
 
 // ai@6 / @ai-sdk/provider@3 (LanguageModelV3) changed the raw doStream
@@ -46,8 +81,10 @@ const textChunks = (text: string) => [
   { type: "text-end", id: "1" },
   FINISH,
 ];
-const toolCallChunks = (toolName: string, input: unknown) => [
-  { type: "tool-call", toolCallId: "c-1", toolName, input: JSON.stringify(input) },
+// toolCallId is a parameter so a multi-step turn can issue DISTINCT calls;
+// it defaults to the single id every existing caller relied on.
+const toolCallChunks = (toolName: string, input: unknown, toolCallId = "c-1") => [
+  { type: "tool-call", toolCallId, toolName, input: JSON.stringify(input) },
   {
     type: "finish",
     finishReason: { unified: "tool-calls", raw: "tool-calls" },
@@ -334,6 +371,77 @@ Deno.test("built-in skill tool returns available list for unknown skill", async 
   assert(JSON.stringify(ev.data.result.output).includes("greeting-style"));
 });
 
+// Fix round 1 (task-6-7-report.md), Finding 1: the built-in `agent` tool now
+// ALWAYS routes through a real child session (ctx.spawn is required, no more
+// in-process fallback) — see toolset.ts's agentTool/runAsChild. A bare
+// runTurn() call (this file drives runTurn directly, not through
+// handler.ts's startTurn) must wire RunTurnOpts.spawn itself, same as
+// hooks.test.ts's makeChildSpawn.
+interface FakeChild {
+  status: "running" | "completed" | "failed";
+  steps: Array<{ kind: string; name: string | null; payload: unknown }>;
+}
+
+function makeChildSpawn(agent: LoadedAgent, model: unknown): SpawnCapabilities {
+  const children = new Map<string, FakeChild>();
+  let n = 0;
+  return createSpawnCapabilities({
+    sessionId: "p-1",
+    turnId: "pt-1",
+    plugin: "toy-agent",
+    agent: "toy",
+    config: DEFAULT_CONTEXT_CONFIG,
+    allowDetached: false,
+    store: {
+      countChildren: () => Promise.resolve({ live: 0, total: children.size }),
+      listChildren: () => Promise.resolve([]),
+      isUnattended: () => Promise.resolve(false),
+      isChannelBound: () => Promise.resolve(false),
+      createChildSession: () => {
+        const id = `c-${++n}`;
+        children.set(id, { status: "running", steps: [] });
+        return Promise.resolve(id);
+      },
+      getHistory: (sessionId: string) => {
+        const child = children.get(sessionId);
+        return Promise.resolve(child ? [{ seq: 1, message: "", metadata: null, steps: child.steps }] : []);
+      },
+      getChild: (agentId: string) => {
+        const child = children.get(agentId);
+        return Promise.resolve(
+          child
+            ? { agentId, nickname: "Kid", subagent: null, status: child.status, startedAt: new Date(), detached: false }
+            : null,
+        );
+      },
+      failTurnsForSession: () => Promise.resolve(0),
+      queueFollowUp: () => Promise.resolve(),
+      takeFollowUps: () => Promise.resolve([]),
+    },
+    startChildTurn: (o) => {
+      const child = children.get(o.sessionId)!;
+      const target = o.subagent ? agent.subagents[o.subagent] : agent;
+      const fakeStore = {
+        addStep: (_turnId: string, _seq: number, kind: string, name: string | null, payload: unknown) => {
+          child.steps.push({ kind, name, payload });
+          return Promise.resolve();
+        },
+      };
+      (async () => {
+        try {
+          await runTurn({
+            agent: target, sessionId: o.sessionId, turnId: "ct-1", history: o.history ?? [],
+            message: o.message, store: fakeStore as never, emit: (e) => publish(o.sessionId, e), model,
+          });
+          child.status = "completed";
+        } catch {
+          child.status = "failed";
+        }
+      })();
+    },
+  });
+}
+
 Deno.test("built-in agent tool runs a named subagent and returns its text", async () => {
   const agent = await loadAgent(TOY);
   const { store } = memoryStoreCalls();
@@ -348,6 +456,7 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
   await runTurn({
     agent, sessionId: "s-1", turnId: "t-1", history: [],
     message: "delegate", store, emit: (e) => events.push(e), model,
+    spawn: makeChildSpawn(agent, model),
   });
   const ev = events.find(
     (e) => e.type === "action.result" && (e as { data: { result: { toolName: string } } }).data.result.toolName === "agent",
@@ -356,6 +465,15 @@ Deno.test("built-in agent tool runs a named subagent and returns its text", asyn
   assertEquals(ev.data.result.output?.text, "BANANA");
 });
 
+// This only proves buildSdkTools' own `if (depth === 0)` gate works when
+// `depth` is handed to it directly — it says nothing about where a REAL
+// child turn's depth comes from. It kept passing, for the wrong reason,
+// through the entire window where a real child turn (started via
+// handler.ts's startChildTurn -> runTurn) always ran at depth 0 regardless
+// (ctx.depth defaulted to 0 and nothing ever set it for a child), so a child
+// could spawn a grandchild. See the test below for the fix (depth derived
+// from store.isChildSession, not threaded) exercised through the real
+// runTurn.
 Deno.test("subagent runs do not get a nested agent tool (one level only)", async () => {
   const agent = await loadAgent(TOY);
   const { buildSdkTools } = await import("./toolset.ts");
@@ -364,6 +482,53 @@ Deno.test("subagent runs do not get a nested agent tool (one level only)", async
   const top = await buildSdkTools({ agent, sessionId: "s-1", depth: 0 });
   assert("agent" in top);
   assert("skill" in top);
+});
+
+// Fix round 2 (task-6-7-report.md): depth must come from durable state
+// (agents.sessions.parent_session_id via store.isChildSession), not a value
+// threaded down from spawn time — see handler.ts's startTurn and its own
+// comment for why. This drives the REAL runTurn (not just buildSdkTools in
+// isolation) with a depth value obtained from the REAL store.isChildSession,
+// against a session genuinely shaped like a child (parent_session_id set),
+// and inspects the actual tool schema sent to the model (via
+// capturingModel) rather than reaching into buildSdkTools' return value —
+// proving the tool is truly withheld from the model, not just absent from
+// some intermediate object nothing downstream reads.
+Deno.test("depth is derived from durable state: a child session's own turn never gets the agent tool, a top-level session's still does", async () => {
+  const agent = await loadAgent(TOY);
+  const query = (sql: string, params: unknown[] = []) => {
+    if (sql.includes("SELECT parent_session_id FROM agents.sessions")) {
+      const sid = params[0] as string;
+      return Promise.resolve({ rows: [{ parent_session_id: sid === "child-1" ? "parent-1" : null }] });
+    }
+    return Promise.resolve({ rows: [] });
+  };
+  const store = createStore(query as never);
+
+  const topDepth = (await store.isChildSession("top-1")) ? 1 : 0;
+  const childDepth = (await store.isChildSession("child-1")) ? 1 : 0;
+  assertEquals(topDepth, 0, "a session with no parent_session_id is depth 0");
+  assertEquals(childDepth, 1, "a session WITH a parent_session_id is depth 1");
+
+  const top = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "top-1", turnId: "t-1", history: [], message: "hi",
+    store, emit: () => {}, model: top.model, depth: topDepth,
+  });
+  assert(
+    top.calls[0].tools?.some((t: { name: string }) => t.name === "agent"),
+    "a top-level turn must still get the built-in agent tool",
+  );
+
+  const child = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "child-1", turnId: "t-2", history: [], message: "hi",
+    store, emit: () => {}, model: child.model, depth: childDepth,
+  });
+  assert(
+    !child.calls[0].tools?.some((t: { name: string }) => t.name === "agent"),
+    "a child session's own turn must NOT get the agent tool — this is what keeps depth capped at one level",
+  );
 });
 
 // ToolContext.emit: the session path publishes a live tool.event and persists a
@@ -581,4 +746,630 @@ Deno.test("authored tools get ToolContext.sql; provider-sourced (dynamic-tools) 
 
   const dynamicResult = await (tools.dynamicEcho as { execute: (input: unknown) => Promise<unknown> }).execute({});
   assertEquals(dynamicResult, { hasSql: false });
+});
+
+// ---------------------------------------------------------------------------
+// Task 3: onTurnEnd + buildUserMessage.
+// ---------------------------------------------------------------------------
+
+Deno.test("runTurn: onTurnEnd receives the final text and finishReason", async () => {
+  const agent = await loadAgent(TOY);
+  // Collected rather than held in a `let ... | null`: TS narrows such a
+  // binding to `null` at the read site (it cannot see the callback assign to
+  // it), which made `seen?.text` an access on `never`. An array also lets the
+  // test say the hook ran EXACTLY once, which the nullable form never checked.
+  const seen: { text: string; finishReason: string }[] = [];
+  agent.config.onTurnEnd = (turn: { text: string; finishReason: string }) => {
+    seen.push(turn);
+    return Promise.resolve();
+  };
+  const { store } = memoryStoreCalls();
+  const out = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hello", store, emit: () => {},
+    model: sequencedModel(textChunks("all done")),
+    hookCtx: fakeHookCtx(),
+  });
+  assertEquals(out.text, "all done");
+  assertEquals(seen.length, 1, "onTurnEnd must run exactly once per turn");
+  assertEquals(seen[0]?.text, "all done");
+  assertEquals(seen[0]?.finishReason, "stop");
+});
+
+Deno.test("runTurn: a throwing onTurnEnd does not fail the turn", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.onTurnEnd = () => Promise.reject(new Error("stop hook exploded"));
+  const { store } = memoryStoreCalls();
+  const out = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hello", store, emit: () => {},
+    model: sequencedModel(textChunks("done")),
+    hookCtx: fakeHookCtx(),
+  });
+  assertEquals(out.text, "done");
+});
+
+// Controller ruling (task-3): onTurnEnd runs AFTER persistText() and the turn
+// has already succeeded, so a missing hookCtx must neither throw (that would
+// retro-fail completed work) nor silently no-op (a configured-but-unrunnable
+// hook is a caller wiring bug worth surfacing) — it warns and skips.
+Deno.test("runTurn: a configured onTurnEnd hook with no hookCtx warns and is skipped, without failing the turn", async () => {
+  const agent = await loadAgent(TOY);
+  let called = false;
+  agent.config.onTurnEnd = () => {
+    called = true;
+    return Promise.resolve();
+  };
+  const { store } = memoryStoreCalls();
+  const warnings: unknown[][] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args);
+  };
+  let out: { text: string; finishReason: string };
+  try {
+    out = await runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: () => {},
+      model: sequencedModel(textChunks("done")),
+      // no hookCtx
+    });
+  } finally {
+    console.warn = originalWarn;
+  }
+  assertEquals(out.text, "done");
+  assert(!called, "onTurnEnd must not run without a hookCtx");
+  assert(
+    warnings.some((args) => String(args[0]).includes("onTurnEnd") && String(args[0]).includes("hookCtx")),
+    `expected a console.warn mentioning onTurnEnd/hookCtx, got: ${JSON.stringify(warnings)}`,
+  );
+});
+
+Deno.test("runTurn: buildUserMessage rewrites the user message reaching the model", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.buildUserMessage = (base: string) => Promise.resolve(`${base}\n\n<extra>attached</extra>`);
+  const { store } = memoryStoreCalls();
+  const { model, calls } = capturingModel(textChunks("ok"));
+  const out = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "build it", store, emit: () => {}, model,
+    hookCtx: fakeHookCtx(),
+  });
+  assertEquals(out.text, "ok");
+  assertEquals(calls.length, 1);
+  const userMsg = calls[0].prompt.find((m: { role: string }) => m.role === "user");
+  assert(userMsg, "expected a user message in the model's prompt");
+  // ai@6 normalizes a string `content` into a text-part array at the
+  // LanguageModelV3Prompt level (verified via a scratch probe of
+  // streamText's doStream options) — reassemble it back to plain text.
+  // deno-lint-ignore no-explicit-any
+  const userText = Array.isArray(userMsg.content)
+    ? userMsg.content.map((p: { text?: string }) => p.text ?? "").join("")
+    : userMsg.content;
+  assertEquals(userText, "build it\n\n<extra>attached</extra>");
+});
+
+// The system prompt is cache-pointed (withSystemCachePoint) precisely because
+// it is stable across turns. Attachments folded into it by buildUserMessage
+// would invalidate the prompt cache on every request — genuinely constrain
+// this by reading the model's actual system message, not just runTurn's
+// return value.
+Deno.test("runTurn: buildUserMessage leaves the (cache-pointed) system prompt untouched", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.buildUserMessage = (base: string) => Promise.resolve(`${base} EXTRA`);
+  const { store } = memoryStoreCalls();
+  const { model, calls } = capturingModel(textChunks("ok"));
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hi", store, emit: () => {}, model,
+    hookCtx: fakeHookCtx(),
+  });
+  const systemMsg = calls[0].prompt.find((m: { role: string }) => m.role === "system");
+  assert(systemMsg, "expected a system message in the model's prompt");
+  assert(
+    !String(systemMsg.content).includes("EXTRA"),
+    "buildUserMessage must not leak into the cache-pointed system prompt",
+  );
+});
+
+Deno.test("runTurn: a configured buildUserMessage hook without a hookCtx fails loudly instead of silently skipping the hook", async () => {
+  const agent = await loadAgent(TOY);
+  agent.config.buildUserMessage = (base: string) => Promise.resolve(base);
+  const { store } = memoryStoreCalls();
+  await assertRejects(
+    () =>
+      runTurn({
+        agent, sessionId: "s-1", turnId: "t-1", history: [],
+        message: "hello", store, emit: () => {},
+        model: sequencedModel(textChunks("hi")), // no hookCtx
+      }),
+    Error,
+    "hookCtx",
+  );
+});
+
+// --- Compaction-trigger usage accounting -----------------------------------
+// ai@6's fullStream carries per-step usage ONLY on `finish-step`; the terminal
+// `finish` part carries `totalUsage`, which its own types document as "the sum
+// of all step usages". runner.ts must persist the LAST step's inputTokens as a
+// separate `lastStepInputTokens` field, because that — not the sum — is what
+// approximates how full the context window is. store.ts's getLastTurnUsage
+// feeds it straight into compact.ts's compaction threshold.
+// deno-lint-ignore no-explicit-any
+function usageCapturingStore(): { store: ReturnType<typeof createStore>; inserted: Array<{ kind: string; usage: any }> } {
+  // deno-lint-ignore no-explicit-any
+  const inserted: Array<{ kind: string; usage: any }> = [];
+  const fn = (sql: string, params: unknown[]) => {
+    if (sql.includes("INSERT INTO agents.steps")) {
+      inserted.push({
+        kind: params[2] as string,
+        usage: params[5] == null ? null : JSON.parse(params[5] as string),
+      });
+    }
+    if (sql.includes("RETURNING id, seq")) return Promise.resolve({ rows: [{ id: "t-1", seq: 1 }] });
+    return Promise.resolve({ rows: [] });
+  };
+  return { store: createStore(fn as never), inserted };
+}
+
+Deno.test("a multi-step turn persists the LAST step's input tokens, not the summed total", async () => {
+  const agent = await loadAgent(TOY);
+  const { store, inserted } = usageCapturingStore();
+
+  // Step 1 prefills 30_000 tokens and calls a tool; step 2 prefills 30_400
+  // (the tool result appended to the same context). totalUsage sums those to
+  // 60_400 — a number describing no context that ever existed.
+  const step1 = [
+    { type: "tool-call", toolCallId: "c-1", toolName: "shout", input: JSON.stringify({ text: "hi" }) },
+    {
+      type: "finish",
+      finishReason: { unified: "tool-calls", raw: "tool-calls" },
+      usage: { inputTokens: { total: 30_000 }, outputTokens: { total: 10 } },
+    },
+  ];
+  const step2 = [
+    { type: "text-start", id: "1" },
+    { type: "text-delta", id: "1", delta: "done" },
+    { type: "text-end", id: "1" },
+    {
+      type: "finish",
+      finishReason: { unified: "stop", raw: "stop" },
+      usage: { inputTokens: { total: 30_400 }, outputTokens: { total: 4 } },
+    },
+  ];
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "shout", store, emit: () => {},
+    model: sequencedModel(step1, step2),
+  });
+
+  const finish = inserted.find((s) => s.kind === "finish");
+  assert(finish, "no finish step was persisted");
+  assertEquals(finish.usage.lastStepInputTokens, 30_400);
+  // The summed total is still persisted under its billing name — it is just
+  // no longer what the compaction threshold reads.
+  assertEquals(finish.usage.inputTokens, 60_400);
+});
+
+Deno.test("a single-step turn's lastStepInputTokens equals its only step's prefill", async () => {
+  const agent = await loadAgent(TOY);
+  const { store, inserted } = usageCapturingStore();
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hi", store, emit: () => {},
+    model: sequencedModel([
+      { type: "text-start", id: "1" },
+      { type: "text-delta", id: "1", delta: "yo" },
+      { type: "text-end", id: "1" },
+      {
+        type: "finish",
+        finishReason: { unified: "stop", raw: "stop" },
+        usage: { inputTokens: { total: 4_242 }, outputTokens: { total: 2 } },
+      },
+    ]),
+  });
+  const finish = inserted.find((s) => s.kind === "finish");
+  assert(finish, "no finish step was persisted");
+  assertEquals(finish.usage.lastStepInputTokens, 4_242);
+  assertEquals(finish.usage.inputTokens, 4_242);
+});
+
+// ---------------------------------------------------------------------------
+// Task 12 (2026-08-27-agent-orchestration): agent_send / prepareStep. A child
+// has exactly ONE turn, so a message queued for it (spawn.ts's sendToChild)
+// is only meaningful DURING that turn — prepareStep is the only hook that
+// runs BETWEEN steps of an already-streaming turn. See
+// .superpowers/sdd/2026-08-27-agent-orchestration/task-12-brief.md.
+// ---------------------------------------------------------------------------
+
+Deno.test("makePrepareStep injects a pending follow-up before the next step", async () => {
+  const drained: string[] = [];
+  const { prepareStep: prepare } = makePrepareStep({
+    sessionId: "c-1",
+    store: {
+      takeFollowUps: (sid: string) => {
+        drained.push(sid);
+        return Promise.resolve([{ message: "stop and summarize", originChildSessionId: null }]);
+      },
+    },
+  });
+  const out = await prepare({ messages: [{ role: "user", content: "go" }] } as never);
+  assertEquals(drained, ["c-1"]);
+  const msgs = (out as { messages: unknown[] }).messages;
+  assertEquals(msgs.length, 2);
+  assert(JSON.stringify(msgs[1]).includes("stop and summarize"));
+});
+
+Deno.test("makePrepareStep leaves messages untouched when nothing is pending", async () => {
+  const { prepareStep: prepare } = makePrepareStep({
+    sessionId: "c-1",
+    store: { takeFollowUps: () => Promise.resolve([]) },
+  });
+  const out = await prepare({ messages: [{ role: "user", content: "go" }] } as never);
+  assertEquals(out, {});
+});
+
+Deno.test("runTurn wires prepareStep to drain a child session's pending follow-ups between steps", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const drainCalls: number[] = [];
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drainCalls.push(drainCalls.length);
+      // Nothing pending before step 1; a message lands before step 2.
+      return Promise.resolve(
+        drainCalls.length === 1 ? [] : [{ message: "please wrap up now", originChildSessionId: null }],
+      );
+    },
+  };
+  const { model, calls } = capturingModel(toolCallChunks("echo", { text: "hi" }), textChunks("done"));
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+  assert(drainCalls.length >= 2, "prepareStep should run before each step of a child's turn");
+  const secondCallPrompt = JSON.stringify(calls[1]?.prompt ?? calls[1]);
+  assert(secondCallPrompt.includes("please wrap up now"), "the pending follow-up should reach the model's next step");
+});
+
+// --- agent_stop's interrupt half (aborts.ts) --------------------------------
+//
+// The signal must reach the PROVIDER call, not merely be accepted by runTurn:
+// what an interrupt has to cancel is the in-flight model request, which is
+// the only thing here that can be mid-flight for minutes while the child
+// keeps calling tools and keeps billing.
+Deno.test("runTurn hands its abort signal to the model call", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const controller = new AbortController();
+  const { model, calls } = capturingModel(textChunks("done"));
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store, emit: () => {},
+    model, depth: 1, abortSignal: controller.signal,
+  });
+  assertEquals(calls[0].abortSignal, controller.signal, "the model call must receive the turn's abort signal");
+});
+
+// ai emits an `abort` part and then simply ENDS the stream. Left unhandled,
+// runTurn would return normally and a stopped turn would be reported as a
+// completed one — and handler.ts would take its success path, delivery to the
+// parent included, for a turn that produced nothing.
+Deno.test("an aborted turn fails (and persists why) rather than reporting a completed turn", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const steps: Array<{ kind: string; payload: unknown }> = [];
+  const recording = {
+    ...store,
+    addStep: (_t: string, _s: number, kind: string, _n: unknown, payload: unknown) => {
+      steps.push({ kind, payload });
+      return Promise.resolve();
+    },
+  };
+  const controller = new AbortController();
+  const model = new MockLanguageModelV3({
+    // Stalls until the abort lands — the shape a real long child turn has
+    // when its parent stops it.
+    // deno-lint-ignore no-explicit-any
+    doStream: async (options: any) => {
+      await new Promise<void>((resolve) => {
+        if (options.abortSignal?.aborted) return resolve();
+        options.abortSignal?.addEventListener("abort", () => resolve());
+      });
+      // An empty stream rather than simulateReadableStream: the latter
+      // schedules a real timer per chunk, and nothing consumes them once the
+      // turn has been aborted — Deno's leak sanitizer counts those.
+      return {
+        stream: new ReadableStream({
+          start(c) {
+            c.close();
+          },
+        }),
+      };
+    },
+  });
+  const run = runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store: recording as never, emit: () => {},
+    model, depth: 1, abortSignal: controller.signal,
+  });
+  controller.abort();
+  const err = await assertRejects(() => run, Error);
+  assert(err.message.includes("aborted"), `expected an abort failure, got: ${err.message}`);
+  const errorStep = steps.find((s) => s.kind === "error");
+  assert(errorStep, "an aborted turn must persist an error step so a replay shows why it stops here");
+  assert(
+    JSON.stringify(errorStep.payload).includes("aborted"),
+    `the persisted reason must say the turn was aborted, got: ${JSON.stringify(errorStep.payload)}`,
+  );
+});
+
+Deno.test("runTurn never calls takeFollowUps for a top-level (non-child) turn — the hot-path cost note", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let called = false;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      called = true;
+      return Promise.resolve([]);
+    },
+  };
+  await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hi", store: wrapped as never, emit: () => {},
+    model: sequencedModel(textChunks("ok")),
+    // depth omitted entirely — the overwhelmingly common (top-level) case.
+  });
+  assertEquals(called, false, "a top-level turn must not query the follow-up queue at all");
+});
+
+// --- model-call retry wiring (service/retry.ts) ------------------------------
+
+// A rate limit that arrives as an `error` PART rather than a rejection — the
+// case runner.ts's own comment flags, and the one a naive
+// withModelRetry(() => streamText(...)) cannot see at all.
+const rateLimited = () =>
+  new APICallError({
+    message: "rate limit exceeded",
+    url: "https://example.test/v1",
+    requestBodyValues: {},
+    statusCode: 429,
+  });
+
+Deno.test("runTurn retries a 429 that arrives before any output, and publishes model.retrying", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+
+  const res = await runTurn({
+    agent, sessionId: "s-1", turnId: "t-1", history: [],
+    message: "hello", store, emit: (e) => events.push(e),
+    model: sequencedModel([{ type: "error", error: rateLimited() }], textChunks("hi there")),
+    retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+  });
+
+  assertEquals(res.text, "hi there");
+  assertEquals(waits, [5_000]);
+  const retrying = events.filter((e) => e.type === "model.retrying");
+  assertEquals(retrying.length, 1);
+  const data = (retrying[0] as { data: { attempt: number; delayMs: number; phase: string; turnId?: string } }).data;
+  assertEquals(data.attempt, 1);
+  assertEquals(data.delayMs, 5_000);
+  assertEquals(data.phase, "turn");
+  assertEquals(data.turnId, "t-1");
+  // The abandoned attempt contributed no text and no duplicate turn boundary.
+  assertEquals(events.filter((e) => e.type === "turn.completed").length, 1);
+  assertEquals(
+    events.filter((e) => e.type === "message.appended").map((e) => (e as { data: { messageDelta: string } }).data.messageDelta),
+    ["hi there"],
+  );
+});
+
+Deno.test("runTurn does not retry a 401 — it fails the turn on the first attempt", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+  let starts = 0;
+
+  const model = new MockLanguageModelV3({
+    doStream: () => {
+      starts++;
+      return Promise.resolve({
+        stream: simulateReadableStream({
+          chunks: [{
+            type: "error",
+            error: new APICallError({
+              message: "invalid api key",
+              url: "https://example.test/v1",
+              requestBodyValues: {},
+              statusCode: 401,
+            }),
+          }],
+        }),
+      });
+    },
+  });
+
+  await assertRejects(() =>
+    runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: (e) => events.push(e),
+      model,
+      retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+    })
+  );
+
+  assertEquals(starts, 1, "an auth failure must not be re-requested");
+  assertEquals(waits, []);
+  assertEquals(events.filter((e) => e.type === "model.retrying").length, 0);
+});
+
+Deno.test("runTurn does NOT retry a 429 that arrives after text was already emitted", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  const events: AgentEvent[] = [];
+  const waits: number[] = [];
+  let starts = 0;
+
+  const model = new MockLanguageModelV3({
+    doStream: () => {
+      starts++;
+      return Promise.resolve({
+        stream: simulateReadableStream({
+          chunks: [
+            { type: "text-start", id: "1" },
+            { type: "text-delta", id: "1", delta: "partial" },
+            { type: "error", error: rateLimited() },
+          ],
+        }),
+      });
+    },
+  });
+
+  // Retrying here would re-stream "partial" into the channel a second time.
+  // The contract is pre-output only, so the turn fails instead.
+  await assertRejects(() =>
+    runTurn({
+      agent, sessionId: "s-1", turnId: "t-1", history: [],
+      message: "hello", store, emit: (e) => events.push(e),
+      model,
+      retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+    })
+  );
+
+  assertEquals(starts, 1);
+  assertEquals(waits, []);
+  assertEquals(events.filter((e) => e.type === "message.appended").length, 1);
+});
+
+// The retry contract is defined over stream PARTS, but prepareStep fires
+// BEFORE any part exists — and for a child turn it is DESTRUCTIVE
+// (takeFollowUps is a DELETE ... RETURNING). An abandoned attempt therefore
+// takes the row out of the queue and then throws away the prompt it was
+// injected into. Without makePrepareStep's carry-across buffer the message is
+// gone from both the database and the retried request, while sendToChild has
+// already told the sender it was queued.
+Deno.test("a retried child turn still delivers a follow-up the abandoned attempt drained", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      // DELETE ... RETURNING: only the FIRST drain ever sees the row.
+      return Promise.resolve(
+        drains === 1 ? [{ message: "stop and summarize", originChildSessionId: null }] : [],
+      );
+    },
+  };
+
+  // capturingModel records each doStream call's options, so the assertions
+  // below read the prompt the model was ACTUALLY handed on each attempt.
+  const { model, calls } = capturingModel([{ type: "error", error: rateLimited() }], textChunks("ok"));
+  const waits: number[] = [];
+  const res = await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "explore", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+    retrySleep: (ms) => (waits.push(ms), Promise.resolve()),
+  });
+
+  assertEquals(res.text, "ok");
+  assertEquals(waits, [5_000], "the 429 must have been retried");
+  assertEquals(calls.length, 2, "the model must have been called twice");
+  assertEquals(drains, 2, "the retried attempt runs prepareStep again");
+  assert(
+    JSON.stringify(calls[0]?.prompt).includes("stop and summarize"),
+    "sanity: the first attempt did receive the follow-up",
+  );
+  // The queue is empty by now, so ONLY the carry-across buffer can put the
+  // message in front of the model on the second attempt.
+  assert(
+    JSON.stringify(calls[1]?.prompt).includes("stop and summarize"),
+    "the drained follow-up never reached the model on the retry: " + JSON.stringify(calls[1]?.prompt),
+  );
+});
+
+// The buffer must not turn "delivered once" into "delivered every step".
+// Worth pinning because the two facts that make it safe are both non-obvious:
+// a committing part from step 1 clears the buffer before step 2 prepareStep
+// runs, AND ai@6 per-step "messages" override does NOT persist into later
+// steps (verified here - step 2 prompt is the SDK own accumulated
+// conversation, with no trace of step 1 override). So the message reaches the
+// model exactly once, which is the pre-existing semantic the carry-across
+// buffer had to preserve rather than change.
+Deno.test("a follow-up delivered to one step is not re-injected into the next", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      return Promise.resolve(
+        drains === 1 ? [{ message: "wrap up now", originChildSessionId: null }] : [],
+      );
+    },
+  };
+  const { model, calls } = capturingModel(toolCallChunks("echo", { text: "hi" }), textChunks("done"));
+
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+
+  assert(drains >= 2, "prepareStep runs before each step");
+  const per = calls.map((c) => JSON.stringify(c?.prompt ?? c).split("wrap up now").length - 1);
+  const total = per.reduce((a: number, b: number) => a + b, 0);
+  assertEquals(total, 1, "the follow-up must reach the model exactly once across the turn, got " + per);
+  assertEquals(per[0], 1, "and it must be the step it was injected into that carried it");
+});
+
+// The test above drains at step 0, which is the case that was ALREADY safe:
+// the seal clears the buffer before step 1 ever asks. The dangerous case is a
+// message that arrives LATER — which is the case agent_send exists for, since
+// a message sent while the child is inside a long tool call reaches step >= 1
+// by construction. After the stream has sealed there is no further attempt to
+// carry into, so continuing to carry is not merely redundant, it re-injects
+// the same instruction into every remaining step of the turn.
+Deno.test("a follow-up arriving at a LATER step is delivered once, not re-injected into every remaining step", async () => {
+  const agent = await loadAgent(TOY);
+  const { store } = memoryStoreCalls();
+  let drains = 0;
+  const wrapped = {
+    ...store,
+    takeFollowUps: (_sid: string) => {
+      drains++;
+      // Nothing queued before step 0; the message lands during the turn, on
+      // the SECOND drain.
+      return Promise.resolve(
+        drains === 2 ? [{ message: "do X now", originChildSessionId: null }] : [],
+      );
+    },
+  };
+  // Three steps: two tool calls (distinct ids) then a closing text step, so
+  // there are two prepareStep calls AFTER the one that picked the message up.
+  const { model, calls } = capturingModel(
+    toolCallChunks("echo", { text: "one" }, "c-1"),
+    toolCallChunks("echo", { text: "two" }, "c-2"),
+    textChunks("done"),
+  );
+
+  await runTurn({
+    agent, sessionId: "c-1", turnId: "t-1", history: [],
+    message: "start", store: wrapped as never, emit: () => {},
+    model, depth: 1,
+  });
+
+  assert(drains >= 3, "the turn must have run at least three steps, got " + drains);
+  const per = calls.map((c) => JSON.stringify(c?.prompt ?? c).split("do X now").length - 1);
+  const total = per.reduce((a: number, b: number) => a + b, 0);
+  assertEquals(total, 1, "the follow-up must reach the model exactly once across the turn, per-step counts: " + per);
 });

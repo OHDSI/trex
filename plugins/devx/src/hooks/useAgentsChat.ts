@@ -17,7 +17,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getToolName, isToolUIPart } from "ai";
 import * as api from "@/lib/api";
 import { getAuthToken } from "@/lib/api";
-import { AGENTS_SESSION_URL } from "@/lib/config";
+import { AGENTS_SESSION_URL, API_BASE } from "@/lib/config";
+import { buildTurnMetadata, type TurnMetadata, type UploadedAttachment } from "./turnMetadata";
 import type { AgentTodo, BuildAction, ChatMode, ConsentRequest } from "@/lib/types";
 import type { VisualEditContext, SelectedComponent } from "@/lib/visual-editing-types";
 import {
@@ -174,6 +175,9 @@ export function useAgentsChat(
   const metadataRef = useRef<{ mode?: "ask" | "plan" | "build"; chatId: string; appId?: string }>({
     chatId: chatId ?? "",
   });
+  // NOTE: per-turn attachments are NOT held here — they belong to one send(),
+  // not to the chat. buildTurnMetadata (./turnMetadata.ts) folds them onto a
+  // copy of this ref's value inside send's async body.
   useEffect(() => {
     metadataRef.current = { mode: toAgentMode(mode), chatId: chatId ?? "", appId: appId ?? undefined };
   }, [mode, chatId, appId]);
@@ -529,7 +533,16 @@ export function useAgentsChat(
   }, [sessionState.turnActive, sessionState.turnError, releaseSendGate]);
 
   const send = useCallback(
-    (prompt: string, context?: { visualEdit?: VisualEditContext; selectedComponents?: SelectedComponent[] }) => {
+    (
+      prompt: string,
+      context?: { visualEdit?: VisualEditContext; selectedComponents?: SelectedComponent[] },
+      // ChatInput hands its picked files to AgentsChatPanel, which passes
+      // them straight here. Before this existed the whole eve loop silently
+      // dropped them: nothing wrote metadata.attachments, so agent.ts's
+      // buildUserMessage always early-returned and the coder never saw a
+      // screenshot the user had dragged in.
+      files?: File[],
+    ) => {
       if (!chatId || streaming) return;
       // Fix (review): synchronous double-submit guard — check-and-set BEFORE
       // any await (and before the optimistic state writes below), so a
@@ -586,7 +599,25 @@ export function useAgentsChat(
         saveCachedSessionId(chatId, id);
         return id;
       };
-      const postTurn = async (sessionId: string): Promise<void> => {
+      // Upload the picked files first — the turn metadata carries {url, name}
+      // references (the shape buildUserMessage filters for), never the bytes.
+      // A failed upload is per-file and non-fatal: the turn still runs, with
+      // one fewer attachment, matching materializeAttachments' own per-file
+      // posture rather than losing the user's message over it.
+      const uploadAttachments = async (): Promise<UploadedAttachment[]> => {
+        if (!files?.length || !chatId) return [];
+        const results = await Promise.all(
+          files.map((f) =>
+            api.uploadAttachment(chatId, f).catch((err) => {
+              console.error("useAgentsChat: attachment upload failed:", err);
+              return null;
+            })
+          ),
+        );
+        return results.filter((r): r is UploadedAttachment => r !== null);
+      };
+
+      const postTurn = async (sessionId: string, metadata: TurnMetadata): Promise<void> => {
         // Pass OUR epoch (fix, re-review #1): a stale send must not let
         // ensureStreamOpen self-capture a fresh epoch and open a stream
         // that considers itself current.
@@ -598,17 +629,22 @@ export function useAgentsChat(
         const res = await fetch(`${AGENTS_SESSION_URL}/${sessionId}`, {
           method: "POST",
           headers: authHeaders(),
-          body: JSON.stringify({ message: text, metadata: metadataRef.current }),
+          body: JSON.stringify({ message: text, metadata }),
         });
         if (!res.ok) throw new HttpError(`send failed (${res.status})`, res.status);
       };
 
       void (async () => {
         try {
+          // Built once per send and reused by the 404-retry below, so the
+          // retried turn carries the SAME attachments (re-uploading them
+          // would duplicate the rows and the workspace files).
+          const turnMetadata = buildTurnMetadata(metadataRef.current, await uploadAttachments(), API_BASE);
+          if (isStale()) throw new HttpError("send superseded by chat switch", 0);
           const existing = sessionIdRef.current;
           if (existing) {
             try {
-              await postTurn(existing);
+              await postTurn(existing, turnMetadata);
             } catch (err) {
               // Fix (review): stale cached session id (agents.sessions row
               // gone server-side, e.g. wiped DB behind a browser that kept
@@ -623,13 +659,13 @@ export function useAgentsChat(
                 sessionIdRef.current = null;
                 streamRef.current?.controller.abort();
                 streamRef.current = null;
-                await postTurn(await createSession());
+                await postTurn(await createSession(), turnMetadata);
               } else {
                 throw err;
               }
             }
           } else {
-            await postTurn(await createSession());
+            await postTurn(await createSession(), turnMetadata);
           }
           // Fix (re-review #2): the POST was accepted — arm the watchdog
           // for the turn's first sign of life. Cleared by the

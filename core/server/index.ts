@@ -24,12 +24,15 @@ import { addPluginRoutes } from "./routes/plugin.ts";
 import { functionsRouter } from "./routes/functions.ts";
 import { cliLoginRouter } from "./routes/cli-login.ts";
 import { nativeIdpEnabled } from "./auth/native-idp.ts";
+import { rolesRouter } from "./auth/roles-api.ts";
 import { oidcProviderEnabled, registerOidcRoutes } from "./auth/oidc/router.ts";
 import { seedClientFromEnv } from "./auth/oidc/seed.ts";
+import { getActiveSigningKey } from "./auth/oidc/keys.ts";
 import { fnmap } from "./plugin/function.ts";
 import { apiLimiter } from "./middleware/rate-limit.ts";
-import { applyD2eCompat, applyD2eCompatEarly, D2E_COMPAT, runD2eBoot, runD2eBootstrap, syncD2ePlugins } from "./d2e-compat/index.ts";
+import { applyD2eCompat, applyD2eCompatEarly, assertD2eProvisioned, D2E_COMPAT, runD2eBoot, syncD2ePlugins } from "./d2e-compat/index.ts";
 import { parseReadyPort, startBootstrapReadySignal } from "./d2e-compat/bootstrap-ready.ts";
+import { collectProvisionTargets, runProvisionTargets } from "./plugin/provision.ts";
 import { startNativeWebApi } from "./webapi-native.ts";
 import { handleRealtimeUpgrade, mountRealtime, startRealtimeService, stopRealtimeService } from "./realtime/index.ts";
 
@@ -173,6 +176,11 @@ if (nativeIdpEnabled()) {
     },
   );
 }
+
+// Application-role administration. Always mounted: it is an admin API guarded by
+// the caller's own token, not part of the login surface the native IdP switch
+// turns off.
+app.use(`${BASE_PATH}/admin/roles`, rolesRouter);
 
 // OIDC provider. Separate switch from the native IdP: a deployment may want the
 // protocol surface for its relying parties without exposing email/password
@@ -520,16 +528,29 @@ app.use("/plugins/trex/studio/api", (req, res, next) => {
   });
 });
 
-// Provision d2e's roles/schemas/grants before plugins load — plugin init
-// functions and plugin migrations both connect using the users created here.
+// Run every plugin-declared `trex.provision` module before plugins load —
+// plugin init functions and plugin migrations both connect using the roles these
+// create. Collected by a filesystem pre-pass so the modules can run ahead of the
+// scan that would otherwise register them.
 // Deliberately OUTSIDE the plugin-init try/catch below: that catch logs and
 // carries on to server.listen, which would leave trex reporting healthy on an
-// unprovisioned database. A bootstrap failure is fatal, same abort idiom as the
-// DEK init further down.
+// unprovisioned database. A provisioning failure is fatal, same abort idiom as
+// the DEK init further down.
 try {
-  await runD2eBootstrap();
+  const provisionTargets = await collectProvisionTargets([
+    Deno.env.get("PLUGINS_DEV_PATH") || "./plugins-dev",
+    Deno.env.get("PLUGINS_PATH") || "./plugins",
+  ]);
+  assertD2eProvisioned(provisionTargets.length);
+  if (provisionTargets.length > 0) {
+    const applied = await runProvisionTargets(provisionTargets, {
+      exec: (sql) => pool.query(sql),
+      env: Deno.env.toObject(),
+    });
+    console.log(`provision: ${provisionTargets.length} plugin(s), ${applied} statement(s) applied`);
+  }
 } catch (err) {
-  console.error("[boot] FATAL: d2e bootstrap failed:", err);
+  console.error("[boot] FATAL: database provisioning failed:", err);
   if (typeof Deno.exit === "function") Deno.exit(1);
   throw err;
 }
@@ -798,6 +819,17 @@ app.all(`${BASE_PATH}/pg/v1/*`, express.json({ limit: "5mb" }), async (req, res)
 try {
   await initDek(pool);
   console.log("[boot] DEK initialized");
+  // Mint the OIDC signing key now rather than on the first token. Relying
+  // parties fetch jwks_uri as soon as they discover the provider, and a JWKS
+  // served empty can be cached that way, leaving every id_token unverifiable
+  // until the client happens to refresh. It has to come after initDek: the
+  // private key is stored encrypted, so minting it any earlier fails with
+  // "DEK not initialized". Fire-and-forget, like the client seed.
+  if (oidcProviderEnabled()) {
+    void getActiveSigningKey().catch((err) =>
+      console.error("[oidc] could not prepare the signing key:", err)
+    );
+  }
 } catch (err) {
   console.error("[boot] FATAL: DEK init failed:", err);
   // This service runs inside the trex host's embedded edge runtime, which does
@@ -1422,16 +1454,21 @@ if (initialKeyName) {
   }
 }
 
-// The embedded WebAPI is part of the base image, not of d2e compatibility, so
-// it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it
-// here rather than from an external init job means a bare `restart` of this
-// container brings WebAPI back with it.
-await startNativeWebApi();
-
 await runD2eBoot();
 
 server.listen(8000, () => {
   console.log("server listening on port 8000");
+
+  // The embedded WebAPI is part of the base image, not of d2e compatibility, so
+  // it starts regardless of D2E_COMPAT (see WEBAPI_NATIVE_ENABLED). Starting it
+  // here rather than from an external init job means a bare `restart` of this
+  // container brings WebAPI back with it.
+  //
+  // It goes last, and deliberately after listen: WebAPI blocks on the OIDC
+  // discovery document, and when trex is its own IdP that document is served by
+  // this process. Starting it before the listener made the node wait on itself,
+  // so WebAPI never launched and the health endpoint never answered.
+  void startNativeWebApi();
 });
 
 // Start the native realtime replication service without blocking boot — a

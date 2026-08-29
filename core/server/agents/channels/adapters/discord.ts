@@ -260,7 +260,11 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   // coder runs a full agentic turn behind askCodeAgent). Re-trigger on a
   // heartbeat so the channel keeps showing activity until the turn delivers,
   // then stop. Keyed by channel id; a new turn replaces any prior heartbeat.
-  const typingHeartbeats = new Map<string, number>();
+// `number` is the browser/Deno return type; under this workspace's node typings
+// setTimeout/setInterval return a Node `Timeout` object instead. Deriving the
+// type from the function keeps it correct either way — hardcoding `number` is
+// what `deno check` flags here.
+  const typingHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
   const TYPING_INTERVAL_MS = 8_000;
   const TYPING_MAX_TICKS = 75; // ~10 min cap, then give up so a parked/idle turn can't type forever.
 
@@ -373,6 +377,29 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
         });
       } catch (e) {
         console.warn("discord: message.queued acknowledgement failed — swallowed:", e);
+      }
+    },
+    // A reap (lazy on-message, service/handler.ts's busy branch, or Task 3's
+    // periodic sweep) previously left total silence — the turn just stopped,
+    // with no indication anything had gone wrong or that a resend would help.
+    // Best-effort like message.queued right above: never throws, a delivery
+    // failure is swallowed and logged, not escalated. See docs/superpowers/
+    // plans/2026-08-24-never-stuck.md.
+    async "turn.reaped"(data, channelCtx) {
+      const state = stateOf(channelCtx);
+      if (!state.channelId) return;
+      const { count } = (data ?? {}) as { count?: number };
+      const content = (count ?? 1) <= 1
+        ? "This got stuck and timed out — I've reset it. Send your message again to continue."
+        : `${count} stuck steps timed out — I've reset them. Send your message again to continue.`;
+      try {
+        await sendDiscordChannelMessage({
+          ...apiOpts(),
+          channelId: state.channelId,
+          body: { content },
+        });
+      } catch (e) {
+        console.warn("discord: turn.reaped notification failed — swallowed:", e);
       }
     },
   };

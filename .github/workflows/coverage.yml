@@ -42,14 +42,13 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            plugins/${{ matrix.plugin }}/target
-          key: coverage-${{ matrix.plugin }}-${{ runner.os }}-${{ hashFiles(format('plugins/{0}/Cargo.lock', matrix.plugin)) }}
-          restore-keys: coverage-${{ matrix.plugin }}-${{ runner.os }}-
+      # No build cache here on purpose. Thirteen plugins x ~1 GB is more than
+      # the repo's entire 10 GB Actions quota, and this workflow is fully
+      # parallel to plugin-ci and informational-only (the gate never fails), so
+      # a hit here buys runner minutes but zero pipeline wall-clock. The quota
+      # is spent where it shortens the critical path instead -- see the cache
+      # budget note in plugin-ci.yml. Coverage measured the same ~20 min with
+      # these caches configured as without, because they were being evicted.
 
       - name: Install PostgreSQL 17 dev headers (pg_trex only)
         if: matrix.plugin == 'pg_trex'

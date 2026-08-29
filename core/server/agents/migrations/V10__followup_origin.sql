@@ -1,0 +1,35 @@
+-- Which child, if any, a queued followup exists BECAUSE of.
+--
+-- The wake budget (MAX_CONSECUTIVE_WAKES) counts turns this session ran
+-- because a child completed rather than because anyone asked. A turn the
+-- parent CHAINS for followups it drained when its own turn ended is such a
+-- turn whenever those followups came from children — and looks like an
+-- ordinary turn otherwise. Getting that distinction wrong in either direction
+-- breaks the guard: reset when it should not have, and the runaway loop it
+-- bounds is unreachable; skip a reset when it should have happened, and a
+-- legitimately busy session walks toward the cap for no reason.
+--
+-- V9 answered it with agents.sessions.pending_wake_child_id: one slot per
+-- SESSION, written before each delivery and retired only by an external turn.
+-- That was a deliberate approximation, and its cost was a deferral with no
+-- bound: a session taking a steady stream of human messages mid-turn chains
+-- turn after turn, each of which sees the standing stamp and skips the reset,
+-- even for a chain that drained nothing but human text. The stamp only ever
+-- cleared once a message landed on an IDLE session.
+--
+-- Recording the origin on the ROW removes the approximation entirely: a
+-- chained turn decides from exactly what it drained. NULL means "nobody asked
+-- for this on a child's behalf" — a human/channel message queued behind a busy
+-- turn, which is the overwhelming majority of rows and needs no backfill.
+--
+-- Not a foreign key, for the same reason pending_wake_child_id is not: the
+-- marker must outlive the child row it names, and it is only ever compared
+-- for NULL-ness or passed straight back as an opaque id.
+ALTER TABLE agents.turn_followups
+    ADD COLUMN IF NOT EXISTS origin_child_session_id UUID;
+
+-- agents.sessions.pending_wake_child_id (V9) is superseded by the column
+-- above and is no longer read or written. It is deliberately LEFT IN PLACE
+-- rather than dropped: dropping a column mid rolling deploy breaks whichever
+-- side of the deploy has not swapped yet, and the cost of keeping an unused
+-- nullable column is nothing.

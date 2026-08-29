@@ -31,6 +31,7 @@ import {
 } from "./id-token.ts";
 import { getJwks } from "./keys.ts";
 import { issuerUrl, loginUrl, oidcProviderEnabled, readCookie } from "./config.ts";
+import { buildReturnTo } from "./policy.ts";
 
 export { issuerUrl, oidcProviderEnabled, readCookie };
 
@@ -52,11 +53,22 @@ async function fetchUser(id: string): Promise<IdTokenUser | null> {
   );
   if (!result.rows.length) return null;
   const row = result.rows[0];
+
+  const roles = await pool.query<{ name: string }>(
+    `SELECT r.name
+       FROM trexdb.user_role ur
+       JOIN trexdb.role r ON r.id = ur."roleId"
+      WHERE ur."userId" = $1
+      ORDER BY r.name`,
+    [id],
+  );
+
   return {
     id: row.id,
     email: row.email,
     name: row.name,
     role: row.role,
+    appRoles: roles.rows.map((r) => r.name),
     emailVerified: Boolean(row.emailVerified),
   };
 }
@@ -86,16 +98,24 @@ function redirectError(
 }
 
 export function registerOidcRoutes(basePath: string) {
-  const issuer = issuerUrl(undefined, basePath);
+  // The provider is mounted at `${basePath}/oidc`, and OIDC Discovery requires
+  // the document to be reachable at `<issuer>/.well-known/openid-configuration`.
+  // The issuer therefore has to name the mount, not just the base path. With
+  // `<base>/trex` as issuer while the document lives under `<base>/trex/oidc`, a
+  // spec-compliant client derives the issuer from where it fetched, finds the
+  // two disagree, and refuses: Spring's fromOidcIssuerLocation fails its
+  // ClientRegistration bean with "Unable to resolve Configuration with the
+  // provided Issuer", so WebAPI never starts at all.
+  const issuer = issuerUrl(undefined, `${basePath}/oidc`);
 
   router.get("/.well-known/openid-configuration", (_req, res) => {
     res.json({
       issuer,
-      authorization_endpoint: `${issuer}/oidc/authorize`,
-      token_endpoint: `${issuer}/oidc/token`,
-      userinfo_endpoint: `${issuer}/oidc/userinfo`,
-      jwks_uri: `${issuer}/oidc/.well-known/jwks.json`,
-      end_session_endpoint: `${issuer}/oidc/session/end`,
+      authorization_endpoint: `${issuer}/authorize`,
+      token_endpoint: `${issuer}/token`,
+      userinfo_endpoint: `${issuer}/userinfo`,
+      jwks_uri: `${issuer}/.well-known/jwks.json`,
+      end_session_endpoint: `${issuer}/session/end`,
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code"],
       subject_types_supported: ["public"],
@@ -169,7 +189,7 @@ export function registerOidcRoutes(basePath: string) {
           return;
         }
         const target = new URL(login);
-        target.searchParams.set("return_to", `${issuer}${req.originalUrl}`);
+        target.searchParams.set("return_to", buildReturnTo(issuer, req.originalUrl));
         res.redirect(302, target.toString());
         return;
       }

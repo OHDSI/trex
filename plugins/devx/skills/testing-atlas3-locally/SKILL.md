@@ -5,15 +5,18 @@ description: Use when running, previewing or verifying Atlas3 / OHDSI ATLAS v3 l
 
 # Testing Atlas3 locally
 
-Atlas3 is a standalone Vue 3 + Vite app (`/home/ph/code/Atlas3`), **not** a
+Atlas3 is a standalone Vue 3 + Vite app in its own git repository, **not** a
 d2e app served through trex. `testing-d2e-ui` and `d2e-ui-preview` are about
 building a d2e app and overwriting the resources trex serves on :41100 — they
-do not apply here. Plugin authoring lives in **`writing-atlas3-plugins`**.
+do not apply here. Plugin authoring lives in **`writing-atlas3-plugins`**,
+which also covers checking the repo out.
 
 ## Run it
 
 ```bash
-cd /home/ph/code/Atlas3
+# Same checkout writing-atlas3-plugins uses; clone it there if it's missing.
+ATLAS3_DIR="${ATLAS3_DIR:-$HOME/code/Atlas3}"
+cd "$ATLAS3_DIR"
 npm install                       # first time
 BROWSER=none npm run dev          # http://localhost:5173 (strictPort)
 ```

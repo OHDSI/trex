@@ -198,6 +198,61 @@ export function cacheProviderOptions(model: any, cacheKey: string): Record<strin
   return {};
 }
 
+// Task 14: applies a subagent's declared `reasoningEffort` (AgentConfig,
+// resolved by loader.ts's resolveAgentRole) to the resolved model's
+// providerOptions. openai only for now — it's the one provider in this
+// codebase with established precedent for a plain-string `reasoningEffort`
+// providerOption (see model.test.ts's withToolCachePoint fixtures); anthropic
+// reasoning is a token-budget object, not a "low"/"high"/"medium" string, and
+// bolting an incorrect shape onto a live request with no test to catch it is
+// worse than leaving it a no-op there until a real caller needs it. Empty
+// ({}) whenever effort is unset or the model isn't openai — same "no-op for
+// everything this doesn't explicitly support" posture as cacheProviderOptions
+// above.
+//
+// Fix round 1: silently doing nothing off-openai is exactly the trap an
+// agent author falls into — `:reasoning-effort "high"` parses, loads, and
+// then vanishes with nothing in the logs, on anthropic/bedrock, the primary
+// provider family in this codebase. `warnReasoningEffortOnce` logs it ONCE
+// per (agentLabel, provider) pair, not per turn/step — this runs on every
+// streamText call (runner.ts), and a warning on every step of every child
+// turn would be its own bug.
+const warnedReasoningEffort = new Set<string>();
+function warnReasoningEffortOnce(agentLabel: string, provider: string, effort: string): void {
+  const key = `${agentLabel} ${provider}`;
+  if (warnedReasoningEffort.has(key)) return;
+  warnedReasoningEffort.add(key);
+  console.warn(
+    `agents: ${agentLabel} declares reasoningEffort="${effort}" but its resolved model provider is "${provider}", ` +
+      `not openai — reasoningEffort is currently a no-op there (see model.ts's reasoningEffortProviderOptions)`,
+  );
+}
+
+// `agentLabel` (e.g. a LoadedAgent's `dir`) identifies the agent in the
+// warning above; optional only so a caller with no meaningful label (a bare
+// unit test) can omit it, at the cost of a less actionable message.
+// deno-lint-ignore no-explicit-any
+export function reasoningEffortProviderOptions(model: any, effort: string | undefined, agentLabel?: string): Record<string, any> {
+  if (!effort) return {};
+  if (isOpenAIModel(model)) return { openai: { reasoningEffort: effort } };
+  warnReasoningEffortOnce(agentLabel ?? "an agent", String(model?.provider ?? "unknown"), effort);
+  return {};
+}
+
+// Merges N streamText-level providerOptions objects, per-provider-key —
+// `{...a, ...b}` at the top level would let `b`'s "openai" entirely clobber
+// `a`'s (e.g. reasoningEffortProviderOptions' `reasoningEffort` erasing
+// cacheProviderOptions' `promptCacheKey`, or vice versa) instead of the two
+// coexisting under the same provider key.
+// deno-lint-ignore no-explicit-any
+export function mergeProviderOptions(...opts: Record<string, any>[]): Record<string, any> {
+  const out: Record<string, any> = {};
+  for (const o of opts) {
+    for (const [k, v] of Object.entries(o)) out[k] = { ...out[k], ...v };
+  }
+  return out;
+}
+
 // A SystemModelMessage carrying a provider cache marker (Bedrock cachePoint
 // or Anthropic cacheControl), or the plain-string no-op for every other
 // provider.
@@ -262,4 +317,59 @@ export function withSystemCachePoint(model: any, system: string): SystemPrompt {
     };
   }
   return system;
+}
+
+// Task 13/14: the deferred-tool-loading cache breakpoint. `core` tools
+// (never deferred, or deferred-but-not-yet-activated is impossible by
+// construction — see partitionTools in context/toolsplit.ts) come first and
+// are byte-identical across a session regardless of what gets activated;
+// `activated` tools are appended AFTER the breakpoint. For anthropic/bedrock,
+// the cache marker moves from the system message onto the LAST core tool
+// instead — placing it on `system` (as withSystemCachePoint does today)
+// would hash newly-appended activated tools into the same cached span the
+// moment one is activated, forcing a full cache-write on every subsequent
+// turn. Marking the last core tool instead means the cached span is exactly
+// "tools[0..lastCore]", unaffected by anything appended after it. OpenAI
+// gets no marker (automatic prefix caching, see cacheProviderOptions above);
+// google and any other provider get no marker either — stable ordering is
+// the only requirement for those.
+// deno-lint-ignore no-explicit-any
+export function withToolCachePoint<T>(model: any, core: [string, T][], activated: [string, T][]): Record<string, T> {
+  const out: Record<string, T> = {};
+  const lastIdx = core.length - 1;
+  for (const [i, [name, def]] of core.entries()) {
+    const isLast = i === lastIdx;
+    // Merge into any providerOptions the tool already carries (e.g. a
+    // connection-backed tool with its own provider hints) rather than
+    // clobbering it — no tool in the codebase sets providerOptions today,
+    // so this is currently inert, but a silent overwrite would fail a
+    // future tool that does.
+    const existing = (def as { providerOptions?: Record<string, unknown> }).providerOptions;
+    // bedrockSupportsPromptCaching, NOT isBedrockModel. See that predicate's
+    // comment: a non-Anthropic Bedrock model rejects ANY request carrying a
+    // cachePoint with AccessDeniedException, which on a streaming turn kills
+    // the turn silently — typing indicator, no reply. withSystemCachePoint
+    // has always used the narrow gate; this function reintroduced the broad
+    // one, which is the same defect the narrow gate exists to prevent.
+    //
+    // The bedrock branch is KEPT despite being inert on the wire today:
+    // @ai-sdk/amazon-bedrock@4's prepareTools builds each toolSpec from name,
+    // description, strict and inputSchema only — it never reads
+    // tool.providerOptions (verified in the installed dist/index.js), so no
+    // cachePoint reaches Converse from here. Only the SYSTEM-block marker
+    // (withSystemCachePoint) is live on bedrock. It stays because it costs
+    // nothing, because it is the correct placement the moment the provider
+    // starts honouring it, and because deleting it would leave the bedrock
+    // half of the deferred-tool cache design undocumented in code. The
+    // anthropic branch above is NOT inert: @ai-sdk/anthropic@4 reads
+    // tool.providerOptions for cacheControl and emits cache_control on the
+    // wire tool definition.
+    out[name] = isLast && isAnthropicModel(model)
+      ? { ...def, providerOptions: { ...existing, anthropic: { cacheControl: { type: "ephemeral" } } } }
+      : isLast && bedrockSupportsPromptCaching(model)
+      ? { ...def, providerOptions: { ...existing, bedrock: { cachePoint: { type: "default" } } } }
+      : def;
+  }
+  for (const [name, def] of activated) out[name] = def;
+  return out;
 }

@@ -32,8 +32,17 @@ Stream event vocabulary (subset of eve's documented set — see
 `docs/concepts/sessions-runs-and-streaming.md` in the packed eve tarball):
 `turn.started`, `message.appended`, `message.completed`, `actions.requested`,
 `action.result`, `input.requested`, `turn.completed`, `turn.failed`,
-`session.waiting`, `session.failed`, plus one additive trex extension not in
-eve's vocabulary at all: `tool.event` (see divergence 10 below).
+`session.waiting`, `session.failed`, plus additive trex extensions not in
+eve's vocabulary at all: `tool.event` (see divergence 10 below),
+`message.queued`, `turn.reaped`, `context.compacted` (divergence 18), and
+`model.retrying` — published when a model call is refused with a 429/5xx or a
+connection error and will be retried after a backoff (`service/retry.ts`), so
+a client can say "rate limited, retrying in 10s" instead of appearing hung
+through a wait that reaches 60s. Carries `phase` (`"turn"` for the turn's own
+`streamText`, `"compaction"` for the pre-turn summarizer) plus `attempt`,
+`maxAttempts`, `delayMs` and `reason`; `turnId` is absent for the compaction
+phase, which runs before the turn exists. Live-only, like `message.queued`,
+`turn.reaped` and `context.compacted` — never persisted, never replayed.
 `session.waiting`/`session.failed`
 matter more than they look: eve's own client (`eve/client`'s
 `MessageResponse.result()`) ends its per-turn read on
@@ -171,11 +180,15 @@ live-tail by event shape.
       (`buildSdkTools` runs before the UIMessage stream is created, with
       the writer late-bound into `toolEmit`); failures after streaming
       begins surface as in-stream error frames, inherent to SSE.
-    - **Subagents** (depth 1, `toolset.ts`'s `runSubagent`) inherit the
-      parent's `toolEmit` unchanged via the existing `{ ...ctx }` spread — a
-      subagent's `ctx.emit(...)` call lands on the SAME channel (session
-      stream or chat writer) as its parent's, not a distinct one; there is
-      no per-subagent tagging of a `tool.event`'s origin.
+    - **Subagents** (depth 1) inherit the parent's `toolEmit` unchanged: a
+      subagent now runs as its own child SESSION (divergence 19), publishing
+      on its own session stream, and `toolset.ts`'s `runAsChild` relays those
+      events onto the PARENT's `toolEmit` for the duration of a blocking
+      `agent` call. So a subagent's tool events still land on the SAME
+      channel (session stream or chat writer) as its parent's, not a distinct
+      one; there is no per-subagent tagging of a `tool.event`'s origin. (The
+      in-process nested loop this used to describe, `runSubagent`, is gone —
+      it was a second, divergent delegation implementation.)
 11. **`resolveModel`/`buildInstructions` request hooks (H1)** are additive
     `AgentConfig` fields real eve's `defineAgent` doesn't define — eve
     silently ignores unknown fields, so an agent directory that uses them
@@ -231,7 +244,69 @@ live-tail by event shape.
     (`created_by IS NULL`) keep the pre-existing behavior: anyone who has the
     ids can resolve. This has no eve equivalent to diverge from — eve
     documents no approval-resolution authorization model at all.
-15. **`ToolContext.sql` is additive/trex-only** (`eve-shim/types.ts`) — real
+15. **`onToolCall`/`onToolResult` tool-call interception hooks (Task 2)** are
+    also additive `AgentConfig` fields real eve's `defineAgent` doesn't
+    define — eve silently ignores unknown fields, so an agent directory using
+    them still loads on real eve, just without interception (every tool call
+    executes and every result passes through unmodified). Read fresh from
+    `ctx.agent.config` on every call (no agent-load-time caching, same as
+    divergences 11/12), so a subagent turn runs the SUBAGENT's own hooks —
+    same posture as divergence 12's `filterTools` at depth 1. Invoked by
+    `toolset.ts`'s `authoredTool`, INSIDE `execute`, and — load-bearing —
+    AFTER the existing `needsApproval` gate: a hook that ran before the gate
+    could approve a tool call on the user's behalf, so an approval-required
+    call that has no pending decision short-circuits before `onToolCall` ever
+    runs (pinned by a dedicated ordering test in `hooks.test.ts`). Unlike
+    divergence 16's `ToolContext.sql` below (withheld from provider-sourced
+    dynamic-tools.ts/MCP/connection tools because it GRANTS power to a less
+    trusted tool), both hooks apply to every tool routed through
+    `authoredTool` — static, dynamic-tools.ts provider output, and MCP —
+    regardless of origin, since these INTERCEPT rather than grant, so
+    withholding them from the least-trusted tools would invert the intent.
+    **Not intercepted (know this before relying on a hook as a control):**
+    the `skill`, `agent` and `connection_search` built-ins
+    (`skillTool`/`agentTool`/`connectionSearchTool`) are constructed directly
+    and never pass through `authoredTool`, so no hook sees them — notably
+    `agent`, so a policy hook cannot police subagent delegation, and `skill`,
+    so it cannot police which procedure a turn loads. And because the hooks
+    are read from `ctx.agent.config`, a depth-1 subagent runs with the
+    SUBAGENT's config, not the caller's: devx's `.edn` subagents carry no TS
+    config at all, so a subagent turn runs with NO hooks. Concretely, a devx
+    user whose legacy PreToolUse matcher was `Agent|Skill` loses that
+    enforcement entirely at the eve cutover. `onToolCall` may deny the
+    call (`{allow: false, reason?}` → the tool returns `{error: reason}`) or
+    rewrite its input (`{allow: true, input}`) before `def.execute` runs;
+    `onToolResult` may rewrite the tool's return value after it runs. **CORE
+    fails closed**: a throwing/rejecting hook denies THAT CALL (`{error:
+    "on{ToolCall,ToolResult} hook failed: <message>"}`) and the turn
+    continues — the opposite of devx's legacy loop, which caught hook errors
+    and proceeded; a hook whose job is to stop something must not be
+    defeated by its own bug.
+
+    **That core guarantee does NOT make the whole chain fail-closed**, and
+    this must not be read as though it did. It covers only the hook
+    FUNCTION throwing. devx's `plugins/devx/functions/skills/hooks.ts` — the
+    implementation behind devx's `onToolCall` — denies only on **exit code
+    2** (the Claude Code blocking convention) or an explicit stdout deny;
+    every other internal failure still returns "approve", i.e. FAILS OPEN:
+    `executeHook` throwing (`hooks.ts:61`), a hook command whose executable
+    is not on the allowlist (`:166`), and the Trex/DuckDB runtime being
+    unavailable so the command cannot run at all (`:216`). Those three sites
+    are byte-identical on both devx loops, so the eve cutover regresses
+    nobody — but a devx user whose hook exits non-zero for a reason other
+    than 2, or whose runtime hiccups, gets the tool call APPROVED. Making
+    those deny would mean a DuckDB blip denies every tool call on both
+    loops; that is a product trade, not a core one, and has deliberately not
+    been made. A hook configured with no `ctx.hookCtx`
+    available throws (`"agents: on{ToolCall,ToolResult} hook configured but
+    no request context (hookCtx) available"`) rather than silently skipping
+    — that gap is a caller wiring bug, not a hook failure, and fail-open
+    would defeat a control whose entire purpose is to deny; same posture as
+    divergence 11's `buildInstructions`. This is also the opposite failure
+    posture from divergence 12's `dynamic-tools.ts` provider
+    (log-and-continue): these hooks are a trust-boundary control on tool
+    calls, not an operational integration.
+16. **`ToolContext.sql` is additive/trex-only** (`eve-shim/types.ts`) — real
     eve's `ToolContext` has no `sql` field at all. It's the worker's pg pool
     query fn, threaded straight from `HookCtx.sql` (`toolset.ts`'s
     `authoredTool`) so a tool's `execute()` can run SQL without reaching for
@@ -252,6 +327,422 @@ live-tail by event shape.
     (`plugins/devx/functions/auth_shape.ts`) and `useEffectiveLoop.ts` forces
     `bedrock` + `auth_shape === "iam"` users onto the legacy loop before
     `/chat` is ever called; the `resolveModel` throw is the backstop.
+17. **`onTurnEnd`/`buildUserMessage` turn-lifecycle hooks (Task 3)** are also
+    additive `AgentConfig` fields real eve's `defineAgent` doesn't define —
+    eve silently ignores unknown fields, so an agent directory using them
+    still loads on real eve, just without the hook running. `onTurnEnd`
+    fires once per turn, called from `runner.ts` AFTER `persistText()` has
+    run and OUTSIDE the stream's `try/finally`, immediately before `runTurn`
+    returns — a failed turn (the `"error"` stream case, which throws) never
+    reaches it, matching devx legacy's posture of running Stop hooks only
+    after a successful turn. Its errors are logged and swallowed, never
+    rethrown: the turn already succeeded, and a Stop-hook bug must not
+    retro-fail completed work — the opposite failure posture from
+    `buildInstructions`/`resolveModel`/`onToolCall`/`onToolResult` above,
+    which all fail the turn on throw. A configured `onTurnEnd` with no
+    `ctx.hookCtx` available is neither thrown (retro-failing a completed
+    turn) nor silently skipped (a caller wiring bug worth surfacing) — it's
+    a third posture unique to this hook: `console.warn`s that the hook was
+    configured but couldn't run for lack of a request context, then skips
+    it. `buildUserMessage` is the per-turn counterpart to `buildInstructions`,
+    resolved by `toolset.ts`'s `resolveUserMessage` (mirroring
+    `resolveInstructions`) and applied to the USER message before it's added
+    to `messages`, deliberately NOT to the system prompt: the system prompt
+    is cache-pointed (`withSystemCachePoint`) on the strength of being
+    stable across turns and across requests for the same agent+metadata, so
+    folding per-turn content (e.g. attachment paths) into it would
+    invalidate that cache on every request. Same never-fall-back-silently
+    posture as `buildInstructions`/`resolveModel`/`onToolCall`/
+    `onToolResult`: a configured `buildUserMessage` with no `hookCtx`
+    available throws rather than silently sending the unmodified base
+    message.
+18. **Context management (Tasks 4/8-16) is additive/trex-only** — real eve
+    leaves conversation-context management to the caller entirely; it does
+    not truncate, summarize, or withhold anything itself. This runtime
+    performs four things eve does not, all in `service/context/`:
+    - **History includes tool calls and results.** `agents.steps` rows of
+      kind `tool-call`/`tool-result` are folded back into the model's
+      message list (`history.ts`'s `assembleHistory`), not just the final
+      `text` step — fixing a real defect where turn 2 had no idea what turn
+      1's tools actually did. Every tool call is guaranteed a matching
+      result — a synthetic one (`SYNTHETIC_RESULT_TEXT`) is inserted when a
+      turn was interrupted mid-call — because providers reject an orphan
+      `tool_use` block outright.
+    - **Two-tier tool-output truncation.** A tool's raw result is capped at
+      execution time (`toolset.ts`'s `wrapToolWithCap`, Step 5, covering
+      every authored/dynamic/built-in tool and subagents alike); once
+      folded into history, results in the most recent `freshTurns` keep
+      `freshToolOutputChars`, older ones are cut to the smaller
+      `staleToolOutputChars` (`truncate.ts`'s `truncateMiddle`).
+    - **Token-budget compaction.** At `compactAtFraction` of the resolved
+      model's context window — or at the optional absolute `compactAtTokens`
+      ceiling, whichever is lower (the ceiling bounds cost, not correctness:
+      on a 1M-token window the fraction alone would not fire until ~750k
+      input tokens; `devx` sets it, `claw`/`d2esupport` leave it unset and
+      are unaffected) — measured from the provider's own last-turn usage
+      when available, and otherwise estimated as the assembled messages plus
+      `estimatePrefixTokens` for the system prompt and shipped tool schemas
+      (a floor: anything behind an await stays uncounted, since widening
+      `startTurn`'s check-then-act window to sharpen an estimate is the worse
+      trade). Older turns
+      are replaced by a model-generated checkpoint summary, persisted as an
+      `agents.steps` row of kind `compaction` — a trex-only step kind added
+      by migration V7. Pre-turn only (`handler.ts`'s `startTurn`, never
+      mid-stream: a mid-turn summary would have to be injected above the
+      last user message or the model misreads it); a summarization failure
+      degrades to dropping the oldest turns outright rather than failing
+      the turn (`compact.ts`'s `maybeCompact`). That degradation publishes a
+      second additive trex-only event, `context.compacted`, carrying `via`
+      and — on the drop path — the reason summarization could not run. Like
+      `tool.event` (divergence 10) it is absent from eve's vocabulary
+      entirely; unlike it, it is turn-agnostic and live-only, since
+      compaction happens before the turn exists.
+      The summarizer is sent a flattened plain-text transcript of only the
+      turns being replaced. Both halves of that are load-bearing: the
+      summarization call declares no `tools`, so structured
+      tool-call/tool-result parts would be rejected by the provider (and the
+      rejection swallowed into the drop fallback, meaning the summarizer
+      would never run at all), and summarizing turns that also survive
+      verbatim would hand the model the same content twice.
+    - **Deferred tool loading.** Tools named in `deferredTools` are withheld
+      from the request entirely — absent from the tool list, not
+      present-but-disabled — until `ToolSearch` activates them for that
+      session (`store.ts`'s `activateTools`/`getActivatedTools`,
+      persisted on `agents.sessions.activated_tools`, also added by V7),
+      and are appended AFTER the prompt-cache breakpoint
+      (`model.ts`'s `withToolCachePoint`) so activating one never
+      invalidates the cached TOOLS+SYSTEM prefix the core tools sit in
+      (`toolsplit.ts`'s `partitionTools`). `ToolContext.activateTools` is
+      itself additive/trex-only, same posture as divergence 16's
+      `ToolContext.sql` — bound to the calling session only
+      (`toolset.ts`'s `authoredTool`: `(names) =>
+      ctx.store.activateTools(ctx.sessionId, names)`), never the raw
+      `AgentStore`, so a tool gets exactly one write capability and cannot
+      touch another session's state.
+
+      **Deferred tools are unreachable on `POST /chat`.** That endpoint is
+      the stateless one — history comes from the client and it creates a
+      fresh session per request purely for observability — so an
+      activated-tools read there can only ever return `[]`, and one is no
+      longer made. `ToolSearch` still writes `activated_tools`, to a session
+      nothing will read again. Activation deliberately takes effect only
+      from the NEXT request (`toolset.ts`'s cache-breakpoint ordering), so
+      reaching a deferred tool on `/chat` needs a caller-supplied session id
+      that the caller then reuses — i.e. giving up the statelessness that
+      defines the endpoint, plus an ownership check on that id. Deferred as
+      a product decision, not an oversight: the only in-repo `/chat` client
+      (devx's `AGENTS_CHAT_URL`) moved to the session API and is now
+      unreferenced, so there is no caller to thread an id through today.
+      The session API (`/eve/v1/session`) is unaffected — it is where
+      deferred tools work.
+
+    All four are configured per agent through the `context` block on
+    `defineAgent` (`context?: Partial<ContextConfig>` — `AgentConfig`,
+    `eve-shim/types.ts`) and default to eve-comparable behaviour
+    (`DEFAULT_CONTEXT_CONFIG`): unbounded-in-practice truncation caps, no
+    compaction until a very large window fraction, and `deferredTools: []`
+    (nothing withheld — `claw`/`d2esupport` run this way, unconfigured).
+    devx is the only agent that sets `deferredTools` (`agent.ts`, ~25 of
+    its 68 tools — the KB, cron, Figma, browser-automation, and DB/image/
+    web-crawl families; the always-on set, including `ToolSearch` itself,
+    is never eligible). devx's `buildInstructions` also appends a fixed
+    note pointing the model at `ToolSearch` for its withheld tools — the
+    ONE place this loop's system prompt deliberately diverges from the
+    legacy AI-SDK loop's (see `lib/prompt_parity.test.ts`'s own exception
+    for it): legacy has no deferred-tool concept at all, so its prompt
+    never carries an equivalent suffix, and never can.
+19. **Subagents are nested sessions (2026-08-27 orchestration) — a trex
+    extension over eve's `Agent` framework tool.** Upstream eve runs a
+    subagent as an in-process nested loop that returns a string. trex runs
+    one as a real `agents.sessions` row with `parent_session_id` /
+    `parent_turn_id` (`migrations/V9__orchestration.sql`), so a child
+    inherits the machinery a top-level turn already has: heartbeat liveness
+    and stale-turn reaping, tool-history assembly and the
+    tool-call/tool-result pairing invariant (divergence 18), two-tier
+    truncation of the history it is given, and approvals.
+    - **What a child does NOT inherit: compaction.** Compaction is strictly
+      PRE-turn (`context/compact.ts`'s `maybeCompact`, called from
+      `startTurn` before `addTurn`), and it short-circuits when the session
+      has no prior turns. A child session has exactly one turn — its first
+      and only (`runner.ts`'s `makePrepareStep`; `startTurn`'s
+      drain-and-chain tail is gated on `depth === 0` precisely so a child
+      never gains a second) — so the compaction check on a child is always
+      the no-op case. A child therefore CANNOT compact, structurally, and
+      no amount of context growth inside its single turn will trigger it.
+      In practice a child starts near-empty (its forked slice is capped at a
+      quarter of the conservative fallback window — `spawn.ts`'s
+      `FORK_TOKEN_BUDGET`) and is bounded by the same per-tool-output cap
+      and two-tier truncation every turn gets, so the exposure is a single
+      very long tool-heavy child turn overrunning its window. Closing it
+      needs MID-turn compaction, which this runtime does not have and which
+      is its own change (a mid-turn summary has to be injected above the
+      last user message or the model misreads it — see `compact.ts`).
+    - **Seven tools instead of one.** `agent` keeps its blocking contract and
+      return shape (`{text}`, or `{error}`) — `agent_spawn` / `agent_wait` /
+      `agent_result` / `agent_list` / `agent_send` / `agent_stop` are new
+      (`service/toolset.ts`, `service/spawn.ts`). `agent_wait` returns each
+      finished child's OUTPUT alongside its status, and `agent_result` reads
+      one back on demand: a detached child's result is otherwise only
+      delivered as a queued followup on a LATER parent turn, and a parent
+      sitting inside `agent_wait` always has a turn running — so without
+      these it could learn WHICH child finished but never WHAT it produced
+      inside its own turn.
+    - **`agent_stop` interrupts in-process, and abandons otherwise.** It always
+      marks the child's turn failed with the `STOPPED_BY_PARENT_ERROR` marker,
+      so the parent stops waiting and the child's result is discarded on
+      arrival — that database marking happens FIRST and is what owns the
+      outcome. It then aborts the child's in-flight `streamText` via an
+      `AbortSignal` threaded through `runTurn`, so the child stops calling
+      tools and stops billing rather than running to completion for nothing.
+      That abort reaches only a child running on the SAME WORKER: the registry
+      of live child controllers (`service/aborts.ts`) is per isolate, and a
+      parent woken on another worker — routine, since child turns are started
+      fire-and-forget and a reap can deliver from anywhere — finds no
+      controller and gets the marking alone, which is exactly what `agent_stop`
+      did before. Making it cross-process needs a notification channel the
+      store does not have (the same gap that makes `agent_wait` a poll rather
+      than a push), and is deliberately not half-built here. The tool
+      description says the same thing, so a model does not treat it as a
+      guaranteed kill switch.
+    - **All seven are depth-0 only** (`ToolBuildCtx.depth`, derived per turn
+      from durable state — `store.isChildSession` — never threaded from spawn
+      time, so a child cannot spawn a grandchild even if a worker restarts
+      mid-turn), and
+      none is deferrable by default: `deferredTools` activation only takes
+      effect from the NEXT request (divergence 18), and a model mid-fan-out
+      needs these tools now, not next turn.
+    - **`fork_turns`** on `agent` and `agent_spawn` lets a child inherit the
+      last N of the PARENT's own turns (`"none"` default, matching prior
+      behaviour; `"all"`, or a positive integer — `context/fork.ts`'s
+      `parseForkTurns`). Slicing is whole-turn only, trimmed from the oldest
+      end to fit a fixed token budget: a partial turn would separate a tool
+      call from its result and the provider would reject the child's very
+      first request. Depends on divergence 18's history-includes-tool-calls
+      work — a forked slice is only worth inheriting once history carries
+      real tool call/result content, not just final text.
+    - **Detached children deliver and wake.** A detached child's completion
+      (success or failure) queues a `turn_followups` row on the parent and
+      starts a parent turn if none is already running
+      (`handler.ts`'s `deliverChildResult`); a BLOCKING child (`agent`,
+      `detached: false`) returns through the tool call that started it
+      instead and never queues anything. Bounded by `MAX_CONSECUTIVE_WAKES`
+      TURNS in a row that this session ran because a child completed rather
+      than because anyone asked — otherwise a session that spawns a child on
+      every wake would chain forever, one real model call per link, billed to
+      the caller.
+      - **The unit is turns, not results.** The counter is charged once in
+        `startTurn`, at the single point a child-caused turn is created,
+        covering BOTH a wake and the turn a parent chains for results that
+        were queued while it was busy. N children draining into one chained
+        turn are one turn, one model call, one unit; a result that
+        `makePrepareStep` injects into an already-running turn between steps
+        costs no turn and therefore no budget. Charging per delivered result
+        instead would let a canonical eight-way `dispatching-parallel-agents`
+        fan-out consume 80% of the budget inside a single human-requested
+        turn.
+      - **How a chained turn knows.** Every delivery records the originating
+        child on the followup ROW it queues
+        (`agents.turn_followups.origin_child_session_id`,
+        `V10__followup_origin.sql`), in the same `INSERT` as the text. A
+        chained turn asks only what it actually drained: any row with an
+        origin makes that turn child-caused, so it charges itself and skips
+        the reset; a chain that drained nothing but human or channel messages
+        is an ordinary turn and resets. Draining a row takes its origin with
+        it, so nothing has to be retired later and a fan-out's N deliveries
+        record N origins rather than competing for one slot.
+      - **Superseded: the session-level stamp.** V9 answered the same
+        question with one slot per session
+        (`agents.sessions.pending_wake_child_id`), written before each
+        followup row and retired only by an external turn that STARTED a turn
+        of its own. Under sustained mid-turn traffic no such turn ever comes —
+        every message folds into a chain instead — so each chain saw the
+        standing stamp and skipped the reset, deferring a legitimate reset for
+        an unbounded number of turns. Per-row origins remove that deferral
+        outright. The column is left in the schema (dropping one mid rolling
+        deploy breaks whichever side has not swapped yet) but is neither read
+        nor written.
+      - **At the cap** the turn is refused rather than the result dropped:
+        `startTurn` requeues the text it had already drained and logs, and
+        everything rides the next message that is genuinely someone asking.
+      A wake racing another parent message is resolved by
+      `idx_agents_turns_one_running_per_session` (a partial unique index,
+      PER session — it does not serialize siblings spawned under the same
+      parent): the loser degrades to queueing its followup for the
+      already-running turn to drain, rather than two turns ever coexisting.
+    - **`agent_wait` polls.** The store exposes a plain query function with
+      no notification channel; `LISTEN`/`NOTIFY` is a separate change.
+    - **Depth stays capped at 1.** A child receives no `agent*` tools at
+      all, so it structurally cannot spawn a grandchild regardless of what
+      it's told.
+    - **Per-subagent role config (`reasoningEffort`/`skills`).** Only
+      `skills` is REDUCING ONLY, ported from codex's `role.rs`: a
+      subagent's `skills` (`AgentConfig.skills`, resolved by `loader.ts`'s
+      `resolveAgentRole`/`resolveChildSkills`) is the INTERSECTION of its
+      own declared list and the delegating session's own skill names, never
+      their union — a caller can narrow what it delegates but never grant a
+      child more than it already has itself (`toolset.ts`'s
+      `restrictChildSkills`, applied at delegation time in
+      `handler.ts`'s `buildSpawnCapabilities`). **Tools are intersected the
+      same way** (`toolset.ts`'s `restrictChildTools`, applied at the same
+      point): a subagent directory declaring `tools/` entries its parent does
+      not have gets them dropped, so a child's tool set can only ever narrow
+      its parent's. A child also runs its parent's `filterTools` hook under
+      the PARENT's own `metadata` — its turn is started with the spawning
+      turn's metadata, bearer token and user id — so a mode-restricted
+      session (devx's `ask`) cannot delegate its way out of that restriction.
+
+      **What `skills` actually caps today is the child's advertised
+      system-prompt text, not a live privilege**: `buildSdkTools` gates the
+      built-in `skill` tool behind
+      `depth === 0`, and every child runs at depth 1 (this divergence's own
+      depth cap, above), so no child can invoke a skill at all regardless of
+      this field. The reduction exists for when that changes — a future
+      grant of skill-invoking access to children must route through
+      `resolveChildSkills`, not assume this field already enforced it.
+      `reasoningEffort` is NOT reduced against anything — it is just the
+      child's own declared value, applied to its own resolved model as a
+      `providerOptions` override (openai only for now; a one-time `console.warn`
+      names the agent and the resolved provider when it's set on a
+      non-openai model, since it would otherwise silently do nothing — see
+      `model.ts`'s `reasoningEffortProviderOptions`). Both keys are read
+      from either camelCase (`agent.ts`) or EDN kebab-case
+      (`:reasoning-effort`, `agent.edn`) via the same explicit-allowlist
+      pattern divergence 18's `ContextConfig` fields use — a key missing
+      from that allowlist is exactly what silently dropped two
+      `ContextConfig` fields in an earlier cycle of this runtime.
+
+## Unattended sessions and the escalate floor
+
+trex-only (eve has no equivalent). Both pieces exist to answer one question a
+bot-driven turn cannot: **who clicks "approve"?**
+
+### The `unattended` session flag
+
+`agents.sessions.unattended` (migration V11) marks a session that has no human
+watching it. It is **create-time only** — set by whichever route creates the
+session and never mutated afterwards, so a later request cannot disarm a gate on
+a turn that is already running. Three creation sites write it:
+
+| site | source |
+| --- | --- |
+| `POST /eve/v1/session` | request body `unattended` |
+| `POST /chat` | request body `unattended` |
+| the spawn path (`spawnChild` → `store.createChildSession`) | inherited from the parent, read back from durable state |
+
+Both HTTP routes require a **strict `=== true`**: `"true"`, `1`, and any other
+truthy value persist as `false`. A truthy string arriving in a request body must
+never widen an approval gate (`functions/autonomy.ts` states the same rule for
+the loop this replaces).
+
+A child of an unattended parent inherits the flag rather than defaulting to
+`false` — it has no approver either. Inheritance reads
+`isUnattended(parent) || isChannelBound(parent)` at spawn time rather than
+threading a parameter down, for the same reason `depth` is derived from
+`parent_session_id`: durable state cannot be forgotten by a future call site.
+Both reads are needed — a channel session never writes the `unattended` column,
+so the durable flag alone would leave a delegated child gating on its own event
+stream, which no channel adapter subscribes to.
+
+**Channel binding implies unattended.** A session with a row in
+`agents.channel_sessions` has no browser consent UI to answer a gate, so
+`handler.ts` resolves `unattended = channelBound || isUnattended(sessionId)`.
+Both flags are resolved **once per turn**, alongside `depth` — `buildSdkTools`
+spreads its `ToolBuildCtx` into every authored tool, so resolving them per tool
+call would cost one round trip per gated call.
+
+### `AGENTS_ESCALATE_TOOLS`
+
+The deployment's floor: tools that require a human every time, no matter what
+the session or a stored consent says. Read **once, at module load, in
+`handler.ts` only** — `toolset.ts` and `approvals.ts` take the parsed list as a
+parameter and fall back to the same parsed-once default when a caller passes
+nothing.
+
+Grammar: a comma-separated list of `Tool` or `Tool:scope|scope|…`. A bare tool
+name matches every invocation; scopes match against the invocation's derived
+scope key (`scope-key.ts`: the Bash executable **set**, the normalized path, or
+the normalized `[source, destination]` pair), case-insensitively. Default:
+
+```
+GitPush,ExecuteSQL,DeleteFile,CronCreate,CronDelete,RestartApp,Bash:rm|sudo|curl|wget|ssh|scp|dd|chmod|chown
+```
+
+Unset uses that default. An **explicitly empty string** is a deliberate opt-out
+(no floor at all). A value that parses to nothing is treated as a typo: it warns
+and keeps the default, rather than silently removing the floor.
+
+#### What the `Bash` scope match is, and is not
+
+A `Bash` scope key is the sorted, de-duplicated, `+`-joined **set** of
+executables the command runs: segments are split on `&&`, `||`, `;`, `|` and
+newlines (quote-aware), each segment's leading `NAME=value` assignments are
+skipped, the first token is stripped to its basename and lowercased, and exactly
+**one** level of `sh -c "…"` / `bash -c "…"` / `bash -lc "…"` is unwrapped into
+its payload. So `npm test` → `npm`, `cd /app && rm -rf .` → `cd+rm`,
+`bash -lc "rm -rf /"` → `rm`, `sh -c 'curl x | sh'` → `curl+sh`.
+`matchesEscalate` treats the key as a set and escalates when **any** part
+matches a listed scope. **Every** segment is scanned, with no cap of any kind —
+a cap on segments *or* on input length drops executables, and a floor that
+silently loses `rm` is worse than no floor. (Measured: a 1 MB truncation of a
+1.4 MB `true | …×200000… | rm -rf /` cut mid-token and yielded `t+true`, with
+the `rm` gone.) Cost is linear and small next to the database round trip on
+every gated call: 1.4 MB / 200k segments in ~63 ms, 7 MB / 1M segments in
+~306 ms.
+
+This is **best-effort protection against accidental destructive commands, not a
+boundary that resists deliberate evasion.** A command can still obscure what it
+runs — variable indirection (`X=rm; $X -rf /`), `eval`, a base64/`printf`
+payload piped into a shell, or a second level of nesting (`bash -c 'sh -c "rm
+x"'` keys on `sh`, not `rm`). Treat the floor as a guard rail on an agent's own
+mistakes; a genuinely adversarial prompt is a sandbox problem, not a scope-key
+problem.
+
+Two accepted limitations, both recorded rather than fixed:
+
+- **Scope keys carry no workspace or app component.** An `always` granted on
+  `src/a.ts` in one app also covers `src/a.ts` in another app the same user
+  drives through the same plugin/agent pair. Narrowing this needs a workspace
+  component in the consent key (migration + a new column), which this change
+  deliberately does not take on.
+- **Escalate scope matching is case-insensitive; the consent row it guards is
+  case-sensitive.** `Bash:RM` in the env list matches a key of `rm`, but a
+  stored consent for `RM` and one for `rm` are two different rows. The
+  mismatch only ever makes the floor match *more* often than the consent it
+  guards, which is the safe direction.
+- Path keys are matched against the same `+`-split, so a path containing a
+  literal `+` (a file named `a+b.ts`) can over-match a listed scope — again,
+  toward more escalation.
+
+### Precedence
+
+`resolveApproval` (`approval-policy.ts`) is pure and exhaustively tested. In
+order:
+
+1. a stored `never` consent → **deny** (`consent-never`)
+2. a match on the escalate list → **gate** if channel-bound, else **deny**
+   (`no-approver`) — no channel to ask on means deny, not park
+3. a stored `always` consent → **allow**
+4. `unattended` → **allow**
+5. otherwise → **gate**
+
+Rule 2 sits above rules 3 and 4 deliberately: under a shared bot identity, one
+`always` click would otherwise disarm the floor for every user of that identity.
+
+For the same reason, **`always` is refused at write time for an escalate-list
+tool**. `POST .../approval` and the `inputResponses` path both reject the
+decision with `"<Tool> cannot be granted 'always' — it requires approval every
+time"` instead of accepting the click and ignoring the row at read time — the
+person clicking must learn the grant did not stick. `never` is still accepted
+(it only narrows), and a plain one-shot `approve` is unaffected.
+
+Both routes return that refusal — and **only** that refusal — as **400** with
+`{ error }`. Swallowing it would leave the gate pending and park the turn for
+the full approval deadline. Every other resolve failure (unknown request,
+already decided, the gate's turn no longer running) keeps its prior behaviour:
+404 on `.../approval`, and on the `inputResponses` route it falls through to
+202. That fall-through is load-bearing — eve's SDK sends `{inputResponses,
+message}` in ONE body, so 400ing a stale decision would discard the message
+with it and every retry of that body would 400 again.
 
 ## Channels
 
