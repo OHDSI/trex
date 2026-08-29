@@ -260,7 +260,11 @@ export function discordChannel(opts: DiscordChannelOptions = {}): ChannelDef {
   // coder runs a full agentic turn behind askCodeAgent). Re-trigger on a
   // heartbeat so the channel keeps showing activity until the turn delivers,
   // then stop. Keyed by channel id; a new turn replaces any prior heartbeat.
-  const typingHeartbeats = new Map<string, number>();
+// `number` is the browser/Deno return type; under this workspace's node typings
+// setTimeout/setInterval return a Node `Timeout` object instead. Deriving the
+// type from the function keeps it correct either way — hardcoding `number` is
+// what `deno check` flags here.
+  const typingHeartbeats = new Map<string, ReturnType<typeof setInterval>>();
   const TYPING_INTERVAL_MS = 8_000;
   const TYPING_MAX_TICKS = 75; // ~10 min cap, then give up so a parked/idle turn can't type forever.
 
