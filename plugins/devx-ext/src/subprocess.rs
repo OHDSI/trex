@@ -2,12 +2,32 @@ use crate::validation::strip_credentials;
 use std::error::Error;
 use std::process::Command;
 
+// SSH_AUTH_SOCK deliberately excluded: it forwards live signing authority
+// (auth as the host to every trusting SSH endpoint), not a static secret.
+// This repo's GitHub auth is HTTPS-token based and commit signing uses a
+// materialized key file, so no consumer needs it; DEVX_CHILD_ENV_EXTRA is
+// the way back for a deployment with a real SSH-remote workflow.
+//
+// PIP_INDEX_URL/PIP_EXTRA_INDEX_URL/GOPROXY and CARGO_REGISTRY_TOKEN are also
+// deliberately excluded: the first three routinely embed credentials in the
+// URL itself, and the last is a token outright. Use DEVX_CHILD_ENV_EXTRA.
 const ALLOWED_EXACT: &[&str] = &[
     "PATH", "HOME", "SHELL", "USER", "LOGNAME", "TERM", "TZ", "TMPDIR", "LANG",
-    "PWD", "SSH_AUTH_SOCK", "DENO_DIR", "CARGO_HOME", "RUSTUP_HOME",
+    "PWD", "DENO_DIR", "CARGO_HOME", "RUSTUP_HOME",
     "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy",
+    "JAVA_HOME", "GOPATH", "GOCACHE", "GOMODCACHE", "GRADLE_USER_HOME", "MAVEN_OPTS",
 ];
 const ALLOWED_PREFIX: &[&str] = &["LC_", "NODE_", "npm_config_", "NPM_CONFIG_", "YARN_", "PNPM_"];
+
+// A prefix admits names nobody vetted one by one, so anything that reads as
+// a credential is refused even when its prefix is allowed. Over-refusing is
+// recoverable via DEVX_CHILD_ENV_EXTRA; under-refusing leaks a secret.
+const SECRET_MARKERS: &[&str] = &["AUTH", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"];
+
+fn looks_secret(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    SECRET_MARKERS.iter().any(|m| upper.contains(m))
+}
 
 /// Filter a parent environment down to what a workspace command legitimately
 /// needs. Allowlist, not denylist: a newly added secret must not become
@@ -23,7 +43,7 @@ where
         .into_iter()
         .filter(|(k, _)| {
             ALLOWED_EXACT.contains(&k.as_str())
-                || ALLOWED_PREFIX.iter().any(|p| k.starts_with(p))
+                || (ALLOWED_PREFIX.iter().any(|p| k.starts_with(p)) && !looks_secret(k))
                 || extras.contains(&k.as_str())
         })
         .collect()
@@ -119,7 +139,35 @@ mod tests {
         ]), None);
         let mut got = names(&out); got.sort();
         assert_eq!(got, vec!["HOME", "HTTPS_PROXY", "LC_ALL", "NODE_ENV", "PATH",
-                             "SSH_AUTH_SOCK", "npm_config_registry"]);
+                             "npm_config_registry"]);
+    }
+
+    // SSH_AUTH_SOCK forwards live signing authority, not a static secret;
+    // DEVX_CHILD_ENV_EXTRA is the deliberate way back for a real SSH-remote workflow.
+    #[test]
+    fn ssh_auth_sock_is_dropped() {
+        let out = filtered_env(env_of(&[("PATH", "/usr/bin"), ("SSH_AUTH_SOCK", "/tmp/agent")]), None);
+        assert_eq!(names(&out), vec!["PATH"]);
+    }
+
+    #[test]
+    fn prefix_match_refuses_credential_shaped_names() {
+        let out = filtered_env(env_of(&[
+            ("PATH", "/usr/bin"),
+            ("NODE_AUTH_TOKEN", "t"), ("npm_config__authToken", "t"), ("npm_config__auth", "t"),
+            ("YARN_NPM_AUTH_TOKEN", "t"),
+            ("NODE_ENV", "production"), ("NODE_PATH", "/x"),
+            ("npm_config_registry", "https://r.example"), ("npm_config_cache", "/c"),
+        ]), None);
+        let mut got = names(&out); got.sort();
+        assert_eq!(got, vec!["NODE_ENV", "NODE_PATH", "PATH", "npm_config_cache", "npm_config_registry"]);
+    }
+
+    #[test]
+    fn extra_reinstates_a_refused_credential_shaped_prefix_name() {
+        let out = filtered_env(env_of(&[("PATH", "/usr/bin"), ("NODE_AUTH_TOKEN", "t")]), Some("NODE_AUTH_TOKEN"));
+        let mut got = names(&out); got.sort();
+        assert_eq!(got, vec!["NODE_AUTH_TOKEN", "PATH"]);
     }
 
     #[test]
